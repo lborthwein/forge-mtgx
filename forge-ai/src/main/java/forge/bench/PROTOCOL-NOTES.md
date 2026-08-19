@@ -61,10 +61,28 @@ those menus are homogeneous and the host wants to name cards, not positions.
    cannot be overridden and are not counted separately — each funnels into a counted
    abstract method, so no call is lost, only the arity is not distinguished.
 
-3. **The `priority` menu excludes mana abilities.** Forge plays mana abilities during cost
-   payment, never at priority; offering them invites a non-terminating priority loop
-   (`PhaseHandler.mainLoopStep` keeps asking while the answer is non-null). Land plays are
-   included.
+3. **The `priority` menu excludes mana abilities, and excludes abilities with too few
+   legal targets.** Forge plays mana abilities during cost payment, never at priority;
+   offering them invites a non-terminating priority loop (`PhaseHandler.mainLoopStep` keeps
+   asking while the answer is non-null). `SpellAbility.canPlay` does not check target
+   availability, so a counterspell would otherwise be offered with an empty stack. Land
+   plays are included.
+
+3b. **The bridge re-targets a host-chosen ability before handing it back** (`ensureTargets`).
+   This is load-bearing and was not in the spec. Forge's AI assigns targets inside
+   `canPlayAI`, while deciding *whether* to play the ability;
+   `ComputerUtil.handlePlayingSpellAbility` then puts it on the stack with whatever targets
+   are already attached and never asks again. Measured: **zero `chooseTargetsFor` calls
+   across three AI-vs-AI cube games**. The abilities in our priority menu have not been
+   through `canPlayAI`, so without this step a host-chosen targeted spell would reach the
+   stack untargeted. Routing the fix through `chooseTargetsFor` means the host gets a
+   `targets` ask, and a delegating host falls back to Forge's per-API targeting
+   (`AiController.doTrigger`).
+
+   Residual, documented rather than fixed: modal (`Charm`) abilities choose their modes
+   inside `handlePlayingSpellAbility` *after* this step, so targets for a mode's
+   sub-abilities are still assigned by Forge's AI. Run with `useSimulation:true` if that
+   matters for a given campaign.
 
 4. **`state` is attached to every ask**, not only to the kinds the spec listed. It is the
    same seat-visible encoding throughout, so a host decoder has one code path.

@@ -256,7 +256,44 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             refuse("chooseSpellAbilityToPlay", "chosen ability is no longer playable: " + chosen);
             return super.chooseSpellAbilityToPlay();
         }
+        if (!ensureTargets(chosen)) {
+            return super.chooseSpellAbilityToPlay();
+        }
         return Lists.newArrayList(chosen);
+    }
+
+    /**
+     * Assign targets to a host-chosen ability before handing it back to Forge.
+     *
+     * <p>Load-bearing. Forge's AI assigns targets inside {@code canPlayAI} while it is
+     * deciding <em>whether</em> to play the ability;
+     * {@code ComputerUtil.handlePlayingSpellAbility} then puts the ability on the stack
+     * with whatever targets are already on it and never asks again (measured: zero
+     * {@code chooseTargetsFor} calls across three AI-vs-AI cube games). The abilities in
+     * our priority menu have not been through {@code canPlayAI}, so without this step a
+     * host-chosen targeted spell would reach the stack with no targets at all.
+     *
+     * <p>Routing through {@link #chooseTargetsFor} means the host gets a {@code targets}
+     * ask, and a host that delegates falls back to Forge's own per-API targeting logic.
+     */
+    private boolean ensureTargets(final SpellAbility root) {
+        SpellAbility cur = root;
+        while (cur != null) {
+            if (cur.usesTargeting()) {
+                cur.clearTargets();
+                cur.setTargetingPlayer(getPlayer());
+                if (!chooseTargetsFor(cur) || !cur.isTargetNumberValid()) {
+                    refuse("chooseSpellAbilityToPlay", "could not legally target " + cur);
+                    return false;
+                }
+            }
+            cur = cur.getSubAbility();
+        }
+        if (!ComputerUtilCost.canPayCost(root, getPlayer(), root.isTrigger())) {
+            refuse("chooseSpellAbilityToPlay", "cost became unpayable after targeting: " + root);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -287,7 +324,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                     continue;
                 }
                 sa.setActivatingPlayer(p);
-                if (sa.canPlay() && ComputerUtilCost.canPayCost(sa, p, sa.isTrigger())) {
+                if (sa.canPlay() && ComputerUtilCost.canPayCost(sa, p, sa.isTrigger())
+                        && hasEnoughTargets(sa)) {
                     out.add(sa);
                 }
             }
@@ -295,6 +333,28 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             JsonRpcChannel.logErr("legalSpellAbilities failed; offering pass only", e);
         }
         return out;
+    }
+
+    /**
+     * {@code SpellAbility.canPlay} does not check that legal targets exist, so without this
+     * the menu offers e.g. a counterspell with an empty stack. Every entry we offer must be
+     * an action the host can actually complete.
+     */
+    private static boolean hasEnoughTargets(final SpellAbility root) {
+        SpellAbility cur = root;
+        while (cur != null) {
+            if (cur.usesTargeting()) {
+                try {
+                    if (cur.getTargetRestrictions().getAllCandidates(cur).size() < cur.getMinTargets()) {
+                        return false;
+                    }
+                } catch (RuntimeException e) {
+                    return false;
+                }
+            }
+            cur = cur.getSubAbility();
+        }
+        return true;
     }
 
     @Override
