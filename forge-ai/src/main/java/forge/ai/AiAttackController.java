@@ -84,6 +84,15 @@ public class AiAttackController {
     private List<CompletableFuture<Integer>> futures = new ArrayList<>();
 
     /**
+     * Benchmark determinism switch (-Dforge.bench.sequentialAi=true). The forced-attacker
+     * evaluation below runs one CompletableFuture per attacker; the insertion order into
+     * the shared Combat and the wall-clock abandonment make the declaration
+     * nondeterministic even under a fixed RNG seed. With this property set the same tasks
+     * run on the calling thread, in attacker order. Default (property unset) is unchanged.
+     */
+    private static final boolean BENCH_SEQUENTIAL_AI = Boolean.getBoolean("forge.bench.sequentialAi");
+
+    /**
      * <p>
      * Constructor for ComputerUtil_Attack2.
      * </p>
@@ -884,7 +893,7 @@ public class AiAttackController {
         if (!nextTurn) {
             for (final Card attacker : this.attackers) {
                 final GameEntity finalDefender = defender;
-                futures.add(CompletableFuture.supplyAsync(()-> {
+                final java.util.function.Supplier<Integer> forcedAttackerTask = ()-> {
                     GameEntity mustAttackDef = null;
                     if (attacker.getSVar("MustAttack").equals("True")) {
                         mustAttackDef = finalDefender;
@@ -942,7 +951,10 @@ public class AiAttackController {
                         numForcedAttackers.incrementAndGet();
                     }
                     return 0;
-                }).exceptionally(ex -> {
+                };
+                futures.add((BENCH_SEQUENTIAL_AI
+                        ? CompletableFuture.supplyAsync(forcedAttackerTask, Runnable::run)
+                        : CompletableFuture.supplyAsync(forcedAttackerTask)).exceptionally(ex -> {
                     ex.printStackTrace();
                     return 0;
                 }));
