@@ -21,6 +21,7 @@ import com.google.common.collect.*;
 import forge.LobbyPlayer;
 import forge.ai.ComputerUtilAbility;
 import forge.ai.ComputerUtilCost;
+import forge.ai.ComputerUtilMana;
 import forge.ai.PlayerControllerAi;
 import forge.card.ColorSet;
 import forge.card.ICardFace;
@@ -29,6 +30,7 @@ import forge.card.mana.ManaCostShard;
 import forge.deck.Deck;
 import forge.deck.DeckSection;
 import forge.game.*;
+import forge.game.GameActionUtil;
 import forge.game.ability.effects.RollDiceEffect;
 import forge.game.card.*;
 import forge.game.combat.Combat;
@@ -86,6 +88,15 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     private final BenchSession.Mode mode;
     private final int seat;
     private final CallCounter counters;
+    /**
+     * True while {@link #legalSpellAbilities} is enumerating the priority menu.
+     * {@code ComputerUtilAbility.getOriginalAndAltCostAbilities} asks the controller to
+     * pick optional costs WHILE BUILDING the list, and it drops the unkicked ability when
+     * the answer is non-empty. Asking the host there would be a round trip per ability per
+     * frame about a cast it has not chosen; declining instead keeps the base ability, and
+     * the kicked variant is added alongside it as its own menu entry.
+     */
+    private boolean buildingMenu = false;
 
     public PlayerControllerBridge(final Game game, final Player p, final LobbyPlayer lp,
             final BenchSession session, final BenchSession.Mode mode, final int seat,
@@ -396,9 +407,35 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 }
             }
             final CardCollection cards = ComputerUtilAbility.getAvailableCards(game, p);
-            final List<SpellAbility> all = ComputerUtilAbility.getOriginalAndAltCostAbilities(
-                    ComputerUtilAbility.getSpellAbilities(cards, p), p);
+            final List<SpellAbility> all;
+            buildingMenu = true;
+            try {
+                all = ComputerUtilAbility.getOriginalAndAltCostAbilities(
+                        ComputerUtilAbility.getSpellAbilities(cards, p), p);
+            } finally {
+                buildingMenu = false;
+            }
+            // Offer the optional-cost variants as their own entries, with their true total
+            // cost, rather than letting Forge pick one and hand us a ballot that reads
+            // "{0}". Everflowing Chalice was voted on as a free cast and then multikicked
+            // for ten mana sources.
+            final List<SpellAbility> withVariants = new ArrayList<>(all);
             for (SpellAbility sa : all) {
+                try {
+                    final List<OptionalCostValue> opts = GameActionUtil.getOptionalCostValues(sa);
+                    if (opts == null || opts.isEmpty()) {
+                        continue;
+                    }
+                    final SpellAbility kicked = GameActionUtil.addOptionalCosts(sa, opts);
+                    if (kicked != null && kicked != sa) {
+                        kicked.setActivatingPlayer(p);
+                        withVariants.add(kicked);
+                    }
+                } catch (RuntimeException e) {
+                    JsonRpcChannel.logErr("optional-cost variant construction failed for " + sa, e);
+                }
+            }
+            for (SpellAbility sa : withVariants) {
                 if (sa.isManaAbility() || sa.isLandAbility()) {
                     continue;
                 }
@@ -412,6 +449,127 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             JsonRpcChannel.logErr("legalSpellAbilities failed; offering pass only", e);
         }
         return out;
+    }
+
+    /**
+     * How many times an optional extra cost may be paid (protocol v2.4).
+     *
+     * <p>{@code addExtraKeywordCost} passes {@code Integer.MAX_VALUE} for Multikicker, so
+     * the raw {@code max} is not a range a host can price against. This is the affordable
+     * ceiling: mana left after the base cost, divided by the repeat's own mana cost.
+     */
+    private int affordableRepeats(final SpellAbility sa, final Cost cost, final int max) {
+        int ceiling;
+        try {
+            final int repeatMana = cost == null || cost.hasNoManaCost()
+                    ? 0 : cost.getTotalMana().getCMC();
+            if (repeatMana <= 0) {
+                // A non-mana repeat (Casualty's sacrifice, Conspire's tap) -- Forge asks
+                // these as a yes/no with max 1 and we have no cheap affordability model.
+                ceiling = Math.min(max, 1);
+            } else {
+                final int available = ComputerUtilMana.getAvailableManaEstimate(getPlayer());
+                final int base = sa.getPayCosts() == null || sa.getPayCosts().hasNoManaCost()
+                        ? 0 : sa.getPayCosts().getTotalMana().getCMC();
+                ceiling = Math.min(max, Math.max(0, (available - base) / repeatMana));
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("keyword-cost ceiling estimate failed", e);
+            ceiling = Math.min(max, 1);
+        }
+        return Math.max(0, ceiling);
+    }
+
+    /**
+     * Every optional extra cost the host will be asked about once it commits to this cast
+     * (protocol v2.4). Read-only, so a `{0}` ballot is not advertised as free while a
+     * Multikicker is pending behind it.
+     */
+    @Override
+    public int chooseNumberForKeywordCost(final SpellAbility sa, final Cost cost,
+            final KeywordInterface keyword, final String prompt, final int max) {
+        count("chooseNumberForKeywordCost");
+        if (!bridged()) {
+            return super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
+        }
+        final int ceiling = affordableRepeats(sa, cost, max);
+        final JsonObject body = envelope(true);
+        body.add("ability", StateEncoder.encodeSpellAbility(sa));
+        body.addProperty("prompt", String.valueOf(prompt));
+        body.addProperty("keyword", keyword == null ? "" : String.valueOf(keyword.getOriginal()));
+        body.addProperty("keywordTitle", keyword == null ? "" : String.valueOf(keyword.getTitle()));
+        final JsonObject c = new JsonObject();
+        c.addProperty("rendered", cost == null ? "" : cost.toSimpleString());
+        c.addProperty("mana", cost == null || cost.hasNoManaCost() ? "" : String.valueOf(cost.getTotalMana()));
+        c.addProperty("cmc", cost == null || cost.hasNoManaCost() ? 0 : cost.getTotalMana().getCMC());
+        body.add("cost", c);
+        body.addProperty("min", 0);
+        body.addProperty("max", ceiling);
+        // The engine's own bound, which is Integer.MAX_VALUE for Multikicker; -1 when it is
+        // effectively unbounded, so a host never sees a range it cannot price.
+        body.addProperty("engineMax", max == Integer.MAX_VALUE ? -1 : max);
+        final JsonObject ans = ask("chooseNumberForKeywordCost", "keywordCost", body);
+        if (ans == null) {
+            return super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
+        }
+        final Integer v = optInt(ans, "value");
+        if (v == null || v < 0 || v > ceiling) {
+            refuse("chooseNumberForKeywordCost",
+                    "value " + v + " outside [0," + ceiling + "] for " + prompt);
+            return super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
+        }
+        counters.instrument("keywordCost.answered");
+        if (v > 0) {
+            counters.instrument("keywordCost.paid");
+        }
+        return v;
+    }
+
+    @Override
+    public List<OptionalCostValue> chooseOptionalCosts(final SpellAbility chosen,
+            final List<OptionalCostValue> optionalCostValues) {
+        count("chooseOptionalCosts");
+        if (buildingMenu) {
+            // Decline while enumerating: taking them here would silently drop the unkicked
+            // ability from the menu. Both variants are offered instead (see
+            // legalSpellAbilities), so the host votes on the cost rather than inheriting it.
+            return Collections.emptyList();
+        }
+        if (!bridged() || optionalCostValues == null || optionalCostValues.isEmpty()) {
+            return super.chooseOptionalCosts(chosen, optionalCostValues);
+        }
+        final JsonObject body = envelope(true);
+        body.add("ability", StateEncoder.encodeSpellAbility(chosen));
+        final JsonArray menu = new JsonArray();
+        for (OptionalCostValue ocv : optionalCostValues) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("type", String.valueOf(ocv.getType()));
+            o.addProperty("rendered", ocv.getCost() == null ? "" : ocv.getCost().toSimpleString());
+            o.addProperty("mana", ocv.getCost() == null || ocv.getCost().hasNoManaCost()
+                    ? "" : String.valueOf(ocv.getCost().getTotalMana()));
+            o.addProperty("cmc", ocv.getCost() == null || ocv.getCost().hasNoManaCost()
+                    ? 0 : ocv.getCost().getTotalMana().getCMC());
+            menu.add(o);
+        }
+        body.add("menu", menu);
+        final JsonObject ans = ask("chooseOptionalCosts", "optionalCosts", body);
+        if (ans == null) {
+            return super.chooseOptionalCosts(chosen, optionalCostValues);
+        }
+        final List<Integer> idx = optIntList(ans, "choices");
+        if (idx == null) {
+            refuse("chooseOptionalCosts", "missing/!array 'choices'");
+            return super.chooseOptionalCosts(chosen, optionalCostValues);
+        }
+        final List<OptionalCostValue> picked = new ArrayList<>();
+        for (int i : idx) {
+            if (i < 0 || i >= optionalCostValues.size() || picked.contains(optionalCostValues.get(i))) {
+                refuse("chooseOptionalCosts", "optional-cost index out of range/duplicate: " + i);
+                return super.chooseOptionalCosts(chosen, optionalCostValues);
+            }
+            picked.add(optionalCostValues.get(i));
+        }
+        return picked;
     }
 
     /**
@@ -1401,8 +1559,6 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public int chooseNumberForCostReduction(final SpellAbility sa, final int min, final int max) { count("chooseNumberForCostReduction"); return super.chooseNumberForCostReduction(sa, min, max); }
     @Override
-    public int chooseNumberForKeywordCost(SpellAbility sa, Cost cost, KeywordInterface keyword, String prompt, int max) { count("chooseNumberForKeywordCost"); return super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max); }
-    @Override
     public boolean chooseFlipResult(SpellAbility sa, Player flipper, boolean call) { count("chooseFlipResult"); return super.chooseFlipResult(sa, flipper, call); }
     @Override
     public byte chooseColor(String message, SpellAbility sa, ColorSet colors) { count("chooseColor"); return super.chooseColor(message, sa, colors); }
@@ -1436,8 +1592,6 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     public void revealAISkipCards(String message, Map<Player, Map<DeckSection, List<? extends PaperCard>>> deckCards) { count("revealAISkipCards"); super.revealAISkipCards(message, deckCards); }
     @Override
     public void revealUnsupported(Map<Player, List<PaperCard>> unsupported) { count("revealUnsupported"); super.revealUnsupported(unsupported); }
-    @Override
-    public List<OptionalCostValue> chooseOptionalCosts(SpellAbility choosen, List<OptionalCostValue> optionalCostValues) { count("chooseOptionalCosts"); return super.chooseOptionalCosts(choosen, optionalCostValues); }
     @Override
     public List<CostPart> orderCosts(List<CostPart> costs) { count("orderCosts"); return super.orderCosts(costs); }
     @Override

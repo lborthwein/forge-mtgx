@@ -377,7 +377,51 @@ public final class StateEncoder {
             // leave the list empty
         }
         o.add("optionalPaid", optional);
+        o.add("pendingKeywordCosts", pendingKeywordCosts(sa));
         return o;
+    }
+
+    /**
+     * Optional EXTRA costs the host will be asked about after it commits to this cast
+     * (protocol v2.4): Multikicker, Kicker, Casualty, Conspire, Offspring and relatives.
+     *
+     * <p>These are not {@code OptionalCostValue}s and never appear in {@code optionalPaid}
+     * or in the rendered mana cost. Everflowing Chalice reaches the ballot as {@code {0}},
+     * {@code cmc} 0, {@code optionalPaid} empty — and then
+     * {@code GameActionUtil.addExtraKeywordCost} multikicks it during payment. Publishing
+     * them here is what stops a free-looking ballot from being billed ten mana.
+     *
+     * <p>Read-only and best-effort: the keyword line is republished verbatim rather than
+     * re-parsed, so this cannot disagree with the engine about what the cost is.
+     */
+    private static JsonArray pendingKeywordCosts(final SpellAbility sa) {
+        final JsonArray a = new JsonArray();
+        try {
+            if (!sa.isSpell() || sa.isCopied() || sa.getHostCard() == null) {
+                return a;
+            }
+            for (KeywordInterface kw : sa.getHostCard().getKeywords()) {
+                final String original = kw.getOriginal();
+                if (original == null) {
+                    continue;
+                }
+                final boolean repeatable = original.startsWith("Multikicker");
+                if (!repeatable && !original.startsWith("Kicker") && !original.startsWith("Casualty")
+                        && !original.equals("Conspire") && !original.startsWith("Offspring")) {
+                    continue;
+                }
+                final JsonObject o = new JsonObject();
+                o.addProperty("keyword", original);
+                o.addProperty("title", String.valueOf(kw.getTitle()));
+                o.addProperty("repeatable", repeatable);
+                final int colon = original.indexOf(':');
+                o.addProperty("cost", colon >= 0 ? original.substring(colon + 1) : "");
+                a.add(o);
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("pending keyword cost scan failed", e);
+        }
+        return a;
     }
 
     /**

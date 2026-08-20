@@ -185,6 +185,82 @@ a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
 
+## Protocol v2.4 — optional extra costs reach the host (B1, the Chalice frame)
+
+**The host voted on a free spell and was billed ten mana.** Everflowing Chalice reached
+the ballot as `cost.mana "{0}"`, `cmc 0`, `optionalPaid []`, `x.has false`; the pilot chose
+it as a zero-mana cast, and Forge then multikicked it for 10 of our 12 mana sources,
+stranding Mana Drain. No pricing seam could fire — there was no cost in the ballot to price.
+
+### Where the decision actually lives
+
+Not `chooseOptionalCosts`, and not `announceRequirements`. Multikicker, Kicker, Casualty,
+Conspire and Offspring are **extra keyword costs**, applied by
+`GameActionUtil.addExtraKeywordCost` during `handlePlayingSpellAbility`, and every one of
+them routes through **`chooseNumberForKeywordCost`** — `addKeywordCost` is a non-abstract
+convenience that calls it with `max = 1`. One choke point covers the whole family.
+
+`chooseOptionalCosts` is a different thing and is only ever called from
+`ComputerUtilAbility.getOriginalAndAltCostAbilities`, i.e. **while the priority menu is
+being built** — and it drops the unkicked ability from the menu when the answer is
+non-empty.
+
+### `keywordCost` — a new ask kind
+
+Issued when the engine asks how many times an optional extra cost is paid:
+
+```json
+{"kind":"keywordCost","keyword":"Multikicker:2","keywordTitle":"Multikicker {2}",
+ "prompt":"Choose Amount for Multikicker: {2}",
+ "cost":{"rendered":"{2}","mana":"{2}","cmc":2},
+ "min":0,"max":0,"engineMax":-1,
+ "ability":{…},"state":{…}}
+```
+Answered `{"value": n}`.
+
+`max` is the **affordable** ceiling (mana left after the base cost, divided by the repeat's
+own mana cost), because the engine's own bound is `Integer.MAX_VALUE` for Multikicker and
+that is not a range a host can price against. `engineMax` reports the engine's bound, `-1`
+when effectively unbounded. A value outside `[0, max]` is a counted refusal.
+
+### `optionalCosts` — a new ask kind, and the menu change
+
+While the menu is being built the bridge **declines** optional costs, so the unkicked
+ability survives, and adds `GameActionUtil.addOptionalCosts(sa, …)` as its **own menu
+entry** with its true total cost. The host votes on the cost instead of inheriting it; the
+two entries are distinguishable by `optionKey` and `cost.optionalPaid`. Outside menu
+construction the kind is published as a normal ask (`menu` of bundles with their mana,
+answered `{"choices":[index,…]}`).
+
+### `cost.pendingKeywordCosts` — ballot honesty
+
+Every ability now publishes the optional extra costs that will be asked about *after* it is
+chosen:
+
+```json
+"pendingKeywordCosts":[{"keyword":"Multikicker:2","title":"Multikicker {2}",
+                        "repeatable":true,"cost":"2"}]
+```
+
+These never appear in `optionalPaid` or in the rendered mana cost, which is exactly why a
+`{0}` ballot looked free. The keyword line is republished verbatim rather than re-parsed,
+so it cannot disagree with the engine about what the cost is.
+
+### Verified — same jar, same seed, only the answer differs
+
+Rig: 34 Island / 16 Everflowing Chalice / 10 Mana Leak, our seat bridged, seed 4100, 2 games.
+
+| `keywordCost` answered | Chalice charge counters by fid | kicks paid |
+|---|---|---|
+| `delegate` (Forge decides — the inherited path) | `{6:0, 7:0, 12:1, 14:2, 15:0}` | **3** |
+| `{"value":0}` (host votes) | `{6:0, 7:0, 12:0, 14:0, 15:0}` | **0** |
+
+6 `keywordCost` asks, 0 refusals. Voting 2 instead produces Chalices carrying
+`{"CHARGE":1}` and `{"CHARGE":2}` — the counters equal the votes, clamped where no mana was
+free. The payment matches the ballot.
+
+New instruments: `keywordCost.answered`, `keywordCost.paid`.
+
 ## Protocol v2.3 — announced X on a `priority` answer (D-1)
 
 **The bridge never transmitted X.** `chooseSpellAbilityToPlay` returned the chosen
