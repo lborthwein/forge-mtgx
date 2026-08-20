@@ -290,14 +290,20 @@ public final class BenchMain {
             }
 
             String abort = null;
+            String abortDetail = null;
             try {
                 TimeLimitedCodeBlock.runWithTimeout(() -> match.startGame(game), timeoutSec, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
                 abort = "timeout";
                 JsonRpcChannel.log(gameId + ": sim timeout after " + timeoutSec + "s, scoring as a draw");
-            } catch (Exception | StackOverflowError e) {
-                abort = "exception: " + e;
-                JsonRpcChannel.logErr(gameId + ": game threw", e instanceof Throwable ? e : new RuntimeException("?"));
+            } catch (Throwable e) {
+                // Anything that escapes here is an INSTRUMENT failure, not a game result.
+                // It used to be stamped GameEndReason.Draw by the finally below and was
+                // then counted as a draw by every downstream analysis -- 15 bridged games
+                // in one campaign, 0 null. `reason` now says so out loud.
+                abort = "InstrumentError";
+                abortDetail = e.toString();
+                JsonRpcChannel.logErr(gameId + ": game threw", e);
             } finally {
                 if (!game.isGameOver()) {
                     game.setGameOver(GameEndReason.Draw);
@@ -329,6 +335,12 @@ public final class BenchMain {
             }
             outcome.addProperty("winner", winner);
             outcome.addProperty("reason", reason);
+            // A crashed game is never a draw. Downstream must classify on these, not on
+            // `reason == "draw"`.
+            outcome.addProperty("crashed", "InstrumentError".equals(abort));
+            if (abortDetail != null) {
+                outcome.addProperty("error", abortDetail);
+            }
             outcome.addProperty("turns", turns);
             outcome.addProperty("wallMs", wallMs);
             outcome.addProperty("events", emitter.emitted());

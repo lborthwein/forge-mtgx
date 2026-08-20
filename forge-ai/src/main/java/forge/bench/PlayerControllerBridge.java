@@ -1193,7 +1193,91 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 return super.chooseTargetsFor(currentAbility);
             }
         }
+        final String divideProblem = applyDividedAllocation(currentAbility, ans);
+        if (divideProblem != null) {
+            currentAbility.setTargets(before);
+            refuse("chooseTargetsFor", divideProblem);
+            return super.chooseTargetsFor(currentAbility);
+        }
         return true;
+    }
+
+    /**
+     * Split a "divided as you choose" amount across the chosen targets (protocol v2.7).
+     *
+     * <p>Choosing targets is only half of targeting such a spell: {@code DamageDealEffect}
+     * then reads {@code sa.getDividedValue(target)} per target and dereferences it. Adding
+     * targets without an allocation left that null, and the NPE escaped as a crashed game
+     * stamped "Draw" -- three of fifteen bridged crashes in one campaign.
+     *
+     * <p>The answer may carry {@code "divide": {"<targetId>": n}}; otherwise the amount is
+     * split evenly with the remainder on the first target, which is Forge's own convention
+     * ({@code PossibleTargetSelector}).
+     *
+     * @return null on success, or the reason to refuse
+     */
+    private static String applyDividedAllocation(final SpellAbility sa, final JsonObject ans) {
+        if (!sa.isDividedAsYouChoose()) {
+            return null;
+        }
+        final List<GameObject> chosen = Lists.newArrayList(sa.getTargets());
+        if (chosen.isEmpty()) {
+            return null;
+        }
+        final Integer totalObj = sa.getDividedValue();
+        if (totalObj == null) {
+            // The engine has not told us how much there is to divide; guessing here is how
+            // an illegal allocation gets built. Hand it back rather than invent one.
+            return "divided-as-you-choose ability with no total to divide: " + sa;
+        }
+        final int total = totalObj;
+        final JsonObject explicit = ans.has("divide") && ans.get("divide").isJsonObject()
+                ? ans.getAsJsonObject("divide") : null;
+        if (explicit != null) {
+            int sum = 0;
+            for (GameObject go : chosen) {
+                final String key = String.valueOf(idOf(go));
+                if (!explicit.has(key)) {
+                    return "'divide' omits target " + key;
+                }
+                final int n;
+                try {
+                    n = explicit.get(key).getAsInt();
+                } catch (RuntimeException e) {
+                    return "'divide' entry for " + key + " is not a number";
+                }
+                if (n < 1) {
+                    // CR 601.2d: every target must get at least one.
+                    return "'divide' gives " + n + " to target " + key;
+                }
+                sa.addDividedAllocation(go, n);
+                sum += n;
+            }
+            if (sum != total) {
+                return "'divide' allocates " + sum + " of " + total;
+            }
+            return null;
+        }
+        if (total < chosen.size()) {
+            return "cannot divide " + total + " among " + chosen.size() + " targets";
+        }
+        final int each = total / chosen.size();
+        int leftover = total - each * chosen.size();
+        for (GameObject go : chosen) {
+            sa.addDividedAllocation(go, each + leftover);
+            leftover = 0;
+        }
+        return null;
+    }
+
+    private static int idOf(final GameObject go) {
+        if (go instanceof GameEntity) {
+            return ((GameEntity) go).getId();
+        }
+        if (go instanceof SpellAbility) {
+            return StateEncoder.SPELL_TARGET_ID_BASE + ((SpellAbility) go).getId();
+        }
+        return -1;
     }
 
     /** Apply one card/player target. Returns null on success, or the reason to refuse. */
@@ -1540,6 +1624,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.addProperty("damage", damageDealt);
         body.addProperty("overrideOrder", overrideOrder);
         body.addProperty("defenderId", defender == null ? -1 : defender.getId());
+        // v2.7: whether the -1 "excess through to the defender" key is legal at all here.
+        // Forge calls this for BLOCKERS too, dividing a blocker's damage among the
+        // attackers it blocks, and there `defender` is null.
+        body.addProperty("allowExcessToDefender", defender != null);
         final JsonObject ans = ask("assignCombatDamage", "assignDamage", body);
         if (ans == null) {
             return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
@@ -1565,9 +1653,31 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
             }
             total += amount;
-            // key -1 means "trample through to the defending player/planeswalker"
-            final Card target = fid < 0 ? null : findCard(blockers, fid);
-            if (fid >= 0 && target == null) {
+            // key -1 means "excess through to the defending player/planeswalker"
+            if (fid < 0) {
+                // FAIL CLOSED. Forge uses this same controller call to divide a BLOCKER's
+                // damage among the attackers it blocks, and passes defender == null there.
+                // Forwarding the sentinel makes Combat.assignBlockersDamage:750 call
+                // damageMap.put(blocker, null, n), which Guava rejects -- and the NPE
+                // escapes as a crashed game stamped "Draw". Ten of fifteen bridged crashes
+                // in one campaign were this. The sentinel never leaves this method unless
+                // there is a defender to receive it.
+                if (defender == null) {
+                    if (amount > 0) {
+                        refuse("assignCombatDamage", "answer routed " + amount
+                                + " to the defender, but this assignment has none"
+                                + " (blocker path, CR 510.1d)");
+                        return super.assignCombatDamage(attacker, blockers, remaining, damageDealt,
+                                defender, overrideOrder);
+                    }
+                    counters.instrument("damage.droppedZeroExcess");
+                    continue;
+                }
+                out.put(null, amount);
+                continue;
+            }
+            final Card target = findCard(blockers, fid);
+            if (target == null) {
                 refuse("assignCombatDamage", "unknown blocker " + fid);
                 return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
             }

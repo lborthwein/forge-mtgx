@@ -185,6 +185,76 @@ a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
 
+## Protocol v2.7 — three bridge crashes, and "Draw" stops meaning "crashed"
+
+**Every "Draw" in a bridged arm was a crashed game.** 15 of 288 bridged games, 0 of 288
+null, all NullPointerExceptions stamped `GameEndReason.Draw` by `BenchMain`'s `finally`.
+Downstream they scored ½ and were read as game results.
+
+### The reason field
+
+A game that throws now reports `reason:"InstrumentError"` with `crashed:true` and an
+`error` string, and the catch widened from `Exception | StackOverflowError` to `Throwable`
+so an `OutOfMemoryError` is classified too. **Classify on `outcome.crashed`, never on
+`reason == "draw"`** — a real draw and an instrument failure are different events and were
+indistinguishable until now.
+
+### (a) the `-1` sentinel in the blocker path — 10 of 15
+
+`assignCombatDamage` is called for **blockers** as well as attackers: Forge uses it to
+divide a blocker's damage among the attackers it blocks, and passes `defender == null`
+there. Our answer decoder accepted `fid < 0` unconditionally, so the "excess to the
+defender" sentinel became `damageMap.put(blocker, null, n)` at
+`Combat.assignBlockersDamage:750`, and Guava's `checkNotNull` threw.
+
+Fail-closed: the sentinel never leaves the decoder unless there is a defender to receive
+it. `defenderId == -1` with a positive amount is a **counted refusal** (the assignment
+falls to Forge's AI); a zero amount is dropped with an instrument
+(`damage.droppedZeroExcess`). The ask also now carries `allowExcessToDefender`, so a
+correct host never constructs the illegal answer in the first place.
+
+### (b) `getDividedValue` returned null — 3 of 15
+
+Choosing targets is only half of targeting a "divided as you choose" spell:
+`DamageDealEffect.resolve:248` then reads `sa.getDividedValue(target)` per target and
+dereferences it. `chooseTargetsFor` added targets and never allocated, so it was null.
+
+A `targets` answer may now carry `"divide": {"<targetId>": n}` — validated to cover every
+chosen target, to give each at least 1 (CR 601.2d), and to sum to the total. Without it the
+amount is split evenly with the remainder on the first target, which is Forge's own
+convention (`PossibleTargetSelector`). If the engine has not published a total to divide,
+the call is refused rather than allocated by guess.
+
+### (c) `encodeSpellAbility` on a null host card — 2 of 15
+
+`toString()` and `getStackDescription()` both walk the host card, which can be null for an
+ability detached from its source (seen inside `chooseSingleEntityForEffect`). A rendering
+failure was killing the game. Both are now produced through a `safeText` helper that
+returns `"(no host card)"` / `"(undescribable)"` instead of throwing — an ability we cannot
+describe is still an ability we must publish.
+
+### Verified — the crashing pairing, driven into the crash on purpose
+
+`decks-p1-sel` seed 3007 (9 and 8 crashes in the banked runs), 6 games per seat
+assignment, with a host that deliberately emits the `-1` excess key:
+
+| | our seat p0 | our seat p1 |
+|---|---|---|
+| games | 6 | 6 |
+| **real winners** | **6** | **6** |
+| **crashed (InstrumentError)** | **0** | **0** |
+| draws | 0 | 0 |
+| `assignDamage` asks / sentinel used | 34 / 7 | 39 / 6 |
+| `assignCombatDamage` refusals (the guard firing) | 5 | 0 |
+
+Worker stderr: **0 NullPointerExceptions, 0 "game threw"** in both runs. The guard's log
+line names the rule it is enforcing:
+`answer routed 4 to the defender, but this assignment has none (blocker path, CR 510.1d)`.
+
+Note the sign, from the autopsy: the crashed games were games the bridged seat was losing
+(mean life 11.2 vs 15.3), and ½ credit flattered it. Fixing them **costs** a little winrate.
+This is corpus hygiene, not a gain.
+
 ## Protocol v2.6 — play/draw reaches the host, and the pre-game surface audit
 
 **`chooseStartingPlayer` was an uncounted decision surface.** The bridge inherited

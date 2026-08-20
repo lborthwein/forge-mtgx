@@ -288,6 +288,22 @@ public final class StateEncoder {
         return o;
     }
 
+    /**
+     * A description that cannot throw. Returns a placeholder rather than propagating a
+     * rendering failure into the game loop.
+     */
+    private static String safeText(final SpellAbility sa, final boolean stack) {
+        if (sa.getHostCard() == null) {
+            return stack ? "(no host card)" : "(no host card)";
+        }
+        try {
+            return String.valueOf(stack ? sa.getStackDescription() : sa.toString());
+        } catch (RuntimeException | StackOverflowError e) {
+            JsonRpcChannel.log("ability description failed to render: " + e);
+            return "(undescribable)";
+        }
+    }
+
     /** Compact summary of a spell/ability for a {@code priority} menu entry. */
     public static JsonObject encodeSpellAbility(final SpellAbility sa) {
         final JsonObject o = new JsonObject();
@@ -304,8 +320,14 @@ public final class StateEncoder {
         o.addProperty("isAbility", sa.isAbility());
         o.addProperty("isManaAbility", sa.isManaAbility());
         o.addProperty("payCosts", sa.getPayCosts() == null ? "" : sa.getPayCosts().toString());
-        o.addProperty("description", String.valueOf(sa.toString()));
-        o.addProperty("stackDescription", String.valueOf(sa.getStackDescription()));
+        // Both renderings walk the HOST CARD, which can be null for an ability that has
+        // been detached from its source (seen inside chooseSingleEntityForEffect). Forge's
+        // own getStackDescription dereferences it, and the NPE escaped as a crashed game
+        // stamped "Draw" -- two of fifteen bridged crashes in one campaign. An ability we
+        // cannot describe is still an ability we must publish, so degrade the text rather
+        // than the message.
+        o.addProperty("description", safeText(sa, false));
+        o.addProperty("stackDescription", safeText(sa, true));
         o.addProperty("usesTargeting", sa.usesTargeting());
         // ---- protocol v2: structured cost / X / modes / discriminator ----------------
         // Two menu entries that differ only in an alternative or optional cost render
