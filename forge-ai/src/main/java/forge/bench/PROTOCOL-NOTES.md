@@ -185,6 +185,70 @@ a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
 
+## Protocol v2.6 — play/draw reaches the host, and the pre-game surface audit
+
+**`chooseStartingPlayer` was an uncounted decision surface.** The bridge inherited
+`PlayerControllerAi`'s "AI is brave" — always take the play — so Forge silently decided
+play/draw for the bridged seat: 88 uncounted calls in one panel, and our deck on the play
+**61% against the null arm's 50%**. Bridge-vs-null arms had never been matched on
+play/draw mix.
+
+### Who is asked, and why the confound is a collider
+
+From `GameAction.java:2415-2440`: game 1 picks the chooser with `Aggregates.random`; every
+later game in a match gives the choice to the **loser of the previous game**. Only that one
+player's controller is called, and its return value is the player who actually goes first —
+so **our seat is not asked at all when the opponent won the roll**.
+
+That makes the 61/50 gap a *collider*, not a stray covariate: the bridged seat loses more
+often → it is the previous-game loser more often → it is the chooser more often → and it
+always took the play. On-the-play rate is a **function of** win rate here, so matching arms
+on it after the fact is not enough; the decision has to be on the wire.
+
+Visible in the smoke: 8 games produced **7** asks, because game 1's roll went to the
+opponent and our seat was never consulted.
+
+### The ask
+
+```json
+{"kind":"startingPlayer","game":"g2","seat":0,
+ "winner":0,"choosingSeat":0,"firstGame":false,"state":{…}}
+```
+answered `{"play": true|false}`, from our seat's perspective. `winner` and `choosingSeat`
+are always our own seat, by the semantics above; they are published anyway so a decoder
+never has to assume it. `play:false` returns the opponent (refused in a >2-player game
+rather than inventing a seating order). No answer = a counted requested-delegation, never
+silent.
+
+Instruments: `start.tookPlay`, `start.tookDraw`.
+
+### Verified — same decks and seed, only the answer differing
+
+| `startingPlayer` answered | asks | our seat on the play | counted |
+|---|---|---|---|
+| `delegate` (reproduces the inherited behaviour) | 7 | **7/8 (88%)** | 7 requested-delegations |
+| `{"play":true}` | 7 | 7/8 (88%) | `start.tookPlay` 7 |
+| `{"play":false}` | 7 | **0/8 (0%)** | `start.tookDraw` 7 |
+
+0 refusals in every arm.
+
+### Audit — other surfaces Forge decides for our seat before turn 1
+
+Counted over a 3-game cube corpus (2 seats):
+
+| surface | calls | status |
+|---|---|---|
+| `chooseStartingPlayer` | 3 | **now on the wire** (v2.6) |
+| `tuckCardsViaMulligan` | 2 | **now on the wire** — London bottoming; Forge was choosing which cards our seat put on the bottom. Routed through the existing `cardsChoice` kind with min = max = cards to return. |
+| `sideboard` | 4 | **inert.** `PlayerControllerAi.sideboard` returns null immediately unless `GameRules.getAISideboardingEnabled()`, which defaults false and `BenchMain` never sets. Counted, no game effect. Becomes live the day a run enables AI sideboarding. |
+| `chooseStartingHand` | 0 | variant-gated (Backup Plan and relatives); does not fire in this cube. Still inherited — put it on the wire before running a format that has it. |
+| `chooseSaToActivateFromOpeningHand` | 0 | leyline/Gemstone-Caverns class; does not fire here. Same caveat. |
+| `revealUnsupported` | 6 | informational, no decision. |
+| `revealAnte`, `chooseCardsYouWonToAddToDeck` | 0 | ante only. |
+
+The two that fire are fixed; the two that would fire in another format are named rather
+than left to be rediscovered.
+
 ## Protocol v2.5 — `menuDiag`, and why the quiet opponent-turn window is NOT bridge-side
 
 The campaign measured a wall: a deferrable instant-speed activation reached our menu 157

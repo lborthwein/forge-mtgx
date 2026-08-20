@@ -946,6 +946,80 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
     }
 
+    /**
+     * Play or draw (protocol v2.6).
+     *
+     * <p>Was an <em>uncounted</em> decision surface: the bridge inherited
+     * {@code PlayerControllerAi}'s "AI is brave" — always take the play — so Forge silently
+     * decided play/draw for the bridged seat, 88 times in one panel.
+     *
+     * <p>Who is asked, from {@code GameAction.java:2415-2440}: game 1 picks the chooser by
+     * {@code Aggregates.random}; every later game in a match gives the choice to the
+     * <em>loser of the previous game</em>. Only that one player's controller is called, and
+     * the return value is the player who actually goes first. So our seat is asked only
+     * when it won the roll or lost the last game — and because the bridged seat loses more
+     * often than it wins, it was the chooser more often, and always took the play. That is
+     * how a bridge arm reached 61% on the play against a null arm's 50%: on-the-play rate
+     * is a <em>function of</em> win rate here, so it is a collider, not a stray covariate.
+     */
+    @Override
+    public Player chooseStartingPlayer(final boolean isFirstGame) {
+        count("chooseStartingPlayer");
+        if (!bridged()) {
+            return super.chooseStartingPlayer(isFirstGame);
+        }
+        final JsonObject body = envelope(true);
+        // The seat being asked IS the seat that won the roll; Forge never asks the other.
+        body.addProperty("winner", seat);
+        body.addProperty("choosingSeat", seat);
+        body.addProperty("firstGame", isFirstGame);
+        final JsonObject ans = ask("chooseStartingPlayer", "startingPlayer", body);
+        if (ans == null) {
+            return super.chooseStartingPlayer(isFirstGame);
+        }
+        final Boolean play = optBool(ans, "play");
+        if (play == null) {
+            refuse("chooseStartingPlayer", "expected boolean 'play'");
+            return super.chooseStartingPlayer(isFirstGame);
+        }
+        counters.instrument(play ? "start.tookPlay" : "start.tookDraw");
+        if (play) {
+            return getPlayer();
+        }
+        // Decline: the opponent goes first. With more than two seats Forge's own rule is
+        // "the chooser or nobody", so fall back rather than invent a seating order.
+        Player other = null;
+        for (Player p : getGame().getPlayers()) {
+            if (p != getPlayer()) {
+                if (other != null) {
+                    refuse("chooseStartingPlayer", "cannot decline the play in a >2 player game");
+                    return super.chooseStartingPlayer(isFirstGame);
+                }
+                other = p;
+            }
+        }
+        return other == null ? getPlayer() : other;
+    }
+
+    /**
+     * London mulligan bottoming (protocol v2.6). Also previously uncounted-and-inherited:
+     * Forge chose which cards our seat put on the bottom. Routed through the existing
+     * {@code cardsChoice} machinery with min = max = the number to return.
+     */
+    @Override
+    public CardCollectionView tuckCardsViaMulligan(final CardCollectionView hand, final int cardsToReturn) {
+        count("tuckCardsViaMulligan");
+        if (!bridged() || cardsToReturn <= 0) {
+            return super.tuckCardsViaMulligan(hand, cardsToReturn);
+        }
+        final CardCollection picked = askForCards("tuckCardsViaMulligan", hand,
+                cardsToReturn, cardsToReturn, "put on the bottom (London mulligan)", null);
+        if (picked == null) {
+            return super.tuckCardsViaMulligan(hand, cardsToReturn);
+        }
+        return picked;
+    }
+
     @Override
     public boolean mulliganKeepHand(final Player p, final int cardsToReturn) {
         count("mulliganKeepHand");
@@ -1592,8 +1666,6 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public List<SpellAbility> chooseSaToActivateFromOpeningHand(List<SpellAbility> usableFromOpeningHand) { count("chooseSaToActivateFromOpeningHand"); return super.chooseSaToActivateFromOpeningHand(usableFromOpeningHand); }
     @Override
-    public Player chooseStartingPlayer(boolean isFirstGame) { count("chooseStartingPlayer"); return super.chooseStartingPlayer(isFirstGame); }
-    @Override
     public PlayerZone chooseStartingHand(List<PlayerZone> zones) { count("chooseStartingHand"); return super.chooseStartingHand(zones); }
     @Override
     public Mana chooseManaFromPool(List<Mana> manaChoices) { count("chooseManaFromPool"); return super.chooseManaFromPool(manaChoices); }
@@ -1619,8 +1691,6 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     public String chooseRollSwapValue(List<String> swapChoices, Integer currentResult, int power, int toughness) { count("chooseRollSwapValue"); return super.chooseRollSwapValue(swapChoices, currentResult, power, toughness); }
     @Override
     public Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) { count("vote"); return super.vote(sa, prompt, options, votes, forPlayer, optional); }
-    @Override
-    public CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn) { count("tuckCardsViaMulligan"); return super.tuckCardsViaMulligan(hand, cardsToReturn); }
     @Override
     public boolean playChosenSpellAbility(SpellAbility sa) { count("playChosenSpellAbility"); return super.playChosenSpellAbility(sa); }
     @Override
