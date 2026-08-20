@@ -185,6 +185,91 @@ a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
 
+## Protocol v2.5 — `menuDiag`, and why the quiet opponent-turn window is NOT bridge-side
+
+The campaign measured a wall: a deferrable instant-speed activation reached our menu 157
+times outside end steps and 4 times at end steps, 87.6% of their-end-step priority frames
+arrived pass-only, and `acti.releasedTerminal` was 0/288 games. Three suspects were named:
+(1) the candidate scan using AI-desirability filters, (2) Forge auto-passing our windows,
+(3) `PhaseHandler` granting priority only when Forge's AI would act.
+
+**All three are refuted.** The bridge does not prune the window.
+
+### (2) and (3): we do get priority
+
+Over 2 games against a do-nothing opponent, our seat received a `priority` ask at
+**107 of 108** of their end steps, and at every other opponent-turn step
+(`THEIRS/UPKEEP` 108, `MAIN1` 107, `COMBAT_BEGIN` 107, `COMBAT_DECLARE_ATTACKERS` 107,
+`COMBAT_END` 107, `MAIN2` 107). There is no skip and no auto-pass.
+
+### (1): the scan is legality-only, and the menu is full when the resources are
+
+`legalSpellAbilities` filters on `sa.canPlay()`, `ComputerUtilCost.canPayCost` and target
+existence. None is an opinion: `canPlay()` routes through
+`SpellAbilityRestriction.canPlay`, which itself calls `sa.canCastTiming(...)`
+(SpellAbilityRestriction.java:560) — so sorcery-speed timing is enforced *by the legality
+check itself*, and `canPlayAI` is never consulted anywhere in the bridge path.
+
+Rig: 30 Island / 15 Brainstorm / 15 Prodigal Sorcerer against a 60-Forest opponent, our
+seat casting only at its own main and never activating, so resources are guaranteed.
+
+| their END_OF_TURN, 107 frames | |
+|---|---|
+| pass-only menus | **3 (2.8%)** |
+| frames offering the instant | **104** |
+| frames offering the activation | **100** |
+| avg untapped Islands / ready activators | 15.7 / 7.9 |
+
+```
+turn 13, their END_OF_TURN — 6 untapped Islands, 3 ready Tims, 4 Brainstorms in hand
+menu: [pass, Brainstorm, Brainstorm, Brainstorm, Brainstorm,
+       Prodigal Sorcerer, Prodigal Sorcerer, Prodigal Sorcerer]
+```
+
+### What the wall actually is
+
+Same jar, same campaign decks (`decks-deploy`, 4 seeds × 2 games), **only the host's own-main
+policy differing**:
+
+| their-turn priority frames | spend at our main | hold |
+|---|---|---|
+| frames | 722 | 592 |
+| **pass-only** | **722 (100.0%)** | **157 (26.5%)** |
+| candidates scanned | 1226 | 970 |
+| **offered** | **0** | **721** |
+| rejected — timing | 802 | 8 |
+| rejected — unaffordable | 424 | 173 |
+| rejected — no legal target | 0 | 68 |
+| *their END_OF_TURN* pass-only | 65/65 (100%) | 16/53 (30.2%) |
+
+The window is destroyed **upstream, at our own main phase**, by spending the mana and
+tapping the permanents. By the time the window arrives there is nothing left to defer.
+Note the split: in the spending arm most rejections are *timing* (a board of
+sorcery-speed activations — loyalty abilities, equip — that are simply not legal at an
+opponent's turn), and every instant-speed-legal option that remains is *unaffordable*.
+
+This is why every pilot-side window seam nulled: a deferral seam that fires **at the
+window** is asking a question whose answer was already fixed one phase earlier.
+
+### The instrument
+
+Rather than widen a menu that is already complete — widening it would mean offering
+illegal actions — every `priority` ask now carries the census:
+
+```json
+"menuDiag":{"candidates":37,"offered":0,"rejectedTiming":22,
+            "rejectedUnaffordable":15,"rejectedNoTarget":0}
+```
+
+and the per-seat counters gain `menu.ourTurn.*` / `menu.theirTurn.*` totals
+(`frames`, `passOnlyFrames`, `candidates`, `offered`, `rejectedTiming`,
+`rejectedUnaffordable`, `rejectedNoTarget`) in the `instruments` map. A quiet window is now
+attributable at the frame instead of inferred.
+
+Cost: five ints per priority ask, no change to menu contents, no measurable wall-time
+change. **Bridged-seat decisions are unchanged by this commit** — the menu is byte-for-byte
+the same set of options; only the diagnostic block is new.
+
 ## Protocol v2.4 — optional extra costs reach the host (B1, the Chalice frame)
 
 **The host voted on a free spell and was billed ten mana.** Everflowing Chalice reached

@@ -48,7 +48,13 @@ public final class CallCounter {
 
     /** Count a named observation that is not a controller call. */
     public synchronized void instrument(final String name) {
-        instruments.merge(name, 1, Integer::sum);
+        instrument(name, 1);
+    }
+
+    public synchronized void instrument(final String name, final int n) {
+        if (n > 0) {
+            instruments.merge(name, n, Integer::sum);
+        }
     }
 
     public synchronized void delegateRequested(final String method) {

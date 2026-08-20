@@ -258,8 +258,11 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (!bridged()) {
             return super.chooseSpellAbilityToPlay();
         }
-        final List<SpellAbility> menu = legalSpellAbilities();
+        final int[] diag = new int[DIAG_LEN];
+        final List<SpellAbility> menu = legalSpellAbilities(diag);
+        recordMenuCensus(diag, menu.size());
         final JsonObject body = envelope(true);
+        body.add("menuDiag", menuDiagJson(diag, menu.size()));
         final JsonArray items = new JsonArray();
         items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
         for (SpellAbility sa : menu) {
@@ -386,12 +389,48 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         return true;
     }
 
+    private static JsonObject menuDiagJson(final int[] diag, final int offered) {
+        final JsonObject o = new JsonObject();
+        o.addProperty("candidates", diag[DIAG_CANDIDATES]);
+        o.addProperty("offered", offered);
+        o.addProperty("rejectedTiming", diag[DIAG_TIMING]);
+        o.addProperty("rejectedUnaffordable", diag[DIAG_UNAFFORDABLE]);
+        o.addProperty("rejectedNoTarget", diag[DIAG_NO_TARGET]);
+        return o;
+    }
+
+    /**
+     * Pool the census, split by whose turn it is. The their-turn split is the one that
+     * settles whether a quiet opponent-turn window is the bridge pruning the menu or the
+     * seat having nothing left to do with.
+     */
+    private void recordMenuCensus(final int[] diag, final int offered) {
+        final String scope = getGame().getPhaseHandler().isPlayerTurn(getPlayer())
+                ? "menu.ourTurn." : "menu.theirTurn.";
+        counters.instrument(scope + "frames");
+        if (offered == 0) {
+            counters.instrument(scope + "passOnlyFrames");
+        }
+        counters.instrument(scope + "candidates", diag[DIAG_CANDIDATES]);
+        counters.instrument(scope + "rejectedTiming", diag[DIAG_TIMING]);
+        counters.instrument(scope + "rejectedUnaffordable", diag[DIAG_UNAFFORDABLE]);
+        counters.instrument(scope + "rejectedNoTarget", diag[DIAG_NO_TARGET]);
+        counters.instrument(scope + "offered", offered);
+    }
+
     /**
      * The legal action menu offered at priority. Mana abilities are excluded: Forge plays
      * those during cost payment, never at priority, and offering them invites a
      * non-terminating priority loop.
      */
     private List<SpellAbility> legalSpellAbilities() {
+        return legalSpellAbilities(null);
+    }
+
+    /**
+     * @param diag optional per-stage rejection census, filled in as the menu is built
+     */
+    private List<SpellAbility> legalSpellAbilities(final int[] diag) {
         final List<SpellAbility> out = new ArrayList<>();
         final Player p = getPlayer();
         final Game game = getGame();
@@ -440,15 +479,43 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                     continue;
                 }
                 sa.setActivatingPlayer(p);
-                if (sa.canPlay() && ComputerUtilCost.canPayCost(sa, p, sa.isTrigger())
-                        && hasEnoughTargets(sa)) {
-                    out.add(sa);
+                if (diag != null) {
+                    diag[DIAG_CANDIDATES]++;
                 }
+                if (!sa.canPlay()) {
+                    bump(diag, DIAG_TIMING);
+                    continue;
+                }
+                if (!ComputerUtilCost.canPayCost(sa, p, sa.isTrigger())) {
+                    bump(diag, DIAG_UNAFFORDABLE);
+                    continue;
+                }
+                if (!hasEnoughTargets(sa)) {
+                    bump(diag, DIAG_NO_TARGET);
+                    continue;
+                }
+                out.add(sa);
             }
         } catch (RuntimeException e) {
             JsonRpcChannel.logErr("legalSpellAbilities failed; offering pass only", e);
         }
         return out;
+    }
+
+    // ---- menu census (protocol v2.5) --------------------------------------------
+    // Why a priority menu is short is a question the harness has been answering by
+    // inference. These four counts answer it at the frame, so an empty their-end-step
+    // window is attributable rather than assumed.
+    private static final int DIAG_CANDIDATES = 0;
+    private static final int DIAG_TIMING = 1;      // canPlay() false: wrong timing/zone/restriction
+    private static final int DIAG_UNAFFORDABLE = 2; // legal, but the mana or cost is not there
+    private static final int DIAG_NO_TARGET = 3;   // legal and affordable, but no legal target exists
+    private static final int DIAG_LEN = 4;
+
+    private static void bump(final int[] diag, final int slot) {
+        if (diag != null) {
+            diag[slot]++;
+        }
     }
 
     /**
