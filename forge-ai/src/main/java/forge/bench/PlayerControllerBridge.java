@@ -106,11 +106,25 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     // ------------------------------------------------------------------ plumbing
 
     private void count(final String method) {
+        if (!isLiveGame()) {
+            return; // search internals are not decisions the seat made
+        }
         counters.count(method);
     }
 
+    /**
+     * False inside a copied game built by {@code GameCopier} for the simulation search.
+     * Such a controller must behave as plain {@link PlayerControllerAi}: it is deciding
+     * about a hypothetical position, so asking the host would both corrupt the host's
+     * model of the real game and stall on an answer that means nothing.
+     */
+    private boolean isLiveGame() {
+        final Game live = session.getLiveGame();
+        return live == null || live == getGame();
+    }
+
     private boolean bridged() {
-        return mode == BenchSession.Mode.BRIDGE && !session.getChannel().isClosed();
+        return mode == BenchSession.Mode.BRIDGE && isLiveGame() && !session.getChannel().isClosed();
     }
 
     /** Envelope shared by every ask: game id, seat and the seat-visible state. */

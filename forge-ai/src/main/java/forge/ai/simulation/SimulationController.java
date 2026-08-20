@@ -14,6 +14,25 @@ public class SimulationController {
     private static boolean DEBUG = false;
     private static final int DEFAULT_MAX_DEPTH = 3;
 
+    /**
+     * Search depth used when a caller does not name one. Forge itself never changes this,
+     * so behaviour is unchanged by default; the mtgx benchmark harness lowers it to bound
+     * the nested {@code GameCopier.copyGameState} explosion on wide cube menus, where the
+     * simulation picker has no wall-clock budget of its own.
+     *
+     * <p>Read once per {@link SimulationController} construction, so a change takes effect
+     * at the next priority decision.
+     */
+    private static int defaultMaxDepth = DEFAULT_MAX_DEPTH;
+
+    public static void setDefaultMaxDepth(final int depth) {
+        defaultMaxDepth = Math.max(0, depth);
+    }
+
+    public static int getDefaultMaxDepth() {
+        return defaultMaxDepth;
+    }
+
     private final int maxDepth;
     private List<Plan.Decision> currentStack;
     private List<Score> scoreStack;
@@ -40,7 +59,7 @@ public class SimulationController {
     }
 
     public SimulationController(Score score) {
-        this(score, DEFAULT_MAX_DEPTH);
+        this(score, defaultMaxDepth);
     }
 
     public SimulationController(Score score, int maxDepth) {

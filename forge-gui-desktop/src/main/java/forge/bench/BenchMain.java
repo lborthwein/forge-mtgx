@@ -40,6 +40,7 @@ import com.google.gson.JsonObject;
 import forge.GuiDesktop;
 import forge.LobbyPlayer;
 import forge.ai.AIOption;
+import forge.ai.simulation.SimulationController;
 import forge.deck.Deck;
 import forge.deck.DeckSection;
 import forge.deck.io.DeckSerializer;
@@ -86,6 +87,9 @@ import forge.view.TimeLimitedCodeBlock;
  * </pre>
  */
 public final class BenchMain {
+
+    /** Forge's own {@code Game.AI_TIMEOUT} default, restated so the config can name it. */
+    private static final int DEFAULT_AI_TIMEOUT_SEC = 5;
 
     private BenchMain() {
     }
@@ -134,6 +138,39 @@ public final class BenchMain {
             return;
         }
 
+        // ------------------------------------------------- resolve the AI search budget
+        // Which seats run the simulation AI is pure config, so this is known before any
+        // deck is loaded and can go in `hello` for the manifest.
+        final JsonArray simulationSeats = new JsonArray();
+        for (int i = 0; i < deckPaths.size(); i++) {
+            if (seatUsesSimulation(cfg, i, useSimulation)) {
+                simulationSeats.add(i);
+            }
+        }
+        final boolean anySim = simulationSeats.size() > 0;
+
+        // Game.AI_CAN_USE_TIMEOUT defaults to true in Forge; the bench forced it off for
+        // determinism. Note what it actually gates: the ONLY reader in the codebase is
+        // AiAttackController's completeOnTimeout over the forced-attacker futures.
+        // SpellAbilityPicker has no wall-clock bound at all, and
+        // AiController.chooseSpellAbilityToPlayFromList applies getAITimeout()
+        // unconditionally. So this flag is a policy choice, not the lever on the
+        // simulation search -- simMaxDepth below is that lever. Resolution:
+        //   explicit config  >  true when any seat simulates  >  false (deterministic)
+        final boolean aiCanUseTimeout = cfg.has("aiCanUseTimeout")
+                ? cfg.get("aiCanUseTimeout").getAsBoolean()
+                : anySim;
+        final int aiTimeoutSec = cfg.has("aiTimeoutSec")
+                ? Math.max(1, cfg.get("aiTimeoutSec").getAsInt())
+                : DEFAULT_AI_TIMEOUT_SEC;
+        final int simMaxDepth = cfg.has("simMaxDepth")
+                ? Math.max(0, cfg.get("simMaxDepth").getAsInt())
+                : SimulationController.getDefaultMaxDepth();
+        SimulationController.setDefaultMaxDepth(simMaxDepth);
+        // A wall-clock bound is not reproducible from a seed. Say so, rather than letting a
+        // manifest imply a sim arm is replayable.
+        final boolean deterministic = !aiCanUseTimeout;
+
         // ---------------------------------------------------------------- boot Forge
         GuiBase.setInterface(new GuiDesktop());
         FModel.initialize(null, prefs -> {
@@ -155,13 +192,17 @@ public final class BenchMain {
         hello.addProperty("games", games);
         hello.addProperty("useSimulation", useSimulation);
         hello.addProperty("sequentialAi", Boolean.getBoolean("forge.bench.sequentialAi"));
+        hello.add("simulationSeats", simulationSeats);
+        hello.addProperty("aiCanUseTimeout", aiCanUseTimeout);
+        hello.addProperty("aiTimeoutSec", aiTimeoutSec);
+        hello.addProperty("simMaxDepth", simMaxDepth);
+        hello.addProperty("deterministic", deterministic);
         ch.send(hello);
 
         // ------------------------------------------------------------- register seats
         final List<RegisteredPlayer> seats = new ArrayList<>();
         final List<LobbyPlayerBridge> bridged = new ArrayList<>();
         final List<Deck> seatDecks = new ArrayList<>();
-        final JsonArray simSeatsOut = new JsonArray();
         for (int i = 0; i < deckPaths.size(); i++) {
             final File f = new File(deckPaths.get(i));
             if (!f.isFile()) {
@@ -183,9 +224,6 @@ public final class BenchMain {
             final boolean seatSim = seatUsesSimulation(cfg, i, useSimulation);
             final Set<AIOption> options = seatSim
                     ? Sets.newHashSet(AIOption.USE_FULL_SIMULATION) : null;
-            if (seatSim) {
-                simSeatsOut.add(i);
-            }
             final LobbyPlayer lp;
             if ("forge".equalsIgnoreCase(modeStr)) {
                 lp = GamePlayerUtil.createAiPlayer(name, i, 0, options, aiProfile);
@@ -205,7 +243,11 @@ public final class BenchMain {
         }
         final JsonObject seatInfo = new JsonObject();
         seatInfo.addProperty("type", "seats");
-        seatInfo.add("simulationSeats", simSeatsOut);
+        seatInfo.add("simulationSeats", simulationSeats);
+        seatInfo.addProperty("aiCanUseTimeout", aiCanUseTimeout);
+        seatInfo.addProperty("aiTimeoutSec", aiTimeoutSec);
+        seatInfo.addProperty("simMaxDepth", simMaxDepth);
+        seatInfo.addProperty("deterministic", deterministic);
         ch.send(seatInfo);
 
         final GameRules rules = new GameRules(GameType.Constructed);
@@ -226,7 +268,11 @@ public final class BenchMain {
 
             final long t0 = System.currentTimeMillis();
             final Game game = match.createGame();
-            game.AI_CAN_USE_TIMEOUT = false;
+            game.AI_CAN_USE_TIMEOUT = aiCanUseTimeout;
+            game.AI_TIMEOUT = aiTimeoutSec;
+            // Everything the bridge answers is keyed to THIS game object; copies made by
+            // the simulation search must fall through to Forge's AI (see BenchSession).
+            session.setLiveGame(game);
             final EventEmitter emitter = new EventEmitter(ch, gameId);
             game.subscribeToEvents(emitter);
 

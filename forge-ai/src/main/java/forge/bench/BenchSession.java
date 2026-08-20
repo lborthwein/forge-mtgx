@@ -50,6 +50,7 @@ public final class BenchSession {
 
     private final JsonRpcChannel channel;
     private String gameId = "g0";
+    private forge.game.Game liveGame;
 
     public BenchSession(final JsonRpcChannel channel) {
         this.channel = channel;
@@ -65,5 +66,24 @@ public final class BenchSession {
 
     public void setGameId(final String gameId) {
         this.gameId = gameId;
+    }
+
+    /**
+     * The one real game currently being played.
+     *
+     * <p>Load-bearing when a seat runs Forge's simulation AI. {@code GameCopier.clonePlayer}
+     * reuses the existing {@code LobbyPlayer} whenever it is a {@code LobbyPlayerAi} — and
+     * {@link LobbyPlayerBridge} is one — so every copied game inside the simulation search
+     * builds a real {@link PlayerControllerBridge}. Without this identity check a simulated
+     * game would send {@code ask} messages to the host about a hypothetical position it has
+     * no way to distinguish from the real one, and would inflate the decision-surface
+     * counters with search internals.
+     */
+    public forge.game.Game getLiveGame() {
+        return liveGame;
+    }
+
+    public void setLiveGame(final forge.game.Game liveGame) {
+        this.liveGame = liveGame;
     }
 }

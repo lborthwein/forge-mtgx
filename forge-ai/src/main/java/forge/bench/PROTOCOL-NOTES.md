@@ -112,6 +112,96 @@ Each stack entry now also carries:
 
 `targets` (the string) is unchanged and still sent, so a v1 decoder is unaffected.
 
+## The AI search budget (`aiCanUseTimeout` / `aiTimeoutSec` / `simMaxDepth`)
+
+Sim-mode runs were dying with `OutOfMemoryError` at `-Xmx4g`.
+
+### What the flag actually gates
+
+`Game.AI_CAN_USE_TIMEOUT` is read in exactly **one** place in the whole codebase:
+`AiAttackController`'s `CompletableFuture.allOf(...).completeOnTimeout(...)` over the
+forced-attacker evaluation. It is **not** a budget on the simulation search:
+
+- `SpellAbilityPicker.chooseSpellAbilityToPlayImpl` has **no wall-clock bound at all**.
+  It is bounded only by `SimulationController.maxDepth` (3) and the candidate count, and
+  it recurses through `GameSimulator.simulateSpellAbility` → `GameCopier.copyGameState`
+  (a full `CardFactory` rebuild per card) once per candidate per level.
+- `AiController.chooseSpellAbilityToPlayFromList` — the *heuristic* path — applies
+  `future.get(game.getAITimeout(), SECONDS)` **unconditionally**, not gated by
+  `canUseTimeout()`. So `AI_TIMEOUT` was already bounding the heuristic arm even while the
+  bench forced `AI_CAN_USE_TIMEOUT` off.
+- `usesFullSimulation()` routes `chooseSpellAbilityToPlay` straight to the sim picker,
+  bypassing that bounded path entirely.
+
+So the bench's unconditional `AI_CAN_USE_TIMEOUT = false` did not remove a budget the
+simulation search had — the search never had one. The knobs below exist because a run
+should be able to choose its budget, and `simMaxDepth` is the lever that actually bounds
+the nested copy explosion.
+
+### Config
+
+| key | type | default |
+|---|---|---|
+| `aiCanUseTimeout` | bool | `true` when any seat simulates, else `false` |
+| `aiTimeoutSec` | int | 5 (Forge's own `Game.AI_TIMEOUT` default) |
+| `simMaxDepth` | int | 3 (`SimulationController`'s own default) |
+
+Resolution rule, in order: **explicit config value** > **`true` if any seat has simulation
+enabled** > **`false`**. `aiTimeoutSec` and `simMaxDepth` are taken from config or left at
+Forge's defaults; both are applied whether or not a seat simulates, so a heuristic arm can
+be given a tighter `aiTimeoutSec` too.
+
+`simMaxDepth` is exposed through a new static default on `SimulationController`
+(`setDefaultMaxDepth`) read at construction. Forge already had a `SimulationController(Score,
+int)` constructor; only `SpellAbilityPicker` used the no-depth one, so this is a four-line
+change and Forge's own behaviour is unchanged when nothing sets it. There is **no** node or
+time budget in `GameSimulator`/`SimulationController` to expose — adding one would mean
+threading a counter through the recursion, which is a real change to Forge's AI and out of
+scope here.
+
+### Measured: the timeout does not prevent the OOM
+
+Two games, drafted cube decks, `simSeats:[1]`, `-Xmx4g`:
+
+| run | outcome |
+|---|---|
+| `aiCanUseTimeout:false`, depth 3 (the old unconditional setting) | wedged at the heap ceiling, no game finished in 10 min, killed |
+| `aiCanUseTimeout:true`, depth 3 (the new default) | game 1 finished (11 turns); **`OutOfMemoryError` during game 2** |
+
+The failing stack is inside a *single* `SpellAbilityPicker.evaluateSa` →
+`GameSimulator.simulateSpellAbility` → `resolveStack` → `Game.copyLastState` →
+`CardCopyService.getLKICopyList`, i.e. the simulation's own per-resolve LKI copying, which
+no wall-clock flag touches. **The flag was not the cause.** Budget a sim arm with heap and
+`simMaxDepth`, not with `aiCanUseTimeout`.
+
+### Determinism
+
+`hello` carries `deterministic`, which is `!aiCanUseTimeout`. A wall-clock bound is not
+reproducible from a seed: the same seed and decks can diverge run to run because the search
+abandons at a different point under different machine load. **A simulation arm is
+therefore not seed-deterministic**, and that is inherent to the tier, not a bench defect —
+a manifest must record `aiCanUseTimeout`, `aiTimeoutSec` and `simMaxDepth` alongside the
+seed, and paired-seed comparisons across a sim arm need resampling at the pairing, not the
+game. Setting `aiCanUseTimeout:false` restores determinism at the cost of an unbounded
+search.
+
+Resolved values are echoed in **`hello`** (`simulationSeats`, `aiCanUseTimeout`,
+`aiTimeoutSec`, `simMaxDepth`, `deterministic`) and mirrored in the `seats` message.
+
+### Simulated games never reach the host
+
+`GameCopier.clonePlayer` keeps the existing `LobbyPlayer` whenever it is a
+`LobbyPlayerAi` — and `LobbyPlayerBridge` is one — so **every copied game inside the
+simulation search builds a real `PlayerControllerBridge`**. Left alone, a `bridge` seat
+would send `ask` messages about hypothetical positions the host cannot distinguish from
+the real game, and a `null` seat would inflate the decision-surface counters with search
+internals.
+
+`BenchSession.getLiveGame()` holds the one real `Game` for the current game; the controller
+compares `getGame()` against it by identity and, inside a copy, both suppresses counting
+and behaves as plain `PlayerControllerAi`. This is why the null-mode instrumentation
+figures elsewhere in this document are counts of decisions the seat actually made.
+
 ## Forge's simulation AI (`useSimulation` / `simSeats`)
 
 `AIOption.USE_FULL_SIMULATION` is a **per-seat policy identity**, so it is selected per
