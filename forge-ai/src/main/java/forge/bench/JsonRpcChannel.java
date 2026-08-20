@@ -39,7 +39,13 @@ import com.google.gson.JsonParser;
  * every controller callback blocks on {@link #ask}.
  */
 public final class JsonRpcChannel {
-    public static final int PROTOCOL_VERSION = 1;
+    /**
+     * v2 (2026-08-19) is strictly additive over v1: card keywords, per-attacker
+     * {@code minBlockers}, a seat-private {@code decklist} message, structured
+     * cost/X/mode data on an ability, and structured stack targets. A v1 host reading a v2
+     * stream sees only fields it does not know about. See PROTOCOL-NOTES.md.
+     */
+    public static final int PROTOCOL_VERSION = 2;
 
     private final BufferedReader in;
     private final PrintStream out;

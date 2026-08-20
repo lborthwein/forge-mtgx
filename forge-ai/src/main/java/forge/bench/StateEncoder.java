@@ -23,17 +23,25 @@ import com.google.common.collect.Multiset;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
+import forge.ai.ComputerUtilMana;
 import forge.card.MagicColor;
 import forge.game.Game;
 import forge.game.GameEntity;
+import forge.game.ability.ApiType;
+import forge.game.ability.effects.CharmEffect;
 import forge.game.card.Card;
 import forge.game.card.CardCollectionView;
 import forge.game.card.CardView;
 import forge.game.card.CounterType;
 import forge.game.combat.Combat;
+import forge.game.cost.Cost;
+import forge.game.cost.CostPart;
+import forge.game.keyword.KeywordInterface;
 import forge.game.mana.ManaPool;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
+import forge.game.spellability.AbilitySub;
+import forge.game.spellability.OptionalCost;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.spellability.TargetChoices;
@@ -157,6 +165,7 @@ public final class StateEncoder {
             o.addProperty("toughness", c.getNetToughness());
             o.addProperty("damage", c.getDamage());
         }
+        o.add("keywords", encodeKeywords(c));
         final Multiset<CounterType> counters = c.getCounters();
         if (counters != null && !counters.isEmpty()) {
             final JsonObject cj = new JsonObject();
@@ -180,6 +189,33 @@ public final class StateEncoder {
         return o;
     }
 
+    /**
+     * The card's keywords <em>as they currently apply</em>.
+     *
+     * <p>{@code Card.getKeywords()} walks the live keyword state through
+     * {@code visitKeywords}, so continuous effects, granted keywords and keywords removed
+     * by an effect are all reflected — this is not the printed card script. Emitted as
+     * Forge's own keyword strings ("Flying", "Menace", "Protection from red",
+     * "Bushido 1"), which is what the host matches on.
+     *
+     * <p>Protocol v2. Added because the host could not see menace on an attacking
+     * <em>token</em> (a token has no cube entry to read the keyword off), and Forge
+     * validates a block declaration as a whole: one blocker on a menacing attacker
+     * refused the entire step. Measured at 6 refusals per 120 games.
+     */
+    public static JsonArray encodeKeywords(final Card c) {
+        final JsonArray a = new JsonArray();
+        try {
+            for (KeywordInterface kw : c.getKeywords()) {
+                final String s = kw.getOriginal();
+                a.add(s == null || s.isEmpty() ? String.valueOf(kw.getKeyword()) : s);
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("keyword enumeration failed for " + c, e);
+        }
+        return a;
+    }
+
     private static JsonArray encodeStack(final Game game, final PlayerView viewer) {
         final JsonArray arr = new JsonArray();
         for (SpellAbilityStackInstance si : game.getStack()) {
@@ -192,7 +228,36 @@ public final class StateEncoder {
                     ? -1 : si.getActivatingPlayer().getId());
             o.addProperty("description", String.valueOf(si.getStackDescription()));
             final TargetChoices tc = si.getTargetChoices();
+            // `targets` is Forge's own rendering, kept for compatibility with protocol v1.
             o.addProperty("targets", tc == null ? "" : tc.toString());
+            // Protocol v2: the same thing structured, so the opponent model can see what a
+            // spell on the stack is aiming at without parsing a rendering that is not a
+            // contract. Spell targets (counterspells) are carried separately because their
+            // ids live in the stack-instance space, not the card/player space.
+            final JsonArray tIds = new JsonArray();
+            final JsonArray tDetail = new JsonArray();
+            final JsonArray tSpells = new JsonArray();
+            if (tc != null) {
+                try {
+                    for (GameEntity ge : tc.getTargetEntities()) {
+                        tIds.add(ge.getId());
+                        tDetail.add(encodeEntity(ge));
+                    }
+                    for (SpellAbility tsa : tc.getTargetSpells()) {
+                        final JsonObject ts = new JsonObject();
+                        ts.addProperty("stackId", tsa.getId());
+                        final Card th = tsa.getHostCard();
+                        ts.addProperty("fid", th == null ? -1 : th.getId());
+                        ts.addProperty("name", th == null ? "?" : th.getName());
+                        tSpells.add(ts);
+                    }
+                } catch (RuntimeException e) {
+                    JsonRpcChannel.logErr("stack target enumeration failed", e);
+                }
+            }
+            o.add("targetIds", tIds);
+            o.add("targetsDetail", tDetail);
+            o.add("targetSpells", tSpells);
             arr.add(o);
         }
         return arr;
@@ -242,7 +307,141 @@ public final class StateEncoder {
         o.addProperty("description", String.valueOf(sa.toString()));
         o.addProperty("stackDescription", String.valueOf(sa.getStackDescription()));
         o.addProperty("usesTargeting", sa.usesTargeting());
+        // ---- protocol v2: structured cost / X / modes / discriminator ----------------
+        // Two menu entries that differ only in an alternative or optional cost render
+        // almost identically in `description`, so a scorer sees undifferentiated casts of
+        // the same card. These fields say what actually differs.
+        o.addProperty("optionKey", optionKey(sa));
+        o.add("cost", encodeCost(sa));
+        o.add("x", encodeXRange(sa));
+        o.add("modes", encodeModes(sa));
+        if (sa.usesTargeting()) {
+            o.addProperty("minTargets", sa.getMinTargets());
+            o.addProperty("maxTargets", sa.getMaxTargets());
+        }
         return o;
+    }
+
+    /**
+     * A stable discriminator for one priority option. Two entries for the same card that
+     * differ only in which alternative/optional costs are baked in get different keys.
+     */
+    private static String optionKey(final SpellAbility sa) {
+        final Card host = sa.getHostCard();
+        final StringBuilder sb = new StringBuilder();
+        sb.append(host == null ? -1 : host.getId()).append('|');
+        sb.append(sa.getApi() == null ? "" : sa.getApi()).append('|');
+        sb.append(sa.getPayCosts() == null ? "" : sa.getPayCosts().toString()).append('|');
+        try {
+            for (OptionalCost oc : sa.getOptionalCosts()) {
+                sb.append(oc).append(',');
+            }
+        } catch (RuntimeException e) {
+            // an option key is a hint, never a decision -- degrade rather than throw
+        }
+        sb.append('|').append(sa.isLandAbility() ? "land" : sa.isSpell() ? "spell" : "ability");
+        return sb.toString();
+    }
+
+    /** Structured breakdown of what an option costs, alongside the rendered string. */
+    private static JsonObject encodeCost(final SpellAbility sa) {
+        final JsonObject o = new JsonObject();
+        final Cost cost = sa.getPayCosts();
+        if (cost == null) {
+            o.addProperty("mana", "");
+            o.add("parts", new JsonArray());
+            return o;
+        }
+        o.addProperty("rendered", cost.toString());
+        o.addProperty("mana", cost.hasNoManaCost() ? "" : String.valueOf(cost.getTotalMana()));
+        o.addProperty("cmc", cost.hasNoManaCost() ? 0 : cost.getTotalMana().getCMC());
+        o.addProperty("onlyMana", cost.isOnlyManaCost());
+        final JsonArray parts = new JsonArray();
+        try {
+            for (CostPart cp : cost.getCostParts()) {
+                final JsonObject p = new JsonObject();
+                p.addProperty("kind", cp.getClass().getSimpleName());
+                p.addProperty("rendered", String.valueOf(cp));
+                parts.add(p);
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("cost part enumeration failed", e);
+        }
+        o.add("parts", parts);
+        final JsonArray optional = new JsonArray();
+        try {
+            for (OptionalCost oc : sa.getOptionalCosts()) {
+                optional.add(String.valueOf(oc));
+            }
+        } catch (RuntimeException e) {
+            // leave the list empty
+        }
+        o.add("optionalPaid", optional);
+        return o;
+    }
+
+    /**
+     * The X range this option may be cast for. {@code max} is an estimate of what the
+     * activating player can actually pay for right now, not an unbounded integer — an X
+     * spell with no ceiling is not a priceable option.
+     */
+    private static JsonObject encodeXRange(final SpellAbility sa) {
+        final JsonObject o = new JsonObject();
+        boolean hasX = false;
+        try {
+            hasX = sa.costHasX() || (sa.getPayCosts() != null && sa.getPayCosts().hasXInAnyCostPart());
+        } catch (RuntimeException e) {
+            // treat as no X
+        }
+        o.addProperty("has", hasX);
+        if (!hasX) {
+            return o;
+        }
+        o.addProperty("min", 0);
+        int max = 0;
+        try {
+            final Player p = sa.getActivatingPlayer();
+            if (p != null) {
+                final int available = ComputerUtilMana.getAvailableManaEstimate(p);
+                final int fixed = sa.getPayCosts() == null || sa.getPayCosts().hasNoManaCost()
+                        ? 0 : sa.getPayCosts().getTotalMana().getCMC();
+                max = Math.max(0, available - fixed);
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("X ceiling estimate failed", e);
+        }
+        o.addProperty("max", max);
+        return o;
+    }
+
+    /**
+     * The modes of a modal ability, with how many must be chosen.
+     *
+     * <p>Forge picks modes inside {@code handlePlayingSpellAbility}, i.e. after the host
+     * has already answered the priority ask, so without this the host is pricing "cast
+     * Charm" with no idea which halves are even legal. {@code makePossibleOptions} already
+     * drops modes whose targets do not exist.
+     */
+    private static JsonArray encodeModes(final SpellAbility sa) {
+        final JsonArray a = new JsonArray();
+        if (sa.getApi() != ApiType.Charm) {
+            return a;
+        }
+        try {
+            final List<AbilitySub> options = CharmEffect.makePossibleOptions(sa);
+            for (int i = 0; i < options.size(); i++) {
+                final AbilitySub sub = options.get(i);
+                final JsonObject m = new JsonObject();
+                m.addProperty("index", i);
+                m.addProperty("api", sub.getApi() == null ? "" : sub.getApi().toString());
+                m.addProperty("description", String.valueOf(sub.getDescription()));
+                m.addProperty("usesTargeting", sub.usesTargeting());
+                a.add(m);
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("mode enumeration failed for " + sa, e);
+        }
+        return a;
     }
 
     /** Compact summary of any game entity (card or player) for a target/entity menu. */

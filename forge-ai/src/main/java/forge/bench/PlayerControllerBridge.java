@@ -441,6 +441,20 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final JsonObject body = envelope(true);
         body.add("legalBlockers", StateEncoder.encodeCards(possible));
         body.add("attackers", StateEncoder.encodeCards(attackers));
+        // Protocol v2. Forge validates a block declaration AS A WHOLE, so a single blocker
+        // on a menacing attacker refuses the entire step. The keyword list on each card
+        // now carries "Menace", but the requirement can also come from an effect with no
+        // keyword at all, so state the number outright.
+        final JsonObject minBlockers = new JsonObject();
+        for (Card a : attackers) {
+            try {
+                minBlockers.addProperty(String.valueOf(a.getId()),
+                        CombatUtil.getMinNumBlockersForAttacker(a, defender));
+            } catch (RuntimeException e) {
+                minBlockers.addProperty(String.valueOf(a.getId()), 1);
+            }
+        }
+        body.add("minBlockers", minBlockers);
         final JsonObject legalPairs = new JsonObject();
         for (Card b : possible) {
             final JsonArray atk = new JsonArray();
@@ -789,13 +803,18 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final JsonObject body = envelope(true);
         body.addProperty("min", min);
         body.addProperty("num", num);
+        body.addProperty("max", num); // protocol v2 alias; `num` kept for v1 hosts
         body.addProperty("allowRepeat", allowRepeat);
         body.add("ability", StateEncoder.encodeSpellAbility(sa));
         final JsonArray modes = new JsonArray();
-        for (AbilitySub s : possible) {
+        for (int i = 0; i < possible.size(); i++) {
+            final AbilitySub s = possible.get(i);
             final JsonObject m = new JsonObject();
+            m.addProperty("index", i); // answers are indices; state them
+            m.addProperty("api", s.getApi() == null ? "" : s.getApi().toString());
             m.addProperty("description", String.valueOf(s.getDescription()));
             m.addProperty("stackDescription", String.valueOf(s.getStackDescription()));
+            m.addProperty("usesTargeting", s.usesTargeting());
             modes.add(m);
         }
         body.add("menu", modes);

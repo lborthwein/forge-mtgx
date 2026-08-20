@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -40,6 +41,7 @@ import forge.GuiDesktop;
 import forge.LobbyPlayer;
 import forge.ai.AIOption;
 import forge.deck.Deck;
+import forge.deck.DeckSection;
 import forge.deck.io.DeckSerializer;
 import forge.game.Game;
 import forge.game.GameEndReason;
@@ -59,6 +61,7 @@ import forge.game.event.GameEventSpellAbilityCast;
 import forge.game.event.GameEventTurnBegan;
 import forge.game.event.GameEventTurnPhase;
 import forge.game.player.RegisteredPlayer;
+import forge.item.PaperCard;
 import forge.gui.GuiBase;
 import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.model.FModel;
@@ -155,11 +158,10 @@ public final class BenchMain {
         ch.send(hello);
 
         // ------------------------------------------------------------- register seats
-        final Set<AIOption> options = useSimulation
-                ? Sets.newHashSet(AIOption.USE_FULL_SIMULATION) : null;
-
         final List<RegisteredPlayer> seats = new ArrayList<>();
         final List<LobbyPlayerBridge> bridged = new ArrayList<>();
+        final List<Deck> seatDecks = new ArrayList<>();
+        final JsonArray simSeatsOut = new JsonArray();
         for (int i = 0; i < deckPaths.size(); i++) {
             final File f = new File(deckPaths.get(i));
             if (!f.isFile()) {
@@ -175,6 +177,15 @@ public final class BenchMain {
             }
             final String modeStr = seatMode(cfg, i);
             final String name = "Seat" + i + "-" + deck.getName();
+            // Forge's simulation AI is the next benchmark tier and is a per-seat policy
+            // identity, so it is selected per seat: `useSimulation:true` turns it on for
+            // every seat, `simSeats:[1]` for just those.
+            final boolean seatSim = seatUsesSimulation(cfg, i, useSimulation);
+            final Set<AIOption> options = seatSim
+                    ? Sets.newHashSet(AIOption.USE_FULL_SIMULATION) : null;
+            if (seatSim) {
+                simSeatsOut.add(i);
+            }
             final LobbyPlayer lp;
             if ("forge".equalsIgnoreCase(modeStr)) {
                 lp = GamePlayerUtil.createAiPlayer(name, i, 0, options, aiProfile);
@@ -188,9 +199,14 @@ public final class BenchMain {
             final RegisteredPlayer rp = new RegisteredPlayer(deck);
             rp.setPlayer(lp);
             seats.add(rp);
-            JsonRpcChannel.log("seat " + i + " = " + modeStr + " / " + f.getName()
-                    + " (" + deck.getMain().countAll() + " main)");
+            seatDecks.add(deck);
+            JsonRpcChannel.log("seat " + i + " = " + modeStr + (seatSim ? "+sim" : "")
+                    + " / " + f.getName() + " (" + deck.getMain().countAll() + " main)");
         }
+        final JsonObject seatInfo = new JsonObject();
+        seatInfo.addProperty("type", "seats");
+        seatInfo.add("simulationSeats", simSeatsOut);
+        ch.send(seatInfo);
 
         final GameRules rules = new GameRules(GameType.Constructed);
         rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
@@ -213,6 +229,18 @@ public final class BenchMain {
             game.AI_CAN_USE_TIMEOUT = false;
             final EventEmitter emitter = new EventEmitter(ch, gameId);
             game.subscribeToEvents(emitter);
+
+            // Protocol v2: each bridged seat learns its OWN registered decklist before the
+            // first ask, which is what a real mulligan decision needs. Seat-private on
+            // purpose -- a seat never sees the opponent's list, so this does not widen the
+            // information the bridged seat plays on beyond what a human would have.
+            for (LobbyPlayerBridge b : bridged) {
+                final int s = b.getSeat();
+                if (s < 0 || s >= seatDecks.size()) {
+                    continue;
+                }
+                ch.send(decklistMessage(gameId, s, seatDecks.get(s)));
+            }
 
             String abort = null;
             try {
@@ -271,6 +299,57 @@ public final class BenchMain {
         bye.addProperty("type", "bye");
         ch.send(bye);
         System.exit(0);
+    }
+
+    /**
+     * One seat's own registered decklist, as name/count pairs. Sent per game because a
+     * match may sideboard between games.
+     */
+    private static JsonObject decklistMessage(final String gameId, final int seat, final Deck deck) {
+        final JsonObject m = new JsonObject();
+        m.addProperty("type", "decklist");
+        m.addProperty("game", gameId);
+        m.addProperty("seat", seat);
+        m.addProperty("name", deck.getName());
+        m.add("main", section(deck, DeckSection.Main));
+        m.add("sideboard", section(deck, DeckSection.Sideboard));
+        return m;
+    }
+
+    private static JsonArray section(final Deck deck, final DeckSection which) {
+        final JsonArray a = new JsonArray();
+        if (deck == null || !deck.has(which)) {
+            return a;
+        }
+        for (Map.Entry<PaperCard, Integer> e : deck.get(which)) {
+            final JsonObject c = new JsonObject();
+            c.addProperty("name", e.getKey().getName());
+            c.addProperty("set", e.getKey().getEdition());
+            c.addProperty("count", e.getValue());
+            a.add(c);
+        }
+        return a;
+    }
+
+    /**
+     * Whether this seat runs Forge's full-simulation AI. `simSeats` names seats
+     * explicitly; `useSimulation` is the all-seats default.
+     */
+    private static boolean seatUsesSimulation(final JsonObject cfg, final int seat,
+            final boolean fallback) {
+        if (cfg.has("simSeats") && cfg.get("simSeats").isJsonArray()) {
+            for (JsonElement e : cfg.getAsJsonArray("simSeats")) {
+                try {
+                    if (e.getAsInt() == seat) {
+                        return true;
+                    }
+                } catch (RuntimeException ignored) {
+                    // a malformed entry names no seat
+                }
+            }
+            return false;
+        }
+        return fallback;
     }
 
     private static String seatMode(final JsonObject cfg, final int seat) {
