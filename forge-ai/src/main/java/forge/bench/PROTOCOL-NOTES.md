@@ -166,13 +166,20 @@ Two games, drafted cube decks, `simSeats:[1]`, `-Xmx4g`:
 | run | outcome |
 |---|---|
 | `aiCanUseTimeout:false`, depth 3 (the old unconditional setting) | wedged at the heap ceiling, no game finished in 10 min, killed |
-| `aiCanUseTimeout:true`, depth 3 (the new default) | game 1 finished (11 turns); **`OutOfMemoryError` during game 2** |
+| `aiCanUseTimeout:true`, depth 3 (the new default) | game 1 finished (11 turns); **`OutOfMemoryError` during game 2**, 5m39s in |
+| `aiCanUseTimeout:true`, `simMaxDepth:2` | both games finished, 176s total, no OOM (155.1s + 16.2s); peaked at 4.4GB and GC'd back |
+| `aiCanUseTimeout:true`, `simMaxDepth:1` | **both games finished, 40s total, no OOM** (25.3s + 9.2s) |
 
 The failing stack is inside a *single* `SpellAbilityPicker.evaluateSa` →
 `GameSimulator.simulateSpellAbility` → `resolveStack` → `Game.copyLastState` →
 `CardCopyService.getLKICopyList`, i.e. the simulation's own per-resolve LKI copying, which
 no wall-clock flag touches. **The flag was not the cause.** Budget a sim arm with heap and
 `simMaxDepth`, not with `aiCanUseTimeout`.
+
+`simMaxDepth` still defaults to Forge's 3, deliberately: search depth *is* the opponent's
+strength, and silently weakening it would change the policy identity the benchmark is
+measuring. A sim arm must choose — raise the heap (the TS harness's `--heap 12g` works) or
+lower the depth — and record the choice in the manifest.
 
 ### Determinism
 
@@ -187,6 +194,14 @@ search.
 
 Resolved values are echoed in **`hello`** (`simulationSeats`, `aiCanUseTimeout`,
 `aiTimeoutSec`, `simMaxDepth`, `deterministic`) and mirrored in the `seats` message.
+
+### Working recipe
+
+`-Xmx4g` per worker: `simMaxDepth:1` is the only depth that is comfortably fast
+(2 games in 40s). `simMaxDepth:2` survives but the first game took 155s and the JVM
+peaked at 4.4GB, so it has no headroom on a loaded box. Depth 3 needs more heap — the TS
+harness's `--heap 12g` is the right lever there, and `--workers 3` at 12g each needs a
+machine that can take 36GB.
 
 ### Simulated games never reach the host
 
