@@ -35,9 +35,20 @@ public final class CallCounter {
     private final Map<String, Integer> calls = new TreeMap<>();
     private final Map<String, Integer> delegatedRequested = new TreeMap<>();
     private final Map<String, Integer> delegatedRefused = new TreeMap<>();
+    /**
+     * Additive research instruments. Kept out of {@code calls} on purpose: that map is the
+     * decision-surface measurement (controller entry points by name) and anything else in
+     * it distorts {@code totalCalls}.
+     */
+    private final Map<String, Integer> instruments = new TreeMap<>();
 
     public synchronized void count(final String method) {
         calls.merge(method, 1, Integer::sum);
+    }
+
+    /** Count a named observation that is not a controller call. */
+    public synchronized void instrument(final String name) {
+        instruments.merge(name, 1, Integer::sum);
     }
 
     public synchronized void delegateRequested(final String method) {
@@ -69,6 +80,7 @@ public final class CallCounter {
         calls.clear();
         delegatedRequested.clear();
         delegatedRefused.clear();
+        instruments.clear();
     }
 
     public synchronized JsonObject toJson() {
@@ -76,6 +88,7 @@ public final class CallCounter {
         o.add("calls", mapToJson(calls));
         o.add("delegatedRequested", mapToJson(delegatedRequested));
         o.add("delegatedRefused", mapToJson(delegatedRefused));
+        o.add("instruments", mapToJson(instruments));
         o.addProperty("totalCalls", totalCalls());
         o.addProperty("totalDelegatedRequested", total(delegatedRequested));
         o.addProperty("totalDelegatedRefused", total(delegatedRefused));

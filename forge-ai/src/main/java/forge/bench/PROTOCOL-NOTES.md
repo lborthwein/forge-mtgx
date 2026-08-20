@@ -185,6 +185,68 @@ a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
 
+## Protocol v2.3 — announced X on a `priority` answer (D-1)
+
+**The bridge never transmitted X.** `chooseSpellAbilityToPlay` returned the chosen
+`SpellAbility` with `XManaCostPaid` untouched, i.e. 0, because Forge announces X inside
+`canPlayAI` — a path a host-chosen ability never goes down. Every {X} spell the bridged
+seat cast was announced at **X=0**: Walking Ballista arrived as a 0/0 and died to
+state-based actions on the adjacent event; Forth Eorlingas! made zero tokens. Measured by
+the morning lane at 0 Ballista casts with X≥1 across 12 games.
+
+### The answer field
+
+`AnswerPriority` may now carry `x`:
+
+```json
+{"type":"answer","id":42,"choice":2,"x":1}
+```
+
+`x` is the **value of X**, not mana spent on X — Forge multiplies by the {X} symbol count
+itself (`ComputerUtilMana.calculateManaCost`). It is applied with `setXManaCostPaid` before
+targeting and before the affordability re-check, because an X spell's legal target count
+can be derived from X and `canPayCost` has to price the announcement. The payment path then
+reads it back through `calculateAmount(host, "X", sa)`, so setting it here *is* the
+announcement.
+
+### The ability's `x` block gains two fields
+
+| field | meaning |
+|---|---|
+| `x.max` | mana available for X: affordability estimate − the cost's fixed pips. **Not** divided by the {X} symbol count. Unchanged from v2.0 — the TS lane's `d1.xClamped` instrument is calibrated on this figure. |
+| `x.symbols` | how many `{X}` the mana cost carries. Walking Ballista is 2. |
+| `x.maxAnnounce` | `x.max / x.symbols` — the largest X actually announceable, and the value the JVM clamps to. A host that trusts this cannot over-announce. |
+
+A `{X}{X}` card with 2 mana for X announces **X=1**, not X=2. Publishing both figures
+rather than redefining `x.max` keeps the existing instrument readable.
+
+### Guards
+
+- **Only when the cost has {X}** (`costHasX() || hasXInAnyCostPart()`). An `x` on an
+  ability with no X is a decode mismatch: counted as a refusal on
+  `chooseSpellAbilityToPlay` and delegated, never silently dropped, so a host-side
+  menu-indexing bug cannot hide behind a field the JVM ignores. Verified: answering `x` on
+  every priority choice produced 50 refusals and 1 legitimate announcement.
+- **Clamped** to `[max(0, xMin), maxAnnounce]`, where `xMin` is the cost's stated minimum
+  (CR 601.2b).
+- **Instrumented** in a new `instruments` map on the per-seat counters —
+  `x.announced`, `x.announcedNonZero`, `x.clampedByJvm`. Deliberately *not* in `calls`:
+  that map is the decision-surface measurement and anything else in it distorts
+  `totalCalls`.
+
+### Verified
+
+`decks-deploy` seed 2004, 4 games, our seat bridged. 3 X announcements, all non-zero, 0
+refusals. Walking Ballista at turn 5 MAIN1 with `{X}{X}` and
+`x:{has:true,min:0,max:2,symbols:2,maxAnnounce:1}` announced **X=1** and appears on the
+battlefield as a **1/1 carrying `{"P1P1": 1}`**, alive on turns 5,6,7,8,9,10 — where it
+previously died on the event adjacent to its own arrival.
+
+Note the *cast event label* still renders `Walking Ballista - Creature 0 / 0 (X=0)`: that
+string is Forge's stack description built when the spell goes on the stack, before payment
+writes X back into it. The board state is the authority, and it says X=1. Do not re-open
+D-1 on the label.
+
 ## Protocol v2.2 — attack requirements on an `attackers` ask (P1 residual)
 
 `CombatUtil.validateAttackers` rejects a declaration that leaves more attack requirements

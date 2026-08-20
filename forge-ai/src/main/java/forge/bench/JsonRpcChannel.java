@@ -59,7 +59,7 @@ public final class JsonRpcChannel {
      *       {@code bestAttackViolations}).</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 2;
+    public static final int PROTOCOL_MINOR = 3;
 
     private final BufferedReader in;
     private final PrintStream out;

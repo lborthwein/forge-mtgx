@@ -398,20 +398,54 @@ public final class StateEncoder {
             return o;
         }
         o.addProperty("min", 0);
-        int max = 0;
+        o.addProperty("max", xManaCeiling(sa));
+        // Protocol v2.3: `max` is mana-for-X and is NOT divided by the number of {X}
+        // symbols; `symbols` says how many there are, so a host can compute the payable X
+        // itself. Both are published because the TS lane's D-1 instrument is calibrated on
+        // the undivided figure; `maxAnnounce` is the one the JVM will clamp an announcement
+        // to, so a host that trusts it cannot over-announce.
+        final int symbols = xSymbolCount(sa);
+        o.addProperty("symbols", symbols);
+        o.addProperty("maxAnnounce", maxAnnounceableX(sa));
+        return o;
+    }
+
+    /** Mana available for X: the affordability estimate minus the cost's fixed pips. */
+    public static int xManaCeiling(final SpellAbility sa) {
         try {
             final Player p = sa.getActivatingPlayer();
-            if (p != null) {
-                final int available = ComputerUtilMana.getAvailableManaEstimate(p);
-                final int fixed = sa.getPayCosts() == null || sa.getPayCosts().hasNoManaCost()
-                        ? 0 : sa.getPayCosts().getTotalMana().getCMC();
-                max = Math.max(0, available - fixed);
+            if (p == null) {
+                return 0;
             }
+            final int available = ComputerUtilMana.getAvailableManaEstimate(p);
+            final int fixed = sa.getPayCosts() == null || sa.getPayCosts().hasNoManaCost()
+                    ? 0 : sa.getPayCosts().getTotalMana().getCMC();
+            return Math.max(0, available - fixed);
         } catch (RuntimeException e) {
             JsonRpcChannel.logErr("X ceiling estimate failed", e);
+            return 0;
         }
-        o.addProperty("max", max);
-        return o;
+    }
+
+    /** How many {X} symbols the mana cost carries. Walking Ballista is 2. */
+    public static int xSymbolCount(final SpellAbility sa) {
+        try {
+            if (sa.getPayCosts() == null || sa.getPayCosts().hasNoManaCost()) {
+                return 1;
+            }
+            final int n = sa.getPayCosts().getTotalMana().countX();
+            return Math.max(1, n);
+        } catch (RuntimeException e) {
+            return 1;
+        }
+    }
+
+    /**
+     * The largest X the activating player can actually announce: mana-for-X divided by the
+     * number of {X} symbols. A {X}{X} card at 3 available mana announces X=1, not X=3.
+     */
+    public static int maxAnnounceableX(final SpellAbility sa) {
+        return xManaCeiling(sa) / xSymbolCount(sa);
     }
 
     /**

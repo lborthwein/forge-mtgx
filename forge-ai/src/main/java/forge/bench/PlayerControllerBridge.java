@@ -272,10 +272,73 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             refuse("chooseSpellAbilityToPlay", "chosen ability is no longer playable: " + chosen);
             return super.chooseSpellAbilityToPlay();
         }
+        // X must be announced BEFORE targeting and before the affordability re-check:
+        // an X spell's legal target count can be derived from X, and canPayCost has to
+        // price the announcement.
+        if (!announceX(chosen, ans)) {
+            return super.chooseSpellAbilityToPlay();
+        }
         if (!ensureTargets(chosen)) {
             return super.chooseSpellAbilityToPlay();
         }
         return Lists.newArrayList(chosen);
+    }
+
+    /**
+     * Apply the host's announced X to the chosen ability (protocol v2.3).
+     *
+     * <p>Without this every {X} spell the bridged seat casts is announced at X=0, because
+     * Forge sets X inside {@code canPlayAI} — a path a host-chosen ability never goes down
+     * — and {@code XManaCostPaid} defaults to zero. Walking Ballista arrived as a 0/0 and
+     * died to state-based actions on the adjacent event; Forth Eorlingas! made no tokens.
+     * The announcement is read back by
+     * {@code ComputerUtilMana.calculateManaCost} via {@code calculateAmount(host, "X", sa)},
+     * so setting it here <em>is</em> the announcement.
+     *
+     * @return false when the answer should be refused and delegated
+     */
+    private boolean announceX(final SpellAbility chosen, final JsonObject ans) {
+        final Integer x = optInt(ans, "x");
+        if (x == null) {
+            return true; // no announcement offered; Forge's default of 0 stands
+        }
+        boolean hasX;
+        try {
+            hasX = chosen.costHasX()
+                    || (chosen.getPayCosts() != null && chosen.getPayCosts().hasXInAnyCostPart());
+        } catch (RuntimeException e) {
+            hasX = false;
+        }
+        if (!hasX) {
+            // A decode mismatch: the host announced X for an ability that has none. Counted
+            // and delegated rather than ignored, so a TS-side menu-indexing bug cannot hide
+            // behind a field the JVM quietly drops.
+            refuse("chooseSpellAbilityToPlay", "answer announced x=" + x
+                    + " for an ability with no {X}: " + chosen);
+            return false;
+        }
+        final int ceiling = StateEncoder.maxAnnounceableX(chosen);
+        int clamped = Math.max(0, Math.min(x, ceiling));
+        // CR 601.2b: an X with a stated minimum may not be announced below it.
+        try {
+            if (chosen.getPayCosts() != null && chosen.getPayCosts().getCostMana() != null) {
+                clamped = Math.max(clamped, Math.min(ceiling, chosen.getPayCosts().getCostMana().getXMin()));
+            }
+        } catch (RuntimeException e) {
+            // no stated minimum available; the [0, ceiling] clamp stands
+        }
+        chosen.setXManaCostPaid(clamped);
+        counters.instrument("x.announced");
+        if (clamped > 0) {
+            counters.instrument("x.announcedNonZero");
+        }
+        if (clamped != x) {
+            counters.instrument("x.clampedByJvm");
+            JsonRpcChannel.log("clamped announced X " + x + " -> " + clamped
+                    + " (ceiling " + ceiling + ", " + StateEncoder.xSymbolCount(chosen)
+                    + " {X} symbols) for " + chosen);
+        }
+        return true;
     }
 
     /**
