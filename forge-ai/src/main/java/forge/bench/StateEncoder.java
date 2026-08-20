@@ -444,6 +444,56 @@ public final class StateEncoder {
         return a;
     }
 
+    /**
+     * Id-namespace offset for spell targets (protocol v2.1).
+     *
+     * <p>Forge counts card ids and spell-ability ids on separate sequences, so a stack
+     * instance's id can collide with a battlefield card's id. A {@code targets} menu that
+     * mixes both would then decode to the wrong object — silently, and only sometimes.
+     * Stack candidates are therefore published at {@code SPELL_TARGET_ID_BASE + stackId};
+     * ids at or above the base live in the stack namespace and nowhere else. The base is
+     * positive so it never collides with the {@code -1} sentinel used elsewhere.
+     */
+    public static final int SPELL_TARGET_ID_BASE = 1_000_000_000;
+
+    /**
+     * One spell/ability on the stack, as a target candidate.
+     *
+     * <p>Carries {@code controllerSeat} as well as the raw player id: a host deciding
+     * whether a counterspell is aimed at its own spell must not have to infer the seat
+     * from a player id, and a fallthrough-to-"ours" there is how a pilot ends up
+     * countering itself with two spells on the stack.
+     */
+    public static JsonObject encodeStackCandidate(final Game game, final SpellAbilityStackInstance si) {
+        final JsonObject o = new JsonObject();
+        final SpellAbility sa = si.getSpellAbility();
+        final Card host = si.getSourceCard();
+        o.addProperty("id", SPELL_TARGET_ID_BASE + si.getId());
+        o.addProperty("stackId", si.getId());
+        o.addProperty("kind", "spell");
+        o.addProperty("zone", "Stack");
+        o.addProperty("name", host == null ? "?" : host.getName());
+        o.addProperty("fid", host == null ? -1 : host.getId());
+        o.addProperty("isSpell", sa != null && sa.isSpell());
+        // The case the bridge was blind to: a creature/artifact/enchantment spell on the
+        // stack. isValid("Spell") rejects these, so getAllCandidates never returned them.
+        o.addProperty("isPermanentSpell", host != null && sa != null && sa.isSpell() && host.isPermanent());
+        o.addProperty("types", host == null ? "" : host.getType().toString());
+        o.addProperty("manaCost", host == null ? "" : String.valueOf(host.getManaCost()));
+        o.addProperty("cmc", host == null ? 0 : host.getCMC());
+        if (host != null && host.isCreature()) {
+            o.addProperty("power", host.getNetPower());
+            o.addProperty("toughness", host.getNetToughness());
+        }
+        final Player act = si.getActivatingPlayer();
+        o.addProperty("controller", act == null ? -1 : act.getId());
+        o.addProperty("activator", act == null ? -1 : act.getId());
+        o.addProperty("controllerSeat", playerIndex(game, act));
+        o.addProperty("api", sa == null || sa.getApi() == null ? "" : sa.getApi().toString());
+        o.addProperty("description", String.valueOf(si.getStackDescription()));
+        return o;
+    }
+
     /** Compact summary of any game entity (card or player) for a target/entity menu. */
     public static JsonObject encodeEntity(final GameEntity ge) {
         final JsonObject o = new JsonObject();

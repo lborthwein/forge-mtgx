@@ -32,6 +32,8 @@ import forge.game.*;
 import forge.game.ability.effects.RollDiceEffect;
 import forge.game.card.*;
 import forge.game.combat.Combat;
+import forge.game.combat.AttackConstraints;
+import forge.game.combat.AttackRequirement;
 import forge.game.combat.CombatUtil;
 import forge.game.cost.*;
 import forge.game.keyword.KeywordInterface;
@@ -350,6 +352,65 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     }
 
     /**
+     * Stack-instance candidates for one ability.
+     *
+     * <p>{@code TargetRestrictions.getAllCandidates} enumerates only
+     * {@code game.getCardsIn(tgtZone)} through {@code sa.canTarget(Card)}, which for a
+     * stack-zone target runs {@code isValid("Spell")} against the <em>card</em>. A
+     * permanent spell on the stack fails that predicate, so counter-vs-permanent was never
+     * offered at all. Forge's own count ({@code TargetRestrictions.getNumCandidates})
+     * handles the stack on a separate branch via {@code canTargetSpellAbility}; this is
+     * that branch.
+     *
+     * <p>Returns empty — never throws, never short-circuits the caller — when the
+     * restriction does not name the stack, so callers can always sum it with
+     * {@code getAllCandidates}.
+     */
+    private static List<SpellAbilityStackInstance> stackCandidates(final SpellAbility sa) {
+        final List<SpellAbilityStackInstance> out = new ArrayList<>();
+        if (sa == null || !sa.usesTargeting()) {
+            return out;
+        }
+        try {
+            final TargetRestrictions tgt = sa.getTargetRestrictions();
+            if (tgt == null || tgt.getZone() == null || !tgt.getZone().contains(ZoneType.Stack)) {
+                return out;
+            }
+            final Card host = sa.getHostCard();
+            if (host == null || host.getGame() == null) {
+                return out;
+            }
+            for (SpellAbilityStackInstance si : host.getGame().getStack()) {
+                if (sa.canTargetSpellAbility(si.getSpellAbility())) {
+                    out.add(si);
+                }
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("stack candidate enumeration failed for " + sa, e);
+        }
+        return out;
+    }
+
+    /**
+     * Every legal target for one ability: the stack branch summed with the card/player
+     * branch, exactly as {@code TargetRestrictions.getNumCandidates} sums them.
+     *
+     * <p>Deliberately an OR, never an either/or on {@code tgtZone.contains(Stack)}: a
+     * "counter target spell or destroy target permanent" shape names both zones, and
+     * branching exclusively on the stack would make it vanish whenever the stack is empty
+     * — the same defect this method exists to fix, pointed the other way.
+     */
+    private static int candidateCount(final SpellAbility sa) {
+        int n = stackCandidates(sa).size();
+        try {
+            n += sa.getTargetRestrictions().getAllCandidates(sa).size();
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("entity candidate enumeration failed for " + sa, e);
+        }
+        return n;
+    }
+
+    /**
      * {@code SpellAbility.canPlay} does not check that legal targets exist, so without this
      * the menu offers e.g. a counterspell with an empty stack. Every entry we offer must be
      * an action the host can actually complete.
@@ -357,14 +418,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     private static boolean hasEnoughTargets(final SpellAbility root) {
         SpellAbility cur = root;
         while (cur != null) {
-            if (cur.usesTargeting()) {
-                try {
-                    if (cur.getTargetRestrictions().getAllCandidates(cur).size() < cur.getMinTargets()) {
-                        return false;
-                    }
-                } catch (RuntimeException e) {
-                    return false;
-                }
+            if (cur.usesTargeting() && candidateCount(cur) < cur.getMinTargets()) {
+                return false;
             }
             cur = cur.getSubAbility();
         }
@@ -400,6 +455,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             legalPairs.add(String.valueOf(c.getId()), defs);
         }
         body.add("legalPairs", legalPairs);
+        addAttackRequirements(body, combat, possible, defenders);
 
         final JsonObject ans = ask("declareAttackers", "attackers", body);
         if (ans == null) {
@@ -434,6 +490,85 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             combat.clearAttackers();
             refuse("declareAttackers", bad);
             super.declareAttackers(attacker, combat);
+        }
+    }
+
+    /**
+     * Attack requirements on the {@code attackers} ask (protocol v2.2).
+     *
+     * <p>{@code CombatUtil.validateAttackers} rejects a declaration that leaves more attack
+     * requirements unmet than the best legal attack would (CR 508.1d). The host could not
+     * see those requirements: Forge models must-attack as a <em>static ability</em>
+     * ({@code StaticAbilityMustAttack}), never as a keyword string, so no amount of reading
+     * {@code keywords} finds it — and the cards it bit on were <em>tokens</em>, which have
+     * no cube entry to read text from at all. Same token-blindness class that
+     * {@code minBlockers} closed for the block step.
+     *
+     * <p>Emits, all keyed by attacker fid:
+     * <ul>
+     *   <li>{@code mustAttack} — defender ids this attacker is required to attack.</li>
+     *   <li>{@code mustAttackAny} — attackers required to attack, with no specific
+     *       defender (every legal defender carries the requirement).</li>
+     *   <li>{@code requiresAlso} — <em>other</em> attackers whose not attacking counts as a
+     *       violation. This is the Goblin Rabblemaster shape: "other Goblin creatures you
+     *       control attack each combat if able".</li>
+     *   <li>{@code bestAttackViolations} — the ceiling. A declaration is legal iff its own
+     *       violation count is less than or equal to this, so a non-zero value is how the
+     *       host tells a hard requirement from one it may leave unmet.</li>
+     * </ul>
+     */
+    private static void addAttackRequirements(final JsonObject body, final Combat combat,
+            final CardCollection possible, final List<GameEntity> defenders) {
+        final JsonObject mustAttack = new JsonObject();
+        final JsonArray mustAttackAny = new JsonArray();
+        final JsonObject requiresAlso = new JsonObject();
+        boolean anyRequirement = false;
+        try {
+            final AttackConstraints constraints = combat.getAttackConstraints();
+            for (Card c : possible) {
+                final AttackRequirement req = constraints.getRequirements().get(c);
+                if (req == null || !req.hasRequirement()) {
+                    continue;
+                }
+                anyRequirement = true;
+                final JsonArray defs = new JsonArray();
+                for (Pair<GameEntity, Integer> e : req.getSortedRequirements()) {
+                    if (e.getValue() != null && e.getValue() > 0 && e.getKey() != null) {
+                        defs.add(e.getKey().getId());
+                    }
+                }
+                if (defs.size() > 0) {
+                    mustAttack.add(String.valueOf(c.getId()), defs);
+                    // A requirement spread across every legal defender is "must attack",
+                    // not "must attack that one".
+                    if (defs.size() == defenders.size()) {
+                        mustAttackAny.add(c.getId());
+                    }
+                }
+                if (!req.getCausesToAttack().isEmpty()) {
+                    final JsonArray also = new JsonArray();
+                    for (Card other : req.getCausesToAttack().keySet()) {
+                        also.add(other.getId());
+                    }
+                    requiresAlso.add(String.valueOf(c.getId()), also);
+                }
+            }
+            body.add("mustAttack", mustAttack);
+            body.add("mustAttackAny", mustAttackAny);
+            body.add("requiresAlso", requiresAlso);
+            // getLegalAttackers() searches the attack space, so only pay for it when a
+            // requirement actually exists; with none, the ceiling is trivially 0.
+            body.addProperty("bestAttackViolations",
+                    anyRequirement ? constraints.getLegalAttackers().getRight() : 0);
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("attack requirement enumeration failed", e);
+            if (!body.has("mustAttack")) {
+                body.add("mustAttack", mustAttack);
+                body.add("mustAttackAny", mustAttackAny);
+                body.add("requiresAlso", requiresAlso);
+            }
+            // Absent rather than wrong: a host that sees no ceiling must not assume zero.
+            body.add("bestAttackViolations", com.google.gson.JsonNull.INSTANCE);
         }
     }
 
@@ -636,21 +771,36 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             return super.chooseTargetsFor(currentAbility);
         }
         final TargetRestrictions tgt = currentAbility.getTargetRestrictions();
+        // Mixed-zone by construction: both branches are always enumerated and the menu is
+        // their union. See stackCandidates/candidateCount.
         final List<GameEntity> candidates;
         try {
             candidates = tgt.getAllCandidates(currentAbility);
         } catch (RuntimeException e) {
             JsonRpcChannel.logErr("target candidate enumeration failed", e);
+            refuse("chooseTargetsFor", "candidate enumeration threw: " + e);
             return super.chooseTargetsFor(currentAbility);
         }
+        final List<SpellAbilityStackInstance> stack = stackCandidates(currentAbility);
         final int min = currentAbility.getMinTargets();
         final int max = currentAbility.getMaxTargets();
 
         final JsonObject body = envelope(true);
         body.add("ability", StateEncoder.encodeSpellAbility(currentAbility));
-        body.add("menu", StateEncoder.encodeEntities(candidates));
+        final JsonArray menu = StateEncoder.encodeEntities(candidates);
+        for (SpellAbilityStackInstance si : stack) {
+            menu.add(StateEncoder.encodeStackCandidate(getGame(), si));
+        }
+        body.add("menu", menu);
         body.addProperty("min", min);
         body.addProperty("max", max);
+        // Protocol v2.1: tell the host that this menu can contain stack candidates, and how
+        // to read them, without making it infer either from the entries present.
+        body.addProperty("stackCandidates", stack.size());
+        body.addProperty("spellTargetIdBase", StateEncoder.SPELL_TARGET_ID_BASE);
+        body.addProperty("targetsStackZone",
+                tgt.getZone() != null && tgt.getZone().contains(ZoneType.Stack));
+
         final JsonObject ans = ask("chooseTargetsFor", "targets", body);
         if (ans == null) {
             return super.chooseTargetsFor(currentAbility);
@@ -667,15 +817,55 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final TargetChoices before = currentAbility.getTargets();
         currentAbility.resetTargets();
         for (int id : ids) {
-            final GameEntity ge = findEntity(candidates, id);
-            if (ge == null || !currentAbility.canTarget(ge)) {
+            // Ids at or above the base are stack instances and are resolved ONLY there;
+            // below it, cards and players and only those. The namespaces never overlap, so
+            // a spell-ability id can never be mistaken for a card id.
+            final String problem = id >= StateEncoder.SPELL_TARGET_ID_BASE
+                    ? addSpellTarget(currentAbility, stack, id)
+                    : addEntityTarget(currentAbility, candidates, id);
+            if (problem != null) {
                 currentAbility.setTargets(before);
-                refuse("chooseTargetsFor", "illegal target id " + id);
+                // Counted, always. A silent fall-through to Forge's AI here would have it
+                // pick our targets and the attribution would credit the pilot for them.
+                refuse("chooseTargetsFor", problem);
                 return super.chooseTargetsFor(currentAbility);
             }
-            currentAbility.getTargets().add(ge);
         }
         return true;
+    }
+
+    /** Apply one card/player target. Returns null on success, or the reason to refuse. */
+    private static String addEntityTarget(final SpellAbility sa, final List<GameEntity> candidates,
+            final int id) {
+        final GameEntity ge = findEntity(candidates, id);
+        if (ge == null) {
+            return "unknown entity target id " + id;
+        }
+        if (!sa.canTarget(ge)) {
+            return "illegal entity target " + id + " (" + ge + ")";
+        }
+        return sa.getTargets().add(ge) ? null : "TargetChoices refused entity " + id;
+    }
+
+    /** Apply one stack (spell/ability) target. Returns null on success, or the refusal reason. */
+    private static String addSpellTarget(final SpellAbility sa,
+            final List<SpellAbilityStackInstance> stack, final int id) {
+        final int stackId = id - StateEncoder.SPELL_TARGET_ID_BASE;
+        SpellAbilityStackInstance found = null;
+        for (SpellAbilityStackInstance si : stack) {
+            if (si.getId() == stackId) {
+                found = si;
+                break;
+            }
+        }
+        if (found == null) {
+            return "unknown stack target stackId " + stackId + " (wire id " + id + ")";
+        }
+        final SpellAbility target = found.getSpellAbility();
+        if (target == null || !sa.canTargetSpellAbility(target)) {
+            return "illegal stack target stackId " + stackId + " (" + found.getStackDescription() + ")";
+        }
+        return sa.getTargets().add(target) ? null : "TargetChoices refused stack target " + stackId;
     }
 
     @Override

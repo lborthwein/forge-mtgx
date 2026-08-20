@@ -112,6 +112,110 @@ Each stack entry now also carries:
 
 `targets` (the string) is unchanged and still sent, so a v1 decoder is unaffected.
 
+## Protocol v2.1 — stack candidates on a `targets` ask (queue item B-1)
+
+`hello` now also carries `protocolMinor`. 2.1 is additive over 2.0.
+
+### The defect
+
+`hasEnoughTargets` and `chooseTargetsFor` both enumerated targets through
+`TargetRestrictions.getAllCandidates`, which walks `game.getCardsIn(tgtZone)` and tests
+`sa.canTarget(Card)` → `isValid("Spell")` **against the card**. A permanent spell sitting
+on the stack is a creature/artifact/enchantment card, so it fails that predicate. Result:
+a counterspell was never offered against a permanent spell — the menu filter dropped the
+counterspell entirely, and on the frames where it was offered the target never appeared.
+Measured by the harness lane: 29 of 32 payable frames omitted; ~11 of Forge's 17 counters
+on identical seeds.
+
+Forge's own count does not have this hole. `TargetRestrictions.getNumCandidates`
+(TargetRestrictions.java:556) handles the stack on a **separate branch**, iterating
+`game.getStack()` as `SpellAbilityStackInstance`s and testing
+`sa.canTargetSpellAbility(...)`, then **adds** `getAllCandidates(sa).size()`.
+
+### The fix
+
+`stackCandidates(sa)` reproduces that branch; `candidateCount(sa)` sums it with
+`getAllCandidates` exactly as `getNumCandidates` does, and both the menu filter and the
+`targets` ask use the union.
+
+**Mixed-zone is an OR, never an either/or.** The code never branches exclusively on
+`tgtZone.contains(ZoneType.Stack)`: both branches are always enumerated and summed. A
+"counter target spell or destroy target permanent" shape names both zones, and an
+exclusive stack branch would make it vanish whenever the stack is empty — the same defect
+pointed the other way.
+
+### New fields on a `targets` ask
+
+| field | meaning |
+|---|---|
+| `stackCandidates` | how many menu entries are stack instances (0 when none) |
+| `spellTargetIdBase` | the id-namespace offset, `1000000000` |
+| `targetsStackZone` | whether the restriction names the stack at all |
+
+and each stack menu entry:
+
+```json
+{"id":1000000007,"stackId":7,"kind":"spell","zone":"Stack",
+ "name":"Spined Thopter","fid":32,"isSpell":true,"isPermanentSpell":true,
+ "types":"Artifact Creature - Phyrexian Thopter","manaCost":"{2}{U/P}","cmc":3,
+ "power":2,"toughness":1,
+ "controller":2,"activator":2,"controllerSeat":1,
+ "api":"","description":"…"}
+```
+
+**Id namespace.** Forge counts card ids and spell-ability ids on separate sequences, so a
+stack instance's id can collide with a battlefield card's id. Stack candidates are
+published at `SPELL_TARGET_ID_BASE + stackId`; an answer id **at or above** the base is
+resolved only against the stack list, **below** it only against cards and players. The
+namespaces cannot overlap, so a spell id can never decode as a card. The base is positive,
+so it never collides with the `-1` sentinel used by `assignDamage`/`entityChoice`.
+
+**Controller tagging.** Stack entries carry `controller`/`activator` (Forge player ids) and
+`controllerSeat` (turn-order index). The seat index is there so a host never has to infer
+ownership from a player id and fall through to "ours" — that fallthrough is how a pilot
+ends up countering its own spell with two spells on the stack.
+
+**Answers.** Unchanged shape: `{"choices":[id,…]}`. A stack id is applied with
+`TargetChoices.add(SpellAbility)` after `canTargetSpellAbility` re-validates it against the
+live game.
+
+**Refusals are counted, never silent.** Every decode mismatch — unknown id in either
+namespace, an id the engine rejects, a `TargetChoices.add` that returns false, and now also
+a throw out of candidate enumeration — goes through `refuse()` and lands in
+`delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
+that record would credit the pilot for Forge's choices.
+
+## Protocol v2.2 — attack requirements on an `attackers` ask (P1 residual)
+
+`CombatUtil.validateAttackers` rejects a declaration that leaves more attack requirements
+unmet than the best legal attack would (CR 508.1d). The host could not see those
+requirements at all, which produced 4 residual `declareAttackers` refusals in the P1
+panel — every one of them **Goblin tokens under Goblin Rabblemaster** ("other Goblin
+creatures you control attack each combat if able").
+
+Reading `keywords` cannot fix this: Forge models must-attack as a **static ability**
+(`StaticAbilityMustAttack`, mode `MustAttack`), never as a keyword string. And the cards it
+bit on were *tokens*, which have no cube entry to read text from — the same token-blindness
+class `minBlockers` closed for the block step.
+
+New fields on an `attackers` ask, all keyed by attacker fid:
+
+| field | meaning |
+|---|---|
+| `mustAttack` | `{attackerFid: [defenderId, …]}` — defenders this attacker is required to attack |
+| `mustAttackAny` | `[attackerFid, …]` — required to attack, no specific defender (the requirement covers every legal defender) |
+| `requiresAlso` | `{attackerFid: [otherAttackerFid, …]}` — other attackers whose *not* attacking counts as a violation (`AttackRequirement.getCausesToAttack`) |
+| `bestAttackViolations` | the ceiling: a declaration is legal iff its own violation count is `<=` this. Non-zero is how the host distinguishes a hard requirement from one it may leave unmet. `null` if enumeration failed — absent rather than wrong, and a host must not read a missing ceiling as zero. |
+
+Sourced from `Combat.getAttackConstraints()`, i.e. the same object `validateAttackers`
+judges against. `getLegalAttackers()` searches the attack space, so it is only called when
+at least one requirement exists; with none, the ceiling is trivially 0.
+
+Verified: 13 of 13 `attackers` asks in a Rabblemaster pod carried a non-empty `mustAttack`,
+e.g. `{"23":[1],"124":[1],"126":[1]}` with `mustAttackAny:[23,124,126]` and
+`bestAttackViolations:1`, where 124/126 are **Goblin Tokens** — the exact objects the P1
+refusals came from. 0 `declareAttackers` refusals.
+
 ## The AI search budget (`aiCanUseTimeout` / `aiTimeoutSec` / `simMaxDepth`)
 
 Sim-mode runs were dying with `OutOfMemoryError` at `-Xmx4g`.

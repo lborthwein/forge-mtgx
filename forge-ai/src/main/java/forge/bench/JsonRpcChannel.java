@@ -47,6 +47,20 @@ public final class JsonRpcChannel {
      */
     public static final int PROTOCOL_VERSION = 2;
 
+    /**
+     * Minor level within protocol 2, additive only. Bumped when a new field appears that a
+     * host may want to gate on.
+     * <ul>
+     *   <li>2.0 — keywords, minBlockers, decklist, structured cost/X/modes, stack targets.</li>
+     *   <li>2.1 — {@code targets} asks can carry stack (spell) candidates, in their own id
+     *       namespace. See PROTOCOL-NOTES.md "B-1".</li>
+     *   <li>2.2 — {@code attackers} asks state attack requirements outright
+     *       ({@code mustAttack}, {@code mustAttackAny}, {@code requiresAlso},
+     *       {@code bestAttackViolations}).</li>
+     * </ul>
+     */
+    public static final int PROTOCOL_MINOR = 2;
+
     private final BufferedReader in;
     private final PrintStream out;
     private final AtomicInteger nextId = new AtomicInteger(1);

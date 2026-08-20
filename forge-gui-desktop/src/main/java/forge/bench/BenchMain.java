@@ -185,6 +185,7 @@ public final class BenchMain {
         final JsonObject hello = new JsonObject();
         hello.addProperty("type", "hello");
         hello.addProperty("protocol", JsonRpcChannel.PROTOCOL_VERSION);
+        hello.addProperty("protocolMinor", JsonRpcChannel.PROTOCOL_MINOR);
         hello.addProperty("forgeCommit", forgeCommit());
         hello.addProperty("forgeVersion", BuildInfo.getVersionString());
         hello.addProperty("aiProfile", aiProfile);
