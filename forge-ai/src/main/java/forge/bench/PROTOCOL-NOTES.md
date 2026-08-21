@@ -185,6 +185,45 @@ a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
 
+## Protocol v2.9 — every ask states its own minor, and the divided total reaches the wire
+
+Two additive items from the TS lane's v2.8 reconciliation. Nothing changes for a host that
+ignores both.
+
+### (a) `protocolMinor` on every ask
+
+`JsonRpcChannel.ask` stamped `type`, `id` and `kind`; the minor was only on the session
+`hello`. An archived corpus therefore replayed in whatever shape the *reading* build
+assumed, and the reader had to remember which session each line came from. Every ask now
+carries `protocolMinor`, so a line is self-describing:
+
+```json
+{"type":"ask","id":7,"kind":"targets","protocolMinor":9, …}
+```
+
+The TS side reads ask-minor first, session-minor second. Verified: **721 of 721 asks**
+across `startingPlayer`, `mulligan`, `priority` and `targets` stamped `9`.
+
+### (b) the divided-as-you-choose total
+
+v2.7 accepts a `divide` map on a `targets` answer, but the total being divided
+(`sa.getDividedValue()`) never reached the wire — so a host had no number to partition and
+could emit nothing, and every allocation silently fell back to the JVM's even split. The
+`targets` ask now publishes:
+
+| field | meaning |
+|---|---|
+| `dividedAsYouChoose` | whether this ability divides an amount at all |
+| `divideTotal` | the total to divide; `null` if the engine has not fixed it yet |
+| `divideRemaining` | what is still unassigned (`getStillToDivide`) — the figure a re-entrant targeting pass actually has to work with |
+
+Verified on Arc Lightning (*3 damage divided as you choose among one, two, or three
+targets*): the ask arrives as
+`{"dividedAsYouChoose":true,"divideTotal":3,"divideRemaining":3,"min":1,"max":3}`, and an
+answer naming two targets with `"divide":{"card:30":2,"card:31":1}` is accepted — 8 such
+answers, **0 refusals**. Note the typed `"card:<id>"` key form from the v2.8 audit is what
+the host should emit; bare ids still work.
+
 ## ID SPACES — the namespace rule for every answer
 
 **A Player's id is its seat index (0, 1). A Card's id is its fid, which starts at 1.** The

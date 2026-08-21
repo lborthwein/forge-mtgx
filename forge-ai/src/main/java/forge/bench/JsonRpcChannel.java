@@ -59,7 +59,7 @@ public final class JsonRpcChannel {
      *       {@code bestAttackViolations}).</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 8;
+    public static final int PROTOCOL_MINOR = 9;
 
     private final BufferedReader in;
     private final PrintStream out;
@@ -122,6 +122,10 @@ public final class JsonRpcChannel {
         body.addProperty("type", "ask");
         body.addProperty("id", id);
         body.addProperty("kind", kind);
+        // v2.9: stamp the minor on EVERY ask, not just the session `hello`. An archived
+        // corpus then replays in its own era's shape inside a newer build, without the
+        // reader having to remember which session it came from.
+        body.addProperty("protocolMinor", PROTOCOL_MINOR);
         send(body);
         if (closed) {
             return delegateAnswer(id);

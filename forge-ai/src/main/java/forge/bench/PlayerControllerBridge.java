@@ -1291,6 +1291,21 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.addProperty("spellTargetIdBase", StateEncoder.SPELL_TARGET_ID_BASE);
         body.addProperty("targetsStackZone",
                 tgt.getZone() != null && tgt.getZone().contains(ZoneType.Stack));
+        // v2.9: the divided-as-you-choose total. Without it a host cannot emit a `divide`
+        // map at all -- it has no number to partition -- so allocations silently fell back
+        // to the JVM's even split. `divideRemaining` is what is still unassigned, which is
+        // what a re-entrant targeting pass actually has to work with.
+        final boolean divided = currentAbility.isDividedAsYouChoose();
+        body.addProperty("dividedAsYouChoose", divided);
+        if (divided) {
+            final Integer total = currentAbility.getDividedValue();
+            if (total == null) {
+                body.add("divideTotal", com.google.gson.JsonNull.INSTANCE);
+            } else {
+                body.addProperty("divideTotal", total);
+            }
+            body.addProperty("divideRemaining", currentAbility.getStillToDivide());
+        }
 
         final JsonObject ans = ask("chooseTargetsFor", "targets", body);
         if (ans == null) {
