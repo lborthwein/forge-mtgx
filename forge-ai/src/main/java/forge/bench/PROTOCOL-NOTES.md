@@ -185,6 +185,70 @@ a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
 
+## ID SPACES — the namespace rule for every answer
+
+**A Player's id is its seat index (0, 1). A Card's id is its fid, which starts at 1.** The
+two spaces overlap: **id 1 is both seat 1 and the first card**. Any answer field that mixes
+them and carries a bare integer is ambiguous, and the ambiguity is silent — it resolves to
+whichever the menu listed first, which is players.
+
+Measured in the field: the host named a creature, the bare id resolved to the player, and
+the burn spell hit its own controller's face. Reproduced here on a fixed seed — same ask,
+only the answer's naming differing:
+
+```
+untyped  [1]                              -> lifeChanged Seat1-Burn: 20 -> 18   (our own face)
+typed    [{"kind":"card","id":1}]         -> zoneChange Grizzly Bears (1): Battlefield -> Graveyard
+```
+with the menu itself showing the collision:
+```
+id 1 -> [{"kind":"player","id":1,"name":"Seat1-Burn","life":20},
+         {"kind":"card","id":1,"name":"Grizzly Bears"}]
+```
+
+### Every answer field, and its space
+
+| ask | answer field | space | mixed? |
+|---|---|---|---|
+| `priority` | `choice` | menu index | safe |
+| `priority` | `x` | scalar | n/a |
+| `targets` | `choices` | **players + cards + stack** | **TYPED (v2.8)** |
+| `targets` | `divide` keys | same as `choices` | **TYPED (v2.8)**, `"card:1"` / `"player:1"`, bare accepted |
+| `attackers` | `pairs[i][0]` | attacker card fid | cards only — safe |
+| `attackers` | `pairs[i][1]` | **players + planeswalkers + battles** | **TYPED (v2.8)** |
+| `blockers` | `pairs` | card fids both sides | cards only — safe |
+| `orderBlockers` | `order` | card fids | cards only — safe |
+| `assignDamage` | `assign` keys | card fids, plus the `-1` sentinel | cards only — safe; `-1` guarded in v2.7 |
+| `cardsChoice` | `choices` | card fids | homogeneous menu — safe |
+| `scry` | `top` / `bottom` | card fids | homogeneous menu — safe |
+| `entityChoice` | `choice` / `choices` | **menu indices, not ids** | safe by construction |
+| `mode`, `optionalCosts` | `choices` | menu indices | safe by construction |
+| `number`, `keywordCost` | `value` | scalar | n/a |
+| `confirm` | `yes` | boolean | n/a |
+| `startingPlayer` | `play` | boolean | n/a |
+
+Stack (spell) candidates were already disjoint: they are published at
+`SPELL_TARGET_ID_BASE + stackId` (1e9) and resolved only in that namespace — see v2.1.
+
+### The typed form
+
+```json
+{"choices":[{"kind":"player"|"card"|"spell","id":n}, …]}
+{"pairs":[[attackerFid, {"kind":"card","id":n}], …]}
+```
+
+The menu already publishes `kind` on every entry; the answer simply echoes it. The JVM
+additionally publishes `legalPairsTyped` and `mustAttackTyped` on the `attackers` ask, and
+`StateEncoder.entityRef` is the single place the shape is produced, so a host never has to
+construct an ambiguous reference.
+
+**Bare ints remain accepted for one minor version** and resolve **exactly as they always
+have** — first match in menu order, i.e. players before cards. That path is ambiguous by
+construction and cannot be made correct; it is preserved unchanged rather than
+"repaired" so the deprecation window does not silently move any existing host's decisions.
+Every use increments `legacy.untypedRef`. **Deprecation: bare ints are removed at v2.9** —
+watch that counter reach zero first.
+
 ## Protocol v2.7 — three bridge crashes, and "Draw" stops meaning "crashed"
 
 **Every "Draw" in a bridged arm was a crashed game.** 15 of 288 bridged games, 0 of 288

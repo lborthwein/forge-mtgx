@@ -518,6 +518,94 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
     }
 
+
+    // ---- typed entity references (protocol v2.8) --------------------------------
+    // Players and cards share one flat id space on the wire: a Player's id is its SEAT
+    // INDEX (0, 1) and a Card's id is its fid, which starts at 1. So id 1 is BOTH seat 1
+    // and the first card ever created, and a bare int cannot say which. Reproduced in the
+    // field: the host named a creature, the bare id resolved to the player first, and
+    // Chain Lightning hit its own controller's face.
+    //
+    // The answer now echoes the `kind` the menu already published. Bare ints are still
+    // accepted for one minor version and resolve EXACTLY as they always have -- first
+    // match in menu order, which is players before cards. That legacy path is ambiguous by
+    // construction and cannot be made correct; it is preserved rather than "fixed" so the
+    // deprecation window does not silently move any existing host's decisions. Every use
+    // is counted under `legacy.untypedRef`.
+    private static final class EntityRef {
+        final String kind;   // "player" | "card" | "spell", or null for a legacy bare int
+        final int id;
+        EntityRef(final String kind, final int id) {
+            this.kind = kind;
+            this.id = id;
+        }
+    }
+
+    /** Parse one answer element as a typed ref, or null if malformed. */
+    private EntityRef parseRef(final JsonElement el, final String method) {
+        if (el == null || el.isJsonNull()) {
+            return null;
+        }
+        if (el.isJsonObject()) {
+            final JsonObject o = el.getAsJsonObject();
+            if (!o.has("id")) {
+                return null;
+            }
+            final int id;
+            try {
+                id = o.get("id").getAsInt();
+            } catch (RuntimeException e) {
+                return null;
+            }
+            String kind = o.has("kind") && !o.get("kind").isJsonNull()
+                    ? o.get("kind").getAsString() : null;
+            if (kind != null) {
+                kind = kind.trim().toLowerCase();
+                if (!"player".equals(kind) && !"card".equals(kind) && !"spell".equals(kind)) {
+                    return null;
+                }
+            }
+            return new EntityRef(kind, id);
+        }
+        try {
+            counters.instrument("legacy.untypedRef");
+            return new EntityRef(null, el.getAsInt());
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** True when this pool member is what the ref says it is. */
+    private static boolean refMatches(final EntityRef ref, final GameEntity ge) {
+        if (ge.getId() != ref.id) {
+            return false;
+        }
+        if (ref.kind == null) {
+            return true; // legacy: first match in menu order wins, as before
+        }
+        if ("player".equals(ref.kind)) {
+            return ge instanceof Player;
+        }
+        if ("card".equals(ref.kind)) {
+            return ge instanceof Card;
+        }
+        return false; // "spell" never lives in the entity pool
+    }
+
+    private static GameEntity findTyped(final Iterable<? extends GameEntity> pool, final EntityRef ref) {
+        for (GameEntity ge : pool) {
+            if (refMatches(ref, ge)) {
+                return ge;
+            }
+        }
+        return null;
+    }
+
+    /** A typed ref rendered for a log or refusal message. */
+    private static String refText(final EntityRef ref) {
+        return (ref.kind == null ? "untyped" : ref.kind) + ":" + ref.id;
+    }
+
     /**
      * How many times an optional extra cost may be paid (protocol v2.4).
      *
@@ -743,6 +831,19 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             legalPairs.add(String.valueOf(c.getId()), defs);
         }
         body.add("legalPairs", legalPairs);
+        // v2.8: the same map with typed defender refs. `legalPairs` keeps bare ids for one
+        // minor version; these are unambiguous and are what an answer should echo.
+        final JsonObject legalPairsTyped = new JsonObject();
+        for (Card c : possible) {
+            final JsonArray defs = new JsonArray();
+            for (GameEntity d : defenders) {
+                if (CombatUtil.canAttack(c, d)) {
+                    defs.add(StateEncoder.entityRef(d));
+                }
+            }
+            legalPairsTyped.add(String.valueOf(c.getId()), defs);
+        }
+        body.add("legalPairsTyped", legalPairsTyped);
         addAttackRequirements(body, combat, possible, defenders);
 
         final JsonObject ans = ask("declareAttackers", "attackers", body);
@@ -750,19 +851,37 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             super.declareAttackers(attacker, combat);
             return;
         }
-        final List<int[]> pairs = optPairs(ans, "pairs");
-        if (pairs == null) {
+        if (!ans.has("pairs") || !ans.get("pairs").isJsonArray()) {
             refuse("declareAttackers", "missing/!array 'pairs'");
             super.declareAttackers(attacker, combat);
             return;
         }
         combat.clearAttackers();
         String bad = null;
-        for (int[] pr : pairs) {
-            final Card c = findCard(possible, pr[0]);
-            final GameEntity d = findEntity(defenders, pr[1]);
+        // The defender side shares the players-and-cards id space (an opposing planeswalker
+        // or battle is a legal defender), so it takes a typed ref exactly like a target.
+        for (JsonElement pairEl : ans.getAsJsonArray("pairs")) {
+            if (!pairEl.isJsonArray() || pairEl.getAsJsonArray().size() != 2) {
+                bad = "each pair must be [attackerFid, defenderRef]: " + pairEl;
+                break;
+            }
+            final JsonArray pr = pairEl.getAsJsonArray();
+            final int attackerFid;
+            try {
+                attackerFid = pr.get(0).getAsInt();
+            } catch (RuntimeException e) {
+                bad = "attacker id is not a number: " + pr.get(0);
+                break;
+            }
+            final EntityRef dref = parseRef(pr.get(1), "declareAttackers");
+            if (dref == null) {
+                bad = "unparseable defender reference: " + pr.get(1);
+                break;
+            }
+            final Card c = findCard(possible, attackerFid);
+            final GameEntity d = findTyped(defenders, dref);
             if (c == null || d == null) {
-                bad = "unknown attacker/defender " + pr[0] + "/" + pr[1];
+                bad = "unknown attacker/defender " + attackerFid + "/" + refText(dref);
                 break;
             }
             if (!CombatUtil.canAttack(c, d)) {
@@ -808,6 +927,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     private static void addAttackRequirements(final JsonObject body, final Combat combat,
             final CardCollection possible, final List<GameEntity> defenders) {
         final JsonObject mustAttack = new JsonObject();
+        final JsonObject mustAttackTyped = new JsonObject();
         final JsonArray mustAttackAny = new JsonArray();
         final JsonObject requiresAlso = new JsonObject();
         boolean anyRequirement = false;
@@ -827,6 +947,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 }
                 if (defs.size() > 0) {
                     mustAttack.add(String.valueOf(c.getId()), defs);
+                    final JsonArray typed = new JsonArray();
+                    for (Pair<GameEntity, Integer> e : req.getSortedRequirements()) {
+                        if (e.getValue() != null && e.getValue() > 0 && e.getKey() != null) {
+                            typed.add(StateEncoder.entityRef(e.getKey()));
+                        }
+                    }
+                    mustAttackTyped.add(String.valueOf(c.getId()), typed);
                     // A requirement spread across every legal defender is "must attack",
                     // not "must attack that one".
                     if (defs.size() == defenders.size()) {
@@ -842,6 +969,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 }
             }
             body.add("mustAttack", mustAttack);
+            body.add("mustAttackTyped", mustAttackTyped);
             body.add("mustAttackAny", mustAttackAny);
             body.add("requiresAlso", requiresAlso);
             // getLegalAttackers() searches the attack space, so only pay for it when a
@@ -852,6 +980,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             JsonRpcChannel.logErr("attack requirement enumeration failed", e);
             if (!body.has("mustAttack")) {
                 body.add("mustAttack", mustAttack);
+                body.add("mustAttackTyped", mustAttackTyped);
                 body.add("mustAttackAny", mustAttackAny);
                 body.add("requiresAlso", requiresAlso);
             }
@@ -1167,24 +1296,33 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (ans == null) {
             return super.chooseTargetsFor(currentAbility);
         }
-        final List<Integer> ids = optIntList(ans, "choices");
-        if (ids == null) {
+        if (!ans.has("choices") || !ans.get("choices").isJsonArray()) {
             refuse("chooseTargetsFor", "missing/!array 'choices'");
             return super.chooseTargetsFor(currentAbility);
         }
-        if (ids.size() < min || ids.size() > max) {
-            refuse("chooseTargetsFor", "chose " + ids.size() + " targets outside [" + min + "," + max + "]");
+        final JsonArray rawChoices = ans.getAsJsonArray("choices");
+        if (rawChoices.size() < min || rawChoices.size() > max) {
+            refuse("chooseTargetsFor", "chose " + rawChoices.size()
+                    + " targets outside [" + min + "," + max + "]");
             return super.chooseTargetsFor(currentAbility);
         }
         final TargetChoices before = currentAbility.getTargets();
         currentAbility.resetTargets();
-        for (int id : ids) {
-            // Ids at or above the base are stack instances and are resolved ONLY there;
-            // below it, cards and players and only those. The namespaces never overlap, so
-            // a spell-ability id can never be mistaken for a card id.
-            final String problem = id >= StateEncoder.SPELL_TARGET_ID_BASE
-                    ? addSpellTarget(currentAbility, stack, id)
-                    : addEntityTarget(currentAbility, candidates, id);
+        for (JsonElement el : rawChoices) {
+            final EntityRef ref = parseRef(el, "chooseTargetsFor");
+            if (ref == null) {
+                currentAbility.setTargets(before);
+                refuse("chooseTargetsFor", "unparseable target reference: " + el);
+                return super.chooseTargetsFor(currentAbility);
+            }
+            // Stack instances live in their own namespace and are resolved only there.
+            final boolean toStack = "spell".equals(ref.kind)
+                    || (ref.kind == null && ref.id >= StateEncoder.SPELL_TARGET_ID_BASE);
+            final String problem = toStack
+                    ? addSpellTarget(currentAbility, stack,
+                            ref.id >= StateEncoder.SPELL_TARGET_ID_BASE
+                                    ? ref.id : ref.id + StateEncoder.SPELL_TARGET_ID_BASE)
+                    : addEntityTarget(currentAbility, candidates, ref);
             if (problem != null) {
                 currentAbility.setTargets(before);
                 // Counted, always. A silent fall-through to Forge's AI here would have it
@@ -1236,9 +1374,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (explicit != null) {
             int sum = 0;
             for (GameObject go : chosen) {
-                final String key = String.valueOf(idOf(go));
+                // Same flat id space as `choices`, so accept a typed key first
+                // ("card:1" / "player:1") and fall back to the bare id.
+                final String typedKey = kindOf(go) + ":" + idOf(go);
+                final String bareKey = String.valueOf(idOf(go));
+                final String key = explicit.has(typedKey) ? typedKey : bareKey;
                 if (!explicit.has(key)) {
-                    return "'divide' omits target " + key;
+                    return "'divide' omits target " + typedKey;
                 }
                 final int n;
                 try {
@@ -1270,6 +1412,19 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         return null;
     }
 
+    private static String kindOf(final GameObject go) {
+        if (go instanceof Player) {
+            return "player";
+        }
+        if (go instanceof Card) {
+            return "card";
+        }
+        if (go instanceof SpellAbility) {
+            return "spell";
+        }
+        return "entity";
+    }
+
     private static int idOf(final GameObject go) {
         if (go instanceof GameEntity) {
             return ((GameEntity) go).getId();
@@ -1282,15 +1437,15 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
     /** Apply one card/player target. Returns null on success, or the reason to refuse. */
     private static String addEntityTarget(final SpellAbility sa, final List<GameEntity> candidates,
-            final int id) {
-        final GameEntity ge = findEntity(candidates, id);
+            final EntityRef ref) {
+        final GameEntity ge = findTyped(candidates, ref);
         if (ge == null) {
-            return "unknown entity target id " + id;
+            return "unknown entity target " + refText(ref);
         }
         if (!sa.canTarget(ge)) {
-            return "illegal entity target " + id + " (" + ge + ")";
+            return "illegal entity target " + refText(ref) + " (" + ge + ")";
         }
-        return sa.getTargets().add(ge) ? null : "TargetChoices refused entity " + id;
+        return sa.getTargets().add(ge) ? null : "TargetChoices refused entity " + refText(ref);
     }
 
     /** Apply one stack (spell/ability) target. Returns null on success, or the refusal reason. */

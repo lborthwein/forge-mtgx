@@ -594,6 +594,25 @@ public final class StateEncoder {
         return o;
     }
 
+    /**
+     * A typed, unambiguous reference to one entity (protocol v2.8).
+     *
+     * <p>A Player's id is its seat index and a Card's id is its fid starting at 1, so the
+     * two spaces overlap and a bare int cannot say which is meant. Answers echo this shape.
+     */
+    public static JsonObject entityRef(final GameEntity ge) {
+        final JsonObject o = new JsonObject();
+        if (ge instanceof Player) {
+            o.addProperty("kind", "player");
+        } else if (ge instanceof Card) {
+            o.addProperty("kind", "card");
+        } else {
+            o.addProperty("kind", ge == null ? "none" : ge.getClass().getSimpleName().toLowerCase());
+        }
+        o.addProperty("id", ge == null ? -1 : ge.getId());
+        return o;
+    }
+
     /** Compact summary of any game entity (card or player) for a target/entity menu. */
     public static JsonObject encodeEntity(final GameEntity ge) {
         final JsonObject o = new JsonObject();
