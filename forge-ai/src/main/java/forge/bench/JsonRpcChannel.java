@@ -67,9 +67,17 @@ public final class JsonRpcChannel {
      *       keeps it instead of being overwritten by Forge's win condition. Forge's own
      *       verdict for such a game is preserved beside it as {@code winCondition}.
      *       A game that finished carries neither field, exactly as 2.10.</li>
+     *   <li>2.12 — the position format ({@code forge.game.GameState}) carries three
+     *       designations it previously dropped on the floor: {@code monarch=p<n>} and
+     *       {@code initiative=p<n>} (CR 724 / CR 725), a dungeon in the command zone
+     *       with its mid-dungeon position ({@code T:undercity|CurrentRoom:Arena},
+     *       CR 309.4), and {@code p<n>completeddungeons=} (CR 309.3). All four keys
+     *       are optional and their absence means "nobody holds it" / "no dungeon" /
+     *       "none completed", so a 2.11 frame file installs identically. Purely a
+     *       {@code frameFile} widening — no wire message changed.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 11;
+    public static final int PROTOCOL_MINOR = 12;
 
     private final BufferedReader in;
     private final PrintStream out;

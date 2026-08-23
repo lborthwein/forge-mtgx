@@ -794,8 +794,7 @@ not synchronous is not reproducible from a seed.
 
 ### What the format cannot carry
 
-The stack; monarch / the initiative / dungeon progress (absent from `GameState.java`
-entirely); and duration-limited continuous effects with no permanent behind them. The
+The stack; and duration-limited continuous effects with no permanent behind them. The
 mtgx-side exporter (`mtgx:tools/forge/from-frame.mjs`) refuses such a frame by name rather
 than exporting a position nobody was ever in.
 
@@ -849,6 +848,65 @@ the tokens echoed as `T:c_a_food_sac|Set:BIG` and
 rebuild the permanent from a database entry and neither carries a delayed trigger, so a
 Kiki-Jiki copy exported this way would be a *permanent* copy. `from-frame.mjs` refuses it
 by name (`frame-has-ephemeral-token`) rather than dropping the rider silently.
+
+### Protocol v2.12 — monarch, the initiative, and dungeons round-trip (2026-08-23)
+
+Additive to the **position format only**; no wire message changed, and a 2.11 frame file
+installs byte-identically because every new key's absence is its old meaning.
+
+`grep -i "monarch\|initiative\|dungeon" GameState.java` used to return nothing, which is
+why `from-frame.mjs` refused those frames outright. On the mtgx owner corpus that was the
+**second-largest blocker after the stack**: `frame-has-initiative` 355 frames and
+`frame-has-dungeon` 355 frames, one tape and one card
+(`2026-08-22T20-19-35-win-kiki-twin-vs-ug`, Undermountain Adventurer).
+
+| key | scope | meaning |
+|---|---|---|
+| `monarch=p0` | game | CR 724. Written only when someone is the monarch. |
+| `initiative=p1` | game | CR 725. Same. |
+| `T:<script>\|Set:<code>\|CurrentRoom:<Room>` | a card in `pNcommand=` | CR 309.4 — the dungeon and the room the player is in. |
+| `p0completeddungeons=undercity,undercity` | player | CR 309.3 — dungeons finished, by token script. |
+
+Four things are worth knowing before touching this again.
+
+**1. The dungeon was already being written, and was silently unreadable.** A dungeon is a
+`GamePieceType.DUNGEON` card built from a *token script* (`VentureEffect.getDungeonCard`),
+but `Card.isToken()` is false for it, so `addCard` took the paper-card lane and wrote
+`Undercity|Set:CLB|Art:0`. There is no such entry in the card database, so
+`processCardsForZone` printed to stderr and **skipped** it: the dungeon vanished and the
+player read back as never having ventured. It now takes the `T:` lane, and a dungeon whose
+script cannot be recovered throws instead of falling through to `IsToken` or
+`t:<TokenInfo>` — neither of which can carry the room triggers.
+
+**2. `CardFactory.getCard` hands back a TOKEN.** `cp.isToken()` is true for the
+`PaperToken` a dungeon is built from, so the reader must re-stamp `GamePieceType.DUNGEON`
+(exactly as `VentureEffect` does) or the dungeon ceases to exist in the command zone the
+moment state-based actions run.
+
+**3. An unknown room name fails closed.** Forge's `RoomName$` values are not display
+names and are not the exporter's: Undercity's sixth room is `Archive`, while the card, the
+`K:Dungeon:` line and mtgx all call it *Archives*. A name no trigger answers to would leave
+`currentRoom` set to a string that reads downstream as "not in a dungeon" — a **silent room
+reset**, the exact failure mode the campaign forbids. `CurrentRoom:` is therefore checked
+against the script's own `RoomName$` params and throws when it does not match.
+
+**4. The designations go on after the zones and while triggers are still suppressed.**
+`setupPlayerState` empties the command zone, which is where the monarch/initiative effect
+card lives, so `applyDesignations` runs after the per-player loop. It must also run *inside*
+the `setSuppressAllTriggers(true)` window, because `GameAction.takeInitiative` fires
+`TriggerType.TakesInitiative` and the initiative effect's own trigger is *"whenever you take
+the initiative … venture into Undercity"* — installing a position would otherwise advance
+the dungeon room it had just installed. Both designations are **cleared first**: a position
+that does not name a monarch is a position with no monarch, and `game.monarch` left pointing
+at a player whose effect card was just wiped is a designation with nothing behind it.
+
+The set code is the designation's *art* and the format does not carry it;
+`CardEdition.UNKNOWN_CODE` makes `StaticData.getOtherImageKey` fall through to its scan over
+every edition. (Note `Player.getMonarchSet()` is inverted upstream — `monarchEffect == null
+? monarchEffect.getSetCode() : null` — and always returns null; it is not on this path.)
+
+Verified as a fixed point on mtgx tape `2026-08-22T20-19-35-win-kiki-twin-vs-ug` action 262
+(p1 has the initiative and is in Undercity's Secret Entrance): see the mtgx-side report.
 
 ### Turn-based actions and `activephaseadvance`
 

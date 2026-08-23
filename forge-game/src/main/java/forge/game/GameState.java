@@ -28,6 +28,7 @@ import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.spellability.AbilityManaPart;
 import forge.game.spellability.SpellAbility;
+import forge.game.trigger.Trigger;
 import forge.game.zone.PlayerZone;
 import forge.game.zone.ZoneType;
 import forge.item.IPaperCard;
@@ -67,6 +68,13 @@ public class GameState {
         private int speed = 0;
         private String precast = null;
         private String putOnStack = null;
+        /**
+         * CR 309.3 — the dungeons this player has finished, as a comma-separated
+         * list of token-script names. A completed dungeon has ceased to exist, so
+         * it is in no zone and cannot ride along in {@code cardTexts}; it is still
+         * live state, because "for each dungeon you've completed" reads it.
+         */
+        private String completedDungeons = "";
         private final Map<ZoneType, String> cardTexts = new EnumMap<>(ZoneType.class);
     }
     private final List<PlayerState> playerStates = new ArrayList<>();
@@ -100,6 +108,19 @@ public class GameState {
 
     private String tAdvancePhase = "NONE";
 
+    /**
+     * CR 724 / CR 725 — who is the monarch and who has the initiative, as a
+     * player key ({@code p0}, {@code human}, {@code ai}) or {@code "NONE"}.
+     *
+     * Both are game-wide singular designations, like {@code activeplayer=}, so
+     * they are written as top-level keys rather than per-player ones. The
+     * designation's effect card lives in the command zone and is NOT written
+     * with the zone's cards: it has no paper card, so {@code addCard} skips it,
+     * and it is rebuilt by {@code applyDesignations} from these keys instead.
+     */
+    private String monarchPlayer = "NONE";
+    private String initiativePlayer = "NONE";
+
     private int turn = 1;
 
     private boolean removeSummoningSickness = false;
@@ -131,6 +152,12 @@ public class GameState {
         sb.append(TextUtil.concatNoSpace("turn=", String.valueOf(turn), "\n"));
         sb.append(TextUtil.concatNoSpace("activeplayer=", tChangePlayer, "\n"));
         sb.append(TextUtil.concatNoSpace("activephase=", tChangePhase, "\n"));
+        if (!"NONE".equalsIgnoreCase(monarchPlayer)) {
+            sb.append(TextUtil.concatNoSpace("monarch=", monarchPlayer, "\n"));
+        }
+        if (!"NONE".equalsIgnoreCase(initiativePlayer)) {
+            sb.append(TextUtil.concatNoSpace("initiative=", initiativePlayer, "\n"));
+        }
 
         int playerIndex = 0;
         for (PlayerState p : playerStates) {
@@ -148,6 +175,9 @@ public class GameState {
             }
             if (!p.persistentMana.isEmpty()) {
                 sb.append(TextUtil.concatNoSpace(prefix + "persistentmana=", p.persistentMana, "\n"));
+            }
+            if (!p.completedDungeons.isEmpty()) {
+                sb.append(TextUtil.concatNoSpace(prefix + "completeddungeons=", p.completedDungeons, "\n"));
             }
             appendCards(p.cardTexts, prefix, sb);
         }
@@ -171,8 +201,12 @@ public class GameState {
             p.manaPool = processManaPool(player.getManaPool());
             p.numRingTemptedYou = player.getNumRingTemptedYou();
             p.speed = player.getSpeed();
+            p.completedDungeons = completedDungeonsToString(player);
             playerStates.add(p);
         }
+
+        monarchPlayer = playerKey(game, game.getMonarch());
+        initiativePlayer = playerKey(game, game.getHasInitiative());
 
         tChangePlayer = "p" + game.getPlayers().indexOf(game.getPhaseHandler().getPlayerTurn());
         tChangePhase = game.getPhaseHandler().getPhase().toString();
@@ -237,6 +271,68 @@ public class GameState {
 
     private String getPlayerString(Player p) {
         return "P" + p.getGame().getPlayers().indexOf(p);
+    }
+
+    /** {@code p<n>} for a designated player, {@code "NONE"} when there is none. */
+    private static String playerKey(Game game, Player p) {
+        if (p == null) {
+            return "NONE";
+        }
+        int idx = game.getPlayers().indexOf(p);
+        return idx < 0 ? "NONE" : "p" + idx;
+    }
+
+    /**
+     * The player index behind a {@code p<n>} / {@code human} / {@code ai} key.
+     *
+     * {@link #parsePlayerString} cannot be used for the top-level designation
+     * keys: it tests {@code startsWith("P")} case-sensitively and silently
+     * returns player 0 for anything it does not recognise, which would turn a
+     * typo into a wrong monarch rather than an error.
+     *
+     * @return the index, or -1 when the key names no player.
+     */
+    private static int parsePlayerIndex(String key) {
+        String k = key.trim().toLowerCase();
+        if (k.startsWith("human")) {
+            return 0;
+        }
+        if (k.startsWith("ai")) {
+            return 1;
+        }
+        if (k.startsWith("p") && k.length() > 1 && Character.isDigit(k.charAt(1))) {
+            return Character.digit(k.charAt(1), 10);
+        }
+        return -1;
+    }
+
+    /**
+     * A player's completed dungeons as a comma-separated list of token-script
+     * names.
+     *
+     * A dungeon that has no resolvable script is written under its own name
+     * anyway, so that the reader throws on it rather than the writer dropping it:
+     * a silently shortened list is a player who has completed fewer dungeons than
+     * they did, which is live state for "for each dungeon you've completed".
+     */
+    private static String completedDungeonsToString(Player player) {
+        List<String> names = new ArrayList<>();
+        for (Card dungeon : player.getCompletedDungeons()) {
+            String script = tokenScriptName(dungeon);
+            names.add(script != null ? script : dungeon.getName());
+        }
+        return TextUtil.join(names, ",");
+    }
+
+    /** True when {@code room} is one of the rooms {@code dungeon}'s script declares. */
+    private static boolean dungeonHasRoom(Card dungeon, String room) {
+        for (final Trigger t : dungeon.getTriggers()) {
+            SpellAbility roomSA = t.getOverridingAbility();
+            if (roomSA != null && room.equals(roomSA.getParam("RoomName"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Player parsePlayerString(Game game, String str) {
@@ -307,7 +403,14 @@ public class GameState {
         if (newText.length() > 0) {
             newText.append(";");
         }
-        if (c.isToken()) {
+        // A dungeon is not a token, but it is built from a token script and has
+        // no entry in the card database, so the card lane below would write it as
+        // `Undercity|Set:CLB|Art:0` and `processCardsForZone` would fail to
+        // resolve it, print to stderr and SKIP it — the dungeon would vanish and
+        // the player would read as never having ventured. It takes the `T:` lane
+        // instead, which is the only form the database can rebuild.
+        boolean isDungeon = c.getGamePieceType() == GamePieceType.DUNGEON || c.getType().isDungeon();
+        if (c.isToken() || isDungeon) {
             // A token is written in the strongest form that can be READ BACK.
             //
             //  1. `T:<script>|Set:<code>` when the token came from a token
@@ -333,6 +436,14 @@ public class GameState {
             // diffs to prove nothing was silently dropped.
             String tokenScript = tokenScriptName(c);
             IPaperCard tokenPaper = c.getPaperCard();
+            if (isDungeon && tokenScript == null) {
+                // Neither fallback lane can carry a dungeon: `IsToken` would make
+                // it a token, and `t:<TokenInfo>` is a body with no abilities, so
+                // none of the room triggers would survive. Fail loudly instead of
+                // writing a position in which the dungeon became something else.
+                throw new RuntimeException("GameState: dungeon \"" + c.getName()
+                        + "\" has no resolvable token script (image key " + c.getImageKey() + ")");
+            }
             if (tokenScript != null) {
                 newText.append("T:").append(tokenScript);
                 if (StringUtils.isNotBlank(c.getSetCode())) {
@@ -360,6 +471,12 @@ public class GameState {
                 newText.append(c.getPaperCard().getName()).append(suffix).append("|Set:").append(c.getPaperCard().getEdition())
                         .append("|Art:").append(c.getPaperCard().getArtIndex());
             }
+        }
+        if (isDungeon && StringUtils.isNotBlank(c.getCurrentRoom())) {
+            // Mid-dungeon position (CR 309.4). Without it a venture in the
+            // restored game would start over at the entrance — a silent room
+            // reset, and a different game from the one being restored.
+            newText.append("|CurrentRoom:").append(c.getCurrentRoom());
         }
         if (c.isCommander()) {
             newText.append("|IsCommander");
@@ -581,6 +698,10 @@ public class GameState {
 
     public void parse(Stream<String> lines) {
         playerStates.clear();
+        // Absence of the key means "nobody holds it", so a reused GameState must
+        // not inherit a designation from the text it parsed last.
+        monarchPlayer = "NONE";
+        initiativePlayer = "NONE";
         lines.forEach(this::parseLine);
     }
 
@@ -624,6 +745,12 @@ public class GameState {
 
         if (categoryName.equals("turn")) {
             turn = Integer.parseInt(categoryValue);
+        } else if (categoryName.equals("monarch")) {
+            monarchPlayer = categoryValue.trim().toLowerCase();
+        } else if (categoryName.equals("initiative")) {
+            initiativePlayer = categoryValue.trim().toLowerCase();
+        } else if (categoryName.endsWith("completeddungeons")) {
+            getPlayerState(categoryName).completedDungeons = categoryValue.trim();
         } else if (categoryName.equals("removesummoningsickness")) {
             removeSummoningSickness = categoryValue.equalsIgnoreCase("true");
         } else if (categoryName.endsWith("life")) {
@@ -707,6 +834,12 @@ public class GameState {
         for (int i = 0; i < playerStates.size(); i++) {
             setupPlayerState(game.getPlayers().get(i), playerStates.get(i));
         }
+        // Monarch / initiative go on AFTER the zones, because setupPlayerState
+        // empties the command zone the designation's effect card lives in, and
+        // while triggers are still suppressed, because taking the initiative
+        // triggers a venture (CR 725.3) that would advance the dungeon room the
+        // frame just installed.
+        applyDesignations(game);
         handleCardAttachments();
         handleChosenEntities();
         handleRememberedEntities();
@@ -759,6 +892,55 @@ public class GameState {
                 game.getPlayers().get(i).setLife(life, null);
             }
         }
+    }
+
+    /**
+     * CR 724 / CR 725 — install {@code monarch=} and {@code initiative=}.
+     *
+     * Both designations are cleared first. A position that does not name a
+     * monarch is a position in which nobody is the monarch, and
+     * {@code setupPlayerState} has already removed the effect card from the
+     * command zone, so leaving {@code game.monarch} pointing somewhere would
+     * leave a designation with nothing behind it — the player would still draw
+     * at end of turn with no card in the command zone to say why.
+     *
+     * The set code is only ever the designation's ART, and the position format
+     * does not carry it; {@link CardEdition#UNKNOWN_CODE} makes
+     * {@code getOtherImageKey} fall through to its scan over every edition.
+     */
+    private void applyDesignations(final Game game) {
+        for (Player p : game.getPlayers()) {
+            if (p.isMonarch()) {
+                p.removeMonarchEffect();
+            }
+            if (p.hasInitiative()) {
+                p.removeInitiativeEffect();
+            }
+        }
+        game.setMonarch(null);
+        game.setMonarchBeginTurn(null);
+        game.setHasInitiative(null);
+
+        Player monarch = designatedPlayer(game, monarchPlayer, "monarch");
+        if (monarch != null) {
+            game.getAction().becomeMonarch(monarch, CardEdition.UNKNOWN_CODE);
+        }
+        Player initiative = designatedPlayer(game, initiativePlayer, "initiative");
+        if (initiative != null) {
+            game.getAction().takeInitiative(initiative, CardEdition.UNKNOWN_CODE);
+        }
+    }
+
+    /** The player a designation key names, or null for {@code "NONE"}. */
+    private static Player designatedPlayer(final Game game, final String key, final String what) {
+        if (key == null || key.equalsIgnoreCase("none") || key.isEmpty()) {
+            return null;
+        }
+        int idx = parsePlayerIndex(key);
+        if (idx < 0 || idx >= game.getPlayers().size()) {
+            throw new RuntimeException("GameState: " + what + "=" + key + " names no player in this game");
+        }
+        return game.getPlayers().get(idx);
     }
 
     private String processManaPool(ManaPool manaPool) {
@@ -1308,6 +1490,28 @@ public class GameState {
             }
         }
         if (state.speed > 0) p.createSpeedEffect();
+
+        // CR 309.3 — completed dungeons have ceased to exist and are in no zone,
+        // so they cannot ride along with the command zone's cards. Always reset
+        // first: an omitted key means "none", and a stale list would answer
+        // "for each dungeon you've completed" with a number from another game.
+        p.resetCompletedDungeons();
+        if (!state.completedDungeons.isEmpty()) {
+            for (String script : state.completedDungeons.split(",")) {
+                String name = script.trim();
+                if (name.isEmpty()) {
+                    continue;
+                }
+                PaperToken token = getTokenOrNull(name, null);
+                if (token == null) {
+                    throw new RuntimeException("GameState: completeddungeons names \"" + name
+                            + "\", which is not a token script the database holds");
+                }
+                Card dungeon = CardFactory.getCard(token, p, p.getGame());
+                dungeon.setGamePieceType(GamePieceType.DUNGEON);
+                p.addCompletedDungeon(dungeon);
+            }
+        }
     }
 
     /**
@@ -1348,6 +1552,12 @@ public class GameState {
 
             Card c;
             boolean hasSetCurSet = false;
+            // True when the card was built from the TOKEN database rather than
+            // the card database. `getMostRecentSet()` below looks the name up in
+            // `getCommonCards()`, which holds no token or dungeon printing, and
+            // NPEs on the null it gets back. Tokens escaped that because
+            // `isToken()` covered them; a dungeon is not a token and does not.
+            boolean fromTokenDb = false;
             if (cardinfo[0].startsWith("t:")) {
                 // `t:<TokenInfo>` is a BODY, not a card: name, P/T, colours,
                 // types and keywords, with no abilities and no statics. When
@@ -1361,6 +1571,7 @@ public class GameState {
                 TokenInfo info = new TokenInfo(tokenStr);
                 Card scripted = info.makeScriptedToken(player);
                 c = scripted != null ? scripted : info.makeOneToken(player);
+                fromTokenDb = true;
             } else if (cardinfo[0].startsWith("T:")) {
                 String tokenStr = cardinfo[0].substring(2);
                 PaperToken token = getTokenOrNull(tokenStr, setCode);
@@ -1369,6 +1580,13 @@ public class GameState {
                     continue;
                 }
                 c = CardFactory.getCard(token, player, player.getGame());
+                fromTokenDb = true;
+                if (c.getType().isDungeon()) {
+                    // A dungeon is built from a token script but is NOT a token:
+                    // CardFactory hands back a TOKEN game piece, and left that way
+                    // it would cease to exist on the spot in the command zone.
+                    c.setGamePieceType(GamePieceType.DUNGEON);
+                }
             } else {
                 PaperCard pc = StaticData.instance().getCommonCards().getCard(cardinfo[0], setCode, artID);
                 if (pc == null) {
@@ -1399,6 +1617,25 @@ public class GameState {
                 } else if (info.startsWith("PhasedOut")) {
                     String tgt = info.substring(info.indexOf(':') + 1);
                     c.setPhasedOut(parsePlayerString(player.getGame(), tgt));
+                } else if (info.startsWith("CurrentRoom:")) {
+                    // Mid-dungeon position. The room name has to be one the
+                    // script declares — Forge's `RoomName$` values are not the
+                    // printed names (Undercity's seventh room is `RoomName$
+                    // Archive`, while its own `K:Dungeon:` line, the card and the
+                    // mtgx exporter all say "Archives"), and an unmatched name
+                    // would leave
+                    // currentRoom set to something no trigger answers to, which
+                    // reads downstream as "not in a dungeon". Fail closed.
+                    String room = info.substring(info.indexOf(':') + 1);
+                    if (!c.getType().isDungeon()) {
+                        throw new RuntimeException("GameState: CurrentRoom: on \"" + c.getName()
+                                + "\", which is not a dungeon");
+                    }
+                    if (!dungeonHasRoom(c, room)) {
+                        throw new RuntimeException("GameState: dungeon \"" + c.getName()
+                                + "\" has no room named \"" + room + "\"");
+                    }
+                    c.setCurrentRoom(room);
                 } else if (info.startsWith("Counters:")) {
                     applyCountersToGameEntity(c, info.substring(info.indexOf(':') + 1));
                 } else if (info.startsWith("SummonSick")) {
@@ -1518,7 +1755,7 @@ public class GameState {
                 }
             }
 
-            if (!hasSetCurSet && !c.isToken()) {
+            if (!hasSetCurSet && !c.isToken() && !fromTokenDb) {
                 c.setSetCode(c.getMostRecentSet());
             }
 
