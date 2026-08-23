@@ -745,7 +745,75 @@ strength, and silently weakening it would change the policy identity the benchma
 measuring. A sim arm must choose — raise the heap (the TS harness's `--heap 12g` works) or
 lower the depth — and record the choice in the manifest.
 
-### Determinism
+### Protocol v2.10 — `frameFile`: start a game from a position, not from a shuffle
+
+Additive. A config without `frameFile` behaves exactly as v2.9 (verified: two games, no
+`frameApplied`, normal outcomes).
+
+### The config key
+
+```json
+{"decks":["/abs/p0.dck","/abs/p1.dck"],"games":1,"seed":7,
+ "seats":{"0":"forge","1":"forge"},"aiCanUseTimeout":false,
+ "frameFile":"/abs/frame.txt","timeoutSec":180}
+```
+
+`frameFile` names a file in `forge.game.GameState`'s own dev-mode/puzzle text format. It is
+read once at startup; `hello` echoes `frameFile` and its `frameSha256` so a host can prove
+the JVM read the bytes it sent. Per game the text is re-parsed (the parsed model's id maps
+are consumed by `applyToGame`) and installed through the **two-argument**
+`Match.startGame(game, hook)`, whose hook `PhaseHandler.setupFirstTurn` runs after the
+untap of turn 1 and before priority is ever offered — the seam every GUI puzzle screen
+uses. The normal opening (draw seven, mulligan) still happens and is then overwritten:
+`applyToGame` clears every zone first, so **a frame that omits `pNlibrary=` decks that
+seat on its next draw.**
+
+### `frameApplied`
+
+```json
+{"type":"frameApplied","game":"g1","frameFile":"…","frameSha256":"…","dump":"turn=7\n…"}
+```
+
+`dump` is `new GameState().initFromGame(game).toString()` taken immediately after the
+install: **Forge's own account of what it believes it installed.** This is not decoration.
+`processCardsForZone` SKIPS a card whose name/set it cannot resolve and only prints to
+stderr (`GameState.java:1279-1281`), so without the round-trip a silently dropped card
+reads to the host as a loss. Diff it against what you sent, every run.
+
+### The threading hazard, and why the install renames its thread
+
+`GameState.applyToGame` goes through `GameAction.invoke`, which runs the install inline
+only when `ThreadUtil.isGameThread()` — i.e. when the current thread's name starts with
+`Game`. Otherwise it posts to an **unbounded cached pool**. The bench's game runs on
+`TimeLimitedCodeBlock`'s `pool-N-thread-1`, so the install would be handed to another
+thread and race the game loop `startGame` is about to enter. That is not theoretical: the
+first run of this feature came back with a `frameApplied` dump showing an untouched
+opening hand and an empty seat-0 board. The hook therefore renames the calling thread to
+`Game-frame-install` for the duration and restores it in a `finally`. An install that is
+not synchronous is not reproducible from a seed.
+
+### What the format cannot carry
+
+The stack; monarch / the initiative / dungeon progress (absent from `GameState.java`
+entirely); tokens (`t:<TokenInfo>` exists and carries an upstream *"TODO: Make sure Game
+State conversion works with new tokens"*); and duration-limited continuous effects with no
+permanent behind them. The mtgx-side exporter
+(`mtgx:tools/forge/from-frame.mjs`) refuses such a frame by name rather than exporting a
+position nobody was ever in.
+
+### Turn-based actions and `activephaseadvance`
+
+`applyGameOnThread` calls `PhaseHandler.devModeSet`, which sets the phase **without**
+running its `onPhaseBegin`. Forge declares attackers inside
+`onPhaseBegin(COMBAT_DECLARE_ATTACKERS)`, so a frame installed *at* that phase never gets
+an attack declared — it is simply given priority in an empty combat. The format's own
+escape is `activephaseadvance=`, which runs `devAdvanceToPhase` at the end of the install.
+A pending-combat frame is therefore installed at `MAIN1` with
+`activephaseadvance=COMBAT_DECLARE_ATTACKERS`; no priority is offered in the phases
+skipped, so the board stays exactly as exported and the only thing Forge is asked is the
+declaration.
+
+## Determinism
 
 `hello` carries `deterministic`, which is `!aiCanUseTimeout`. A wall-clock bound is not
 reproducible from a seed: the same seed and decks can diverge run to run because the search

@@ -126,6 +126,37 @@ public final class BenchMain {
         final boolean useSimulation = cfg.has("useSimulation") && cfg.get("useSimulation").getAsBoolean();
         final String aiProfile = cfg.has("aiProfile") ? cfg.get("aiProfile").getAsString() : "Default";
 
+        // ---------------------------------------------------------------- from-frame
+        // A frame is a mid-game position exported by mtgx (tools/forge/from-frame.mjs) in
+        // Forge's own dev-mode/puzzle GameState text format. It is installed through the
+        // startGameHook, which PhaseHandler.setupFirstTurn runs after the untap of turn 1
+        // and before priority is ever offered -- the same seam every GUI puzzle uses.
+        //
+        // Everything the normal opening does (draw seven, mulligan) still happens and is
+        // then overwritten by applyToGame, which clears every zone first. That is why the
+        // frame text MUST carry a library for both seats: a seat whose library is not in
+        // the frame is decked on its next draw.
+        final String frameFile = cfg.has("frameFile") ? cfg.get("frameFile").getAsString() : null;
+        final String[] frame = new String[2];   // [0] text, [1] sha256
+        if (frameFile != null) {
+            try {
+                final byte[] raw = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(frameFile));
+                frame[0] = new String(raw, StandardCharsets.UTF_8);
+                final java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                final StringBuilder hex = new StringBuilder();
+                for (byte b : md.digest(raw)) {
+                    hex.append(String.format("%02x", b));
+                }
+                frame[1] = hex.toString();
+            } catch (Exception e) {
+                JsonRpcChannel.logErr("could not read frameFile " + frameFile, e);
+                System.exit(2);
+                return;
+            }
+        }
+        final String frameText = frame[0];
+        final String frameSha = frame[1];
+
         final List<String> deckPaths = new ArrayList<>();
         if (cfg.has("decks")) {
             for (JsonElement e : cfg.getAsJsonArray("decks")) {
@@ -198,6 +229,10 @@ public final class BenchMain {
         hello.addProperty("aiTimeoutSec", aiTimeoutSec);
         hello.addProperty("simMaxDepth", simMaxDepth);
         hello.addProperty("deterministic", deterministic);
+        if (frameFile != null) {
+            hello.addProperty("frameFile", frameFile);
+            hello.addProperty("frameSha256", frameSha);
+        }
         ch.send(hello);
 
         // ------------------------------------------------------------- register seats
@@ -289,10 +324,60 @@ public final class BenchMain {
                 ch.send(decklistMessage(gameId, s, seatDecks.get(s)));
             }
 
+            // The from-frame hook. Parsed per game because applyToGame consumes the
+            // parsed model's id maps, and because a K-seed oracle sweep runs the same
+            // frame many times in one JVM.
+            Runnable startHook = null;
+            if (frameText != null) {
+                final String text = frameText;
+                startHook = () -> {
+                    final forge.game.GameState gs = new forge.game.GameState();
+                    gs.parse(java.util.Arrays.asList(text.split("\\R")));
+
+                    // GameState.applyToGame goes through GameAction.invoke, which runs the
+                    // install INLINE on a game thread and hands it to an unbounded cached
+                    // pool otherwise (ThreadUtil.isGameThread / invokeInGameThread). The
+                    // bench's game runs on TimeLimitedCodeBlock's "pool-N-thread-1", so
+                    // the install would be posted to another thread and race the game loop
+                    // that startGame is about to enter -- which is exactly what it did the
+                    // first time this was run: the frameApplied dump came back showing an
+                    // untouched opening hand. Naming this thread the way ThreadUtil tests
+                    // for makes the install synchronous, which is the only version of this
+                    // that is reproducible from a seed.
+                    final Thread self = Thread.currentThread();
+                    final String was = self.getName();
+                    self.setName("Game-frame-install");
+                    String dump;
+                    try {
+                        gs.applyToGame(game);
+                        // Forge's own dump of what it believes it just installed. This is
+                        // the whole safety story for the serializer: processCardsForZone
+                        // SKIPS a card it cannot resolve and only prints to stderr, so
+                        // without a round-trip a silently dropped card reads as a loss.
+                        final forge.game.GameState back = new forge.game.GameState();
+                        back.initFromGame(game);
+                        dump = back.toString();
+                    } catch (RuntimeException ex) {
+                        dump = "frame install threw: " + ex;
+                        JsonRpcChannel.logErr("frame install threw", ex);
+                    } finally {
+                        self.setName(was);
+                    }
+                    final JsonObject fa = new JsonObject();
+                    fa.addProperty("type", "frameApplied");
+                    fa.addProperty("game", gameId);
+                    fa.addProperty("frameFile", frameFile);
+                    fa.addProperty("frameSha256", frameSha);
+                    fa.addProperty("dump", dump);
+                    ch.send(fa);
+                };
+            }
+            final Runnable hook = startHook;
+
             String abort = null;
             String abortDetail = null;
             try {
-                TimeLimitedCodeBlock.runWithTimeout(() -> match.startGame(game), timeoutSec, TimeUnit.SECONDS);
+                TimeLimitedCodeBlock.runWithTimeout(() -> match.startGame(game, hook), timeoutSec, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
                 abort = "timeout";
                 JsonRpcChannel.log(gameId + ": sim timeout after " + timeoutSec + "s, scoring as a draw");

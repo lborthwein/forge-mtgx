@@ -57,9 +57,14 @@ public final class JsonRpcChannel {
      *   <li>2.2 — {@code attackers} asks state attack requirements outright
      *       ({@code mustAttack}, {@code mustAttackAny}, {@code requiresAlso},
      *       {@code bestAttackViolations}).</li>
+     *   <li>2.10 — {@code frameFile} in the config installs a mid-game position
+     *       ({@code forge.game.GameState}) through {@code Match.startGame(game, hook)};
+     *       the JVM answers with a {@code frameApplied} message carrying Forge's own
+     *       {@code initFromGame} dump of what it actually installed. Additive: a config
+     *       without {@code frameFile} behaves exactly as 2.9.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 9;
+    public static final int PROTOCOL_MINOR = 10;
 
     private final BufferedReader in;
     private final PrintStream out;
