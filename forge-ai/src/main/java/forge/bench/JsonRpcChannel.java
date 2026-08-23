@@ -62,9 +62,14 @@ public final class JsonRpcChannel {
      *       the JVM answers with a {@code frameApplied} message carrying Forge's own
      *       {@code initFromGame} dump of what it actually installed. Additive: a config
      *       without {@code frameFile} behaves exactly as 2.9.</li>
+     *   <li>2.11 — {@code outcome.aborted} names the abort ({@code "timeout"} /
+     *       {@code "InstrumentError"}) on a game that did not finish, and {@code reason}
+     *       keeps it instead of being overwritten by Forge's win condition. Forge's own
+     *       verdict for such a game is preserved beside it as {@code winCondition}.
+     *       A game that finished carries neither field, exactly as 2.10.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 10;
+    public static final int PROTOCOL_MINOR = 11;
 
     private final BufferedReader in;
     private final PrintStream out;

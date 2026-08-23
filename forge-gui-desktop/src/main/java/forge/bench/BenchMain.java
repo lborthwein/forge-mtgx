@@ -380,7 +380,7 @@ public final class BenchMain {
                 TimeLimitedCodeBlock.runWithTimeout(() -> match.startGame(game, hook), timeoutSec, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
                 abort = "timeout";
-                JsonRpcChannel.log(gameId + ": sim timeout after " + timeoutSec + "s, scoring as a draw");
+                JsonRpcChannel.log(gameId + ": sim timeout after " + timeoutSec + "s, reporting outcome.aborted=timeout");
             } catch (Throwable e) {
                 // Anything that escapes here is an INSTRUMENT failure, not a game result.
                 // It used to be stamped GameEndReason.Draw by the finally below and was
@@ -403,13 +403,24 @@ public final class BenchMain {
             final GameOutcome go = game.getOutcome();
             int winner = -1;
             String reason = abort != null ? abort : "unknown";
+            String winCondition = null;
             int turns = 0;
             if (go != null) {
                 turns = go.getLastTurnNumber();
                 if (go.isDraw()) {
-                    reason = abort != null ? abort : "draw";
+                    if (abort == null) {
+                        reason = "draw";
+                    }
                 } else {
-                    reason = String.valueOf(go.getWinCondition());
+                    // The `finally` above force-ends an aborted game, so `go` is non-null and
+                    // frequently NOT a draw even when nothing was decided: a 300s wall-clock
+                    // timeout used to come back as `reason: "Draw"` with a winner seat, i.e.
+                    // as a decided game. `reason` now keeps the abort; Forge's own verdict is
+                    // reported beside it, never on top of it.
+                    winCondition = String.valueOf(go.getWinCondition());
+                    if (abort == null) {
+                        reason = winCondition;
+                    }
                     final LobbyPlayer wlp = go.getWinningLobbyPlayer();
                     for (int i = 0; i < seats.size(); i++) {
                         if (seats.get(i).getPlayer() == wlp) {
@@ -423,6 +434,14 @@ public final class BenchMain {
             // A crashed game is never a draw. Downstream must classify on these, not on
             // `reason == "draw"`.
             outcome.addProperty("crashed", "InstrumentError".equals(abort));
+            // v2.11. PRESENT means the game did not finish on its own -- a timeout is not a
+            // result no matter what `winner`/`winCondition` say. Absent means it did.
+            if (abort != null) {
+                outcome.addProperty("aborted", abort);
+            }
+            if (winCondition != null) {
+                outcome.addProperty("winCondition", winCondition);
+            }
             if (abortDetail != null) {
                 outcome.addProperty("error", abortDetail);
             }
