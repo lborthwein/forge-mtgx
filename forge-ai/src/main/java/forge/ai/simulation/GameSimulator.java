@@ -147,12 +147,22 @@ public class GameSimulator {
         String desc = sa.getDescription();
         FCollectionView<SpellAbility> candidates = hostCard.getSpellAbilities();
 
-        SpellAbility result = saMatcher(candidates, desc);
-        for (SpellAbility cSa : candidates) {
-            if (result != null) {
-                break;
-            }
-            result = saMatcher(GameActionUtil.getAlternativeCosts(cSa, aiPlayer, true), desc);
+        // An alternative-cost SA's description is the basic spell's description with a
+        // suffix appended (StaticAbilityAlternativeCost), so the prefix fallback below
+        // matches the BASIC spell for it -- and the simulation then tries to pay the
+        // full mana cost the alternative cost exists to avoid. Gush ("return two
+        // Islands" vs {4}{U}) span 1,618 unpayable attempts and 30 GB of game copies
+        // that way. Every EXACT match, alternative costs included, has to be exhausted
+        // before the prefix fallback is allowed a vote.
+        SpellAbility result = saMatcher(candidates, desc, true);
+        if (result == null) {
+            result = saMatcherOverAltCosts(candidates, desc, true);
+        }
+        if (result == null) {
+            result = saMatcher(candidates, desc, false);
+        }
+        if (result == null) {
+            result = saMatcherOverAltCosts(candidates, desc, false);
         }
 
         if (result != null) {
@@ -162,16 +172,23 @@ public class GameSimulator {
         return result;
     }
 
-    private SpellAbility saMatcher(Iterable<SpellAbility> candidates, String desc) {
-        // first pass for accuracy (spells with alternative costs)
+    private SpellAbility saMatcherOverAltCosts(Iterable<SpellAbility> candidates, String desc, boolean exact) {
         for (SpellAbility cSa : candidates) {
-            if (desc.equals(cSa.getDescription())) {
-                return cSa;
+            SpellAbility result = saMatcher(GameActionUtil.getAlternativeCosts(cSa, aiPlayer, true), desc, exact);
+            if (result != null) {
+                return result;
             }
         }
-        // fall back for safety
+        return null;
+    }
+
+    /**
+     * @param exact true for the accurate pass (spells with alternative costs); false for
+     *              the prefix fallback, which must only run once every exact pass has failed.
+     */
+    private SpellAbility saMatcher(Iterable<SpellAbility> candidates, String desc, boolean exact) {
         for (SpellAbility cSa : candidates) {
-            if (desc.startsWith(cSa.getDescription())) {
+            if (exact ? desc.equals(cSa.getDescription()) : desc.startsWith(cSa.getDescription())) {
                 return cSa;
             }
         }
@@ -222,6 +239,11 @@ public class GameSimulator {
                 }
             });
             if (!success) {
+                // Name it. A silent MIN_VALUE here is indistinguishable from "this play is
+                // bad", so an SA the picker keeps re-selecting and can never pay for reads
+                // as a slow AI rather than as a defect.
+                System.err.println("Simulation: couldn't pay for " + sa + " on " + sa.getHostCard()
+                        + " (costs " + sa.getPayCosts() + ")");
                 return new Score(Integer.MIN_VALUE);
             }
         }
