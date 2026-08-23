@@ -101,8 +101,23 @@ public class SpellAbilityPicker {
         if (sa != null) {
             return sa;
         }
-        createNewPlan(origGameScore, candidateSAs);
+        // This is the top of a search: arm the node budget here, so that everything the
+        // plan formulation does below -- both phases, every candidate, every choice
+        // combination -- is counted against one allowance. See SimSearchBudget.
+        SimSearchBudget.beginDecision(describeDecision(candidateSAs));
+        try {
+            createNewPlan(origGameScore, candidateSAs);
+        } finally {
+            SimSearchBudget.endDecision();
+        }
         return getPlannedSpellAbility(origGameScore, candidateSAs);
+    }
+
+    /** One line naming the decision the budget is being spent on. Trace/report only. */
+    private String describeDecision(List<SpellAbility> candidateSAs) {
+        return player + " " + game.getPhaseHandler().getPhase()
+                + " turn " + game.getPhaseHandler().getTurn()
+                + " (" + candidateSAs.size() + " candidates)";
     }
 
     private Plan formulatePlanWithPhase(Score origGameScore, List<SpellAbility> candidateSAs, PhaseType phase) {
@@ -169,6 +184,14 @@ public class SpellAbilityPicker {
         Score bestSaValue = origGameScore;
         print("Evaluating... (orig score = " + origGameScore +  ")");
         for (int i = 0; i < candidateSAs.size(); i++) {
+            // Budget check BEFORE the expansion, not after: an exhausted budget means we
+            // stop opening new candidates, keeping whatever the search has already found.
+            if (SimSearchBudget.exhausted()) {
+                SimSearchBudget.reportClip("candidate list",
+                        (candidateSAs.size() - i) + " of " + candidateSAs.size()
+                                + " candidates never evaluated");
+                break;
+            }
             Score value = evaluateSa(controller, phase, candidateSAs, i);
             if (value.value > bestSaValue.value) {
                 bestSaValue = value;
@@ -350,6 +373,7 @@ public class SpellAbilityPicker {
 
         Score bestScore = new Score(Integer.MIN_VALUE);
         final SpellAbilityChoicesIterator choicesIterator = new SpellAbilityChoicesIterator(controller);
+        final SpellAbilityChoicesIterator outerOdometer = SimSearchBudget.swapOdometer(choicesIterator);
         Score lastScore;
         do {
             // TODO: MyRandom should be an instance on the game object, so that we could do
@@ -360,10 +384,21 @@ public class SpellAbilityPicker {
             // I feel like something here is making a wrong assumption about what the target is
             lastScore = simulator.simulateSpellAbility(sa);
             numSimulations++;
+            SimSearchBudget.countSimulation();
             if (lastScore.value > bestScore.value) {
                 bestScore = lastScore;
             }
+            // The choices odometer is the wide half of the explosion: one ChoicePoint per
+            // hidden-origin card choice the resolving spell makes, enumerated exhaustively.
+            // Abandoning it here is safe because advance() still runs its whole unwinding
+            // path -- see SpellAbilityChoicesIterator#abandoned.
+            if (SimSearchBudget.exhausted() && !choicesIterator.isAbandoned()) {
+                SimSearchBudget.reportClip("choices odometer of " + abilityToString(sa),
+                        choicesIterator.describeProgress());
+                choicesIterator.abandon();
+            }
         } while (choicesIterator.advance(lastScore));
+        SimSearchBudget.swapOdometer(outerOdometer);
         controller.doneEvaluating(bestScore);
         MyRandom.setRandom(origRandom);
         return bestScore;

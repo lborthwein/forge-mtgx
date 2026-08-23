@@ -75,9 +75,17 @@ public final class JsonRpcChannel {
      *       are optional and their absence means "nobody holds it" / "no dungeon" /
      *       "none completed", so a 2.11 frame file installs identically. Purely a
      *       {@code frameFile} widening — no wire message changed.</li>
+     *   <li>2.13 — the simulation search gained a WIDTH bound to go with its depth bound.
+     *       Config accepts {@code simMaxSimulations} (a deterministic node budget per
+     *       top-level decision, 0 = unbounded = Forge's own behaviour) and
+     *       {@code simTraceMs} (a diagnostic progress trace); {@code hello} and
+     *       {@code seatInfo} echo them. Without it, one Doomsday-castable frame is
+     *       ~31^5 whole-game copies inside a single depth level and the JVM never
+     *       returns. Both keys are optional and default to off, so a 2.12 config
+     *       behaves identically. See {@code forge.ai.simulation.SimSearchBudget}.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 12;
+    public static final int PROTOCOL_MINOR = 13;
 
     private final BufferedReader in;
     private final PrintStream out;

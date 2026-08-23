@@ -38,6 +38,61 @@ public class SpellAbilityChoicesIterator {
     // Maps from filtered mode indexes to original ones.
     private List<Integer> modesMap;
 
+    /**
+     * Set by {@link #abandon()} when the search has spent its budget (see
+     * {@link SimSearchBudget}). It does NOT short-circuit {@link #advance}: advance still
+     * runs every {@code doneEvaluating} pop it would normally run, because those pops are
+     * what keeps {@link SimulationController}'s decision stack balanced and what makes
+     * {@code getBestPlan()} legal. All it does is refuse to hand back another combination,
+     * so the odometer unwinds to zero on the next call instead of counting on.
+     */
+    private boolean abandoned;
+
+    /**
+     * Stop enumerating. The current combination's score has already been folded in by the
+     * caller; the next {@link #advance} unwinds and returns false.
+     */
+    public void abandon() {
+        abandoned = true;
+    }
+
+    /** True once {@link #abandon()} has been called. */
+    public boolean isAbandoned() {
+        return abandoned;
+    }
+
+    /**
+     * How far through the odometer we are, for the progress trace. Diagnostic only.
+     * Reads mutable state without synchronisation on purpose: it is called from the trace
+     * thread and a torn read costs a wrong log line, never a wrong decision.
+     */
+    public String describeProgress() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("choicePoints=").append(choicePoints.size()).append('[');
+        long combos = 1;
+        for (int i = 0; i < choicePoints.size(); i++) {
+            ChoicePoint cp = choicePoints.get(i);
+            if (i > 0) {
+                sb.append(' ');
+            }
+            sb.append(cp.nextChoice).append('/').append(cp.numChoices);
+            if (cp.numChoices > 0 && combos < Long.MAX_VALUE / 64) {
+                combos *= cp.numChoices;
+            }
+        }
+        sb.append("] combinations~").append(combos);
+        if (cachedTargetScores != null) {
+            sb.append(" target=").append(nextTarget).append('/').append(cachedTargetScores.size());
+        }
+        if (modeIterator != null) {
+            sb.append(" modes=iterating");
+        }
+        if (abandoned) {
+            sb.append(" ABANDONED");
+        }
+        return sb.toString();
+    }
+
     public SpellAbilityChoicesIterator(SimulationController controller) {
         this.controller = controller;
     }
@@ -170,7 +225,7 @@ public class SpellAbilityChoicesIterator {
         }
 
         if (!choicePoints.isEmpty()) {
-            for (int i = choicePoints.size() - 1; i >= 0; i--) {
+            for (int i = abandoned ? -1 : choicePoints.size() - 1; i >= 0; i--) {
                 ChoicePoint cp = choicePoints.get(i);
                 if (cp.nextChoice + 1 < cp.numChoices) {
                     cp.nextChoice++;
@@ -192,7 +247,7 @@ public class SpellAbilityChoicesIterator {
             pushTarget = true;
             doneEvaluating(bestScoreForTarget);
             bestScoreForTarget = new Score(Integer.MIN_VALUE);
-            while (nextTarget + 1 < cachedTargetScores.size()) {
+            while (!abandoned && nextTarget + 1 < cachedTargetScores.size()) {
                 nextTarget++;
                 if (cachedTargetScores.get(nextTarget) == null) {
                     return true;
@@ -204,7 +259,7 @@ public class SpellAbilityChoicesIterator {
         if (modeIterator != null) {
             doneEvaluating(bestScoreForMode);
             bestScoreForMode = new Score(Integer.MIN_VALUE);
-            if (modeIterator.hasNext()) {
+            if (!abandoned && modeIterator.hasNext()) {
                 selectedModes = remapModes(modeIterator.next());
                 advancedToNextMode = true;
                 return true;

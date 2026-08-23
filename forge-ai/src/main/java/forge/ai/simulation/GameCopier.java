@@ -494,6 +494,47 @@ public class GameCopier {
         }
     }
 
+    /**
+     * The CR 506.4c placeholder, and the one card a copy can legitimately be asked to map
+     * that lives in no zone.
+     *
+     * <p>When an attacked planeswalker or battle leaves the battlefield mid-combat,
+     * {@code Combat.unregisterDefender} keeps its attackers in combat by re-keying their
+     * band onto {@code new Card(-1, game)} named {@code <Nothing>} (Combat.java, "Rule
+     * 506.4c workaround"). That card is never put in a zone, so
+     * {@link #copyGameState}'s zone walk never sees it and {@code cardMap} has no entry —
+     * and then {@code Combat}'s copy constructor asks us to map it, because it is a key of
+     * {@code attackedByBands}. The result was
+     * {@code RuntimeException: Couldn't map <Nothing>/…} out of
+     * {@code GameStateEvaluator.simulateUpcomingCombatThisTurn}, i.e. the simulation AI
+     * crashing the whole game merely for taking priority during a combat whose defending
+     * planeswalker had died.
+     *
+     * <p>Found while bounding the simulation search (see
+     * {@link SimSearchBudget}): it is independent of that work and was simply unreachable
+     * before, because the same frame used to hang forever a turn earlier. Reproduced
+     * identically at three different search budgets.
+     *
+     * <p>The copy is the same shape Combat builds, in the copied game, cached in
+     * {@code cardMap} so every band keyed on this placeholder maps to one object.
+     *
+     * @return the placeholder's copy, or null if {@code c} is not a placeholder
+     */
+    private Card mapCombatPlaceholder(Card c) {
+        if (c.getId() != -1 || c.getZone() != null || c.getGame() != origGame) {
+            return null;
+        }
+        final Player controller = playerMap.get(c.getController());
+        if (controller == null) {
+            return null;
+        }
+        final Card fake = new Card(-1, controller.getGame());
+        fake.setName(c.getName());
+        fake.setController(controller, 0);
+        cardMap.put(c, fake);
+        return fake;
+    }
+
     public GameObject find(GameObject o) {
         if (origGame.EXPERIMENTAL_RESTORE_SNAPSHOT) {
             return snapshot.find(o);
@@ -504,9 +545,12 @@ public class GameCopier {
             result = cardMap.get(o);
             if (result != null) {
                 return result;
-            } else {
-                System.out.println("Couldn't map " + o + "/" + System.identityHashCode(o));
             }
+            result = mapCombatPlaceholder((Card) o);
+            if (result != null) {
+                return result;
+            }
+            System.out.println("Couldn't map " + o + "/" + System.identityHashCode(o));
         } else if (o instanceof Player) {
             result = playerMap.get(o);
             if (result != null)

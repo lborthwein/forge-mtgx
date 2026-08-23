@@ -40,6 +40,7 @@ import com.google.gson.JsonObject;
 import forge.GuiDesktop;
 import forge.LobbyPlayer;
 import forge.ai.AIOption;
+import forge.ai.simulation.SimSearchBudget;
 import forge.ai.simulation.SimulationController;
 import forge.deck.Deck;
 import forge.deck.DeckSection;
@@ -198,6 +199,19 @@ public final class BenchMain {
                 ? Math.max(0, cfg.get("simMaxDepth").getAsInt())
                 : SimulationController.getDefaultMaxDepth();
         SimulationController.setDefaultMaxDepth(simMaxDepth);
+        // simMaxDepth bounds the RECURSION. It does not bound the WIDTH: the choices
+        // odometer inside one depth level enumerates every combination of hidden-origin
+        // card choices a resolving spell makes, which for Doomsday (ChangeNum$ 5 out of a
+        // 30-card library) is ~31^5 whole-game copies and does not terminate. simMaxSims
+        // is the width lever -- a deterministic node budget per top-level decision, 0 for
+        // unbounded (Forge's own behaviour). Every clip prints to stderr. See
+        // forge.ai.simulation.SimSearchBudget.
+        final int simMaxSims = cfg.has("simMaxSimulations")
+                ? Math.max(0, cfg.get("simMaxSimulations").getAsInt())
+                : SimSearchBudget.getBudget();
+        SimSearchBudget.setBudget(simMaxSims);
+        final long simTraceMs = cfg.has("simTraceMs") ? Math.max(0, cfg.get("simTraceMs").getAsLong()) : 0L;
+        SimSearchBudget.setTraceMs(simTraceMs);
         // A wall-clock bound is not reproducible from a seed. Say so, rather than letting a
         // manifest imply a sim arm is replayable.
         final boolean deterministic = !aiCanUseTimeout;
@@ -228,6 +242,8 @@ public final class BenchMain {
         hello.addProperty("aiCanUseTimeout", aiCanUseTimeout);
         hello.addProperty("aiTimeoutSec", aiTimeoutSec);
         hello.addProperty("simMaxDepth", simMaxDepth);
+        hello.addProperty("simMaxSimulations", simMaxSims);
+        hello.addProperty("simTraceMs", simTraceMs);
         hello.addProperty("deterministic", deterministic);
         if (frameFile != null) {
             hello.addProperty("frameFile", frameFile);
@@ -283,6 +299,7 @@ public final class BenchMain {
         seatInfo.addProperty("aiCanUseTimeout", aiCanUseTimeout);
         seatInfo.addProperty("aiTimeoutSec", aiTimeoutSec);
         seatInfo.addProperty("simMaxDepth", simMaxDepth);
+        seatInfo.addProperty("simMaxSimulations", simMaxSims);
         seatInfo.addProperty("deterministic", deterministic);
         ch.send(seatInfo);
 
