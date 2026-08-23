@@ -7,6 +7,7 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multiset;
 
+import forge.ImageKeys;
 import forge.StaticData;
 import forge.card.CardEdition;
 import forge.card.CardStateName;
@@ -29,6 +30,7 @@ import forge.game.spellability.AbilityManaPart;
 import forge.game.spellability.SpellAbility;
 import forge.game.zone.PlayerZone;
 import forge.game.zone.ZoneType;
+import forge.item.IPaperCard;
 import forge.item.PaperCard;
 import forge.item.PaperToken;
 import forge.util.TextUtil;
@@ -249,13 +251,99 @@ public class GameState {
         }
     }
 
+    /**
+     * The token-script name behind a token card, or null when there is none.
+     *
+     * Tokens built from a script carry that script in their image key
+     * (`PaperToken.getImageKey` renders `t:<script>` or `t:<script>|<SET>` or
+     * `t:<script>|<SET>|<collector>|<idx>`), which is the same field
+     * {@link TokenInfo} writes as `Image:`. The name is only returned when the
+     * token database actually holds a rules entry for it, so a stale or
+     * hand-set image key can never produce a `T:` line that fails to read back.
+     *
+     * The card's own image key is used rather than the paper token's, because
+     * {@code PaperToken.getImageKey(boolean)} draws from {@code MyRandom} to
+     * pick an art index and this is called while writing a dump.
+     */
+    private static String tokenScriptName(Card c) {
+        String key = c.getImageKey();
+        if (StringUtils.isBlank(key)) {
+            return null;
+        }
+        String img = ImageKeys.getTokenImageName(key);
+        if (StringUtils.isBlank(img)) {
+            return null;
+        }
+        int bar = img.indexOf('|');
+        String script = bar < 0 ? img : img.substring(0, bar);
+        if (script.isEmpty()) {
+            return null;
+        }
+        return StaticData.instance().getAllTokens().containsRule(script) ? script : null;
+    }
+
+    /**
+     * `T:<script>` with an optional `Set:`. The set is only ever a preference:
+     * {@code TokenDb.getToken} throws on an edition code it does not know, and
+     * a token script that no edition registers still resolves through the
+     * database's rules fallback, so an unusable set code must not be allowed to
+     * abort the whole install.
+     */
+    private static PaperToken getTokenOrNull(String script, String setCode) {
+        try {
+            return StaticData.instance().getAllTokens().getToken(script,
+                    setCode != null ? setCode : CardEdition.UNKNOWN_CODE);
+        } catch (RuntimeException e) {
+            try {
+                return StaticData.instance().getAllTokens().getToken(script);
+            } catch (RuntimeException e2) {
+                return null;
+            }
+        }
+    }
+
     private void addCard(ZoneType zoneType, Map<ZoneType, String> cardTexts, Card c) {
         StringBuilder newText = new StringBuilder(cardTexts.get(zoneType));
         if (newText.length() > 0) {
             newText.append(";");
         }
         if (c.isToken()) {
-            newText.append("t:").append(new TokenInfo(c));
+            // A token is written in the strongest form that can be READ BACK.
+            //
+            //  1. `T:<script>|Set:<code>` when the token came from a token
+            //     script. This is the only form that restores the token's
+            //     RULES: `t:<TokenInfo>` carries name/P/T/colours/types/
+            //     keywords and nothing else, so a Food loses its sacrifice
+            //     ability and a `c_0_0_a_construct_total_artifacts` comes back
+            //     as a literal 0/0 and dies to CR 704.5f the moment state-based
+            //     actions run.
+            //  2. `<Name>|Set:..|Art:..|IsToken` for a token COPY of a real
+            //     card (Kiki-Jiki, Splinter Twin, Phyrexian Metamorph…). The
+            //     card database rebuilds every ability; `IsToken` is an
+            //     existing reader flag that puts the copy back in the token
+            //     game-piece class.
+            //  3. `t:<TokenInfo>` only when neither applies — an unscripted
+            //     synthesized body. That is the legacy lane and the reason for
+            //     the "Make sure Game State conversion works with new tokens"
+            //     TODO in processCardsForZone; it is now the last resort rather
+            //     than the only one.
+            //
+            // The point is idempotence: initFromGame -> applyToGame has to be a
+            // fixed point for tokens, because that round-trip is what a caller
+            // diffs to prove nothing was silently dropped.
+            String tokenScript = tokenScriptName(c);
+            IPaperCard tokenPaper = c.getPaperCard();
+            if (tokenScript != null) {
+                newText.append("T:").append(tokenScript);
+                if (StringUtils.isNotBlank(c.getSetCode())) {
+                    newText.append("|Set:").append(c.getSetCode());
+                }
+            } else if (tokenPaper != null && !(tokenPaper instanceof PaperToken)) {
+                newText.append(tokenPaper.getName()).append("|Set:").append(tokenPaper.getEdition())
+                        .append("|Art:").append(tokenPaper.getArtIndex()).append("|IsToken");
+            } else {
+                newText.append("t:").append(new TokenInfo(c));
+            }
         } else {
             if (c.getPaperCard() == null) {
                 return;
@@ -1261,13 +1349,21 @@ public class GameState {
             Card c;
             boolean hasSetCurSet = false;
             if (cardinfo[0].startsWith("t:")) {
-                // TODO Make sure Game State conversion works with new tokens
+                // `t:<TokenInfo>` is a BODY, not a card: name, P/T, colours,
+                // types and keywords, with no abilities and no statics. When
+                // its `Image:` field names a token script the database knows,
+                // rebuild the real token from that script instead — otherwise a
+                // Food comes back unsacrificeable and a Construct whose P/T is
+                // a static comes back a 0/0 and dies to CR 704.5f on the spot.
+                // The synthesized body remains the fallback for tokens that
+                // never had a script.
                 String tokenStr = cardinfo[0].substring(2);
-                c = new TokenInfo(tokenStr).makeOneToken(player);
+                TokenInfo info = new TokenInfo(tokenStr);
+                Card scripted = info.makeScriptedToken(player);
+                c = scripted != null ? scripted : info.makeOneToken(player);
             } else if (cardinfo[0].startsWith("T:")) {
                 String tokenStr = cardinfo[0].substring(2);
-                PaperToken token = StaticData.instance().getAllTokens().getToken(tokenStr,
-                        setCode != null ? setCode : CardEdition.UNKNOWN_CODE);
+                PaperToken token = getTokenOrNull(tokenStr, setCode);
                 if (token == null) {
                     System.err.println("ERROR: Tried to create a non-existent token named " + cardinfo[0] + " when loading game state!");
                     continue;

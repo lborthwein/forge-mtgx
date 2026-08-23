@@ -78,30 +78,151 @@ public class TokenInfo {
             }
             String remainder = info.substring(index + 1);
             if (info.startsWith("P:")) {
-                power = Integer.parseInt(remainder);
+                power = parseIntOr(remainder, 0);
             } else if (info.startsWith("T:")) {
-                toughness = Integer.parseInt(remainder);
+                toughness = parseIntOr(remainder, 0);
             } else if (info.startsWith("Cost:")) {
                 manaCost = remainder;
             } else if (info.startsWith("Types:")) {
-                types = remainder.split("-");
+                types = splitList(remainder);
             } else if (info.startsWith("Keywords:")) {
-                keywords = remainder.split("-");
+                keywords = splitList(remainder);
             } else if (info.startsWith("Image:")) {
-                imageName = remainder;
+                imageName = "null".equals(remainder) || remainder.isEmpty() ? null : remainder;
             } else if (info.startsWith("Color:")) {
-                color = ColorSet.fromNames(remainder);
+                color = parseColor(remainder);
             }
         }
 
         this.name = tokenInfo[0];
         this.imageName = imageName;
         this.manaCost = manaCost;
-        this.types = types;
-        this.intrinsicKeywords = keywords;
+        // Never null: toCard() and makeOneToken() both iterate these, so a
+        // token written without a Types: or Keywords: field used to be an NPE
+        // in the middle of installing a game state rather than a bad token.
+        this.types = types == null ? new String[0] : types;
+        this.intrinsicKeywords = keywords == null ? new String[0] : keywords;
         this.basePower = power;
         this.baseToughness = toughness;
         this.color = color;
+    }
+
+    private static int parseIntOr(String s, int fallback) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    /**
+     * `Types:`/`Keywords:` are `-`-joined and may be empty. `"".split("-")`
+     * yields `[""]`, which reached `addType("")` and `addIntrinsicKeyword("")`;
+     * empty entries are dropped here instead.
+     */
+    private static String[] splitList(String remainder) {
+        if (remainder == null || remainder.isEmpty()) {
+            return new String[0];
+        }
+        List<String> out = Lists.newArrayList();
+        for (String part : remainder.split("-")) {
+            if (!part.trim().isEmpty()) {
+                out.add(part);
+            }
+        }
+        return out.toArray(new String[0]);
+    }
+
+    /**
+     * Read a `Color:` field.
+     *
+     * The writer used to emit `ColorSet`'s inherited {@code Object.toString()}
+     * — `forge.card.ColorSet@1f2e3d` — so every token written before this
+     * change came back colourless. Such a value is recognised and treated as
+     * absent (falling back to the mana cost) rather than being fed to
+     * {@link ColorSet#fromNames}, where its stray `r`/`g` characters would
+     * otherwise be read as colours.
+     */
+    private static ColorSet parseColor(String s) {
+        if (s == null) {
+            return null;
+        }
+        String t = s.trim();
+        if (t.isEmpty() || t.indexOf('@') >= 0 || t.indexOf('.') >= 0) {
+            return null;
+        }
+        byte mask = 0;
+        boolean shorthand = true;
+        for (char ch : t.toCharArray()) {
+            byte b = MagicColor.fromName(ch);
+            if (b == 0) {
+                shorthand = false;
+                break;
+            }
+            mask |= b;
+        }
+        if (shorthand) {
+            return ColorSet.fromMask(mask);
+        }
+        if ("c".equalsIgnoreCase(t) || "colorless".equalsIgnoreCase(t)) {
+            return ColorSet.fromMask(0);
+        }
+        return ColorSet.fromNames(t);
+    }
+
+    /** `WUBRG` shorthand, or `c` when the token has no colour. */
+    private static String colorShort(ColorSet cs) {
+        if (cs == null) {
+            return "c";
+        }
+        StringBuilder sb = new StringBuilder();
+        if (cs.hasWhite()) sb.append('W');
+        if (cs.hasBlue()) sb.append('U');
+        if (cs.hasBlack()) sb.append('B');
+        if (cs.hasRed()) sb.append('R');
+        if (cs.hasGreen()) sb.append('G');
+        return sb.length() == 0 ? "c" : sb.toString();
+    }
+
+    /**
+     * Rebuild this token from its token SCRIPT, or null when it does not name
+     * one the token database holds.
+     *
+     * `t:<TokenInfo>` carries a body — name, P/T, colours, types, keywords —
+     * and no rules whatsoever. That is the whole content of the standing
+     * *"Make sure Game State conversion works with new tokens"* TODO in
+     * {@code GameState.processCardsForZone}: a Food written as `t:` comes back
+     * unable to be sacrificed, and a `c_0_0_a_construct_total_artifacts` comes
+     * back a literal 0/0 and is put into the graveyard by CR 704.5f before
+     * anyone gets priority. The `Image:` field is the script name, so when the
+     * database knows it the real token is built instead.
+     */
+    public Card makeScriptedToken(final Player controller) {
+        if (imageName == null || imageName.isEmpty()) {
+            return null;
+        }
+        int bar = imageName.indexOf('|');
+        String script = bar < 0 ? imageName : imageName.substring(0, bar);
+        String edition = bar < 0 ? null : imageName.substring(bar + 1);
+        int nextBar = edition == null ? -1 : edition.indexOf('|');
+        if (nextBar >= 0) {
+            edition = edition.substring(0, nextBar);
+        }
+        if (script.isEmpty() || !StaticData.instance().getAllTokens().containsRule(script)) {
+            return null;
+        }
+        PaperToken paper;
+        try {
+            paper = edition == null || edition.isEmpty()
+                    ? StaticData.instance().getAllTokens().getToken(script)
+                    : StaticData.instance().getAllTokens().getToken(script, edition);
+        } catch (RuntimeException e) {
+            paper = StaticData.instance().getAllTokens().getToken(script);
+        }
+        if (paper == null) {
+            return null;
+        }
+        return CardFactory.getCard(paper, controller, controller.getGame());
     }
 
     private static String[] getCardTypes(Card c) {
@@ -144,7 +265,7 @@ public class TokenInfo {
         sb.append("P:").append(basePower).append(',');
         sb.append("T:").append(baseToughness).append(',');
         sb.append("Cost:").append(manaCost).append(',');
-        sb.append("Color:").append(color).append(",");
+        sb.append("Color:").append(colorShort(color)).append(",");
         sb.append("Types:").append(Joiner.on('-').join(types)).append(',');
         sb.append("Keywords:").append(Joiner.on('-').join(intrinsicKeywords)).append(',');
         sb.append("Image:").append(imageName);

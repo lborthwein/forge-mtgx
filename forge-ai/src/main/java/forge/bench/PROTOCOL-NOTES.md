@@ -795,11 +795,60 @@ not synchronous is not reproducible from a seed.
 ### What the format cannot carry
 
 The stack; monarch / the initiative / dungeon progress (absent from `GameState.java`
-entirely); tokens (`t:<TokenInfo>` exists and carries an upstream *"TODO: Make sure Game
-State conversion works with new tokens"*); and duration-limited continuous effects with no
-permanent behind them. The mtgx-side exporter
-(`mtgx:tools/forge/from-frame.mjs`) refuses such a frame by name rather than exporting a
-position nobody was ever in.
+entirely); and duration-limited continuous effects with no permanent behind them. The
+mtgx-side exporter (`mtgx:tools/forge/from-frame.mjs`) refuses such a frame by name rather
+than exporting a position nobody was ever in.
+
+**Tokens are no longer on that list** — see the next section.
+
+### Tokens round-trip (2026-08-23)
+
+`GameState` had three ways to write a token and only one of them was used, which is what
+the standing *"TODO: Make sure Game State conversion works with new tokens"* in
+`processCardsForZone` was about. `addCard` wrote every token as `t:<TokenInfo>`, and a
+`TokenInfo` is a **body, not a card**: name, P/T, colours, types and keywords, with no
+abilities and no static abilities. Measured consequences, both reproduced headless before
+the change:
+
+- an Urza's Saga Construct (`c_0_0_a_construct_total_artifacts`, a printed **0/0** whose
+  size is `S:Mode$ Continuous | AddPower$ X …`) installs as a literal 0/0 and CR 704.5f
+  puts it in the graveyard before anyone gets priority — the dump comes back with the
+  token simply **gone**;
+- a Food installs with no sacrifice ability;
+- `ColorSet` has no `toString()` override, so the writer emitted
+  `Color:forge.card.ColorSet@1f2e3d` and **every** token read back colourless;
+- `Types:`/`Keywords:` were `null` when the field was absent (NPE inside the install) and
+  `[""]` when it was present-but-empty.
+
+`addCard` now writes a token in the strongest form that reads back:
+
+| form | when | what survives |
+|---|---|---|
+| `T:<script>\|Set:<code>` | the token came from a token script (recovered from the card's own image key, `t:<script>\|<SET>…`, and only when `TokenDb.containsRule` confirms it) | everything — it is rebuilt from the database entry |
+| `<Name>\|Set:..\|Art:..\|IsToken` | the token is a COPY of a real card (Kiki-Jiki, Splinter Twin, Metamorph) — no `PaperToken`, but a `PaperCard` | every ability, rebuilt from the card database; `IsToken` is an existing reader flag |
+| `t:<TokenInfo>` | neither — an unscripted synthesized body | name/P/T/colours/types/keywords, as before |
+
+The reader gained the matching half: the `t:` lane now tries
+`TokenInfo.makeScriptedToken` first, so a `t:` written by an older build (or by a shipped
+`.pzl`) whose `Image:` names a real script is rebuilt from that script instead of as a
+body. `T:` with an unusable `Set:` no longer throws out of the whole install.
+
+The point is **idempotence**: `initFromGame` -> `applyToGame` is now a fixed point for
+tokens, which is what makes the `frameApplied` dump a usable acceptance test.
+
+Verified on `mtgx:docs/qa/owner-queue/inbox/2026-08-23T05-43-10-loss-storm-tendrils-vs-ug`
+action 337 (a Food and three Urza's Saga Constructs across both seats), 20 reseeded runs:
+**20/20 installed, 20/20 round-trip clean, 84 cards sent and 84 in Forge's own dump**, with
+the tokens echoed as `T:c_a_food_sac|Set:BIG` and
+`T:c_0_0_a_construct_total_artifacts|Set:BIG|SummonSick`. A hand-built copy token
+`Pestermite|Set:LRW|IsToken|Tapped|Counters:P1P1=2` came back as
+`Pestermite|Set:LRW|Art:1|IsToken|Tapped|Counters:P1P1=2`.
+
+**What still cannot be carried, and must be refused upstream:** a token with a delayed
+"sacrifice/exile it at the beginning of the next end step" rider. Both faithful lanes
+rebuild the permanent from a database entry and neither carries a delayed trigger, so a
+Kiki-Jiki copy exported this way would be a *permanent* copy. `from-frame.mjs` refuses it
+by name (`frame-has-ephemeral-token`) rather than dropping the rider silently.
 
 ### Turn-based actions and `activephaseadvance`
 
