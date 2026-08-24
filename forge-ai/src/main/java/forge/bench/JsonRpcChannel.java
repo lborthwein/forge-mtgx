@@ -106,9 +106,32 @@ public final class JsonRpcChannel {
      *       the JVM has nothing to say, so absent never asserts a value and a 2.14 host is
      *       unaffected. See {@code StateEncoder.encodeProducedMana} and
      *       {@code StateEncoder.encodeCombat}.</li>
+     *   <li><b>16</b> — <i>{@code ForgeCard.producedManaKnown}: "produces nothing" is now
+     *       a statement, not an absence.</i> v2.15 sent {@code producedMana} only when
+     *       non-empty and asserted that this kept "absent" and "produces nothing" apart.
+     *       It did not. Absent carried FOUR meanings at once — a pre-2.15 jar, no mana
+     *       ability at all, a mana ability that currently produces nothing (an
+     *       un-imprinted Chrome Mox, a level-0 Joraga Treespeaker), and an enumeration
+     *       that threw — so the only reading a host could take from it was the one
+     *       v2.15's own docstring prescribed: keep the printed-text derivation. Printed
+     *       text says "add" on a loyalty ability (CR 605.1a excludes loyalty abilities
+     *       from mana abilities <i>by name</i>), on a trigger that fires off someone
+     *       else's tap ({@code Nissa, Who Shakes the World}, {@code Utopia Sprawl}), and
+     *       on a blank Chrome Mox — so the host offered mana that does not exist, on
+     *       9.5% of its decision frames.
+     *       <p>{@code producedManaKnown: true} accompanies every card whose enumeration
+     *       SUCCEEDED, alongside {@code producedMana} when that is non-empty and alone
+     *       when it is empty. The reader's rule is one line — <i>known is
+     *       {@code producedManaKnown === true}; what it produces is
+     *       {@code producedMana ?? []}</i> — and the key is omitted only when the
+     *       enumeration threw, which is the same shape (and the same host behaviour) as
+     *       a jar that never heard of the field. {@code producedMana} itself is
+     *       byte-identical to v2.15 on every observation that carried it, so a 2.15 host
+     *       reading a 2.16 stream is unaffected. See
+     *       {@code StateEncoder.encodeProducedMana}.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 15;
+    public static final int PROTOCOL_MINOR = 16;
 
     private final BufferedReader in;
     private final PrintStream out;

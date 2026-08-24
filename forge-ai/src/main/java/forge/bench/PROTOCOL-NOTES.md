@@ -1,6 +1,6 @@
 # forge.bench — wire protocol implementation notes
 
-**Current version: 2** (`hello.protocol`), minor **15** (`hello.protocolMinor`). v2 is strictly additive over v1 — a v1 host
+**Current version: 2** (`hello.protocol`), minor **16** (`hello.protocolMinor`). v2 is strictly additive over v1 — a v1 host
 reading a v2 stream sees only fields it does not know about, plus one new message type
 (`decklist`) and one informational message (`seats`), both of which an unknown-`type`
 skipper already ignores. See "Protocol v2" below for what was added and why.
@@ -185,6 +185,74 @@ a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
 
+## Protocol v2.16 — "produces nothing" becomes a statement instead of an absence
+
+*One boolean, and it exists because **v2.15's own claim below is wrong** — §1 of that
+section ends "omitted … so 'absent' and 'produces nothing' stay distinguishable", and they
+were not. This is the correction, and it is the second half of the round trip the host's
+`producedMana` census opened.*
+
+### The defect the census measured
+
+The host shipped its v2.15 reader **fail-closed**, exactly as this file prescribed: absent
+`producedMana` keeps the printed-oracle-text derivation. Then it measured what that costs,
+over 3,262 decision frames on a v2.15 jar:
+
+```
+  our untapped battlefield permanents the wire is SILENT about   3,436
+  of those, the host emits a tap_for_mana for                      310   in 4 card shapes
+  PHANTOM tap_for_mana actions emitted                             614   across 9.5% of frames
+```
+
+| card | the host offered | why the JVM is right to say nothing |
+|---|---|---|
+| `Chrome Mox`, nothing imprinted | `WUBRG` ×5 | the ability exists and every colour answers false |
+| `Nissa, Who Shakes the World` | `G` | *"whenever you tap a Forest for mana"* is a **trigger off the Forest's tap**, not Nissa's mana ability |
+| `Chandra, Torch of Defiance` | `R` | **CR 605.1a** excludes loyalty abilities from mana abilities *by name* |
+| `Utopia Sprawl` | `WUBRG` ×5 | same trigger shape as Nissa |
+
+Every one of those is mana the pilot cannot make, counted by its own `manaSources` and
+planned through by its cast scorer — the **mirror image** of the choice-list defect v2.15
+§1 closed, and the worse direction: that one hid mana the seat had, this one invents mana
+it does not have and lets it announce a spell the engine will refuse.
+
+### Why the host may not fix it alone
+
+Absent carried **four** meanings at once and the wire could not separate them: a pre-2.15
+jar, no mana ability at all, an ability that currently produces nothing (an un-imprinted
+Chrome Mox, a level-0 Joraga Treespeaker), and an enumeration that threw. Reading absent as
+"produces nothing" would be inferring a fact the protocol declines to state — and it would
+be wrong on the first of the four, silently, for every archived corpus.
+
+### The field
+
+`producedManaKnown: true` accompanies every card whose enumeration **succeeded**, whatever
+it found:
+
+```
+"producedMana": ["U"], "producedManaKnown": true    // Chrome Mox, blue card imprinted
+"producedManaKnown": true                           // Chrome Mox, nothing imprinted -> NO MANA
+                                                    // Chandra / Nissa / Utopia Sprawl -> NO MANA
+(neither key)                                       // the enumeration threw, or a pre-2.16 jar
+```
+
+The reader's rule is one line — *known is `producedManaKnown === true`; what it produces is
+`producedMana ?? []`* — and the key is **omitted only when `encodeProducedMana` throws**,
+which is byte-for-byte the shape a jar that never heard of the field emits, so the
+fail-closed host behaviour is unchanged on exactly the population that still needs it.
+
+`producedMana` itself is **unchanged**: same values, still omitted when empty. Every
+observation that carried it in v2.15 carries the identical array in v2.16, so a 2.15 host
+reading a 2.16 stream is not affected at all — the boolean is a new key an unknown-field
+skipper ignores.
+
+`StateEncoder.encodeProducedMana` returns `null` for the throw case rather than an empty
+array; the two shared one encoding through v2.15 and that conflation *is* the bug.
+
+Host side: `MTGX_PHANTOMTAP` (`mtgx: src/ai/forgeBench/decode.ts`), which emits no
+`tap_for_mana` for a permanent the wire declares known-and-empty, and stops
+`manaOpen`/`manaTypes` claiming a colour for it.
+
 ## Protocol v2.15 — four state facts the host was guessing, and one id space it could not read
 
 *Filed by the host's systematic decode audit (`mtgx:
@@ -216,7 +284,13 @@ Asked through `Card.canProduceColorMana(Set)`, one colour at a time over
 `MagicColor.Constant.COLORS_AND_COLORLESS`, so reflected mana (`ManaReflected`) and combo
 mana are the engine's answer and not a re-parse. **Read-only**: no `setActivatingPlayer`,
 so encoding a state cannot perturb one. Omitted — not an empty array — for anything whose
-`getManaAbilities()` is empty, so "absent" and "produces nothing" stay distinguishable.
+`getManaAbilities()` is empty.
+
+> **Corrected at v2.16.** This paragraph originally ended *"so 'absent' and 'produces
+> nothing' stay distinguishable"*. They were not: omission also covered a pre-2.15 jar, a
+> currently-blank producer and a thrown enumeration, and the host's fail-closed reading of
+> it cost 614 phantom mana offers across 9.5% of frames. `producedManaKnown` is the fix —
+> see the v2.16 section above.
 
 ### 2. `ForgePlayerState.maxLandPlays` / `maxLandPlaysInfinite`
 

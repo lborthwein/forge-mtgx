@@ -178,11 +178,27 @@ public final class StateEncoder {
             o.addProperty("damage", c.getDamage());
         }
         o.add("keywords", encodeKeywords(c));
-        // Protocol v2.15. Omitted (not an empty array) for anything with no mana ability,
-        // so "absent" and "produces nothing" stay distinguishable on the wire.
+        // Protocol v2.15 sent `producedMana` only when non-empty, and v2.15's own comment
+        // here claimed that kept "absent" and "produces nothing" distinguishable. IT DID
+        // NOT: absent carried FOUR meanings the host could not separate -- a pre-2.15 jar,
+        // no mana ability at all, an ability that currently produces nothing (an
+        // un-imprinted Chrome Mox, a level-0 Joraga Treespeaker), and an enumeration that
+        // threw -- so the host's only safe reading was "keep the printed-text derivation",
+        // and it therefore offered mana that does not exist for every permanent whose
+        // ORACLE TEXT says "add" while its mana abilities say nothing (614 phantom taps
+        // across 9.5% of frames, measured on the host side).
+        //
+        // v2.16 states the fact instead of leaving it inferable: `producedManaKnown` is
+        // true exactly when the enumeration SUCCEEDED, whatever it found. Absent now means
+        // one thing only -- this JVM cannot say -- which is what a 2.15-and-older jar
+        // conveys by never sending the key at all. `producedMana` itself keeps its v2.15
+        // shape (omitted when empty) so no observation that already carried it changes.
         final JsonArray produced = encodeProducedMana(c);
-        if (produced.size() > 0) {
-            o.add("producedMana", produced);
+        if (produced != null) {
+            if (produced.size() > 0) {
+                o.add("producedMana", produced);
+            }
+            o.addProperty("producedManaKnown", true);
         }
         final Multiset<CounterType> counters = c.getCounters();
         if (counters != null && !counters.isEmpty()) {
@@ -231,8 +247,22 @@ public final class StateEncoder {
      * {@code ManaType} uses. Read-only: no {@code setActivatingPlayer}, so encoding a state
      * cannot perturb one.
      *
-     * <p>Best-effort. An enumeration failure yields an empty array, the field is then
-     * omitted, and the host keeps its printed-text derivation.
+     * <p><b>Protocol v2.16 — the return is now NULLABLE, and that is the whole point.</b>
+     * An empty array is a real answer: <i>this object's mana abilities produce nothing
+     * right now</i>. {@code null} is the absence of an answer: the enumeration threw and
+     * this JVM cannot say. Through v2.15 the two shared one encoding (empty), the caller
+     * omitted the key for both, and the host could only ever fall back to printed oracle
+     * text — which reads "add" on a loyalty ability (CR 605.1a excludes those from mana
+     * abilities by name), on a triggered ability that fires off SOMEONE ELSE'S tap
+     * ("whenever you tap a Forest for mana, add an additional {G}"), and on a Chrome Mox
+     * that has imprinted nothing. All three are mana the permanent cannot make, and the
+     * host offered every one of them.
+     *
+     * <p>Both of the callers' branches are load-bearing, so neither is folded away:
+     * {@code getManaAbilities().isEmpty()} is "no mana ability exists" and the per-colour
+     * loop falling through is "the ability exists and answers false to every colour".
+     * They mean different things to a rules lawyer and the same thing to a host paying a
+     * cost, which is why one empty array serves for both.
      */
     public static JsonArray encodeProducedMana(final Card c) {
         final JsonArray a = new JsonArray();
@@ -247,7 +277,10 @@ public final class StateEncoder {
             }
         } catch (RuntimeException e) {
             JsonRpcChannel.logErr("mana production enumeration failed for " + c, e);
-            return new JsonArray();
+            // NOT an empty array: an empty array now ASSERTS "produces nothing", and this
+            // path knows nothing at all. The caller omits both keys and the host keeps its
+            // printed derivation, exactly as a pre-2.16 jar leaves it.
+            return null;
         }
         return a;
     }
