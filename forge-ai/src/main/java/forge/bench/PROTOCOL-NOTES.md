@@ -185,6 +185,59 @@ a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
 
+## Protocol v2.14 — a stack entry says what it IS (spell vs ability)
+
+*The one field the stack payload never had, and the host had no honest way to derive.*
+
+### The defect, host-side
+
+`state.stack[]` carried `id`, `name`, `fid`, `controller`, `description` and the v2 target
+structure — and **nothing that separates a spell from an ability**. The host
+(`mtgx: src/ai/forgeBench/decode.ts`) derived `isAbility` as `fid == null`, which is
+exactly backwards: **`fid` is the SOURCE card's id, and an activated or triggered ability
+has a source** — so `fid` is set on every entry Forge has ever sent and `isAbility` was
+`false` for all of them. Three shipped host guards read that flag and were therefore
+silently inert on the entire bridge surface (`claimedByOwnStack`, `handPutIsAtCapacity`,
+`sacrificesClaimedSource`).
+
+Measured on the archived traces before the fix: **1,096 stack entries over 522 asks in one
+game, `fid` set on 1,096 of 1,096, and every one of the nine keys present on every entry** —
+one uniform key shape, no discriminator anywhere in it.
+
+### Why it has to come from the JVM
+
+`description` is `si.getStackDescription()`, a rendering and not a contract, and it is
+genuinely ambiguous: an instant and an activated ability render the *same* shape.
+
+```
+Fatal Push (74) - Destroy Scavenging Ooze (31).                             <- SPELL
+Scavenging Ooze (31) - Exile Scalding Tarn (70) from the graveyard. …       <- ACTIVATED
+```
+
+`SpellAbilityStackInstance.getSpellAbility()` knows; nothing on the wire did.
+
+### The fields
+
+| field | meaning |
+|---|---|
+| `kind` | `"spell"` \| `"activated"` \| `"triggered"` \| `"replacement"` \| `"other"` |
+| `isAbility` | `!"spell".equals(kind)` — the half a host branches on |
+
+The first three words are deliberately the host engine's own `StackEntry.kind` vocabulary,
+so both engines decode into the same three names.
+
+Order of the tests in `StateEncoder.stackKind` is load-bearing: a trigger arrives as a
+`WrappedAbility` and `isActivatedAbility()` can also answer true for the ability it wraps,
+so `isTrigger()` is asked first, then `isReplacementAbility()`, then
+`isActivatedAbility()`.
+
+**Additive, and absent means "ask the old way".** Both keys are omitted when the instance
+carries no `SpellAbility` (and if the classification throws, which is logged). A 2.13 host
+ignoring them behaves exactly as before, and the 2.14 host reads them only when present —
+it does **not** fall back to a rendering heuristic on a pre-2.14 jar, because a wrong
+`isAbility` asserted with the authority of the wire is worse than the inert flag it
+replaces.
+
 ## Protocol v2.9 — every ask states its own minor, and the divided total reaches the wire
 
 Two additive items from the TS lane's v2.8 reconciliation. Nothing changes for a host that

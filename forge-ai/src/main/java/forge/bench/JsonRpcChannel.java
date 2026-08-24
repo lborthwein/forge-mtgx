@@ -83,9 +83,19 @@ public final class JsonRpcChannel {
      *       ~31^5 whole-game copies inside a single depth level and the JVM never
      *       returns. Both keys are optional and default to off, so a 2.12 config
      *       behaves identically. See {@code forge.ai.simulation.SimSearchBudget}.</li>
+     *   <li>2.14 — every {@code state.stack[]} entry says WHAT IT IS: {@code kind}
+     *       ({@code "spell" | "activated" | "triggered" | "replacement" | "other"}) and
+     *       the {@code isAbility} boolean derived from it. Nothing on the wire carried
+     *       this before: {@code fid} is the SOURCE card's id and an ability has one too,
+     *       so a host deriving "ability" from a missing {@code fid} read {@code false}
+     *       for every entry ever sent, and {@code description} cannot stand in for it
+     *       (Firebolt-the-spell and Scavenging Ooze's activation both render
+     *       "Name (id) - &lt;effect&gt;"). Additive: both keys are absent when the
+     *       instance carries no {@code SpellAbility}, and a 2.13 host that ignores them
+     *       behaves exactly as before. See {@code StateEncoder.stackKind}.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 13;
+    public static final int PROTOCOL_MINOR = 14;
 
     private final BufferedReader in;
     private final PrintStream out;

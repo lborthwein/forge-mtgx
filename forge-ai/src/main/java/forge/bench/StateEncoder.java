@@ -216,6 +216,48 @@ public final class StateEncoder {
         return a;
     }
 
+    /**
+     * The one thing a stack entry never said: whether it is a spell or an ability.
+     *
+     * <p>Protocol v2.14. The vocabulary deliberately mirrors the host engine's own
+     * {@code StackEntry.kind} (<code>'spell' | 'activated' | 'triggered'</code>) so the two
+     * engines decode into the same three words, with two more for the cases Forge has and
+     * the host's cube does not produce.
+     *
+     * <p>Order is load-bearing. A trigger reaches the stack as a {@code WrappedAbility}
+     * whose {@code isActivatedAbility()} may also answer true for the ability it wraps, so
+     * the trigger test comes first; a replacement effect is likewise not an activation the
+     * player made. Returns {@code null} — and the caller then emits nothing at all — when
+     * the instance carries no {@link SpellAbility}, so the host's fallback engages instead
+     * of a wrong word being asserted with the full authority of the wire.
+     */
+    static String stackKind(final SpellAbility sa) {
+        if (sa == null) {
+            return null;
+        }
+        try {
+            if (sa.isSpell()) {
+                return "spell";
+            }
+            if (sa.isTrigger()) {
+                return "triggered";
+            }
+            if (sa.isReplacementAbility()) {
+                return "replacement";
+            }
+            if (sa.isActivatedAbility()) {
+                return "activated";
+            }
+            // Not a spell, not a trigger, not a replacement, not an activation: a static
+            // ability Forge has put on the stack. It is an ABILITY, which is the half the
+            // host actually branches on, so say so rather than dropping the field.
+            return "other";
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("stack kind classification failed for " + sa, e);
+            return null;
+        }
+    }
+
     private static JsonArray encodeStack(final Game game, final PlayerView viewer) {
         final JsonArray arr = new JsonArray();
         for (SpellAbilityStackInstance si : game.getStack()) {
@@ -227,6 +269,20 @@ public final class StateEncoder {
             o.addProperty("controller", si.getActivatingPlayer() == null
                     ? -1 : si.getActivatingPlayer().getId());
             o.addProperty("description", String.valueOf(si.getStackDescription()));
+            // Protocol v2.14: WHAT this entry is. Nothing on the wire distinguished a
+            // spell from an ability before, because `fid` is the SOURCE card's id and
+            // every entry has one — an activated ability's and a trigger's included.
+            // A host deriving "ability" from `fid == null` therefore read `false` for
+            // every entry ever sent. `stackKind` is the only honest answer and the JVM
+            // is the only place that knows it: `description` cannot carry it, since
+            // Firebolt-the-spell and Scavenging Ooze's activation both render
+            // "Name (id) - <effect>". Absent = a pre-2.14 jar; the host falls back to
+            // its old reading rather than guessing.
+            final String kind = stackKind(si.getSpellAbility());
+            if (kind != null) {
+                o.addProperty("kind", kind);
+                o.addProperty("isAbility", !"spell".equals(kind));
+            }
             final TargetChoices tc = si.getTargetChoices();
             // `targets` is Forge's own rendering, kept for compatibility with protocol v1.
             o.addProperty("targets", tc == null ? "" : tc.toString());
