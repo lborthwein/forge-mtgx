@@ -1,6 +1,6 @@
 # forge.bench — wire protocol implementation notes
 
-**Current version: 2** (`hello.protocol`). v2 is strictly additive over v1 — a v1 host
+**Current version: 2** (`hello.protocol`), minor **15** (`hello.protocolMinor`). v2 is strictly additive over v1 — a v1 host
 reading a v2 stream sees only fields it does not know about, plus one new message type
 (`decklist`) and one informational message (`seats`), both of which an unknown-`type`
 skipper already ignores. See "Protocol v2" below for what was added and why.
@@ -184,6 +184,104 @@ namespace, an id the engine rejects, a `TargetChoices.add` that returns false, a
 a throw out of candidate enumeration — goes through `refuse()` and lands in
 `delegatedRefused.chooseTargetsFor` before falling back. Forge picking our targets without
 that record would credit the pilot for Forge's choices.
+
+## Protocol v2.15 — four state facts the host was guessing, and one id space it could not read
+
+*Filed by the host's systematic decode audit (`mtgx:
+docs/qa/losing-lines/recon/decode-audit.md` §4), which walked **every field
+`decode.ts` derives from a JVM message** against 2,050 observed protocol frames and
+66,074 card observations. Four of its six filed items were "ask Forge for a field".
+This is that batch. Every one is a new key on an existing message and every one is
+**omitted where the JVM has nothing to say**, so absent never asserts a value.*
+
+### 1. `ForgeCard.producedMana` — a Treasure token made no mana
+
+The host derives `manaOpen` / `manaTypes` from **printed oracle text**, looked up by card
+name in its own cube index. A **token has no printed text and no cube entry**: a Treasure,
+a Blood or a Food reached the pilot as a permanent that produces nothing. Observed in the
+archived corpus: Treasure Token 12, Blood Token 37, Food Token 46.
+
+The same re-derivation is also the shape of the largest correctness defect this bridge has
+had — the host's own parser read *"Add {W} or {U}"* as `[W]` on **63 of 540 cube cards**
+(every original dual, shock, fastland, horizon land, Triome, both Hierarchs, all ten
+Talismans), which is a mono-coloured mana base for the whole benchmark. Publishing what the
+engine already knows makes that class structurally impossible rather than repaired.
+
+```
+"producedMana": ["W","U"]        // Tundra
+"producedMana": ["C"]            // Treasure Token  (any colour -> see below)
+```
+
+Asked through `Card.canProduceColorMana(Set)`, one colour at a time over
+`MagicColor.Constant.COLORS_AND_COLORLESS`, so reflected mana (`ManaReflected`) and combo
+mana are the engine's answer and not a re-parse. **Read-only**: no `setActivatingPlayer`,
+so encoding a state cannot perturb one. Omitted — not an empty array — for anything whose
+`getManaAbilities()` is empty, so "absent" and "produces nothing" stay distinguishable.
+
+### 2. `ForgePlayerState.maxLandPlays` / `maxLandPlaysInfinite`
+
+The host reads `landLimit - landsPlayed` **explicitly because of Azusa and Oracle of Mul
+Daya**, and then had to hardcode `landLimit` to 1 because the wire never said. Oracle of
+Mul Daya is in the bench cube (80 battlefield observations in the archived corpus) and the
+constant is provably wrong on **26 of 2,050 frames**.
+
+Not recoverable host-side. Inferring the limit from whether a land play appears in the
+priority menu would make a state field a function of a menu — and the menu is built *after*
+the engine consults the limit. `getMaxLandPlays()` is base 1 plus every active adjustment;
+`maxLandPlaysInfinite` is the separate flag no integer can express.
+
+### 3. `combat.attackers[].defenderKind` / `defenderSeat`
+
+`defenderId` is **one int over two namespaces**: a player's id is its seat index, a
+planeswalker's or battle's is its `fid`, and both count from 0/1. The host had no way to
+separate them and recorded **every attack as an attack on the face**. Measured in the
+archived corpus: `defenderId` takes the value 27 on **24 attacker records**, and fid 27 is
+`Nissa, Who Shakes the World` — a Ninja Token and a Thief of Sanity attacking a walker,
+decoded as 5 power coming at the player. That is not cosmetic: it inflates the perceived
+clock at exactly the frames where the clock decides whether to block.
+
+The `attackers` **ask** has published `legalPairsTyped` since v2.8 and
+`AskAssignDamage` has published `defenderKind`; the **state's** combat block never did.
+This mirrors those. `defenderKind` is emitted only for the two kinds that exist
+(`"player"` | `"card"`), so absent means *this jar does not say*. `defenderSeat` is the
+turn-order index — the space a host's seat map already speaks — for the same reason
+`encodeStackCandidate` publishes `controllerSeat` beside the raw `controller`.
+
+### 4. `ForgeCard.attachedToKind` — and a correction to the audit that asked for it
+
+The audit filed *"attachments are absent from the protocol"* on the evidence that
+`attachedTo` / `attachments` are **0 occurrences across all 66,074 card observations**.
+
+**That is a population zero, not a protocol gap, and the record should say so.**
+`encodeCardUnchecked` has emitted both keys **since protocol v1** (`6d5fb4e1`), from
+`Card.getEntityAttachedTo()` and `Card.getAttachedCards()`. The corpus contains **one**
+`Equip` observation in eight games and that Equipment was never equipped, so the fields had
+nothing to describe. *Absence on the wire is evidence about the games, not about the
+encoder.*
+
+What v2.15 does add is the half that was genuinely missing: **which namespace `attachedTo`
+is in.** An Aura may enchant a **player** (CR 303.4a), whose id is a seat index, while a
+Card's id is an fid from 1 — the same two-spaces-in-one-int shape `entityRef` was
+introduced for at v2.8. A host resolving a bare `attachedTo` through its card map gets the
+wrong object, silently and only sometimes.
+
+```
+"attachedTo": 41, "attachedToKind": "card"
+"attachedTo": 0,  "attachedToKind": "player"
+```
+
+### Not in this batch, and why
+
+- **`activePlayer: -1`.** 13 archived frames (turn 0, phase `"null"`) send `-1` for both
+  `activePlayer` and `priorityPlayer`, and the host mapped it to *the opponent*. `-1` is
+  the honest encoding of "nobody" — there is no Forge-side repair, and the fix belongs in
+  the host's seat mapping.
+- **`protectionsNow` / structured keyword parameters.** Forge writes protection as
+  `"Protection from red"` and ward as `"Ward:2"` inside the `keywords` array, so the
+  parameter *is* on the wire; the host's reader wants it split out. That is a host-side
+  parse of a string this jar already sends, and the archived corpus contains **no**
+  protection or ward string at all (0 of 51 distinct keyword spellings), so a jar change
+  would ship unmeasured.
 
 ## Protocol v2.14 — a stack entry says what it IS (spell vs ability)
 

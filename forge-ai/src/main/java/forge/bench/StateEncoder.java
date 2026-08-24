@@ -19,6 +19,7 @@ package forge.bench;
 
 import java.util.List;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multiset;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -98,6 +99,17 @@ public final class StateEncoder {
         o.addProperty("life", p.getLife());
         o.addProperty("poison", p.getPoisonCounters());
         o.addProperty("landsPlayed", p.getLandsPlayedThisTurn());
+        // Protocol v2.15: how many land plays this player gets THIS TURN. The host reads
+        // `landLimit - landsPlayed` and had no wire field for the first half, so it
+        // hardcoded 1 -- wrong for every turn a player controls Azusa, Oracle of Mul Daya,
+        // Exploration or Dryad of the Ilysian Grove, all of which are in the bench cube.
+        // Not derivable host-side: inferring it from whether a land play appears in the
+        // priority menu would make a state field a function of a menu, and the menu is
+        // built AFTER the limit is consulted. `getMaxLandPlays()` is the engine's own
+        // answer (base 1 plus every active adjustment); `maxLandPlaysInfinite` is the
+        // separate dev-mode/effect flag that no integer can express.
+        o.addProperty("maxLandPlays", p.getMaxLandPlays());
+        o.addProperty("maxLandPlaysInfinite", p.getMaxLandPlaysInfinite());
         o.addProperty("librarySize", p.getCardsIn(ZoneType.Library).size());
         o.addProperty("handSize", p.getCardsIn(ZoneType.Hand).size());
         o.add("manaPool", encodeManaPool(p.getManaPool()));
@@ -166,6 +178,12 @@ public final class StateEncoder {
             o.addProperty("damage", c.getDamage());
         }
         o.add("keywords", encodeKeywords(c));
+        // Protocol v2.15. Omitted (not an empty array) for anything with no mana ability,
+        // so "absent" and "produces nothing" stay distinguishable on the wire.
+        final JsonArray produced = encodeProducedMana(c);
+        if (produced.size() > 0) {
+            o.add("producedMana", produced);
+        }
         final Multiset<CounterType> counters = c.getCounters();
         if (counters != null && !counters.isEmpty()) {
             final JsonObject cj = new JsonObject();
@@ -185,8 +203,53 @@ public final class StateEncoder {
         final GameEntity attachedTo = c.getEntityAttachedTo();
         if (attachedTo != null) {
             o.addProperty("attachedTo", attachedTo.getId());
+            // Protocol v2.15: which SPACE that id lives in. An Aura may enchant a PLAYER
+            // (CR 303.4a), whose id is a seat index, and a Card's id is an fid from 1 --
+            // the same two-namespaces-in-one-int shape `entityRef` was introduced for at
+            // v2.8 and `targetIds` was repaired for on the host side. A host resolving a
+            // bare `attachedTo` through its card map silently gets the wrong object.
+            o.addProperty("attachedToKind", attachedTo instanceof Player ? "player"
+                    : attachedTo instanceof Card ? "card" : "other");
         }
         return o;
+    }
+
+    /**
+     * The colours of mana this permanent's own mana abilities can produce (protocol v2.15).
+     *
+     * <p>The host derived this from PRINTED ORACLE TEXT, which works for a cube card and
+     * cannot work at all for a TOKEN: a Treasure, a Blood or a Food has no printed text to
+     * read and no cube entry to read it from, so a bridged seat holding three Treasures
+     * believed it had no mana. Re-deriving what the engine already knows is also the exact
+     * shape of the largest correctness defect this bridge has had — a choice list
+     * ("Add {W} or {U}") parsed to its first symbol on 63 of 540 cube cards.
+     *
+     * <p>Asked through {@link Card#canProduceColorMana}, which is the engine's own answer
+     * and already walks reflected mana ({@code ManaReflected}) and combo mana. One colour
+     * at a time so the result is the full set rather than a boolean, and colourless is
+     * included — {@code COLORS_AND_COLORLESS} is the six-symbol vocabulary the host's
+     * {@code ManaType} uses. Read-only: no {@code setActivatingPlayer}, so encoding a state
+     * cannot perturb one.
+     *
+     * <p>Best-effort. An enumeration failure yields an empty array, the field is then
+     * omitted, and the host keeps its printed-text derivation.
+     */
+    public static JsonArray encodeProducedMana(final Card c) {
+        final JsonArray a = new JsonArray();
+        try {
+            if (c.getManaAbilities().isEmpty()) {
+                return a;
+            }
+            for (final String col : MagicColor.Constant.COLORS_AND_COLORLESS) {
+                if (c.canProduceColorMana(ImmutableSet.of(col))) {
+                    a.add(MagicColor.toShortString(col));
+                }
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("mana production enumeration failed for " + c, e);
+            return new JsonArray();
+        }
+        return a;
     }
 
     /**
@@ -333,6 +396,24 @@ public final class StateEncoder {
             e.addProperty("name", a.getName());
             final GameEntity def = combat.getDefenderByAttacker(a);
             e.addProperty("defenderId", def == null ? -1 : def.getId());
+            // Protocol v2.15. `defenderId` is ONE INT OVER TWO NAMESPACES -- a player's id
+            // is its seat index, a planeswalker's or battle's is its fid, and both count
+            // from 0/1 -- so the host could not tell an attack on the face from an attack
+            // on a walker and recorded every attack as an attack on the FACE. That is not
+            // a cosmetic misread: it inflates the perceived clock at exactly the frames
+            // where the clock decides whether to block. The `attackers` ASK has carried
+            // `legalPairsTyped` since v2.8; the STATE's combat block never did.
+            //
+            // Emitted only for the two kinds that exist, so ABSENT means "this jar does
+            // not say" and a pre-2.15 host keeps the reading it had. `defenderSeat` is the
+            // turn-order index, which is the space the host's seat map speaks -- the same
+            // reason `encodeStackCandidate` publishes `controllerSeat` beside `controller`.
+            if (def instanceof Player) {
+                e.addProperty("defenderKind", "player");
+                e.addProperty("defenderSeat", playerIndex(game, (Player) def));
+            } else if (def instanceof Card) {
+                e.addProperty("defenderKind", "card");
+            }
             final JsonArray blockers = new JsonArray();
             for (Card b : combat.getBlockers(a)) {
                 blockers.add(b.getId());

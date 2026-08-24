@@ -93,9 +93,22 @@ public final class JsonRpcChannel {
      *       "Name (id) - &lt;effect&gt;"). Additive: both keys are absent when the
      *       instance carries no {@code SpellAbility}, and a 2.13 host that ignores them
      *       behaves exactly as before. See {@code StateEncoder.stackKind}.</li>
+     *   <li><b>15</b> — <i>four state facts the host had to guess at, and one id space it
+     *       could not read.</i> {@code ForgeCard.producedMana} (a token has no printed
+     *       text and the host was re-deriving cube cards' production from oracle text);
+     *       {@code ForgePlayerState.maxLandPlays} / {@code maxLandPlaysInfinite} (the host
+     *       hardcoded 1, wrong under Azusa and Oracle of Mul Daya);
+     *       {@code combat.attackers[].defenderKind} / {@code defenderSeat} (an attack on a
+     *       planeswalker decoded as an attack on the face); and
+     *       {@code ForgeCard.attachedToKind} beside the {@code attachedTo} that has been
+     *       on the wire since v1 — an Aura may enchant a PLAYER, and a bare id cannot say
+     *       so. Every one is a new key on an existing message; every one is OMITTED where
+     *       the JVM has nothing to say, so absent never asserts a value and a 2.14 host is
+     *       unaffected. See {@code StateEncoder.encodeProducedMana} and
+     *       {@code StateEncoder.encodeCombat}.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 14;
+    public static final int PROTOCOL_MINOR = 15;
 
     private final BufferedReader in;
     private final PrintStream out;
