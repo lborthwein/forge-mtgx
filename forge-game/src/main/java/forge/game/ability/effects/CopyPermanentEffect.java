@@ -272,6 +272,36 @@ public class CopyPermanentEffect extends TokenEffectBase {
         }
     }
 
+    /**
+     * The physical shell for a permanent that has no paper card to read faces from.
+     *
+     * <p>{@link CardFactory#getCard} reaches straight through {@code IPaperCard.getRules()},
+     * so a permanent built without a paper card NPEs out of {@code CardFactory.readCard}
+     * and takes the whole match with it. Every token is such a permanent
+     * ({@code TokenInfo.toCard} builds them with {@code new Card(id, game)}), which makes
+     * this the failure mode of copying a token — and copying a token is exactly what
+     * {@code CopyPermanentEffect} is asked to do inside the simulation AI, where
+     * {@code GameCopier.createCardCopy} rebuilds every token through
+     * {@code TokenInfo.makeOneToken}: 21 dead games of one sim-tier bench arm, the
+     * largest crash class in the bridged half of it.
+     *
+     * <p>Guarding on {@code getPaperCard() == null} is the same shape
+     * {@code CardCopyService.copyCard} already applies for the same reason. Only the
+     * shell is needed here: the caller replaces every state immediately via
+     * {@code setStates(CardFactory.getCloneStates(...))}, which is where a copy's
+     * copiable values legitimately come from (CR 707.2), and those cloned states carry
+     * the abilities {@code buildAbilities} would otherwise have supplied.
+     */
+    private static Card protoShellWithoutPaperCard(final Card original, final Player newOwner,
+            final int id, final Game game) {
+        final Card shell = new Card(id, null, game);
+        shell.setOwner(newOwner);
+        shell.setSetCode(original.getSetCode());
+        shell.setImageKey(original.getImageKey());
+        shell.setGamePieceType(GamePieceType.TOKEN);
+        return shell;
+    }
+
     public static Card getProtoType(final SpellAbility sa, final Card original, final Player newOwner) {
         final Card copy;
         if (sa.hasParam("DefinedName")) {
@@ -286,7 +316,9 @@ public class CopyPermanentEffect extends TokenEffectBase {
 
             int id = newOwner == null ? 0 : newOwner.getGame().nextCardId();
             // need to create a physical card first, i need the original card faces
-            copy = CardFactory.getCard(original.getPaperCard(), newOwner, id, host.getGame());
+            copy = original.getPaperCard() == null
+                    ? protoShellWithoutPaperCard(original, newOwner, id, host.getGame())
+                    : CardFactory.getCard(original.getPaperCard(), newOwner, id, host.getGame());
 
             copy.setStates(CardFactory.getCloneStates(original, copy, sa));
             // force update the now set State

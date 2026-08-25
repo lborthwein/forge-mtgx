@@ -2802,10 +2802,33 @@ public class Player extends GameEntity implements Comparable<Player> {
         toPlayer.speedEffect = mapEffectCard(speedEffect, mapper);
     }
 
+    /**
+     * An effect card that was not part of the copy is left unset on the snapshot so its
+     * lazy creation path stays consistent.
+     *
+     * <p>"Not part of the copy" has to be asked of the ZONE, not of the card's zone
+     * POINTER. {@link forge.game.zone.Zone#remove} unlinks the card from the zone's list
+     * and leaves {@code currentZone} pointing at the zone it just left — only
+     * {@code add} ever re-points it — so a field-managed effect card that has been
+     * removed from the command zone still answers a non-null {@code getZone()} while the
+     * copier's zone walk never saw it.
+     *
+     * <p>That is a live state, not a corner case: {@code GameAction.takeInitiative}
+     * calls {@code removeInitiativeEffect} on the previous holder while
+     * {@code Player.initiativeEffect} deliberately stays set (so re-taking the
+     * initiative reuses the same card and its registered triggers), and
+     * {@code removeMonarchEffect} does the same. The stale pointer then sent the
+     * orphan through {@code GameCopier.find}, which has no {@code cardMap} entry for it
+     * and throws {@code RuntimeException: Couldn't map The Initiative (id)} out of the
+     * whole match — 27 dead games of one sim-tier bench arm, on every deck pairing
+     * holding an initiative card.
+     */
     private static Card mapEffectCard(Card effect, Function<Card, Card> mapper) {
-        // An effect card in no zone was not part of the copy; leave the
-        // snapshot's field unset so its lazy creation path stays consistent.
-        return effect == null || effect.getZone() == null ? null : mapper.apply(effect);
+        if (effect == null) {
+            return null;
+        }
+        final Zone zone = effect.getZone();
+        return zone == null || !zone.contains(effect) ? null : mapper.apply(effect);
     }
 
     public void addCommander(Card commander) {
