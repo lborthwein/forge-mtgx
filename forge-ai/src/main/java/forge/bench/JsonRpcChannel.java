@@ -154,9 +154,63 @@ public final class JsonRpcChannel {
      *       <br>Additive: a pre-2.17 host has never seen the kind, answers nothing, and
      *       the JVM delegates exactly as it did before. See
      *       {@code PlayerControllerBridge.askForZoneChange}.</li>
+     *   <li><b>18</b> — <i>the two remaining wire clamps: the ORDER half of the pile, and
+     *       the mana abilities that were never on the wire at all.</i> Two independent
+     *       additions, each additive and each declinable.
+     *       <p><b>{@code orderZone}, a second new ask kind.</b>
+     *       {@code PlayerController.orderMoveToZoneList} was the same
+     *       {@code count(); return super....} shape one method along, at <b>495 calls per
+     *       288 games</b>. It is the controller entry point for
+     *       {@code RearrangeTopOfLibraryEffect}, {@code DigEffect}'s remainder,
+     *       {@code ChangeZoneAllEffect} and {@code ChangeZoneEffect}'s own
+     *       {@code chosenCards} ordering — and <b>Doomsday's {@code SVar:DBDig} is a
+     *       {@code RearrangeTopOfLibrary}</b>, so after v2.17 the host chose WHICH five
+     *       cards and Forge still chose in WHAT ORDER they were stacked. Same shape as
+     *       {@code zoneChange}: a {@code bridged()} guard, one round trip, {@code null}
+     *       meaning <i>delegate</i>.
+     *       <br>The answer is a PERMUTATION of the menu's fids — every card exactly once,
+     *       nothing added and nothing dropped — and it is in <b>MOVE ORDER</b>, which is
+     *       to say the exact list this method returns to its caller. The bridge performs
+     *       <b>no transformation whatsoever</b> on it. That matters because the callers do
+     *       not agree with each other about what the order means:
+     *       {@code RearrangeTopOfLibraryEffect} walks the list calling
+     *       {@code moveToLibrary(next, 0)}, so the LAST element ends up on top of the
+     *       library. {@code PlayerController.orderedMoveToTopOfLibrary} is the predicate
+     *       that says when that reversal applies, and it is published as {@code topFirst}
+     *       rather than applied here, so the host reads the same fact Forge's own two
+     *       controllers read and no reversal happens twice. ({@code PlayerControllerHuman}
+     *       collects a top-first order from its user and reverses before returning;
+     *       {@code PlayerControllerAi} builds a top-first list and reverses at the same
+     *       gate. Both would be indistinguishable from the outside had the bridge chosen
+     *       to reverse too, and one of the three would have been wrong.)
+     *       <br>Also on the body: {@code destination} (the zone), {@code count}, and
+     *       {@code ability}. An answer that is not a permutation is REFUSED and the call
+     *       delegates.
+     *       <p><b>{@code manaAbilities} on the {@code priority} body.</b>
+     *       {@code legalSpellAbilities} skips every {@code sa.isManaAbility()} when it
+     *       builds the priority menu — deliberately, since v1, because a mana ability is
+     *       part of paying for something rather than a thing to do. The consequence was
+     *       invisible until it was counted: the host builds {@code CardView.abilities} out
+     *       of that menu, so on the bench a permanent's mana abilities <b>are not in its
+     *       ability list at all</b>. Measured host-side: {@code isManaAbility} appears
+     *       <b>57,053 times on the wire and is {@code false} every time</b>, and
+     *       <b>0 of 118,481</b> menu options is a mana ability. A Grim Monolith published
+     *       one ability, {@code "{4}: Untap this artifact."}, and never the
+     *       {@code "{T}: Add {C}{C}{C}"} the loop is made of.
+     *       <br>This is a PARALLEL CHANNEL and not a menu change, on purpose: the
+     *       {@code menu} array is byte-identical to v2.17, so every index a host answers
+     *       with means what it always meant, and a host that ignores the new key behaves
+     *       exactly as it did. The entries are {@code encodeSpellAbility} objects — the
+     *       same encoding the menu uses, each already carrying the host card's
+     *       {@code fid}, {@code isManaAbility: true}, {@code payCosts} and
+     *       {@code description} — for every card the bridged seat controls whose
+     *       {@code getManaAbilities()} is non-empty. Enumeration failures are swallowed
+     *       per card and the key is simply shorter, never wrong.
+     *       <br>Additive on both counts: a pre-2.18 host sees an unknown kind it never
+     *       answers (the JVM delegates) and an unknown key it never reads.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 17;
+    public static final int PROTOCOL_MINOR = 18;
 
     private final BufferedReader in;
     private final PrintStream out;

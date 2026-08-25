@@ -278,6 +278,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             items.add(StateEncoder.encodeSpellAbility(sa));
         }
         body.add("menu", items);
+        body.add("manaAbilities", manaAbilityChannel());
         final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body);
         if (ans == null) {
             return super.chooseSpellAbilityToPlay();
@@ -434,6 +435,59 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      */
     private List<SpellAbility> legalSpellAbilities() {
         return legalSpellAbilities(null);
+    }
+
+    /**
+     * v2.18 — THE MANA ABILITIES, ON A CHANNEL OF THEIR OWN.
+     *
+     * <p>The exclusion documented one method above is right and stays: a mana ability is
+     * part of paying for something, not a thing to do at priority, and offering them
+     * invites a non-terminating loop. What was never true is the host's inference from it.
+     * The host builds {@code CardView.abilities} by walking THIS menu
+     * ({@code answer.ts:publishAbilities}), so on the bench a permanent's mana abilities
+     * are not in its ability list at all — measured on the host side, {@code isManaAbility}
+     * is on the wire <b>57,053 times and false every time</b>, and <b>0 of 118,481</b> menu
+     * options is a mana ability. A Grim Monolith published exactly one ability,
+     * {@code "{4}: Untap this artifact."}, so the predicate that asks <i>what does one
+     * {@code T} of this permanent add</i> answered zero on <b>every frame of a 384-game
+     * corpus</b>, on a board where the Monolith and its cost reducer stood together 610
+     * times.
+     *
+     * <p>So they are published beside the menu rather than inside it. Same encoding
+     * ({@code encodeSpellAbility}: {@code fid} of the host card, {@code isManaAbility},
+     * {@code payCosts}, {@code description}), and the {@code menu} array is byte-identical
+     * to v2.17, so every index a host answers with means exactly what it meant before and
+     * a host that does not read the key cannot behave differently.
+     *
+     * <p>Scope is the bridged seat's own battlefield: the reader this exists for
+     * ({@code activations.ts:selfRestoringSources}) walks our permanents, and a channel
+     * that enumerated the opponent's would publish hidden information for nobody's
+     * benefit. {@code setActivatingPlayer} is NOT called — this is a read of the card, not
+     * a preparation of an ability — and an enumeration that throws is swallowed per card,
+     * so the key is shorter and never wrong.
+     */
+    private JsonArray manaAbilityChannel() {
+        final JsonArray out = new JsonArray();
+        final Player p = getPlayer();
+        if (p == null) {
+            return out;
+        }
+        for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+            if (c == null) {
+                continue;
+            }
+            try {
+                for (SpellAbility sa : c.getManaAbilities()) {
+                    if (sa == null) {
+                        continue;
+                    }
+                    out.add(StateEncoder.encodeSpellAbility(sa));
+                }
+            } catch (RuntimeException e) {
+                JsonRpcChannel.logErr("mana ability channel failed for " + c, e);
+            }
+        }
+        return out;
     }
 
     /**
@@ -1939,7 +1993,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public boolean willPutCardOnTop(Card c) { count("willPutCardOnTop"); return super.willPutCardOnTop(c); }
     @Override
-    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) { count("orderMoveToZoneList"); return super.orderMoveToZoneList(cards, destinationZone, source); }
+    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) { count("orderMoveToZoneList"); return bridgedOrderMoveToZoneList(cards, destinationZone, source); }
     @Override
     public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) { count("chooseCardsToDiscardFrom"); return super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser); }
     @Override
@@ -2225,6 +2279,98 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             picked.add(c);
         }
         return picked;
+    }
+
+    /*
+     * ---------------------------------------------------------------------
+     * THE ORDER HALF — v2.18, AND IT IS THE SAME BUG ONE METHOD ALONG.
+     * ---------------------------------------------------------------------
+     * v2.17 closed `chooseSingleCardForZoneChange` and left this one open, and
+     * the campaign's own measurement named the consequence exactly: over 288
+     * games `orderMoveToZoneList` was called **495 times** and every one of them
+     * was `count(); return super....`.
+     *
+     * It matters for one card in particular. Doomsday is
+     *
+     *     A:SP$ ChangeZone | ... | ChangeNum$ 5 | SubAbility$ DBChangeZone
+     *     SVar:DBChangeZone: ... | SubAbility$ DBDig
+     *     SVar:DBDig: DB$ RearrangeTopOfLibrary | Defined$ You | NumCards$ X
+     *
+     * so the five chosen cards are put on top **in any order** and then RE-ORDERED
+     * through `RearrangeTopOfLibraryEffect`, which is to say through this method.
+     * After v2.17 the host chose WHICH five and `PlayerControllerAi`'s scry
+     * heuristic still chose in WHAT ORDER — and the order is the whole plan: a
+     * five-card library whose finisher is under two cantrips it cannot pay for is
+     * a loss, and the host's own `MTGX_PILEREACH` exists to put it at the
+     * shallowest depth the mana reaches.
+     *
+     * THE ANSWER IS A PERMUTATION IN MOVE ORDER, AND THE BRIDGE TRANSFORMS
+     * NOTHING. `orderMoveToZoneList`'s contract is *the order in which the cards
+     * will be moved, one at a time, to the destination* — and its own javadoc
+     * warns that "when moving cards to the top of a deck, this will be the
+     * reverse of the order they will ultimately end up in", because
+     * `RearrangeTopOfLibraryEffect` walks the returned list calling
+     * `moveToLibrary(next, 0)`. Both of Forge's own controllers handle that by
+     * building a top-first list and reversing at `orderedMoveToTopOfLibrary`.
+     * This bridge publishes that predicate as `topFirst` and reverses NOTHING, so
+     * there is exactly one place in the system where the flip happens and it is
+     * the host's, where the pile is. A bridge that also reversed would be
+     * indistinguishable from this one in the wire log and wrong in the game.
+     *
+     * FAIL CLOSED. A non-permutation answer — the wrong arity, a duplicate, an
+     * fid that is not on the menu — is REFUSED and the call falls through to
+     * `super`, byte-identically to the pre-2.18 behaviour. So is a null answer,
+     * an unbridged session, a list of one, and a decider that is not our seat.
+     */
+    private CardCollectionView bridgedOrderMoveToZoneList(final CardCollectionView cards,
+            final ZoneType destinationZone, final SpellAbility source) {
+        if (!bridged() || cards == null || cards.size() < 2) {
+            return super.orderMoveToZoneList(cards, destinationZone, source);
+        }
+        final JsonObject body = envelope(true);
+        body.addProperty("destination", destinationZone == null ? "" : destinationZone.name());
+        body.addProperty("count", cards.size());
+        /*
+         * `PlayerController.orderedMoveToTopOfLibrary` — a deck destination whose
+         * `LibraryPosition`/`RevealedLibraryPosition` is non-negative (or absent).
+         * True means the list the host sends back is walked onto the TOP one card
+         * at a time, so its LAST entry is the one drawn first.
+         */
+        body.addProperty("topFirst", destinationZone != null
+                && orderedMoveToTopOfLibrary(destinationZone, source));
+        body.add("menu", StateEncoder.encodeCards(cards));
+        if (source != null) {
+            body.add("ability", StateEncoder.encodeSpellAbility(source));
+        }
+        final JsonObject ans = ask("orderMoveToZoneList", "orderZone", body);
+        if (ans == null) {
+            return super.orderMoveToZoneList(cards, destinationZone, source);
+        }
+        final List<Integer> ids = optIntList(ans, "choices");
+        if (ids == null) {
+            refuse("orderMoveToZoneList", "missing/!array 'choices'");
+            return super.orderMoveToZoneList(cards, destinationZone, source);
+        }
+        if (ids.size() != cards.size()) {
+            refuse("orderMoveToZoneList", "ordered " + ids.size() + " of " + cards.size());
+            return super.orderMoveToZoneList(cards, destinationZone, source);
+        }
+        final CardCollection ordered = new CardCollection();
+        for (int fid : ids) {
+            Card found = null;
+            for (Card c : cards) {
+                if (c != null && c.getId() == fid) {
+                    found = c;
+                    break;
+                }
+            }
+            if (found == null || ordered.contains(found)) {
+                refuse("orderMoveToZoneList", "unknown/duplicate card id " + fid);
+                return super.orderMoveToZoneList(cards, destinationZone, source);
+            }
+            ordered.add(found);
+        }
+        return ordered;
     }
 
     @Override

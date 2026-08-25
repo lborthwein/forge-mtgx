@@ -1343,6 +1343,83 @@ retry cannot reveal twice.
 **Additive.** A pre-2.17 host has never heard of the kind, answers nothing, and the JVM
 delegates — which is what it did for every one of those 1,072 calls before this change.
 
+## Protocol v2.18 — the two remaining wire clamps
+
+Two independent additions, each additive and each declinable. They are in one minor because
+they are one finding: **the bridge decided, silently and in two different places, that a
+decision was not worth publishing.**
+
+### `orderZone` — the ORDER half of the pile
+
+`PlayerController.orderMoveToZoneList` was `count(); return super.…`, the same shape one
+method along from v2.17's pair, at **495 calls per 288 games**. It is the controller entry
+point for `RearrangeTopOfLibraryEffect`, for `DigEffect`'s remainder, for
+`ChangeZoneAllEffect`, for `ChangeZoneEffect`'s own `chosenCards` ordering, and for
+`GameActionUtil.orderCardsByTheirOwners`.
+
+**Doomsday's `SVar:DBDig` is a `RearrangeTopOfLibrary`.** So after v2.17 the host chose
+WHICH five cards and Forge's scry heuristic still chose in WHAT ORDER they were stacked —
+which for a five-card library is the whole plan.
+
+```
+{"type":"ask","id":58,"kind":"orderZone","protocolMinor":18,
+ "game":"g3","seat":0,"state":{…},
+ "destination":"Library","count":5,"topFirst":true,
+ "menu":[{"fid":312,"name":"Gush",…},…],
+ "ability":{…}}
+```
+
+Answer form is `{"choices":[fid,…]}` and it must be a **PERMUTATION of the menu** — every
+card exactly once, nothing added and nothing dropped. A wrong arity, a duplicate or an
+unknown id is `refuse`d and the call falls back to `super`, which is pre-2.18 behaviour
+exactly. A `null` answer delegates, as does an unbridged session and any list shorter than
+two.
+
+**The order on the wire is MOVE ORDER and the bridge transforms nothing.**
+`orderMoveToZoneList`'s own javadoc: *"The cards will be returned in the order that they
+should be moved, one at a time, to the given zone and position. Be aware that when moving
+cards to the top of a deck, this will be the reverse of the order they will ultimately end
+up in."* `RearrangeTopOfLibraryEffect` walks the returned list calling
+`moveToLibrary(next, 0)`, so the LAST element is the card drawn first.
+
+`PlayerController.orderedMoveToTopOfLibrary(destinationZone, source)` is the predicate that
+says when that reversal applies — a deck destination whose `LibraryPosition` /
+`RevealedLibraryPosition` is non-negative or absent — and it is published as **`topFirst`**
+rather than applied here. Both of Forge's own controllers build a top-first list and
+reverse at that gate (`PlayerControllerHuman` after its user has ordered,
+`PlayerControllerAi` after its scry sort). Publishing the fact instead of applying it keeps
+exactly one reversal in the system, on the side that holds the pile. A bridge that also
+reversed would look identical in the wire log and be wrong in the game.
+
+### `manaAbilities` — a parallel channel on the `priority` body
+
+`legalSpellAbilities` skips every `sa.isManaAbility()`, deliberately and correctly: Forge
+plays those during cost payment, and offering them at priority invites a non-terminating
+loop. The host, however, builds `CardView.abilities` **out of that menu**, so on this bench
+a permanent's mana abilities are not in its ability list at all. Measured host-side over one
+384-game corpus: `isManaAbility` appears **57,053 times on the wire and is `false` every
+time**, and **0 of 118,481** menu options is a mana ability. Grim Monolith published exactly
+one ability — `"{4}: Untap this artifact."` — and never the `"{T}: Add {C}{C}{C}"` that
+makes the loop.
+
+```
+"manaAbilities":[{"fid":118,"source":"Grim Monolith","api":"Mana",
+                  "isManaAbility":true,"payCosts":"T",
+                  "description":"{T}: Add {C}{C}{C}.", …}, …]
+```
+
+`encodeSpellAbility` entries, the same encoding the menu uses, for every card the bridged
+seat controls whose `getManaAbilities()` is non-empty. **`menu` is byte-identical to
+v2.17** — this is beside it, not inside it — so every index a host answers with means what
+it always meant, and a host that ignores the key cannot behave differently. Scope is our own
+battlefield (the reader this exists for walks our permanents, and enumerating the
+opponent's would publish hidden information for nobody). `setActivatingPlayer` is not
+called: this is a read of the card, not a preparation of an ability. A per-card enumeration
+failure is swallowed, so the array is shorter and never wrong.
+
+**Additive on both counts.** A pre-2.18 host sees an unknown kind it never answers (the JVM
+delegates) and an unknown key it never reads.
+
 ## Hidden information
 
 `StateEncoder` filters every card through `CardView.canBeShownTo(PlayerView)`. Libraries
