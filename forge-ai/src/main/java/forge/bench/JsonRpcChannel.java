@@ -129,9 +129,34 @@ public final class JsonRpcChannel {
      *       byte-identical to v2.15 on every observation that carried it, so a 2.15 host
      *       reading a 2.16 stream is unaffected. See
      *       {@code StateEncoder.encodeProducedMana}.</li>
+     *   <li><b>17</b> — <i>a new ask kind, {@code zoneChange}, and it is the first one
+     *       added since v2.0 rather than a new field on an existing one.</i>
+     *       {@code PlayerControllerBridge.chooseSingleCardForZoneChange} and
+     *       {@code chooseCardsForZoneChange} were {@code count(); return super....} —
+     *       counted and handed to Forge's own AI with no wire ask at all. The counter
+     *       reads <b>1,072 per 384 games</b>, so a thousand library searches a bench were
+     *       decided by {@code ChangeZoneAi} while the bridged seat watched, Doomsday's
+     *       five-card pile among them. Both now take the {@code chooseCardsForEffect}
+     *       shape: a {@code bridged()} guard, one {@code zoneChange} round trip, and a
+     *       {@code null} answer meaning <i>delegate</i>, so every path the host declines
+     *       is byte-identical to the old behaviour.
+     *       <br>The ask body is {@code cardsChoice}'s ({@code title}, {@code min},
+     *       {@code max}, {@code menu}, {@code ability}) plus five fields a host cannot
+     *       infer: {@code destination} and {@code origin[]} (zone names — a fetch to hand,
+     *       to the battlefield, to the graveyard and to the library are four different
+     *       decisions and the prompt text does not reliably say which); {@code changeNum}
+     *       and {@code chosen} (a multi-card search reaches an <b>AI</b> controller as N
+     *       SEQUENTIAL single-card asks off a shrinking {@code fetchList} — see
+     *       {@code ChangeZoneEffect.allowMultiSelect}, which requires
+     *       {@code !decider.getController().isAI()} — so without the index the host
+     *       re-derives a different pile at every pick); and {@code optional}/{@code single}
+     *       (which method is asking, and whether declining is legal).
+     *       <br>Additive: a pre-2.17 host has never seen the kind, answers nothing, and
+     *       the JVM delegates exactly as it did before. See
+     *       {@code PlayerControllerBridge.askForZoneChange}.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 16;
+    public static final int PROTOCOL_MINOR = 17;
 
     private final BufferedReader in;
     private final PrintStream out;

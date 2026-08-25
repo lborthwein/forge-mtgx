@@ -1,6 +1,6 @@
 # forge.bench — wire protocol implementation notes
 
-**Current version: 2** (`hello.protocol`), minor **16** (`hello.protocolMinor`). v2 is strictly additive over v1 — a v1 host
+**Current version: 2** (`hello.protocol`), minor **17** (`hello.protocolMinor`). v2 is strictly additive over v1 — a v1 host
 reading a v2 stream sees only fields it does not know about, plus one new message type
 (`decklist`) and one informational message (`seats`), both of which an unknown-`type`
 skipper already ignores. See "Protocol v2" below for what was added and why.
@@ -1293,6 +1293,55 @@ those menus are homogeneous and the host wants to name cards, not positions.
 7. **Answers arriving for a stale id are discarded with a stderr log**, and EOF on stdin
    latches the channel closed — from then on every decision delegates to Forge's AI rather
    than deadlocking.
+
+## Protocol v2.17 — the zone-change asks reach the host at last
+
+`PlayerControllerBridge.chooseSingleCardForZoneChange` and `chooseCardsForZoneChange` were
+`count(); return super.…` — **counted and delegated unconditionally**. The counter is in
+every bench manifest and reads **`chooseSingleCardForZoneChange: 1072` per 384 games**
+against `chooseCardsForZoneChange: 0`, so roughly a thousand library searches a bench were
+decided by `ChangeZoneAi` while the bridged seat watched: every tutor, every fetchland, and
+**every Doomsday pile** (`Origin$ Graveyard,Library | ChangeNum$ 5`).
+
+Both now take the `chooseCardsForEffect` shape — `bridged()` guard, one round trip, `null`
+meaning *delegate* — behind a **new ask kind, `zoneChange`**, the first new kind since v2.0.
+
+```
+{"type":"ask","id":41,"kind":"zoneChange","protocolMinor":17,
+ "game":"g3","seat":0,"state":{…},
+ "title":"Select a card from your graveyard and library (2 / 5)",
+ "min":1,"max":1,
+ "destination":"Library","origin":["Graveyard","Library"],
+ "changeNum":5,"chosen":1,"optional":false,"single":true,
+ "menu":[{"fid":312,"name":"Gush",…},…],
+ "ability":{…}}
+```
+
+Answer form is `cardsChoice`'s: `{"choices":[fid,…]}`, **Forge card ids, not menu
+indices**, validated against `[min,max]` and against the fetch list before anything moves.
+An out-of-range count, an unknown id or a duplicate is `refuse`d and the call falls back to
+`super`, which is the pre-2.17 behaviour exactly.
+
+Five fields beyond `cardsChoice`, each because the host cannot infer it:
+
+| field | why it is on the wire |
+|---|---|
+| `destination`, `origin[]` | a fetch to HAND, to the BATTLEFIELD, to the GRAVEYARD and to the LIBRARY are four different decisions, and the printed `selectPrompt` does not reliably distinguish them |
+| `changeNum`, `chosen` | `ChangeZoneEffect.allowMultiSelect` requires `!decider.getController().isAI()`, and this controller extends `PlayerControllerAi`. **So a five-card pile arrives as FIVE SEQUENTIAL SINGLE-CARD ASKS** off a `fetchList` one card shorter each time. Without the index a host re-derives a different pile at every pick. `chosen` is counted JVM-side against `SpellAbility` identity because the effect's loop is the only place the index exists |
+| `optional`, `single` | `isOptional` is `!mandatory` at the call site and is what makes `min` 0; `single` says which of the two methods is asking (one card, or a `[min,max]` unordered set) |
+
+`chooseCardsForZoneChange` is bridged although **it has never once been called on this
+bench** — `allowMultiSelect`'s AI test excludes it, and `PlayerControllerAi`'s own body is
+`return null` under the comment *"this isn't used"*. Its ceiling check is load-bearing all
+the same: the caller loops `while (selectedCards != null && selectedCards.size() >
+changeNum)`, so an over-long answer would be an infinite loop rather than a refusal.
+
+`delayedReveal` is honoured on the bridged path exactly as `super` does (AI card memory is
+written whichever side answers), and the fallback call passes `null` for it so a delegated
+retry cannot reveal twice.
+
+**Additive.** A pre-2.17 host has never heard of the kind, answers nothing, and the JVM
+delegates — which is what it did for every one of those 1,072 calls before this change.
 
 ## Hidden information
 
