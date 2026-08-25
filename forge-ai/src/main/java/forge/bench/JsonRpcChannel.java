@@ -208,9 +208,29 @@ public final class JsonRpcChannel {
      *       per card and the key is simply shorter, never wrong.
      *       <br>Additive on both counts: a pre-2.18 host sees an unknown kind it never
      *       answers (the JVM delegates) and an unknown key it never reads.</li>
+     *   <li><b>v2.19 — {@code spellsCastThisTurn} on every player state.</b>
+     *       The STORM COUNT, and its absence was never noticed because nothing on the
+     *       wire was wrong: {@code decodeState} builds its view off
+     *       {@code emptyTableView}, whose {@code spellsCast} is {@code [0, 0]}, and no
+     *       field ever overwrote it. So the bridged pilot read a structural zero on
+     *       <b>every bench frame ever recorded</b> — {@code planner.ts}'s copy count
+     *       ({@code 1 + spellsCast[seat]}), {@code heuristic.ts}'s storm payoff and
+     *       {@code turnSpend.ts}'s {@code theirSpellsCast} all priced a storm of zero
+     *       while the game had a storm.
+     *       <br><b>Not derivable host-side, which is why it is a wire field.</b> The
+     *       bridge publishes no {@code log}, so {@code TableView.log} is empty and the
+     *       native reading has nothing to count; and the ask stream shows a seat only
+     *       its OWN questions, so the opponent's casts are invisible between our asks
+     *       even in principle. {@code Player.getSpellsCastThisTurn()} is the engine's
+     *       own count — the one CR 702.40a (storm) reads — filtered to the activating
+     *       player, and it resets at the turn boundary exactly as
+     *       {@code state.spellsCastThisTurn} does natively.
+     *       <br>Additive: one integer on the player object, no menu change, no ask kind.
+     *       A pre-2.19 host never reads the key; a post-2.19 host reading a pre-2.19 jar
+     *       finds it absent and keeps the structural zero it always had.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 18;
+    public static final int PROTOCOL_MINOR = 19;
 
     private final BufferedReader in;
     private final PrintStream out;

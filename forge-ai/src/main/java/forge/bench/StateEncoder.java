@@ -112,6 +112,18 @@ public final class StateEncoder {
         o.addProperty("maxLandPlaysInfinite", p.getMaxLandPlaysInfinite());
         o.addProperty("librarySize", p.getCardsIn(ZoneType.Library).size());
         o.addProperty("handSize", p.getCardsIn(ZoneType.Hand).size());
+        // Protocol v2.19: the STORM COUNT for this player, this turn.
+        //
+        // `decodeState` builds its TableView off `emptyTableView`, whose `spellsCast` is
+        // [0, 0], and no wire field ever overwrote it -- so every bridged frame ever
+        // recorded showed the pilot a storm count of zero. Not derivable host-side: the
+        // bridge publishes no game log for `TableView.log` to count, and an ask shows a
+        // seat only its own questions, so the OPPONENT's casts are invisible between our
+        // asks even in principle. `getSpellsCastThisTurn()` is the engine's own count --
+        // the stack's spells-cast-this-turn list filtered to this activating player,
+        // which is what CR 702.40a (storm) itself reads -- and it resets at the turn
+        // boundary the same way the native `spellsCastThisTurn` does.
+        o.addProperty("spellsCastThisTurn", p.getSpellsCastThisTurn());
         o.add("manaPool", encodeManaPool(p.getManaPool()));
 
         o.add("hand", encodeZone(p, ZoneType.Hand, viewer));
