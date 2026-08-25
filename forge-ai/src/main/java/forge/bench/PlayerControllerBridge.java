@@ -31,6 +31,7 @@ import forge.deck.Deck;
 import forge.deck.DeckSection;
 import forge.game.*;
 import forge.game.GameActionUtil;
+import forge.game.ability.AbilityUtils;
 import forge.game.ability.effects.RollDiceEffect;
 import forge.game.card.*;
 import forge.game.combat.Combat;
@@ -97,6 +98,14 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * the kicked variant is added alongside it as its own menu entry.
      */
     private boolean buildingMenu = false;
+
+    /**
+     * The `ChangeZone` resolution currently walking its one-at-a-time loop, and how many
+     * cards it has taken. See `zoneChangeProgress` — v2.17's `chosen` field exists because
+     * a five-card pile reaches this controller as five separate single-card asks.
+     */
+    private SpellAbility zoneChangeRun = null;
+    private int zoneChangeChosen = 0;
 
     public PlayerControllerBridge(final Game game, final Player p, final LobbyPlayer lp,
             final BenchSession session, final BenchSession.Mode mode, final int seat,
@@ -2029,10 +2038,195 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     public String chooseCardName(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) { count("chooseCardName"); return super.chooseCardName(sa, cpp, valid, message); }
     @Override
     public String chooseCardName(SpellAbility sa, List<ICardFace> faces, String message) { count("chooseCardName"); return super.chooseCardName(sa, faces, message); }
+    /*
+     * ---------------------------------------------------------------------
+     * THE ZONE-CHANGE ASKS — v2.17, and until this they were COUNTED AND
+     * HANDED TO FORGE'S OWN AI.
+     * ---------------------------------------------------------------------
+     * Both methods below used to read `count(); return super....`. The counter
+     * is in every manifest the campaign has ever written and it says
+     * `chooseSingleCardForZoneChange: 1072` per 384 games — a thousand library
+     * searches a bench, every one of them decided by `brains
+     * .chooseCardToHiddenOriginChangeZone` while the host's pilot watched. See
+     * `docs/qa/losing-lines/recon/archetype-bench-0825.md` §5.4 (mtgx): our
+     * pilot cast Doomsday 135 times on that corpus and never once chose the
+     * five, because Doomsday is `ChangeZone | Origin$ Graveyard,Library |
+     * ChangeNum$ 5` and every one of its picks came through here.
+     *
+     * THE SHAPE IS `chooseCardsForEffect`'S — a `bridged()` guard, one
+     * `askForCards`-style round trip, and `null` meaning *delegate*, so the
+     * fallback is byte-identical to the old behaviour on every path the host
+     * cannot answer. Three things are new and all three are on the wire rather
+     * than inferred by the host:
+     *
+     *  · `destination` / `origin` — a fetch to HAND, to the BATTLEFIELD, to the
+     *    GRAVEYARD and to the LIBRARY are four different decisions and the
+     *    printed prompt does not reliably say which.
+     *  · `changeNum` / `chosen` — `ChangeZoneEffect` only takes its multi-select
+     *    branch when `!decider.getController().isAI()`, and this controller
+     *    extends `PlayerControllerAi`, so a five-card pile arrives here as FIVE
+     *    SEQUENTIAL SINGLE-CARD ASKS off a shrinking `fetchList`. A host that
+     *    cannot tell pick 1 from pick 4 re-derives a different pile at every
+     *    one of them. `chosen` is counted here, against `sa` identity, because
+     *    the effect's loop is the only place the index exists and it is not a
+     *    parameter.
+     *  · `optional` — `isOptional` is `!mandatory` at the call site and it is
+     *    what makes `min` 0 rather than 1.
+     *
+     * `delayedReveal` is honoured on the bridged path exactly as `super` does
+     * (`PlayerControllerAi` calls `reveal(delayedReveal)` before deciding), so
+     * the AI card memory is written whichever side answers.
+     */
     @Override
-    public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional, Player decider) { count("chooseSingleCardForZoneChange"); return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider); }
+    public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+            CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
+            Player decider) {
+        count("chooseSingleCardForZoneChange");
+        if (!bridged() || decider != getPlayer() || fetchList == null || fetchList.isEmpty()) {
+            return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
+                    selectPrompt, isOptional, decider);
+        }
+        final int changeNum = zoneChangeNum(sa);
+        final int chosen = zoneChangeProgress(sa, changeNum);
+        if (delayedReveal != null) {
+            reveal(delayedReveal);
+        }
+        final CardCollection picked = askForZoneChange("chooseSingleCardForZoneChange", destination, origin,
+                sa, fetchList, isOptional ? 0 : 1, 1, selectPrompt, changeNum, chosen, true);
+        if (picked == null) {
+            return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, null,
+                    selectPrompt, isOptional, decider);
+        }
+        if (picked.isEmpty()) {
+            return null; // a legal answer when `isOptional`; `min` refused it otherwise
+        }
+        zoneChangeChosen++;
+        return picked.get(0);
+    }
+
     @Override
-    public List<Card> chooseCardsForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, int min, int max, DelayedReveal delayedReveal, String selectPrompt, Player decider) { count("chooseCardsForZoneChange"); return super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max, delayedReveal, selectPrompt, decider); }
+    public List<Card> chooseCardsForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+            CardCollection fetchList, int min, int max, DelayedReveal delayedReveal, String selectPrompt,
+            Player decider) {
+        count("chooseCardsForZoneChange");
+        /*
+         * UNORDERED, and unlike its sibling it has NEVER been called on this
+         * bench: `ChangeZoneEffect.allowMultiSelect` requires
+         * `!decider.getController().isAI()` and this controller is an AI one,
+         * so the counter reads 0 in 384 games. `PlayerControllerAi`'s own body
+         * is `return null` under the comment "this isn't used". It is bridged
+         * anyway — the caller loops `while (selectedCards != null &&
+         * selectedCards.size() > changeNum)`, so an over-long answer is an
+         * infinite loop rather than a refusal, and `askForZoneChange` enforces
+         * the ceiling before it can happen.
+         */
+        if (!bridged() || decider != getPlayer() || fetchList == null || fetchList.isEmpty()) {
+            return super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max,
+                    delayedReveal, selectPrompt, decider);
+        }
+        if (delayedReveal != null) {
+            reveal(delayedReveal);
+        }
+        final int lo = Math.max(0, min);
+        final int hi = Math.max(lo, max);
+        final CardCollection picked = askForZoneChange("chooseCardsForZoneChange", destination, origin, sa,
+                fetchList, lo, hi, selectPrompt, hi, 0, false);
+        if (picked == null) {
+            return super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max, null,
+                    selectPrompt, decider);
+        }
+        return picked;
+    }
+
+    /**
+     * `ChangeNum`, evaluated — how many cards this whole resolution will take.
+     *
+     * The host needs it to size a pile, and it is not a parameter of either
+     * method: the effect reads it once and then loops. `1` where the ability
+     * does not print one, and where evaluating it throws (a `Count$` SVar that
+     * needs a context this call does not have).
+     */
+    private int zoneChangeNum(final SpellAbility sa) {
+        if (sa == null || !sa.hasParam("ChangeNum")) {
+            return 1;
+        }
+        try {
+            return Math.max(1, AbilityUtils.calculateAmount(sa.getHostCard(), sa.getParam("ChangeNum"), sa));
+        } catch (RuntimeException e) {
+            return 1;
+        }
+    }
+
+    /**
+     * How many cards this resolution has already taken, by `sa` IDENTITY.
+     *
+     * `ChangeZoneEffect`'s one-at-a-time loop calls this method `changeNum`
+     * times with the same `SpellAbility` object and a `fetchList` one card
+     * shorter each time. Nothing else can interleave — the loop is synchronous
+     * inside one resolution — so object identity plus a bound at `changeNum` is
+     * the whole state. A second resolution of the same object (a copied spell)
+     * re-enters at 0 because the previous run reached its bound.
+     */
+    private int zoneChangeProgress(final SpellAbility sa, final int changeNum) {
+        if (sa != zoneChangeRun || zoneChangeChosen >= changeNum) {
+            zoneChangeRun = sa;
+            zoneChangeChosen = 0;
+        }
+        return zoneChangeChosen;
+    }
+
+    /** Shared {@code zoneChange} round trip. Returns null to mean "delegate". */
+    private CardCollection askForZoneChange(final String method, final ZoneType destination,
+            final List<ZoneType> origin, final SpellAbility sa, final CardCollection fetchList,
+            final int min, final int max, final String title, final int changeNum, final int chosen,
+            final boolean single) {
+        final JsonObject body = envelope(true);
+        body.addProperty("title", String.valueOf(title));
+        body.addProperty("min", min);
+        body.addProperty("max", max);
+        body.addProperty("destination", destination == null ? "" : destination.name());
+        final JsonArray zones = new JsonArray();
+        if (origin != null) {
+            for (ZoneType z : origin) {
+                if (z != null) {
+                    zones.add(z.name());
+                }
+            }
+        }
+        body.add("origin", zones);
+        body.addProperty("changeNum", changeNum);
+        body.addProperty("chosen", chosen);
+        body.addProperty("optional", min == 0);
+        body.addProperty("single", single);
+        body.add("menu", StateEncoder.encodeCards(fetchList));
+        if (sa != null) {
+            body.add("ability", StateEncoder.encodeSpellAbility(sa));
+        }
+        final JsonObject ans = ask(method, "zoneChange", body);
+        if (ans == null) {
+            return null;
+        }
+        final List<Integer> ids = optIntList(ans, "choices");
+        if (ids == null) {
+            refuse(method, "missing/!array 'choices'");
+            return null;
+        }
+        if (ids.size() < min || ids.size() > max) {
+            refuse(method, "chose " + ids.size() + " outside [" + min + "," + max + "]");
+            return null;
+        }
+        final CardCollection picked = new CardCollection();
+        for (int fid : ids) {
+            final Card c = findCard(fetchList, fid);
+            if (c == null || picked.contains(c)) {
+                refuse(method, "unknown/duplicate card id " + fid);
+                return null;
+            }
+            picked.add(c);
+        }
+        return picked;
+    }
+
     @Override
     public void autoPassCancel() { count("autoPassCancel"); super.autoPassCancel(); }
     @Override
