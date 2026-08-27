@@ -167,14 +167,343 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     /**
      * Send an ask and return the answer, or null when the host asked to delegate
      * (which is counted, not an error).
+     *
+     * <p>On the delegate branch this also arms {@link #pendingEcho}. See the ECHO block
+     * below for why the arming and the reading are two steps.
      */
     private JsonObject ask(final String method, final String kind, final JsonObject body) {
         final JsonObject ans = session.getChannel().ask(kind, body);
         if (ans == null || (ans.has("delegate") && ans.get("delegate").getAsBoolean())) {
             counters.delegateRequested(method);
+            final Integer id = optInt(ans, "id");
+            pendingEcho = new Echo(id == null ? -1 : id, kind, method);
             return null;
         }
+        pendingEcho = null;
         return ans;
+    }
+
+    /*
+     * =======================================================================
+     * THE ECHO — v2.20, AND IT IS THE FIRST THING ON THIS WIRE THAT REPORTS
+     * WHAT HAPPENED RATHER THAN WHAT IS TRUE.
+     * =======================================================================
+     * `{"delegate": true}` was WRITE-ONLY. The host declined, `super....` ran,
+     * Forge's AI decided, the game moved on and nothing said what it had picked.
+     * `ResultMessage.delegationCounts` is per-METHOD counts — `calls`,
+     * `delegatedRequested`, `delegatedRefused` — and a count is not a choice. So
+     * the host's `MTGX_FORGEDELEG` instrument could price a delegated kind by
+     * WIN RATE and could record its own counterfactual answer (the shadow arm),
+     * and the one column it could never fill was the one the behaviour-clone
+     * lane is built on: `forgeAction`, the imitation TARGET, empty on 100% of
+     * rows because the target was never on the wire.
+     *
+     * WHAT IS SENT, AND THE ONE RULE THAT MAKES IT USEFUL. One fire-and-forget
+     * `delegated` line per declined ask, carrying the ask's own `id` and Forge's
+     * decision IN THE SHAPE THAT ASK'S OWN ANSWER WOULD HAVE TAKEN. Not a new
+     * vocabulary — the host already encodes `{"choice": n}`, `{"pairs": [...]}`,
+     * `{"choices": [fid, ...]}` for every one of the eighteen kinds and already
+     * owns a decoder and an action-space grammar for them. An echo in a second
+     * shape would need a second grammar, and a second grammar is one that can
+     * drift from the first without either side going red.
+     *
+     * ONLY ON A DELEGATION, NEVER ON A REFUSAL. Every handler below also calls
+     * `super....` after `refuse(...)` — a fallback taken because OUR answer was
+     * unusable. Forge decides there too, and echoing it would be easy and wrong:
+     * a refusal is a defect in the host's encoding, so its outcome is our bug's
+     * consequence rather than Forge's judgement, and folding the two together
+     * would put our own encoding failures into a teacher corpus labelled
+     * "what Forge would do". `pendingEcho` is armed only on the `{"delegate":
+     * true}` branch, which is exactly `MTGX_FORGEDELEG`'s population.
+     *
+     * WHY ARMING AND READING ARE TWO STEPS. `super....` RE-ENTERS this
+     * controller: `chooseSpellAbilityToPlay` reaches `chooseOptionalCosts`,
+     * targeting reaches `chooseTargetsFor`, and each of those runs its own ask
+     * and may arm its own echo. A single "last delegated id" field read AFTER
+     * the super call would report the innermost ask's id for the outermost
+     * decision. So every handler takes its token with `takeEcho()` BEFORE it
+     * calls super — the token is consumed, the nested asks arm and consume their
+     * own, and the ids can never cross.
+     */
+
+    /** One armed echo: the ask the host just declined. */
+    private static final class Echo {
+        final int id;
+        final String kind;
+        final String method;
+        Echo(final int id, final String kind, final String method) {
+            this.id = id;
+            this.kind = kind;
+            this.method = method;
+        }
+    }
+
+    /** Armed by {@link #ask} on the delegate branch; consumed by {@link #takeEcho}. */
+    private Echo pendingEcho = null;
+
+    /**
+     * Take the armed echo token. MUST be called before the {@code super....} that
+     * makes the decision, because that call re-enters this controller and arms
+     * echoes of its own.
+     */
+    private Echo takeEcho() {
+        final Echo e = pendingEcho;
+        pendingEcho = null;
+        return e;
+    }
+
+    /**
+     * Publish one delegated decision. Never throws: an echo that fails is a lost
+     * training row, and a lost training row must not be a lost game.
+     */
+    private void echo(final Echo e, final JsonObject answer) {
+        if (e == null || answer == null || session.getChannel().isClosed()) {
+            return;
+        }
+        try {
+            final JsonObject m = new JsonObject();
+            m.addProperty("type", "delegated");
+            m.addProperty("game", session.getGameId());
+            m.addProperty("seat", seat);
+            m.addProperty("id", e.id);
+            m.addProperty("kind", e.kind);
+            m.addProperty("method", e.method);
+            m.addProperty("protocolMinor", JsonRpcChannel.PROTOCOL_MINOR);
+            m.add("answer", answer);
+            session.getChannel().send(m);
+            counters.instrument("echo.sent." + e.kind);
+        } catch (RuntimeException ex) {
+            counters.instrument("echo.failed." + e.kind);
+            JsonRpcChannel.logErr("delegated echo failed for ask " + e.id + " (" + e.kind + ")", ex);
+        }
+    }
+
+    /** Fids in order, the primitive under every card-shaped echo. */
+    private static JsonArray fidArray(final Iterable<Card> cards) {
+        final JsonArray ids = new JsonArray();
+        if (cards != null) {
+            for (Card c : cards) {
+                if (c != null) {
+                    ids.add(c.getId());
+                }
+            }
+        }
+        return ids;
+    }
+
+    /** {@code {"choices": [fid, ...]}} — the cardsChoice / zoneChange / orderZone shape. */
+    private static JsonObject echoCards(final Iterable<Card> cards) {
+        final JsonObject o = new JsonObject();
+        o.add("choices", fidArray(cards));
+        return o;
+    }
+
+    /** {@code {"choices": [i, ...]}} — menu INDICES, for the index-answered kinds. */
+    private static <T> JsonObject echoIndices(final List<T> menu, final Iterable<T> picked) {
+        final JsonObject o = new JsonObject();
+        final JsonArray idx = new JsonArray();
+        if (picked != null && menu != null) {
+            for (T t : picked) {
+                final int i = indexOfIdentity(menu, t);
+                if (i >= 0) {
+                    idx.add(i);
+                }
+            }
+        }
+        o.add("choices", idx);
+        return o;
+    }
+
+    /** Object identity, not {@code equals}: two menu entries may compare equal and differ. */
+    private static <T> int indexOfIdentity(final List<T> menu, final T t) {
+        for (int i = 0; i < menu.size(); i++) {
+            if (menu.get(i) == t) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static JsonObject echoBool(final String key, final boolean v) {
+        final JsonObject o = new JsonObject();
+        o.addProperty(key, v);
+        return o;
+    }
+
+    private static JsonObject echoInt(final String key, final int v) {
+        final JsonObject o = new JsonObject();
+        o.addProperty(key, v);
+        return o;
+    }
+
+    /**
+     * A choice Forge made that this ask's menu cannot name. A null index and a stated
+     * {@code match}, never an out-of-range integer: a host decoding {@code -1} as an
+     * ordinal would train on a label pointing at nothing.
+     */
+    private static JsonObject unmatchedChoice() {
+        final JsonObject o = new JsonObject();
+        o.add("choice", com.google.gson.JsonNull.INSTANCE);
+        o.addProperty("match", "none");
+        return o;
+    }
+
+    /**
+     * The {@code priority} echo, and the only one that can fail to name an index.
+     *
+     * <p>{@code AiController.chooseSpellAbilityToPlay} enumerates its own abilities
+     * through {@code ComputerUtilAbility.getAvailableSpellAbilities}, independently of
+     * {@link #legalSpellAbilities}, and {@code getOriginalAndAltCostAbilities} hands back
+     * COPIES for alt-cost variants. So the object Forge returns is often not an object in
+     * the menu we published one message earlier. Identity is tried first because it is
+     * exact; the structural key (host card fid + API + description) is tried second
+     * because it is the same triple the host's own decoder keys on; and where neither
+     * lands the echo says {@code match: "none"} with a null {@code choice} rather than
+     * guessing an index. The full {@code sa} encoding rides along in every case, so an
+     * unmatched echo is still a usable label — it is a decision this menu could not name,
+     * which is a fact about the menu.
+     */
+    private static JsonObject echoPriority(final List<SpellAbility> menu, final List<SpellAbility> out) {
+        final JsonObject o = new JsonObject();
+        final SpellAbility sa = (out == null || out.isEmpty()) ? null : out.get(0);
+        if (sa == null) {
+            // Forge passed. Choice 0 is always pass; the menu index space agrees.
+            o.addProperty("choice", 0);
+            o.addProperty("match", "identity");
+            return o;
+        }
+        int at = indexOfIdentity(menu, sa);
+        String match = at >= 0 ? "identity" : null;
+        if (at < 0) {
+            final String key = saKey(sa);
+            for (int i = 0; i < menu.size(); i++) {
+                if (key.equals(saKey(menu.get(i)))) {
+                    at = i;
+                    match = "structural";
+                    break;
+                }
+            }
+        }
+        if (at >= 0) {
+            o.addProperty("choice", at + 1); // menu index 0 is pass
+            o.addProperty("match", match);
+        } else {
+            o.add("choice", com.google.gson.JsonNull.INSTANCE);
+            o.addProperty("match", "none");
+        }
+        o.add("sa", StateEncoder.encodeSpellAbility(sa));
+        try {
+            final int x = sa.getXManaCostPaid();
+            if (x > 0) {
+                o.addProperty("x", x);
+            }
+        } catch (RuntimeException e) {
+            // No announcement to report. Absent means here what it means on an
+            // answer we send ourselves: Forge's default of 0 stands.
+        }
+        return o;
+    }
+
+    /** Host card + API + description: what a structural match means, in one place. */
+    private static String saKey(final SpellAbility sa) {
+        if (sa == null) {
+            return "null";
+        }
+        String host = "?";
+        String api = "?";
+        String desc = "?";
+        try {
+            host = sa.getHostCard() == null ? "?" : String.valueOf(sa.getHostCard().getId());
+        } catch (RuntimeException e) { /* keep the sentinel */ }
+        try {
+            api = sa.getApi() == null ? "?" : sa.getApi().toString();
+        } catch (RuntimeException e) { /* keep the sentinel */ }
+        try {
+            desc = String.valueOf(sa.getDescription());
+        } catch (RuntimeException e) { /* keep the sentinel */ }
+        return host + "|" + api + "|" + desc;
+    }
+
+    /** {@code {"pairs": [[attackerFid, defenderRef], ...]}}, read off the declared combat. */
+    private static JsonObject echoAttackers(final Combat combat) {
+        final JsonObject o = new JsonObject();
+        final JsonArray pairs = new JsonArray();
+        try {
+            for (Card a : combat.getAttackers()) {
+                final GameEntity d = combat.getDefenderByAttacker(a);
+                if (d == null) {
+                    continue;
+                }
+                final JsonArray pr = new JsonArray();
+                pr.add(a.getId());
+                pr.add(StateEncoder.entityRef(d));
+                pairs.add(pr);
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("attacker echo enumeration failed", e);
+        }
+        o.add("pairs", pairs);
+        return o;
+    }
+
+    /** {@code {"pairs": [[blockerFid, attackerFid], ...]}}, read off the declared combat. */
+    private static JsonObject echoBlockers(final Combat combat) {
+        final JsonObject o = new JsonObject();
+        final JsonArray pairs = new JsonArray();
+        try {
+            for (Card a : combat.getAttackers()) {
+                for (Card b : combat.getBlockers(a)) {
+                    final JsonArray pr = new JsonArray();
+                    pr.add(b.getId());
+                    pr.add(a.getId());
+                    pairs.add(pr);
+                }
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("blocker echo enumeration failed", e);
+        }
+        o.add("pairs", pairs);
+        return o;
+    }
+
+    /**
+     * The {@code targets} echo: typed refs in the SAME flat space an answer uses, plus
+     * the divided allocation when there is one.
+     *
+     * <p>Read off {@code sa.getTargets()} after the delegated call, because that is where
+     * Forge's own per-API targeting puts them and there is no return value that carries
+     * them. {@code ok} is what {@code super.chooseTargetsFor} returned: a {@code false}
+     * with an empty {@code choices} is Forge declining to target at all, which is a
+     * decision and not a missing row.
+     */
+    private static JsonObject echoTargets(final SpellAbility sa, final boolean ok) {
+        final JsonObject o = new JsonObject();
+        o.addProperty("ok", ok);
+        final JsonArray choices = new JsonArray();
+        final JsonObject divide = new JsonObject();
+        boolean divided = false;
+        try {
+            divided = sa.isDividedAsYouChoose();
+            for (GameObject go : sa.getTargets()) {
+                final JsonObject ref = new JsonObject();
+                ref.addProperty("kind", kindOf(go));
+                ref.addProperty("id", idOf(go));
+                choices.add(ref);
+                if (divided) {
+                    final Integer n = sa.getDividedValue(go);
+                    if (n != null) {
+                        divide.addProperty(kindOf(go) + ":" + idOf(go), n);
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("target echo enumeration failed for " + sa, e);
+        }
+        o.add("choices", choices);
+        if (divided) {
+            o.add("divide", divide);
+        }
+        return o;
     }
 
     private void refuse(final String method, final String why) {
@@ -281,7 +610,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.add("manaAbilities", manaAbilityChannel());
         final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body);
         if (ans == null) {
-            return super.chooseSpellAbilityToPlay();
+            final Echo e = takeEcho();
+            final List<SpellAbility> out = super.chooseSpellAbilityToPlay();
+            echo(e, echoPriority(menu, out));
+            return out;
         }
         final Integer choice = optInt(ans, "choice");
         if (choice == null || choice < 0 || choice > menu.size()) {
@@ -728,7 +1060,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.addProperty("engineMax", max == Integer.MAX_VALUE ? -1 : max);
         final JsonObject ans = ask("chooseNumberForKeywordCost", "keywordCost", body);
         if (ans == null) {
-            return super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
+            final Echo e = takeEcho();
+            final int out = super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
+            echo(e, echoInt("value", out));
+            return out;
         }
         final Integer v = optInt(ans, "value");
         if (v == null || v < 0 || v > ceiling) {
@@ -772,7 +1107,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.add("menu", menu);
         final JsonObject ans = ask("chooseOptionalCosts", "optionalCosts", body);
         if (ans == null) {
-            return super.chooseOptionalCosts(chosen, optionalCostValues);
+            final Echo e = takeEcho();
+            final List<OptionalCostValue> out = super.chooseOptionalCosts(chosen, optionalCostValues);
+            echo(e, echoIndices(optionalCostValues, out));
+            return out;
         }
         final List<Integer> idx = optIntList(ans, "choices");
         if (idx == null) {
@@ -911,7 +1249,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
         final JsonObject ans = ask("declareAttackers", "attackers", body);
         if (ans == null) {
+            final Echo e = takeEcho();
             super.declareAttackers(attacker, combat);
+            // The declaration is the return value here; `combat` IS the answer.
+            echo(e, echoAttackers(combat));
             return;
         }
         if (!ans.has("pairs") || !ans.get("pairs").isJsonArray()) {
@@ -1098,7 +1439,9 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
         final JsonObject ans = ask("declareBlockers", "blockers", body);
         if (ans == null) {
+            final Echo e = takeEcho();
             super.declareBlockers(defender, combat);
+            echo(e, echoBlockers(combat));
             return;
         }
         final List<int[]> pairs = optPairs(ans, "pairs");
@@ -1167,7 +1510,11 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.addProperty("firstGame", isFirstGame);
         final JsonObject ans = ask("chooseStartingPlayer", "startingPlayer", body);
         if (ans == null) {
-            return super.chooseStartingPlayer(isFirstGame);
+            final Echo e = takeEcho();
+            final Player out = super.chooseStartingPlayer(isFirstGame);
+            // `play` is the answer field; Forge returns the player who goes first.
+            echo(e, echoBool("play", out == getPlayer()));
+            return out;
         }
         final Boolean play = optBool(ans, "play");
         if (play == null) {
@@ -1207,7 +1554,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final CardCollection picked = askForCards("tuckCardsViaMulligan", hand,
                 cardsToReturn, cardsToReturn, "put on the bottom (London mulligan)", null);
         if (picked == null) {
-            return super.tuckCardsViaMulligan(hand, cardsToReturn);
+            // `takeEcho()` is null on the REFUSAL branch of `askForCards` — `ask` clears
+            // the token whenever the host actually answered — so the echo fires only on a
+            // delegation, exactly as the ECHO block prescribes.
+            final Echo e = takeEcho();
+            final CardCollectionView out = super.tuckCardsViaMulligan(hand, cardsToReturn);
+            echo(e, echoCards(out));
+            return out;
         }
         return picked;
     }
@@ -1223,7 +1576,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.add("hand", StateEncoder.encodeCards(getPlayer().getCardsIn(ZoneType.Hand)));
         final JsonObject ans = ask("mulliganKeepHand", "mulligan", body);
         if (ans == null) {
-            return super.mulliganKeepHand(p, cardsToReturn);
+            final Echo e = takeEcho();
+            final boolean out = super.mulliganKeepHand(p, cardsToReturn);
+            echo(e, echoBool("keep", out));
+            return out;
         }
         Boolean keep = optBool(ans, "keep");
         if (keep == null) {
@@ -1247,7 +1603,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final CardCollection picked = askForCards("chooseCardsToDiscardToMaximumHandSize", hand,
                 numDiscard, numDiscard, "discard to maximum hand size", null);
         if (picked == null) {
-            return super.chooseCardsToDiscardToMaximumHandSize(numDiscard);
+            final Echo e = takeEcho();
+            final CardCollectionView out = super.chooseCardsToDiscardToMaximumHandSize(numDiscard);
+            echo(e, echoCards(out));
+            return out;
         }
         return picked;
     }
@@ -1261,7 +1620,11 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final CardCollection picked = askForCards("choosePermanentsToSacrifice", validTargets, min, max, message, sa);
         if (picked == null) {
-            return super.choosePermanentsToSacrifice(sa, min, max, validTargets, message);
+            final Echo e = takeEcho();
+            final CardCollectionView out =
+                    super.choosePermanentsToSacrifice(sa, min, max, validTargets, message);
+            echo(e, echoCards(out));
+            return out;
         }
         return picked;
     }
@@ -1277,7 +1640,11 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final CardCollection picked = askForCards("chooseCardsForEffect", sourceList,
                 isOptional ? 0 : min, max, title, sa);
         if (picked == null) {
-            return super.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
+            final Echo e = takeEcho();
+            final CardCollectionView out =
+                    super.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
+            echo(e, echoCards(out));
+            return out;
         }
         return picked;
     }
@@ -1372,7 +1739,11 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
         final JsonObject ans = ask("chooseTargetsFor", "targets", body);
         if (ans == null) {
-            return super.chooseTargetsFor(currentAbility);
+            final Echo e = takeEcho();
+            final boolean out = super.chooseTargetsFor(currentAbility);
+            // The chosen targets are on the ability, not in the return value.
+            echo(e, echoTargets(currentAbility, out));
+            return out;
         }
         if (!ans.has("choices") || !ans.get("choices").isJsonArray()) {
             refuse("chooseTargetsFor", "missing/!array 'choices'");
@@ -1566,8 +1937,16 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final JsonObject ans = ask("chooseSingleEntityForEffect", "entityChoice", body);
         if (ans == null) {
-            return super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional,
-                    relatedPlayer, params);
+            final Echo e = takeEcho();
+            final T out = super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title,
+                    isOptional, relatedPlayer, params);
+            final int at = out == null ? -1 : indexOfIdentity(options, out);
+            // `none` is a legal answer only when the ask said `optional`; a non-null
+            // pick that is somehow not in the menu we published is reported as an
+            // unmatched choice rather than silently as index -1.
+            echo(e, out == null ? echoBool("none", true)
+                    : at >= 0 ? echoInt("choice", at) : unmatchedChoice());
+            return out;
         }
         if (isOptional && Boolean.TRUE.equals(optBool(ans, "none"))) {
             return null;
@@ -1601,8 +1980,11 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final JsonObject ans = ask("chooseEntitiesForEffect", "entityChoice", body);
         if (ans == null) {
-            return super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
-                    relatedPlayer, params);
+            final Echo e = takeEcho();
+            final List<T> out = super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa,
+                    title, relatedPlayer, params);
+            echo(e, echoIndices(options, out));
+            return out;
         }
         final List<Integer> idx = optIntList(ans, "choices");
         if (idx == null || idx.size() < min || idx.size() > max) {
@@ -1637,7 +2019,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final JsonObject ans = ask("chooseNumber", "number", body);
         if (ans == null) {
-            return super.chooseNumber(sa, title, min, max);
+            final Echo e = takeEcho();
+            final int out = super.chooseNumber(sa, title, min, max);
+            echo(e, echoInt("value", out));
+            return out;
         }
         final Integer v = optInt(ans, "value");
         if (v == null || v < min || v > max) {
@@ -1666,7 +2051,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final JsonObject ans = ask("chooseNumber", "number", body);
         if (ans == null) {
-            return super.chooseNumber(sa, title, values, relatedPlayer);
+            final Echo e = takeEcho();
+            final int out = super.chooseNumber(sa, title, values, relatedPlayer);
+            echo(e, echoInt("value", out));
+            return out;
         }
         final Integer v = optInt(ans, "value");
         if (v == null || !values.contains(v)) {
@@ -1703,7 +2091,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.add("menu", modes);
         final JsonObject ans = ask("chooseModeForAbility", "mode", body);
         if (ans == null) {
-            return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            final Echo e = takeEcho();
+            final List<AbilitySub> out = super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            // `possible` is the menu and the answer is its indices, repeats included:
+            // `indexOfIdentity` maps a repeated mode back to the same index, which is
+            // what an answer with `allowRepeat` would itself have sent.
+            echo(e, echoIndices(possible, out));
+            return out;
         }
         final List<Integer> idx = optIntList(ans, "choices");
         if (idx == null || idx.size() < min || idx.size() > num) {
@@ -1739,7 +2133,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final JsonObject ans = ask("confirmAction", "confirm", body);
         if (ans == null) {
-            return super.confirmAction(sa, mode0, message, options, cardToShow, params);
+            final Echo e = takeEcho();
+            final boolean out = super.confirmAction(sa, mode0, message, options, cardToShow, params);
+            echo(e, echoBool("yes", out));
+            return out;
         }
         final Boolean yes = optBool(ans, "yes");
         if (yes == null) {
@@ -1764,7 +2161,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final JsonObject ans = ask("chooseBinary", "confirm", body);
         if (ans == null) {
-            return super.chooseBinary(sa, question, kindOfChoice, defaultChoice);
+            final Echo e = takeEcho();
+            final boolean out = super.chooseBinary(sa, question, kindOfChoice, defaultChoice);
+            echo(e, echoBool("yes", out));
+            return out;
         }
         final Boolean yes = optBool(ans, "yes");
         if (yes == null) {
@@ -1784,7 +2184,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.add("menu", StateEncoder.encodeCards(topN));
         final JsonObject ans = ask("arrangeForScry", "scry", body);
         if (ans == null) {
-            return super.arrangeForScry(topN);
+            final Echo e = takeEcho();
+            final ImmutablePair<CardCollection, CardCollection> out = super.arrangeForScry(topN);
+            final JsonObject a = new JsonObject();
+            a.add("top", fidArray(out == null ? null : out.getLeft()));
+            a.add("bottom", fidArray(out == null ? null : out.getRight()));
+            echo(e, a);
+            return out;
         }
         final List<Integer> top = optIntList(ans, "top");
         final List<Integer> bottom = optIntList(ans, "bottom");
@@ -1824,7 +2230,16 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.add("menu", StateEncoder.encodeCards(blockers));
         final JsonObject ans = ask("orderBlockers", "orderBlockers", body);
         if (ans == null) {
-            return super.orderBlockers(attacker, blockers);
+            final Echo e = takeEcho();
+            final CardCollection out = super.orderBlockers(attacker, blockers);
+            // `orderBlockers` answers on `order`; `orderZone` answers on `choices`. The
+            // two ordering kinds are NOT uniform and the host's own signature reader
+            // says so — echoing the wrong key would publish an empty order for every
+            // damage-assignment ordering this instrument is pointed at.
+            final JsonObject a = new JsonObject();
+            a.add("order", fidArray(out));
+            echo(e, a);
+            return out;
         }
         final List<Integer> order = optIntList(ans, "order");
         if (order == null || order.size() != blockers.size()) {
@@ -1863,7 +2278,34 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.addProperty("allowExcessToDefender", defender != null);
         final JsonObject ans = ask("assignCombatDamage", "assignDamage", body);
         if (ans == null) {
-            return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
+            final Echo e = takeEcho();
+            final Map<Card, Integer> out = super.assignCombatDamage(attacker, blockers, remaining,
+                    damageDealt, defender, overrideOrder);
+            final JsonObject a = new JsonObject();
+            final JsonObject assign = new JsonObject();
+            if (out != null) {
+                for (Map.Entry<Card, Integer> en : out.entrySet()) {
+                    final int n = en.getValue() == null ? 0 : en.getValue();
+                    // ZERO ENTRIES ARE DROPPED, and that is canonicalisation rather than
+                    // loss. `Combat` treats a recipient absent from the map exactly as it
+                    // treats one assigned 0, the answer reader's own `total` sums the same
+                    // either way, and this side's `damage.droppedZeroExcess` instrument
+                    // already applies the rule to the `-1` slot. Keeping them would put
+                    // the echo in a shape the host's action grammar never emits, so an
+                    // imitation target and a policy's output would differ on a difference
+                    // that is not one — measured: 5 of 88 `assignDamage` echoes on the
+                    // 2026-08-27 smoke, every one of them an ask with `damage: 0`.
+                    if (n == 0) {
+                        continue;
+                    }
+                    // The null key is the excess-to-defender sentinel, and it is spelled
+                    // "-1" on the wire in both directions.
+                    assign.addProperty(en.getKey() == null ? "-1" : String.valueOf(en.getKey().getId()), n);
+                }
+            }
+            a.add("assign", assign);
+            echo(e, a);
+            return out;
         }
         if (!ans.has("assign") || !ans.get("assign").isJsonObject()) {
             refuse("assignCombatDamage", "missing 'assign' object");
@@ -2148,8 +2590,14 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final CardCollection picked = askForZoneChange("chooseSingleCardForZoneChange", destination, origin,
                 sa, fetchList, isOptional ? 0 : 1, 1, selectPrompt, changeNum, chosen, true);
         if (picked == null) {
-            return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, null,
-                    selectPrompt, isOptional, decider);
+            final Echo e = takeEcho();
+            final Card out = super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList,
+                    null, selectPrompt, isOptional, decider);
+            // Single-card ask, list-shaped answer: the host answers `choices` here even
+            // when `max` is 1, and declining is the empty list rather than a `none`.
+            echo(e, echoCards(out == null ? Collections.<Card>emptyList()
+                    : Collections.singletonList(out)));
+            return out;
         }
         if (picked.isEmpty()) {
             return null; // a legal answer when `isOptional`; `min` refused it otherwise
@@ -2186,8 +2634,14 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final CardCollection picked = askForZoneChange("chooseCardsForZoneChange", destination, origin, sa,
                 fetchList, lo, hi, selectPrompt, hi, 0, false);
         if (picked == null) {
-            return super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max, null,
-                    selectPrompt, decider);
+            final Echo e = takeEcho();
+            final List<Card> out = super.chooseCardsForZoneChange(destination, origin, sa, fetchList,
+                    min, max, null, selectPrompt, decider);
+            // `PlayerControllerAi`'s own body is `return null` under the comment "this
+            // isn't used", so an empty `choices` here is the honest echo of a method
+            // that decides nothing rather than a lost row.
+            echo(e, echoCards(out));
+            return out;
         }
         return picked;
     }
@@ -2344,7 +2798,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final JsonObject ans = ask("orderMoveToZoneList", "orderZone", body);
         if (ans == null) {
-            return super.orderMoveToZoneList(cards, destinationZone, source);
+            final Echo e = takeEcho();
+            final CardCollectionView out = super.orderMoveToZoneList(cards, destinationZone, source);
+            // MOVE ORDER, untransformed, exactly as an answer would be. The `topFirst`
+            // flip is the host's and stays the host's; echoing a reversed list would put
+            // the flip in two places and make one of them wrong.
+            echo(e, echoCards(out));
+            return out;
         }
         final List<Integer> ids = optIntList(ans, "choices");
         if (ids == null) {

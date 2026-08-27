@@ -228,9 +228,52 @@ public final class JsonRpcChannel {
      *       <br>Additive: one integer on the player object, no menu change, no ask kind.
      *       A pre-2.19 host never reads the key; a post-2.19 host reading a pre-2.19 jar
      *       finds it absent and keeps the structural zero it always had.</li>
+     *   <li><b>v2.20 — the {@code delegated} message: WHAT FORGE CHOSE.</b>
+     *       Every previous minor widened what the host is TOLD BEFORE it answers. This
+     *       one is the first that reports back what happened when the host declined to
+     *       answer at all, and it exists because the behaviour-clone lane cannot start
+     *       without it.
+     *       <br><b>The hole.</b> {@code AnswerDelegate} — {@code {"delegate": true}} — is
+     *       WRITE-ONLY. The JVM hands the call to {@code PlayerControllerAi}, plays the
+     *       result, and says nothing; {@code ResultMessage.delegationCounts} then reports
+     *       {@code delegatedRequested}/{@code delegatedRefused} as PER-METHOD COUNTS with
+     *       no choices in them. So a host running {@code MTGX_FORGEDELEG} could measure
+     *       how often it handed a kind away and never once what came back, and the data
+     *       pipeline's imitation-target column ({@code forgeAction}) was
+     *       <b>100% empty by construction</b> — three lanes found it independently.
+     *       <br><b>The shape.</b> After the delegated call returns, and only for an ask the
+     *       host actually declined, the JVM sends one fire-and-forget line:
+     *       <pre>{type:"delegated", game, seat, id, kind, method, protocolMinor,
+     *  answer:{…}, match?:"identity"|"structural"|"none"}</pre>
+     *       where {@code id} is the id of the ask that was declined and {@code answer} is
+     *       Forge's decision <b>in the same shape that ask's own answer would have
+     *       taken</b> — {@code {choice}} for a {@code priority}, {@code {pairs}} for an
+     *       {@code attackers}, {@code {choices}} of fids for a {@code cardsChoice}, and so
+     *       on down all eighteen kinds. That is deliberate and it is the whole design
+     *       constraint: the host already owns a decoder and an action-space grammar for
+     *       every answer shape it emits, so an echo in that shape needs no second grammar
+     *       and cannot drift from the first.
+     *       <br><b>{@code match} is on the {@code priority} echo only, and it is a
+     *       confession.</b> Forge's own {@code AiController} enumerates its abilities
+     *       independently of {@link PlayerControllerBridge#legalSpellAbilities}, so the
+     *       {@code SpellAbility} it returns is frequently not an object in the menu the
+     *       ask published. The echo resolves it by object identity first, then by a
+     *       structural key (host card fid + API + description), and says which — or
+     *       {@code "none"} with {@code choice: null} and the full {@code sa} encoding
+     *       beside it. A host must never read {@code choice} without reading
+     *       {@code match}; an unmatched echo is a real Forge decision that this menu could
+     *       not name, not a menu index.
+     *       <br><b>Additive, and silent when nothing is delegated.</b> The message is sent
+     *       only on a host-requested delegation ({@code {"delegate": true}}), never on a
+     *       REFUSAL — a refused answer is our encoding defect and Forge deciding after it
+     *       is a fallback, not a handoff, and mixing the two would put our own bugs in the
+     *       teacher corpus. It is never sent on an unbridged seat, inside a simulation
+     *       copy, or once the channel has closed. A pre-2.20 host sees an unknown message
+     *       type; a post-2.20 host reading a pre-2.20 jar sees none, which is exactly the
+     *       empty column it had before.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 19;
+    public static final int PROTOCOL_MINOR = 20;
 
     private final BufferedReader in;
     private final PrintStream out;
