@@ -4002,8 +4002,40 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         runParams.put(AbilityKey.AttachTarget, entity);
         getController().getGame().getTriggerHandler().runTrigger(TriggerType.Attached, runParams, false);
 
+        /*
+         * `sa` IS LEGITIMATELY NULL WHEN A POSITION IS RESTORED.
+         *
+         * `GameState.handleCardAttachments` re-attaches every permanent by id with
+         * `attacher.attachToEntity(attachedTo, null, true)` — deliberately null,
+         * because a restored board has no spell that made the attachment. Every
+         * other branch of this method already tolerates that; this one dereferenced
+         * it twice and threw, taking the WHOLE install down rather than one card.
+         *
+         * Measured by the mtgx native-teacher corpus: 548 of 33,824 position
+         * installs (1.6%) died here, all with
+         * `Cannot invoke "SpellAbility.getActivatingPlayer()" because "sa" is null`,
+         * and every one of them was a board holding an attached Reconfigure
+         * equipment (Lion Sash). A thrown install is not a degraded position, it is
+         * NO position — the game plays on from a fresh shuffle — so this cost the
+         * corpus every frame of those games.
+         *
+         * The controller is the right activating player for a restore: there is no
+         * activator, and `getController()` is who the effect belongs to. When `sa`
+         * is present the behaviour is byte-identical to before.
+         */
         if (hasKeyword(Keyword.RECONFIGURE)) {
-            final Card eff = SpellAbilityEffect.createEffect(sa, sa.getActivatingPlayer(), "Reconfigure Effect", getImageKey());
+            final Player reconfigureActivator = sa != null ? sa.getActivatingPlayer() : getController();
+            /*
+             * The SIX-ARGUMENT overload, because the four-argument one is
+             * `createEffect(sa, controller, …) -> createEffect(sa, sa.getHostCard(), …)`
+             * and dereferences `sa` a second time. The six-argument version already
+             * branches on `sa != null` internally — it was written to tolerate this
+             * and only the convenience wrapper was not. The host card of a
+             * reconfigure effect is the equipment itself.
+             */
+            final Card eff = SpellAbilityEffect.createEffect(
+                    sa, this, reconfigureActivator, "Reconfigure Effect", getImageKey(),
+                    reconfigureActivator.getGame().getNextTimestamp());
             eff.setRenderForUI(false);
             eff.addRemembered(this);
 
