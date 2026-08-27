@@ -272,6 +272,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             m.add("answer", answer);
             session.getChannel().send(m);
             counters.instrument("echo.sent." + e.kind);
+            // v2.21 -- the frame-batch stop. See BenchSession.noteEcho for why the
+            // game ends here rather than after the ask returns: the row this JVM was
+            // booted for is now on the wire, and every further millisecond is Forge
+            // playing on from our board, which is a distribution we already have.
+            if (session.noteEcho(e.kind)) {
+                counters.instrument("echo.stop." + e.kind);
+            }
         } catch (RuntimeException ex) {
             counters.instrument("echo.failed." + e.kind);
             JsonRpcChannel.logErr("delegated echo failed for ask " + e.id + " (" + e.kind + ")", ex);

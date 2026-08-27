@@ -137,26 +137,64 @@ public final class BenchMain {
         // then overwritten by applyToGame, which clears every zone first. That is why the
         // frame text MUST carry a library for both seats: a seat whose library is not in
         // the frame is decked on its next draw.
-        final String frameFile = cfg.has("frameFile") ? cfg.get("frameFile").getAsString() : null;
-        final String[] frame = new String[2];   // [0] text, [1] sha256
-        if (frameFile != null) {
+        //
+        // ------------------------------------------------------- v2.21: frameFiles[]
+        // ONE position per JVM was the whole cost story. `docs/ml/native-oracle.md` §5
+        // measured it: boot + card database ~7,970 ms, the install 4.8 ms, one ask
+        // 0.41 ms -- 84% of a run spent on a JVM that has not been asked anything yet,
+        // and 257 teacher rows/hour/worker as a result. `frameFiles` is a LIST indexed
+        // by game, so the boot is paid once per batch and the marginal frame is the
+        // install plus a handful of asks.
+        //
+        // The decks stay the batch's. `applyToGame` clears every zone and installs the
+        // position's own libraries, so the registered `.dck`s exist only to construct
+        // the `Match` -- the host groups a batch by deck pair and nothing here has to
+        // re-register between frames.
+        //
+        // `frameFile` (v2.10, singular) still means "this one position, every game",
+        // because a K-seed sweep over ONE frame is a different and still-wanted shape.
+        // The two are alternatives and giving both is a config error rather than a
+        // silent precedence rule.
+        final List<String> framePaths = new ArrayList<>();
+        if (cfg.has("frameFiles") && cfg.get("frameFiles").isJsonArray()) {
+            for (JsonElement e : cfg.getAsJsonArray("frameFiles")) {
+                framePaths.add(e.getAsString());
+            }
+        }
+        final String singleFrameFile = cfg.has("frameFile") ? cfg.get("frameFile").getAsString() : null;
+        if (singleFrameFile != null && !framePaths.isEmpty()) {
+            JsonRpcChannel.log("config carries both frameFile and frameFiles; they are alternatives");
+            System.exit(2);
+            return;
+        }
+        // The batch, read up front: a path that cannot be read is a config error and
+        // must not surface as game 47 quietly playing an opening hand.
+        final List<String[]> frames = new ArrayList<>();   // [path, text, sha256]
+        for (final String p : (singleFrameFile != null ? java.util.Collections.singletonList(singleFrameFile) : framePaths)) {
             try {
-                final byte[] raw = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(frameFile));
-                frame[0] = new String(raw, StandardCharsets.UTF_8);
+                final byte[] raw = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(p));
                 final java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
                 final StringBuilder hex = new StringBuilder();
                 for (byte b : md.digest(raw)) {
                     hex.append(String.format("%02x", b));
                 }
-                frame[1] = hex.toString();
+                frames.add(new String[] {p, new String(raw, StandardCharsets.UTF_8), hex.toString()});
             } catch (Exception e) {
-                JsonRpcChannel.logErr("could not read frameFile " + frameFile, e);
+                JsonRpcChannel.logErr("could not read frameFile " + p, e);
                 System.exit(2);
                 return;
             }
         }
-        final String frameText = frame[0];
-        final String frameSha = frame[1];
+        // With a batch, the batch decides how many games there are. Anything else makes
+        // "I gave you 200 frames and got 1 row" a thing a caller has to notice.
+        final boolean batched = !framePaths.isEmpty();
+        final int gameCount = batched ? frames.size() : games;
+        // v2.21. The first delegated echo of this kind ends its game. See
+        // BenchSession.noteEcho -- without it every frame buys one row and pays for a
+        // whole game of Forge playing on from our board, which is ~99% of the marginal
+        // cost and a distribution the priority clone already refused.
+        final String stopAfterEchoKind = cfg.has("stopAfterEchoKind")
+                ? cfg.get("stopAfterEchoKind").getAsString() : null;
 
         final List<String> deckPaths = new ArrayList<>();
         if (cfg.has("decks")) {
@@ -226,6 +264,7 @@ public final class BenchMain {
         MyRandom.setRandom(new Random(seed));
 
         final BenchSession session = new BenchSession(ch);
+        session.setStopAfterEchoKind(stopAfterEchoKind);
 
         final JsonObject hello = new JsonObject();
         hello.addProperty("type", "hello");
@@ -235,7 +274,7 @@ public final class BenchMain {
         hello.addProperty("forgeVersion", BuildInfo.getVersionString());
         hello.addProperty("aiProfile", aiProfile);
         hello.addProperty("seed", seed);
-        hello.addProperty("games", games);
+        hello.addProperty("games", gameCount);
         hello.addProperty("useSimulation", useSimulation);
         hello.addProperty("sequentialAi", Boolean.getBoolean("forge.bench.sequentialAi"));
         hello.add("simulationSeats", simulationSeats);
@@ -245,9 +284,22 @@ public final class BenchMain {
         hello.addProperty("simMaxSimulations", simMaxSims);
         hello.addProperty("simTraceMs", simTraceMs);
         hello.addProperty("deterministic", deterministic);
-        if (frameFile != null) {
-            hello.addProperty("frameFile", frameFile);
-            hello.addProperty("frameSha256", frameSha);
+        if (!frames.isEmpty()) {
+            // The singular pair stays exactly as v2.10 wrote it for a single frame, so
+            // a v2.10 host reading a v2.21 jar sees no change at all.
+            if (!batched) {
+                hello.addProperty("frameFile", frames.get(0)[0]);
+                hello.addProperty("frameSha256", frames.get(0)[2]);
+            }
+            // v2.21. PRESENT means this jar understands frameFiles; a host that sent a
+            // batch and does not see this is talking to a pre-2.21 jar that ignored it
+            // and is about to play `games` openings. Detecting that here beats
+            // discovering it in a corpus of unrelated positions.
+            hello.addProperty("frameFileCount", frames.size());
+            hello.addProperty("frameBatched", batched);
+        }
+        if (stopAfterEchoKind != null) {
+            hello.addProperty("stopAfterEchoKind", stopAfterEchoKind);
         }
         ch.send(hello);
 
@@ -310,12 +362,17 @@ public final class BenchMain {
         final Match match = new Match(rules, seats, "mtgx-bench");
 
         // -------------------------------------------------------------------- play
-        for (int iGame = 0; iGame < games; iGame++) {
+        for (int iGame = 0; iGame < gameCount; iGame++) {
             final String gameId = "g" + (iGame + 1);
             session.setGameId(gameId);
+            session.resetEchoStop();
             for (LobbyPlayerBridge b : bridged) {
                 b.getCounters().reset();
             }
+            // v2.21: game i installs frame i of the batch. A singular `frameFile`
+            // installs the same position in every game, which is v2.10's meaning.
+            final String[] thisFrame = frames.isEmpty() ? null
+                    : frames.get(batched ? iGame : 0);
             // Fresh, reproducible RNG per game (the harness pairs seeds across seats).
             MyRandom.setRandom(new Random(seed + iGame));
 
@@ -345,8 +402,9 @@ public final class BenchMain {
             // parsed model's id maps, and because a K-seed oracle sweep runs the same
             // frame many times in one JVM.
             Runnable startHook = null;
-            if (frameText != null) {
-                final String text = frameText;
+            if (thisFrame != null) {
+                final String text = thisFrame[1];
+                final int frameIndex = batched ? iGame : 0;
                 startHook = () -> {
                     final forge.game.GameState gs = new forge.game.GameState();
                     gs.parse(java.util.Arrays.asList(text.split("\\R")));
@@ -383,8 +441,13 @@ public final class BenchMain {
                     final JsonObject fa = new JsonObject();
                     fa.addProperty("type", "frameApplied");
                     fa.addProperty("game", gameId);
-                    fa.addProperty("frameFile", frameFile);
-                    fa.addProperty("frameSha256", frameSha);
+                    fa.addProperty("frameFile", thisFrame[0]);
+                    fa.addProperty("frameSha256", thisFrame[2]);
+                    // v2.21. The index INTO THE BATCH. A host joining a row back to the
+                    // frame it came from cannot reconstruct this from the game id once a
+                    // game aborts before its `frameApplied`, and a corpus whose rows are
+                    // attributed to the wrong position is worse than a smaller one.
+                    fa.addProperty("frameIndex", frameIndex);
                     fa.addProperty("dump", dump);
                     ch.send(fa);
                 };
@@ -410,6 +473,13 @@ public final class BenchMain {
                 if (!game.isGameOver()) {
                     game.setGameOver(GameEndReason.Draw);
                 }
+            }
+            // v2.21. The stop ended this game on purpose, so Forge's verdict for it is
+            // a `Draw` that means nothing. It takes the v2.11 `aborted` channel for the
+            // same reason a timeout does: PRESENT means the game did not finish on its
+            // own, and every downstream analysis already knows not to count one.
+            if (abort == null && session.echoStopFired()) {
+                abort = "frameEchoStop";
             }
             final long wallMs = System.currentTimeMillis() - t0;
 
@@ -455,6 +525,13 @@ public final class BenchMain {
             // result no matter what `winner`/`winCondition` say. Absent means it did.
             if (abort != null) {
                 outcome.addProperty("aborted", abort);
+            }
+            if (session.echoStopFired()) {
+                outcome.addProperty("echoStopped", true);
+            }
+            if (thisFrame != null) {
+                outcome.addProperty("frameIndex", batched ? iGame : 0);
+                outcome.addProperty("frameFile", thisFrame[0]);
             }
             if (winCondition != null) {
                 outcome.addProperty("winCondition", winCondition);

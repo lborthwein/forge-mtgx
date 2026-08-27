@@ -271,9 +271,44 @@ public final class JsonRpcChannel {
      *       copy, or once the channel has closed. A pre-2.20 host sees an unknown message
      *       type; a post-2.20 host reading a pre-2.20 jar sees none, which is exactly the
      *       empty column it had before.</li>
+     *   <li><b>2.21 — {@code frameFiles}: many installed positions per JVM boot, and a
+     *       stop that makes the marginal one cheap.</b>
+     *       <br><b>The problem it solves is entirely arithmetic.</b> v2.10's
+     *       {@code frameFile} installs ONE mid-game position per JVM, and
+     *       {@code docs/ml/native-oracle.md} §5 measured where the time goes: JVM boot
+     *       plus the card database is ~7,970 ms of a ~9,500 ms run — <b>84%</b> — while
+     *       the install itself is 4.8 ms and one ask is 0.41 ms. At one frame per boot
+     *       that is 257 teacher rows per hour per worker, and the ~60k rows the
+     *       priority clone trained on would take ~58 hours on four workers. The work is
+     *       free; the boot is not.
+     *       <br><b>The shape.</b> The config line may carry {@code frameFiles: [path, …]}
+     *       instead of {@code frameFile}. Game {@code i} installs {@code frameFiles[i]},
+     *       and {@code games} defaults to the array's length, so one JVM walks a whole
+     *       batch of positions with one card database and one {@code Match}. Each game's
+     *       {@code frameApplied} carries its own {@code frameFile}, {@code frameSha256}
+     *       and, new here, {@code frameIndex} — the index INTO THE ARRAY, which is the
+     *       join a host needs and cannot reconstruct from the game id alone once a game
+     *       aborts. {@code hello} reports {@code frameFileCount}.
+     *       <br><b>The decks are the batch's, not the frame's, and that is sound.</b>
+     *       {@code GameState.applyToGame} clears every zone and installs the position's
+     *       own libraries, so the registered {@code .dck}s exist only to construct the
+     *       {@code Match}. A batch must therefore group frames that share a deck pair —
+     *       which the host does — and the JVM does not have to re-register between them.
+     *       <br><b>{@code stopAfterEchoKind}.</b> Optional, a kind name (in practice
+     *       {@code "priority"}). When set, the first {@code delegated} echo of that kind
+     *       in a game ends the game through {@code Game.setGameOver}, and the result row
+     *       carries {@code outcome.aborted: "frameEchoStop"} plus
+     *       {@code outcome.echoStopped: true}. Without it the marginal frame costs a
+     *       whole game (~1,557 ms) to buy one row; with it, an install and a handful of
+     *       asks. A stopped game is NOT a result and must never be counted as a draw —
+     *       which is why it takes the v2.11 {@code aborted} channel rather than a new one.
+     *       <br><b>Additive.</b> A config with {@code frameFile} behaves exactly as
+     *       v2.10; a config with neither is unchanged; a pre-2.21 jar handed
+     *       {@code frameFiles} ignores it and installs nothing, which the host detects
+     *       through the absent {@code hello.frameFileCount} rather than by guessing.</li>
      * </ul>
      */
-    public static final int PROTOCOL_MINOR = 20;
+    public static final int PROTOCOL_MINOR = 21;
 
     private final BufferedReader in;
     private final PrintStream out;
