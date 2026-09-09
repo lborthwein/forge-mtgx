@@ -542,7 +542,7 @@ public abstract class InputPayMana extends InputSyncronizedBase {
     }
 
     protected boolean supportAutoPay() {
-        return true;
+        return getController().getGui().supportsAutoPayMana();
     }
 
     protected void runAsAi(Runnable proc) {

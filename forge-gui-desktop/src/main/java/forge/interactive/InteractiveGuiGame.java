@@ -446,19 +446,27 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 return true;
             }
             final CardView view = card.getView();
+            // Hidden, unselectable cards cannot yield a browser control. Avoid
+            // constructing their alternative abilities merely to discard them.
+            if (!view.canBeShownTo(human.getView()) && !isSelectable(view)) {
+                return true;
+            }
             final boolean londonCard = input instanceof InputLondonMulligan london
                     && london.canSelectCard(card);
             if (input instanceof InputLondonMulligan && !londonCard) return true;
-            final String activate = input.getActivateAction(card);
             final var priorityAbilities = input instanceof InputPassPriority
                     ? card.getAllPossibleAbilities(human, true) : null;
+            // InputPassPriority.getActivateAction computes this same list.
+            // Reuse it without caching across changes in Forge's game state.
+            final String activate = priorityAbilities == null ? input.getActivateAction(card)
+                    : priorityAbilities.isEmpty() ? null
+                    : forge.util.Localizer.getInstance().getMessage(priorityAbilities.get(0).isSpell()
+                            ? "lblCastSpell" : priorityAbilities.get(0).isLandAbility()
+                            ? "lblPlayLand" : "lblActivateAbility");
             final var affordableAbilities = priorityAbilities == null ? null : priorityAbilities.stream()
                     .filter(a -> forge.player.HumanManaAffordability.mayAfford(human, a)).toList();
             if (priorityAbilities != null && !priorityAbilities.isEmpty() && affordableAbilities.isEmpty()) return true;
             if (!londonCard && activate == null && !isSelectable(view) && !isWeaklySelectable(view)) {
-                return true;
-            }
-            if (!view.canBeShownTo(human.getView()) && !isSelectable(view)) {
                 return true;
             }
             if (!cardIds.add(card.getId())) {
@@ -1205,6 +1213,13 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     @Override
     public boolean isLibgdxPort() {
+        return false;
+    }
+
+    @Override
+    public boolean supportsAutoPayMana() {
+        // Browser users select whole payments themselves; no Auto button or
+        // desktop AI auto-tap preview is presented. Do not compute that plan.
         return false;
     }
 
