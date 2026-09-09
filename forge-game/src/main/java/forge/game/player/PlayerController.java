@@ -273,6 +273,8 @@ public abstract class PlayerController {
     public abstract Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional);
 
     public abstract boolean mulliganKeepHand(Player player, int cardsToReturn);
+    /** Opt-in UI flow: choose London bottom cards only after keeping the hand. */
+    public boolean defersLondonMulliganTuckUntilKeep() { return false; }
     public abstract CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn);
 
     public abstract List<SpellAbility> chooseSpellAbilityToPlay();

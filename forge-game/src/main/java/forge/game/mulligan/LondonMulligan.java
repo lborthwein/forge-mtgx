@@ -12,6 +12,11 @@ public class LondonMulligan extends AbstractMulligan {
 
     @Override
     public boolean canMulligan() {
+        if (player.getController().defersLondonMulliganTuckUntilKeep()) {
+            // This flow retains a full hand until Keep, so hand emptiness cannot
+            // terminate redraws. Stop when the eventual kept hand would be zero.
+            return !kept && tuckCardsDuringMulligan() < player.getMaxHandSize();
+        }
         return !kept && tuckCardsDuringMulligan() <= player.getMaxHandSize();
     }
 
@@ -23,6 +28,21 @@ public class LondonMulligan extends AbstractMulligan {
     @Override
     public void mulliganDraw() {
         player.drawCards(handSizeAfterNextMulligan());
+        if (!player.getController().defersLondonMulliganTuckUntilKeep()) {
+            tuckCards();
+        }
+    }
+
+    @Override
+    public void keep() {
+        if (!kept && player.getController().defersLondonMulliganTuckUntilKeep()
+                && tuckCardsDuringMulligan() > 0) {
+            tuckCards();
+        }
+        super.keep();
+    }
+
+    private void tuckCards() {
         int tuckingCards = tuckCardsDuringMulligan();
         CardCollection hand = new CardCollection(player.getCardsIn(ZoneType.Hand));
 

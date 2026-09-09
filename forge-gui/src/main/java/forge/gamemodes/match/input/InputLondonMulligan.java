@@ -108,6 +108,15 @@ public class InputLondonMulligan extends InputSyncronizedBase {
 
     volatile boolean cardSelectLocked = false;
 
+    public int getCardsToReturn() {
+        return toReturn;
+    }
+
+    public boolean canSelectCard(final Card card) {
+        return !cardSelectLocked && player.getZone(ZoneType.Hand).contains(card)
+                && (selected.contains(card) || selected.size() < toReturn);
+    }
+
     @Override
     protected boolean onCardSelected(final Card c0, final List<Card> otherCardsToSelect, final ITriggerEvent triggerEvent) { // the only place that would cause troubles - input is supposed only to confirm, not to fire abilities
         final boolean fromHand = player.getZone(ZoneType.Hand).contains(c0);
@@ -144,4 +153,3 @@ public class InputLondonMulligan extends InputSyncronizedBase {
         getController().getGui().setHighlighted(views, false);
     }
 }
-

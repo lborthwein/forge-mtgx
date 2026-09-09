@@ -1510,7 +1510,15 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
     }
 
     @Override
+    public boolean defersLondonMulliganTuckUntilKeep() {
+        return getGui().defersLondonMulliganTuckUntilKeep();
+    }
+
+    @Override
     public CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn) {
+        if (cardsToReturn == 0 && defersLondonMulliganTuckUntilKeep()) {
+            return new CardCollection();
+        }
         final InputLondonMulligan inp = new InputLondonMulligan(this, player, cardsToReturn);
         inp.showAndWait();
         return inp.getSelectedCards();

@@ -40,6 +40,8 @@ import java.util.Map;
 public interface IGuiGame {
     /** Whether hand reveals can use a desktop FloatingZone plus acknowledgement. */
     default boolean supportsFloatingHandReveal() { return true; }
+    /** Browser/native hand flow; leave existing desktop and AI mulligan flows unchanged. */
+    default boolean defersLondonMulliganTuckUntilKeep() { return false; }
     record OrderResult<T>(List<T> ordered, boolean rememberDecision) implements Serializable {}
 
     /**
