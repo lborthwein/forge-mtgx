@@ -34,6 +34,7 @@ import forge.game.player.IHasIcon;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
 import forge.game.spellability.SpellAbilityView;
+import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
 import forge.gamemodes.match.AbstractGuiGame;
 import forge.gamemodes.match.input.Input;
