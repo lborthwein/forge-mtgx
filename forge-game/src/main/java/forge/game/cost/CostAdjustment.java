@@ -34,6 +34,61 @@ import java.util.function.Predicate;
 
 public class CostAdjustment {
 
+    /**
+     * Read-only deterministic mana pricing for human action presentation. Null means
+     * unknown, never unaffordable. Uses the same adjustment functions as payment but
+     * excludes choice/target-dependent adjustments and never invokes a controller.
+     * The caller must separately exclude alternative payment mechanics (convoke etc.).
+     */
+    public static ManaCost presentationManaCost(final SpellAbility sa) {
+        if (sa == null || sa.getActivatingPlayer() == null || sa.getPayCosts() == null
+                || sa.isCastFaceDown() || sa.isBestow() || sa.hasParam("RaiseCost")
+                || sa.hasParam("ReduceCost")) return null;
+        final Card host = sa.getHostCard();
+        final Game game = sa.getActivatingPlayer().getGame();
+        final CardCollection active = new CardCollection(game.getCardsIn(ZoneType.Battlefield));
+        active.addAll(game.getCardsIn(ZoneType.Stack));
+        active.addAll(game.getCardsIn(ZoneType.Command));
+        if (!active.contains(host)) active.add(host);
+        final List<StaticAbility> raises = Lists.newArrayList();
+        final List<StaticAbility> reduces = Lists.newArrayList();
+        final List<StaticAbility> sets = Lists.newArrayList();
+        for (Card card : active) {
+            for (StaticAbility st : card.getStaticAbilities()) {
+                final boolean raise = st.checkMode(StaticAbilityMode.RaiseCost);
+                final boolean reduce = st.checkMode(StaticAbilityMode.ReduceCost);
+                final boolean set = st.checkMode(StaticAbilityMode.SetCost);
+                if (!raise && !reduce && !set) continue;
+                if (sa.getPayCosts().getCostMana() != null
+                        && sa.getPayCosts().getCostMana().getMana().countX() > 0) return null;
+                // Targets/modes/announced values have not necessarily been selected.
+                if (st.hasParam("ValidTarget") || st.hasParam("UpTo") || st.hasParam("Relative")
+                        || !st.getParamOrDefault("Amount", "1").matches("[0-9]{1,4}")) return null;
+                // Generic reductions commute; colored/hybrid orderings need choices.
+                if (reduce && (st.hasParam("Color") || st.hasParam("MinMana"))) return null;
+                if (raise) raises.add(st);
+                if (reduce) reduces.add(st);
+                if (set) sets.add(st);
+            }
+        }
+        final Cost adjusted = sa.getPayCosts().copy();
+        for (StaticAbility st : raises) applyRaiseCostAbility(adjusted, sa, st);
+        if (adjusted.getCostParts().stream().anyMatch(p -> !(p instanceof CostPartMana)
+                && !(p instanceof CostTap))) return null;
+        final CostPartMana mana = adjusted.getCostMana();
+        if (mana == null) return ManaCost.ZERO;
+        final ManaCostBeingPaid result = new ManaCostBeingPaid(mana.getMana());
+        int generic = 0;
+        for (StaticAbility st : reduces) {
+            if (checkRequirement(sa, st)) generic += applyReduceCostAbility(st, sa, result, generic);
+        }
+        result.decreaseGenericMana(generic);
+        for (StaticAbility st : sets) applySetCostAbility(st, sa, result);
+        // Commander tax is deliberately omitted: an underestimate remains safe for
+        // impossibility filtering, and a not-yet-cast card may have no castFrom set.
+        return result.toManaCost();
+    }
+
     public static Cost adjust(final Cost cost, final SpellAbility sa, boolean effect) {
         if (sa.isTrigger() || cost == null || effect) {
             sa.setMaxWaterbend(cost);

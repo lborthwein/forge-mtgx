@@ -40,6 +40,13 @@ public final class HumanManaAffordabilitySmoke {
         check("C", true, List.of(c));
         check("0", true, List.of());
         check("W W", false, List.of(w | r)); // alternatives are not extra mana
+        int life = HumanManaAffordability.LIFE_PAYMENT;
+        check("RP", true, List.of(life));
+        check("RP", false, List.of(b));
+        check("BP BP", true, List.of(b, life));
+        check("1 BP BP", true, List.of(w, life, life));
+        check("1 BP BP", false, List.of(life, life, life));
+        check("W", false, List.of(life));
         if (!HumanManaAffordability.mayAfford(null, null)) throw new AssertionError("unknown hidden");
         System.out.println("HumanManaAffordabilitySmoke: " + checks + " matching checks passed; inputs unchanged");
     }
