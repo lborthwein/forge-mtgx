@@ -41,6 +41,7 @@ import forge.gamemodes.match.input.InputAttack;
 import forge.gamemodes.match.input.InputBlock;
 import forge.gamemodes.match.input.InputConfirm;
 import forge.gamemodes.match.input.InputLockUI;
+import forge.gamemodes.match.input.InputLondonMulligan;
 import forge.gamemodes.match.input.InputPassPriority;
 import forge.gamemodes.match.input.InputPayMana;
 import forge.gamemodes.match.input.InputPayManaOfCostPayment;
@@ -417,7 +418,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             final String requestId = nextRequestId();
             final JsonObject body = requestBody(requestId, kind,
                     inputClassName(input), "Forge", cleanPrompt,
-                    getSelectionMin(), getSelectionMax(), cancelEnabled, controls);
+                    input instanceof InputLondonMulligan london ? london.getCardsToReturn() : getSelectionMin(),
+                    input instanceof InputLondonMulligan london ? london.getCardsToReturn() : getSelectionMax(),
+                    !(input instanceof InputLondonMulligan) && cancelEnabled, controls);
             final ActiveRequest request = new ActiveRequest(requestId, kind, input, bindings);
             activeRequest.set(request);
             channel.send("request", body);
@@ -443,13 +446,16 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 return true;
             }
             final CardView view = card.getView();
+            final boolean londonCard = input instanceof InputLondonMulligan london
+                    && london.canSelectCard(card);
+            if (input instanceof InputLondonMulligan && !londonCard) return true;
             final String activate = input.getActivateAction(card);
             final var priorityAbilities = input instanceof InputPassPriority
                     ? card.getAllPossibleAbilities(human, true) : null;
             final var affordableAbilities = priorityAbilities == null ? null : priorityAbilities.stream()
                     .filter(a -> forge.player.HumanManaAffordability.mayAfford(human, a)).toList();
             if (priorityAbilities != null && !priorityAbilities.isEmpty() && affordableAbilities.isEmpty()) return true;
-            if (activate == null && !isSelectable(view) && !isWeaklySelectable(view)) {
+            if (!londonCard && activate == null && !isSelectable(view) && !isWeaklySelectable(view)) {
                 return true;
             }
             if (!view.canBeShownTo(human.getView()) && !isSelectable(view)) {
@@ -480,6 +486,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             controls.add(control);
             bindings.put(id, new ControlBinding("selectCard", action -> {
                 final Card current = game.findById(card.getId());
+                if (input instanceof InputLondonMulligan london
+                        && (current == null || !london.canSelectCard(current))) {
+                    return ActionResult.reject("card is no longer a legal mulligan selection");
+                }
                 if (current == null || (!current.getView().canBeShownTo(human.getView())
                         && !isSelectable(current.getView()))) {
                     return ActionResult.reject("card is no longer visible/selectable");
@@ -681,7 +691,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     return ActionResult.accept();
                 }));
             }
-            if (cancelEnabled) {
+            if (cancelEnabled && !(input instanceof InputLondonMulligan)) {
                 controls.add(control("button:cancel", "cancel", sanitizeText(cancelLabel)));
                 bindings.put("button:cancel", new ControlBinding("cancel", action -> {
                     controller.selectButtonCancel();
@@ -973,18 +983,14 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             return result;
         }
         final Set<Integer> authorized = explicitlyOfferedCards.get();
-        final String[] mutable = {result};
+        final List<InteractiveText.CardLabel> labels = new ArrayList<>();
         game.forEachCardInGame(card -> {
-            if (!authorized.contains(card.getId())
-                    && !InteractiveState.mayReceiveIdentity(card.getView(), human.getView())) {
-                final String privateName = card.getName();
-                if (privateName != null && !privateName.isBlank()) {
-                    mutable[0] = mutable[0].replace(privateName, "Face-down card");
-                }
-            }
+            labels.add(new InteractiveText.CardLabel(card.getId(), card.getName(),
+                    authorized.contains(card.getId())
+                    || InteractiveState.mayReceiveIdentity(card.getView(), human.getView())));
             return true;
         });
-        return mutable[0];
+        return InteractiveText.sanitize(result, labels);
     }
 
     private static String inputClassName(final Input input) {
@@ -1200,6 +1206,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public boolean isLibgdxPort() {
         return false;
+    }
+
+    @Override
+    public boolean defersLondonMulliganTuckUntilKeep() {
+        return true;
     }
 
     @Override
@@ -2378,6 +2389,35 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final CardView host = ability.getHostCard();
         if (host != null && !InteractiveState.mayReceiveIdentity(host, human.getView())) {
             return "Ability of face-down card (" + host.getId() + ")";
+        }
+        final var offered = controller == null ? null : controller.getBrowserAbility(ability);
+        if (offered != null) {
+            final StringBuilder description = new StringBuilder();
+            for (var node = offered; node != null; node = node.getSubAbility()) {
+                final Card source = node.getHostCard();
+                if (source == null || !InteractiveState.mayReceiveIdentity(source.getView(), human.getView())) {
+                    return "Ability of a hidden card";
+                }
+                // Sanitize dynamic literal references first. Only then fill the
+                // engine's self-reference placeholders from a verified public
+                // source. A hidden duplicate name must not erase CARDNAME, and
+                // knowing one public copy never authorizes other hidden copies.
+                final String name = node.getHostName(node).getTranslatedName();
+                String part = sanitizeText(node.getDescription())
+                        .replace("CARDNAME", name)
+                        .replace("NICKNAME", forge.util.Lang.getInstance().getNickName(name));
+                if (part.contains("ORIGINALHOST")) {
+                    final Card original = node.getOriginalHost();
+                    part = part.replace("ORIGINALHOST", original != null
+                            && InteractiveState.mayReceiveIdentity(original.getView(), human.getView())
+                            ? original.getDisplayName() : "a hidden card");
+                }
+                if (!part.isBlank()) {
+                    if (description.length() > 0) description.append(' ');
+                    description.append(part);
+                }
+            }
+            if (description.length() > 0) return description.toString();
         }
         return sanitizeText(Objects.requireNonNullElse(ability.getDescription(), "Ability"));
     }
