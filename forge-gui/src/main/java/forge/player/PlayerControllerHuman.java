@@ -237,6 +237,11 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
                 spellViewCache == null ? null : spellViewCache.get(view));
     }
 
+    /** Resolve only an ability explicitly offered to this human's current chooser. */
+    public SpellAbility getBrowserAbility(final SpellAbilityView view) {
+        return spellViewCache == null ? null : spellViewCache.get(view);
+    }
+
     @Override
     public List<PaperCard> sideboard(final Deck deck, final GameType gameType, String message) {
         CardPool sideboard = deck.get(DeckSection.Sideboard);
