@@ -142,14 +142,13 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         readerThread.start();
     }
 
-    void onEngineEvent(final String eventClass) {
+    void onEngineEvent(final GameEvent engineEvent) {
         if (channel.isEnded() || game == null || human == null) {
             return;
         }
         try {
             final JsonObject body = new JsonObject();
-            final JsonObject event = new JsonObject();
-            event.addProperty("class", eventClass);
+            final JsonObject event = InteractiveGameEvents.encode(engineEvent, game, human.getView());
             body.add("event", event);
             channel.send("event", body);
         } catch (InteractiveProtocol.ProtocolException e) {
@@ -975,7 +974,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             controller.macros().cancelCurrentMacro();
             controller.getInputQueue().onGameOver(true);
         }
-        onEngineEvent(event.getClass().getSimpleName());
+        onEngineEvent(event);
         if (event instanceof GameEventGameFinished) {
             finishGame();
         }

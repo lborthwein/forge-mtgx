@@ -116,6 +116,9 @@ public final class InteractiveMain {
             rules.setAISideboardingEnabled(false);
             rules.setSideboardForAI(false);
             rules.setAllowCheatShuffle(false);
+            // Desktop deck-advice modal, not a rules failure or human choice.
+            // Its opponent-card list is inappropriate for a hidden-information game.
+            rules.setWarnAboutAICards(false);
 
             final Match match = new Match(rules, registered, "Browser vs Default Forge");
             final Game game = match.createGame();
