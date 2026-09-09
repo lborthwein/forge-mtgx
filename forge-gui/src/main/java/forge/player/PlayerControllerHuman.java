@@ -231,6 +231,12 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
         PlaySpellAbility.playSpellAbilityNoStack(this, player, effectSA, !canSetupTargets);
     }
 
+    /** Browser presentation only: unknown/complex payments remain selectable. */
+    public boolean mayAffordAbility(final SpellAbilityView view) {
+        return HumanManaAffordability.mayAfford(player,
+                spellViewCache == null ? null : spellViewCache.get(view));
+    }
+
     @Override
     public List<PaperCard> sideboard(final Deck deck, final GameType gameType, String message) {
         CardPool sideboard = deck.get(DeckSection.Sideboard);
@@ -946,6 +952,7 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
             TrackableCollection<CardView> collection = CardView.getCollection(cards);
             // Show opponent's hand as a FloatingZone with a minimal OK dialog instead of a names list
             final boolean useFloatingHandReveal = zone == ZoneType.Hand
+                    && getGui().supportsFloatingHandReveal()
                     && owner != getLocalPlayerView()
                     && FModel.getPreferences().getPrefBoolean(FPref.UI_SELECT_FROM_CARD_DISPLAYS)
                     && !getGui().isLibgdxPort();

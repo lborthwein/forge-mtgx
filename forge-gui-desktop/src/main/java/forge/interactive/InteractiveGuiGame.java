@@ -444,6 +444,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
             final CardView view = card.getView();
             final String activate = input.getActivateAction(card);
+            final var priorityAbilities = input instanceof InputPassPriority
+                    ? card.getAllPossibleAbilities(human, true) : null;
+            final var affordableAbilities = priorityAbilities == null ? null : priorityAbilities.stream()
+                    .filter(a -> forge.player.HumanManaAffordability.mayAfford(human, a)).toList();
+            if (priorityAbilities != null && !priorityAbilities.isEmpty() && affordableAbilities.isEmpty()) return true;
             if (activate == null && !isSelectable(view) && !isWeaklySelectable(view)) {
                 return true;
             }
@@ -461,6 +466,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             final JsonObject value = new JsonObject();
             value.addProperty("selected", isHighlighted(view));
             value.addProperty("zone", String.valueOf(view.getZone()));
+            if (input instanceof InputPassPriority) {
+                // Same candidate list that Forge uses when this card is clicked.
+                // A land with a non-mana ability must still hold priority.
+                value.addProperty("manaOnly", !affordableAbilities.isEmpty()
+                        && affordableAbilities.stream().allMatch(ability -> ability.isManaAbility()));
+            }
             if (input instanceof InputAttack && game.getCombat() != null
                     && game.getCombat().getDefenders().contains(card)) {
                 value.addProperty("combatAction", "defender");
@@ -807,7 +818,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         // Keep the wire prompt meaningful even when their message is blank.
         final String promptMessage = message != null && !message.isBlank() ? message
                 : title != null && !title.isBlank() ? title : "Choose an action";
-        prompt.addProperty("message", sanitizeText(promptMessage));
+        // revealMessage already sanitizes its heading and appends only the
+        // explicitly offered objects. Re-scrubbing by hidden duplicate names
+        // would erase the very identities Forge authorized us to reveal.
+        prompt.addProperty("message", "modal:reveal".equals(inputClass)
+                ? promptMessage : sanitizeText(promptMessage));
         if (min != null && min >= 0) {
             prompt.addProperty("min", min);
         }
@@ -1188,6 +1203,13 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     @Override
+    public boolean supportsFloatingHandReveal() {
+        // Send the actual revealed cards through our informational reveal path.
+        // There is no desktop FloatingZone for an OK / End Turn dialog to cover.
+        return false;
+    }
+
+    @Override
     public void setGameView(final forge.game.GameView gameView) {
         super.setGameView(gameView);
         scheduleInputPublish();
@@ -1413,8 +1435,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (abilities == null || abilities.isEmpty()) {
             return null;
         }
+        if (abilities.stream().noneMatch(a -> a.canPlay() && controller.mayAffordAbility(a))) return null;
         if (abilities.size() == 1) {
             final SpellAbilityView only = abilities.get(0);
+            if (!only.canPlay() || !controller.mayAffordAbility(only)) return null;
             if (triggerEvent == null) {
                 return only;
             }
@@ -1427,7 +1451,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final Map<String, SpellAbilityView> byId = new LinkedHashMap<>();
         int index = 0;
         for (SpellAbilityView ability : abilities) {
-            if (!ability.canPlay()) {
+            if (!ability.canPlay() || !controller.mayAffordAbility(ability)) {
                 index++;
                 continue;
             }
@@ -2425,7 +2449,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     private <T> String revealMessage(final String message, final Collection<T> values,
                                      final FSerializableFunction<T, String> display) {
-        final StringBuilder result = new StringBuilder(Objects.requireNonNullElse(message, ""));
+        final StringBuilder result = new StringBuilder(sanitizeText(message));
         if (values != null) {
             for (T value : values) {
                 result.append("\n").append(offeredObjectLabel(value, display));
