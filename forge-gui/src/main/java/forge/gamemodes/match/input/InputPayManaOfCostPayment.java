@@ -40,6 +40,34 @@ public class InputPayManaOfCostPayment extends InputPayMana {
     private static final long serialVersionUID = 3467312982164195091L;
     private ManaConversionMatrix extraMatrix;
 
+    /** Eligibility includes life already committed and only the remaining cost. */
+    public final boolean canPayManaWithLife() {
+        return payLifeOnCopy(new ManaCostBeingPaid(manaCost), 2);
+    }
+
+    @Override
+    protected boolean payLifeOnCopy(ManaCostBeingPaid cost, int additionalLife) {
+        if (!player.canPayLife(phyLifeToLose + additionalLife, effect, saPaidFor)) {
+            return false;
+        }
+        if (cost.payPhyrexian()) { return true; }
+        if (player.hasKeyword("PayLifeInsteadOf:B") && cost.hasAnyKind(ManaAtom.BLACK)) {
+            cost.decreaseShard(ManaCostShard.BLACK, 1);
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    protected void commitPoolPaymentLife() {
+        if (manaCost.payPhyrexian()) {
+            saPaidFor.setSpendPhyrexianMana(true);
+        } else {
+            manaCost.decreaseShard(ManaCostShard.BLACK, 1);
+        }
+        phyLifeToLose += 2;
+    }
+
     @Override
     protected final void onPlayerSelected(Player selected, final ITriggerEvent triggerEvent) {
         if (player == selected) {

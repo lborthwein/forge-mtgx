@@ -127,7 +127,7 @@ public final class InteractiveMain {
                 throw new IllegalStateException("configured human seat did not create PlayerControllerHuman");
             }
 
-            enableCompleteHumanControl(humanController);
+            configureHumanPayment(humanController);
             gui = new InteractiveGuiGame(channel, config.humanSeat());
             gui.bind(game, human, humanController);
             desktop.bind(gui);
@@ -231,13 +231,11 @@ public final class InteractiveMain {
         return players;
     }
 
-    private static void enableCompleteHumanControl(final PlayerControllerHuman controller) {
-        controller.getFullControl().addAll(EnumSet.of(
-                FullControlFlag.ChooseCostOrder,
-                FullControlFlag.ChooseCostReductionOrderAndVariableAmount,
-                FullControlFlag.ChooseManaPoolShard,
-                FullControlFlag.NoPaymentFromManaAbility,
-                FullControlFlag.LayerTimestampOrder));
+    private static void configureHumanPayment(final PlayerControllerHuman controller) {
+        // Keep produced mana for the player's complete-payment choice. Do not
+        // force desktop power-user cost-order/shard/timestamp dialogs: use
+        // Forge's ordinary human defaults for those conveniences.
+        controller.getFullControl().add(FullControlFlag.NoPaymentFromManaAbility);
         // Deliberately omit NoFreeCombatCostHandling: it can skip a real zero-mana
         // combat-cost prompt rather than merely disabling assistance.
         controller.setDisableAutoYields(true);

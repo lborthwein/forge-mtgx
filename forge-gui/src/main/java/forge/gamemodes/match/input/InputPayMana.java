@@ -8,10 +8,13 @@ import forge.card.MagicColor;
 import forge.card.mana.ManaAtom;
 import forge.game.Game;
 import forge.game.GameActionUtil;
+import forge.game.event.EventValueChangeType;
+import forge.game.event.GameEventManaPool;
 import forge.game.card.Card;
 import forge.game.card.CardView;
 import forge.game.card.CardCollection;
 import forge.game.mana.ManaCostBeingPaid;
+import forge.game.mana.Mana;
 import forge.game.player.PlaySpellAbility;
 import forge.game.player.Player;
 import forge.game.player.PlayerController.FullControlFlag;
@@ -201,6 +204,180 @@ public abstract class InputPayMana extends InputSyncronizedBase {
             getController().macros().addRememberedAction(new PayManaFromPoolAction(colorCode));
             showMessage();
         }
+    }
+
+    /** A browser payment is a sequence of exact pool objects, never an auto-tap plan.
+     * A null mana step means paying two life through the cost-payment input. */
+    public record PoolPaymentStep(Mana mana) { }
+    public record PoolPaymentChoice(List<PoolPaymentStep> steps, String state, List<Mana> pool) { }
+    public record PoolPaymentChoices(List<PoolPaymentChoice> choices, boolean complete) { }
+
+    protected boolean payLifeOnCopy(ManaCostBeingPaid cost, int additionalLife) {
+        return false;
+    }
+
+    protected void commitPoolPaymentLife() {
+        throw new IllegalStateException("Life payment is not supported by this input");
+    }
+
+    private List<Mana> currentPoolObjects() {
+        final List<Mana> pool = new ArrayList<>();
+        player.getManaPool().forEach(pool::add);
+        return pool;
+    }
+
+    private String poolPaymentState(List<Mana> pool) {
+        final StringBuilder key = new StringBuilder(manaCost.toString());
+        key.append('|').append(manaCost.getColorsPaid()).append('|')
+                .append(manaCost.getXManaCostPaidByColor()).append('|')
+                .append(phyLifeToLose).append('|').append(player.getLife());
+        return key.toString();
+    }
+
+    private boolean canSpendPoolMana(ManaCostBeingPaid cost, Mana mana) {
+        return mana.meetsManaRestrictions(saPaidFor)
+                && saPaidFor.allowsPayingWithShard(mana.getSourceCard(), mana.getColor())
+                && cost.isNeeded(mana, player.getManaPool());
+    }
+
+    /** Same source and same producer, not merely Mana.equals (which can merge
+     * sources). Source properties are observable through ManaFrom predicates. */
+    private static boolean interchangeablePoolObjects(Mana a, Mana b) {
+        return a.getColor() == b.getColor() && a.getPlayer() == b.getPlayer()
+                && a.getSourceCard().getId() == b.getSourceCard().getId()
+                && a.getManaAbility() == b.getManaAbility() && a.isSnow() == b.isSnow();
+    }
+
+    private static int[] poolPaymentGroups(List<Mana> pool) {
+        final int[] groups = new int[pool.size()];
+        for (int i = 0; i < pool.size(); i++) {
+            groups[i] = i;
+            for (int j = 0; j < i; j++) {
+                if (interchangeablePoolObjects(pool.get(i), pool.get(j))) {
+                    groups[i] = groups[j];
+                    break;
+                }
+            }
+        }
+        return groups;
+    }
+
+    /** Read-only search using Forge's actual mana-shard transitions and restrictions.
+     * No pool mutation, ability activation, AI controller, or default choice. A capped
+     * result is explicitly incomplete so clients must retain manual payment controls. */
+    public final PoolPaymentChoices getPoolPaymentChoices() {
+        final List<Mana> pool = currentPoolObjects();
+        final List<PoolPaymentChoice> choices = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        final Set<String> outcomes = new HashSet<>();
+        final int[] budget = {20000};
+        final boolean[] complete = {true};
+        enumeratePoolPayments(new ManaCostBeingPaid(manaCost), pool, poolPaymentGroups(pool), new BitSet(),
+                new ArrayList<>(), 0, poolPaymentState(pool), choices, seen, outcomes, budget, complete);
+        return new PoolPaymentChoices(List.copyOf(choices), complete[0]);
+    }
+
+    private void enumeratePoolPayments(ManaCostBeingPaid cost, List<Mana> pool, int[] groups, BitSet used,
+            List<PoolPaymentStep> steps, int life, String state, List<PoolPaymentChoice> choices,
+            Set<String> seen, Set<String> outcomes, int[] budget, boolean[] complete) {
+        if (--budget[0] < 0 || choices.size() >= 128) {
+            complete[0] = false;
+            return;
+        }
+        final String spent = used + ":" + life + ":" + cost.getColorsPaid()
+                + ":" + cost.getXManaCostPaidByColor();
+        if (!seen.add(spent + ":" + cost)) { return; }
+        if (cost.isPaid()) {
+            if (outcomes.add(spent)) {
+                choices.add(new PoolPaymentChoice(List.copyOf(steps), state, List.copyOf(pool)));
+            }
+            return;
+        }
+        // Use only the first remaining object of each fungible group. Ten ordinary
+        // globes from one source paying six mana produce one branch, not 210
+        // subsets (or factorial orderings). Keep different source effects distinct.
+        final BitSet visitedGroups = new BitSet();
+        for (int i = 0; i < pool.size(); i++) {
+            if (!complete[0]) { return; }
+            if (used.get(i) || visitedGroups.get(groups[i])) { continue; }
+            visitedGroups.set(groups[i]);
+            if (!canSpendPoolMana(cost, pool.get(i))) { continue; }
+            final ManaCostBeingPaid next = new ManaCostBeingPaid(cost);
+            next.payMana(pool.get(i), player.getManaPool());
+            used.set(i);
+            steps.add(new PoolPaymentStep(pool.get(i)));
+            enumeratePoolPayments(next, pool, groups, used, steps, life, state, choices, seen, outcomes, budget, complete);
+            steps.remove(steps.size() - 1);
+            used.clear(i);
+        }
+        final ManaCostBeingPaid next = new ManaCostBeingPaid(cost);
+        if (payLifeOnCopy(next, life + 2)) {
+            steps.add(new PoolPaymentStep(null));
+            enumeratePoolPayments(next, pool, groups, used, steps, life + 2, state, choices, seen, outcomes, budget, complete);
+            steps.remove(steps.size() - 1);
+        }
+    }
+
+    /** Execute only a currently valid complete sequence. Validate the entire sequence
+     * before changing the pool; the interactive request dispatcher serializes inputs. */
+    public final boolean payPoolPaymentChoice(PoolPaymentChoice choice) {
+        if (locked || isFinished() || !choice.state().equals(poolPaymentState(currentPoolObjects()))) {
+            return false;
+        }
+        final List<Mana> remaining = currentPoolObjects();
+        if (remaining.size() != choice.pool().size()) { return false; }
+        for (int i = 0; i < remaining.size(); i++) {
+            if (remaining.get(i) != choice.pool().get(i)) { return false; }
+        }
+        final ManaCostBeingPaid check = new ManaCostBeingPaid(manaCost);
+        int life = 0;
+        for (PoolPaymentStep step : choice.steps()) {
+            final Mana mana = step.mana();
+            if (mana == null) {
+                life += 2;
+                if (!payLifeOnCopy(check, life)) { return false; }
+            } else {
+                int found = -1;
+                for (int i = 0; i < remaining.size(); i++) {
+                    if (remaining.get(i) == mana) { found = i; break; }
+                }
+                if (found < 0 || !canSpendPoolMana(check, mana)) { return false; }
+                remaining.remove(found);
+                check.payMana(mana, player.getManaPool());
+            }
+        }
+        if (!check.isPaid()) { return false; }
+        for (PoolPaymentStep step : choice.steps()) {
+            if (step.mana() == null) {
+                commitPoolPaymentLife();
+            } else {
+                // Mana.equals intentionally merges some sources; remove the captured
+                // object by identity so snow/spend-trigger sources cannot be swapped.
+                boolean removed = false;
+                for (Iterator<Mana> it = player.getManaPool().iterator(); it.hasNext();) {
+                    if (it.next() == step.mana()) {
+                        it.remove();
+                        removed = true;
+                        break;
+                    }
+                }
+                if (!removed) {
+                    throw new IllegalStateException("Validated pool payment changed during execution");
+                }
+                manaCost.payMana(step.mana(), player.getManaPool());
+                saPaidFor.getPayingMana().add(step.mana());
+            }
+        }
+        final Set<MagicColor.Color> colors = EnumSet.noneOf(MagicColor.Color.class);
+        for (PoolPaymentStep step : choice.steps()) {
+            if (step.mana() != null) { colors.add(MagicColor.Color.fromByte(step.mana().getColor())); }
+        }
+        if (!colors.isEmpty()) {
+            player.updateManaForView();
+            game.fireEvent(new GameEventManaPool(player, EventValueChangeType.Removed, colors));
+        }
+        showMessage();
+        return true;
     }
 
     protected boolean activateManaAbility(final Card card) {

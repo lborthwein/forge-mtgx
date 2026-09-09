@@ -23,6 +23,8 @@ import forge.game.GameEntityView;
 import forge.game.GameState;
 import forge.game.card.Card;
 import forge.game.card.CardView;
+import forge.game.combat.Combat;
+import forge.game.combat.CombatUtil;
 import forge.game.event.GameEvent;
 import forge.game.event.GameEventGameFinished;
 import forge.game.event.GameEventGameOutcome;
@@ -430,8 +432,16 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private JsonArray buildStatefulControls(final Input input, final String kind,
                                             final Map<String, ControlBinding> bindings) {
         final JsonArray controls = new JsonArray();
+        if (input instanceof InputBlock) {
+            addBlockControls(controls, bindings);
+        }
         final Set<Integer> cardIds = new LinkedHashSet<>();
         game.forEachCardInGame(card -> {
+            // Blocking is a pair chosen by the browser, not Forge's currently
+            // highlighted attacker followed by an otherwise ambiguous card click.
+            if (input instanceof InputBlock) {
+                return true;
+            }
             final CardView view = card.getView();
             final String activate = input.getActivateAction(card);
             if (activate == null && !isSelectable(view) && !isWeaklySelectable(view)) {
@@ -451,6 +461,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             final JsonObject value = new JsonObject();
             value.addProperty("selected", isHighlighted(view));
             value.addProperty("zone", String.valueOf(view.getZone()));
+            if (input instanceof InputAttack && game.getCombat() != null
+                    && game.getCombat().getDefenders().contains(card)) {
+                value.addProperty("combatAction", "defender");
+            }
             control.add("value", value);
             controls.add(control);
             bindings.put(id, new ControlBinding("selectCard", action -> {
@@ -470,6 +484,13 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             int seat = 0;
             for (Player player : game.getPlayers()) {
                 final int playerSeat = seat++;
+                if (input instanceof InputSelectTargets targetInput && !targetInput.canSelectPlayer(player)) {
+                    continue;
+                }
+                if (input instanceof InputAttack && (game.getCombat() == null
+                        || !game.getCombat().getDefenders().contains(player))) {
+                    continue;
+                }
                 if (input instanceof InputSelectEntitiesFromList<?> selectEntities
                         && !selectEntities.getValidChoices().contains(player)) {
                     continue;
@@ -477,11 +498,23 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 final String id = "player:" + playerSeat;
                 final JsonObject control = control(id, "selectPlayer", player.getName());
                 control.addProperty("player", playerSeat);
+                if (input instanceof InputAttack) {
+                    final JsonObject value = new JsonObject();
+                    value.addProperty("combatAction", "defender");
+                    control.add("value", value);
+                }
                 controls.add(control);
                 bindings.put(id, new ControlBinding("selectPlayer", action -> {
                     final Player current = playerAtSeat(playerSeat);
                     if (current == null) {
                         return ActionResult.reject("player is no longer present");
+                    }
+                    if (input instanceof InputSelectTargets targetInput && !targetInput.canSelectPlayer(current)) {
+                        return ActionResult.reject("player is not a legal target for this decision");
+                    }
+                    if (input instanceof InputAttack && (game.getCombat() == null
+                            || !game.getCombat().getDefenders().contains(current))) {
+                        return ActionResult.reject("player is not a legal attack defender");
                     }
                     controller.selectPlayer(current.getView(), null);
                     return ActionResult.accept();
@@ -489,14 +522,105 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
         }
 
-        if (input instanceof InputPayMana) {
-            if (input instanceof InputPayManaOfCostPayment) {
+
+        if (input instanceof InputPayMana paymentInput) {
+            final InputPayMana.PoolPaymentChoices payments = paymentInput.getPoolPaymentChoices();
+            final Map<Integer, Integer> sourceNumbers = new LinkedHashMap<>();
+            final Map<String, Set<Integer>> sourceNames = new LinkedHashMap<>();
+            for (InputPayMana.PoolPaymentChoice payment : payments.choices()) {
+                for (InputPayMana.PoolPaymentStep step : payment.steps()) {
+                    if (step.mana() == null) { continue; }
+                    final int sourceId = step.mana().getSourceCard().getId();
+                    sourceNumbers.computeIfAbsent(sourceId, ignored -> sourceNumbers.size() + 1);
+                    final String sourceName = InteractiveState.safeCardLabel(
+                            step.mana().getSourceCard().getView(), human.getView());
+                    sourceNames.computeIfAbsent(sourceName, ignored -> new LinkedHashSet<>()).add(sourceId);
+                }
+            }
+            final List<JsonObject> paymentControls = new ArrayList<>();
+            final Map<String, Integer> paymentLabels = new LinkedHashMap<>();
+            int paymentIndex = 0;
+            for (InputPayMana.PoolPaymentChoice payment : payments.choices()) {
+                final String id = "payment:" + paymentIndex++;
+                final JsonObject mana = new JsonObject();
+                final JsonArray sources = new JsonArray();
+                final Map<String, Integer> sourceCounts = new LinkedHashMap<>();
+                int life = 0;
+                final StringBuilder label = new StringBuilder("Pay ");
+                for (InputPayMana.PoolPaymentStep step : payment.steps()) {
+                    if (step.mana() == null) { life += 2; continue; }
+                    final String color = MagicColor.toShortString(step.mana().getColor());
+                    mana.addProperty(color, mana.has(color) ? mana.get(color).getAsInt() + 1 : 1);
+                    final JsonObject source = new JsonObject();
+                    source.addProperty("cardId", step.mana().getSourceCard().getId());
+                    String sourceLabel = InteractiveState.safeCardLabel(
+                            step.mana().getSourceCard().getView(), human.getView());
+                    if (sourceNames.get(sourceLabel).size() > 1) {
+                        sourceLabel += " (source " + sourceNumbers.get(step.mana().getSourceCard().getId()) + ")";
+                    }
+                    if (step.mana().isSnow()) { sourceLabel += " · snow"; }
+                    if (step.mana().isRestricted()) { sourceLabel += " · restricted"; }
+                    if (step.mana().triggersWhenSpent()) { sourceLabel += " · spend trigger"; }
+                    if (step.mana().isPersistentMana()) { sourceLabel += " · persistent"; }
+                    if (step.mana().isCombatMana()) { sourceLabel += " · combat mana"; }
+                    if (step.mana().addsCounters(null)) { sourceLabel += " · counter bonus"; }
+                    if (step.mana().addsKeywords(null)) { sourceLabel += " · ability bonus"; }
+                    if (step.mana().getManaAbility() != null
+                            && step.mana().getManaAbility().isCannotCounterPaidWith()) {
+                        sourceLabel += " · counterspell protection";
+                    }
+                    source.addProperty("label", sourceLabel);
+                    source.addProperty("color", color);
+                    sources.add(source);
+                    sourceCounts.merge(sourceLabel, 1, Integer::sum);
+                }
+                // Canonical color order keeps equivalent display costs identical
+                // regardless of the internal legal payment sequence.
+                for (byte color : ManaAtom.MANATYPES) {
+                    final String symbol = MagicColor.toShortString(color);
+                    if (!mana.has(symbol)) { continue; }
+                    for (int i = 0; i < mana.get(symbol).getAsInt(); i++) {
+                        label.append('{').append(symbol).append('}');
+                    }
+                }
+                if (life > 0) { label.append(mana.size() > 0 ? " + " : "").append(life).append(" life"); }
+                final JsonObject control = control(id, "choice", label.toString());
+                final JsonObject value = new JsonObject();
+                value.addProperty("payment", true);
+                value.add("mana", mana);
+                value.addProperty("life", life);
+                value.add("sources", sources);
+                final List<String> sourceSummary = new ArrayList<>();
+                sourceCounts.forEach((source, count) -> sourceSummary.add(count > 1 ? count + " from " + source : source));
+                value.addProperty("sourceSummary", String.join(", ", sourceSummary));
+                value.addProperty("completeEnumeration", payments.complete());
+                control.add("value", value);
+                controls.add(control);
+                paymentControls.add(control);
+                paymentLabels.merge(label.toString(), 1, Integer::sum);
+                bindings.put(id, new ControlBinding("choice", action ->
+                        paymentInput.payPoolPaymentChoice(payment) ? ActionResult.accept()
+                                : ActionResult.reject("Payment changed; choose again from the current mana pool")));
+            }
+            for (JsonObject control : paymentControls) {
+                final String label = control.get("label").getAsString();
+                if (paymentLabels.get(label) > 1) {
+                    control.addProperty("label", label + " — "
+                            + control.getAsJsonObject("value").get("sourceSummary").getAsString());
+                }
+            }
+            // Keep individual controls available when the bounded search cannot
+            // enumerate every payment, or the player still needs to produce mana.
+            if (input instanceof InputPayManaOfCostPayment payment && payment.canPayManaWithLife()) {
                 final String id = "player:" + humanSeat;
                 final JsonObject control = control(id, "selectPlayer",
-                        "Pay 2 life for eligible Phyrexian or black mana");
+                        "Pay 2 life");
                 control.addProperty("player", humanSeat);
                 controls.add(control);
                 bindings.put(id, new ControlBinding("selectPlayer", action -> {
+                    if (!payment.canPayManaWithLife()) {
+                        return ActionResult.reject("life cannot pay any remaining mana cost");
+                    }
                     controller.selectPlayer(human.getView(), null);
                     return ActionResult.accept();
                 }));
@@ -509,6 +633,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 final JsonObject control = control(id, "useMana",
                         "Use " + MagicColor.toShortString(color) + " mana");
                 control.add("value", new JsonPrimitive(color));
+                control.addProperty("paymentEnumerationComplete", payments.complete());
                 controls.add(control);
                 bindings.put(id, new ControlBinding("useMana", action -> {
                     if (human.getManaPool().getAmountOfColor(color) <= 0) {
@@ -561,6 +686,83 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }));
         }
         return controls;
+    }
+
+    /** Keep legality and mutation in Forge while allowing blocker-first board input. */
+    private void addBlockControls(final JsonArray controls,
+                                  final Map<String, ControlBinding> bindings) {
+        final Combat combat = game.getCombat();
+        if (combat == null) {
+            return;
+        }
+        for (Card blocker : human.getCreaturesInPlay()) {
+            if (!blocker.getView().canBeShownTo(human.getView())) {
+                continue;
+            }
+            final int blockerId = blocker.getId();
+            if (combat.isBlocking(blocker)) {
+                final String id = "combat:unblock:" + blockerId;
+                final JsonObject control = control(id, "selectCard", "Remove block: "
+                        + InteractiveState.safeCardLabel(blocker.getView(), human.getView()));
+                control.addProperty("cardId", blockerId);
+                final JsonObject value = new JsonObject();
+                value.addProperty("combatAction", "unblock");
+                value.addProperty("blockerId", blockerId);
+                control.add("value", value);
+                controls.add(control);
+                bindings.put(id, new ControlBinding("selectCard", action -> {
+                    final Card current = game.findById(blockerId);
+                    if (current == null || current.getController() != human
+                            || game.getCombat() != combat || !combat.isBlocking(current)) {
+                        return ActionResult.reject("blocker is no longer assigned");
+                    }
+                    // InputBlock's existing right-click handler removes all assignments
+                    // regardless of its currently highlighted attacker.
+                    final ITriggerEvent remove = new ITriggerEvent() {
+                        public int getButton() { return 3; }
+                        public int getX() { return 0; }
+                        public int getY() { return 0; }
+                    };
+                    return controller.selectCard(current.getView(), null, remove)
+                            ? ActionResult.accept() : ActionResult.reject("Forge rejected block removal");
+                }));
+            }
+            for (Card attacker : combat.getAttackers()) {
+                if (!attacker.getView().canBeShownTo(human.getView())
+                        || !CombatUtil.canBlock(attacker, blocker, combat)) {
+                    continue;
+                }
+                final int attackerId = attacker.getId();
+                final String id = "combat:block:" + blockerId + ":" + attackerId;
+                final JsonObject control = control(id, "selectCard", "Block "
+                        + InteractiveState.safeCardLabel(attacker.getView(), human.getView())
+                        + " with " + InteractiveState.safeCardLabel(blocker.getView(), human.getView()));
+                control.addProperty("cardId", blockerId);
+                final JsonObject value = new JsonObject();
+                value.addProperty("combatAction", "block");
+                value.addProperty("blockerId", blockerId);
+                value.addProperty("attackerId", attackerId);
+                control.add("value", value);
+                controls.add(control);
+                bindings.put(id, new ControlBinding("selectCard", action -> {
+                    final Card currentBlocker = game.findById(blockerId);
+                    final Card currentAttacker = game.findById(attackerId);
+                    if (game.getCombat() != combat || currentBlocker == null
+                            || currentBlocker.getController() != human || currentAttacker == null
+                            || !combat.isAttacking(currentAttacker)
+                            || !CombatUtil.canBlock(currentAttacker, currentBlocker, combat)) {
+                        return ActionResult.reject("block pair is no longer legal");
+                    }
+                    // One user-selected pair, executed by the two existing Forge input
+                    // operations under the request's in-flight guard. No policy chooses it.
+                    if (!controller.selectCard(currentAttacker.getView(), null, null)) {
+                        return ActionResult.reject("Forge rejected attacker selection");
+                    }
+                    return controller.selectCard(currentBlocker.getView(), null, null)
+                            ? ActionResult.accept() : ActionResult.reject("Forge rejected block assignment");
+                }));
+            }
+        }
     }
 
     private void addConfirmButton(final JsonArray controls,

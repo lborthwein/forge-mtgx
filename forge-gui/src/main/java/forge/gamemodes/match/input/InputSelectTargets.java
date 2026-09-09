@@ -365,6 +365,16 @@ public final class InputSelectTargets extends InputSyncronizedBase {
         addTarget(player);
     }
 
+    /** Viewer controls must use the same player eligibility as actual selection.
+     * Previously selected targets remain clickable so they can be removed. */
+    public boolean canSelectPlayer(final Player player) {
+        if (targets.contains(player)) { return true; }
+        return !player.hasLost()
+                && !(sa.isSpell() && sa.getHostCard().isAura() && !player.canBeAttached(sa.getHostCard(), sa))
+                && sa.canTarget(player) && !mustTargetFiltered
+                && (filter == null || filter.test(player));
+    }
+
     public boolean selectPlayerForMacro(final Player player, final ITriggerEvent triggerEvent) {
         final int oldTargetCount = targets.size();
         onPlayerSelected(player, triggerEvent);
