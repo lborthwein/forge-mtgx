@@ -106,9 +106,9 @@ public final class HumanManaAffordabilityEngineSmoke {
             check("Lightning Bolt", new String[]{}, null, false);
             check("Lightning Bolt", new String[]{"Plains"}, null, false);
             check("Lightning Bolt", new String[]{"Mountain"}, null, true);
-            check("Get Lost", new String[]{"Plains:tapped", "Swamp:tapped", "Plains:tapped"}, null, false);
-            check("Elspeth, Sun's Champion", new String[]{"Plains:tapped", "Swamp:tapped", "Plains:tapped"}, null, false);
-            check("Lingering Souls", new String[]{"Plains:tapped", "Swamp:tapped", "Plains:tapped"}, null, false, true);
+            check("Get Lost", new String[]{"Plains:tapped", "Island:tapped", "Island:tapped"}, null, false);
+            check("Elspeth, Sun's Champion", new String[]{"Plains:tapped", "Island:tapped", "Island:tapped"}, null, false);
+            check("Lingering Souls", new String[]{"Plains:tapped", "Island:tapped", "Island:tapped"}, null, false, true);
             check("Lingering Souls", new String[]{"Plains", "Swamp"}, null, true, true);
             check("Lightning Bolt", new String[]{"Mountain"}, "Thalia, Guardian of Thraben", false);
             check("Lightning Bolt", new String[]{"Mountain", "Plains"}, "Thalia, Guardian of Thraben", true);
