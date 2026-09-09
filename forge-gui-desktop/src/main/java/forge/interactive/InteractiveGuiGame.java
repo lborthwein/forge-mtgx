@@ -1459,6 +1459,17 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         scheduleInputPublish();
     }
 
+    private boolean canChooseOfferedAbility(final SpellAbilityView view) {
+        final SpellAbility actual = controller.getBrowserAbility(view);
+        // Forge also invokes this chooser while preparing an engine-triggered
+        // ability. WrappedAbility delegates canPlay() to AbilitySub, which is
+        // deliberately false: it cannot be manually activated from priority.
+        // Trust only the current controller's exact engine-offered trigger,
+        // never a null mouse event or an arbitrary client-provided ability.
+        return (view.canPlay() || (actual != null && actual.isTrigger()))
+                && controller.mayAffordAbility(view);
+    }
+
     @Override
     public SpellAbilityView getAbilityToPlay(final CardView hostCard,
                                              final List<SpellAbilityView> abilities,
@@ -1466,15 +1477,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (abilities == null || abilities.isEmpty()) {
             return null;
         }
-        if (abilities.stream().noneMatch(a -> a.canPlay() && controller.mayAffordAbility(a))) return null;
+        if (abilities.stream().noneMatch(this::canChooseOfferedAbility)) return null;
         if (abilities.size() == 1) {
             final SpellAbilityView only = abilities.get(0);
-            if (!only.canPlay() || !controller.mayAffordAbility(only)) return null;
+            if (!canChooseOfferedAbility(only)) return null;
             if (triggerEvent == null) {
                 return only;
             }
             if (!only.promptIfOnlyPossibleAbility()) {
-                return only.canPlay() ? only : null;
+                return canChooseOfferedAbility(only) ? only : null;
             }
         }
 
@@ -1482,7 +1493,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final Map<String, SpellAbilityView> byId = new LinkedHashMap<>();
         int index = 0;
         for (SpellAbilityView ability : abilities) {
-            if (!ability.canPlay() || !controller.mayAffordAbility(ability)) {
+            if (!canChooseOfferedAbility(ability)) {
                 index++;
                 continue;
             }
