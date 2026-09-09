@@ -40,6 +40,8 @@ import java.util.Map;
 public interface IGuiGame {
     /** Whether this UI exposes Forge's AI-powered Auto mana button and preview. */
     default boolean supportsAutoPayMana() { return true; }
+
+    default boolean promptsForCosmeticExileOrder() { return true; }
     /** Whether hand reveals can use a desktop FloatingZone plus acknowledgement. */
     default boolean supportsFloatingHandReveal() { return true; }
     /** Browser/native hand flow; leave existing desktop and AI mulligan flows unchanged. */

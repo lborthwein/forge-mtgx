@@ -26,6 +26,38 @@ import java.util.List;
 /** Actual pinned card scripts and game objects; never runs AI decisions or a shared match. */
 public final class HumanManaAffordabilityEngineSmoke {
     private static int checks;
+    private static void checkCosmeticExileOrder() {
+        var game = game(); var player = game.getPlayers().get(0);
+        var relic = card("Relic of Progenitus", player, ZoneType.Battlefield);
+        var source = relic.getSpellAbilities().stream()
+                .filter(a -> a.getApi() == forge.game.ability.ApiType.ChangeZoneAll).findFirst().orElseThrow();
+        var cards = new forge.game.card.CardCollection();
+        cards.add(card("Plains", player, ZoneType.Graveyard));
+        cards.add(card("Island", player, ZoneType.Graveyard));
+        var controller = new forge.player.PlayerControllerHuman(game, player, player.getLobbyPlayer());
+        final RuntimeException reachedGui = new RuntimeException("normal ordering path reached");
+        final boolean[] cosmetic = {false};
+        controller.setGui((forge.gui.interfaces.IGuiGame) java.lang.reflect.Proxy.newProxyInstance(
+                forge.gui.interfaces.IGuiGame.class.getClassLoader(), new Class<?>[]{forge.gui.interfaces.IGuiGame.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("promptsForCosmeticExileOrder")) return cosmetic[0];
+                    throw reachedGui;
+                }));
+        if (controller.orderMoveToZoneList(cards, ZoneType.Exile, source) != cards)
+            throw new AssertionError("Cosmetic exile must preserve the exact supplied cards");
+        // Library ordering, explicit effects and desktop behavior must still
+        // take their normal UI path, not the cosmetic browser shortcut.
+        var reorder = forge.game.ability.AbilityFactory.getAbility("DB$ ReorderZone | Zone$ Exile", relic);
+        for (int test = 0; test < 3; test++) {
+            cosmetic[0] = test == 2;
+            try {
+                controller.orderMoveToZoneList(cards, test == 0 ? ZoneType.Library : ZoneType.Exile,
+                        test == 1 ? reorder : source);
+                throw new AssertionError("Required ordering was bypassed");
+            } catch (RuntimeException expected) { if (expected != reachedGui) throw expected; }
+        }
+        System.out.println("PASS Relic cosmetic exile bypass and preserved library/effect/desktop ordering");
+    }
     private static Game game() {
         var registered = List.of(new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("Fixture payer", 0, 0, null, "Default")),
                 new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("Fixture", 1, 0, null, "Default")));
@@ -103,6 +135,7 @@ public final class HumanManaAffordabilityEngineSmoke {
         try {
             GuiBase.setInterface(new GuiDesktop() { @Override public String getAssetsDir() { return args[0] + "/forge-gui/"; } });
             FModel.initialize(null, prefs -> { prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); prefs.setPref(FPref.UI_LANGUAGE, "en-US"); return null; });
+            checkCosmeticExileOrder();
             check("Lightning Bolt", new String[]{}, null, false);
             check("Lightning Bolt", new String[]{"Plains"}, null, false);
             check("Lightning Bolt", new String[]{"Mountain"}, null, true);

@@ -1224,6 +1224,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     @Override
+    public boolean promptsForCosmeticExileOrder() {
+        return false;
+    }
+
+    @Override
     public boolean defersLondonMulliganTuckUntilKeep() {
         return true;
     }

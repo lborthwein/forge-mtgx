@@ -1113,6 +1113,15 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
 
     @Override
     public CardCollectionView orderMoveToZoneList(final CardCollectionView cards, final ZoneType destinationZone, final SpellAbility source) {
+        // CR 400.5: ordinary face-up exile is not an ordered zone. Preserve the
+        // supplied sequence without asking a cosmetic question or exposing cards.
+        // Do not generalize this to face-down piles or explicit ordering effects.
+        if (destinationZone == ZoneType.Exile && !getGui().promptsForCosmeticExileOrder()
+                && source != null && (source.getApi() == ApiType.ChangeZoneAll || source.getApi() == ApiType.ChangeZone)
+                && !source.hasParam("ExileFaceDown") && !source.hasParam("FaceDown")
+                && cards.stream().noneMatch(Card::isFaceDown)) {
+            return cards;
+        }
         if (source == null || source.getApi() != ApiType.ReorderZone) {
             if (destinationZone == ZoneType.Graveyard) {
                 switch (FModel.getPreferences().getPref(FPref.UI_ALLOW_ORDER_GRAVEYARD_WHEN_NEEDED)) {
