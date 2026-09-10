@@ -183,6 +183,7 @@ public final class HumanManaAffordabilityEngineSmoke {
             check("Stoke the Flames", new String[]{}, null, true); // unsupported convoke remains visible
             var five = new String[]{"Karakas", "Plains", "Plains", "Mountain", "Mana Confluence"};
             checkX("Walking Ballista", five, null, 16, 2, true);
+            checkX("Walking Ballista", new String[]{}, null, 1_000_000, 0, true);
             checkX("Banefire", five, null, 16, 4, true);
             checkX("Banefire", five, "Thalia, Guardian of Thraben", 16, 3, true);
             checkX("Banefire", five, "Goblin Electromancer", 16, 5, true);
