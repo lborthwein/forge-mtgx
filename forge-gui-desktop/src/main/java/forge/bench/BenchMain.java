@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -69,7 +68,6 @@ import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.model.FModel;
 import forge.player.GamePlayerUtil;
 import forge.util.BuildInfo;
-import forge.util.MyRandom;
 import forge.view.TimeLimitedCodeBlock;
 
 /**
@@ -261,7 +259,7 @@ public final class BenchMain {
             prefs.setPref(FPref.UI_LANGUAGE, "en-US");
             return null;
         });
-        MyRandom.setRandom(new Random(seed));
+        BenchRandomAudit.install(seed);
 
         final BenchSession session = new BenchSession(ch);
         session.setStopAfterEchoKind(stopAfterEchoKind);
@@ -273,6 +271,7 @@ public final class BenchMain {
         hello.addProperty("rulesCostVersion", RulesCostFeasibility.VERSION);
         hello.addProperty("paymentVersion", "rules-payment-v1");
         hello.addProperty("paymentControl", "host-complete-witness");
+        hello.addProperty("privateRngAuditVersion", 1);
         hello.addProperty("forgeCommit", forgeCommit());
         hello.addProperty("forgeVersion", BuildInfo.getVersionString());
         hello.addProperty("aiProfile", aiProfile);
@@ -377,7 +376,7 @@ public final class BenchMain {
             final String[] thisFrame = frames.isEmpty() ? null
                     : frames.get(batched ? iGame : 0);
             // Fresh, reproducible RNG per game (the harness pairs seeds across seats).
-            MyRandom.setRandom(new Random(seed + iGame));
+            BenchRandomAudit.install(seed + iGame);
 
             final long t0 = System.currentTimeMillis();
             final Game game = match.createGame();

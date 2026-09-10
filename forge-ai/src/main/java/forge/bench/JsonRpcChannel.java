@@ -338,6 +338,7 @@ public final class JsonRpcChannel {
 
     /** Fire-and-forget message (hello / event / result). */
     public synchronized void send(final JsonObject msg) {
+        BenchRandomAudit.checkpoint(msg);
         out.println(msg.toString());
         out.flush();
     }

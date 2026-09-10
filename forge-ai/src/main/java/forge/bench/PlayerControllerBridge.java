@@ -606,6 +606,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             return super.chooseSpellAbilityToPlay();
         }
         if (pendingExternalAbility != null) throw new RulesCostFeasibility.Unsupported("previous selected action was not executed");
+        final BenchRandomAudit.Token rngBeforeMenu = BenchRandomAudit.begin();
         final int[] diag = new int[DIAG_LEN];
         final List<SpellAbility> menu = legalSpellAbilities(diag);
         recordMenuCensus(diag, menu.size());
@@ -621,6 +622,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         body.add("menu", items);
         body.add("manaAbilities", manaAbilityChannel());
+        BenchRandomAudit.assertUnchanged(rngBeforeMenu, "priority menu and seat-visible encoding");
         final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body);
         if (ans == null) {
             final Echo e = takeEcho();
