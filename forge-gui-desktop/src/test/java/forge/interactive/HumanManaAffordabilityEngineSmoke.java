@@ -10,7 +10,6 @@ import forge.game.GameType;
 import forge.game.Match;
 import forge.game.card.Card;
 import forge.game.card.CounterEnumType;
-import forge.game.card.CounterType;
 import forge.game.cost.CostAdjustment;
 import forge.game.mana.ManaCostBeingPaid;
 import forge.game.phase.PhaseType;
@@ -80,7 +79,7 @@ public final class HumanManaAffordabilityEngineSmoke {
         // These fixtures bypass entering-the-battlefield replacement effects.
         // Seed printed loyalty so state-based actions do not remove our modifier.
         if (zone == ZoneType.Battlefield && card.isPlaneswalker()) {
-            card.setCounters(CounterType.get(CounterEnumType.LOYALTY),
+            card.setCounters(CounterEnumType.LOYALTY,
                     Integer.parseInt(card.getCurrentState().getBaseLoyalty()));
         }
         card.setSickness(false);
