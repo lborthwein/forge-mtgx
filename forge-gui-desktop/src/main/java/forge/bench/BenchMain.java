@@ -279,7 +279,7 @@ public final class BenchMain {
         hello.addProperty("rulesCostVersion", RulesCostFeasibility.VERSION);
         hello.addProperty("paymentVersion", "rules-payment-v1");
         hello.addProperty("paymentControl", "host-complete-witness");
-        hello.addProperty("privateRngAuditVersion", 1);
+        hello.addProperty("privateRngAuditVersion", 2);
         hello.addProperty("privateActionAuditVersion", 1);
         // Explicit identity: a diagnostic no-op run is never a strength panel.
         hello.addProperty("auditMenuProbe", auditMenuProbe);

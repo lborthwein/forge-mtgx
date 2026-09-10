@@ -1,6 +1,9 @@
 package forge.bench;
 
 import java.util.Random;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 
 import com.google.gson.JsonObject;
 
@@ -27,7 +30,9 @@ public final class BenchRandomAudit {
         private static final long serialVersionUID = 1L;
         private long draws;
         private long stateTouches;
-        private long digest = 0xcbf29ce484222325L;
+        // No field initializer: Random's constructor calls our setSeed before
+        // subclass initializers. Its initial seed must remain in the transcript.
+        private MessageDigest transcript;
         private long purityChecks;
 
         public AuditedRandom(final long seed) { super(seed); }
@@ -36,8 +41,7 @@ public final class BenchRandomAudit {
         protected synchronized int next(final int bits) {
             final int value = super.next(bits);
             draws++;
-            digest = (digest ^ bits) * 0x100000001b3L;
-            digest = (digest ^ Integer.toUnsignedLong(value)) * 0x100000001b3L;
+            record((byte) 1, bits, Integer.toUnsignedLong(value));
             return value;
         }
 
@@ -45,6 +49,7 @@ public final class BenchRandomAudit {
         public synchronized void setSeed(final long seed) {
             super.setSeed(seed);
             stateTouches++;
+            record((byte) 2, seed, 0);
         }
 
         @Override
@@ -52,16 +57,34 @@ public final class BenchRandomAudit {
             // The cached second Gaussian consumes no new raw bits but DOES
             // mutate RNG state, so a raw-bit counter alone misses this case.
             stateTouches++;
-            return super.nextGaussian();
+            final double value = super.nextGaussian();
+            record((byte) 3, Double.doubleToRawLongBits(value), 0);
+            return value;
+        }
+
+        /** Fixed-width, domain-tagged private transcript; no RNG calls. */
+        private void record(final byte kind, final long first, final long second) {
+            if (transcript == null) {
+                try { transcript = MessageDigest.getInstance("SHA-256"); }
+                catch (NoSuchAlgorithmException e) { throw new IllegalStateException("SHA-256 unavailable", e); }
+            }
+            transcript.update(kind);
+            for (int shift = 56; shift >= 0; shift -= 8) transcript.update((byte) (first >>> shift));
+            for (int shift = 56; shift >= 0; shift -= 8) transcript.update((byte) (second >>> shift));
         }
 
         synchronized JsonObject snapshot() {
             final JsonObject out = new JsonObject();
-            out.addProperty("schema", "forge-bench-private-rng/1");
+            out.addProperty("schema", "forge-bench-private-rng/2");
             out.addProperty("provider", "java.util.Random");
             out.addProperty("draws", draws);
             out.addProperty("stateTouches", stateTouches);
-            out.addProperty("digest", Long.toUnsignedString(digest, 16));
+            out.addProperty("digestAlgorithm", "sha256-seed-bits-gaussian-v1");
+            try {
+                out.addProperty("digest", HexFormat.of().formatHex(((MessageDigest) transcript.clone()).digest()));
+            } catch (CloneNotSupportedException e) {
+                throw new IllegalStateException("Read-only SHA-256 snapshot unavailable", e);
+            }
             out.addProperty("purityChecks", purityChecks);
             return out;
         }

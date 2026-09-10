@@ -44,6 +44,22 @@ public final class BenchRandomAuditSmoke {
             }
         }
 
+        final BenchRandomAudit.AuditedRandom seedA = new BenchRandomAudit.AuditedRandom(17);
+        final BenchRandomAudit.AuditedRandom seedB = new BenchRandomAudit.AuditedRandom(18);
+        final BenchRandomAudit.AuditedRandom repeatA = new BenchRandomAudit.AuditedRandom(17);
+        check(seedA.snapshot().get("digest").equals(repeatA.snapshot().get("digest")), "same initial seed same transcript");
+        check(!seedA.snapshot().get("digest").equals(seedB.snapshot().get("digest")), "initial seed is recorded before first draw");
+        seedA.setSeed(19); repeatA.setSeed(20);
+        check(!seedA.snapshot().get("digest").equals(repeatA.snapshot().get("digest")), "reset argument recorded even without later draw");
+        check(seedA.snapshot().equals(seedA.snapshot()), "checkpoint does not finalize or mutate transcript");
+        check(seedA.snapshot().get("digest").getAsString().matches("[0-9a-f]{64}"), "SHA-256 transcript width");
+        final BenchRandomAudit.AuditedRandom gaussian = new BenchRandomAudit.AuditedRandom(99);
+        gaussian.nextGaussian();
+        final JsonObject beforeCached = gaussian.snapshot();
+        gaussian.nextGaussian();
+        check(beforeCached.get("draws").equals(gaussian.snapshot().get("draws")), "cached Gaussian adds no raw bits");
+        check(!beforeCached.get("digest").equals(gaussian.snapshot().get("digest")), "cached Gaussian changes transcript");
+
         BenchRandomAudit.install(99);
         final Random reference = new Random(99);
         BenchRandomAudit.Token before = BenchRandomAudit.begin();
