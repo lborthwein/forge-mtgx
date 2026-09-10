@@ -20,10 +20,12 @@ package forge.game.spellability;
 import forge.card.CardStateName;
 import forge.card.mana.ManaCost;
 import forge.game.card.Card;
+import forge.game.card.CardCollection;
 import forge.game.card.CardCopyService;
 import forge.game.card.CardState;
 import forge.game.player.Player;
 import forge.game.staticability.StaticAbility;
+import forge.game.staticability.StaticAbilityContinuous;
 import forge.game.zone.ZoneType;
 import forge.util.CardTranslation;
 import forge.util.Localizer;
@@ -56,6 +58,15 @@ public class LandAbility extends AbilityStatic {
         }
  
         land = Objects.requireNonNullElse(getAlternateHost(land), land);
+
+        // A face-down exiled object can satisfy a nonLand permission while its
+        // prospective face-up land does not (Thief of Sanity). Do not reuse that
+        // cached permission merely because this ability still holds its pointer.
+        // The prospective card takes precedence over the live object in preList.
+        if (getMayPlay() != null && !StaticAbilityContinuous.getAffectedCards(
+                getMayPlay(), new CardCollection(land)).contains(land)) {
+            return false;
+        }
 
         return p.canPlayLand(land, false, this);
     }

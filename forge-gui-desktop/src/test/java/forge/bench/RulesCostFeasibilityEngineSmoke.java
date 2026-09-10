@@ -157,7 +157,7 @@ public final class RulesCostFeasibilityEngineSmoke {
             throw new AssertionError("Actual stack/mana state differs from witness");
         if (alternate && (source.isTapped() || !other.isTapped())) throw new AssertionError("Ignored explicit alternate payment source");
         if (sourceName.equals("Black Lotus")) {
-            var emitted = source.getManaAbilities().get(0).getManaPart().getLastManaProduced();
+            var emitted = List.copyOf(source.getManaAbilities().get(0).getManaPart().getLastManaProduced());
             if (emitted.size() != 3) throw new AssertionError("Lotus did not emit three actual mana objects");
             for (var mana : emitted) if (!mana.equals(emitted.get(0)) || mana.getManaAbility() != emitted.get(0).getManaAbility()
                     || mana.isRestricted() || mana.triggersWhenSpent() || mana.addsCounters(spell)
@@ -188,8 +188,8 @@ public final class RulesCostFeasibilityEngineSmoke {
         catch (RulesCostFeasibility.Unsupported expected) { }
         first.setTapped(true); second.setTapped(true);
         var manaAbility = first.getManaAbilities().get(0);
-        player.getManaPool().addMana(new forge.game.mana.Mana(forge.card.mana.ManaAtom.RED, first, manaAbility.getManaPart(), player));
-        player.getManaPool().addMana(new forge.game.mana.Mana(forge.card.mana.ManaAtom.RED, first, manaAbility.getManaPart(), player));
+        player.getManaPool().addMana(new forge.game.mana.Mana((byte) forge.card.mana.ManaAtom.RED, first, manaAbility.getManaPart(), player));
+        player.getManaPool().addMana(new forge.game.mana.Mana((byte) forge.card.mana.ManaAtom.RED, first, manaAbility.getManaPart(), player));
         var floating = new RulesPaymentChoices(player, spell).request();
         if (floating.getAsJsonArray("pool").size() != 2 || floating.getAsJsonArray("menu").size() != 2
                 || floating.getAsJsonArray("menu").get(0).getAsJsonObject().getAsJsonArray("spend").get(0).getAsJsonObject().get("token")

@@ -20,6 +20,7 @@ shasum -a 256 "$integrity_jar"
   "$integrity_root/forge-game/src/main/java/forge/game/cost/CostAdjustment.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/mana/ManaCostBeingPaid.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/mana/ManaPool.java" \
+  "$integrity_root/forge-game/src/main/java/forge/game/spellability/LandAbility.java" \
   "$integrity_root/forge-ai/src/main/java/forge/ai/ComputerUtil.java" \
   "$integrity_root/forge-ai/src/main/java/forge/bench/StateEncoder.java" \
   "$integrity_root/forge-ai/src/main/java/forge/bench/RulesCostFeasibility.java" \

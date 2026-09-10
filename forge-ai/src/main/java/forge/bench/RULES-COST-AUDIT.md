@@ -80,10 +80,29 @@ larger bound or silent pruning.
 New fixtures cover exact host-selected alternative sources, Lotus execution,
 floating-token identity, tapped non-tap mana abilities, and actual Thief of Sanity
 versus Expensive Taste face-down land permission. They also snapshot original
-ability fields and the global ability-ID counter. **These phase-2 changes have not
-been compiled or run yet:** the human Forge browser game owns Studio admission.
-Only the 16 phase-1 checks above are passing evidence. No deployment is authorized
-by this unverified implementation snapshot.
+ability fields and the global ability-ID counter. Integrated development fixtures
+now pass under the shared test admission lane; this is not a strength certificate
+or browser deployment authorization.
+
+Integrated evidence: `/Users/channel/runs/2026-09-10-forge-integrated-integrity-v3/fixture.log`.
+All five fixture programs pass: 60,013 RNG stream/tripwire checks, 17 observation
+checks, 23 rules/payment checks, two real full-menu RNG cases and three actual
+action-receipt cases (including deliberate nonexecution rejection). The preceding
+v1 failed on fixture API mismatches; v2 compiled and exposed a genuine Thief of
+Sanity permission defect rather than passing that case silently.
+
+`LandAbility.canPlay` now revalidates a cached MayPlay static against the prospective
+face-up land using Forge's affected-card rules. A face-down object satisfying
+`nonLand` no longer carries that permission into a land play. The actual Thief of
+Sanity script now rejects exiled Mountain, while Expensive Taste still permits it.
+This is an engine rules repair shared by both seats, not a policy change. The
+historical blank-source trace does not reveal its original card; these fixtures do
+not identify that hidden historical face or quantify any historical win-rate effect.
+
+The full-menu fixtures currently check RNG only, not every original ability field:
+the expanded state/ID snapshot is applied to the rules feasibility queries. Thus
+the identified original-actor/optional-cost ID mutation in full enumeration remains
+an open gate even though the combined development suite passes.
 
 ## Outstanding gates and next implementation
 
