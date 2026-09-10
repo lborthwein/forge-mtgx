@@ -201,6 +201,11 @@ public final class InteractiveMain {
         FModel.initialize(null, preferences -> {
             preferences.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
             preferences.setPref(FPref.UI_LANGUAGE, "en-US");
+            // The browser owns presentation. Opening desktop audio clips here
+            // blocks game-event delivery (including each mana-source tap) on
+            // the server, and cannot provide sound to the remote player.
+            preferences.setPref(FPref.UI_ENABLE_SOUNDS, false);
+            preferences.setPref(FPref.UI_ENABLE_MUSIC, false);
             preferences.setPref(FPref.PLAYER_NAME, "Browser Player");
             preferences.setPref(FPref.UI_CURRENT_AI_PROFILE, "Default");
             preferences.setPref(FPref.YIELD_AUTO_PASS_NO_ACTIONS, false);
