@@ -656,7 +656,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final List<SpellAbility> menu = legalSpellAbilities(diag);
         final JsonObject body = envelope(true);
         body.addProperty("rulesCostVersion", RulesCostFeasibility.VERSION);
-        body.addProperty("paymentVersion", "rules-payment-v1");
+        body.addProperty("paymentVersion", RulesCostFeasibility.PAYMENT_VERSION);
         body.addProperty("paymentControl", "host-complete-witness");
         body.add("menuDiag", menuDiagJson(diag, menu.size()));
         final JsonArray items = new JsonArray();

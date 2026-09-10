@@ -277,7 +277,7 @@ public final class BenchMain {
         hello.addProperty("protocol", JsonRpcChannel.PROTOCOL_VERSION);
         hello.addProperty("protocolMinor", JsonRpcChannel.PROTOCOL_MINOR);
         hello.addProperty("rulesCostVersion", RulesCostFeasibility.VERSION);
-        hello.addProperty("paymentVersion", "rules-payment-v1");
+        hello.addProperty("paymentVersion", RulesCostFeasibility.PAYMENT_VERSION);
         hello.addProperty("paymentControl", "host-complete-witness");
         hello.addProperty("privateRngAuditVersion", 2);
         hello.addProperty("privateActionAuditVersion", 1);

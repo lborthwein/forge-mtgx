@@ -29,14 +29,24 @@ import java.util.List;
  * separate certification gates; this class makes no whole-bridge purity claim.
  */
 public final class RulesCostFeasibility {
-    public static final String VERSION = "rules-cost-v2-witness-bounded";
+    public static final String VERSION = "rules-cost-v3-fixed-life";
+    public static final String PAYMENT_VERSION = "rules-payment-v2-fixed-life";
+    public static final String LIFE_VERSION = "rules-fixed-life-v1";
     public enum Status { PAYABLE, UNPAYABLE, UNSUPPORTED }
     public record Result(Status status, String reason, PaymentWitness witness, PaymentSpace space) {}
-    public record PaymentSpace(ManaCost cost, List<ManaCostShard> shards, List<Token> pool, List<List<SourceChoice>> sources) {}
+    public record PaymentSpace(ManaCost cost, List<ManaCostShard> shards, List<Token> pool, List<List<SourceChoice>> sources, int life) {
+        public PaymentSpace(ManaCost cost, List<ManaCostShard> shards, List<Token> pool, List<List<SourceChoice>> sources) {
+            this(cost, shards, pool, sources, 0);
+        }
+    }
     public record SourceChoice(SpellAbility ability, String choice, List<Integer> output) {}
     public record Token(int color, Mana floating, SourceChoice source, int outputIndex) {}
     public record Allocation(ManaCostShard shard, Token token) {}
-    public record PaymentWitness(ManaCost cost, List<SourceChoice> sources, List<Allocation> allocations) {}
+    public record PaymentWitness(ManaCost cost, List<SourceChoice> sources, List<Allocation> allocations, int life) {
+        public PaymentWitness(ManaCost cost, List<SourceChoice> sources, List<Allocation> allocations) {
+            this(cost, sources, allocations, 0);
+        }
+    }
     private static final int SEARCH_LIMIT = 100_000;
     private RulesCostFeasibility() {}
 
@@ -51,9 +61,10 @@ public final class RulesCostFeasibility {
     }
 
     private static Result unknown(String reason) { return new Result(Status.UNSUPPORTED, reason, null, null); }
-    private static Result answer(boolean yes) { return new Result(yes ? Status.PAYABLE : Status.UNPAYABLE, VERSION,
-            yes ? new PaymentWitness(ManaCost.ZERO, List.of(), List.of()) : null,
-            yes ? new PaymentSpace(ManaCost.ZERO, List.of(), List.of(), List.of()) : null); }
+    private static Result answer(boolean yes) { return answer(yes, 0); }
+    private static Result answer(boolean yes, int life) { return new Result(yes ? Status.PAYABLE : Status.UNPAYABLE, VERSION,
+            yes ? new PaymentWitness(ManaCost.ZERO, List.of(), List.of(), life) : null,
+            yes ? new PaymentSpace(ManaCost.ZERO, List.of(), List.of(), List.of(), life) : null); }
 
     public static Result assess(Player payer, SpellAbility ability) {
         if (payer == null || ability == null || ability.getActivatingPlayer() != payer
@@ -63,9 +74,19 @@ public final class RulesCostFeasibility {
                 || ability.hasParam("Announce") || ability.hasSVar("NumTimes") || !ability.getPipsToReduce().isEmpty()
                 || ability.hasParam("ReduceCost") || ability.hasParam("RaiseCost")
                 || ability.hasParam("TapCreaturesForMana") || ability.hasParam("ManaRestriction")
-                || ability.hasParam("ManaConversion") || ability.getMayPlayOption() != null
+                || ability.hasParam("ManaConversion")
                 || ability.getHostCard().isCommander())
             return unknown("complex announcement or payment");
+        var permission = ability.getMayPlayOption();
+        if (permission != null) {
+            if (permission.getPlayer() != payer || !permission.getAbility().checkConditions()
+                    || ability.getHostCard().mayPlay(payer).stream().noneMatch(p -> p.getAbility() == permission.getAbility())
+                    || !forge.game.staticability.StaticAbilityContinuous.getAffectedCards(permission.getAbility(),
+                        new forge.game.card.CardCollection(ability.getHostCard())).contains(ability.getHostCard())) return answer(false);
+            if (permission.isIgnoreManaCostColor() || permission.isIgnoreManaCostType() || permission.isIgnoreSnowSourceManaCostColor()
+                    || permission.getPayManaCost() != forge.game.card.CardPlayOption.PayManaCost.YES)
+                return unknown("unsupported permission payment conversion");
+        }
         for (Keyword keyword : new Keyword[]{Keyword.CONVOKE, Keyword.IMPROVISE, Keyword.DELVE, Keyword.ASSIST}) {
             if (ability.getHostCard().hasKeyword(keyword)) return unknown("alternative mana payment: " + keyword);
         }
@@ -74,6 +95,7 @@ public final class RulesCostFeasibility {
             return unknown("splice may alter selected spell during execution");
         boolean hostUsed = false;
         int nonMana = 0;
+        int life = 0;
         for (CostPart part : ability.getPayCosts().getCostParts()) {
             if (part instanceof CostPartMana) continue;
             // Multiple nonmana costs can compete for the same resource. Do not prove
@@ -87,9 +109,13 @@ public final class RulesCostFeasibility {
             } else if (part instanceof CostPutCounter put && put.payCostFromSource()
                     && put.convertAmount() != null && put.getCounter().is(CounterEnumType.LOYALTY) && ability.isActivatedAbility()) {
                 // Non-ETB source counter cost; no temporary static-state query.
+            } else if (part instanceof CostPayLife payLife && payLife.convertAmount() != null) {
+                life = payLife.convertAmount();
+                if (life < 0 || life > 1_000_000) return unknown("fixed life cost outside bounded scope");
             } else return unknown("nonmana cost: " + part.getClass().getSimpleName());
             if (!part.canPay(ability, payer, false)) return answer(false);
         }
+        if (life > 0 && !payer.canLoseLife()) return unknown("life payment without ordinary life loss");
 
         // These effects can change payment feasibility or make source costs dependent.
         for (Card card : payer.getGame().getCardsInGame()) {
@@ -100,7 +126,9 @@ public final class RulesCostFeasibility {
                     || s.checkMode(StaticAbilityMode.CantBeActivated))) return unknown("mana conversion/optional cost/conditional activation");
             if (card.getReplacementEffects().stream().filter(r -> r.zonesCheck(payer.getGame().getZoneOf(card)))
                     .anyMatch(r -> r.getMode() == ReplacementType.ProduceMana
-                            || r.getMode() == ReplacementType.Tap || r.getMode() == ReplacementType.Untap)) return unknown("mana/tap replacement");
+                            || r.getMode() == ReplacementType.Tap || r.getMode() == ReplacementType.Untap
+                            || (lifeCostPresent(ability) && (r.getMode() == ReplacementType.PayLife || r.getMode() == ReplacementType.LifeReduced))))
+                return unknown("mana/tap/life replacement");
             if (card.getTriggers().stream().filter(t -> t.getSpawningAbility() != null
                     || t.zonesCheck(payer.getGame().getZoneOf(card)))
                     .anyMatch(t -> t.getMode() == TriggerType.TapsForMana || t.getMode() == TriggerType.ManaAdded))
@@ -116,7 +144,7 @@ public final class RulesCostFeasibility {
             shards.add(shard);
         }
         for (int i = 0; i < cost.getGenericCost(); i++) shards.add(ManaCostShard.GENERIC);
-        if (shards.isEmpty()) return answer(true);
+        if (shards.isEmpty()) return answer(true, life);
         List<Token> tokens = new ArrayList<>();
         for (byte color : ManaAtom.MANATYPES) if (payer.getManaPool().getPossibleColorUses(color) != color)
             return unknown("pool/source color conversion");
@@ -201,11 +229,15 @@ public final class RulesCostFeasibility {
                 allocations.add(new Allocation(shards.get(matching[i]), token));
                 if (token.source() != null && !used.contains(token.source())) used.add(token.source());
             }
-            return new Result(Status.PAYABLE, VERSION, new PaymentWitness(cost, List.copyOf(used), List.copyOf(allocations)),
+            return new Result(Status.PAYABLE, VERSION, new PaymentWitness(cost, List.copyOf(used), List.copyOf(allocations), life),
                     new PaymentSpace(cost, List.copyOf(shards), List.copyOf(tokens),
-                            sources.stream().map(List::copyOf).toList()));
+                            sources.stream().map(List::copyOf).toList(), life));
         }
         catch (Unsupported limit) { return unknown(limit.getMessage()); }
+    }
+
+    private static boolean lifeCostPresent(SpellAbility ability) {
+        return ability.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostPayLife);
     }
 
     private static List<Token> search(List<ManaCostShard> shards, List<Token> tokens,

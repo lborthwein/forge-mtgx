@@ -7,8 +7,13 @@ import forge.game.spellability.SpellAbility;
 
 /** Rules-only decisions for the bounded cost subset. Never invokes an AI. */
 final class RulesCostDecisionMaker extends CostDecisionMakerBase {
+    private final Integer selectedLife;
     RulesCostDecisionMaker(Player player, SpellAbility ability) {
+        this(player, ability, null);
+    }
+    RulesCostDecisionMaker(Player player, SpellAbility ability, Integer selectedLife) {
         super(player, false, ability, ability.getHostCard());
+        this.selectedLife = selectedLife;
     }
     @Override public boolean paysRightAfterDecision() { return false; }
     private PaymentDecision unsupported(CostPart cost) {
@@ -62,7 +67,11 @@ final class RulesCostDecisionMaker extends CostDecisionMakerBase {
     @Override public PaymentDecision visit(CostRollDice cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostMill cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostAddMana cost) { return unsupported(cost); }
-    @Override public PaymentDecision visit(CostPayLife cost) { return unsupported(cost); }
+    @Override public PaymentDecision visit(CostPayLife cost) {
+        if (selectedLife == null || !selectedLife.equals(cost.convertAmount())) return unsupported(cost);
+        require(cost);
+        return PaymentDecision.number(selectedLife);
+    }
     @Override public PaymentDecision visit(CostPayEnergy cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostGainLife cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostPromiseGift cost) { return unsupported(cost); }
@@ -79,4 +88,3 @@ final class RulesCostDecisionMaker extends CostDecisionMakerBase {
     @Override public PaymentDecision visit(CostPayShards cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostBlight cost) { return unsupported(cost); }
 }
-

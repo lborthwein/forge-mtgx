@@ -608,12 +608,29 @@ public final class StateEncoder {
         o.addProperty("mana", cost.hasNoManaCost() ? "" : String.valueOf(cost.getTotalMana()));
         o.addProperty("cmc", cost.hasNoManaCost() ? 0 : cost.getTotalMana().getCMC());
         o.addProperty("onlyMana", cost.isOnlyManaCost());
+        // Fixed life is engine cost data, not inferred from card names/text.
+        // Variable costs remain unrepresented and are rejected by the checker.
+        int fixedLife = 0;
+        boolean fixedLifeKnown = true;
+        for (CostPart part : cost.getCostParts()) {
+            if (part instanceof forge.game.cost.CostPayLife life) {
+                if (life.convertAmount() == null || life.convertAmount() < 0) fixedLifeKnown = false;
+                else fixedLife = Math.addExact(fixedLife, life.convertAmount());
+            }
+        }
+        if (fixedLifeKnown) {
+            o.addProperty("fixedLifeVersion", RulesCostFeasibility.LIFE_VERSION);
+            o.addProperty("life", fixedLife);
+            o.addProperty("alternative", sa.getMayPlayOption() != null && sa.getMayPlayOption().getAltManaCost() != null);
+        }
         final JsonArray parts = new JsonArray();
         try {
             for (CostPart cp : cost.getCostParts()) {
                 final JsonObject p = new JsonObject();
                 p.addProperty("kind", cp.getClass().getSimpleName());
                 p.addProperty("rendered", String.valueOf(cp));
+                if (cp instanceof forge.game.cost.CostPayLife life && life.convertAmount() != null)
+                    p.addProperty("amount", life.convertAmount());
                 parts.add(p);
             }
         } catch (RuntimeException e) {

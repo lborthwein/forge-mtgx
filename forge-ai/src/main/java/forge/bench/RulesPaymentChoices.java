@@ -56,7 +56,7 @@ public final class RulesPaymentChoices {
         visit();
         if (index == shards.size()) {
             if (plans.size() >= MAX_PLANS) throw new RulesCostFeasibility.Unsupported("complete payment witness bound");
-            plans.add(new RulesCostFeasibility.PaymentWitness(space.cost(), List.copyOf(chosen), List.copyOf(allocations)));
+            plans.add(new RulesCostFeasibility.PaymentWitness(space.cost(), List.copyOf(chosen), List.copyOf(allocations), space.life()));
             return;
         }
         ManaCostShard shard = shards.get(index);
@@ -86,13 +86,14 @@ public final class RulesPaymentChoices {
 
     public JsonObject request() {
         var out = new JsonObject();
-        out.addProperty("paymentVersion", "rules-payment-v1");
+        out.addProperty("paymentVersion", RulesCostFeasibility.PAYMENT_VERSION);
         out.addProperty("complete", true);
         out.addProperty("sourceOrderRequired", true);
         out.addProperty("domain", "fixed-cost-supported-tap-source-activations-and-token-shard-allocations");
         var cost = new JsonObject();
         cost.addProperty("mana", space.cost().toString());
         cost.addProperty("x", 0);
+        cost.addProperty("life", space.life());
         var shards = new JsonArray();
         for (var shard : space.shards()) shards.add(shard.name());
         cost.add("shards", shards);
@@ -143,7 +144,7 @@ public final class RulesPaymentChoices {
                 spend.add(payment);
             }
             item.add("spend", spend);
-            item.addProperty("lifePaid", 0);
+            item.addProperty("lifePaid", witness.life());
             menu.add(item);
         }
         out.add("menu", menu);
@@ -169,7 +170,7 @@ public final class RulesPaymentChoices {
                 if (source == null) throw new IllegalArgumentException("unknown/duplicate source in sourceOrder");
                 ordered.add(source);
             }
-            return new RulesCostFeasibility.PaymentWitness(witness.cost(), List.copyOf(ordered), witness.allocations());
+            return new RulesCostFeasibility.PaymentWitness(witness.cost(), List.copyOf(ordered), witness.allocations(), witness.life());
         } catch (RuntimeException invalid) {
             throw new RulesCostFeasibility.Unsupported("invalid complete-payment answer: " + invalid.getMessage());
         }

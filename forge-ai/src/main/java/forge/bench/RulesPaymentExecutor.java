@@ -20,6 +20,8 @@ public final class RulesPaymentExecutor {
     private final String selectedAction;
     private final RulesCostFeasibility.PaymentWitness witness;
     private boolean paid;
+    private final int lifeBefore;
+    private SpellAbility paidAction;
     private SpellAbility activeSource;
 
     /** Explicit witness entry point. A protocol decoder must resolve host-selected
@@ -28,12 +30,14 @@ public final class RulesPaymentExecutor {
     public RulesPaymentExecutor(Player payer, SpellAbility selected, RulesCostFeasibility.PaymentWitness requested) {
         if (requested == null) fail("explicit host-selected witness required");
         this.payer = payer;
+        lifeBefore = payer.getLife();
         selectedAction = actionKey(selected);
         var result = RulesCostFeasibility.assess(payer, selected);
         if (result.status() != RulesCostFeasibility.Status.PAYABLE || result.witness() == null)
             throw new RulesCostFeasibility.Unsupported("selected action has no executable payment witness: " + result.reason());
         witness = requested;
-        if (!witness.cost().equals(result.witness().cost())) fail("requested witness prices a different cost");
+        if (!witness.cost().equals(result.witness().cost()) || witness.life() != result.witness().life())
+            fail("requested witness prices a different mana/life cost");
     }
 
     static String actionKey(SpellAbility sa) {
@@ -47,7 +51,7 @@ public final class RulesPaymentExecutor {
 
     public CostDecisionMakerBase decisions(SpellAbility actual) {
         if (!selectedAction.equals(actionKey(actual))) fail("selected action/cost/targets changed before payment");
-        return new RulesCostDecisionMaker(payer, actual);
+        return new RulesCostDecisionMaker(payer, actual, witness.life());
     }
 
     public boolean pay(ManaCost toPay, CostPartMana costPart, SpellAbility actual, boolean effect) {
@@ -96,9 +100,14 @@ public final class RulesPaymentExecutor {
         }
         if (!remaining.isPaid()) fail("witness left an unpaid mana cost");
         paid = true;
+        paidAction = actual;
         return true;
     }
 
-    public void assertPaid() { if (!paid) fail("selected action did not execute its mana payment"); }
+    public void assertPaid() {
+        if (!paid) fail("selected action did not execute its mana payment");
+        if (witness.life() > 0 && (paidAction.getAmountLifePaid() != witness.life()
+                || payer.getLife() != lifeBefore - witness.life())) fail("actual life payment differs from host-selected witness");
+    }
     private static void fail(String reason) { throw new RulesCostFeasibility.Unsupported("payment witness: " + reason); }
 }
