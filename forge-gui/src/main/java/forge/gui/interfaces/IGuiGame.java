@@ -196,6 +196,12 @@ public interface IGuiGame {
     Integer getInteger(String message, int min, int max, boolean sortDesc);
     Integer getInteger(String message, int min, int max, int cutoff);
 
+    /** Browser opt-in: preserve the semantic X decision instead of a desktop 0..9 list. */
+    default boolean supportsTypedManaX() { return false; }
+    default Integer chooseManaX(String message, int min, int max, boolean exact, String detail, boolean cancellable) {
+        throw new UnsupportedOperationException("Typed mana X is not implemented by this GUI");
+    }
+
     /**
      * Convenience for getChoices(message, 0, 1, choices).
      *

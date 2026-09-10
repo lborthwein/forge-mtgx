@@ -1782,6 +1782,39 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     @Override
+    public boolean supportsTypedManaX() { return true; }
+
+    @Override
+    public Integer chooseManaX(final String message, final int min, final int max,
+                              final boolean exact, final String detail, final boolean cancellable) {
+        final JsonObject number = control("mana-x", "number", "Choose X");
+        number.addProperty("min", min);
+        number.addProperty("max", max);
+        final JsonObject metadata = new JsonObject();
+        metadata.addProperty("semantic", "mana-x");
+        metadata.addProperty("affordability", exact ? "exact" : "unknown");
+        metadata.addProperty("detail", detail);
+        number.add("value", metadata);
+        final JsonArray controls = new JsonArray();
+        controls.add(number);
+        if (cancellable) controls.add(control("mana-x:cancel", "cancel", "Cancel"));
+        final String prompt = exact ? "Choose X (" + min + "–" + max + ")"
+                : "Choose X — maximum affordability is not verified: " + detail;
+        final JsonObject answer = ask("number", "modal:announceManaX", "Forge", prompt,
+                min, max, cancellable, controls, action -> {
+                    if (cancellable && "cancel".equals(string(action, "type"))
+                            && "mana-x:cancel".equals(string(action, "controlId"))) return null;
+                    if (!"number".equals(string(action, "type")) || !"mana-x".equals(string(action, "controlId"))
+                            || !isIntegralNumber(action.get("number"))) return "answer must choose X or cancel";
+                    try {
+                        final int chosen = action.get("number").getAsBigDecimal().intValueExact();
+                        return chosen < min || chosen > max ? "X is outside the offered range" : null;
+                    } catch (RuntimeException invalid) { return "X must be a 32-bit integer"; }
+                });
+        return "cancel".equals(string(answer, "type")) ? null : answer.get("number").getAsInt();
+    }
+
+    @Override
     public String showInputDialog(final String message, final String title,
                                   final FSkinProp icon, final String initialInput,
                                   final List<String> inputOptions, final boolean isNumeric) {

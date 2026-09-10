@@ -21,6 +21,7 @@ import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.model.FModel;
 import forge.player.GamePlayerUtil;
 import forge.player.HumanManaAffordability;
+import forge.player.HumanManaX;
 import java.util.List;
 
 /** Actual pinned card scripts and game objects; never runs AI decisions or a shared match. */
@@ -131,6 +132,23 @@ public final class HumanManaAffordabilityEngineSmoke {
         System.out.println("PASS " + spellName + " " + List.of(sources) + " modifier=" + modifier + " mayAfford=" + actual);
         checks++;
     }
+    private static void checkX(String name, String[] sources, String modifier, int life, int expectedMax, boolean exact) {
+        var game = game(); var player = game.getPlayers().get(0);
+        player.setLife(life, null);
+        for (String source : sources) card(source, player, ZoneType.Battlefield);
+        card("Plains", player, ZoneType.Hand);
+        if (modifier != null) card(modifier, player, ZoneType.Battlefield);
+        var ability = card(name, player, ZoneType.Hand).getFirstSpellAbility();
+        ability.setActivatingPlayer(player);
+        game.getAction().checkStateEffects(true);
+        String before = state(game);
+        var result = HumanManaX.range(player, ability, 0, Integer.MAX_VALUE);
+        if (!before.equals(state(game))) throw new AssertionError("X query mutated actual game: " + name);
+        if (result.exact() != exact || (exact && result.max() != expectedMax))
+            throw new AssertionError(name + " X range " + result + " expectedMax=" + expectedMax + " exact=" + exact);
+        System.out.println("PASS exact X fixture " + name + " sources=" + List.of(sources) + " modifier=" + modifier + " " + result);
+        checks++;
+    }
     public static void main(String[] args) {
         try {
             GuiBase.setInterface(new GuiDesktop() { @Override public String getAssetsDir() { return args[0] + "/forge-gui/"; } });
@@ -163,6 +181,17 @@ public final class HumanManaAffordabilityEngineSmoke {
             check("Banefire", new String[]{"Mountain"}, null, true);
             check("Fireball", new String[]{}, null, true); // target-dependent tax is unknown
             check("Stoke the Flames", new String[]{}, null, true); // unsupported convoke remains visible
+            var five = new String[]{"Karakas", "Plains", "Plains", "Mountain", "Mana Confluence"};
+            checkX("Walking Ballista", five, null, 16, 2, true);
+            checkX("Banefire", five, null, 16, 4, true);
+            checkX("Banefire", five, "Thalia, Guardian of Thraben", 16, 3, true);
+            checkX("Banefire", five, "Goblin Electromancer", 16, 5, true);
+            checkX("Walking Ballista", five, "Trinisphere", 16, 2, true);
+            checkX("Walking Ballista", new String[]{"Plains", "Plains"}, "Trinisphere", 16, -1, true);
+            checkX("Banefire", new String[]{"Plains", "Plains", "Plains"}, null, 16, -1, true);
+            checkX("Walking Ballista", new String[]{"Mana Confluence", "Mana Confluence", "Mana Confluence", "Mana Confluence", "Mana Confluence"}, null, 2, 1, true);
+            checkX("Walking Ballista", new String[]{"Mystic Gate", "Island"}, null, 16, 0, false);
+            checkX("Fireball", five, null, 16, 0, false);
             System.out.println("PASS " + checks + " actual-engine affordability cases; no presentation-query state changes");
             System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }

@@ -395,6 +395,12 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
 
         String announceTitle = "X".equals(announce) ? ability.getParamOrDefault("XAnnounceTitle", announce) :
                 ability.getParamOrDefault("AnnounceTitle", announce);
+        if ("X".equals(announce) && getGui().supportsTypedManaX()) {
+            final HumanManaX.Range range = HumanManaX.range(player, ability, min, max);
+            if (range.min() > range.max()) return null;
+            return getGui().chooseManaX("Choose X", range.min(), range.max(), range.exact(), range.reason(),
+                    cost == null || !cost.isMandatory());
+        }
         if (cost != null && cost.isMandatory()) {
             return chooseNumber(ability, localizer.getMessage("lblChooseAnnounceForCard", announceTitle,
                     host.getTranslatedName()), min, max);
