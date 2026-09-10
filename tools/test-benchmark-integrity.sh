@@ -46,12 +46,13 @@ shasum -a 256 "$integrity_jar"
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/ObservationIntegrityEngineSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/FixedLifePaymentEngineSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/SourceLifePaymentEngineSmoke.java" \
+  "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/MixedManaPaymentEngineSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/BenchRandomAuditSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/BenchRandomAuditMenuSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/BenchMenuPurityVariantsSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/BenchNullProbeWiringSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/BenchActionAuditSmoke.java"
-for integrity_fixture in BenchRandomAuditSmoke SourceLifePaymentEngineSmoke FixedLifePaymentEngineSmoke ObservationIntegrityEngineSmoke RulesCostFeasibilityEngineSmoke BenchRandomAuditMenuSmoke BenchMenuPurityVariantsSmoke BenchActionAuditSmoke BenchNullProbeWiringSmoke; do
+for integrity_fixture in BenchRandomAuditSmoke MixedManaPaymentEngineSmoke SourceLifePaymentEngineSmoke FixedLifePaymentEngineSmoke ObservationIntegrityEngineSmoke RulesCostFeasibilityEngineSmoke BenchRandomAuditMenuSmoke BenchMenuPurityVariantsSmoke BenchActionAuditSmoke BenchNullProbeWiringSmoke; do
   echo "RUN $integrity_fixture"
   /opt/homebrew/opt/openjdk@17/bin/java -Xmx2g -Duser.home="$integrity_dir/home" \
     -cp "$integrity_dir/classes:$integrity_jar" "forge.bench.$integrity_fixture" "$integrity_root"
