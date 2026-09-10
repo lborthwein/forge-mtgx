@@ -22,20 +22,17 @@ public final class RulesPaymentExecutor {
     private boolean paid;
     private SpellAbility activeSource;
 
-    public RulesPaymentExecutor(Player payer, SpellAbility selected) {
-        this(payer, selected, null);
-    }
-
     /** Explicit witness entry point. A protocol decoder must resolve host-selected
      * source/token identities against this decision's offered witnesses first.
      */
     public RulesPaymentExecutor(Player payer, SpellAbility selected, RulesCostFeasibility.PaymentWitness requested) {
+        if (requested == null) fail("explicit host-selected witness required");
         this.payer = payer;
         selectedAction = actionKey(selected);
         var result = RulesCostFeasibility.assess(payer, selected);
         if (result.status() != RulesCostFeasibility.Status.PAYABLE || result.witness() == null)
             throw new RulesCostFeasibility.Unsupported("selected action has no executable payment witness: " + result.reason());
-        witness = requested == null ? result.witness() : requested;
+        witness = requested;
         if (!witness.cost().equals(result.witness().cost())) fail("requested witness prices a different cost");
     }
 

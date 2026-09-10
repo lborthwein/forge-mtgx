@@ -823,8 +823,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * ({@code activations.ts:selfRestoringSources}) walks our permanents, and a channel
      * that enumerated the opponent's would publish hidden information for nobody's
      * benefit. {@code setActivatingPlayer} is NOT called — this is a read of the card, not
-     * a preparation of an ability — and an enumeration that throws is swallowed per card,
-     * so the key is shorter and never wrong.
+     * a preparation of an ability. An enumeration failure invalidates the observation;
+     * silently omitting one producer can change the host's payment policy.
      */
     private JsonArray manaAbilityChannel() {
         final JsonArray out = new JsonArray();
@@ -844,7 +844,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                     out.add(StateEncoder.encodeSpellAbility(sa, p.getView()));
                 }
             } catch (RuntimeException e) {
-                JsonRpcChannel.logErr("mana ability channel failed for " + c, e);
+                JsonRpcChannel.logErr("BENCH_INTEGRITY_FAILURE: mana ability channel failed for " + c, e);
+                throw e;
             }
         }
         return out;
