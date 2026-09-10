@@ -9,6 +9,8 @@ import forge.game.GameStage;
 import forge.game.GameType;
 import forge.game.Match;
 import forge.game.card.Card;
+import forge.game.card.CounterEnumType;
+import forge.game.card.CounterType;
 import forge.game.cost.CostAdjustment;
 import forge.game.mana.ManaCostBeingPaid;
 import forge.game.phase.PhaseType;
@@ -75,6 +77,12 @@ public final class HumanManaAffordabilityEngineSmoke {
         var card = Card.fromPaperCard(paper, player);
         card.setGameTimestamp(player.getGame().getNextTimestamp());
         player.getZone(zone).add(card);
+        // These fixtures bypass entering-the-battlefield replacement effects.
+        // Seed printed loyalty so state-based actions do not remove our modifier.
+        if (zone == ZoneType.Battlefield && card.isPlaneswalker()) {
+            card.setCounters(CounterType.get(CounterEnumType.LOYALTY),
+                    Integer.parseInt(card.getCurrentState().getBaseLoyalty()));
+        }
         card.setSickness(false);
         return card;
     }
@@ -107,12 +115,14 @@ public final class HumanManaAffordabilityEngineSmoke {
         }
         // A hand full of basic lands must not force the old unknown-source escape.
         card("Plains", player, ZoneType.Hand);
-        if (modifier != null) card(modifier, player, ZoneType.Battlefield);
+        var modifierCard = modifier == null ? null : card(modifier, player, ZoneType.Battlefield);
         var host = card(spellName, player, flashback ? ZoneType.Graveyard : ZoneType.Hand);
         var spell = flashback ? host.getAllPossibleAbilities(player, false).stream().filter(SpellAbility::isFlashback)
                 .findFirst().orElseThrow(() -> new AssertionError("No actual flashback candidate")) : host.getFirstSpellAbility();
         spell.setActivatingPlayer(player);
         game.getAction().checkStateEffects(true);
+        if (modifierCard != null && !modifierCard.isInZone(ZoneType.Battlefield))
+            throw new AssertionError("Fixture modifier did not survive state-based actions: " + modifier);
         String before = state(game);
         var assessment = HumanManaAffordability.assess(player, spell);
         boolean actual = assessment != HumanManaAffordability.Assessment.PROVEN_UNAFFORDABLE;
