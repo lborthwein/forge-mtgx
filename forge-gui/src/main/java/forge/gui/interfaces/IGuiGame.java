@@ -201,6 +201,7 @@ public interface IGuiGame {
     default Integer chooseManaX(String message, int min, int max, boolean exact, String detail, boolean cancellable) {
         throw new UnsupportedOperationException("Typed mana X is not implemented by this GUI");
     }
+    default void notifyUnableToPayManaX(String message) { message(message, "Forge"); }
 
     /**
      * Convenience for getChoices(message, 0, 1, choices).

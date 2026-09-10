@@ -395,10 +395,15 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
 
         String announceTitle = "X".equals(announce) ? ability.getParamOrDefault("XAnnounceTitle", announce) :
                 ability.getParamOrDefault("AnnounceTitle", announce);
-        if ("X".equals(announce) && getGui().supportsTypedManaX()) {
+        if ("X".equals(announce) && cost != null && cost.getCostMana() != null
+                && cost.getCostMana().getMana().countX() > 0 && getGui().supportsTypedManaX()) {
             final HumanManaX.Range range = HumanManaX.range(player, ability, min, max);
-            if (range.min() > range.max()) return null;
-            return getGui().chooseManaX("Choose X", range.min(), range.max(), range.exact(), range.reason(),
+            if (range.min() > range.max()) {
+                getGui().notifyUnableToPayManaX("You cannot pay the cost for any allowed value of X. That action was cancelled.");
+                return null;
+            }
+            return getGui().chooseManaX(localizer.getMessage("lblChooseAnnounceForCard", announceTitle,
+                    host.getTranslatedName()), range.min(), range.max(), range.exact(), range.reason(),
                     cost == null || !cost.isMandatory());
         }
         if (cost != null && cost.isMandatory()) {

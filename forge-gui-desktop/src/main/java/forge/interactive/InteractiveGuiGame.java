@@ -1785,9 +1785,14 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     public boolean supportsTypedManaX() { return true; }
 
     @Override
+    public void notifyUnableToPayManaX(final String message) {
+        emitNotice("warning", message, "mana-x-unaffordable");
+    }
+
+    @Override
     public Integer chooseManaX(final String message, final int min, final int max,
                               final boolean exact, final String detail, final boolean cancellable) {
-        final JsonObject number = control("mana-x", "number", "Choose X");
+        final JsonObject number = control("mana-x", "number", sanitizeText(message));
         number.addProperty("min", min);
         number.addProperty("max", max);
         final JsonObject metadata = new JsonObject();
@@ -1798,8 +1803,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final JsonArray controls = new JsonArray();
         controls.add(number);
         if (cancellable) controls.add(control("mana-x:cancel", "cancel", "Cancel"));
-        final String prompt = exact ? "Choose X (" + min + "–" + max + ")"
-                : "Choose X — maximum affordability is not verified: " + detail;
+        final String prompt = exact ? sanitizeText(message) + " (" + min + "–" + max + ")"
+                : sanitizeText(message) + " — maximum affordability is not verified: " + detail;
         final JsonObject answer = ask("number", "modal:announceManaX", "Forge", prompt,
                 min, max, cancellable, controls, action -> {
                     if (cancellable && "cancel".equals(string(action, "type"))

@@ -140,6 +140,7 @@ public final class HumanManaX {
             }
             tokens.addAll(cardTokens);
         }
+        if (tokens.size() > 64) return unknown(min, max, "Large mana-source search");
 
         min = Math.max(min, part.getXMin());
         if (min > SEARCH_LIMIT) return unknown(min, max, "Large X search");
@@ -154,7 +155,9 @@ public final class HumanManaX {
                 shards.add(shard);
             }
             for (int n = 0; n < cost.getGenericCost(); n++) shards.add(ManaCostShard.GENERIC);
-            if (minimumLife(shards, tokens) > Math.max(0, player.getLife())) return new Range(min, last, true, "Complete mana payment");
+            final int requiredLife = minimumLife(shards, tokens);
+            if (requiredLife >= INF || requiredLife > Math.max(0, player.getLife()))
+                return new Range(min, last, true, "Complete mana payment");
             last = x;
         }
         return last == max ? new Range(min, max, true, "Complete mana payment") : unknown(min, max, "Large X search");
