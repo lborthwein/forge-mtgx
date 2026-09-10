@@ -220,7 +220,7 @@ public final class RulesCostFeasibilityEngineSmoke {
             spell("Lightning Bolt", new String[]{"Mountain", "Plains"}, "Sphere of Resistance", PAYABLE);
             spell("Lightning Bolt", new String[]{"Black Lotus"}, null, PAYABLE);
             spell("Esper Charm", new String[]{"Black Lotus"}, null, UNPAYABLE);
-            spell("Lightning Bolt", new String[]{"Mana Confluence"}, null, UNSUPPORTED);
+            spell("Lightning Bolt", new String[]{"Mana Confluence"}, null, PAYABLE);
             spell("Lightning Bolt", new String[]{"Mountain"}, "Mana Reflection", UNSUPPORTED);
             spell("Dismember", new String[]{"Swamp"}, null, UNSUPPORTED);
             var wallGame = game(); var wallPlayer = wallGame.getPlayers().get(0);

@@ -38,6 +38,7 @@ public final class RulesPaymentExecutor {
         witness = requested;
         if (!witness.cost().equals(result.witness().cost()) || witness.life() != result.witness().life())
             fail("requested witness prices a different mana/life cost");
+        if (witness.totalLife() > 0 && witness.totalLife() > payer.getLife()) fail("aggregate source/action life is unaffordable");
     }
 
     static String actionKey(SpellAbility sa) {
@@ -72,9 +73,12 @@ public final class RulesPaymentExecutor {
             if (!source.canPlay() || !source.metConditions()) fail("witness source no longer playable");
             if (!choice.choice().isEmpty()) source.getManaPart().setExpressChoice(choice.choice());
             activeSource = source;
+            int sourceLifeBefore = payer.getLife();
             try {
-                if (!new CostPayment(source.getPayCosts(), source).payComputerCosts(new RulesCostDecisionMaker(payer, source)))
+                if (!new CostPayment(source.getPayCosts(), source).payComputerCosts(new RulesCostDecisionMaker(payer, source, choice.life())))
                     fail("source payment failed");
+                if (payer.getLife() != sourceLifeBefore - choice.life()
+                        || (choice.life() > 0 && source.getAmountLifePaid() != choice.life())) fail("actual source life payment differs from witness");
                 // The normal engine mana-ability path records activation and resolves
                 // immediately; it is not a call to ComputerUtil.playNoStack/AI.
                 payer.getGame().getStack().addAndUnfreeze(source);
@@ -106,8 +110,8 @@ public final class RulesPaymentExecutor {
 
     public void assertPaid() {
         if (!paid) fail("selected action did not execute its mana payment");
-        if (witness.life() > 0 && (paidAction.getAmountLifePaid() != witness.life()
-                || payer.getLife() != lifeBefore - witness.life())) fail("actual life payment differs from host-selected witness");
+        if (witness.totalLife() > 0 && ((witness.life() > 0 && paidAction.getAmountLifePaid() != witness.life())
+                || payer.getLife() != lifeBefore - witness.totalLife())) fail("actual life payment differs from host-selected witness");
     }
     private static void fail(String reason) { throw new RulesCostFeasibility.Unsupported("payment witness: " + reason); }
 }

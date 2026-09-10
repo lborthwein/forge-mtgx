@@ -20,12 +20,14 @@ public final class RulesPaymentChoices {
     private final List<RulesCostFeasibility.PaymentWitness> plans = new ArrayList<>();
     private final Map<RulesCostFeasibility.SourceChoice, String> sourceIds = new LinkedHashMap<>();
     private int nodes;
+    private final int availableLife;
 
     public RulesPaymentChoices(Player player, SpellAbility ability) {
         var assessment = RulesCostFeasibility.assess(player, ability);
         if (assessment.status() != RulesCostFeasibility.Status.PAYABLE || assessment.space() == null)
             throw new RulesCostFeasibility.Unsupported("payment space unavailable: " + assessment.reason());
         space = assessment.space();
+        availableLife = player.getLife();
         for (var group : space.sources()) for (var source : group) {
             sourceIds.put(source, "s" + source.ability().getHostCard().getId() + "-a" + source.ability().getId() + "-o" + sourceIds.size());
         }
@@ -36,6 +38,8 @@ public final class RulesPaymentChoices {
     private void visit() { if (++nodes > MAX_NODES) throw new RulesCostFeasibility.Unsupported("complete payment enumeration node bound"); }
     private void enumerateSources(int index, List<RulesCostFeasibility.Token> tokens, List<RulesCostFeasibility.SourceChoice> chosen) {
         visit();
+        int totalLife = space.life() + chosen.stream().mapToInt(RulesCostFeasibility.SourceChoice::life).sum();
+        if (totalLife > 0 && totalLife > availableLife) return;
         if (index == space.sources().size()) {
             var shards = new ArrayList<>(space.shards());
             shards.sort(Comparator.comparingInt(Enum::ordinal));
@@ -118,6 +122,7 @@ public final class RulesPaymentChoices {
             item.addProperty("abilityIndex", source.ability().getHostCard().getManaAbilities().indexOf(source.ability()));
             item.addProperty("choice", source.choice());
             item.addProperty("tap", true);
+            item.addProperty("life", source.life());
             item.addProperty("sacrificeSelf", source.ability().getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostSacrifice));
             var output = new JsonArray();
             for (int color : source.output()) output.add(MagicColor.toShortString((byte) color));
@@ -144,7 +149,7 @@ public final class RulesPaymentChoices {
                 spend.add(payment);
             }
             item.add("spend", spend);
-            item.addProperty("lifePaid", witness.life());
+            item.addProperty("lifePaid", witness.totalLife());
             menu.add(item);
         }
         out.add("menu", menu);
