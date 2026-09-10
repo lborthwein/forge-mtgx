@@ -54,9 +54,10 @@ import forge.game.zone.ZoneType;
  *
  * <p>Every card that leaves this class is filtered through
  * {@link CardView#canBeShownTo(PlayerView)}. That makes the bridged seat <em>stricter</em>
- * than Forge's own AI, which peeks at hidden information in a handful of places
- * ({@code ChangeZoneAi}, {@code BalanceAi}); the asymmetry is deliberate and documented
- * in the architecture note.
+ * than stock Forge in some paths (for example {@code ChangeZoneAi}'s opponent-type
+ * heuristic reads hidden identities). Public hand-size comparisons alone are not
+ * a hidden-information leak. Default Forge and equal-information comparisons are
+ * different estimands and must be named separately.
  *
  * <p>Zone rules: own hand in full; opponent hand as a count plus whatever is individually
  * revealed; libraries never (size only); battlefield / graveyard / exile / stack / command
@@ -510,6 +511,11 @@ public final class StateEncoder {
 
     /** Compact summary of a spell/ability for a {@code priority} menu entry. */
     public static JsonObject encodeSpellAbility(final SpellAbility sa) {
+        return encodeSpellAbility(sa, null);
+    }
+
+    /** Face knowledge belongs to the receiving viewer, not the ability's actor. */
+    public static JsonObject encodeSpellAbility(final SpellAbility sa, final PlayerView viewer) {
         final JsonObject o = new JsonObject();
         if (sa == null) {
             o.addProperty("pass", true);
@@ -520,8 +526,7 @@ public final class StateEncoder {
         o.addProperty("fid", host == null ? -1 : host.getId());
         String source = host == null ? "?" : host.getName();
         if (host != null && host.isFaceDown() && host.isInZone(ZoneType.Exile)
-                && sa.getActivatingPlayer() != null
-                && host.getView().canFaceDownBeShownTo(sa.getActivatingPlayer().getView())) {
+                && viewer != null && host.getView().canFaceDownBeShownTo(viewer)) {
             source = host.getState(CardStateName.Original).getName();
         }
         o.addProperty("source", source);

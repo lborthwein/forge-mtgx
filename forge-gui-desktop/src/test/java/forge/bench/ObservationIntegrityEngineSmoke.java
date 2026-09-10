@@ -60,11 +60,13 @@ public final class ObservationIntegrityEngineSmoke {
             check(StateEncoder.encodeCard(stolen, owner.getView()) == null, "face knowledge does not leak to owner/opponent");
             check(!StateEncoder.encodeCardUnchecked(stolen).has("knownFace"), "unchecked serializer does not grant face knowledge");
             var land = new LandAbility(stolen, stolen.getState(CardStateName.Original)); land.setActivatingPlayer(viewer);
-            var option = StateEncoder.encodeSpellAbility(land);
+            var option = StateEncoder.encodeSpellAbility(land, viewer.getView());
             check(option.get("isLandAbility").getAsBoolean(), "land kind is structural, not display text");
             check(option.get("source").getAsString().equals("Swamp"), "permission-bearing land retains authorized source identity");
+            check(StateEncoder.encodeSpellAbility(land, owner.getView()).get("source").getAsString().isEmpty(), "authorized actor does not disclose face to unauthorized recipient");
+            check(StateEncoder.encodeSpellAbility(land).get("source").getAsString().isEmpty(), "missing recipient cannot grant face knowledge");
             land.setActivatingPlayer(owner);
-            check(StateEncoder.encodeSpellAbility(land).get("source").getAsString().isEmpty(), "ability cannot grant unauthorized face knowledge");
+            check(StateEncoder.encodeSpellAbility(land, viewer.getView()).get("source").getAsString().equals("Swamp"), "recipient authorization does not depend on actor");
             var morph = card("Grave Titan", owner, ZoneType.Battlefield); morph.turnFaceDown();
             var publicMorph = StateEncoder.encodeCard(morph, viewer.getView());
             check(publicMorph != null && !publicMorph.has("knownFace"), "opponent morph object visible but original face hidden");
@@ -73,6 +75,13 @@ public final class ObservationIntegrityEngineSmoke {
             check(ownMorph.get("power").getAsInt() == 2 && ownMorph.get("toughness").getAsInt() == 2, "known Grave Titan still has face-down 2/2 characteristics");
             var hiddenHand = card("Lightning Bolt", owner, ZoneType.Hand);
             check(StateEncoder.encodeCard(hiddenHand, viewer.getView()) == null, "ordinary opponent hand remains hidden");
+            var hiddenLibrary = card("Forest", owner, ZoneType.Library);
+            var beforeHiddenChange = StateEncoder.encode(game, viewer);
+            owner.getZone(ZoneType.Hand).remove(hiddenHand);
+            card("Grief", owner, ZoneType.Hand);
+            owner.getZone(ZoneType.Library).remove(hiddenLibrary);
+            card("Mind Twist", owner, ZoneType.Library);
+            check(beforeHiddenChange.equals(StateEncoder.encode(game, viewer)), "changing only hidden opponent identities leaves complete seat observation unchanged");
             System.out.println("PASS all " + checks + " observation checks");
             System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }

@@ -611,7 +611,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final JsonArray items = new JsonArray();
         items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
         for (SpellAbility sa : menu) {
-            items.add(StateEncoder.encodeSpellAbility(sa));
+            items.add(StateEncoder.encodeSpellAbility(sa, getPlayer().getView()));
         }
         body.add("menu", items);
         body.add("manaAbilities", manaAbilityChannel());
@@ -820,7 +820,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                     if (sa == null) {
                         continue;
                     }
-                    out.add(StateEncoder.encodeSpellAbility(sa));
+                    out.add(StateEncoder.encodeSpellAbility(sa, p.getView()));
                 }
             } catch (RuntimeException e) {
                 JsonRpcChannel.logErr("mana ability channel failed for " + c, e);
