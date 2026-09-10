@@ -134,7 +134,7 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
     private TreeBasedTable<String, Boolean, CardCollection> paidLists = TreeBasedTable.create();
     private EnumMap<AbilityKey, Object> triggeringObjects = AbilityKey.newMap();
     private EnumMap<AbilityKey, Object> replacingObjects = AbilityKey.newMap();
-    private final Supplier<List<String>> pipsToReduce = Suppliers.memoize(ArrayList::new);
+    private Supplier<List<String>> pipsToReduce = Suppliers.memoize(ArrayList::new);
     private List<AbilitySub> chosenList = null;
     private final Supplier<CardCollection> tappedForConvoke = Suppliers.memoize(CardCollection::new);
     private Card sacrificedAsOffering;
@@ -1217,6 +1217,26 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
 
     public SpellAbility copy() {
         return copy(hostCard, false);
+    }
+
+    /** Detached decision-enumeration copy: no global ability IDs or tracker writes.
+     * In particular clone() alone shares the memoized mutable pips list.
+     * Ordinary execution copy methods retain their existing behavior.
+     */
+    public SpellAbility copyForEnumeration(Player activator) {
+        SpellAbility result = copy(hostCard, activator, true);
+        detachEnumerationLists(result);
+        return result;
+    }
+
+    private static void detachEnumerationLists(SpellAbility sa) {
+        if (sa == null) return;
+        sa.pipsToReduce = Suppliers.ofInstance(new ArrayList<>(sa.getPipsToReduce()));
+        if (sa.getPayCosts() != null) sa.setPayCosts(sa.getPayCosts().copy());
+        detachEnumerationLists(sa.getSubAbility());
+        for (SpellAbility child : sa.getAdditionalAbilities().values()) detachEnumerationLists(child);
+        for (List<AbilitySub> children : sa.getAdditionalAbilityLists().values())
+            for (SpellAbility child : children) detachEnumerationLists(child);
     }
     public SpellAbility copy(Player activ) {
         return copy(hostCard, activ, false);
