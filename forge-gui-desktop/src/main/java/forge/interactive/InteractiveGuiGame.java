@@ -912,6 +912,22 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         body.addProperty("seat", humanSeat);
         body.add("view", visibleState());
         final JsonObject prompt = new JsonObject();
+        // The card being paid for need not yet be a committed stack item. Use
+        // the real InputPayMana prompt source, not a remembered browser click
+        // or a guessed identity from a duplicate name in a hidden zone.
+        final Input currentPaymentInput = controller == null ? null : controller.getInputProxy().getInput();
+        final CardView paymentCard = currentPaymentInput instanceof InputPayMana payment
+                ? payment.getPaymentSourceCard() : null;
+        if ("mana".equals(kind) && paymentCard != null) {
+            final JsonObject source = new JsonObject();
+            source.addProperty("cardId", paymentCard.getId());
+            final boolean visible = InteractiveState.mayReceiveIdentity(paymentCard, human.getView());
+            source.addProperty("hidden", !visible);
+            if (visible) {
+                source.addProperty("name", paymentCard.getName());
+            }
+            prompt.add("paymentSource", source);
+        }
         if (title != null && !title.isBlank()) {
             prompt.addProperty("title", sanitizeText(title));
         }

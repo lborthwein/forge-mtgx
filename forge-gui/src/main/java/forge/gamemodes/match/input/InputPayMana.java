@@ -41,6 +41,10 @@ public abstract class InputPayMana extends InputSyncronizedBase {
     protected final Game game;
     protected ManaCostBeingPaid manaCost;
     protected final SpellAbility saPaidFor;
+    /** Read-only identity of the actual payment, not the last tapped mana source. */
+    public final CardView getPaymentSourceCard() {
+        return saPaidFor == null ? null : CardView.get(saPaidFor.getHostCard());
+    }
     protected boolean effect;
     protected boolean mandatory = false;
     private final boolean wasFloatingMana;
