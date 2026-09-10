@@ -18,6 +18,7 @@ exec > >(tee "$fixture_dir/fixture.log") 2>&1
   "$fixture_root/forge-ai/src/main/java/forge/bench/RulesPaymentChoices.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/BenchmarkOptionalCosts.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/BenchRandomAudit.java" \
+  "$fixture_root/forge-ai/src/main/java/forge/bench/BenchActionAudit.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/JsonRpcChannel.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/PlayerControllerBridge.java" \
   "$fixture_root/forge-gui-desktop/src/main/java/forge/bench/BenchMain.java" \

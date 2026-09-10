@@ -272,6 +272,7 @@ public final class BenchMain {
         hello.addProperty("paymentVersion", "rules-payment-v1");
         hello.addProperty("paymentControl", "host-complete-witness");
         hello.addProperty("privateRngAuditVersion", 1);
+        hello.addProperty("privateActionAuditVersion", 1);
         hello.addProperty("forgeCommit", forgeCommit());
         hello.addProperty("forgeVersion", BuildInfo.getVersionString());
         hello.addProperty("aiProfile", aiProfile);
@@ -385,7 +386,8 @@ public final class BenchMain {
             // Everything the bridge answers is keyed to THIS game object; copies made by
             // the simulation search must fall through to Forge's AI (see BenchSession).
             session.setLiveGame(game);
-            final EventEmitter emitter = new EventEmitter(ch, gameId);
+            BenchActionAudit.beginGame(game, gameId);
+            final EventEmitter emitter = new EventEmitter(ch, gameId, game);
             game.subscribeToEvents(emitter);
 
             // Protocol v2: each bridged seat learns its OWN registered decklist before the
@@ -551,6 +553,7 @@ public final class BenchMain {
                 counts.add(String.valueOf(b.getSeat()), b.getCounters().toJson());
             }
             result.add("delegationCounts", counts);
+            BenchActionAudit.finishGame(game);
             ch.send(result);
         }
 
@@ -640,11 +643,17 @@ public final class BenchMain {
     public static final class EventEmitter {
         private final JsonRpcChannel ch;
         private final String gameId;
+        private final Game game;
         private int n = 0;
 
         EventEmitter(final JsonRpcChannel ch, final String gameId) {
+            this(ch, gameId, null);
+        }
+
+        EventEmitter(final JsonRpcChannel ch, final String gameId, final Game game) {
             this.ch = ch;
             this.gameId = gameId;
+            this.game = game;
         }
 
         int emitted() {
@@ -653,6 +662,7 @@ public final class BenchMain {
 
         @Subscribe
         public void receive(final GameEvent ev) {
+            if (game != null) BenchActionAudit.event(game, ev);
             final JsonObject e = new JsonObject();
             if (ev instanceof GameEventTurnBegan g) {
                 e.addProperty("kind", "turnBegan");

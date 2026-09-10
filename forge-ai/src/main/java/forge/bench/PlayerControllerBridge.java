@@ -656,11 +656,12 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             final RulesPaymentChoices payments = new RulesPaymentChoices(getPlayer(), chosen);
             final JsonObject request = envelope(true);
             for (var entry : payments.request().entrySet()) request.add(entry.getKey(), entry.getValue());
-            request.add("selectedAbility", StateEncoder.encodeSpellAbility(chosen));
+            request.add("selectedAbility", StateEncoder.encodeSpellAbility(chosen, getPlayer().getView()));
             final JsonObject selectedPayment = ask("payManaCost", "payment", request);
             pendingExternalPayment = new RulesPaymentExecutor(getPlayer(), chosen, payments.select(selectedPayment));
         }
         pendingExternalAbility = chosen;
+        BenchActionAudit.selected(getGame(), seat, chosen, ans);
         return Lists.newArrayList(chosen);
     }
 

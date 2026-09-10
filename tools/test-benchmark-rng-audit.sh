@@ -12,11 +12,15 @@ exec > >(tee "$fixture_dir/fixture.log") 2>&1
   "$fixture_root/forge-ai/src/main/java/forge/bench/RulesCostFeasibility.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/BenchmarkOptionalCosts.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/BenchRandomAudit.java" \
+  "$fixture_root/forge-ai/src/main/java/forge/bench/BenchActionAudit.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/JsonRpcChannel.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/PlayerControllerBridge.java" \
   "$fixture_root/forge-gui-desktop/src/main/java/forge/bench/BenchMain.java" \
   "$fixture_root/forge-gui-desktop/src/test/java/forge/bench/BenchRandomAuditSmoke.java" \
-  "$fixture_root/forge-gui-desktop/src/test/java/forge/bench/BenchRandomAuditMenuSmoke.java"
+  "$fixture_root/forge-gui-desktop/src/test/java/forge/bench/BenchRandomAuditMenuSmoke.java" \
+  "$fixture_root/forge-gui-desktop/src/test/java/forge/bench/BenchActionAuditSmoke.java"
 /opt/homebrew/opt/openjdk@17/bin/java -cp "$fixture_dir/classes:$fixture_jar" forge.bench.BenchRandomAuditSmoke
 /opt/homebrew/opt/openjdk@17/bin/java -Xmx2g -Duser.home="$fixture_dir/home" \
   -cp "$fixture_dir/classes:$fixture_jar" forge.bench.BenchRandomAuditMenuSmoke "$fixture_root"
+/opt/homebrew/opt/openjdk@17/bin/java -Xmx2g -Duser.home="$fixture_dir/home" \
+  -cp "$fixture_dir/classes:$fixture_jar" forge.bench.BenchActionAuditSmoke "$fixture_root"
