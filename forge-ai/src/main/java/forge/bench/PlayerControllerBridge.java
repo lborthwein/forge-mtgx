@@ -1172,7 +1172,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 }
             }
         } catch (RuntimeException e) {
-            JsonRpcChannel.logErr("stack candidate enumeration failed for " + sa, e);
+            JsonRpcChannel.logErr("BENCH_INTEGRITY_FAILURE: stack candidate enumeration failed for " + sa, e);
+            throw e;
         }
         return out;
     }
