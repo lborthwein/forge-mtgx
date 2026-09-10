@@ -19,6 +19,7 @@ import forge.card.mana.ManaAtom;
 import forge.deck.CardPool;
 import forge.game.Game;
 import forge.game.GameEndReason;
+import forge.game.GameEntity;
 import forge.game.GameEntityView;
 import forge.game.GameState;
 import forge.game.card.Card;
@@ -439,11 +440,14 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (input instanceof InputBlock) {
             addBlockControls(controls, bindings);
         }
+        if (input instanceof InputAttack) {
+            addAttackControls(controls, bindings);
+        }
         final Set<Integer> cardIds = new LinkedHashSet<>();
         game.forEachCardInGame(card -> {
-            // Blocking is a pair chosen by the browser, not Forge's currently
-            // highlighted attacker followed by an otherwise ambiguous card click.
-            if (input instanceof InputBlock) {
+            // Combat choices name both participants; do not expose Forge's
+            // hidden current-attacker/current-defender cursor as a card action.
+            if (input instanceof InputBlock || input instanceof InputAttack) {
                 return true;
             }
             final CardView view = card.getView();
@@ -487,10 +491,6 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 value.addProperty("manaOnly", !affordableAbilities.isEmpty()
                         && affordableAbilities.stream().allMatch(ability -> ability.isManaAbility()));
             }
-            if (input instanceof InputAttack && game.getCombat() != null
-                    && game.getCombat().getDefenders().contains(card)) {
-                value.addProperty("combatAction", "defender");
-            }
             control.add("value", value);
             controls.add(control);
             bindings.put(id, new ControlBinding("selectCard", action -> {
@@ -509,16 +509,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             return true;
         });
 
-        if (input instanceof InputSelectTargets || input instanceof InputAttack
+        if (input instanceof InputSelectTargets
                 || input instanceof InputSelectEntitiesFromList<?>) {
             int seat = 0;
             for (Player player : game.getPlayers()) {
                 final int playerSeat = seat++;
                 if (input instanceof InputSelectTargets targetInput && !targetInput.canSelectPlayer(player)) {
-                    continue;
-                }
-                if (input instanceof InputAttack && (game.getCombat() == null
-                        || !game.getCombat().getDefenders().contains(player))) {
                     continue;
                 }
                 if (input instanceof InputSelectEntitiesFromList<?> selectEntities
@@ -528,11 +524,6 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 final String id = "player:" + playerSeat;
                 final JsonObject control = control(id, "selectPlayer", player.getName());
                 control.addProperty("player", playerSeat);
-                if (input instanceof InputAttack) {
-                    final JsonObject value = new JsonObject();
-                    value.addProperty("combatAction", "defender");
-                    control.add("value", value);
-                }
                 controls.add(control);
                 bindings.put(id, new ControlBinding("selectPlayer", action -> {
                     final Player current = playerAtSeat(playerSeat);
@@ -541,10 +532,6 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     }
                     if (input instanceof InputSelectTargets targetInput && !targetInput.canSelectPlayer(current)) {
                         return ActionResult.reject("player is not a legal target for this decision");
-                    }
-                    if (input instanceof InputAttack && (game.getCombat() == null
-                            || !game.getCombat().getDefenders().contains(current))) {
-                        return ActionResult.reject("player is not a legal attack defender");
                     }
                     controller.selectPlayer(current.getView(), null);
                     return ActionResult.accept();
@@ -735,6 +722,82 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }));
         }
         return controls;
+    }
+
+    /** Advertise complete attacker/defender choices, rather than a hidden future
+     * defender selection which cannot retarget an already assigned attacker. */
+    private void addAttackControls(final JsonArray controls,
+                                   final Map<String, ControlBinding> bindings) {
+        final Combat combat = game.getCombat();
+        if (combat == null) return;
+        for (Card attacker : human.getCreaturesInPlay()) {
+            final int attackerId = attacker.getId();
+            final String attackerName = InteractiveState.safeCardLabel(attacker.getView(), human.getView());
+            if (combat.isAttacking(attacker)) {
+                final String id = "combat:unattack:" + attackerId;
+                final JsonObject control = control(id, "selectCard", "Remove attacker: " + attackerName);
+                control.addProperty("cardId", attackerId);
+                final JsonObject value = new JsonObject();
+                value.addProperty("combatAction", "unattack");
+                value.addProperty("attackerId", attackerId);
+                control.add("value", value);
+                controls.add(control);
+                bindings.put(id, new ControlBinding("selectCard", action -> {
+                    final Card current = game.findById(attackerId);
+                    if (current == null || current.getController() != human
+                            || game.getCombat() != combat || !combat.isAttacking(current)) {
+                        return ActionResult.reject("attacker is no longer assigned");
+                    }
+                    final ITriggerEvent remove = new ITriggerEvent() {
+                        public int getButton() { return 3; }
+                        public int getX() { return 0; }
+                        public int getY() { return 0; }
+                    };
+                    return controller.selectCard(current.getView(), null, remove)
+                            ? ActionResult.accept() : ActionResult.reject("Forge rejected attacker removal");
+                }));
+                continue;
+            }
+            for (GameEntity defender : combat.getDefenders()) {
+                if (!CombatUtil.canAttack(attacker, defender)) continue;
+                if (defender instanceof Card card && !card.getView().canBeShownTo(human.getView())) continue;
+                final String defenderKind = defender instanceof Player ? "player" : "card";
+                final int defenderId = defender.getId();
+                final String id = "combat:attack:" + attackerId + ":" + defenderKind + ":" + defenderId;
+                final String defenderName = defender instanceof Card card
+                        ? InteractiveState.safeCardLabel(card.getView(), human.getView())
+                        : sanitizeText(defender.getName());
+                final JsonObject control = control(id, "selectCard", "Attack " + defenderName);
+                control.addProperty("cardId", attackerId);
+                final JsonObject value = new JsonObject();
+                value.addProperty("combatAction", "attack");
+                value.addProperty("attackerId", attackerId);
+                value.addProperty("defenderKind", defenderKind);
+                value.addProperty("defenderId", defenderId);
+                value.addProperty("attackerName", attackerName);
+                value.addProperty("defenderName", defenderName);
+                control.add("value", value);
+                controls.add(control);
+                bindings.put(id, new ControlBinding("selectCard", action -> {
+                    final Card current = game.findById(attackerId);
+                    if (current == null || current.getController() != human
+                            || game.getCombat() != combat || combat.isAttacking(current)
+                            || !combat.getDefenders().contains(defender)
+                            || !CombatUtil.canAttack(current, defender)) {
+                        return ActionResult.reject("attack pair is no longer legal");
+                    }
+                    // Both operations belong to this one user-selected, guarded input.
+                    if (defender instanceof Player player) {
+                        controller.selectPlayer(player.getView(), null);
+                    } else if (defender instanceof Card card) {
+                        if (!controller.selectCard(card.getView(), null, null))
+                            return ActionResult.reject("Forge rejected attack defender");
+                    } else return ActionResult.reject("unsupported attack defender kind");
+                    return controller.selectCard(current.getView(), null, null)
+                            ? ActionResult.accept() : ActionResult.reject("Forge rejected attacker assignment");
+                }));
+            }
+        }
     }
 
     /** Keep legality and mutation in Forge while allowing blocker-first board input. */
