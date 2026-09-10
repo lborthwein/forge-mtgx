@@ -99,9 +99,9 @@ public final class RulesPaymentDomain {
             item.addProperty("abilityIndex", source.ability().getHostCard().getManaAbilities().indexOf(source.ability()));
             item.addProperty("choice", source.choice()); item.addProperty("tap", true);
             item.addProperty("life", source.life());
-            item.addProperty("persistent", source.ability().getManaPart().isPersistentMana());
-            item.addProperty("combat", source.ability().getManaPart().isCombatMana());
-            item.addProperty("snow", source.ability().getHostCard().isSnow());
+            item.addProperty("persistent", source.traits().persistent());
+            item.addProperty("combat", source.traits().combat());
+            item.addProperty("snow", source.traits().snow());
             item.addProperty("sacrificeSelf", source.ability().getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostSacrifice));
             var output = new JsonArray();
             for (int color : source.output()) output.add(MagicColor.toShortString((byte) color));

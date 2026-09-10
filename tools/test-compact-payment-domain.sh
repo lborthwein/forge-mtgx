@@ -30,6 +30,9 @@ shasum -a 256 "$domain_jar"
   "$domain_root/forge-ai/src/main/java/forge/bench/RulesPaymentDomain.java" \
   "$domain_root/forge-ai/src/main/java/forge/bench/BenchRandomAudit.java" \
   "$domain_root/forge-ai/src/main/java/forge/bench/BenchMenuStateAudit.java" \
-  "$domain_root/forge-gui-desktop/src/test/java/forge/bench/RulesPaymentDomainEngineSmoke.java"
-/opt/homebrew/opt/openjdk@17/bin/java -Xmx2g -Duser.home="$domain_dir/home" \
-  -cp "$domain_dir/classes:$domain_jar" forge.bench.RulesPaymentDomainEngineSmoke "$domain_root"
+  "$domain_root/forge-gui-desktop/src/test/java/forge/bench/RulesPaymentDomainEngineSmoke.java" \
+  "$domain_root/forge-gui-desktop/src/test/java/forge/bench/SourceOutputTraitsEngineSmoke.java"
+for domain_fixture in RulesPaymentDomainEngineSmoke SourceOutputTraitsEngineSmoke; do
+  /opt/homebrew/opt/openjdk@17/bin/java -Xmx2g -Duser.home="$domain_dir/home" \
+    -cp "$domain_dir/classes:$domain_jar" "forge.bench.$domain_fixture" "$domain_root"
+done

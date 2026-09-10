@@ -39,7 +39,26 @@ public final class RulesCostFeasibility {
             this(cost, shards, pool, sources, 0);
         }
     }
-    public record SourceChoice(SpellAbility ability, String choice, List<Integer> output, int life) {
+    /** Snapshot of traits that may change the value of spent/surplus mana.
+     * Never derive the expected value from a source AFTER it has been paid or
+     * sacrificed; the emitted Mana's actual LKI can differ from that live card.
+     */
+    public record OutputTraits(boolean persistent, boolean combat, boolean snow) {
+        static OutputTraits from(SpellAbility source) {
+            return new OutputTraits(source.getManaPart().isPersistentMana(), source.getManaPart().isCombatMana(), source.getHostCard().isSnow());
+        }
+        public boolean matches(forge.game.mana.Mana actual) {
+            return persistent == actual.isPersistentMana() && combat == actual.isCombatMana() && snow == actual.isSnow();
+        }
+    }
+    public record SourceChoice(SpellAbility ability, String choice, List<Integer> output, int life, OutputTraits traits) {
+        public SourceChoice {
+            output = List.copyOf(output);
+            java.util.Objects.requireNonNull(traits, "source output traits");
+        }
+        public SourceChoice(SpellAbility ability, String choice, List<Integer> output, int life) {
+            this(ability, choice, output, life, OutputTraits.from(ability));
+        }
         public SourceChoice(SpellAbility ability, String choice, List<Integer> output) { this(ability, choice, output, 0); }
     }
     public record Token(int color, Mana floating, SourceChoice source, int outputIndex) {}

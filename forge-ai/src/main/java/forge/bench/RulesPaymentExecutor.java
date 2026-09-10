@@ -88,6 +88,7 @@ public final class RulesPaymentExecutor {
             for (int i = 0; i < emitted.size(); i++) {
                 if (emitted.get(i).getColor() != choice.output().get(i)) fail("source output color changed");
                 Mana mana = emitted.get(i);
+                if (!choice.traits().matches(mana)) fail("source output persistence/combat/snow traits changed");
                 if (mana.isRestricted() || mana.triggersWhenSpent() || mana.addsCounters(actual)
                         || mana.addsKeywords(actual) || mana.addsNoCounterMagic(actual)) fail("source emitted unsupported effectful mana");
             }

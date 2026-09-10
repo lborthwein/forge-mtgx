@@ -25,6 +25,8 @@ Request:
   `pool[]` has a distinct ID for every actual floating Mana object, plus color,
   source FID, and `persistent`, `combat`, `snow` traits. No floating provenance
   is collapsed, including equal-color tokens from the same producing ability.
+- Future source output traits are captured immutably in `SourceChoice.traits`
+  during assessment; request encoding does not re-read a changed live source.
 - There is **no `menu`** and no count of materialized plans.
 
 Host answer (alongside ordinary RPC envelope fields):
@@ -80,12 +82,16 @@ request mutation, wrong color, and malformed witnesses are covered.
 
 ## Promotion work, deliberately not hidden by this prototype
 
-1. Capture future source output traits immutably at assessment and compare them
-   against actual emitted mana before spending. The initial prototype reads
-   source traits at offer time, while the existing executor checks amount,
-   color and restrictions but not persistence/combat/snow. A sacrifice/static
-   transition can invalidate that expectation. Parent authorized this next
-   scoped repair; this initial commit does not claim it solved.
+1. **Implemented and tested:** immutable future source output traits plus
+   equality against every actual emitted Mana before spending. The follow-up
+   run `2026-09-10-compact-payment-domain-v3/fixture.log` exited 0 with all 50
+   compact tests plus 31 new trait checks. Real Rimefeather Owl makes a
+   Mountain/Black Lotus snow; actual Lotus sacrifice preserves snow in the
+   producing card's LKI even after the graveyard card loses the static snow
+   effect. Removing Owl after selection preserves the old expected trait and
+   rejects actual changed output. Independently forged persistent/combat/snow
+   expectations each fail before payment mana is consumed. These are
+   invalidating errors, not a rollback promise or fallback payer.
 2. Implement the TS symbolic adapter and exact capability negotiation. Keep
    native `planMana`/spend policy in charge. Color-count output alone does not
    choose among different floating or cross-source token provenance. If the
