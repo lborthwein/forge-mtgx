@@ -270,6 +270,9 @@ public final class BenchMain {
         hello.addProperty("type", "hello");
         hello.addProperty("protocol", JsonRpcChannel.PROTOCOL_VERSION);
         hello.addProperty("protocolMinor", JsonRpcChannel.PROTOCOL_MINOR);
+        hello.addProperty("rulesCostVersion", RulesCostFeasibility.VERSION);
+        hello.addProperty("paymentVersion", "rules-payment-v1");
+        hello.addProperty("paymentControl", "host-complete-witness");
         hello.addProperty("forgeCommit", forgeCommit());
         hello.addProperty("forgeVersion", BuildInfo.getVersionString());
         hello.addProperty("aiProfile", aiProfile);

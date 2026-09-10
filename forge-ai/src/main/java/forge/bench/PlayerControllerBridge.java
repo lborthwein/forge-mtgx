@@ -97,6 +97,9 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * the kicked variant is added alongside it as its own menu entry.
      */
     private boolean buildingMenu = false;
+    private SpellAbility pendingExternalAbility;
+    private RulesPaymentExecutor pendingExternalPayment;
+    private RulesPaymentExecutor activeRulesPayment;
 
     /**
      * The `ChangeZone` resolution currently walking its one-at-a-time loop, and how many
@@ -602,10 +605,14 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (!bridged()) {
             return super.chooseSpellAbilityToPlay();
         }
+        if (pendingExternalAbility != null) throw new RulesCostFeasibility.Unsupported("previous selected action was not executed");
         final int[] diag = new int[DIAG_LEN];
         final List<SpellAbility> menu = legalSpellAbilities(diag);
         recordMenuCensus(diag, menu.size());
         final JsonObject body = envelope(true);
+        body.addProperty("rulesCostVersion", RulesCostFeasibility.VERSION);
+        body.addProperty("paymentVersion", "rules-payment-v1");
+        body.addProperty("paymentControl", "host-complete-witness");
         body.add("menuDiag", menuDiagJson(diag, menu.size()));
         final JsonArray items = new JsonArray();
         items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
@@ -643,6 +650,15 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (!ensureTargets(chosen)) {
             return super.chooseSpellAbilityToPlay();
         }
+        if (!chosen.isLandAbility()) {
+            final RulesPaymentChoices payments = new RulesPaymentChoices(getPlayer(), chosen);
+            final JsonObject request = envelope(true);
+            for (var entry : payments.request().entrySet()) request.add(entry.getKey(), entry.getValue());
+            request.add("selectedAbility", StateEncoder.encodeSpellAbility(chosen));
+            final JsonObject selectedPayment = ask("payManaCost", "payment", request);
+            pendingExternalPayment = new RulesPaymentExecutor(getPlayer(), chosen, payments.select(selectedPayment));
+        }
+        pendingExternalAbility = chosen;
         return Lists.newArrayList(chosen);
     }
 
@@ -718,6 +734,9 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * ask, and a host that delegates falls back to Forge's own per-API targeting logic.
      */
     private boolean ensureTargets(final SpellAbility root) {
+        // A land play is not a spell/casting cost. Its rules permission is checked
+        // by LandAbility.canPlay, including again immediately before execution.
+        if (root.isLandAbility()) return true;
         SpellAbility cur = root;
         while (cur != null) {
             if (cur.usesTargeting()) {
@@ -867,7 +886,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                     if (sa.getAlternateHost(sa.getHostCard()) != null) {
                         throw new RulesCostFeasibility.Unsupported("optional-cost alternate-host static simulation");
                     }
-                    final List<OptionalCostValue> opts = GameActionUtil.getOptionalCostValues(sa.copy());
+                    final List<OptionalCostValue> opts = GameActionUtil.getOptionalCostValues(sa.copy(sa.getHostCard(), p, true));
                     if (opts == null || opts.isEmpty()) {
                         continue;
                     }
@@ -2486,7 +2505,34 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) { count("vote"); return super.vote(sa, prompt, options, votes, forPlayer, optional); }
     @Override
-    public boolean playChosenSpellAbility(SpellAbility sa) { count("playChosenSpellAbility"); return super.playChosenSpellAbility(sa); }
+    public boolean playChosenSpellAbility(SpellAbility sa) {
+        count("playChosenSpellAbility");
+        if (pendingExternalAbility == null) return super.playChosenSpellAbility(sa);
+        if (pendingExternalAbility != sa) throw new RulesCostFeasibility.Unsupported("selected/executed ability identity mismatch");
+        pendingExternalAbility = null;
+        try {
+            if (sa.isLandAbility()) {
+                if (!sa.canPlay()) throw new RulesCostFeasibility.Unsupported("selected land no longer playable");
+                int id = sa.getHostCard().getId();
+                sa.resolve();
+                if (getPlayer().getCardsIn(ZoneType.Battlefield).stream().noneMatch(c -> c.getId() == id))
+                    throw new RulesCostFeasibility.Unsupported("selected land did not enter battlefield");
+                return true;
+            }
+            if (pendingExternalPayment == null) throw new RulesCostFeasibility.Unsupported("host payment witness missing");
+            activeRulesPayment = pendingExternalPayment;
+            pendingExternalPayment = null;
+            if (!sa.canPlay()) throw new RulesCostFeasibility.Unsupported("selected spell no longer playable");
+            if (!forge.ai.ComputerUtil.handlePlayingSpellAbility(getPlayer(), sa, null, activeRulesPayment::decisions))
+                throw new RulesCostFeasibility.Unsupported("controlled action execution failed");
+            activeRulesPayment.assertPaid();
+            counters.instrument("rulesPayment.executed");
+            return true;
+        } catch (RuntimeException failure) {
+            JsonRpcChannel.logErr("BENCH_INTEGRITY_FAILURE: controlled action execution failed", failure);
+            throw failure;
+        } finally { activeRulesPayment = null; pendingExternalPayment = null; }
+    }
     @Override
     public int chooseNumberForCostReduction(final SpellAbility sa, final int min, final int max) { count("chooseNumberForCostReduction"); return super.chooseNumberForCostReduction(sa, min, max); }
     @Override
@@ -2532,7 +2578,14 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public boolean payCombatCost(Card card, Cost cost, SpellAbility sa, String prompt) { count("payCombatCost"); return super.payCombatCost(card, cost, sa, prompt); }
     @Override
-    public boolean payManaCost(ManaCost toPay, CostPartMana costPartMana, SpellAbility sa, String prompt, ManaConversionMatrix matrix, boolean effect) { count("payManaCost"); return super.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect); }
+    public boolean payManaCost(ManaCost toPay, CostPartMana costPartMana, SpellAbility sa, String prompt, ManaConversionMatrix matrix, boolean effect) {
+        count("payManaCost");
+        if (activeRulesPayment != null) {
+            if (matrix != null) throw new RulesCostFeasibility.Unsupported("payment matrix not in witness");
+            return activeRulesPayment.pay(toPay, costPartMana, sa, effect);
+        }
+        return super.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect);
+    }
     @Override
     public boolean applyManaToCost(ManaCostBeingPaid toPay, SpellAbility ability, String prompt, ManaConversionMatrix matrix, boolean effect) { count("applyManaToCost"); return super.applyManaToCost(toPay, ability, prompt, matrix, effect); }
     @Override

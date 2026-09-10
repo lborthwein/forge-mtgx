@@ -263,6 +263,25 @@ public class ManaPool extends ManaConversionMatrix implements Iterable<Mana> {
         return true;
     }
 
+    /** Consume exactly the identified floating token for an explicit cost shard.
+     * No AI selection, auto-payment or equality-based substitution of another token.
+     */
+    public boolean payExactShard(final SpellAbility sa, final ManaCostBeingPaid cost,
+                                 final Mana mana, final ManaCostShard shard) {
+        if (!mana.meetsManaRestrictions(sa) || !sa.allowsPayingWithShard(mana.getSourceCard(), mana.getColor())) return false;
+        var iterator = floatingMana.get(mana.getColor()).iterator();
+        while (iterator.hasNext()) {
+            if (iterator.next() != mana) continue;
+            if (!cost.payExactShard(mana, this, shard)) return false;
+            iterator.remove();
+            owner.updateManaForView();
+            owner.getGame().fireEvent(new GameEventManaPool(owner, EventValueChangeType.Removed,
+                    EnumSet.of(MagicColor.Color.fromByte(mana.getColor()))));
+            return true;
+        }
+        return false;
+    }
+
     public final boolean isEmpty() {
         return floatingMana.isEmpty();
     }

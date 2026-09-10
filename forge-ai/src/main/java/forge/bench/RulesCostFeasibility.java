@@ -4,8 +4,10 @@ import forge.card.mana.ManaAtom;
 import forge.card.mana.ManaCost;
 import forge.card.mana.ManaCostShard;
 import forge.game.card.Card;
+import forge.game.card.CounterEnumType;
 import forge.game.cost.*;
 import forge.game.keyword.Keyword;
+import forge.game.mana.Mana;
 import forge.game.player.Player;
 import forge.game.replacement.ReplacementType;
 import forge.game.spellability.SpellAbility;
@@ -27,9 +29,14 @@ import java.util.List;
  * separate certification gates; this class makes no whole-bridge purity claim.
  */
 public final class RulesCostFeasibility {
-    public static final String VERSION = "rules-cost-v1-bounded";
+    public static final String VERSION = "rules-cost-v2-witness-bounded";
     public enum Status { PAYABLE, UNPAYABLE, UNSUPPORTED }
-    public record Result(Status status, String reason) {}
+    public record Result(Status status, String reason, PaymentWitness witness, PaymentSpace space) {}
+    public record PaymentSpace(ManaCost cost, List<ManaCostShard> shards, List<Token> pool, List<List<SourceChoice>> sources) {}
+    public record SourceChoice(SpellAbility ability, String choice, List<Integer> output) {}
+    public record Token(int color, Mana floating, SourceChoice source, int outputIndex) {}
+    public record Allocation(ManaCostShard shard, Token token) {}
+    public record PaymentWitness(ManaCost cost, List<SourceChoice> sources, List<Allocation> allocations) {}
     private static final int SEARCH_LIMIT = 100_000;
     private RulesCostFeasibility() {}
 
@@ -43,22 +50,28 @@ public final class RulesCostFeasibility {
         return result.status == Status.PAYABLE;
     }
 
-    private static Result unknown(String reason) { return new Result(Status.UNSUPPORTED, reason); }
-    private static Result answer(boolean yes) { return new Result(yes ? Status.PAYABLE : Status.UNPAYABLE, VERSION); }
+    private static Result unknown(String reason) { return new Result(Status.UNSUPPORTED, reason, null, null); }
+    private static Result answer(boolean yes) { return new Result(yes ? Status.PAYABLE : Status.UNPAYABLE, VERSION,
+            yes ? new PaymentWitness(ManaCost.ZERO, List.of(), List.of()) : null,
+            yes ? new PaymentSpace(ManaCost.ZERO, List.of(), List.of(), List.of()) : null); }
 
     public static Result assess(Player payer, SpellAbility ability) {
         if (payer == null || ability == null || ability.getActivatingPlayer() != payer
                 || ability.getPayCosts() == null) return unknown("missing cost/activator");
         if (ability.isTrigger() || ability.isReplacementAbility() || ability.isOffering()
                 || ability.isEmerge() || ability.isBestow() || ability.isCastFaceDown()
-                || ability.hasParam("Announce") || !ability.getPipsToReduce().isEmpty()
+                || ability.hasParam("Announce") || ability.hasSVar("NumTimes") || !ability.getPipsToReduce().isEmpty()
                 || ability.hasParam("ReduceCost") || ability.hasParam("RaiseCost")
-                || ability.hasParam("TapCreaturesForMana") || ability.getHostCard().isCommander())
+                || ability.hasParam("TapCreaturesForMana") || ability.hasParam("ManaRestriction")
+                || ability.hasParam("ManaConversion") || ability.getMayPlayOption() != null
+                || ability.getHostCard().isCommander())
             return unknown("complex announcement or payment");
         for (Keyword keyword : new Keyword[]{Keyword.CONVOKE, Keyword.IMPROVISE, Keyword.DELVE, Keyword.ASSIST}) {
             if (ability.getHostCard().hasKeyword(keyword)) return unknown("alternative mana payment: " + keyword);
         }
         if (payer.hasKeyword("PayLifeInsteadOf:B")) return unknown("life substitutes for black mana");
+        if (payer.getCardsIn(ZoneType.Hand).stream().anyMatch(c -> c.hasKeyword(Keyword.SPLICE)))
+            return unknown("splice may alter selected spell during execution");
         boolean hostUsed = false;
         int nonMana = 0;
         for (CostPart part : ability.getPayCosts().getCostParts()) {
@@ -69,10 +82,10 @@ public final class RulesCostFeasibility {
             if (part instanceof CostTap) {
                 hostUsed = true;
             } else if (part instanceof CostRemoveCounter remove && remove.payCostFromSource()
-                    && remove.convertAmount() != null) {
+                    && remove.convertAmount() != null && remove.counter != null && remove.counter.is(CounterEnumType.LOYALTY)) {
                 // Forge's rule implementation permits spending the last loyalty.
             } else if (part instanceof CostPutCounter put && put.payCostFromSource()
-                    && put.convertAmount() != null && ability.isActivatedAbility()) {
+                    && put.convertAmount() != null && put.getCounter().is(CounterEnumType.LOYALTY) && ability.isActivatedAbility()) {
                 // Non-ETB source counter cost; no temporary static-state query.
             } else return unknown("nonmana cost: " + part.getClass().getSimpleName());
             if (!part.canPay(ability, payer, false)) return answer(false);
@@ -83,9 +96,11 @@ public final class RulesCostFeasibility {
             if (!card.isInZone(ZoneType.Battlefield) && !card.isInZone(ZoneType.Command)
                     && !card.isInZone(ZoneType.Stack) && card != ability.getHostCard()) continue;
             if (card.getStaticAbilities().stream().anyMatch(s -> s.checkMode(StaticAbilityMode.ManaConvert)
-                    || s.checkMode(StaticAbilityMode.OptionalCost))) return unknown("mana conversion/optional static cost");
+                    || s.checkMode(StaticAbilityMode.OptionalCost)
+                    || s.checkMode(StaticAbilityMode.CantBeActivated))) return unknown("mana conversion/optional cost/conditional activation");
             if (card.getReplacementEffects().stream().filter(r -> r.zonesCheck(payer.getGame().getZoneOf(card)))
-                    .anyMatch(r -> r.getMode() == ReplacementType.ProduceMana)) return unknown("mana replacement");
+                    .anyMatch(r -> r.getMode() == ReplacementType.ProduceMana
+                            || r.getMode() == ReplacementType.Tap || r.getMode() == ReplacementType.Untap)) return unknown("mana/tap replacement");
             if (card.getTriggers().stream().filter(t -> t.getSpawningAbility() != null
                     || t.zonesCheck(payer.getGame().getZoneOf(card)))
                     .anyMatch(t -> t.getMode() == TriggerType.TapsForMana || t.getMode() == TriggerType.ManaAdded))
@@ -102,31 +117,45 @@ public final class RulesCostFeasibility {
         }
         for (int i = 0; i < cost.getGenericCost(); i++) shards.add(ManaCostShard.GENERIC);
         if (shards.isEmpty()) return answer(true);
-        List<Integer> tokens = new ArrayList<>();
+        List<Token> tokens = new ArrayList<>();
+        for (byte color : ManaAtom.MANATYPES) if (payer.getManaPool().getPossibleColorUses(color) != color)
+            return unknown("pool/source color conversion");
         for (var mana : payer.getManaPool()) {
-            if (mana.isRestricted()) return unknown("restricted pooled mana");
+            if (mana.isRestricted() || mana.triggersWhenSpent() || mana.addsCounters(ability)
+                    || mana.addsKeywords(ability) || mana.addsNoCounterMagic(ability)) return unknown("restricted/effectful pooled mana");
             if (payer.getManaPool().getPossibleColorUses(mana.getColor()) != mana.getColor())
                 return unknown("pool color conversion");
-            tokens.add((int) mana.getColor());
+            tokens.add(new Token(mana.getColor(), mana, null, tokens.size()));
         }
-        List<List<List<Integer>>> sources = new ArrayList<>();
+        List<List<SourceChoice>> sources = new ArrayList<>();
         for (Card card : payer.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
             if (card.isPhasedOut() || (hostUsed && card == ability.getHostCard())) continue;
-            List<List<Integer>> alternatives = new ArrayList<>();
+            List<SourceChoice> alternatives = new ArrayList<>();
             for (SpellAbility printed : card.getManaAbilities()) {
                 if (printed.getRestrictions().getZone() != null
                         && !card.isInZone(printed.getRestrictions().getZone())
                         && !printed.hasParam("AdditionalActivationZone")) continue;
                 if (!card.isInZone(ZoneType.Battlefield)) return unknown("nonbattlefield mana source");
-                if (printed.isSuppressed() || card.isDetained() || card.isTapped() || card.isAbilitySick()) continue;
+                if (printed.isSuppressed() || card.isDetained()) continue;
+                // A tapped/sick Wall of Roots still has a usable non-tap ability.
+                // Never silently drop it while proving an empty mana budget.
+                if (printed.getPayCosts() != null && printed.getPayCosts().hasTapCost()
+                        && (card.isTapped() || card.isAbilitySick())) continue;
                 // Restrictions can assign an unset activator; query only a disposable
                 // ability copy, never mutate the printed source or its AI memory.
-                SpellAbility source = printed.copy();
-                source.setActivatingPlayer(payer);
+                // LKI=true also avoids advancing global ability IDs / tracker views.
+                SpellAbility source = printed.copy(card, payer, true);
+                if (source.hasSVar("NumTimes") || source.getMapParams().keySet().stream().anyMatch(k -> k.startsWith("Condition")
+                        || (k.startsWith("Activation") && !"ActivationZone".equals(k)) || "CheckSVar".equals(k))
+                        || (source.hasParam("Defined") && !"You".equals(source.getParam("Defined"))))
+                    return unknown("conditional mana-source availability");
                 if (!source.getRestrictions().canPlay(card, source)) continue;
                 if (source.getPayCosts() == null || source.getManaPart() == null || source.getSubAbility() != null
                         || source.hasParam("Each")) return unknown("complex mana source");
+                if (!java.util.Set.of("AB", "Cost", "Produced", "Amount", "AILogic", "SpellDescription", "Description",
+                        "ActivationZone", "Secondary").containsAll(source.getMapParams().keySet()))
+                    return unknown("unverified mana-source parameters");
                 ManaCost sourceMana = CostAdjustment.benchmarkManaCost(source);
                 if (sourceMana == null || !sourceMana.isZero()) return unknown("adjusted mana source cost");
                 boolean tap = false;
@@ -150,41 +179,60 @@ public final class RulesCostFeasibility {
                 int amount = Integer.parseInt(count);
                 if ("Any".equals(produced)) {
                     for (String color : List.of("W", "U", "B", "R", "G"))
-                        alternatives.add(new ArrayList<>(java.util.Collections.nCopies(amount, (int) ManaAtom.fromName(color))));
+                        alternatives.add(new SourceChoice(printed, color,
+                                List.copyOf(java.util.Collections.nCopies(amount, (int) ManaAtom.fromName(color)))));
                 } else if (produced.matches("[WUBRGC]( [WUBRGC])*")) {
                     List<Integer> output = new ArrayList<>();
                     for (int i = 0; i < amount; i++) for (String color : produced.split(" ")) output.add((int) ManaAtom.fromName(color));
-                    alternatives.add(output);
+                    alternatives.add(new SourceChoice(printed, "", List.copyOf(output)));
                 } else return unknown("choice/dynamic mana output");
             }
             if (!alternatives.isEmpty()) sources.add(alternatives);
         }
         if (sources.size() > 32) return unknown("source search bound");
-        try { return answer(search(shards, tokens, sources, 0, new int[]{0})); }
+        try {
+            List<Token> found = search(shards, tokens, sources, 0, new int[]{0});
+            if (found == null) return answer(false);
+            int[] matching = matching(shards, found.stream().map(Token::color).toList());
+            List<SourceChoice> used = new ArrayList<>();
+            List<Allocation> allocations = new ArrayList<>();
+            for (int i = 0; i < matching.length; i++) if (matching[i] >= 0) {
+                Token token = found.get(i);
+                allocations.add(new Allocation(shards.get(matching[i]), token));
+                if (token.source() != null && !used.contains(token.source())) used.add(token.source());
+            }
+            return new Result(Status.PAYABLE, VERSION, new PaymentWitness(cost, List.copyOf(used), List.copyOf(allocations)),
+                    new PaymentSpace(cost, List.copyOf(shards), List.copyOf(tokens),
+                            sources.stream().map(List::copyOf).toList()));
+        }
         catch (Unsupported limit) { return unknown(limit.getMessage()); }
     }
 
-    private static boolean search(List<ManaCostShard> shards, List<Integer> tokens,
-                                  List<List<List<Integer>>> sources, int index, int[] visited) {
+    private static List<Token> search(List<ManaCostShard> shards, List<Token> tokens,
+                                  List<List<SourceChoice>> sources, int index, int[] visited) {
         if (++visited[0] > SEARCH_LIMIT) throw new Unsupported("source search bound");
-        if (matches(shards, tokens)) return true;
-        if (index == sources.size()) return false;
-        for (List<Integer> output : sources.get(index)) {
-            List<Integer> next = new ArrayList<>(tokens);
-            next.addAll(output);
-            if (search(shards, next, sources, index + 1, visited)) return true;
+        if (matches(shards, tokens.stream().map(Token::color).toList())) return tokens;
+        if (index == sources.size()) return null;
+        for (SourceChoice source : sources.get(index)) {
+            List<Token> next = new ArrayList<>(tokens);
+            for (int i = 0; i < source.output().size(); i++) next.add(new Token(source.output().get(i), null, source, i));
+            List<Token> found = search(shards, next, sources, index + 1, visited);
+            if (found != null) return found;
         }
         // Every supported source is optional and has no cross-source negative cost.
         // Using one extra source cannot destroy a payment; no skip branch is needed.
-        return false;
+        return null;
     }
 
     static boolean matches(List<ManaCostShard> shards, List<Integer> tokens) {
-        if (tokens.size() < shards.size()) return false;
+        return matching(shards, tokens) != null;
+    }
+    private static int[] matching(List<ManaCostShard> shards, List<Integer> tokens) {
+        if (tokens.size() < shards.size()) return null;
         int[] assigned = new int[tokens.size()];
         Arrays.fill(assigned, -1);
-        for (int i = 0; i < shards.size(); i++) if (!augment(i, shards, tokens, assigned, new boolean[tokens.size()])) return false;
-        return true;
+        for (int i = 0; i < shards.size(); i++) if (!augment(i, shards, tokens, assigned, new boolean[tokens.size()])) return null;
+        return assigned;
     }
     private static boolean augment(int shard, List<ManaCostShard> shards, List<Integer> tokens, int[] assigned, boolean[] seen) {
         for (int token = 0; token < tokens.size(); token++) {

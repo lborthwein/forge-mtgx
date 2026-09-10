@@ -510,6 +510,15 @@ public class ManaCostBeingPaid {
         return Iterables.getFirst(choice, null);
     }
 
+    /** Pay the caller's explicitly selected shard, not a heuristic-priority shard.
+     * Used by verified payment witnesses. Validation is nonmutating on failure.
+     */
+    public boolean payExactShard(final Mana mana, final ManaPool pool, final ManaCostShard shard) {
+        if (!unpaidShards.containsKey(shard) || !pool.canPayForShardWithColor(shard, mana.getColor())
+                || (mana.getManaAbility() != null && !mana.getManaAbility().meetsManaShardRestrictions(shard, mana.getColor()))) return false;
+        return tryPayMana(mana.getColor(), java.util.List.of(shard), pool.getPossibleColorUses(mana.getColor())) == shard;
+    }
+
     private ManaCostShard tryPayMana(final byte colorMask, Iterable<ManaCostShard> payableShards, byte possibleUses) {
         ManaCostShard chosenShard = getShardToPayByPriority(payableShards, possibleUses);
         if (chosenShard == null) {

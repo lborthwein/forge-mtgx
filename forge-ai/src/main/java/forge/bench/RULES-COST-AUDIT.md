@@ -1,7 +1,8 @@
 # Bounded benchmark rules-cost repair — 2026-09-10
 
 Status: **first implementation, not whole-bridge certification**. Based on
-Forge3544576919d55f1deb6fe8391a3c2ff446c30c0c. Stock/default AI code is untouched.
+Forge3544576919d55f1deb6fe8391a3c2ff446c30c0c. Existing stock/default AI behavior is
+preserved; the new cost-decision overload is used only by the external bridge.
 No browser runtime deployment, benchmark matches, or playing-strength claims.
 
 `PlayerControllerBridge` now uses `RulesCostFeasibility` at initial and post-target
@@ -51,9 +52,38 @@ Run only through the existing Studio admission wrapper:
  /bin/bash tools/test-benchmark-rules-cost.sh PINNED_JAR NEW_ABSOLUTE_ARTIFACT_DIR
 ```
 
-The script compiles the four changed production classes and actual-card fixture
+The script compiles the changed production classes and actual-card fixture
 against the pinned shaded jar, then runs with isolated classes/user.home. It does
 not use Maven caches, shared targets, GUI windows, or launch a game match.
+
+## Phase 2 implementation — verification pending
+
+The bridge now asks the host to select a complete payment witness, including source
+ability identities, source activation order and exact mana-token/shard allocation.
+The executor uses Forge's real cost payment and mana ability resolution primitives,
+then verifies actual produced mana and spends the selected tokens. It does not call
+the default AI payment planner. Missing, ambiguous or unsupported answers invalidate
+the run rather than choosing a canonical witness or delegating.
+
+The advertised capability trio is `rules-cost-v2-witness-bounded`,
+`rules-payment-v1`, `host-complete-witness`. It is a bounded protocol, not a general
+legality certificate. Initial support excludes X and nonordinary payment costs.
+The finite menu includes surplus source activations and retains distinct sources
+and floating mana-token provenance. Equal-colored units from one fixed, effectless
+source activation are treated as interchangeable; an actual Lotus output fixture
+is added to check that assumption. Complete enumeration has explicit bounds of
+200,000 nodes and 4,096 plans, and throws before publishing any truncated menu.
+These bounds can reject ordinary late-game positions. A combinatorial domain plus
+validated host-submitted witness is the planned scalability replacement, not a
+larger bound or silent pruning.
+
+New fixtures cover exact host-selected alternative sources, Lotus execution,
+floating-token identity, tapped non-tap mana abilities, and actual Thief of Sanity
+versus Expensive Taste face-down land permission. They also snapshot original
+ability fields and the global ability-ID counter. **These phase-2 changes have not
+been compiled or run yet:** the human Forge browser game owns Studio admission.
+Only the 16 phase-1 checks above are passing evidence. No deployment is authorized
+by this unverified implementation snapshot.
 
 ## Outstanding gates and next implementation
 
@@ -61,10 +91,9 @@ not use Maven caches, shared targets, GUI windows, or launch a game match.
   snow, two-generic hybrid, convoke/delve/improvise, reductions/set-costs, restricted
   mana, life-paying/filter/nonbattlefield/dynamic sources and coupled nonmana costs
   are explicitly unsupported. Bound exhaustion is likewise invalidity, not illegal.
-- This is feasibility, not an executed payment witness. Next: emit a full payment
-  plan (source ability identity, color allocation, floating token identity, nonmana
-  resources), execute exactly that plan, and assert actual cost/action/target identity.
-  Do not leave payment execution to strategy if claiming policy-independent legality.
+- Verify the phase-2 execution witness and host policy selection together. Exact
+  execution of one chosen witness does not establish complete payment coverage or
+  parity with the TypeScript pilot's intended strategic payment policy.
 - Source interactions need independent adversarial review before broadening support:
   resource-dependent activation restrictions, source sacrifice changing another
   source, activation-tax adjustments, replacement/trigger and mana conversion effects.
