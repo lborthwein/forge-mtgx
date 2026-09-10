@@ -50,9 +50,13 @@ public final class SourceLifePaymentEngineSmoke {
         return choices.select(answer);
     }
     private static void execute(String name, int sourceLife) {
+        execute(name, sourceLife, 20);
+    }
+    private static void execute(String name, int sourceLife, int initialLife) {
         var game = game(); var player = game.getPlayers().get(0);
         var source = card(name, player, ZoneType.Battlefield);
         var ability = spell(player, "Savannah Lions");
+        player.setLife(initialLife, null);
         game.getAction().checkStateEffects(true);
         var before = BenchMenuStateAudit.capture(game); var rng = BenchRandomAudit.begin();
         var result = RulesCostFeasibility.assess(player, ability);
@@ -75,7 +79,7 @@ public final class SourceLifePaymentEngineSmoke {
         });
         check(forge.ai.ComputerUtil.handlePlayingSpellAbility(player, ability, null, payment::decisions), name + " actual cast executes");
         payment.assertPaid();
-        check(player.getLife() == 20 - sourceLife && source.isTapped() && ability.getHostCard().isInZone(ZoneType.Stack),
+        check(player.getLife() == initialLife - sourceLife && source.isTapped() && ability.getHostCard().isInZone(ZoneType.Stack),
             name + " exact life/tap/stack receipt");
     }
     private static void aggregate() {
@@ -131,6 +135,21 @@ public final class SourceLifePaymentEngineSmoke {
         check(RulesCostFeasibility.assess(player, ability).status() == RulesCostFeasibility.Status.UNSUPPORTED,
             "nonordinary life loss remains unsupported");
     }
+    private static void replacements() {
+        for (String name : List.of("Ashiok, Wicked Manipulator", "Bloodletter of Aclazotz")) {
+            var game = game(); var player = game.getPlayers().get(0); var opponent = game.getPlayers().get(1);
+            card("Mana Confluence", player, ZoneType.Battlefield); card("Forest", player, ZoneType.Library);
+            var replacement = card(name, name.startsWith("Bloodletter") ? opponent : player, ZoneType.Battlefield);
+            if (replacement.isPlaneswalker()) replacement.setCounters(forge.game.card.CounterEnumType.LOYALTY, 5);
+            if (name.startsWith("Bloodletter")) game.getPhaseHandler().devModeSet(PhaseType.MAIN1, opponent);
+            var ability = spell(player, "Lightning Bolt"); game.getAction().checkStateEffects(true);
+            var before = BenchMenuStateAudit.capture(game); var rng = BenchRandomAudit.begin();
+            var result = RulesCostFeasibility.assess(player, ability);
+            check(result.status() == RulesCostFeasibility.Status.UNSUPPORTED && result.reason().contains("replacement"),
+                name + " actual active payment/life-loss replacement cannot masquerade as fixed source life: " + result.status() + " " + result.reason());
+            BenchRandomAudit.assertUnchanged(rng, "life replacement rejection"); BenchMenuStateAudit.assertUnchanged(before, game);
+        }
+    }
     private static void production() {
         String answers = "{\"type\":\"answer\",\"id\":1,\"choice\":1}\n"
             + "{\"type\":\"answer\",\"id\":2,\"choice\":0,\"sourceOrder\":[\"SOURCE\"]}\n";
@@ -172,7 +191,8 @@ public final class SourceLifePaymentEngineSmoke {
             FModel.initialize(null, prefs -> { prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); prefs.setPref(FPref.UI_LANGUAGE, "en-US"); return null; });
             BenchRandomAudit.install(401);
             execute("Mana Confluence", 1); execute("Myr Convert", 2);
-            aggregate(); skipAndZero(); distinctUnsupported(); production();
+            execute("Mana Confluence", 1, 1);
+            aggregate(); skipAndZero(); distinctUnsupported(); replacements(); production();
             System.out.println("PASS all " + checks + " source-life checks; development only"); System.exit(0);
         } catch (Throwable error) { error.printStackTrace(); System.exit(1); }
     }
