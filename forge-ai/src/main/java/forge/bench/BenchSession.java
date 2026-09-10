@@ -30,6 +30,8 @@ public final class BenchSession {
          * protocol null: it must reproduce pure-Forge results.
          */
         NULL,
+        /** Development-only: enumerate the production menu, then let Default AI decide. */
+        NULL_PROBE,
         /** Answer the strategic decision set over the wire; delegate the rest. */
         BRIDGE;
 
@@ -40,10 +42,13 @@ public final class BenchSession {
             switch (s.trim().toLowerCase()) {
                 case "bridge":
                     return BRIDGE;
+                case "null-probe":
+                    return NULL_PROBE;
                 case "null":
                 case "forge":
-                default:
                     return NULL;
+                default:
+                    throw new IllegalArgumentException("Unknown benchmark seat mode: " + s);
             }
         }
     }

@@ -68,7 +68,18 @@ public class LobbyPlayerBridge extends LobbyPlayerAi {
 
     private PlayerControllerBridge createControllerFor(final Player p) {
         final PlayerControllerBridge result =
-                new PlayerControllerBridge(p.getGame(), p, this, session, mode, seat, counters);
+                mode == BenchSession.Mode.NULL_PROBE
+                ? new PlayerControllerBridge(p.getGame(), p, this, session, mode, seat, counters) {
+                    @Override
+                    public java.util.List<forge.game.spellability.SpellAbility> chooseSpellAbilityToPlay() {
+                        if (session.getLiveGame() == null || session.getLiveGame() == getGame()) {
+                            probePriorityMenuPurity();
+                            counters.instrument("auditPriorityProbe");
+                        }
+                        return super.chooseSpellAbilityToPlay();
+                    }
+                }
+                : new PlayerControllerBridge(p.getGame(), p, this, session, mode, seat, counters);
         result.getAi().setUseSimulation(option);
         return result;
     }

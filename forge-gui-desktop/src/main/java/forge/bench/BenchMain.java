@@ -205,6 +205,14 @@ public final class BenchMain {
             System.exit(2);
             return;
         }
+        boolean auditMenuProbe = false;
+        for (int seat = 0; seat < deckPaths.size(); seat++) {
+            final BenchSession.Mode mode = BenchSession.Mode.parse(seatMode(cfg, seat));
+            auditMenuProbe |= mode == BenchSession.Mode.NULL_PROBE;
+        }
+        if (auditMenuProbe && (useSimulation || cfg.has("simSeats"))) {
+            throw new IllegalArgumentException("null-probe is a Default AI diagnostic, not a simulation experiment");
+        }
 
         // ------------------------------------------------- resolve the AI search budget
         // Which seats run the simulation AI is pure config, so this is known before any
@@ -273,6 +281,8 @@ public final class BenchMain {
         hello.addProperty("paymentControl", "host-complete-witness");
         hello.addProperty("privateRngAuditVersion", 1);
         hello.addProperty("privateActionAuditVersion", 1);
+        // Explicit identity: a diagnostic no-op run is never a strength panel.
+        hello.addProperty("auditMenuProbe", auditMenuProbe);
         hello.addProperty("forgeCommit", forgeCommit());
         hello.addProperty("forgeVersion", BuildInfo.getVersionString());
         hello.addProperty("aiProfile", aiProfile);
