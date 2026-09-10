@@ -7523,11 +7523,14 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
             sa.setActivatingPlayer(player);
             // fix things like retrace
             // check only if SA can't be cast normally
-            if (!sa.canPlay(true) && (removeUnplayable || !sa.isPossible())) {
+            if (!(readOnly ? sa.canPlayForEnumeration() : sa.canPlay(true)) && (removeUnplayable || !sa.isPossible())) {
                 toRemove.add(sa);
             }
         }
-        abilities.removeAll(toRemove);
+        // LKI copies preserve IDs, and SpellAbility.equals compares those IDs.
+        // An illegal base and legal alternative are still distinct candidates.
+        if (readOnly) abilities.removeIf(sa -> toRemove.stream().anyMatch(rejected -> rejected == sa));
+        else abilities.removeAll(toRemove);
 
         return abilities;
     }

@@ -135,6 +135,16 @@ benchmark collection. The now-unmasked unset-actor warnings in mana observation
 are being repaired in the separate encoder lane; no old original-actor mutation is
 reintroduced to conceal them.
 
+V9 also passes after closing two LKI-specific hazards: SpellAbility.equals compares
+IDs, so removal of an illegal base/duplicate alternative now uses object identity
+in the read-only path; optional timing/zone fallback uses read-only copies rather
+than allocating IDs through canPlay(true). Added actual Bringer of the Blue Dawn
+assertions retain both ordinary and five-color costs (only the latter affordable),
+and an unplayable graveyard kicker plus playable Firebolt flashback probe. All six
+variant probes repeat three times without host RPC/state/RNG changes. The combined
+run includes the integrated 55 visibility assertions and all existing payment and
+receipt tests: `/Users/channel/runs/2026-09-10-forge-integrated-integrity-v9/fixture.log`.
+
 ## Outstanding gates and next implementation
 
 - **Do not run an unrestricted cube benchmark yet.** X/announcements, Phyrexian,

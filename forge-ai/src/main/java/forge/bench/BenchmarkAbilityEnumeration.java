@@ -17,7 +17,8 @@ final class BenchmarkAbilityEnumeration {
         for (Card card : cards) {
             var hidden = ArrayListMultimap.<SpellAbility, SpellAbility>create();
             var possible = card.getAllPossibleAbilities(player, false, hidden, true);
-            for (SpellAbility base : hidden.keySet()) if (possible.contains(base)) possible.removeAll(hidden.get(base));
+            for (SpellAbility base : hidden.keySet()) if (possible.stream().anyMatch(candidate -> candidate == base))
+                possible.removeIf(candidate -> hidden.get(base).stream().anyMatch(alt -> alt == candidate));
             originals.addAll(possible);
         }
         List<SpellAbility> result = new ArrayList<>();

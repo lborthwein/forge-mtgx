@@ -87,6 +87,36 @@ public final class BenchMenuPurityVariantsSmoke {
             throw new AssertionError("Both Pathway faces must survive enumeration");
         BenchMenuStateAudit.assertUnchanged(before, f.game());
     }
+    private static void alternateCosts() {
+        var f = fixture();
+        var host = card("Bringer of the Blue Dawn", f.player(), ZoneType.Hand);
+        for (String name : List.of("Plains", "Island", "Swamp", "Mountain", "Forest")) card(name, f.player(), ZoneType.Battlefield);
+        f.game().getAction().checkStateEffects(true);
+        probe(f, "alternative ordinary mana cost retains distinct LKI candidates");
+        var before = BenchMenuStateAudit.capture(f.game());
+        var abilities = BenchmarkAbilityEnumeration.spells(ComputerUtilAbility.getAvailableCards(f.game(), f.player()), f.player());
+        var costs = abilities.stream().filter(a -> a.isSpell() && a.getHostCard() == host)
+                .map(a -> a.getPayCosts().getTotalMana().toString()).collect(java.util.stream.Collectors.toSet());
+        if (!costs.equals(java.util.Set.of("{7}{U}{U}", "{W}{U}{B}{R}{G}"))) throw new AssertionError("Alternative IDs collapsed candidates: " + costs);
+        long affordable = abilities.stream().filter(a -> a.isSpell() && a.getHostCard() == host)
+                .filter(a -> RulesCostFeasibility.requirePayable(f.player(), a)).count();
+        if (affordable != 1) throw new AssertionError("Only five-color alternate should be affordable");
+        BenchMenuStateAudit.assertUnchanged(before, f.game());
+    }
+    private static void inactiveOptional() {
+        var f = fixture();
+        var host = card("Thornscape Battlemage", f.player(), ZoneType.Graveyard);
+        card("Firebolt", f.player(), ZoneType.Graveyard);
+        for (int i = 0; i < 5; i++) card("Mountain", f.player(), ZoneType.Battlefield);
+        f.game().getAction().checkStateEffects(true);
+        host.getFirstSpellAbility().getPipsToReduce().add("G");
+        probe(f, "unplayable kicker fallback and legal graveyard flashback");
+        var before = BenchMenuStateAudit.capture(f.game());
+        var abilities = BenchmarkAbilityEnumeration.spells(ComputerUtilAbility.getAvailableCards(f.game(), f.player()), f.player());
+        if (abilities.stream().noneMatch(a -> a.isSpell() && a.getHostCard().getName().equals("Firebolt") && a.canPlay()
+                && a.getPayCosts().getTotalMana().toString().equals("{4}{R}"))) throw new AssertionError("Lost legal flashback variant");
+        BenchMenuStateAudit.assertUnchanged(before, f.game());
+    }
     private static void exile(String sourceName, boolean expectedLand) {
         var f = fixture();
         var source = card(sourceName, f.player(), ZoneType.Battlefield);
@@ -114,7 +144,7 @@ public final class BenchMenuPurityVariantsSmoke {
                         default -> throw new AssertionError("Unexpected GUI call " + method.getName());
                     }));
             FModel.initialize(null, prefs -> { prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); prefs.setPref(FPref.UI_LANGUAGE, "en-US"); return null; });
-            optional(); modal(); exile("Thief of Sanity", false); exile("Decadent Dragon", true);
+            optional(); modal(); alternateCosts(); inactiveOptional(); exile("Thief of Sanity", false); exile("Decadent Dragon", true);
             System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }

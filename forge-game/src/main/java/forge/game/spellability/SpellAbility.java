@@ -466,6 +466,18 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
         return false;
     }
 
+    /** Timing/zone fallback on an already detached enumeration copy. The normal
+     * canPlay(true) path allocates new IDs while testing optional variants. */
+    public boolean canPlayForEnumeration() {
+        if (canPlay()) return true;
+        for (OptionalCostValue value : GameActionUtil.getOptionalCostValues(this, true))
+            if (GameActionUtil.addOptionalCosts(this, Lists.newArrayList(value), true).canPlay()) return true;
+        if (isActivatedAbility() && hasParam("AlternateCost"))
+            for (SpellAbility alternative : GameActionUtil.getAdditionalCostSpell(this, true))
+                if (alternative != this && alternative.canPlay()) return true;
+        return false;
+    }
+
     public boolean canPlayWithOptionalCost(OptionalCostValue opt) {
         return GameActionUtil.addOptionalCosts(this, Lists.newArrayList(opt)).canPlay();
     }

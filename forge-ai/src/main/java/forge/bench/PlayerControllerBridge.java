@@ -1191,7 +1191,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         try {
             n += sa.getTargetRestrictions().getAllCandidates(sa).size();
         } catch (RuntimeException e) {
-            JsonRpcChannel.logErr("entity candidate enumeration failed for " + sa, e);
+            JsonRpcChannel.logErr("BENCH_INTEGRITY_FAILURE: entity candidate enumeration failed for " + sa, e);
+            throw e;
         }
         return n;
     }
