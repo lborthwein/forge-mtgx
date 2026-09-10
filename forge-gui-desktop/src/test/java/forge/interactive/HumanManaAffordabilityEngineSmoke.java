@@ -114,7 +114,11 @@ public final class HumanManaAffordabilityEngineSmoke {
         spell.setActivatingPlayer(player);
         game.getAction().checkStateEffects(true);
         String before = state(game);
-        boolean actual = HumanManaAffordability.mayAfford(player, spell);
+        var assessment = HumanManaAffordability.assess(player, spell);
+        boolean actual = assessment != HumanManaAffordability.Assessment.PROVEN_UNAFFORDABLE;
+        if (("Nissa, Who Shakes the World".equals(modifier) || "Mana Reflection".equals(modifier))
+                && assessment != HumanManaAffordability.Assessment.UNKNOWN)
+            throw new AssertionError("Active mana doubler must remain unknown: " + modifier + " " + assessment);
         if (!before.equals(state(game))) throw new AssertionError("Query mutated game: " + spellName);
         if (actual != expected) throw new AssertionError(spellName + " via " + List.of(sources)
                 + " modifier=" + modifier + " expected=" + expected + " actual=" + actual);
@@ -181,6 +185,16 @@ public final class HumanManaAffordabilityEngineSmoke {
             check("Banefire", new String[]{"Mountain"}, null, true);
             check("Fireball", new String[]{}, null, true); // target-dependent tax is unknown
             check("Stoke the Flames", new String[]{}, null, true); // unsupported convoke remains visible
+            check("Nissa, Who Shakes the World", new String[]{}, null, false);
+            check("Nissa, Who Shakes the World", new String[]{"Mountain"}, null, false);
+            check("Nissa, Who Shakes the World", new String[]{"Forest", "Forest", "Forest", "Forest", "Forest"}, null, true);
+            check("Nissa, Ascended Animist", new String[]{}, null, false);
+            check("Nissa, Ascended Animist", new String[]{"Forest"}, null, false);
+            check("Nissa, Ascended Animist", new String[]{"Forest", "Forest", "Forest", "Forest", "Forest"}, null, true);
+            check("Mana Reflection", new String[]{}, null, false);
+            check("Mana Reflection", new String[]{"Forest"}, null, false);
+            check("Grizzly Bears", new String[]{"Forest"}, "Nissa, Who Shakes the World", true);
+            check("Grizzly Bears", new String[]{"Forest"}, "Mana Reflection", true);
             var five = new String[]{"Karakas", "Plains", "Plains", "Mountain", "Mana Confluence"};
             checkX("Walking Ballista", five, null, 16, 2, true);
             checkX("Walking Ballista", new String[]{}, null, 1_000_000, 0, true);

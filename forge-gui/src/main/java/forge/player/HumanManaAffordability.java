@@ -82,10 +82,13 @@ public final class HumanManaAffordability {
                     || (s.hasParam("AddKeyword") && s.getParam("AddKeyword")
                         .matches("(?s).*(Convoke|Delve|Improvise|Assist|Emerge|Offering|Harmonize|Waterbend|Affinity|Undaunted).*"))
                     || (s.hasParam("AddKeyword") && s.getParamOrDefault("AffectedZone", "").contains("Stack")))) return Assessment.UNKNOWN;
-            if (card.getReplacementEffects().stream().anyMatch(r -> r.getMode() == ReplacementType.ProduceMana
+            if (card.getReplacementEffects().stream().filter(r -> r.zonesCheck(player.getGame().getZoneOf(card)))
+                    .anyMatch(r -> r.getMode() == ReplacementType.ProduceMana
                     || r.getMode() == ReplacementType.PayLife || r.getMode() == ReplacementType.LifeReduced
                     || r.getMode() == ReplacementType.DamageDone || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
-            if (card.getTriggers().stream().anyMatch(t -> t.getMode() == TriggerType.TapsForMana
+            if (card.getTriggers().stream().filter(t -> t.getSpawningAbility() != null
+                    || t.zonesCheck(player.getGame().getZoneOf(card)))
+                    .anyMatch(t -> t.getMode() == TriggerType.TapsForMana
                     || t.getMode() == TriggerType.ManaAdded)) return Assessment.UNKNOWN;
         }
 

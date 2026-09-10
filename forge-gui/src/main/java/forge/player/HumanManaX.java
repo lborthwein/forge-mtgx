@@ -5,6 +5,7 @@ import forge.card.mana.ManaCost;
 import forge.card.mana.ManaCostShard;
 import forge.game.card.Card;
 import forge.game.cost.CostAdjustment;
+import forge.game.cost.Cost;
 import forge.game.cost.CostPartMana;
 import forge.game.cost.CostPayLife;
 import forge.game.cost.CostTap;
@@ -59,10 +60,13 @@ public final class HumanManaX {
             if (!card.isInZone(ZoneType.Battlefield) && !card.isInZone(ZoneType.Command)
                     && !card.isInZone(ZoneType.Stack) && card != ability.getHostCard()) continue;
             // Replacement effects can alter life costs, source reuse, or mana output.
-            if (card.getReplacementEffects().stream().anyMatch(r -> List.of(ReplacementType.ProduceMana,
+            if (card.getReplacementEffects().stream().filter(r -> r.zonesCheck(player.getGame().getZoneOf(card)))
+                    .anyMatch(r -> List.of(ReplacementType.ProduceMana,
                     ReplacementType.PayLife, ReplacementType.LifeReduced, ReplacementType.Tap,
                     ReplacementType.Untap).contains(r.getMode()))) return unknown(min, max, "Mana or payment replacement effects");
-            if (card.getTriggers().stream().anyMatch(t -> t.getMode() == TriggerType.ManaAdded
+            if (card.getTriggers().stream().filter(t -> t.getSpawningAbility() != null
+                    || t.zonesCheck(player.getGame().getZoneOf(card)))
+                    .anyMatch(t -> t.getMode() == TriggerType.ManaAdded
                     || t.getMode() == TriggerType.TapsForMana)) return unknown(min, max, "Triggered mana");
             for (var st : card.getStaticAbilities()) {
                 if (st.checkMode(StaticAbilityMode.CantBeActivated) || st.checkMode(StaticAbilityMode.CantPayLife))
@@ -167,7 +171,10 @@ public final class HumanManaX {
         final SpellAbility copy = ability.copy(ability.getHostCard(), player, true);
         final ManaCostBeingPaid expanded = new ManaCostBeingPaid(ability.getPayCosts().getCostMana().getMana());
         expanded.setXManaCostPaid(x, ability.getXColor()); // applies EVERY printed X, on the private cost only
-        copy.setPayCosts(copy.getPayCosts().copyWithDefinedMana(expanded.toManaCost()));
+        // Cost.copyWithDefinedMana retains a leading zero-mana part; getCostMana
+        // then reads that zero instead of the expanded X. This exact-X subset is
+        // mana-only, so construct one private mana part rather than append to zero.
+        copy.setPayCosts(new Cost(expanded.toManaCost(), ability.getPayCosts().isAbility()));
         copy.setXManaCostPaid(x);
         return CostAdjustment.presentationManaCost(copy);
     }
