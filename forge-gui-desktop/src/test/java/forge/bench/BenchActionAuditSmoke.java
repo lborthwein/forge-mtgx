@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import com.google.gson.JsonParser;
+import com.google.gson.JsonObject;
 import forge.StaticData;
 import forge.deck.Deck;
 import forge.game.GameRules;
@@ -25,9 +26,17 @@ import forge.player.GamePlayerUtil;
 
 /** Actual paid cast/land event receipts, not the controller's always-true return. */
 public final class BenchActionAuditSmoke {
+    private static final class FixtureAnswers extends ByteArrayInputStream {
+        FixtureAnswers() { super(new byte[0]); }
+        void install(String answers) {
+            buf = answers.getBytes(StandardCharsets.UTF_8);
+            pos = 0; count = buf.length;
+        }
+    }
     private static void fixture(String name, boolean land, boolean execute) {
         final var wire = new ByteArrayOutputStream();
-        final var channel = new JsonRpcChannel(new ByteArrayInputStream("{\"type\":\"answer\",\"id\":1,\"choice\":1}\n".getBytes(StandardCharsets.UTF_8)), wire);
+        final var answers = new FixtureAnswers();
+        final var channel = new JsonRpcChannel(answers, wire);
         final var session = new BenchSession(channel);
         final var lobby = new LobbyPlayerBridge("Payer", null, session, BenchSession.Mode.BRIDGE, 0);
         lobby.setAiProfile("Default");
@@ -49,6 +58,18 @@ public final class BenchActionAuditSmoke {
             source.setSickness(false);
         }
         game.getAction().checkStateEffects(true);
+        String responses = "{\"type\":\"answer\",\"id\":1,\"choice\":1}\n";
+        if (!land) {
+            final var spell = card.getFirstSpellAbility();
+            spell.setActivatingPlayer(player);
+            final var payments = new RulesPaymentChoices(player, spell).request().getAsJsonArray("menu");
+            if (payments.size() != 1) throw new AssertionError("Fixture requires exactly one payment, not a first-plan policy");
+            final var payment = new JsonObject();
+            payment.addProperty("type", "answer"); payment.addProperty("id", 2); payment.addProperty("choice", 0);
+            payment.add("sourceOrder", payments.get(0).getAsJsonObject().get("sources").deepCopy());
+            responses += payment + "\n";
+        }
+        answers.install(responses);
         BenchRandomAudit.install(95600);
         BenchActionAudit.beginGame(game, "g1");
         game.subscribeToEvents(new BenchMain.EventEmitter(channel, "g1", game));
