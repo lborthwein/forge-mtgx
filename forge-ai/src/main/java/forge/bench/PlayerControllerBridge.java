@@ -20,7 +20,6 @@ package forge.bench;
 import com.google.common.collect.*;
 import forge.LobbyPlayer;
 import forge.ai.ComputerUtilAbility;
-import forge.ai.ComputerUtilCost;
 import forge.ai.ComputerUtilMana;
 import forge.ai.PlayerControllerAi;
 import forge.card.ColorSet;
@@ -731,7 +730,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             }
             cur = cur.getSubAbility();
         }
-        if (!ComputerUtilCost.canPayCost(root, getPlayer(), root.isTrigger())) {
+        if (!RulesCostFeasibility.requirePayable(getPlayer(), root)) {
             refuse("chooseSpellAbilityToPlay", "cost became unpayable after targeting: " + root);
             return false;
         }
@@ -863,17 +862,19 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             final List<SpellAbility> withVariants = new ArrayList<>(all);
             for (SpellAbility sa : all) {
                 try {
-                    final List<OptionalCostValue> opts = GameActionUtil.getOptionalCostValues(sa);
+                    // Discovery clears pips on its argument. Never mutate the base
+                    // candidate while discovering independent optional subsets.
+                    if (sa.getAlternateHost(sa.getHostCard()) != null) {
+                        throw new RulesCostFeasibility.Unsupported("optional-cost alternate-host static simulation");
+                    }
+                    final List<OptionalCostValue> opts = GameActionUtil.getOptionalCostValues(sa.copy());
                     if (opts == null || opts.isEmpty()) {
                         continue;
                     }
-                    final SpellAbility kicked = GameActionUtil.addOptionalCosts(sa, opts);
-                    if (kicked != null && kicked != sa) {
-                        kicked.setActivatingPlayer(p);
-                        withVariants.add(kicked);
-                    }
+                    withVariants.addAll(BenchmarkOptionalCosts.variants(sa, opts, p));
                 } catch (RuntimeException e) {
                     JsonRpcChannel.logErr("optional-cost variant construction failed for " + sa, e);
+                    throw e;
                 }
             }
             for (SpellAbility sa : withVariants) {
@@ -888,7 +889,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                     bump(diag, DIAG_TIMING);
                     continue;
                 }
-                if (!ComputerUtilCost.canPayCost(sa, p, sa.isTrigger())) {
+                if (!RulesCostFeasibility.requirePayable(p, sa)) {
                     bump(diag, DIAG_UNAFFORDABLE);
                     continue;
                 }
@@ -899,7 +900,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 out.add(sa);
             }
         } catch (RuntimeException e) {
-            JsonRpcChannel.logErr("legalSpellAbilities failed; offering pass only", e);
+            JsonRpcChannel.logErr("BENCH_INTEGRITY_FAILURE: legalSpellAbilities failed", e);
+            throw e;
         }
         return out;
     }

@@ -34,6 +34,34 @@ import java.util.function.Predicate;
 
 public class CostAdjustment {
 
+    /** Exact, bounded benchmark pricing. Null is unsupported, not unaffordable.
+     * Only literal generic increases are admitted in v1. The usual adjust methods
+     * can mutate announcements, invoke controllers or temporarily modify the host.
+     */
+    public static ManaCost benchmarkManaCost(final SpellAbility sa) {
+        if (sa == null || sa.getPayCosts() == null || sa.getActivatingPlayer() == null
+                || sa.isCastFaceDown() || sa.isBestow() || sa.getHostCard().isCommander()
+                || sa.hasParam("RaiseCost") || sa.hasParam("ReduceCost")) return null;
+        Cost adjusted = sa.getPayCosts().copy();
+        CardCollection active = new CardCollection(sa.getActivatingPlayer().getGame().getCardsIn(ZoneType.Battlefield));
+        active.addAll(sa.getActivatingPlayer().getGame().getCardsIn(ZoneType.Stack));
+        active.addAll(sa.getActivatingPlayer().getGame().getCardsIn(ZoneType.Command));
+        if (!active.contains(sa.getHostCard())) active.add(sa.getHostCard());
+        for (Card card : active) for (StaticAbility st : card.getStaticAbilities()) {
+            if (st.checkMode(StaticAbilityMode.ReduceCost) || st.checkMode(StaticAbilityMode.SetCost)) return null;
+            if (!st.checkMode(StaticAbilityMode.RaiseCost)) continue;
+            if (!st.getMapParams().keySet().stream().allMatch(k -> java.util.Set.of(
+                    "Mode", "Type", "ValidCard", "ValidSpell", "Activator", "Amount", "Description").contains(k))
+                    || !st.getParamOrDefault("Amount", "").matches("[0-9]{1,3}")) return null;
+            applyRaiseCostAbility(adjusted, sa, st);
+        }
+        CostPartMana mana = adjusted.getCostMana();
+        if (mana == null) return ManaCost.ZERO;
+        if (mana.isExiledCreatureCost() || mana.isEnchantedCreatureCost() || mana.getMaxWaterbend() != null
+                || mana.getXMin() > 0) return null;
+        return mana.getMana();
+    }
+
     public static Cost adjust(final Cost cost, final SpellAbility sa, boolean effect) {
         if (sa.isTrigger() || cost == null || effect) {
             sa.setMaxWaterbend(cost);
