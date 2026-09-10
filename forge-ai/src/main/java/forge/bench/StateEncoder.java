@@ -26,6 +26,7 @@ import com.google.gson.JsonObject;
 
 import forge.ai.ComputerUtilMana;
 import forge.card.MagicColor;
+import forge.card.CardStateName;
 import forge.game.Game;
 import forge.game.GameEntity;
 import forge.game.ability.ApiType;
@@ -167,7 +168,28 @@ public final class StateEncoder {
         if (viewer != null && !cv.canBeShownTo(viewer)) {
             return null;
         }
-        return encodeCardUnchecked(c);
+        final JsonObject encoded = encodeCardUnchecked(c);
+        // Visibility of an object is not visibility of its face. A face-down
+        // battlefield object is public, while Thief of Sanity's exiled card is
+        // private but its face is known to the player granted permission to look.
+        // Keep effective characteristics untouched; publish knowledge separately.
+        if (viewer != null && c.isFaceDown() && cv.canFaceDownBeShownTo(viewer)) {
+            final var face = c.getState(CardStateName.Original);
+            final JsonObject known = new JsonObject();
+            known.addProperty("name", face.getName());
+            known.addProperty("types", face.getType().toString());
+            known.addProperty("manaCost", face.getManaCost().toString());
+            known.addProperty("cmc", face.getManaCost().getCMC());
+            if (face.getType().isCreature()) {
+                known.addProperty("power", face.getBasePower());
+                known.addProperty("toughness", face.getBaseToughness());
+            }
+            final JsonArray keywords = new JsonArray();
+            for (final KeywordInterface keyword : face.getIntrinsicKeywords()) keywords.add(keyword.getOriginal());
+            known.add("keywords", keywords);
+            encoded.add("knownFace", known);
+        }
+        return encoded;
     }
 
     /** Encode a card the caller has already established is legal to show. */
@@ -496,11 +518,18 @@ public final class StateEncoder {
         }
         final Card host = sa.getHostCard();
         o.addProperty("fid", host == null ? -1 : host.getId());
-        o.addProperty("source", host == null ? "?" : host.getName());
+        String source = host == null ? "?" : host.getName();
+        if (host != null && host.isFaceDown() && host.isInZone(ZoneType.Exile)
+                && sa.getActivatingPlayer() != null
+                && host.getView().canFaceDownBeShownTo(sa.getActivatingPlayer().getView())) {
+            source = host.getState(CardStateName.Original).getName();
+        }
+        o.addProperty("source", source);
         o.addProperty("api", sa.getApi() == null ? "" : sa.getApi().toString());
         o.addProperty("isSpell", sa.isSpell());
         o.addProperty("isAbility", sa.isAbility());
         o.addProperty("isManaAbility", sa.isManaAbility());
+        o.addProperty("isLandAbility", sa.isLandAbility());
         o.addProperty("payCosts", sa.getPayCosts() == null ? "" : sa.getPayCosts().toString());
         // Both renderings walk the HOST CARD, which can be null for an ability that has
         // been detached from its source (seen inside chooseSingleEntityForEffect). Forge's
