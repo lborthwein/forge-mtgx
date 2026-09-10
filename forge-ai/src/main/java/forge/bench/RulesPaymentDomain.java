@@ -14,10 +14,10 @@ import java.util.*;
  * One option per source group may be selected (or none), in host-specified order;
  * each indexed cost shard is matched to one distinct advertised mana token.
  * Unspent production is allowed. Equal-colored floating tokens remain distinct.
- * This prototype is NOT advertised or connected to the production bridge yet.
+ * The bridge uses this exact domain for host-selected payment and execution.
  */
 public final class RulesPaymentDomain {
-    public static final String PAYMENT_VERSION = "rules-payment-v4-domain";
+    public static final String PAYMENT_VERSION = RulesCostFeasibility.PAYMENT_VERSION;
     public static final String REPRESENTATION = "token-shard-domain-v1";
     private final RulesCostFeasibility.PaymentSpace space;
     private final int lifeAvailable;

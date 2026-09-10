@@ -9,11 +9,13 @@ import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
 import java.util.*;
 
-/** Complete finite witness surface for the explicitly supported payment domain.
+/** Legacy eager differential reference; never used by the production bridge.
+ * Complete finite witness surface for the explicitly supported payment domain.
  * Source-order permutations are selected explicitly in the answer. No truncation:
  * exhausting a bound throws before any menu is sent to the host.
  */
 public final class RulesPaymentChoices {
+    public static final String PAYMENT_VERSION = "rules-payment-v3-source-life";
     private static final int MAX_NODES = 200_000;
     private static final int MAX_PLANS = 4096;
     private final RulesCostFeasibility.PaymentSpace space;
@@ -90,7 +92,7 @@ public final class RulesPaymentChoices {
 
     public JsonObject request() {
         var out = new JsonObject();
-        out.addProperty("paymentVersion", RulesCostFeasibility.PAYMENT_VERSION);
+        out.addProperty("paymentVersion", PAYMENT_VERSION);
         out.addProperty("complete", true);
         out.addProperty("sourceOrderRequired", true);
         out.addProperty("domain", "fixed-cost-supported-tap-source-activations-and-token-shard-allocations");

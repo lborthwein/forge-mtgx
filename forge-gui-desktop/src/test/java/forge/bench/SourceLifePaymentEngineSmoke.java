@@ -152,7 +152,8 @@ public final class SourceLifePaymentEngineSmoke {
     }
     private static void production() {
         String answers = "{\"type\":\"answer\",\"id\":1,\"choice\":1}\n"
-            + "{\"type\":\"answer\",\"id\":2,\"choice\":0,\"sourceOrder\":[\"SOURCE\"]}\n";
+            + "{\"type\":\"answer\",\"id\":2,\"paymentVersion\":\"" + RulesPaymentDomain.PAYMENT_VERSION
+            + "\",\"sourceOrder\":[\"SOURCE\"],\"spend\":[{\"token\":\"SOURCE:0\",\"shardIndex\":0}],\"lifePaid\":1}\n";
         // Prepare source id using real object/ability identity before binding input.
         var input = new java.io.PipedInputStream();
         var wire = new java.io.ByteArrayOutputStream();
@@ -165,8 +166,11 @@ public final class SourceLifePaymentEngineSmoke {
         game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player);
         card("Mana Confluence", player, ZoneType.Battlefield); var ability = spell(player, "Savannah Lions");
         game.getAction().checkStateEffects(true); BenchRandomAudit.install(402);
-        var choices = new RulesPaymentChoices(player, ability);
-        var sourceId = choices.request().getAsJsonArray("menu").get(0).getAsJsonObject().getAsJsonArray("sources").get(0).getAsString();
+        var choices = new RulesPaymentDomain(player, ability);
+        var white = choices.request().getAsJsonArray("sourceOptions").asList().stream().map(JsonElement::getAsJsonObject)
+            .filter(option -> option.get("choice").getAsString().equals("W")).toList();
+        if (white.size() != 1) throw new AssertionError("Expected exactly one Confluence white option");
+        var sourceId = white.get(0).get("id").getAsString();
         try (var sender = new java.io.PipedOutputStream(input)) {
             sender.write(answers.replace("SOURCE", sourceId).getBytes(java.nio.charset.StandardCharsets.UTF_8));
             var before = BenchMenuStateAudit.capture(game);

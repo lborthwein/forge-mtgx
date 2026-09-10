@@ -1,8 +1,10 @@
 # Compact exact payment domain prototype — 2026-09-10
 
 `RulesPaymentDomain` replaces a list of every payment plan with the complete
-rules-assessed domain. It is an additive prototype, **not wired into production**.
-The normal bridge and its existing version negotiation are unchanged.
+rules-assessed domain. The Java production bridge now uses it for the payment
+ask and validation; hello, priority and payment agree on
+`rules-payment-v4-domain`. The eager helper is retained only as an explicitly
+versioned v3 differential reference, not called by the production bridge.
 
 ## API and wire contract
 
@@ -92,15 +94,40 @@ request mutation, wrong color, and malformed witnesses are covered.
    rejects actual changed output. Independently forged persistent/combat/snow
    expectations each fail before payment mana is consumed. These are
    invalidating errors, not a rollback promise or fallback payer.
-2. Implement the TS symbolic adapter and exact capability negotiation. Keep
+2. Integrate and verify the TS symbolic adapter and exact capability negotiation. Keep
    native `planMana`/spend policy in charge. Color-count output alone does not
    choose among different floating or cross-source token provenance. If the
    selected token set is not uniquely implied, fail explicitly until an
    authorized policy semantics extension exists—never select the first token.
-3. Connect the bridge's payment ask/decoder to this helper; prove actual
-   priority→host selection→engine execution with protocol fault injections.
+3. **Java production hookup implemented and tested:**
+   `2026-09-10-symbolic-payment-production-v2/fixture.log` exited 0 for all 13
+   integrated fixture programs. The new production test passes 164 assertions:
+   six actual channel→host answer→engine casts (20-source minimal and reverse
+   surplus, mixed ordinary RW, mixed hybrid RG/RG, source life, action life),
+   plus 13 malformed/delegated/legacy/duplicate/partial/source-order faults.
+   Exact source order, output token identity, life, surplus, private engine
+   receipt, and original priority request ID are checked. Rejected answers
+   obtain no action receipt and leave original engine/RNG state unchanged.
+   `ProductionPaymentDomainEngineSmoke ROOT --stdio CASE` uses a real external
+   stdio host instead of the scripted test host; external TS execution is a
+   separate pending check. Six `WIRE_PAYMENT_FIXTURE` rows retain actual
+   priority/payment/answer envelopes, including seat-visible state and life.
 4. Run the full same-lineage null/probe and benchmark integrity gates before
    strength games. This representation is not whole-engine or policy parity.
+
+New legality finding retained, **not resolved by this hookup commit**: the
+actual Citadel/Sol Ring priority request offers both the legal one-life variant
+and an erroneous twice-applied two-life variant. The first production run v1
+stopped on the fixture's ambiguous-card check. V2 explicitly selects the intended
+one-life alternative to test payment execution, but does not certify that menu.
+The v2 `life-only` raw exported request preserves both variants. A separate
+general permission-enumeration repair and exact-menu regression are required.
+
+TS native color-count payment also does not currently specify every possible
+source-to-shard allocation (for example two equal-color sources paying a colored
+plus generic bill). Do not relieve that explicit unsupported case by assuming
+different `payingMana` orders or provenance are equivalent without a separate
+rules/consumer proof.
 
 Reproduce through installed `admitted-check.sh` with `--lane test`, invoking
 `/bin/bash tools/test-compact-payment-domain.sh PINNED_JAR NEW_ARTIFACT_DIR`.

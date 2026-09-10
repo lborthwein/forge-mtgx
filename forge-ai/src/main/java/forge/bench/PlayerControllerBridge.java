@@ -631,7 +631,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         if (!announceX(chosen, ans) || !ensureTargets(chosen)) return super.chooseSpellAbilityToPlay();
         if (!chosen.isLandAbility()) {
-            final RulesPaymentChoices payments = new RulesPaymentChoices(getPlayer(), chosen);
+            final RulesPaymentDomain payments = new RulesPaymentDomain(getPlayer(), chosen);
             final JsonObject request = envelope(true);
             for (var entry : payments.request().entrySet()) request.add(entry.getKey(), entry.getValue());
             request.add("selectedAbility", StateEncoder.encodeSpellAbility(chosen, getPlayer().getView()));

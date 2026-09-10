@@ -30,7 +30,7 @@ import java.util.List;
  */
 public final class RulesCostFeasibility {
     public static final String VERSION = "rules-cost-v4-source-life";
-    public static final String PAYMENT_VERSION = "rules-payment-v3-source-life";
+    public static final String PAYMENT_VERSION = "rules-payment-v4-domain";
     public static final String LIFE_VERSION = "rules-fixed-life-v1";
     public enum Status { PAYABLE, UNPAYABLE, UNSUPPORTED }
     public record Result(Status status, String reason, PaymentWitness witness, PaymentSpace space) {}

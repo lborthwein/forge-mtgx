@@ -62,11 +62,17 @@ public final class BenchActionAuditSmoke {
         if (!land) {
             final var spell = card.getFirstSpellAbility();
             spell.setActivatingPlayer(player);
-            final var payments = new RulesPaymentChoices(player, spell).request().getAsJsonArray("menu");
-            if (payments.size() != 1) throw new AssertionError("Fixture requires exactly one payment, not a first-plan policy");
+            final var payments = new RulesPaymentDomain(player, spell).request();
+            final var options = payments.getAsJsonArray("sourceOptions");
+            if (options.size() != 1 || payments.getAsJsonObject("cost").getAsJsonArray("shards").size() != 1)
+                throw new AssertionError("Fixture requires one explicit source and one shard, not a first-plan policy");
+            final String sourceId = options.get(0).getAsJsonObject().get("id").getAsString();
             final var payment = new JsonObject();
-            payment.addProperty("type", "answer"); payment.addProperty("id", 2); payment.addProperty("choice", 0);
-            payment.add("sourceOrder", payments.get(0).getAsJsonObject().get("sources").deepCopy());
+            payment.addProperty("type", "answer"); payment.addProperty("id", 2);
+            payment.addProperty("paymentVersion", RulesPaymentDomain.PAYMENT_VERSION); payment.addProperty("lifePaid", 0);
+            final var order = new com.google.gson.JsonArray(); order.add(sourceId); payment.add("sourceOrder", order);
+            final var spend = new com.google.gson.JsonArray(); final var allocation = new JsonObject();
+            allocation.addProperty("token", sourceId + ":0"); allocation.addProperty("shardIndex", 0); spend.add(allocation); payment.add("spend", spend);
             responses += payment + "\n";
         }
         answers.install(responses);
