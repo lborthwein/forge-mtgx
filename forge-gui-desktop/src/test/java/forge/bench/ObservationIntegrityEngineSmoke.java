@@ -7,6 +7,7 @@ import forge.game.*;
 import forge.game.card.Card;
 import forge.game.player.Player;
 import forge.game.player.RegisteredPlayer;
+import forge.game.phase.PhaseType;
 import forge.game.spellability.LandAbility;
 import forge.game.zone.ZoneType;
 import forge.gui.GuiBase;
@@ -31,6 +32,77 @@ public final class ObservationIntegrityEngineSmoke {
         card.setGameTimestamp(player.getGame().getNextTimestamp());
         player.getZone(zone).add(card);
         return card;
+    }
+    private static Game topGame() {
+        var players = List.of(new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("P0", 0, 0, null, "Default")),
+            new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("P1", 1, 0, null, "Default")));
+        var game = new Match(new GameRules(GameType.Constructed), players, "Visible top fixture").createGame();
+        game.setAge(GameStage.Play);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, game.getPlayers().get(0));
+        return game;
+    }
+    private static com.google.gson.JsonElement top(Game game, Player viewer, int owner) {
+        return StateEncoder.encode(game, viewer).getAsJsonArray("players").get(owner)
+            .getAsJsonObject().get("revealedTop");
+    }
+    private static void visibleTop(String permanentName, boolean publicTop) {
+        var game = topGame();
+        var owner = game.getPlayers().get(0); var opponent = game.getPlayers().get(1);
+        var first = card("Forest", owner, ZoneType.Library);
+        var deeper = card("Mind Twist", owner, ZoneType.Library);
+        card("Swamp", opponent, ZoneType.Library);
+        check(top(game, owner, 0).isJsonNull(), permanentName + ": ordinary own library remains hidden");
+        var permanent = card(permanentName, owner, ZoneType.Battlefield);
+        game.getAction().checkStateEffects(true);
+        check(first.getView().canBeShownTo(owner.getView()), permanentName + ": real static ability authorizes controller");
+        check(first.getView().canBeShownTo(opponent.getView()) == publicTop, permanentName + ": real permission distinguishes public/private");
+        check(top(game, owner, 0).getAsJsonObject().get("name").getAsString().equals("Forest"), permanentName + ": authorized current top encoded");
+        check(publicTop ? top(game, opponent, 0).getAsJsonObject().get("name").getAsString().equals("Forest")
+            : top(game, opponent, 0).isJsonNull(), permanentName + ": opponent observation follows permission");
+        check(top(game, owner, 1).isJsonNull(), permanentName + ": unrelated opponent library not revealed");
+        var before = StateEncoder.encode(game, owner);
+        var beforeOpponent = StateEncoder.encode(game, opponent);
+        owner.getZone(ZoneType.Library).remove(deeper);
+        var replacement = card("Grief", owner, ZoneType.Library);
+        game.getAction().checkStateEffects(true);
+        check(before.equals(StateEncoder.encode(game, owner)) && beforeOpponent.equals(StateEncoder.encode(game, opponent)),
+            permanentName + ": changing deeper hidden identity cannot change either observation");
+        owner.getZone(ZoneType.Library).remove(first);
+        game.getAction().checkStateEffects(true);
+        check(top(game, owner, 0).getAsJsonObject().get("name").getAsString().equals("Grief"), permanentName + ": top changes, not stale remembered card");
+        owner.getZone(ZoneType.Battlefield).remove(permanent);
+        owner.getZone(ZoneType.Graveyard).add(permanent);
+        game.getAction().checkStateEffects(true);
+        check(top(game, owner, 0).isJsonNull() && top(game, opponent, 0).isJsonNull(), permanentName + ": permission loss clears current top");
+        owner.getZone(ZoneType.Library).remove(replacement);
+        check(top(game, owner, 0).isJsonNull(), permanentName + ": empty library has no top");
+    }
+    private static void playVisibleLand(String permanentName) {
+        var game = topGame(); var player = game.getPlayers().get(0);
+        var land = card("Forest", player, ZoneType.Library);
+        card("Mountain", player, ZoneType.Library);
+        card(permanentName, player, ZoneType.Battlefield);
+        game.getAction().checkStateEffects(true);
+        var ability = land.getAllPossibleAbilities(player, true).stream()
+            .filter(a -> a.isLandAbility() && a.canPlay()).findFirst().orElseThrow();
+        check(StateEncoder.encodeSpellAbility(ability, player.getView()).get("isLandAbility").getAsBoolean(),
+            permanentName + ": real entitled top action is structurally a land play");
+        ability.resolve();
+        check(player.getCardsIn(ZoneType.Battlefield).stream().anyMatch(c -> c.getId() == land.getId()),
+            permanentName + ": real entitled top land executes onto battlefield");
+    }
+    private static void privateTopNoninterference() {
+        var game = topGame(); var owner = game.getPlayers().get(0); var opponent = game.getPlayers().get(1);
+        var first = card("Forest", owner, ZoneType.Library);
+        card("Grief", owner, ZoneType.Library);
+        card("Bolas's Citadel", owner, ZoneType.Battlefield);
+        game.getAction().checkStateEffects(true);
+        var before = StateEncoder.encode(game, opponent);
+        owner.getZone(ZoneType.Library).remove(first);
+        card("Mountain", owner, ZoneType.Library);
+        game.getAction().checkStateEffects(true);
+        check(top(game, owner, 0).getAsJsonObject().get("name").getAsString().equals("Grief"), "Citadel controller sees changed private top");
+        check(before.equals(StateEncoder.encode(game, opponent)), "changing private top identity with same library size cannot affect opponent observation");
     }
     public static void main(String[] args) {
         try {
@@ -82,6 +154,13 @@ public final class ObservationIntegrityEngineSmoke {
             owner.getZone(ZoneType.Library).remove(hiddenLibrary);
             card("Mind Twist", owner, ZoneType.Library);
             check(beforeHiddenChange.equals(StateEncoder.encode(game, viewer)), "changing only hidden opponent identities leaves complete seat observation unchanged");
+            visibleTop("Courser of Kruphix", true);
+            visibleTop("Oracle of Mul Daya", true);
+            visibleTop("Bolas's Citadel", false);
+            playVisibleLand("Courser of Kruphix");
+            playVisibleLand("Oracle of Mul Daya");
+            playVisibleLand("Bolas's Citadel");
+            privateTopNoninterference();
             System.out.println("PASS all " + checks + " observation checks");
             System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }

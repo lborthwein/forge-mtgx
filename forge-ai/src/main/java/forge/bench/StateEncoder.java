@@ -60,7 +60,8 @@ import forge.game.zone.ZoneType;
  * different estimands and must be named separately.
  *
  * <p>Zone rules: own hand in full; opponent hand as a count plus whatever is individually
- * revealed; libraries never (size only); battlefield / graveyard / exile / stack / command
+ * revealed; libraries as size plus an individually authorized top card only;
+ * battlefield / graveyard / exile / stack / command
  * in full where visible.
  */
 public final class StateEncoder {
@@ -113,6 +114,12 @@ public final class StateEncoder {
         o.addProperty("maxLandPlays", p.getMaxLandPlays());
         o.addProperty("maxLandPlaysInfinite", p.getMaxLandPlaysInfinite());
         o.addProperty("librarySize", p.getCardsIn(ZoneType.Library).size());
+        // Inspect only the current top. Continuous effects update Forge's own
+        // visibility permission (public reveal and controller-only look differ).
+        // Do not enumerate the library, infer permission from a card name, or
+        // reuse yesterday's known top after a draw/shuffle/permission loss.
+        final var library = p.getCardsIn(ZoneType.Library);
+        o.add("revealedTop", library.isEmpty() ? null : encodeCard(library.get(0), viewer));
         o.addProperty("handSize", p.getCardsIn(ZoneType.Hand).size());
         // Protocol v2.19: the STORM COUNT for this player, this turn.
         //
