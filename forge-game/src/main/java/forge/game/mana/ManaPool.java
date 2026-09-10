@@ -276,32 +276,17 @@ public class ManaPool extends ManaConversionMatrix implements Iterable<Mana> {
         if (ma == null) {
             return false;
         }
-        if (floatingMana.isEmpty()) {
+        final List<Mana> produced = new ArrayList<>(ma.getLastManaProduced());
+        // The values collection is a live multimap view. Prevalidate identity
+        // and multiplicity for the whole activation, then remove exact objects.
+        // General payment/removeMana behavior is intentionally unchanged.
+        if (!ManaUndoSelection.removeExact(floatingMana.values(), produced)) {
             return false;
         }
-
-        final List<Mana> removeFloating = Lists.newArrayList();
-
-        boolean manaNotAccountedFor = false;
-        // loop over mana produced by mana ability
-        for (Mana mana : ma.getLastManaProduced()) {
-            Collection<Mana> poolLane = floatingMana.get(mana.getColor());
-
-            if (poolLane != null && poolLane.contains(mana)) {
-                removeFloating.add(mana);
-            } else {
-                manaNotAccountedFor = true;
-                break;
-            }
-        }
-
-        // When is it legitimate for all the mana not to be accountable?
-        // TODO: Does this condition really indicate an bug in Forge?
-        if (manaNotAccountedFor) {
-            return false;
-        }
-
-        removeMana(removeFloating);
+        final Set<MagicColor.Color> colors = EnumSet.noneOf(MagicColor.Color.class);
+        for (Mana mana : produced) { colors.add(MagicColor.Color.fromByte(mana.getColor())); }
+        owner.updateManaForView();
+        owner.getGame().fireEvent(new GameEventManaPool(owner, EventValueChangeType.Removed, colors));
         return true;
     }
 
