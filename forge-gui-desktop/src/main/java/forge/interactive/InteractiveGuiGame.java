@@ -708,6 +708,25 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 }));
             }
         }
+        if ((input instanceof InputPassPriority || input instanceof InputPayMana)
+                && controller.canUndoLastAction() && game.getStack().canUndoMana(human)) {
+            controls.add(control("undo:mana", "undoMana", "Undo mana"));
+            bindings.put("undo:mana", new ControlBinding("undoMana", action -> {
+                // Never route through cancel: the priority cancel handler can
+                // pass the rest of the turn when the undo entry has gone away.
+                if (!controller.canUndoLastAction() || !game.getStack().canUndoMana(human)) {
+                    return ActionResult.reject("This mana activation can no longer be undone");
+                }
+                if (!controller.tryUndoLastAction()) {
+                    return ActionResult.reject("Forge could not undo this mana activation");
+                }
+                if (input instanceof InputPayMana payment
+                        && controller.getInputProxy().getInput() == input) {
+                    payment.showMessage();
+                }
+                return ActionResult.accept();
+            }));
+        }
         if (!game.isGameOver()) {
             controls.add(control("game:concede", "concede", "Concede game"));
             bindings.put("game:concede", new ControlBinding("concede", action -> {

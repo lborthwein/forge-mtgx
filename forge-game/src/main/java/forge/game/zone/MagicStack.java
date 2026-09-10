@@ -193,6 +193,32 @@ public class MagicStack /* extends MyObservable */ implements Iterable<SpellAbil
     public final boolean canUndo(Player player) {
         return undoStackOwner == player;
     }
+
+    /** Read-only availability for an explicit human mana-takeback control.
+     * Unlike the general desktop Undo button, do not advertise an expired entry
+     * which undo() would merely discard. Never infer untaps or refunds in a client. */
+    public final boolean canUndoMana(final Player player) {
+        if (!canUndo(player) || undoStack.isEmpty()) { return false; }
+        final SpellAbility last = undoStack.peek();
+        if (!last.isManaAbility() || !last.isUndoable() || last.getManaPart() == null
+                || last.getActivatingPlayer() != player) {
+            return false;
+        }
+        final List<Mana> available = new ArrayList<>();
+        player.getManaPool().forEach(available::add);
+        if (last.getManaPart().getLastManaProduced().isEmpty()) { return false; }
+        // A partial spend/conversion is not a reversible mana activation. Require
+        // the original objects, not merely an equal-color replacement in the pool.
+        for (Mana produced : last.getManaPart().getLastManaProduced()) {
+            int found = -1;
+            for (int i = 0; i < available.size(); i++) {
+                if (available.get(i) == produced) { found = i; break; }
+            }
+            if (found < 0) { return false; }
+            available.remove(found);
+        }
+        return true;
+    }
     public final boolean undo() {
         if (undoStack.isEmpty()) { return false; }
 
