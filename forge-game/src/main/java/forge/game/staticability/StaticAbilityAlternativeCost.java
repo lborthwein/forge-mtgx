@@ -7,6 +7,7 @@ import com.google.common.collect.Lists;
 
 import forge.card.mana.ManaCostParser;
 import forge.game.card.Card;
+import forge.game.GameActionUtil;
 import forge.game.card.CardCollection;
 import forge.game.cost.Cost;
 import forge.game.player.Player;
@@ -17,6 +18,9 @@ import forge.game.zone.ZoneType;
 public class StaticAbilityAlternativeCost {
 
     public static List<SpellAbility> alternativeCosts(final SpellAbility sa, final Card source, final Player pl) {
+        return alternativeCosts(sa, source, pl, false);
+    }
+    public static List<SpellAbility> alternativeCosts(final SpellAbility sa, final Card source, final Player pl, boolean readOnly) {
         List<SpellAbility> result = Lists.newArrayList();
         // add source first in case it's LKI (alternate host)
         CardCollection list = new CardCollection(source);
@@ -36,7 +40,11 @@ public class StaticAbilityAlternativeCost {
 
                 Cost cost = new Cost(costTemplate, sa.isAbility());
                 // set the cost to this directly to bypass non mana cost
-                final SpellAbility newSA = sa.isAbility() ? sa.copyWithDefinedCost(cost) : sa.copyWithManaCostReplaced(pl, cost);
+                final SpellAbility newSA;
+                if (sa.isAbility()) {
+                    newSA = GameActionUtil.copyForDecision(sa, pl, readOnly);
+                    newSA.setPayCosts(cost);
+                } else newSA = GameActionUtil.copyWithManaCost(sa, pl, cost, readOnly);
                 newSA.setActivatingPlayer(pl);
                 newSA.setBasicSpell(false);
 

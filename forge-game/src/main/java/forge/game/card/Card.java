@@ -7449,15 +7449,19 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         return getAllPossibleAbilities(player, removeUnplayable, null);
     }
     public List<SpellAbility> getAllPossibleAbilities(final Player player, final boolean removeUnplayable, final Multimap<SpellAbility, SpellAbility> unhiddenAltCost) {
+        return getAllPossibleAbilities(player, removeUnplayable, unhiddenAltCost, false);
+    }
+    public List<SpellAbility> getAllPossibleAbilities(final Player player, final boolean removeUnplayable, final Multimap<SpellAbility, SpellAbility> unhiddenAltCost, boolean readOnly) {
         CardState oState = getOriginalState(CardStateName.Original);
         final List<SpellAbility> abilities = Lists.newArrayList();
-        for (SpellAbility sa : getSpellAbilities()) {
+        for (SpellAbility original : getSpellAbilities()) {
+            SpellAbility sa = readOnly ? original.copyForEnumeration(player) : original;
             if (sa.isAdventure() && isOnAdventure()) {
                 continue; // skip since it's already on adventure
             }
             abilities.add(sa);
             //add alternative costs as additional spell abilities
-            List<SpellAbility> altCost = GameActionUtil.getAlternativeCosts(sa, player, false);
+            List<SpellAbility> altCost = GameActionUtil.getAlternativeCosts(sa, player, false, readOnly);
             abilities.addAll(altCost);
             if (unhiddenAltCost != null) {
                 unhiddenAltCost.putAll(sa, altCost);
@@ -7466,24 +7470,25 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
 
         if (isFaceDown() && isInZone(ZoneType.Exile)) {
             for (final SpellAbility sa : oState.getSpellAbilities()) {
-                abilities.addAll(GameActionUtil.getAlternativeCosts(sa, player, false));
+                abilities.addAll(GameActionUtil.getAlternativeCosts(readOnly ? sa.copyForEnumeration(player) : sa, player, false, readOnly));
             }
         }
         if (isFaceDown() && isInZone(ZoneType.Command)) {
             for (KeywordInterface k : oState.getCachedKeyword(Keyword.HIDDEN_AGENDA)) {
-                abilities.addAll(k.getAbilities());
+                for (SpellAbility sa : k.getAbilities()) abilities.add(readOnly ? sa.copyForEnumeration(player) : sa);
             }
             for (KeywordInterface k : oState.getCachedKeyword(Keyword.DOUBLE_AGENDA)) {
-                abilities.addAll(k.getAbilities());
+                for (SpellAbility sa : k.getAbilities()) abilities.add(readOnly ? sa.copyForEnumeration(player) : sa);
             }
         }
         // Add Modal Spells
         if (isModal() && hasState(CardStateName.Backside)) {
-            for (SpellAbility sa : getState(CardStateName.Backside).getSpellAbilities()) {
+            for (SpellAbility original : getState(CardStateName.Backside).getSpellAbilities()) {
+                SpellAbility sa = readOnly ? original.copyForEnumeration(player) : original;
                 // only add Spells there
                 if (sa.isSpell() || sa.isLandAbility()) {
                     abilities.add(sa);
-                    List<SpellAbility> altCost = GameActionUtil.getAlternativeCosts(sa, player, false);
+                    List<SpellAbility> altCost = GameActionUtil.getAlternativeCosts(sa, player, false, readOnly);
                     abilities.addAll(altCost);
                     if (unhiddenAltCost != null) {
                         unhiddenAltCost.putAll(sa, altCost);
@@ -7494,9 +7499,11 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
 
         if (isInPlay() && !isPhasedOut() && player.canCastSorcery()) {
             if (getCurrentStateName() == CardStateName.RightSplit || getCurrentStateName() == CardStateName.EmptyRoom) {
+                if (readOnly) throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: Room unlock ability construction");
                 abilities.add(getUnlockAbility(CardStateName.LeftSplit));
             }
             if (getCurrentStateName() == CardStateName.LeftSplit || getCurrentStateName() == CardStateName.EmptyRoom) {
+                if (readOnly) throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: Room unlock ability construction");
                 abilities.add(getUnlockAbility(CardStateName.RightSplit));
             }
         }
@@ -7504,10 +7511,10 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         if (isInPlay() && isFaceDown() && oState.getType().isCreature() && oState.getManaCost() != null && !oState.getManaCost().isNoCost())
         {
             if (isManifested()) {
-                abilities.add(oState.getManifestUp());
+                abilities.add(readOnly ? oState.getManifestUp().copyForEnumeration(player) : oState.getManifestUp());
             }
             if (isCloaked()) {
-                abilities.add(oState.getCloakUp());
+                abilities.add(readOnly ? oState.getCloakUp().copyForEnumeration(player) : oState.getCloakUp());
             }
         }
 

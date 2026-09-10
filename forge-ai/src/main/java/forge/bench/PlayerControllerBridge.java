@@ -160,7 +160,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             try {
                 o.add("state", StateEncoder.encode(getGame(), getPlayer()));
             } catch (RuntimeException e) {
-                JsonRpcChannel.logErr("state encoding failed", e);
+                JsonRpcChannel.logErr("BENCH_INTEGRITY_FAILURE: state encoding failed", e);
+                throw e;
             }
         }
         return o;
@@ -606,23 +607,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             return super.chooseSpellAbilityToPlay();
         }
         if (pendingExternalAbility != null) throw new RulesCostFeasibility.Unsupported("previous selected action was not executed");
-        final BenchRandomAudit.Token rngBeforeMenu = BenchRandomAudit.begin();
-        final int[] diag = new int[DIAG_LEN];
-        final List<SpellAbility> menu = legalSpellAbilities(diag);
-        recordMenuCensus(diag, menu.size());
-        final JsonObject body = envelope(true);
-        body.addProperty("rulesCostVersion", RulesCostFeasibility.VERSION);
-        body.addProperty("paymentVersion", "rules-payment-v1");
-        body.addProperty("paymentControl", "host-complete-witness");
-        body.add("menuDiag", menuDiagJson(diag, menu.size()));
-        final JsonArray items = new JsonArray();
-        items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
-        for (SpellAbility sa : menu) {
-            items.add(StateEncoder.encodeSpellAbility(sa, getPlayer().getView()));
-        }
-        body.add("menu", items);
-        body.add("manaAbilities", manaAbilityChannel());
-        BenchRandomAudit.assertUnchanged(rngBeforeMenu, "priority menu and seat-visible encoding");
+        final PriorityDecision decision = buildPriorityDecision();
+        final List<SpellAbility> menu = decision.menu();
+        recordMenuCensus(decision.diag(), menu.size());
+        final JsonObject body = decision.body();
         final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body);
         if (ans == null) {
             final Echo e = takeEcho();
@@ -635,23 +623,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             refuse("chooseSpellAbilityToPlay", "choice out of range: " + choice);
             return super.chooseSpellAbilityToPlay();
         }
-        if (choice == 0) {
-            return null; // pass
-        }
+        if (choice == 0) return null;
         final SpellAbility chosen = menu.get(choice - 1);
         if (!chosen.canPlay()) {
             refuse("chooseSpellAbilityToPlay", "chosen ability is no longer playable: " + chosen);
             return super.chooseSpellAbilityToPlay();
         }
-        // X must be announced BEFORE targeting and before the affordability re-check:
-        // an X spell's legal target count can be derived from X, and canPayCost has to
-        // price the announcement.
-        if (!announceX(chosen, ans)) {
-            return super.chooseSpellAbilityToPlay();
-        }
-        if (!ensureTargets(chosen)) {
-            return super.chooseSpellAbilityToPlay();
-        }
+        if (!announceX(chosen, ans) || !ensureTargets(chosen)) return super.chooseSpellAbilityToPlay();
         if (!chosen.isLandAbility()) {
             final RulesPaymentChoices payments = new RulesPaymentChoices(getPlayer(), chosen);
             final JsonObject request = envelope(true);
@@ -663,6 +641,34 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         pendingExternalAbility = chosen;
         BenchActionAudit.selected(getGame(), seat, chosen, ans);
         return Lists.newArrayList(chosen);
+    }
+
+    private record PriorityDecision(List<SpellAbility> menu, JsonObject body, int[] diag) {}
+
+    /** Same production enumeration/encoding, without host RPC, decisions, census
+     * counters or execution. Intended for matched stock/null/probe controls. */
+    public void probePriorityMenuPurity() { buildPriorityDecision(); }
+
+    private PriorityDecision buildPriorityDecision() {
+        final BenchRandomAudit.Token rngBeforeMenu = BenchRandomAudit.begin();
+        final var stateBeforeMenu = BenchMenuStateAudit.capture(getGame());
+        final int[] diag = new int[DIAG_LEN];
+        final List<SpellAbility> menu = legalSpellAbilities(diag);
+        final JsonObject body = envelope(true);
+        body.addProperty("rulesCostVersion", RulesCostFeasibility.VERSION);
+        body.addProperty("paymentVersion", "rules-payment-v1");
+        body.addProperty("paymentControl", "host-complete-witness");
+        body.add("menuDiag", menuDiagJson(diag, menu.size()));
+        final JsonArray items = new JsonArray();
+        items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
+        for (SpellAbility sa : menu) {
+            items.add(StateEncoder.encodeSpellAbility(sa, getPlayer().getView()));
+        }
+        body.add("menu", items);
+        body.add("manaAbilities", manaAbilityChannel());
+        BenchMenuStateAudit.assertUnchanged(stateBeforeMenu, getGame());
+        BenchRandomAudit.assertUnchanged(rngBeforeMenu, "priority menu and seat-visible encoding");
+        return new PriorityDecision(menu, body, diag);
     }
 
     /**
@@ -862,7 +868,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             final CardCollection lands = ComputerUtilAbility.getAvailableLandsToPlay(game, p);
             if (lands != null) {
                 for (Card land : lands) {
-                    for (SpellAbility sa : land.getAllPossibleAbilities(p, true)) {
+                    for (SpellAbility sa : land.getAllPossibleAbilities(p, true, null, true)) {
                         if (sa.isLandAbility() && sa.canPlay()) {
                             out.add(sa);
                         }
@@ -870,36 +876,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 }
             }
             final CardCollection cards = ComputerUtilAbility.getAvailableCards(game, p);
-            final List<SpellAbility> all;
-            buildingMenu = true;
-            try {
-                all = ComputerUtilAbility.getOriginalAndAltCostAbilities(
-                        ComputerUtilAbility.getSpellAbilities(cards, p), p);
-            } finally {
-                buildingMenu = false;
-            }
-            // Offer the optional-cost variants as their own entries, with their true total
-            // cost, rather than letting Forge pick one and hand us a ballot that reads
-            // "{0}". Everflowing Chalice was voted on as a free cast and then multikicked
-            // for ten mana sources.
-            final List<SpellAbility> withVariants = new ArrayList<>(all);
-            for (SpellAbility sa : all) {
-                try {
-                    // Discovery clears pips on its argument. Never mutate the base
-                    // candidate while discovering independent optional subsets.
-                    if (sa.getAlternateHost(sa.getHostCard()) != null) {
-                        throw new RulesCostFeasibility.Unsupported("optional-cost alternate-host static simulation");
-                    }
-                    final List<OptionalCostValue> opts = GameActionUtil.getOptionalCostValues(sa.copy(sa.getHostCard(), p, true));
-                    if (opts == null || opts.isEmpty()) {
-                        continue;
-                    }
-                    withVariants.addAll(BenchmarkOptionalCosts.variants(sa, opts, p));
-                } catch (RuntimeException e) {
-                    JsonRpcChannel.logErr("optional-cost variant construction failed for " + sa, e);
-                    throw e;
-                }
-            }
+            final List<SpellAbility> withVariants = BenchmarkAbilityEnumeration.spells(cards, p);
             for (SpellAbility sa : withVariants) {
                 if (sa.isManaAbility() || sa.isLandAbility()) {
                     continue;

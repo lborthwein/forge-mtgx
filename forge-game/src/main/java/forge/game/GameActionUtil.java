@@ -45,6 +45,7 @@ import forge.game.replacement.ReplacementLayer;
 import forge.game.spellability.*;
 import forge.game.staticability.StaticAbility;
 import forge.game.staticability.StaticAbilityAlternativeCost;
+import forge.game.staticability.StaticAbilityContinuous;
 import forge.game.staticability.StaticAbilityLayer;
 import forge.game.staticability.StaticAbilityMode;
 import forge.game.zone.Zone;
@@ -67,6 +68,38 @@ import java.util.Map;
  * @version $Id$
  */
 public final class GameActionUtil {
+    public static SpellAbility copyForDecision(SpellAbility sa, Player player, boolean readOnly) {
+        return readOnly ? sa.copyForEnumeration(player) : sa.copy(player);
+    }
+    public static SpellAbility copyWithManaCost(SpellAbility sa, Player player, Cost cost, boolean readOnly) {
+        if (!readOnly) return sa.copyWithManaCostReplaced(player, cost);
+        SpellAbility result = sa.copyForEnumeration(player);
+        Cost replaced = result.getPayCosts().copyWithNoMana();
+        replaced.add(cost);
+        result.setPayCosts(replaced);
+        return result;
+    }
+    private static SpellAbility copyWithoutManaCost(SpellAbility sa, Player player, boolean readOnly) {
+        if (!readOnly) return sa.copyWithNoManaCost(player);
+        SpellAbility result = sa.copyForEnumeration(player);
+        result.setPayCosts(result.getPayCosts().copyWithNoMana());
+        if (!result.hasParam("WithoutManaCost")) result.putParam("WithoutManaCost", "True");
+        result.setDescription(result.getDescription() + " (without paying its mana cost)");
+        return result;
+    }
+    /** No global layer simulation while enumerating a prospective face. Unknown
+     * characteristic changes invalidate the decision, never silently drop it. */
+    private static void verifyProspectiveEnumerationHost(Card prospective) {
+        for (Card card : prospective.getGame().getCardsIn(ZoneType.STATIC_ABILITIES_SOURCE_ZONES))
+            for (StaticAbility st : card.getStaticAbilities()) {
+                if (!st.checkConditions(StaticAbilityMode.Continuous)) continue;
+                if (st.hasParam("AffectedZone") && ZoneType.listValueOf(st.getParam("AffectedZone")).stream().noneMatch(prospective::isInZone)) continue;
+                if (!st.hasParam("AffectedZone") && !prospective.isInZone(ZoneType.Battlefield)) continue;
+                if (!st.hasParam("MayPlay") || !java.util.Set.of("Mode", "MayPlay", "MayPlayIgnoreType", "MayPlayIgnoreColor",
+                        "Affected", "AffectedZone", "Description", "MayLookAt", "MayPlayText").containsAll(st.getMapParams().keySet()))
+                    throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: prospective face requires characteristic-layer simulation");
+            }
+    }
 
     private GameActionUtil() {
         throw new AssertionError();
@@ -86,6 +119,10 @@ public final class GameActionUtil {
      *         the provided {@link SpellAbility}.
      */
     public static List<SpellAbility> getAlternativeCosts(final SpellAbility sa, final Player activator, boolean altCostOnly) {
+        return getAlternativeCosts(sa, activator, altCostOnly, false);
+    }
+
+    public static List<SpellAbility> getAlternativeCosts(final SpellAbility sa, final Player activator, boolean altCostOnly, boolean readOnly) {
         final List<SpellAbility> alternatives = Lists.newArrayList();
 
         Card source = sa.getHostCard();
@@ -105,7 +142,7 @@ public final class GameActionUtil {
             }
 
             // CR 601.3e
-            if (lkicheck) {
+            if (lkicheck && !readOnly) {
                 // double freeze tracker, so it doesn't update view
                 game.getTracker().freeze();
                 source.clearStaticChangedCardKeywords(false);
@@ -115,14 +152,15 @@ public final class GameActionUtil {
 
             // Alt Cost only for Basic Spells
             if (sa.isBasicSpell()) {
-                for (SpellAbility newSA : StaticAbilityAlternativeCost.alternativeCosts(sa, source, activator)) {
+                for (SpellAbility newSA : StaticAbilityAlternativeCost.alternativeCosts(sa, source, activator, readOnly)) {
                     alternatives.add(newSA);
                     // should only add MayPlay Zones
-                    alternatives.addAll(getMayPlaySpellOptions(newSA, source, activator, altCostOnly));
+                    alternatives.addAll(getMayPlaySpellOptions(newSA, source, activator, altCostOnly, readOnly));
                 }
             }
 
-            alternatives.addAll(getMayPlaySpellOptions(sa, source, activator, altCostOnly));
+            if (lkicheck && readOnly) verifyProspectiveEnumerationHost(source);
+            alternatives.addAll(getMayPlaySpellOptions(sa, source, activator, altCostOnly, readOnly));
 
             // need to be done there before static abilities does reset the card
             // These Keywords depend on the Mana Cost of for Split Cards
@@ -135,7 +173,7 @@ public final class GameActionUtil {
                             continue;
                         }
 
-                        alternatives.add(getGraveyardSpellByKeyword(inst, sa, activator, AlternativeCost.Mayhem));
+                        alternatives.add(getGraveyardSpellByKeyword(inst, sa, activator, AlternativeCost.Mayhem, readOnly));
                     }
 
                     if (sa.isLandAbility()) {
@@ -150,7 +188,7 @@ public final class GameActionUtil {
                         final String[] k = keyword.split(":");
                         final Cost escapeCost = new Cost(k[1], true);
 
-                        final SpellAbility newSA = sa.copyWithManaCostReplaced(activator, escapeCost);
+                        final SpellAbility newSA = copyWithManaCost(sa, activator, escapeCost, readOnly);
 
                         newSA.putParam("PrecostDesc", "Escape—");
                         newSA.putParam("CostDesc", escapeCost.toString());
@@ -173,7 +211,7 @@ public final class GameActionUtil {
                         }
 
                         final SpellAbility beamSA = getGraveyardSpellByKeyword(inst, sa, activator,
-                                AlternativeCost.BeamMeUp);
+                                AlternativeCost.BeamMeUp, readOnly);
                         // "if you also return a creature you control to its owner's hand" is an
                         // additional cost, so with nothing to return the spell is simply not castable
                         beamSA.getPayCosts().add(new Cost(
@@ -191,7 +229,7 @@ public final class GameActionUtil {
                             continue;
                         }
 
-                        alternatives.add(getGraveyardSpellByKeyword(inst, sa, activator, AlternativeCost.Flashback));
+                        alternatives.add(getGraveyardSpellByKeyword(inst, sa, activator, AlternativeCost.Flashback, readOnly));
                     } else if (keyword.startsWith("Harmonize")) {
                         if (!source.isInZone(ZoneType.Graveyard)) {
                             continue;
@@ -201,7 +239,7 @@ public final class GameActionUtil {
                             continue;
                         }
 
-                        alternatives.add(getGraveyardSpellByKeyword(inst, sa, activator, AlternativeCost.Harmonize));
+                        alternatives.add(getGraveyardSpellByKeyword(inst, sa, activator, AlternativeCost.Harmonize, readOnly));
                     } else if (keyword.startsWith("Foretell")) {
                         // Foretell cast only from Exile
                         if (!source.isInZone(ZoneType.Exile) || !source.isForetold() || source.enteredThisTurn() ||
@@ -213,7 +251,7 @@ public final class GameActionUtil {
                             continue;
                         }
 
-                        final SpellAbility foretold = sa.copy(activator);
+                        final SpellAbility foretold = copyForDecision(sa, activator, readOnly);
                         foretold.setAlternativeCost(AlternativeCost.Foretold);
                         foretold.getRestrictions().setZone(ZoneType.Exile);
                         foretold.putParam("AfterDescription", "(Foretold)");
@@ -229,7 +267,7 @@ public final class GameActionUtil {
                 if (source.isForetoldCostByEffect() && source.isInZone(ZoneType.Exile) && activator.equals(source.getOwner())
                         && source.isForetold() && !source.enteredThisTurn() && !source.getManaCost().isNoCost()) {
                     // Its foretell cost is equal to its mana cost reduced by {2}.
-                    final SpellAbility foretold = sa.copy(activator);
+                    final SpellAbility foretold = copyForDecision(sa, activator, readOnly);
                     int reduced = Math.min(2, sa.getPayCosts().getCostMana().getMana().getGenericCost());
                     foretold.putParam("ReduceCost", Integer.toString(reduced));
                     foretold.setAlternativeCost(AlternativeCost.Foretold);
@@ -239,7 +277,7 @@ public final class GameActionUtil {
                 }
 
                 if (activator.canCastSorcery() && source.isPlotted() && source.isInZone(ZoneType.Exile) && activator.equals(source.getOwner()) && !source.enteredThisTurn()) {
-                    final SpellAbility plotted = sa.copyWithNoManaCost(activator);
+                    final SpellAbility plotted = copyWithoutManaCost(sa, activator, readOnly);
                     plotted.setAlternativeCost(AlternativeCost.Plotted);
                     plotted.getRestrictions().setZone(ZoneType.Exile);
                     plotted.putParam("AfterDescription", "(Plotted)");
@@ -248,6 +286,7 @@ public final class GameActionUtil {
 
                 // some needs to check after ability was put on the stack
                 if (game.getAction().hasStaticAbilityAffectingZone(ZoneType.Stack, StaticAbilityLayer.ABILITIES)) {
+                    if (readOnly) throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: prospective stack static simulation");
                     Map<StaticAbility, CardPlayOption> oldMayPlay = source.getMayPlay();
                     Zone oldZone = source.getLastKnownZone();
                     Card stackCopy = source;
@@ -281,7 +320,7 @@ public final class GameActionUtil {
             }
 
             // reset static abilities
-            if (lkicheck) {
+            if (lkicheck && !readOnly) {
                 game.getAction().checkStaticAbilities(false);
                 // clear delayed changes, this check should not have updated the view
                 game.getTracker().clearDelayed();
@@ -290,7 +329,7 @@ public final class GameActionUtil {
             }
         } else {
             if (sa.isManaAbility() && sa.isActivatedAbility() && activator.hasKeyword("Piracy") && source.isLand() && source.isInPlay() && !activator.equals(source.getController()) && sa.getPayCosts().hasTapCost()) {
-                SpellAbility newSA = sa.copy(activator);
+                SpellAbility newSA = copyForDecision(sa, activator, readOnly);
                 // to bypass Activator restriction, set Activator to Player
                 newSA.getRestrictions().setActivator("Player");
 
@@ -301,20 +340,23 @@ public final class GameActionUtil {
                 alternatives.add(newSA);
             }
             // alternative Cost for activated abilities
-            alternatives.addAll(StaticAbilityAlternativeCost.alternativeCosts(sa, source, activator));
+            alternatives.addAll(StaticAbilityAlternativeCost.alternativeCosts(sa, source, activator, readOnly));
         }
 
         return alternatives;
     }
 
     public static SpellAbility getGraveyardSpellByKeyword(KeywordInterface inst, SpellAbility sa, Player activator, AlternativeCost altCost) {
+        return getGraveyardSpellByKeyword(inst, sa, activator, altCost, false);
+    }
+    private static SpellAbility getGraveyardSpellByKeyword(KeywordInterface inst, SpellAbility sa, Player activator, AlternativeCost altCost, boolean readOnly) {
         String keyword = inst.getOriginal();
         SpellAbility newSA = null;
 
         // there is a flashback cost (and not the cards cost)
         if (keyword.contains(":")) { // K:Flashback:Cost:ExtraParams:ExtraDescription
             final String[] k = keyword.split(":");
-            newSA = sa.copyWithManaCostReplaced(activator, new Cost(k[1], false));
+            newSA = copyWithManaCost(sa, activator, new Cost(k[1], false), readOnly);
             String extraParams =  k.length > 2 ? k[2] : "";
             if (!extraParams.isEmpty()) {
                 for (Map.Entry<String, String> param : AbilityFactory.getMapParams(extraParams).entrySet()) {
@@ -322,7 +364,7 @@ public final class GameActionUtil {
                 }
             }
         } else { // same cost as original (e.g. Otaria plane)
-            newSA = sa.copy(activator);
+            newSA = copyForDecision(sa, activator, readOnly);
         }
         newSA.setAlternativeCost(altCost);
         newSA.getRestrictions().setZone(ZoneType.Graveyard);
@@ -332,6 +374,9 @@ public final class GameActionUtil {
     }
 
     public static List<SpellAbility> getMayPlaySpellOptions(final SpellAbility sa, final Card source, final Player activator, boolean altCostOnly) {
+        return getMayPlaySpellOptions(sa, source, activator, altCostOnly, false);
+    }
+    private static List<SpellAbility> getMayPlaySpellOptions(final SpellAbility sa, final Card source, final Player activator, boolean altCostOnly, boolean readOnly) {
         final List<SpellAbility> alternatives = Lists.newArrayList();
 
         if (sa.isSpell() && source.isInPlay()) {
@@ -339,6 +384,7 @@ public final class GameActionUtil {
         }
 
         for (CardPlayOption o : source.mayPlay(activator)) {
+            if (readOnly && !StaticAbilityContinuous.getAffectedCards(o.getAbility(), new CardCollection(source)).contains(source)) continue;
             // do not appear if it can be cast with SorcerySpeed
             if (o.getAbility().hasParam("MayPlayNotSorcerySpeed") && activator.canCastSorcery()) {
                 continue;
@@ -356,16 +402,16 @@ public final class GameActionUtil {
 
             SpellAbility newSA;
             if (o.getPayManaCost() == PayManaCost.NO) {
-                newSA = sa.copyWithNoManaCost(activator);
+                newSA = copyWithoutManaCost(sa, activator, readOnly);
                 newSA.setBasicSpell(false);
             } else if (o.getAltManaCost() != null) {
-                newSA = sa.copyWithManaCostReplaced(activator, o.getAltManaCost());
+                newSA = copyWithManaCost(sa, activator, o.getAltManaCost(), readOnly);
                 newSA.setBasicSpell(false);
             } else {
                 if (altCostOnly) {
                     continue;
                 }
-                newSA = sa.copy(activator);
+                newSA = copyForDecision(sa, activator, readOnly);
             }
 
             if (o.getAbility().hasParam("ValidAfterStack")) {
@@ -407,6 +453,9 @@ public final class GameActionUtil {
     }
 
     public static List<OptionalCostValue> getOptionalCostValues(final SpellAbility sa) {
+        return getOptionalCostValues(sa, false);
+    }
+    public static List<OptionalCostValue> getOptionalCostValues(final SpellAbility sa, boolean readOnly) {
         final List<OptionalCostValue> costs = Lists.newArrayList();
         if (sa == null || !sa.isSpell()) {
             return costs;
@@ -425,7 +474,8 @@ public final class GameActionUtil {
         }
 
         // CR 601.3e
-        if (lkicheck) {
+        if (lkicheck && readOnly) verifyProspectiveEnumerationHost(source);
+        if (lkicheck && !readOnly) {
             // double freeze tracker, so it doesn't update view
             game.getTracker().freeze();
             source.clearStaticChangedCardKeywords(false);
@@ -519,7 +569,7 @@ public final class GameActionUtil {
         }
 
         // reset static abilities
-        if (lkicheck) {
+        if (lkicheck && !readOnly) {
             game.getAction().checkStaticAbilities(false);
             // clear delayed changes, this check should not have updated the view
             game.getTracker().clearDelayed();
@@ -531,10 +581,13 @@ public final class GameActionUtil {
     }
 
     public static SpellAbility addOptionalCosts(final SpellAbility sa, List<OptionalCostValue> list) {
+        return addOptionalCosts(sa, list, false);
+    }
+    public static SpellAbility addOptionalCosts(final SpellAbility sa, List<OptionalCostValue> list, boolean readOnly) {
         if (sa == null || list.isEmpty()) {
             return sa;
         }
-        final SpellAbility result = sa.copy();
+        final SpellAbility result = copyForDecision(sa, sa.getActivatingPlayer(), readOnly);
         if (sa.hasParam("ReduceCost")) {
             result.putParam("ReduceCost", sa.getParam("ReduceCost"));
         }
@@ -565,6 +618,9 @@ public final class GameActionUtil {
     }
 
     public static List<SpellAbility> getAdditionalCostSpell(final SpellAbility sa) {
+        return getAdditionalCostSpell(sa, false);
+    }
+    public static List<SpellAbility> getAdditionalCostSpell(final SpellAbility sa, boolean readOnly) {
         final List<SpellAbility> abilities = Lists.newArrayList(sa);
         if (sa.isSpell()) {
             final Card source = sa.getHostCard();
@@ -574,7 +630,7 @@ public final class GameActionUtil {
                     abilities.clear();
 
                     for (String s : keyword.split(":", 2)[1].split(":")) {
-                        final SpellAbility newSA = sa.copy();
+                        final SpellAbility newSA = copyForDecision(sa, sa.getActivatingPlayer(), readOnly);
                         newSA.setBasicSpell(false);
 
                         final Cost cost = new Cost(s, false);
@@ -591,7 +647,7 @@ public final class GameActionUtil {
 
             abilities.clear();
 
-            SpellAbility newSA = sa.copy();
+            SpellAbility newSA = copyForDecision(sa, sa.getActivatingPlayer(), readOnly);
             newSA.removeParam("AlternateCost");
             newSA.rebuiltDescription();
             if (newSA.canPlay()) {
@@ -600,7 +656,8 @@ public final class GameActionUtil {
 
             // set the cost to this directly to bypass non mana cost
             Cost alternateCost = new Cost(sa.getParam("AlternateCost"), sa.isAbility());
-            SpellAbility newSA2 = sa.copyWithDefinedCost(alternateCost);
+            SpellAbility newSA2 = copyForDecision(sa, sa.getActivatingPlayer(), readOnly);
+            newSA2.setPayCosts(alternateCost);
             newSA2.removeParam("AlternateCost");
             newSA2.rebuiltDescription();
             if (newSA2.canPlay()) {

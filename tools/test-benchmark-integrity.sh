@@ -17,6 +17,10 @@ git -C "$integrity_root" rev-parse HEAD
 git -C "$integrity_root" status --porcelain
 shasum -a 256 "$integrity_jar"
 /opt/homebrew/opt/openjdk@17/bin/javac -cp "$integrity_jar" -d "$integrity_dir/classes" \
+  "$integrity_root/forge-game/src/main/java/forge/game/GameActionUtil.java" \
+  "$integrity_root/forge-game/src/main/java/forge/game/card/Card.java" \
+  "$integrity_root/forge-game/src/main/java/forge/game/spellability/SpellAbility.java" \
+  "$integrity_root/forge-game/src/main/java/forge/game/staticability/StaticAbilityAlternativeCost.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/cost/CostAdjustment.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/mana/ManaCostBeingPaid.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/mana/ManaPool.java" \
@@ -28,6 +32,10 @@ shasum -a 256 "$integrity_jar"
   "$integrity_root/forge-ai/src/main/java/forge/bench/RulesPaymentExecutor.java" \
   "$integrity_root/forge-ai/src/main/java/forge/bench/RulesPaymentChoices.java" \
   "$integrity_root/forge-ai/src/main/java/forge/bench/BenchmarkOptionalCosts.java" \
+  "$integrity_root/forge-ai/src/main/java/forge/bench/BenchmarkAbilityEnumeration.java" \
+  "$integrity_root/forge-ai/src/main/java/forge/bench/BenchMenuStateAudit.java" \
+  "$integrity_root/forge-ai/src/main/java/forge/bench/BenchSession.java" \
+  "$integrity_root/forge-ai/src/main/java/forge/bench/LobbyPlayerBridge.java" \
   "$integrity_root/forge-ai/src/main/java/forge/bench/BenchRandomAudit.java" \
   "$integrity_root/forge-ai/src/main/java/forge/bench/BenchActionAudit.java" \
   "$integrity_root/forge-ai/src/main/java/forge/bench/JsonRpcChannel.java" \
@@ -37,8 +45,9 @@ shasum -a 256 "$integrity_jar"
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/ObservationIntegrityEngineSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/BenchRandomAuditSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/BenchRandomAuditMenuSmoke.java" \
+  "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/BenchMenuPurityVariantsSmoke.java" \
   "$integrity_root/forge-gui-desktop/src/test/java/forge/bench/BenchActionAuditSmoke.java"
-for integrity_fixture in BenchRandomAuditSmoke ObservationIntegrityEngineSmoke RulesCostFeasibilityEngineSmoke BenchRandomAuditMenuSmoke BenchActionAuditSmoke; do
+for integrity_fixture in BenchRandomAuditSmoke ObservationIntegrityEngineSmoke RulesCostFeasibilityEngineSmoke BenchRandomAuditMenuSmoke BenchMenuPurityVariantsSmoke BenchActionAuditSmoke; do
   echo "RUN $integrity_fixture"
   /opt/homebrew/opt/openjdk@17/bin/java -Xmx2g -Duser.home="$integrity_dir/home" \
     -cp "$integrity_dir/classes:$integrity_jar" "forge.bench.$integrity_fixture" "$integrity_root"

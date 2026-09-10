@@ -99,10 +99,41 @@ This is an engine rules repair shared by both seats, not a policy change. The
 historical blank-source trace does not reveal its original card; these fixtures do
 not identify that hidden historical face or quantify any historical win-rate effect.
 
-The full-menu fixtures currently check RNG only, not every original ability field:
-the expanded state/ID snapshot is applied to the rules feasibility queries. Thus
-the identified original-actor/optional-cost ID mutation in full enumeration remains
-an open gate even though the combined development suite passes.
+## Production menu no-op probe — 2026-09-10
+
+V4 added original-field checks to the real bridge menu and reproduced contamination
+on Lightning Bolt/Mountain despite RNG neutrality. The repair adds explicit
+read-only rules-enumeration overloads; all initial and nested alternative/optional
+ability copies retain existing IDs and avoid tracker allocation. Enumeration also
+detaches the cloned memoized pips list and Cost.Zero so mutations cannot reach the
+printed ability. The bridge no longer invokes a controller's optional-cost policy
+while constructing the menu. Existing default overloads remain execution paths.
+
+`PlayerControllerBridge.probePriorityMenuPurity()` calls the exact same production
+`buildPriorityDecision` as a bridged priority ask, but does not ask the host, choose,
+execute, update census counters or call AI policy. Both paths check RNG, both seat
+views, AI memory, all original card-state abilities (actor, targets, X, optional
+pips/costs, parameters, restrictions and conditions), and the global ability-ID
+sequence. The check never restores contaminated state. This explicit field set is
+a tripwire, not a proof covering every possible engine cache or alias.
+
+V7 integrated fixtures pass: the prior five programs plus real production no-op
+probes repeated three times for dual kicker with nonempty original pips/foreign
+actor/X; land/land and spell/land MDFCs; Thief and Expensive Taste face-down exile.
+Both kicker singletons and the combined subset, both Pathway land faces, and the
+distinct exile permissions are asserted. V6 passed optional/MDFC cases and exposed
+a prospective-LKI zone lookup bug; v7 uses last-known-zone rules through isInZone.
+Logs: `/Users/channel/runs/2026-09-10-forge-integrated-integrity-v4/fixture.log`,
+`/Users/channel/runs/2026-09-10-forge-integrated-integrity-v7/fixture.log`.
+
+Prospective face queries avoid global static-layer simulation. Unsupported active
+characteristic-layer interactions, prospective stack ability layers and Room
+unlock construction invalidate the whole decision rather than returning a partial
+menu. The supported paths are not a universal rules enumeration solver. Ordinary
+whole-game stock/null/probe conformance controls remain required before certifying
+benchmark collection. The now-unmasked unset-actor warnings in mana observation
+are being repaired in the separate encoder lane; no old original-actor mutation is
+reintroduced to conceal them.
 
 ## Outstanding gates and next implementation
 

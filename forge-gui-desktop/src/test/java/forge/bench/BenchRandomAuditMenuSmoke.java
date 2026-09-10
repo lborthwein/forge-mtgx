@@ -52,8 +52,11 @@ public final class BenchRandomAuditMenuSmoke {
         game.getAction().checkStateEffects(true);
         BenchRandomAudit.install(95600);
         final var before = BenchRandomAudit.begin();
+        final String stateBefore = RulesCostFeasibilityEngineSmoke.state(game);
         for (int i = 0; i < 2; i++) {
             if (player.getController().chooseSpellAbilityToPlay() != null) throw new AssertionError("Pass changed identity");
+            if (!stateBefore.equals(RulesCostFeasibilityEngineSmoke.state(game)))
+                throw new AssertionError("Full menu changed original ability/state/ID fields: " + spell);
         }
         BenchRandomAudit.assertUnchanged(before, "two real " + spell + " menus");
         final String[] lines = wire.toString(StandardCharsets.UTF_8).trim().split("\n");

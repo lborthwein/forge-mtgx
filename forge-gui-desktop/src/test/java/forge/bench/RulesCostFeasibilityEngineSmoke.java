@@ -42,7 +42,7 @@ public final class RulesCostFeasibilityEngineSmoke {
         card.setSickness(false);
         return card;
     }
-    private static String state(Game game) {
+    static String state(Game game) {
         var out = new StringBuilder();
         try {
             var sequence = SpellAbility.class.getDeclaredField("maxId");

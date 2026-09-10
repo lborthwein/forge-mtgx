@@ -16,7 +16,7 @@ final class BenchmarkOptionalCosts {
         for (int mask = 1; mask < (1 << options.size()); mask++) {
             List<OptionalCostValue> subset = new ArrayList<>();
             for (int bit = 0; bit < options.size(); bit++) if ((mask & (1 << bit)) != 0) subset.add(options.get(bit));
-            SpellAbility variant = GameActionUtil.addOptionalCosts(base, subset);
+            SpellAbility variant = GameActionUtil.addOptionalCosts(base, subset, true);
             if (variant == null || variant == base) throw new RulesCostFeasibility.Unsupported("optional-cost variant not constructed");
             variant.setActivatingPlayer(player);
             out.add(variant);
