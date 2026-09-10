@@ -19,7 +19,6 @@ package forge.bench;
 
 import java.util.List;
 
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multiset;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -32,6 +31,7 @@ import forge.game.GameEntity;
 import forge.game.ability.ApiType;
 import forge.game.ability.effects.CharmEffect;
 import forge.game.card.Card;
+import forge.game.card.CardUtil;
 import forge.game.card.CardCollectionView;
 import forge.game.card.CardView;
 import forge.game.card.CounterType;
@@ -282,17 +282,18 @@ public final class StateEncoder {
      * shape of the largest correctness defect this bridge has had — a choice list
      * ("Add {W} or {U}") parsed to its first symbol on 63 of 540 cube cards.
      *
-     * <p>Asked through {@link Card#canProduceColorMana}, which is the engine's own answer
-     * and already walks reflected mana ({@code ManaReflected}) and combo mana. One colour
+     * <p>Uses Forge's own production checks on private ability copies, including
+     * its read-only reflected-mana traversal. One colour
      * at a time so the result is the full set rather than a boolean, and colourless is
      * included — {@code COLORS_AND_COLORLESS} is the six-symbol vocabulary the host's
-     * {@code ManaType} uses. Read-only: no {@code setActivatingPlayer}, so encoding a state
-     * cannot perturb one.
+     * {@code ManaType} uses. Actors are assigned only on ID-neutral private copies;
+     * original ability actors, cost reductions and trigger caches remain untouched.
      *
-     * <p><b>Protocol v2.16 — the return is now NULLABLE, and that is the whole point.</b>
+     * <p><b>Historical protocol v2.16 distinguished unavailable from empty.</b>
      * An empty array is a real answer: <i>this object's mana abilities produce nothing
      * right now</i>. {@code null} is the absence of an answer: the enumeration threw and
-     * this JVM cannot say. Through v2.15 the two shared one encoding (empty), the caller
+     * this JVM cannot say. Current integrity observations throw instead of allowing
+     * a null-to-printed-text fallback. Through v2.15 the two shared one encoding (empty), the caller
      * omitted the key for both, and the host could only ever fall back to printed oracle
      * text — which reads "add" on a loyalty ability (CR 605.1a excludes those from mana
      * abilities by name), on a triggered ability that fires off SOMEONE ELSE'S tap
@@ -309,20 +310,26 @@ public final class StateEncoder {
     public static JsonArray encodeProducedMana(final Card c) {
         final JsonArray a = new JsonArray();
         try {
-            if (c.getManaAbilities().isEmpty()) {
-                return a;
-            }
-            for (final String col : MagicColor.Constant.COLORS_AND_COLORLESS) {
-                if (c.canProduceColorMana(ImmutableSet.of(col))) {
-                    a.add(MagicColor.toShortString(col));
+            final java.util.Set<String> colors = new java.util.HashSet<>();
+            for (final SpellAbility original : c.getManaAbilities()) {
+                if (original.getApi() == ApiType.ManaReflected) {
+                    colors.addAll(CardUtil.getReflectableManaColorsForObservation(original));
+                    continue;
+                }
+                final SpellAbility ability = original.copyForEnumeration(c.getController());
+                for (final String col : MagicColor.Constant.COLORS_AND_COLORLESS) {
+                    if (ability.canProduce(MagicColor.toShortString(col))) colors.add(col);
                 }
             }
+            for (final String col : MagicColor.Constant.COLORS_AND_COLORLESS) {
+                if (colors.contains(col)) a.add(MagicColor.toShortString(col));
+            }
+        } catch (UnsupportedOperationException e) {
+            JsonRpcChannel.logErr("BENCH_INTEGRITY_UNSUPPORTED: mana production observation for " + c, e);
+            throw e;
         } catch (RuntimeException e) {
-            JsonRpcChannel.logErr("mana production enumeration failed for " + c, e);
-            // NOT an empty array: an empty array now ASSERTS "produces nothing", and this
-            // path knows nothing at all. The caller omits both keys and the host keeps its
-            // printed derivation, exactly as a pre-2.16 jar leaves it.
-            return null;
+            JsonRpcChannel.logErr("BENCH_INTEGRITY_FAILURE: mana production observation for " + c, e);
+            throw e;
         }
         return a;
     }

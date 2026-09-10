@@ -229,10 +229,16 @@ public final class CardUtil {
 
     // a nice entry point with minimum parameters
     public static Set<String> getReflectableManaColors(final SpellAbility sa) {
-        return getReflectableManaColors(sa, sa, Sets.newHashSet(), new CardCollection());
+        return getReflectableManaColors(sa, sa, Sets.newHashSet(), new CardCollection(), false);
+    }
+    /** Same rules traversal for observations, using private ID-neutral abilities.
+     * Does not initialize missing trigger abilities or mutate any live actor. */
+    public static Set<String> getReflectableManaColorsForObservation(final SpellAbility sa) {
+        final SpellAbility copy = sa.copyForEnumeration(sa.getHostCard().getController());
+        return getReflectableManaColors(copy, copy, Sets.newHashSet(), new CardCollection(), true);
     }
     private static Set<String> getReflectableManaColors(final SpellAbility abMana, final SpellAbility sa,
-            Set<String> colors, final CardCollection parents) {
+            Set<String> colors, final CardCollection parents, final boolean observation) {
         // Here's the problem with reflectable Mana. If more than one is out,
         // they need to Reflect each other,
         // so we basically need to have a recursive list that send the parents
@@ -307,19 +313,27 @@ public final class CardUtil {
             for (final Card c : cards) {
                 abilities.addAll(c.getSpellAbilities());
                 for (Trigger trig : c.getTriggers()) {
-                    abilities.add(trig.ensureAbility());
+                    // ensureAbility may allocate a new global ability ID and write
+                    // a trigger cache. Observations cannot safely do either.
+                    SpellAbility triggered = observation ? trig.getOverridingAbility() : trig.ensureAbility();
+                    if (observation && triggered == null && trig.hasParam("Execute")) {
+                        throw new UnsupportedOperationException("uninitialized reflected-mana trigger on " + c);
+                    }
+                    if (!observation || triggered != null) abilities.add(triggered);
                 }
             }
 
             final List<SpellAbility> reflectAbilities = Lists.newArrayList();
 
-            for (final SpellAbility ab : abilities) {
-                if (ab.isSpell() || ab.isLandAbility()) {
+            for (final SpellAbility original : abilities) {
+                if (original.isSpell() || original.isLandAbility()) {
                     continue;
                 }
                 if (maxChoices == colors.size()) {
                     break;
                 }
+                final SpellAbility ab = observation
+                        ? original.copyForEnumeration(original.getHostCard().getController()) : original;
 
                 if (!parents.contains(ab.getHostCard())) {
                     parents.add(ab.getHostCard());
@@ -339,7 +353,7 @@ public final class CardUtil {
                     break;
                 }
 
-                colors = CardUtil.getReflectableManaColors(sa, ab, colors, parents);
+                colors = CardUtil.getReflectableManaColors(sa, ab, colors, parents, observation);
             }
         }
         return colors;

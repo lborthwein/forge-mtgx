@@ -104,6 +104,67 @@ public final class ObservationIntegrityEngineSmoke {
         check(top(game, owner, 0).getAsJsonObject().get("name").getAsString().equals("Grief"), "Citadel controller sees changed private top");
         check(before.equals(StateEncoder.encode(game, opponent)), "changing private top identity with same library size cannot affect opponent observation");
     }
+    private static void manaObservationPurity() throws Exception {
+        var game = topGame(); var player = game.getPlayers().get(0);
+        var pool = card("Reflecting Pool", player, ZoneType.Battlefield);
+        var otherPool = card("Reflecting Pool", player, ZoneType.Battlefield);
+        game.getAction().checkStateEffects(true);
+        check(StateEncoder.encodeProducedMana(pool).isEmpty(), "two reflecting pools terminate without inventing mana");
+        var forest = card("Forest", player, ZoneType.Battlefield);
+        game.getAction().checkStateEffects(true);
+        var originals = new java.util.ArrayList<forge.game.spellability.SpellAbility>();
+        for (var source : List.of(pool, otherPool, forest)) originals.addAll(source.getSpellAbilities());
+        for (var original : originals) {
+            original.setActivatingPlayer(null);
+            original.getPipsToReduce().add("G");
+        }
+        var maxId = forge.game.spellability.SpellAbility.class.getDeclaredField("maxId");
+        maxId.setAccessible(true);
+        int beforeId = maxId.getInt(null);
+        var actors = originals.stream().map(a -> a.getActivatingPlayer()).toList();
+        var pips = originals.stream().map(a -> List.copyOf(a.getPipsToReduce())).toList();
+        BenchRandomAudit.install(101);
+        var rng = BenchRandomAudit.begin();
+        check(StateEncoder.encodeProducedMana(forest).toString().equals("[\"G\"]"), "ordinary unset-actor Forest encodes green via private ability");
+        check(StateEncoder.encodeProducedMana(pool).toString().equals("[\"G\"]"), "reflecting-pool cycle sees real Forest output through private abilities");
+        StateEncoder.encode(game, player);
+        BenchRandomAudit.assertUnchanged(rng, "full state including reflective mana");
+        check(beforeId == maxId.getInt(null), "mana observations allocate no global ability identities");
+        check(actors.equals(originals.stream().map(a -> a.getActivatingPlayer()).toList()), "mana observation preserves every original actor");
+        check(pips.equals(originals.stream().map(a -> List.copyOf(a.getPipsToReduce())).toList()), "mana observation preserves existing original pip reductions");
+        // Exercise the boundary without allowing ensureAbility to initialize a
+        // live trigger or consume a new ability ID as an observational side effect.
+        var lotus = card("Lotus Field", player, ZoneType.Battlefield);
+        var trigger = lotus.getTriggers().stream().filter(t -> t.hasParam("Execute")).findFirst().orElseThrow();
+        var cached = trigger.getOverridingAbility();
+        check(cached != null, "real Lotus Field trigger is already initialized for positive traversal fixture");
+        var cachedActor = cached.getActivatingPlayer();
+        int beforeInitializedId = maxId.getInt(null);
+        var initializedRng = BenchRandomAudit.begin();
+        var observed = StateEncoder.encodeProducedMana(pool);
+        check(observed.toString().equals("[\"W\",\"U\",\"B\",\"R\",\"G\"]"), "reflection includes actual any-color source with initialized trigger");
+        check(trigger.getOverridingAbility() == cached && cached.getActivatingPlayer() == cachedActor
+            && beforeInitializedId == maxId.getInt(null), "positive reflective trigger traversal preserves cache, actor and global IDs");
+        BenchRandomAudit.assertUnchanged(initializedRng, "initialized reflective trigger");
+        // Run the stock rules query only AFTER the purity assertions: it is
+        // intentionally mutating, and is used here solely as a differential oracle.
+        var stockColors = new com.google.gson.JsonArray();
+        for (String color : forge.card.MagicColor.Constant.COLORS_AND_COLORLESS) {
+            if (pool.canProduceColorMana(java.util.Set.of(color))) stockColors.add(forge.card.MagicColor.toShortString(color));
+        }
+        check(observed.equals(stockColors), "private traversal agrees with stock rules color set on real pool/Forest/Lotus Field fixture");
+        var triggerAbility = forge.game.TriggerReplacementBase.class.getDeclaredField("overridingAbility");
+        triggerAbility.setAccessible(true);
+        triggerAbility.set(trigger, null); // fault injection: emulate an uninitialized trigger cache
+        int beforeUnsupportedId = maxId.getInt(null);
+        var unsupportedRng = BenchRandomAudit.begin();
+        boolean rejected = false;
+        try { StateEncoder.encodeProducedMana(pool); }
+        catch (UnsupportedOperationException expected) { rejected = true; }
+        check(rejected, "uninitialized reflected trigger is explicit unsupported, never a printed-output fallback");
+        check(trigger.getOverridingAbility() == null && beforeUnsupportedId == maxId.getInt(null), "unsupported reflection leaves trigger cache and global IDs untouched");
+        BenchRandomAudit.assertUnchanged(unsupportedRng, "unsupported reflected trigger");
+    }
     public static void main(String[] args) {
         try {
             GuiBase.setInterface((IGuiBase) java.lang.reflect.Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),
@@ -161,6 +222,7 @@ public final class ObservationIntegrityEngineSmoke {
             playVisibleLand("Oracle of Mul Daya");
             playVisibleLand("Bolas's Citadel");
             privateTopNoninterference();
+            manaObservationPurity();
             System.out.println("PASS all " + checks + " observation checks");
             System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
