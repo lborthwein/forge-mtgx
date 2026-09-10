@@ -12,6 +12,10 @@ constructs its `TrigExile` ability, and invokes the actual stock
 `Hidden$ True` zone-change ability. Both legal selectable graveyard cards are
 public. The actual controller and `ChangeZoneAi` implementations come from the
 surviving pinned jar, not a test double or copied preference function.
+`ChangeZoneEffect`'s real hidden-origin resolver obtains all graveyards when
+neither hand/library nor `DefinedPlayer` is specified (lines 1009–1011), then
+calls this controller callback (line 1206); the fixture options match that
+production candidate set.
 
 | Controlled comparison | Same visible decision | Same registered deck | Actual Default choice |
 | --- | --- | --- | --- |
@@ -112,5 +116,7 @@ Preserved artifacts under `/Users/channel/runs/`:
   incomplete overlay dependency list; no decisions executed.
 - `2026-09-10-gatekeeper-information-v2/fixture.log`: passing first reproduction,
   before adding independent public object assertions and class origins.
-- `2026-09-10-gatekeeper-information-v3/fixture.log`: reserved next immutable
-  committed-source rerun; require actual exit status before citing as passed.
+- `2026-09-10-gatekeeper-information-v3/fixture.log`: **passed, exit 0**, clean
+  committed source `e7d3830d8329e272714e61ef8fd232df1dacafc2`; all 15 actual
+  decisions and nine comparison assertions passed. Both AI class-origin lines
+  identify the pinned jar. Includes independent public object assertions.
