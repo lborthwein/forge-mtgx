@@ -24,6 +24,10 @@ public final class CubeDoomsdayPlan {
     private int turn = -1, doomsdayId = -1;
     private boolean oracleSelected, gushSelected, gushRoute;
     private Card reservedStar;
+    /** Observability only: the token for the check that already declined the
+     * most recent {@link #nextAction}. Never read by a decision. */
+    private String decline = "other check=doomsday-plan";
+    public String declineReason() { return decline; }
 
     public CubeDoomsdayPlan(Player player) { this.player = player; }
 
@@ -212,15 +216,16 @@ public final class CubeDoomsdayPlan {
     }
 
     public SpellAbility nextAction() {
+        decline = "other check=doomsday-plan";
         if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)
-                && !player.getGame().getPhaseHandler().is(PhaseType.MAIN2, player)) { stage = Stage.NONE; return null; }
+                && !player.getGame().getPhaseHandler().is(PhaseType.MAIN2, player)) { stage = Stage.NONE; decline = "phase"; return null; }
         if (turn != player.getGame().getPhaseHandler().getTurn()) stage = Stage.NONE;
-        if (!player.getGame().getStack().isEmpty()) return null;
-        if (player.cantWin()) { stage = Stage.NONE; return null; }
+        if (!player.getGame().getStack().isEmpty()) { decline = "stack-not-empty"; return null; }
+        if (player.cantWin()) { stage = Stage.NONE; decline = "cant-win"; return null; }
         int librarySize = player.getCardsIn(ZoneType.Library).size(); // count, never identities/order
         if (stage == Stage.DOOMSDAY) {
             if (librarySize > 5 || inHand("Doomsday") != null || inHand("Thassa's Oracle") == null && !oracleSelected) {
-                stage = Stage.NONE; return null;
+                stage = Stage.NONE; decline = "other check=pile-not-resolved"; return null;
             }
             if (gushRoute) {
                 if (reservedStar == null) {
@@ -229,54 +234,66 @@ public final class CubeDoomsdayPlan {
                 }
                 SpellAbility star = player.canDrawAmount(3) && librarySize == 5 ? starAbility() : null;
                 if (star != null) { stage = Stage.STAR; return star; }
-                stage = Stage.NONE; return null;
+                stage = Stage.NONE; decline = "other check=starAbility"; return null;
             }
             SpellAbility draw = playable("Ancestral Recall");
             if (librarySize >= 3 && player.canDrawAmount(3) && draw != null
                     && CubeComboAi.canPayCost(new Cost("U U U", false), draw, player, false)) {
                 stage = Stage.DRAW; return draw;
             }
-            stage = Stage.NONE; return null;
+            stage = Stage.NONE; decline = "other check=post-doomsday-draw"; return null;
         }
         if (stage == Stage.STAR) {
+            decline = "other check=advanceGush";
             return advanceGush(librarySize);
         }
         if (stage == Stage.DRAW) {
             SpellAbility oracle = librarySize <= oracleThreshold(false) ? playable("Thassa's Oracle") : null;
             stage = oracle == null ? Stage.NONE : Stage.ORACLE;
+            if (oracle == null) decline = "other check=oracleThreshold";
             return oracle;
         }
-        if (stage == Stage.ORACLE) { stage = Stage.NONE; return null; }
+        if (stage == Stage.ORACLE) { stage = Stage.NONE; decline = "other check=oracle-resolved"; return null; }
         if (librarySize <= 5) {
             SpellAbility recovery = recoverSmallLibrary(librarySize);
             if (recovery != null) {
                 turn = player.getGame().getPhaseHandler().getTurn();
                 System.err.println("CUBE_COMBO recovered-small-library card=" + recovery.getHostCard().getName());
-            }
+            } else decline = "no-pile-route";
             return recovery;
         }
         // No unnecessary Doomsday on a library already small enough for the draw.
-        if (player.getLife() <= 1 || !availableInOwnDeck("Thassa's Oracle")) return null;
+        if (player.getLife() <= 1 || !availableInOwnDeck("Thassa's Oracle")) {
+            decline = player.getLife() <= 1 ? "cant-win" : "no-pile-route";
+            return null;
+        }
         gushRoute = false; reservedStar = null;
         SpellAbility doom = playable("Doomsday");
-        if (doom == null) return null;
+        if (doom == null) {
+            decline = inHand("Doomsday") == null ? "no-doomsday-in-hand"
+                    : CubeComboAi.ownVisibleMana(player) < 6 ? "mana:6/" + CubeComboAi.ownVisibleMana(player)
+                    : "other check=playable:Doomsday";
+            return null;
+        }
         if (!player.canDrawAmount(3) || inHand("Ancestral Recall") == null
                 || !CubeComboAi.canPayCost(new Cost("B B B U U U", false), doom, player, false)) {
             if (!availableInOwnDeck("Gush") || player.getCardsIn(ZoneType.Battlefield).stream()
-                    .filter(c -> c.getType().hasSubtype("Island")).count() < 2) return null;
+                    .filter(c -> c.getType().hasSubtype("Island")).count() < 2) { decline = "no-pile-route"; return null; }
             gushRoute = true;
             boolean direct = gushReachesOracle(5) && alternateGush() != null;
             if (!direct) {
-                if (!player.canDrawAmount(3)) { gushRoute = false; return null; }
+                if (!player.canDrawAmount(3)) { gushRoute = false; decline = "no-pile-route"; return null; }
                 for (Card card : player.getCardsIn(ZoneType.Battlefield)) if (card.getName().equals("Chromatic Star")) {
                     reservedStar = card;
                     if (starAbility() != null) break;
                     reservedStar = null;
                 }
-                if (reservedStar == null) { gushRoute = false; return null; }
+                if (reservedStar == null) { gushRoute = false; decline = "no-pile-route"; return null; }
             }
             if (!withStarReserved(() -> CubeComboAi.canPayCost(new Cost("B B B U U", false), doom, player, false))) {
-                gushRoute = false; reservedStar = null; return null;
+                gushRoute = false; reservedStar = null;
+                decline = "mana:5/" + CubeComboAi.ownVisibleMana(player);
+                return null;
             }
         }
         turn = player.getGame().getPhaseHandler().getTurn();

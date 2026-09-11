@@ -18,6 +18,25 @@ public final class CubeComboAi {
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
+    /** Observability only: own-visible mana breadth, used by the decision log
+     * and by decline reasons. Pure reads of our own public battlefield and our
+     * own floating mana; no payment probe, no RNG, no state change. */
+    static int ownVisibleMana(Player player) {
+        int lands = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) if (card.isLand() && card.isUntapped()) lands++;
+        return lands + player.getManaPool().totalMana();
+    }
+
+    /** Observability only: why the most recent {@link #planTutor} call on this
+     * thread produced no plan. Set from checks planTutor already performs, read
+     * by the controller immediately after the call. Never consulted by a decision. */
+    private static final ThreadLocal<String> TUTOR_DECLINE = new ThreadLocal<>();
+    private static void tutorDecline(String reason) { TUTOR_DECLINE.set(reason); }
+    static String lastTutorDecline() {
+        String reason = TUTOR_DECLINE.get();
+        return reason == null ? "other check=planTutor" : reason;
+    }
+
     /** Only the current actor's speculative payment, never a real activation
      * or another player's choice. No RNG state is read, copied or rewound. */
     public static boolean isPaymentProbeFor(Player player) { return PAYMENT_PROBE.get() == player; }
@@ -319,7 +338,17 @@ public final class CubeComboAi {
         String thopterMissing = CubeThopterPlan.missingPiece(player);
         if (!enabled(player) || !(main1 || thopterMissing != null && player.getGame().getPhaseHandler().is(PhaseType.MAIN2, player))
                 || !player.getGame().getStack().isEmpty() || !player.getManaPool().isEmpty()
-                || player.cantWin() || player.hasKeyword("LimitSearchLibrary")) return null;
+                || player.cantWin() || player.hasKeyword("LimitSearchLibrary")) {
+            // Observability only: name the guard that already rejected the plan.
+            tutorDecline(!player.getGame().getStack().isEmpty() ? "stack-not-empty"
+                    : player.cantWin() ? "cant-win"
+                    : !main1 ? "phase"
+                    : !player.getManaPool().isEmpty() ? "other check=floating-mana"
+                    : player.hasKeyword("LimitSearchLibrary") ? "other check=LimitSearchLibrary"
+                    : "other check=planTutor-guard");
+            return null;
+        }
+        tutorDecline("other check=no-tutor-in-hand");
         for (Card hand : player.getCardsIn(ZoneType.Hand)) {
             if (hand.isFaceDown()) continue;
             for (SpellAbility original : hand.getSpellAbilities()) {
@@ -331,6 +360,7 @@ public final class CubeComboAi {
                         || !"You".equals(tutor.getParamOrDefault("Defined", "You"))
                         || tutor.getSubAbility() != null || !manaOnly(tutor)
                         || !canPlayNative(tutor, player) || !player.canSearchLibraryWith(tutor, player)) continue;
+                tutorDecline("other check=no-partner-route");
                 for (var entry : player.getRegisteredPlayer().getDeck().getMain()) {
                     String name = entry.getKey().getName();
                     if (!(name.equals(thopterMissing) || main1 && java.util.Set.of("Kiki-Jiki, Mirror Breaker", "Pestermite", "Deceiver Exarch",
@@ -348,6 +378,7 @@ public final class CubeComboAi {
                     if (!manaOnly(creature) || !castFitsAfter(player, tutor, creature)) continue;
                     var cost = ComputerUtilMana.calculateManaCost(creature.getPayCosts(), creature, player, true, 0, false);
                     CardCollection reserve = CubeComboAi.getManaSourcesToPayCost(cost, creature, player, false);
+                    tutorDecline("mana:" + (tutor.getHostCard().getCMC() + forecast.getCMC()) + "/" + ownVisibleMana(player));
                     if (reserve != null && withReservedSources(player, reserve,
                             () -> CubeComboAi.canPayCost(tutor, player, false))) return new TutorPlan(tutor, reserve, name);
                 }
