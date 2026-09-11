@@ -1064,7 +1064,11 @@ public class ComputerUtilMana {
 
         int chanceToReserve = aic.getIntProperty(AiProps.RESERVE_MANA_FOR_MAIN2_CHANCE);
         // TODO use Math.min(100 - AiAbilityDecision.rating(), chanceToReserve)
-        if (chanceToReserve == 0 || !MyRandom.percentTrue(chanceToReserve)) {
+        // Default.ai uses 100, despite AiProps' fallback of zero. A speculative
+        // check must not advance gameplay RNG for this certain result. Preserve
+        // native reservation and ordinary/real-payment RNG behavior unchanged.
+        boolean certainProbeReservation = chanceToReserve >= 100 && CubeComboAi.isPaymentProbeFor(ai);
+        if (chanceToReserve == 0 || !certainProbeReservation && !MyRandom.percentTrue(chanceToReserve)) {
             // using a reserved source might make rest of reservation pointless, but that's tricky to conclude
             return false;
         }

@@ -65,10 +65,13 @@ public final class CubeComboProbePuritySmoke {
         guide.getManaAbilities().get(0).getManaPart().setExpressChoice("R");
         p.getManaPool().adjustColorReplacement(MagicColor.BLUE,MagicColor.RED,true);p.getManaPool().setSnowForColor(true);
         Map<String,Object> before=state(p);
+        var rngBefore=BenchRandomAudit.begin();
         var action=new CubeDoomsdayPlan(p).nextAction();
         if(action!=null)throw new AssertionError("No draw route exists; planner must decline");
         Map<String,Object> after=state(p);List<String> changed=new ArrayList<>();
         for(String k:before.keySet())if(!before.get(k).equals(after.get(k)))changed.add(k+":"+before.get(k)+"->"+after.get(k));
+        try { BenchRandomAudit.assertUnchanged(rngBefore,"declined-doom-plan"); }
+        catch(IllegalStateException failure) { changed.add(failure.getMessage()); }
         System.out.println("PURITY seat="+seat+" phase="+phase+" probeDoom="+probeDoom+" changed="+changed);
         if(changed.isEmpty()) {
             // Nested and exceptional speculation must restore the same live objects.
@@ -88,8 +91,17 @@ public final class CubeComboProbePuritySmoke {
             if(livePool!=p.getManaPool()||liveMemory!=AiCardMemory.getMemorySet(p,AiCardMemory.MemorySet.PAYS_TAP_COST)||!before.equals(state(p)))throw new AssertionError("Exceptional probe changed state/identity");
             if(probeDoom) {
                 var doom=p.getCardsIn(ZoneType.Hand).stream().filter(c->c.getName().equals("Doomsday")).findFirst().orElseThrow().getSpellAbilities().get(0).copy(p);
+                var random=(BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom();
+                long draws=random.snapshot().get("draws").getAsLong();
+                if(!forge.ai.ComputerUtilCost.canPayCost(doom,p,false))throw new AssertionError("Native control cost must be payable");
+                if(random.snapshot().get("draws").getAsLong()-draws!=3)throw new AssertionError("Ordinary native payment forecast RNG changed");
+                // The unwrapped native control intentionally mutates scratch
+                // state; retain its state as the next wrapped probe's baseline.
+                var controlState=state(p);
+                var successfulRng=BenchRandomAudit.begin();
                 if(!CubeComboAi.canPayCost(doom,p,false))throw new AssertionError("BBB is genuinely payable despite no combo draw route");
-                if(!before.equals(state(p)))throw new AssertionError("Successful payment probe changed live state");
+                BenchRandomAudit.assertUnchanged(successfulRng,"successful-payment-probe");
+                if(!controlState.equals(state(p)))throw new AssertionError("Successful payment probe changed live state");
                 // Detached queried abilities are not necessarily in a card's
                 // live list. A parent's setter propagates through the tree.
                 doom.setActivatingPlayer(null);
@@ -110,6 +122,7 @@ public final class CubeComboProbePuritySmoke {
                 var handMana=guide.getManaAbilities().get(0);
                 try {
                     CubeComboAi.probePayment(p,()->{
+                        if(!CubeComboAi.isPaymentProbeFor(p)||CubeComboAi.isPaymentProbeFor(other))throw new AssertionError("Probe actor scope");
                         doom.setActivatingPlayer(p);handMana.getManaPart().setExpressChoice("G");handMana.setActivatingPlayer(other);
                         CubeComboAi.probePayment(p,()->{doom.setActivatingPlayer(other);handMana.getManaPart().setExpressChoice("B");return null;},doom);
                         if(doom.getActivatingPlayer()!=p||!handMana.getManaPart().getExpressChoice().equals("G"))throw new AssertionError("Nested actor/hand choice restoration");
@@ -119,7 +132,7 @@ public final class CubeComboProbePuritySmoke {
                 } catch(IllegalArgumentException expected) {
                     if(!expected.getMessage().equals("intentional actor exception"))throw expected;
                 }
-                if(doom.getActivatingPlayer()!=null||child.getActivatingPlayer()!=other||extra.getActivatingPlayer()!=other||listChild.getActivatingPlayer()!=null||!before.equals(state(p)))
+                if(doom.getActivatingPlayer()!=null||child.getActivatingPlayer()!=other||extra.getActivatingPlayer()!=other||listChild.getActivatingPlayer()!=null||!controlState.equals(state(p))||CubeComboAi.isPaymentProbeFor(p))
                     throw new AssertionError("Exceptional actor/hand choice restoration");
             }
         }
@@ -149,6 +162,7 @@ public final class CubeComboProbePuritySmoke {
             FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
             int failures=0;
             matrixCopy();
+            BenchRandomAudit.install(0); // Native fixture, no opening-game seed.
             for(int seat=0;seat<2;seat++)for(PhaseType phase:List.of(PhaseType.MAIN1,PhaseType.MAIN2))for(boolean probe:new boolean[]{false,true})if(!run(seat,phase,probe))failures++;
             if(failures!=0)throw new AssertionError("Null plan leaked live state in "+failures+" of8 cases");
             System.out.println("PASS null-plan purity8/8");

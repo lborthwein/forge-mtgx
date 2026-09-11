@@ -14,8 +14,13 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v36";
+    public static final String VERSION = "cube-combo-execution-v37";
+    private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
+
+    /** Only the current actor's speculative payment, never a real activation
+     * or another player's choice. No RNG state is read, copied or rewound. */
+    public static boolean isPaymentProbeFor(Player player) { return PAYMENT_PROBE.get() == player; }
 
     /** Native affordability helpers are stateful even in test mode. Their scratch
      * payment memory/conversion must not escape a speculative combo check into
@@ -31,8 +36,11 @@ public final class CubeComboAi {
         for (Card card : CardCollection.combine(player.getCardsIn(ZoneType.Battlefield), player.getCardsIn(ZoneType.Hand)))
             for (SpellAbility ability : card.getSpellAbilities()) abilities.add(new ProbeAbilityState(ability));
         for (SpellAbility ability : queried) if (ability != null) abilities.add(new ProbeAbilityState(ability.getRootAbility()));
+        Player previousProbe = PAYMENT_PROBE.get();
+        PAYMENT_PROBE.set(player);
         try { return probe.get(); }
         finally {
+            if (previousProbe == null) PAYMENT_PROBE.remove(); else PAYMENT_PROBE.set(previousProbe);
             for (var entry : memory.entrySet()) {
                 var live = AiCardMemory.getMemorySet(player, entry.getKey());
                 live.clear(); live.addAll(entry.getValue());
