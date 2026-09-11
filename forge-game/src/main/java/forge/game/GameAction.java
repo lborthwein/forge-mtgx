@@ -2414,7 +2414,18 @@ public class GameAction {
         }
 
         boolean isFirstGame = lastGameOutcome == null;
-        if (isFirstGame) {
+        final RegisteredPlayer chooser = game.getRules().getStartingChooser();
+        if (chooser != null && lastGameOutcome == null) {
+            // CR 103.1, decided by the caller's match layer: the die-roll winner in
+            // its first game, the previous game's loser after that.
+            isFirstGame = game.getRules().isStartingChooserFirstGame();
+            for (Player p : game.getPlayers()) {
+                if (p.getRegisteredPlayer() == chooser) {
+                    goesFirst = p;
+                    break;
+                }
+            }
+        } else if (isFirstGame) {
             game.fireEvent(new GameEventFlipCoin()); // Play the Flip Coin sound
             goesFirst = Aggregates.random(game.getPlayers());
         } else {

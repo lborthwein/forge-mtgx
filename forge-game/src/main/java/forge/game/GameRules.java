@@ -3,6 +3,8 @@ package forge.game;
 import java.util.EnumSet;
 import java.util.Set;
 
+import forge.game.player.RegisteredPlayer;
+
 public class GameRules {
     private final GameType gameType;
     private boolean manaBurn;
@@ -24,6 +26,13 @@ public class GameRules {
 
     // whether to warn about cards AI can't play well
     private boolean warnAboutAICards = true;
+
+    // CR 103.1 when each game of a match runs as its own one-game Forge match
+    // (the interactive browser client): the player the caller's match layer says
+    // chooses who takes the first turn, and whether this is the match's first
+    // game. Null keeps Forge's own coin toss and loser-chooses logic.
+    private RegisteredPlayer startingChooser = null;
+    private boolean startingChooserFirstGame = true;
 
     public GameRules(final GameType type) {
         this.gameType = type;
@@ -140,6 +149,17 @@ public class GameRules {
     }
     public void setWarnAboutAICards(final boolean warnAboutAICards) {
         this.warnAboutAICards = warnAboutAICards;
+    }
+
+    public RegisteredPlayer getStartingChooser() {
+        return startingChooser;
+    }
+    public boolean isStartingChooserFirstGame() {
+        return startingChooserFirstGame;
+    }
+    public void setStartingChooser(final RegisteredPlayer chooser, final boolean firstGame) {
+        this.startingChooser = chooser;
+        this.startingChooserFirstGame = firstGame;
     }
 
     public int getSimTimeout() {

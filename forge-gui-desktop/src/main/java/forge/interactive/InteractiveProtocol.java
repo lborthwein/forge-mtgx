@@ -31,7 +31,13 @@ final class InteractiveProtocol {
     private InteractiveProtocol() {
     }
 
-    record Config(String session, int humanSeat, List<Path> decks, long seed, String aiProfile) {
+    /**
+     * {@code startingChooser} is the seat that chooses who takes the first turn
+     * (CR 103.1), or -1 for Forge's own coin toss; {@code gameNumber} is this
+     * game's number in the caller's match (1 when not part of one).
+     */
+    record Config(String session, int humanSeat, List<Path> decks, long seed, String aiProfile,
+                  int startingChooser, int gameNumber) {
         Config {
             decks = List.copyOf(decks);
         }
@@ -109,7 +115,23 @@ final class InteractiveProtocol {
             }
             decks.add(path);
         }
-        return new Config(session, humanSeat, decks, seed, aiProfile);
+        // Optional: a game of a longer match whose play/draw choice belongs to a
+        // particular seat. Absent keeps the coin toss of a one-game match.
+        int startingChooser = -1;
+        if (json.has("startingChooser") && !json.get("startingChooser").isJsonNull()) {
+            startingChooser = requireInt(json, "startingChooser", "invalid_config");
+            if (startingChooser != 0 && startingChooser != 1) {
+                throw new ProtocolException("invalid_config", "startingChooser must be 0, 1 or null");
+            }
+        }
+        int gameNumber = 1;
+        if (json.has("gameNumber") && !json.get("gameNumber").isJsonNull()) {
+            gameNumber = requireInt(json, "gameNumber", "invalid_config");
+            if (gameNumber < 1 || gameNumber > 99) {
+                throw new ProtocolException("invalid_config", "gameNumber must be 1..99");
+            }
+        }
+        return new Config(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber);
     }
 
     static String bestEffortSession(final String line) {

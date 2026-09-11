@@ -119,6 +119,11 @@ public final class InteractiveMain {
             // Desktop deck-advice modal, not a rules failure or human choice.
             // Its opponent-card list is inappropriate for a hidden-information game.
             rules.setWarnAboutAICards(false);
+            // Each game of the client's best-of-three is its own one-game match, so
+            // Forge cannot see who lost the last one. The client's match layer can.
+            if (config.startingChooser() >= 0) {
+                rules.setStartingChooser(registered.get(config.startingChooser()), config.gameNumber() == 1);
+            }
 
             final Match match = new Match(rules, registered, "Browser vs Default Forge");
             final Game game = match.createGame();
