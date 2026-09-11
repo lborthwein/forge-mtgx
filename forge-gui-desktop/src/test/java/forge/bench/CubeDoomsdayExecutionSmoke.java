@@ -375,6 +375,10 @@ public final class CubeDoomsdayExecutionSmoke {
             c.setTapped(p.tapped());
             if (p.name().equals("Narset, Parter of Veils")) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 5);
             if (p.name().equals("Teferi, Time Raveler")) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 4);
+            // Placed planeswalkers need their printed loyalty or checkStateEffects
+            // puts them straight into the graveyard and the pips vanish.
+            if (p.name().equals("Jace, the Mind Sculptor")) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 3);
+            if (p.name().equals("Liliana of the Veil")) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 3);
         }
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
@@ -583,6 +587,168 @@ public final class CubeDoomsdayExecutionSmoke {
             throw new AssertionError("Devotion removal control did not interact");
     }
 
+
+    /** Runtime policy string of the loaded {@code CubeComboAi}, read reflectively
+     * so the matched-v42 control (this test source compiled against the frozen
+     * v42 classes) reports the version it actually ran, not a constant inlined
+     * at compile time. */
+    private static String policy() {
+        try {
+            return String.valueOf(forge.ai.CubeComboAi.class.getField("VERSION").get(null));
+        } catch (final ReflectiveOperationException failure) {
+            return "unknown";
+        }
+    }
+
+    /** Positive assertions run only when the probe asks for them, so the
+     * matched-v42 control can execute exactly this source against the frozen
+     * v42 classes and record what v42 decides instead of failing. */
+    private static final boolean NATURAL_STRICT = Boolean.getBoolean("forge.test.requireDoomsdayNatural");
+
+    private static final List<String> NODRAW_CASES = List.of("pips3-mixed", "pips3-singles", "pips4",
+            "pips2-oracle-hand", "liliana", "torpor", "lethal-board", "oracle-battlefield",
+            "cannot-win", "life-one", "counterspell");
+    private static final List<String> PASSTURN_CASES = List.of("pips2", "oracle-graveyard", "pips3",
+            "clock-safe", "clock-blocker", "narset-one-draw", "clock", "torpor", "lethal-board",
+            "oracle-battlefield", "cannot-win", "life-one", "counterspell");
+
+    /** Whether the plan's first decision must be Doomsday. `lethal-board` is
+     * main-dependent on purpose: the better-attack abstention only dominates a
+     * same-turn route while an attack step is still ahead of us, so in MAIN2 a
+     * route-1 board must still commit. */
+    private static boolean naturalProposes(String kase, boolean passTurn) {
+        if (kase.equals("lethal-board")) return !passTurn && main2;
+        return switch (kase) {
+            case "pips3-mixed", "pips3-singles", "pips4", "pips2", "oracle-graveyard", "pips3",
+                 "clock-safe", "clock-blocker", "narset-one-draw", "counterspell" -> true;
+            default -> false;
+        };
+    }
+
+    /** Route 1 (no-draw public devotion) and route 2 (pass-turn pile), both
+     * seats and both mains. Board is 3 Swamp + 2 Island untapped, so Doomsday's
+     * BBB cannot eat the blue Oracle needs; plus N public blue pips and a
+     * 25-card library that makes Doomsday necessary. The fixture specifies
+     * zones, tapped states and life totals only - never a game action. */
+    private static void naturalRun(int seat, boolean passTurn, String kase) {
+        List<Placement> own = new ArrayList<>(), other = new ArrayList<>();
+        own.add(new Placement("Doomsday", ZoneType.Hand, false));
+        for (int i = 0; i < 3; i++) own.add(new Placement("Swamp", ZoneType.Battlefield, false));
+        for (int i = 0; i < 2; i++) own.add(new Placement("Island", ZoneType.Battlefield, false));
+        // Tapped devotion still counts toward devotion but cannot block, which
+        // is what isolates the clock guard's blocker term.
+        boolean tappedPips = kase.startsWith("clock");
+        List<String> pips = switch (kase) {
+            case "pips3-singles" -> List.of("Spellseeker", "Emry, Lurker of the Loch", "Faerie Mastermind");
+            case "pips4" -> List.of("Jace, the Mind Sculptor", "Narset, Parter of Veils");
+            case "pips3" -> List.of("Emry, Lurker of the Loch", "Faerie Mastermind", "Spellseeker");
+            case "pips2-oracle-hand", "liliana" -> List.of("Spellseeker", "Emry, Lurker of the Loch");
+            // Control boards deliberately carry no permanent that can remove
+            // the control itself. probe-1 caught Default legally bouncing
+            // Platinum Angel with Jace, the Mind Sculptor's -1 and then winning
+            // through the restored route: a correct adaptation, and a broken
+            // rig. Jace stays only in the two MUST-MOVE cases, where the plan
+            // wins on its first priority pass and Jace never acts.
+            default -> passTurn ? List.of("Emry, Lurker of the Loch", "Faerie Mastermind")
+                    : List.of("Spellseeker", "Emry, Lurker of the Loch", "Faerie Mastermind");
+        };
+        for (String name : pips) own.add(new Placement(name, ZoneType.Battlefield, tappedPips));
+        // Our own fatty: the attacker that makes the board lethal, or the
+        // untapped blocker that legitimately answers a lethal public clock.
+        if (kase.equals("lethal-board") || kase.equals("clock-blocker"))
+            own.add(new Placement("Old One Eye", ZoneType.Battlefield, false));
+        ZoneType oracleZone = kase.equals("oracle-battlefield") ? ZoneType.Battlefield
+                : kase.equals("oracle-graveyard") ? ZoneType.Graveyard
+                : passTurn ? ZoneType.Library : ZoneType.Hand;
+        own.add(new Placement("Thassa's Oracle", oracleZone, false));
+        for (int i = 0; i < (oracleZone == ZoneType.Library ? 24 : 25); i++)
+            own.add(new Placement("Forest", ZoneType.Library, false));
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        switch (kase) {
+            case "torpor" -> other.add(new Placement("Torpor Orb", ZoneType.Battlefield, false));
+            case "cannot-win" -> other.add(new Placement("Platinum Angel", ZoneType.Battlefield, false));
+            case "liliana" -> other.add(new Placement("Liliana of the Veil", ZoneType.Battlefield, false));
+            case "narset-one-draw" -> other.add(new Placement("Narset, Parter of Veils", ZoneType.Battlefield, false));
+            case "clock", "clock-safe", "clock-blocker" -> other.add(new Placement("Old One Eye", ZoneType.Battlefield, false));
+            case "counterspell" -> {
+                other.add(new Placement("Counterspell", ZoneType.Hand, false));
+                other.add(new Placement("Island", ZoneType.Battlefield, false));
+                other.add(new Placement("Island", ZoneType.Battlefield, false));
+            }
+            default -> { }
+        }
+        while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player p = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
+        if (kase.equals("life-one")) p.setLife(1, null);
+        // life 12 -> ceil(12/2) = 6 paid, 6 left, exactly the visible 6/6 clock.
+        if (kase.equals("clock") || kase.equals("clock-blocker")) p.setLife(12, null);
+        if (kase.equals("lethal-board")) opponent.setLife(6, null);
+        game.getAction().checkStateEffects(true);
+        game.getTriggerHandler().resetActiveTriggers();
+        int ourPower = 0;
+        for (Card card : p.getCardsIn(ZoneType.Battlefield))
+            if (card.isCreature() && card.isUntapped()) ourPower += card.getNetPower();
+        int clock = 0;
+        for (Card card : opponent.getCardsIn(ZoneType.Battlefield)) if (card.isCreature()) clock += card.getNetPower();
+        if (kase.equals("cannot-win") && !p.cantWin())
+            throw new AssertionError("Win-prohibition fixture must actually prohibit winning");
+        if (kase.equals("clock") && !(clock >= p.getLife() - (p.getLife() + 1) / 2))
+            throw new AssertionError("Clock fixture must actually be lethal through the passed turn");
+        if (kase.equals("narset-one-draw") && !(p.canDrawAmount(1) && !p.canDrawAmount(2)))
+            throw new AssertionError("Narset fixture must permit exactly one draw");
+        boolean proposes = naturalProposes(kase, passTurn), expectWin = proposes && !kase.equals("counterspell");
+        BenchRandomAudit.install(0); // Fixed constructed fixture, not a sampled opening.
+        var proposed = new forge.ai.CubeDoomsdayPlan(p).nextAction();
+        String action = proposed == null ? "none" : proposed.getHostCard().getName();
+        System.out.println("NATURAL_PROPOSAL suite=" + (passTurn ? "passturn" : "nodraw") + " improved=" + improved
+                + " policy=" + policy() + " seat=" + seat + " main2=" + main2 + " case=" + kase
+                + " pips=" + String.join("+", pips).replace(' ', '_') + " tappedPips=" + tappedPips
+                + " oracleZone=" + oracleZone + " life=" + p.getLife() + " oppLife=" + opponent.getLife()
+                + " ourUntappedPower=" + ourPower + " visibleClock=" + clock
+                + " mustMove=" + proposes + " action=" + action);
+        if (improved && NATURAL_STRICT && proposes != action.equals("Doomsday"))
+            throw new AssertionError("Natural route proposal mismatch: " + kase + " main2=" + main2 + " -> " + action);
+        int steps = 0, limit = passTurn ? 1500 : STEP_LIMIT, lastTurn = passTurn ? 3 : 1;
+        boolean doom = false, pile = false;
+        int beforeOracle = -1, doomTurn = -1, oracleTurn = -1;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= lastTurn && steps++ < limit) {
+            game.getPhaseHandler().mainLoopStep();
+            if (!doom && has(p, ZoneType.Graveyard, "Doomsday")) { doom = true; doomTurn = game.getPhaseHandler().getTurn(); }
+            pile |= doom && p.getCardsIn(ZoneType.Library).size() == 5;
+            if (!game.getStack().isEmpty()) {
+                var sa = game.getStack().peekAbility();
+                if (sa.isSpell() && sa.getHostCard().getName().equals("Thassa's Oracle")) {
+                    beforeOracle = p.getCardsIn(ZoneType.Library).size();
+                    oracleTurn = game.getPhaseHandler().getTurn();
+                }
+            }
+        }
+        boolean oracleWin = p.getOutcome() != null && "Thassa's Oracle".equals(p.getOutcome().altWinSourceName);
+        System.out.println("NATURAL_RESULT suite=" + (passTurn ? "passturn" : "nodraw") + " improved=" + improved
+                + " policy=" + policy() + " seat=" + seat + " main2=" + main2 + " case=" + kase
+                + " mustMove=" + proposes + " expectWin=" + expectWin + " proposed=" + action
+                + " doomsdayCast=" + doom + " doomsdayTurn=" + doomTurn + " fiveCardPile=" + pile
+                + " libraryBeforeOracle=" + beforeOracle + " oracleTurn=" + oracleTurn
+                + " oracleEnteredBattlefield=" + has(p, ZoneType.Battlefield, "Thassa's Oracle")
+                + " won=" + p.hasWon() + " oracleWin=" + oracleWin + " gameOver=" + game.isGameOver()
+                + " life=" + p.getLife() + " oppLife=" + opponent.getLife() + " steps=" + steps
+                + " opponentCounterspell=" + has(opponent, ZoneType.Graveyard, "Counterspell"));
+        if (steps >= limit) throw new AssertionError("Natural route step budget: " + kase);
+        if (improved && NATURAL_STRICT) {
+            if (expectWin && !(doom && pile && oracleWin && beforeOracle == (passTurn ? 4 : 5)
+                    && doomTurn == 1 && oracleTurn == (passTurn ? 3 : 1)))
+                throw new AssertionError("Natural route did not execute: " + kase + " main2=" + main2);
+            if (!proposes && doom) throw new AssertionError("Doomsday committed despite " + kase);
+            if (!expectWin && oracleWin) throw new AssertionError("Unexpected control Oracle win: " + kase);
+            if (kase.equals("counterspell") && !has(opponent, ZoneType.Graveyard, "Counterspell"))
+                throw new AssertionError("Counterspell control did not interact: " + kase);
+        }
+        // Default arm is the improvement witness: it must not reach the Oracle win.
+        if (!improved && NATURAL_STRICT && oracleWin)
+            throw new AssertionError("Default arm unexpectedly won with Oracle: " + kase);
+    }
+
     public static void main(final String[] args) {
         try {
             improved = args.length > 1 && args[1].equals("improved");
@@ -599,6 +765,17 @@ public final class CubeDoomsdayExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
+            if (suite.equals("nodraw") || suite.equals("passturn")) {
+                boolean passTurn = suite.equals("passturn");
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++)
+                        for (String kase : passTurn ? PASSTURN_CASES : NODRAW_CASES) naturalRun(seat, passTurn, kase);
+                }
+                System.out.println("NATURAL_SUITE_COMPLETE suite=" + suite + " improved=" + improved
+                        + " policy=" + policy() + " cases=" + 4 * (passTurn ? PASSTURN_CASES.size() : NODRAW_CASES.size()));
+                return;
+            }
             if(suite.equals("devotion")) {
                 for(boolean second:new boolean[]{false,true}) {
                     main2=second;
