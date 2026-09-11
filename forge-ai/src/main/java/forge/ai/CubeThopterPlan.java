@@ -30,6 +30,9 @@ public final class CubeThopterPlan {
     private int turn=-1, actions, failedTurn=-1, beforeTokens, beforeLife;
     private SpellAbility selected, pending;
     private Card paymentSword, paymentTap;
+    /** Native sources forecast for the second assembly cast; held out of the
+     * first cast's actual payment exactly as planTutor holds a tutor's reserve. */
+    private CardCollection assemblyReserve;
 
     public CubeThopterPlan(Player player) { this.player=player; }
 
@@ -90,28 +93,36 @@ public final class CubeThopterPlan {
         return false;
     }
 
+    /** Missing pieces, from our current visible battlefield, in a fixed
+     * enumeration order that is not a play order. */
+    static java.util.List<String> missingPieces(Player player) {
+        CubeThopterPlan plan=new CubeThopterPlan(player);
+        java.util.List<String> missing=new java.util.ArrayList<>();
+        for(String name:java.util.List.of(URZA,FOUNDRY,SWORD))if(plan.find(name)==null)missing.add(name);
+        return missing;
+    }
+
     /** Exactly one missing piece, from our current visible battlefield. */
     static String missingPiece(Player player) {
-        CubeThopterPlan plan=new CubeThopterPlan(player);
-        String missing=null;
-        for(String name:java.util.List.of(URZA,FOUNDRY,SWORD))if(plan.find(name)==null) {
-            if(missing!=null)return null;
-            missing=name;
-        }
-        return missing;
+        java.util.List<String> missing=missingPieces(player);
+        return missing.size()==1?missing.get(0):null;
     }
 
     /** Negative-ID CardFactory previews omit intrinsic scripts. Restore just
      * the printed variables, abilities and triggers this forecast inspects,
-     * from our registered card's public rules, using native parsers. This is
-     * still detached: never insert it into a zone or execute its abilities. */
-    static void addAssemblyPreviewRules(Card card,forge.item.PaperCard paper) {
-        if(card.getId()!=-1 || !java.util.List.of(URZA,FOUNDRY,SWORD).contains(card.getName()))
-            throw new IllegalArgumentException("Expected a detached Thopter assembly preview");
+     * from our registered card's public rules, using native parsers. Not
+     * restored: replacement effects, static abilities and intrinsic keywords
+     * (the preview Sword has no Equip); no check here may read those. This is
+     * still detached: never insert it into a zone or execute its abilities.
+     * Returns false, declining the forecast, for anything that is not a
+     * detached preview of one of the three pieces. */
+    static boolean addAssemblyPreviewRules(Card card,forge.item.PaperCard paper) {
+        if(card.getId()!=-1 || !java.util.List.of(URZA,FOUNDRY,SWORD).contains(card.getName()))return false;
         var face=paper.getRules().getMainPart();
         for(var variable:face.getVariables())card.setSVar(variable.getKey(),variable.getValue());
         for(String trigger:face.getTriggers())card.addTrigger(forge.game.trigger.TriggerHandler.parseTrigger(trigger,card,true,card.getCurrentState()));
         forge.game.card.CardFactoryUtil.addAbilityFactoryAbilities(card,face.getAbilities());
+        return true;
     }
 
     /** The selection caller supplies only the cards the effect legally reveals.
@@ -138,10 +149,20 @@ public final class CubeThopterPlan {
     /** Public native restrictions on the completed engine, before spending a
      * cast/selection on it. Detached LKI gives activation checks the future
      * battlefield zone; actual casts/activations still pass full native gates. */
-    private boolean supportsAssembly(Card piece) {
-        Card urza=URZA.equals(piece.getName())?piece:find(URZA);
-        Card foundry=FOUNDRY.equals(piece.getName())?piece:find(FOUNDRY);
-        Card sword=SWORD.equals(piece.getName())?piece:find(SWORD);
+    private boolean supportsAssembly(Card piece) { return supportsAssembly(java.util.List.of(piece)); }
+
+    /** Resolve each piece from the supplied previews first, then from our
+     * visible battlefield, and run every public gate on that configuration. */
+    private boolean supportsAssembly(java.util.Collection<Card> previews) {
+        Card urza=null,foundry=null,sword=null;
+        for(Card piece:previews) {
+            if(URZA.equals(piece.getName()))urza=piece;
+            else if(FOUNDRY.equals(piece.getName()))foundry=piece;
+            else if(SWORD.equals(piece.getName()))sword=piece;
+        }
+        if(urza==null)urza=find(URZA);
+        if(foundry==null)foundry=find(FOUNDRY);
+        if(sword==null)sword=find(SWORD);
         if(urza==null || foundry==null || sword==null || !sword.isArtifact() || sword.isToken()
                 || !recursionAvailable(sword))return false;
         SpellAbility mana=ability(urza,ApiType.Mana),make=ability(foundry,ApiType.Token);
@@ -178,8 +199,10 @@ public final class CubeThopterPlan {
     private SpellAbility assembleFromHand() {
         var phase=player.getGame().getPhaseHandler();
         if(!(phase.is(PhaseType.MAIN1,player)||phase.is(PhaseType.MAIN2,player)))return null;
-        String missing=missingPiece(player);
-        if(missing==null)return null;
+        java.util.List<String> missingAll=missingPieces(player);
+        if(missingAll.size()==2)return assembleTwoFromHand(missingAll);
+        if(missingAll.size()!=1)return null;
+        String missing=missingAll.get(0);
         for(Card card:player.getCardsIn(ZoneType.Hand)) {
             if(card.isFaceDown() || !card.getName().equals(missing) || !supportsAssembly(card))continue;
             var original=card.getSpellPermanent();
@@ -194,10 +217,84 @@ public final class CubeThopterPlan {
         return null;
     }
 
+    /** Whether a card carries the artifact-tap mana ability the engine relies
+     * on. A property of the printed rules, not a card-name play order. */
+    private static boolean carriesArtifactTapMana(Card card) {
+        for(SpellAbility sa:card.getSpellAbilities())
+            if(sa.getApi()==ApiType.Mana && sa.getPayCosts()!=null && sa.getPayCosts().getCostParts().size()==1
+                    && sa.getPayCosts().getCostParts().get(0) instanceof CostTapType tap && "Artifact".equals(tap.getType()))return true;
+        return false;
+    }
+
+    /** Every colored shard of the cast's mana cost can be produced by some
+     * mana source we control. Distinguishes "not enough lands yet" (a later
+     * turn can pay) from "this color is unobtainable" (the plan cannot
+     * complete). Quantity is not forecast here; each actual cast still passes
+     * native payment. */
+    private boolean colorCompletable(SpellAbility cast) {
+        // Native source discovery sets ability actors; the payment probe restores them.
+        CardCollection sources=CubeComboAi.probePayment(player,()->ComputerUtilMana.getAvailableManaSources(player,false));
+        for(var shard:cast.getPayCosts().getTotalMana()) {
+            if(shard.isGeneric() || shard.getColorMask()==0)continue;
+            java.util.Set<String> colors=new java.util.HashSet<>();
+            for(byte color:forge.card.MagicColor.WUBRG)if((shard.getColorMask()&color)!=0)colors.add(forge.card.MagicColor.toLongString(color));
+            boolean producible=false;
+            for(Card source:sources)if(source.canProduceColorMana(colors)) { producible=true; break; }
+            if(!producible)return false;
+        }
+        return true;
+    }
+
+    /** Two pieces missing, both in hand. Every piece must be a mana-only
+     * permanent that is castable now or at least color-completable from our
+     * mana sources; at least one must be castable now; the completed engine
+     * must pass every public gate; the pool must be empty so the
+     * disjoint-source forecast is meaningful; a ready Kiki route in MAIN1
+     * keeps priority. When both are castable now, forecast both orders with
+     * native disjoint sources and cast the first piece of a same-turn order;
+     * otherwise cast one castable piece and re-evaluate on the next decision.
+     * No sequence is pre-committed. */
+    private SpellAbility assembleTwoFromHand(java.util.List<String> missing) {
+        if(!player.getManaPool().isEmpty() || CubeComboAi.hasImmediateKikiRoute(player))return null;
+        java.util.List<Card> pieces=new java.util.ArrayList<>();
+        java.util.List<SpellAbility> casts=new java.util.ArrayList<>();
+        boolean[] payable=new boolean[2];
+        for(String name:missing) {
+            Card found=null;
+            for(Card card:player.getCardsIn(ZoneType.Hand))
+                if(!card.isFaceDown() && card.getName().equals(name)) { found=card; break; }
+            if(found==null || found.getSpellPermanent()==null)return null;
+            SpellAbility cast=found.getSpellPermanent().copy(player);
+            if(!CubeComboAi.manaOnly(cast) || !CubeComboAi.canPlayNative(cast,player))return null;
+            payable[pieces.size()]=CubeComboAi.canPayCost(cast,player,false);
+            if(!payable[pieces.size()] && !colorCompletable(cast))return null;
+            pieces.add(found); casts.add(cast);
+        }
+        if(!payable[0] && !payable[1])return null;
+        if(!supportsAssembly(pieces))return null;
+        int preferred=carriesArtifactTapMana(pieces.get(1)) && !carriesArtifactTapMana(pieces.get(0))?1:0;
+        if(!payable[preferred])preferred=1-preferred;
+        if(payable[0] && payable[1])for(int first:new int[]{preferred,1-preferred}) {
+            SpellAbility a=casts.get(first),b=casts.get(1-first);
+            var cost=ComputerUtilMana.calculateManaCost(b.getPayCosts(),b,player,true,0,false);
+            CardCollection reserve=CubeComboAi.getManaSourcesToPayCost(cost,b,player,false);
+            if(reserve!=null && CubeComboAi.withReservedSources(player,reserve,
+                    ()->CubeComboAi.canPlayNative(a,player) && CubeComboAi.canPayCost(a,player,false))) {
+                selected=a;actions++;assemblyReserve=reserve;
+                System.err.println("CUBE_THOPTER_ASSEMBLY select-hand2 card="+pieces.get(first).getName()+" forecast=same-turn");
+                return a;
+            }
+        }
+        SpellAbility a=casts.get(preferred);
+        selected=a;actions++;
+        System.err.println("CUBE_THOPTER_ASSEMBLY select-hand2 card="+pieces.get(preferred).getName()+" forecast=partial");
+        return a;
+    }
+
     public SpellAbility nextAction() {
         var game=player.getGame();
         int currentTurn=game.getPhaseHandler().getTurn();
-        if(currentTurn!=turn) { turn=currentTurn; actions=0; selected=null; pending=null; }
+        if(currentTurn!=turn) { turn=currentTurn; actions=0; selected=null; pending=null; assemblyReserve=null; }
         if(failedTurn==turn || actions>=160 || !game.getStack().isEmpty() || player.cantWin())return null;
         if(pending!=null) {
             boolean failed=tokens()<=beforeTokens || find(SWORD)==null || player.getLife()<beforeLife;
@@ -239,7 +336,9 @@ public final class CubeThopterPlan {
     public boolean play(SpellAbility sa) {
         beforeTokens=tokens(); beforeLife=player.getLife();
         int beforeMana=player.getManaPool().totalMana();
-        boolean played=ComputerUtil.handlePlayingSpellAbility(player,sa,null,current->new AiCostDecision(player,current,false) {
+        CardCollection reserve=sa==selected && assemblyReserve!=null?assemblyReserve:new CardCollection();
+        assemblyReserve=null;
+        boolean played=CubeComboAi.withReservedSources(player,reserve,()->ComputerUtil.handlePlayingSpellAbility(player,sa,null,current->new AiCostDecision(player,current,false) {
             @Override public PaymentDecision visit(CostTapType cost) {
                 if(sa.getApi()==ApiType.Mana && current==sa && cost.getAbilityAmount(current)==1
                         && "Artifact".equals(cost.getType()) && paymentTap!=null && paymentTap.canTap()
@@ -255,7 +354,7 @@ public final class CubeThopterPlan {
                         && paymentSword.canBeSacrificedBy(current,false))return PaymentDecision.card(paymentSword);
                 return super.visit(cost);
             }
-        });
+        }));
         if(!played || sa.isManaAbility() && player.getManaPool().totalMana()<=beforeMana)failedTurn=turn;
         if(played && sa.getApi()==ApiType.Token)pending=sa;
         System.err.println("CUBE_THOPTER_PLAN "+(played?"played":"native-payment-failed")

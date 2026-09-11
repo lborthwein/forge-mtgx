@@ -44,6 +44,27 @@ public final class CubeThopterExecutionSmoke {
             "tutor-sword:rest-in-peace", "tutor-sword:rule-of-law", "tutor-foundry:no-black",
             "tutor-foundry:restricted-search", "tutor-foundry:exiled-piece");
     private static final List<String> SACRIFICE_CONTROLS = List.of("hand-foundry:yasharn", "tutor-foundry:yasharn", "tutor-sword:yasharn");
+    // v42: two pieces missing, both in hand (checkpoint-26-registration).
+    private static final List<String> ASSEMBLY2 = List.of("hand2-urza-foundry", "hand2-urza-sword", "hand2-foundry-sword");
+    private static final List<String> ASSEMBLY2_VARIANTS = List.of("hand2-urza-foundry:five-lands", "hand2-urza-sword:four-lands",
+            "hand2-urza-foundry:three-lands", "hand2-foundry-sword:sigarda");
+    private static final List<String> ASSEMBLY2_CONTROLS = List.of("hand2-urza-foundry:no-black", "hand2-foundry-sword:yasharn",
+            "hand2-foundry-sword:rest-in-peace", "hand2-urza-foundry:null-rod", "hand2-urza-foundry:cursed-totem",
+            "hand2-urza-foundry:kiki-hand", "hand2-urza-foundry:missing-two", "hand3-all");
+    // Guard negatives on the one-piece path: the plan must start and finish.
+    private static final List<String> GUARD_NEGATIVES = List.of("hand-foundry:sigarda", "hand-foundry:yasharn-graveyard");
+
+    private static boolean assemblyBase(String base) {
+        return ASSEMBLY.contains(base) || base.startsWith("hand2-") || base.equals("hand3-all");
+    }
+    private static boolean mustAssemble(String control) {
+        return ASSEMBLY.contains(control) || ASSEMBLY2.contains(control) || ASSEMBLY2_VARIANTS.contains(control)
+                || GUARD_NEGATIVES.contains(control) || variant(control).equals("lethal-board") || variant(control).equals("kiki-hand");
+    }
+    private static boolean blockedAssembly(String control) {
+        return ASSEMBLY_CONTROLS.contains(control) || SACRIFICE_CONTROLS.contains(control)
+                || ASSEMBLY2_CONTROLS.contains(control) && !variant(control).equals("kiki-hand");
+    }
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone) {}
@@ -55,10 +76,19 @@ public final class CubeThopterExecutionSmoke {
             result.add(new Placement(URZA, pieceZone(control,"urza")));
             result.add(new Placement(FOUNDRY, pieceZone(control,"foundry")));
             result.add(new Placement(SWORD, pieceZone(control,"sword")));
-            if(ASSEMBLY.contains(base)) {
+            if(assemblyBase(base)) {
                 if(!variant.equals("no-mana")) {
-                    for(int i=0;i<4;i++)result.add(new Placement("Island",ZoneType.Battlefield));
-                    for(int i=0;i<2;i++)result.add(new Placement(variant.equals("no-black")?"Island":"Swamp",ZoneType.Battlefield));
+                    int islands=switch(variant) { case "five-lands", "four-lands" -> 3; case "three-lands" -> 2; default -> 4; };
+                    int swamps=switch(variant) { case "four-lands", "three-lands" -> 1; default -> 2; };
+                    for(int i=0;i<islands;i++)result.add(new Placement("Island",ZoneType.Battlefield));
+                    for(int i=0;i<swamps;i++)result.add(new Placement(variant.equals("no-black")?"Island":"Swamp",ZoneType.Battlefield));
+                }
+                if(variant.equals("sigarda"))result.add(new Placement("Sigarda, Host of Herons",ZoneType.Battlefield));
+                // Two-turn deployment needs an ordinary land drop: the library's top card is a Forest.
+                if(variant.equals("three-lands"))result.add(new Placement("Forest",ZoneType.Library));
+                if(variant.equals("kiki-hand")) {
+                    result.add(new Placement("Kiki-Jiki, Mirror Breaker",ZoneType.Battlefield));
+                    result.add(new Placement("Pestermite",ZoneType.Hand));
                 }
                 if(base.startsWith("tutor-"))result.add(new Placement("Demonic Tutor",ZoneType.Hand));
                 result.add(new Placement("Grave Titan",ZoneType.Library));
@@ -87,6 +117,8 @@ public final class CubeThopterExecutionSmoke {
                 default -> null;
             };
             if(blocker != null) result.add(new Placement(blocker, ZoneType.Battlefield));
+            // Non-battlefield static source: the sweep visits the graveyard but the static is battlefield-only.
+            if(variant.equals("yasharn-graveyard")) result.add(new Placement("Yasharn, Implacable Earth", ZoneType.Graveyard));
             if(control.equals("remove-foundry")) {
                 result.add(new Placement("Disenchant", ZoneType.Hand));
                 result.add(new Placement("Plains", ZoneType.Battlefield));
@@ -105,6 +137,12 @@ public final class CubeThopterExecutionSmoke {
 
     private static ZoneType pieceZone(String control,String piece) {
         String variant=variant(control);control=control.split(":")[0];
+        if(control.equals("hand3-all"))return ZoneType.Hand;
+        if(control.startsWith("hand2-")) {
+            String[] pair=control.substring(6).split("-");
+            if(variant.equals("missing-two") && piece.equals(pair[1]))return ZoneType.Exile;
+            return List.of(pair).contains(piece)?ZoneType.Hand:ZoneType.Battlefield;
+        }
         if(variant.equals("missing-two") && piece.equals(control.endsWith("urza")?"foundry":"urza"))return ZoneType.Exile;
         if(variant.equals("exiled-piece") && control.equals("tutor-"+piece))return ZoneType.Exile;
         if(control.equals("missing-"+piece) || piece.equals("sword")&&control.equals("sword-exile"))return ZoneType.Exile;
@@ -167,14 +205,16 @@ public final class CubeThopterExecutionSmoke {
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
         BenchRandomAudit.install(10811 + seat * 100 + control.length());
-        if(improved && Boolean.getBoolean("forge.test.probeThopterPurity")) probePurity(player,control);
+        if(improved && Boolean.getBoolean("forge.test.probeThopterPurity")) probePurity(player,control,phase);
         String key = "arm=" + (improved ? "improved" : "baseline") + " seat=" + seat + " phase=" + phase + " control=" + control;
         System.out.println("THOPTER_FIXTURE " + key + " policy=" + forge.ai.CubeComboAi.VERSION + " infoPolicy=CLOSED_REPAIR registered=40 initialMana=0"
                 + " swordStartsTapped=" + player.getCardsIn(ZoneType.Battlefield).stream().anyMatch(c->c.getName().equals(SWORD)&&c.isTapped()));
         Set<Integer> stackIds = new HashSet<>();
         int steps = 0, activations = 0, returns = 0, resolvedReturns = 0, created = 0, maxMana = 0, maxTokens = 0, removals = 0;
         String previous = "";
-        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps < 600) {
+        // Turns alternate: our turns are 1, 3, 5. Two-turn deployment needs our third turn for combat.
+        int turnBound = variant(control).equals("three-lands") ? 5 : 3;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= turnBound && steps < 600) {
             int before = tokens(player);
             String beforeSword = swordZone(player);
             game.getPhaseHandler().mainLoopStep();
@@ -212,9 +252,14 @@ public final class CubeThopterExecutionSmoke {
         if (improved && Boolean.getBoolean("forge.test.requireThopterWin")
                 && POSITIVES.contains(control) && !player.hasWon())
             throw new AssertionError("Candidate must finish with the native Thopter army");
-        if(improved && Boolean.getBoolean("forge.test.requireThopterAssembly")
-                && (ASSEMBLY.contains(control) || variant(control).equals("lethal-board")) && !player.hasWon())
+        if(improved && Boolean.getBoolean("forge.test.requireThopterAssembly") && mustAssemble(control) && !player.hasWon())
             throw new AssertionError("Candidate must assemble and finish the native Thopter army: "+key);
+        if(improved && Boolean.getBoolean("forge.test.requireThopterAssembly") && variant(control).equals("kiki-hand")
+                && phase==PhaseType.MAIN1 && game.getPhaseHandler().getTurn()!=1)
+            throw new AssertionError("Two-piece assembly must not postpone the ready Kiki win: "+key);
+        if(improved && Boolean.getBoolean("forge.test.requireThopterAssembly") && variant(control).equals("yasharn")
+                && control.startsWith("hand2-") && activations!=0)
+            throw new AssertionError("Foundry must not activate under a visible sacrifice prohibition: "+key);
         if(improved && Boolean.getBoolean("forge.test.requireThopterAssembly")
                 && variant(control).equals("lethal-board") && phase==PhaseType.MAIN1 && game.getPhaseHandler().getTurn()!=1)
             throw new AssertionError("Assembly must not delay the available ordinary combat win");
@@ -247,24 +292,28 @@ public final class CubeThopterExecutionSmoke {
         return result;
     }
 
-    private static void probePurity(Player player,String control) {
+    private static void probePurity(Player player,String control,PhaseType phase) {
         try {
             var before=snapshot(player); var rng=BenchRandomAudit.begin();
             int selected=0;
             for(int i=0;i<3;i++)if(new forge.ai.CubeThopterPlan(player).nextAction()!=null)selected++;
             int tutors=0;
-            if(ASSEMBLY.contains(control.split(":")[0]))
+            if(assemblyBase(control.split(":")[0]))
                 for(int i=0;i<3;i++)if(forge.ai.CubeComboAi.planTutor(player)!=null)tutors++;
             if(!before.equals(snapshot(player)))throw new AssertionError("Thopter plan probe changed native state: "+before+" -> "+snapshot(player));
             BenchRandomAudit.assertUnchanged(rng,"thopter-plan-preview");
             if(POSITIVES.contains(control) && selected!=3)throw new AssertionError("Positive purity case did not reach a proposed action");
             if(!POSITIVES.contains(control) && !control.equals("remove-foundry")
-                    && !ASSEMBLY.contains(control.split(":")[0]) && selected!=0)
+                    && !assemblyBase(control.split(":")[0]) && selected!=0)
                 throw new AssertionError("Blocked recursion must not propose a Thopter plan action: "+control);
-            if(ASSEMBLY.contains(control) && control.startsWith("hand-") && selected!=3)
-                throw new AssertionError("Hand assembly purity must reach the planner");
-            if((ASSEMBLY_CONTROLS.contains(control) || SACRIFICE_CONTROLS.contains(control)) && (selected!=0 || tutors!=0))
+            if((ASSEMBLY.contains(control) && control.startsWith("hand-") || ASSEMBLY2.contains(control)
+                    || ASSEMBLY2_VARIANTS.contains(control) || GUARD_NEGATIVES.contains(control)) && selected!=3)
+                throw new AssertionError("Hand assembly purity must reach the planner: "+control+" hand="+selected);
+            if(blockedAssembly(control) && (selected!=0 || tutors!=0))
                 throw new AssertionError("Blocked assembly must not start a plan: "+control+" hand="+selected+" tutor="+tutors);
+            // Kiki's haste copies can finish this combat only from MAIN1; in MAIN2 no faster route exists.
+            if(variant(control).equals("kiki-hand") && phase==PhaseType.MAIN1 && selected!=0)
+                throw new AssertionError("Ready Kiki route must keep priority over two-piece assembly: "+control);
             System.out.println("THOPTER_PURITY passed=true checks=3 selected="+selected+" tutors="+tutors+" control="+control);
         } catch(ReflectiveOperationException e) { throw new AssertionError(e); }
     }
@@ -329,7 +378,7 @@ public final class CubeThopterExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
-            for (String name : List.of(URZA, FOUNDRY, SWORD, "Forest", "Island", "Cursed Totem", "Intangible Virtue", "Rest in Peace", "Torpor Orb", "Null Rod", "Serra Angel", "Disenchant", "Plains", "Swamp", "Demonic Tutor", "Grave Titan", "Wurmcoil Engine", "Humility", "Rule of Law", "Aven Mindcensor", "Kiki-Jiki, Mirror Breaker", "Pestermite", "Yasharn, Implacable Earth"))
+            for (String name : List.of(URZA, FOUNDRY, SWORD, "Forest", "Island", "Cursed Totem", "Intangible Virtue", "Rest in Peace", "Torpor Orb", "Null Rod", "Serra Angel", "Disenchant", "Plains", "Swamp", "Demonic Tutor", "Grave Titan", "Wurmcoil Engine", "Humility", "Rule of Law", "Aven Mindcensor", "Kiki-Jiki, Mirror Breaker", "Pestermite", "Yasharn, Implacable Earth", "Sigarda, Host of Herons"))
                 StaticData.instance().attemptToLoadCard(name);
             List<String> cases=args.length>2 ? switch(args[2]) {
                 case "assembly" -> ASSEMBLY;
@@ -337,6 +386,11 @@ public final class CubeThopterExecutionSmoke {
                 case "ordinary-win" -> List.of("hand-foundry:lethal-board");
                 case "competing-route" -> List.of("tutor-foundry:kiki-tutor");
                 case "sacrifice-blocked" -> SACRIFICE_CONTROLS;
+                case "assembly2" -> ASSEMBLY2;
+                case "assembly2-variants" -> ASSEMBLY2_VARIANTS;
+                case "assembly2-controls" -> ASSEMBLY2_CONTROLS;
+                case "guard-negatives" -> GUARD_NEGATIVES;
+                case "ordinary-win2" -> List.of("hand2-foundry-sword:lethal-board");
                 default -> CONTROLS;
             } : CONTROLS;
             for (int seat = 0; seat < 2; seat++) for (PhaseType phase : List.of(PhaseType.MAIN1, PhaseType.MAIN2))

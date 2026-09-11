@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v41";
+    public static final String VERSION = "cube-combo-execution-v42";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -233,6 +233,31 @@ public final class CubeComboAi {
         return immediate != null ? immediate : CubeThopterPlan.chooseAssemblyCard(player, legalChoices);
     }
 
+    /** A Kiki pair that can finish this combat: the copy engine is on our
+     * battlefield with a partner body on the battlefield or castable from
+     * hand, or vice versa. Used so a slower plan does not spend the mana that
+     * the faster available route needs. MAIN1 only. */
+    static boolean hasImmediateKikiRoute(Player player) {
+        if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)) return false;
+        boolean haveKiki = false, havePartner = false;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown()) continue;
+            if (card.getName().equals("Kiki-Jiki, Mirror Breaker")
+                    && card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
+                        && sa.copy(player).checkRestrictions(card, player))) haveKiki = true;
+            if (untapBody(card) || card.getName().equals("Restoration Angel")) havePartner = true;
+        }
+        if (haveKiki && havePartner) return true;
+        if (haveKiki == havePartner) return false;
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.isFaceDown()) continue;
+            if ((haveKiki && (untapBody(card) || card.getName().equals("Restoration Angel"))
+                    || havePartner && card.getName().equals("Kiki-Jiki, Mirror Breaker"))
+                    && feasiblePartnerAfterSelection(player, card)) return true;
+        }
+        return false;
+    }
+
     private static Card chooseKikiTutorPartner(Player player, CardCollection legalChoices) {
         if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)) return null;
         boolean haveKiki = false, havePartner = false;
@@ -314,7 +339,7 @@ public final class CubeComboAi {
                                 ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command, ZoneType.Stack)) continue;
                     // A detached prototype: no game ID allocation or zone insertion.
                     Card forecast = forge.game.card.CardFactory.getCard(entry.getKey(), player, -1, player.getGame());
-                    if(name.equals(thopterMissing))CubeThopterPlan.addAssemblyPreviewRules(forecast,entry.getKey());
+                    if(name.equals(thopterMissing) && !CubeThopterPlan.addAssemblyPreviewRules(forecast,entry.getKey()))continue;
                     forecast.setZone(player.getZone(ZoneType.Library));
                     if (!forecast.isValid(tutor.getParamOrDefault("ChangeType", "Card").split(","), player, hand, tutor)
                             || chooseTutorPartner(player, tutor, new CardCollection(forecast)) == null) continue;
@@ -331,7 +356,7 @@ public final class CubeComboAi {
         return null;
     }
 
-    private static boolean manaOnly(SpellAbility sa) {
+    static boolean manaOnly(SpellAbility sa) {
         return sa.getPayCosts() != null && sa.getPayCosts().getCostParts().stream()
                 .allMatch(part -> part instanceof forge.game.cost.CostPartMana);
     }
