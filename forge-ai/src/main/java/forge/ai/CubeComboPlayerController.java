@@ -20,6 +20,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     private final CubeMonolithPlan monolithPlan;
     private final CubeKittenPlan kittenPlan;
     private final CubeTopPlan topPlan;
+    private final CubeThopterPlan thopterPlan;
     private int comboSelectionChanges;
     private CubeComboAi.TutorPlan tutorPlan;
     private int comboTutorPlanCasts;
@@ -35,17 +36,19 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         monolithPlan = new CubeMonolithPlan(player);
         kittenPlan = new CubeKittenPlan(player);
         topPlan = new CubeTopPlan(player);
+        thopterPlan = new CubeThopterPlan(player);
     }
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell()) return null;
+        if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell()) return null;
         SpellAbility action = doomsdayPlan.nextAction();
         if (action == null) action = breachPlan.nextAction();
         if (action == null) action = stormPlan.nextAction();
         if (action == null) action = monolithPlan.nextAction();
         if (action == null) action = kittenPlan.nextAction();
         if (action == null) action = topPlan.nextAction();
+        if (action == null) action = thopterPlan.nextAction();
         if (action == null) {
             tutorPlan = CubeComboAi.planTutor(getPlayer());
             if (tutorPlan != null) action = tutorPlan.tutor();
@@ -74,6 +77,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (monolithPlan.owns(ability)) return monolithPlan.play(ability);
         if (kittenPlan.owns(ability)) return kittenPlan.play(ability);
         if (topPlan.owns(ability)) return topPlan.play(ability);
+        if (thopterPlan.owns(ability)) return thopterPlan.play(ability);
         return doomsdayPlan.withReservedDrawSource(ability, () -> super.playChosenSpellAbility(ability));
     }
 
