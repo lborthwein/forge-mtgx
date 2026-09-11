@@ -956,6 +956,26 @@ public class AttachAi extends SpellAbilityAi {
 
     @Override
     public AiAbilityDecision chkDrawback(final Player ai, final SpellAbility sa) {
+        // Sword's free return is followed by a defined, non-targeting attach.
+        // The generic fallback below rejects that subability, which makes the
+        // native controller decline the entire optional return trigger. Keep
+        // the baseline unchanged; only the versioned cube policy opts in.
+        final SpellAbility parent = sa.getParent();
+        final Card returningEquipment = sa.getHostCard();
+        if (CubeComboAi.enabled(ai) && parent != null && parent.getApi() == ApiType.ChangeZone
+                && "Graveyard".equals(parent.getParam("Origin"))
+                && "Battlefield".equals(parent.getParam("Destination"))
+                && "Self".equals(parent.getParam("Defined"))
+                && "TriggeredCardLKICopy".equals(sa.getParam("Defined"))
+                && !returningEquipment.isFaceDown() && "Sword of the Meek".equals(returningEquipment.getName())
+                && returningEquipment.getOwner() == ai && returningEquipment.isInZone(ZoneType.Graveyard)) {
+            for (Card defined : AbilityUtils.getDefinedCards(returningEquipment, sa.getParam("Defined"), sa)) {
+                Card recipient = ai.getGame().getCardState(defined);
+                if (recipient != null && recipient.isInPlay() && recipient.getController() == ai
+                        && recipient.canBeAttached(returningEquipment, sa))
+                    return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+            }
+        }
         if (sa.isTrigger() && sa.usesTargeting()) {
             CardCollection targetables = CardLists.getTargetableCards(ai.getCardsIn(ZoneType.Battlefield), sa);
             CardCollection source = AbilityUtils.getDefinedCards(sa.getHostCard(), sa.getParam("Object"), sa);
