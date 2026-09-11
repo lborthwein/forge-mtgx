@@ -23,6 +23,9 @@ import java.util.function.Predicate;
 public class CopyPermanentAi extends SpellAbilityAi {
     @Override
     protected AiAbilityDecision checkApiLogic(Player aiPlayer, SpellAbility sa) {
+        if (CubeComboAi.copyPartner(aiPlayer, sa) != null && !CubeComboAi.needsMoreCopies(aiPlayer, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
         Card source = sa.getHostCard();
         PhaseHandler ph = aiPlayer.getGame().getPhaseHandler();
         String aiLogic = sa.getParamOrDefault("AILogic", "");
@@ -125,6 +128,11 @@ public class CopyPermanentAi extends SpellAbilityAi {
             sa.resetTargets();
 
             CardCollection list = CardUtil.getValidCardsToTarget(sa);
+
+            Card comboPartner = CubeComboAi.copyPartner(aiPlayer, sa);
+            if (comboPartner != null && list.contains(comboPartner)) {
+                if (CubeComboAi.selectSingleTarget(sa, comboPartner)) return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+            }
 
             if (aiLogic.equals("Different")) {
                 // TODO: possibly improve the check, currently only checks if the name is the same

@@ -190,6 +190,7 @@ public class ChangeZoneAi extends SpellAbilityAi {
      */
     @Override
     public AiAbilityDecision chkDrawback(Player aiPlayer, SpellAbility sa) {
+        if (CubeComboAi.selectBlinkSource(aiPlayer, sa)) return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         if (sa.isHidden()) {
             return hiddenOriginPlayDrawbackAI(aiPlayer, sa);
         }
@@ -209,6 +210,9 @@ public class ChangeZoneAi extends SpellAbilityAi {
      */
     @Override
     protected AiAbilityDecision doTriggerNoCost(Player aiPlayer, SpellAbility sa, boolean mandatory) {
+        if (aiPlayer.getController() instanceof forge.ai.CubeComboPlayerController combo && combo.chooseKittenBlink(sa))
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        if (CubeComboAi.selectBlinkSource(aiPlayer, sa)) return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         String aiLogic = sa.getParamOrDefault("AILogic", "");
 
         if (sa.isReplacementAbility() && "Command".equals(sa.getParam("Destination")) && "ReplacedCard".equals(sa.getParam("Defined"))) {
@@ -1474,6 +1478,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
         if (fetchList.isEmpty()) {
             return null;
         }
+        if (destination == ZoneType.Hand && origin.contains(ZoneType.Library) && player == decider) {
+            Card comboPartner = CubeComboAi.chooseTutorPartner(player, sa, fetchList);
+            if (comboPartner != null) return comboPartner;
+        }
         List<String> keyCards = player.getRegisteredPlayer().getDeck().getKeyCards();
         String position = sa.getParamOrDefault("LibraryPosition", null);
         // Focus on the keycards I don't already have access to
@@ -1924,11 +1932,18 @@ public class ChangeZoneAi extends SpellAbilityAi {
                 scanList.addAll(aiPlayer.getCardsIn(ZoneType.Library));
                 scanList.addAll(aiPlayer.getCardsIn(ZoneType.Hand));
             } else if (logic.endsWith("OppType")) {
+                if (forge.ai.AiKnownCardObservations.enabled(aiPlayer)) {
+                    // Closed decklists: use observed cards, never the unseen
+                    // remainder inferred from the submitted opponent deck.
+                    for (Player opponent : aiPlayer.getOpponents())
+                        scanList.addAll(forge.ai.AiKnownCardObservations.cardsKnownTo(aiPlayer, opponent));
+                } else {
                 // this assumes that the deck list is known to the AI before the match starts,
                 // so it's possible to figure out what remains in library/hand if you know what's
                 // in graveyard, exile, etc.
                 scanList.addAll(aiPlayer.getOpponents().getCardsIn(ZoneType.Library));
                 scanList.addAll(aiPlayer.getOpponents().getCardsIn(ZoneType.Hand));
+                }
             }
 
             if (logic.contains("NonLand")) {

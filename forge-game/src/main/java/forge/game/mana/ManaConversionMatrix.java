@@ -18,6 +18,20 @@ public class ManaConversionMatrix {
         return snowForColor;
     }
 
+    /** Exact value snapshot for speculative AI cost checks. Keep conversion and
+     * restriction separate: copying only their effective AND loses information. */
+    public ManaConversionMatrix copyConversionState() {
+        ManaConversionMatrix result = new ManaConversionMatrix();
+        result.restoreConversionState(this);
+        return result;
+    }
+
+    public void restoreConversionState(ManaConversionMatrix snapshot) {
+        System.arraycopy(snapshot.colorConversionMatrix, 0, colorConversionMatrix, 0, colorConversionMatrix.length);
+        System.arraycopy(snapshot.colorRestrictionMatrix, 0, colorRestrictionMatrix, 0, colorRestrictionMatrix.length);
+        snowForColor = snapshot.snowForColor;
+    }
+
     public void setSnowForColor(boolean value) {
         snowForColor = value;
     }

@@ -91,7 +91,7 @@ public abstract class SpellAbilityAi {
             }
         } else if (!checkPhaseRestrictions(ai, sa, ai.getGame().getPhaseHandler())) {
             return new AiAbilityDecision(0, AiPlayDecision.MissingPhaseRestrictions);
-        } else if (ComputerUtil.preventRunAwayActivations(sa)) {
+        } else if (!CubeComboAi.needsMoreCopies(ai, sa) && ComputerUtil.preventRunAwayActivations(sa)) {
             return new AiAbilityDecision(0, AiPlayDecision.StopRunawayActivations);
         }
 

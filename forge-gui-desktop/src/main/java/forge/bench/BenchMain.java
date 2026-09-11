@@ -124,6 +124,12 @@ public final class BenchMain {
         final int timeoutSec = cfg.has("timeoutSec") ? cfg.get("timeoutSec").getAsInt() : 120;
         final boolean useSimulation = cfg.has("useSimulation") && cfg.get("useSimulation").getAsBoolean();
         final String aiProfile = cfg.has("aiProfile") ? cfg.get("aiProfile").getAsString() : "Default";
+        final JsonElement informationSetting = cfg.get("aiInformationPolicy");
+        if (informationSetting != null && (!informationSetting.isJsonPrimitive()
+                || !informationSetting.getAsJsonPrimitive().isString()))
+            throw new IllegalArgumentException("aiInformationPolicy must be an explicit version string");
+        final GameRules.AiInformationPolicy informationPolicy = GameRules.AiInformationPolicy.parse(
+            informationSetting == null ? "stock-default-v1" : informationSetting.getAsString());
 
         // ---------------------------------------------------------------- from-frame
         // A frame is a mid-game position exported by mtgx (tools/forge/from-frame.mjs) in
@@ -205,6 +211,9 @@ public final class BenchMain {
             System.exit(2);
             return;
         }
+        final Set<Integer> cubeComboSeats = cubeComboSeats(cfg, deckPaths.size(), useSimulation, aiProfile, informationPolicy);
+        final JsonArray cubeComboSeatIds = new JsonArray();
+        for (int seat : cubeComboSeats) cubeComboSeatIds.add(seat);
         boolean auditMenuProbe = false;
         for (int seat = 0; seat < deckPaths.size(); seat++) {
             final BenchSession.Mode mode = BenchSession.Mode.parse(seatMode(cfg, seat));
@@ -281,11 +290,18 @@ public final class BenchMain {
         hello.addProperty("paymentControl", "host-complete-witness");
         hello.addProperty("privateRngAuditVersion", 2);
         hello.addProperty("privateActionAuditVersion", 1);
+        hello.addProperty("targetAllocationVersion", "host-explicit-divide-v1");
+        hello.addProperty("stackIdentityVersion", "host-stack-instance-v1");
+        hello.addProperty("priorityStackTargetsVersion", PriorityStackTargetDomain.VERSION);
+        hello.addProperty("priorityBoardTargetsVersion", PriorityBoardTargetDomain.VERSION);
         // Explicit identity: a diagnostic no-op run is never a strength panel.
         hello.addProperty("auditMenuProbe", auditMenuProbe);
         hello.addProperty("forgeCommit", forgeCommit());
         hello.addProperty("forgeVersion", BuildInfo.getVersionString());
         hello.addProperty("aiProfile", aiProfile);
+        hello.addProperty("aiInformationPolicy", informationPolicy.id());
+        hello.addProperty("cubeComboPolicyVersion", forge.ai.CubeComboAi.VERSION);
+        hello.add("cubeComboSeats", cubeComboSeatIds);
         hello.addProperty("seed", seed);
         hello.addProperty("games", gameCount);
         hello.addProperty("useSimulation", useSimulation);
@@ -343,7 +359,8 @@ public final class BenchMain {
                     ? Sets.newHashSet(AIOption.USE_FULL_SIMULATION) : null;
             final LobbyPlayer lp;
             if ("forge".equalsIgnoreCase(modeStr)) {
-                lp = GamePlayerUtil.createAiPlayer(name, i, 0, options, aiProfile);
+                lp = cubeComboSeats.contains(i) ? new forge.ai.LobbyPlayerCubeComboAi(name)
+                        : GamePlayerUtil.createAiPlayer(name, i, 0, options, aiProfile);
             } else {
                 final LobbyPlayerBridge b = new LobbyPlayerBridge(name, options, session,
                         BenchSession.Mode.parse(modeStr), i);
@@ -360,6 +377,8 @@ public final class BenchMain {
         }
         final JsonObject seatInfo = new JsonObject();
         seatInfo.addProperty("type", "seats");
+        seatInfo.addProperty("cubeComboPolicyVersion", forge.ai.CubeComboAi.VERSION);
+        seatInfo.add("cubeComboSeats", cubeComboSeatIds);
         seatInfo.add("simulationSeats", simulationSeats);
         seatInfo.addProperty("aiCanUseTimeout", aiCanUseTimeout);
         seatInfo.addProperty("aiTimeoutSec", aiTimeoutSec);
@@ -369,6 +388,11 @@ public final class BenchMain {
         ch.send(seatInfo);
 
         final GameRules rules = new GameRules(GameType.Constructed);
+        rules.setAiInformationPolicy(informationPolicy);
+        // Explicit for BOTH seats, regardless of the selected AI profile.
+        // Player.shuffle supplies the only random permutation; no mana weaving.
+        rules.setAllowCheatShuffle(false);
+        configureCombatDamageAudit(rules, session);
         rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
         rules.setSimTimeout(timeoutSec);
 
@@ -500,6 +524,9 @@ public final class BenchMain {
             final JsonObject result = new JsonObject();
             result.addProperty("type", "result");
             result.addProperty("game", gameId);
+            result.addProperty("aiInformationPolicy", game.getRules().getAiInformationPolicy().id());
+            result.addProperty("cubeComboPolicyVersion", forge.ai.CubeComboAi.VERSION);
+            result.add("cubeComboSeats", cubeComboSeatIds);
             final JsonObject outcome = new JsonObject();
             final GameOutcome go = game.getOutcome();
             int winner = -1;
@@ -556,6 +583,8 @@ public final class BenchMain {
             outcome.addProperty("turns", turns);
             outcome.addProperty("wallMs", wallMs);
             outcome.addProperty("events", emitter.emitted());
+            BenchActionAudit.finishGame(game, session);
+            guardIntegrityOutcome(session, game, outcome);
             result.add("outcome", outcome);
 
             final JsonObject counts = new JsonObject();
@@ -563,7 +592,6 @@ public final class BenchMain {
                 counts.add(String.valueOf(b.getSeat()), b.getCounters().toJson());
             }
             result.add("delegationCounts", counts);
-            BenchActionAudit.finishGame(game);
             ch.send(result);
         }
 
@@ -571,6 +599,56 @@ public final class BenchMain {
         bye.addProperty("type", "bye");
         ch.send(bye);
         System.exit(0);
+    }
+
+    /** Explicit per-seat identity, never a silent global replacement for Default. */
+    static Set<Integer> cubeComboSeats(JsonObject cfg, int seatCount, boolean useSimulation,
+                                      String profile, GameRules.AiInformationPolicy informationPolicy) {
+        final Set<Integer> selected = new java.util.TreeSet<>();
+        if (!cfg.has("cubeComboSeats")) return selected;
+        JsonElement setting = cfg.get("cubeComboSeats");
+        if (!setting.isJsonArray()) throw new IllegalArgumentException("cubeComboSeats must be an integer array");
+        for (JsonElement entry : setting.getAsJsonArray()) {
+            if (!entry.isJsonPrimitive() || !entry.getAsJsonPrimitive().isNumber())
+                throw new IllegalArgumentException("cubeComboSeats entries must be integers");
+            final int seat;
+            try { seat = entry.getAsBigDecimal().intValueExact(); }
+            catch (ArithmeticException | NumberFormatException failure) {
+                throw new IllegalArgumentException("cubeComboSeats entries must be exact integers", failure);
+            }
+            if (seat < 0 || seat >= seatCount || !selected.add(seat))
+                throw new IllegalArgumentException("cubeComboSeats must be unique valid seat indices");
+            if (!"forge".equalsIgnoreCase(seatMode(cfg, seat)) || seatUsesSimulation(cfg, seat, useSimulation)
+                    || !"Default".equals(profile))
+                throw new IllegalArgumentException("cubeComboSeats requires native Default, without simulation");
+        }
+        if (!selected.isEmpty() && informationPolicy != GameRules.AiInformationPolicy.CLOSED_REPAIR)
+            throw new IllegalArgumentException("cubeComboSeats requires closed-decklist-repair-v1");
+        return selected;
+    }
+
+    /** Same rules validation for both seats, limited to the exact live game.
+     * Search copies retain their native behavior and cannot poison live results. */
+    static void configureCombatDamageAudit(final GameRules rules, final BenchSession session) {
+        rules.setCombatDamageAudit(new GameRules.CombatDamageAudit() {
+            @Override public boolean appliesTo(Game game) { return game == session.getLiveGame(); }
+            @Override public void failed(Game game, Throwable failure) {
+                session.noteIntegrityFailure(game, -1, "combat damage aggregate", failure);
+            }
+        });
+    }
+
+    /** A swallowed controller exception is still an instrument failure, never a result. */
+    static void guardIntegrityOutcome(final BenchSession session, final Game game, final JsonObject outcome) {
+        final String failure = session.integrityFailure(game);
+        if (failure == null) return;
+        if (outcome.has("aborted")) outcome.add("priorAborted", outcome.get("aborted"));
+        if (outcome.has("error")) outcome.add("priorError", outcome.get("error"));
+        outcome.addProperty("crashed", true);
+        outcome.addProperty("aborted", "InstrumentError");
+        outcome.addProperty("reason", "InstrumentError");
+        outcome.addProperty("error", failure);
+        // Retain Forge's winner/winCondition for diagnosis, not scoring.
     }
 
     /**
