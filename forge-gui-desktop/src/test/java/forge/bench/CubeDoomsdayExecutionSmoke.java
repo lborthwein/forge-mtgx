@@ -313,6 +313,41 @@ public final class CubeDoomsdayExecutionSmoke {
     }
 
     private static Game fixtureGame(List<Placement> own, List<Placement> other, int seat) {
+        return fixtureGame(own, other, seat, null);
+    }
+
+    /** Deterministic adversarial opponent for removal tests only. The test
+     * chooses a response; Forge still grants priority, pays costs, checks the
+     * target and resolves the spell. This is NOT Default opponent behavior. */
+    private static forge.ai.LobbyPlayerAi removalOpponent(String responseTo) {
+        var lobby = new forge.ai.LobbyPlayerAi("Scripted-removal", null) {
+            @Override public Player createIngamePlayer(Game game, int id) {
+                Player responder = new Player(getName(), game, id);
+                responder.setFirstController(new forge.ai.PlayerControllerAi(game, responder, this) {
+                    @Override public List<forge.game.spellability.SpellAbility> chooseSpellAbilityToPlay() {
+                        if (game.getStack().isEmpty() || !game.getStack().peekAbility().getHostCard().getName().equals(responseTo)) return null;
+                        for (Card source : responder.getCardsIn(ZoneType.Hand)) if (source.getName().equals("Dismember")) {
+                            for (var original : source.getSpellAbilities()) {
+                                var removal = original.copy(responder);
+                                for (Player opponent : responder.getOpponents()) for (Card target : opponent.getCardsIn(ZoneType.Battlefield))
+                                    if (target.getName().equals("Jace, Vryn's Prodigy") && removal.canTarget(target)) {
+                                        removal.resetTargets(); removal.getTargets().add(target);
+                                        if (removal.isTargetNumberValid() && forge.ai.CubeComboAi.canPlayNative(removal, responder)
+                                                && forge.ai.CubeComboAi.canPayCost(removal, responder, false)) return List.of(removal);
+                                    }
+                            }
+                        }
+                        return null;
+                    }
+                });
+                return responder;
+            }
+        };
+        lobby.setAiProfile("Default");
+        return lobby;
+    }
+
+    private static Game fixtureGame(List<Placement> own, List<Placement> other, int seat, String removalResponseTo) {
         List<List<Placement>> layouts = seat == 0 ? List.of(own, other) : List.of(other, own);
         List<RegisteredPlayer> players = new ArrayList<>();
         for (int s = 0; s < 2; s++) {
@@ -324,6 +359,7 @@ public final class CubeDoomsdayExecutionSmoke {
             if (deck.getMain().countAll() != 40) throw new AssertionError("Cold fixture must register forty");
             players.add(new RegisteredPlayer(deck).setPlayer(s == seat && improved
                     ? new forge.ai.LobbyPlayerCubeComboAi("Combo-" + s)
+                    : s != seat && removalResponseTo != null ? removalOpponent(removalResponseTo)
                     : GamePlayerUtil.createAiPlayer("Default-" + s, s, 0, null, "Default")));
         }
         GameRules rules = new GameRules(GameType.Constructed);
@@ -474,6 +510,79 @@ public final class CubeDoomsdayExecutionSmoke {
         }
     }
 
+    /** Five-card pile, direct alternate-cost Gush, then a public-devotion
+     * Oracle finish. No Star/Recall and no host-specified game actions. */
+    private static void devotionRun(int seat, String permanent, boolean oracleInHand, String blocker) {
+        List<Placement> own=new ArrayList<>(),other=new ArrayList<>();
+        own.add(new Placement("Doomsday",ZoneType.Hand,false));
+        own.add(new Placement("Gush",blocker.equals("gush-exiled")?ZoneType.Exile:ZoneType.Hand,false));
+        for(int i=0;i<3;i++)own.add(new Placement("Swamp",ZoneType.Battlefield,false));
+        own.add(new Placement("Island",ZoneType.Battlefield,false));
+        own.add(new Placement(blocker.equals("one-island")?"Mox Sapphire":"Island",ZoneType.Battlefield,blocker.equals("short-blue")));
+        // Removal controls isolate losing devotion, without Jace looting a
+        // third card in response and thereby creating a different legal win.
+        own.add(new Placement(blocker.equals("no-devotion")?"Elvish Mystic":permanent,ZoneType.Battlefield,blocker.startsWith("remove-devotion")));
+        boolean oracleExiled=blocker.equals("oracle-exiled");
+        own.add(new Placement("Thassa's Oracle",oracleExiled?ZoneType.Exile:oracleInHand?ZoneType.Hand:ZoneType.Library,false));
+        for(int i=0;i<(oracleExiled||oracleInHand?25:24);i++)own.add(new Placement("Forest",ZoneType.Library,false));
+        while(own.size()<40)own.add(new Placement("Forest",ZoneType.Exile,false));
+        if(blocker.equals("draw-limit"))other.add(new Placement("Narset, Parter of Veils",ZoneType.Battlefield,false));
+        if(blocker.equals("cannot-win"))other.add(new Placement("Platinum Angel",ZoneType.Battlefield,false));
+        if(blocker.equals("counterspell")) {
+            other.add(new Placement("Counterspell",ZoneType.Hand,false));
+            other.add(new Placement("Island",ZoneType.Battlefield,false));
+            other.add(new Placement("Island",ZoneType.Battlefield,false));
+        }
+        if(blocker.startsWith("remove-devotion")) {
+            other.add(new Placement("Dismember",ZoneType.Hand,false));
+            for(int i=0;i<3;i++)other.add(new Placement("Swamp",ZoneType.Battlefield,false));
+        }
+        while(other.size()<40)other.add(new Placement("Forest",ZoneType.Library,false));
+        String removalResponseTo=blocker.equals("remove-devotion-doom")?"Doomsday":blocker.equals("remove-devotion-gush")?"Gush":null;
+        Game game=fixtureGame(own,other,seat,removalResponseTo);Player p=game.getPlayers().get(seat),opponent=game.getPlayers().get(1-seat);
+        Card devotionPermanent=p.getCardsIn(ZoneType.Battlefield).stream().filter(c->c.getName().equals(permanent)).findFirst().orElse(null);
+        if(blocker.equals("facedown-devotion"))devotionPermanent.turnFaceDown(true);
+        if(blocker.equals("island-devotion")) { devotionPermanent.addType("Land");devotionPermanent.addType("Island"); }
+        game.getAction().checkStateEffects(true);game.getTriggerHandler().resetActiveTriggers();
+        BenchRandomAudit.install(0); // Fixed constructed fixture, not a sampled opening.
+        var proposed=new forge.ai.CubeDoomsdayPlan(p).nextAction();
+        System.out.println("DEVOTION_PROPOSAL seat="+seat+" blocker="+blocker+" action="+(proposed==null?"none":proposed.getHostCard().getName()));
+        if(improved&&blocker.equals("none")&&(proposed==null||!proposed.getHostCard().getName().equals("Doomsday")))
+            throw new AssertionError("Missing direct Gush Doomsday plan");
+        if(improved&&!blocker.equals("none")&&!blocker.equals("counterspell")&&!blocker.startsWith("remove-devotion")&&proposed!=null)
+            throw new AssertionError("Direct Gush plan committed despite "+blocker);
+        int steps=0;boolean doom=false,gush=false,pile=false,alternate=false,removedDevotion=false;int beforeOracle=-1;
+        while(!game.isGameOver()&&game.getPhaseHandler().getTurn()==1&&steps++<STEP_LIMIT) {
+            game.getPhaseHandler().mainLoopStep();
+            doom|=has(p,ZoneType.Graveyard,"Doomsday");
+            pile|=doom&&p.getCardsIn(ZoneType.Library).size()==5;
+            gush|=has(p,ZoneType.Graveyard,"Gush");
+            removedDevotion|=has(opponent,ZoneType.Graveyard,"Dismember")&&has(p,ZoneType.Graveyard,permanent);
+            if(!game.getStack().isEmpty()) {
+                var sa=game.getStack().peekAbility();
+                if(sa.getHostCard().getName().equals("Gush")) {
+                    alternate|=sa.getPayCosts().getCostParts().stream().anyMatch(cost->cost instanceof forge.game.cost.CostReturn);
+                    if(improved&&doom&&blocker.equals("none")&&p.getManaPool().getAmountOfColor(forge.card.MagicColor.BLUE)<2)
+                        throw new AssertionError("Direct Gush lost floating UU");
+                }
+                if(sa.isSpell()&&sa.getHostCard().getName().equals("Thassa's Oracle"))beforeOracle=p.getCardsIn(ZoneType.Library).size();
+            }
+        }
+        boolean oracleWin=p.getOutcome()!=null&&"Thassa's Oracle".equals(p.getOutcome().altWinSourceName);
+        System.out.println("DEVOTION_RESULT improved="+improved+" seat="+seat+" main2="+main2+" permanent="+permanent.replace(' ','_')
+                +" oracleInHand="+oracleInHand+" blocker="+blocker+" doom="+doom+" pile="+pile+" gush="+gush+" alternate="+alternate
+                +" libraryBeforeOracle="+beforeOracle+" won="+p.hasWon()+" oracleWin="+oracleWin+" steps="+steps
+                +" removedDevotion="+removedDevotion+" opponent="+(removalResponseTo==null?"Default":"scripted-removal-on-"+removalResponseTo));
+        if(steps>=STEP_LIMIT)throw new AssertionError("Direct Gush step budget");
+        if(improved&&blocker.equals("none")&&!(doom&&pile&&gush&&alternate&&oracleWin&&beforeOracle==3))
+            throw new AssertionError("Native direct Gush/public-devotion route not executed");
+        if(!blocker.equals("none")&&oracleWin)throw new AssertionError("Unexpected direct Gush control win: "+blocker);
+        if(improved&&blocker.equals("counterspell")&&!has(opponent,ZoneType.Graveyard,"Counterspell"))
+            throw new AssertionError("Counterspell control did not interact");
+        if(improved&&blocker.startsWith("remove-devotion")&&!removedDevotion)
+            throw new AssertionError("Devotion removal control did not interact");
+    }
+
     public static void main(final String[] args) {
         try {
             improved = args.length > 1 && args[1].equals("improved");
@@ -490,6 +599,19 @@ public final class CubeDoomsdayExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
+            if(suite.equals("devotion")) {
+                for(boolean second:new boolean[]{false,true}) {
+                    main2=second;
+                    for(int seat=0;seat<2;seat++) {
+                        for(String permanent:List.of("Jace, Vryn's Prodigy","Faerie Mastermind","Narset, Parter of Veils"))
+                            for(boolean hand:new boolean[]{false,true})devotionRun(seat,permanent,hand,"none");
+                        for(String blocker:List.of("no-devotion","one-island","short-blue","gush-exiled","oracle-exiled","draw-limit","cannot-win","counterspell",
+                                "facedown-devotion","island-devotion","remove-devotion-doom","remove-devotion-gush"))
+                            devotionRun(seat,"Jace, Vryn's Prodigy",false,blocker);
+                    }
+                }
+                System.out.println("DEVOTION_SUITE_COMPLETE");return;
+            }
             if (suite.startsWith("availability")) {
                 for(int seat=0;seat<2;seat++) for(String plan:List.of("doomsday","kitten","recovery"))
                     for(String variant:List.of("available","oracle-visible-exile","oracle-facedown-bf","oracle-facedown-exile",

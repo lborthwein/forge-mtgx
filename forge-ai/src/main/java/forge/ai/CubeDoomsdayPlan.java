@@ -14,7 +14,7 @@ import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
 import java.util.function.Supplier;
 
-/** Native Doomsday plans using Recall or Chromatic Star/Gush to reach Oracle. The search and
+/** Native Doomsday plans using Recall, Star/Gush, or Gush with public devotion to reach Oracle. The search and
  * ordering hooks see only choices the resolving spell legally exposes. Other
  * piles are not yet supported by this planner. */
 public final class CubeDoomsdayPlan {
@@ -130,8 +130,28 @@ public final class CubeDoomsdayPlan {
         ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command, ZoneType.Stack
     };
 
+    /** Oracle adds UU. Count only current public mana symbols, not a card's
+     * printed back face or hidden identity. Before Gush, conservatively exclude
+     * every returnable Island, and sources our blue float could sacrifice. The
+     * threshold is recomputed after responses rather than cached with the pile. */
+    private int oracleThreshold(boolean beforeGush) {
+        int devotion = 2 + player.getDevotionMod();
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (beforeGush && (card.getType().hasSubtype("Island")
+                    || card.getManaAbilities().stream().anyMatch(sa -> sa.getPayCosts().getCostParts().stream()
+                        .anyMatch(cost -> cost instanceof forge.game.cost.CostSacrifice)))) continue;
+            for (var shard : card.getManaCost()) if (shard.isColor(MagicColor.BLUE)) devotion++;
+        }
+        return Math.max(0, devotion);
+    }
+
+    private boolean gushReachesOracle(int librarySize) {
+        return librarySize >= 2 && librarySize <= 5 && librarySize - 2 <= oracleThreshold(true)
+                && player.canDrawAmount(2);
+    }
+
     private SpellAbility advanceGush(int librarySize) {
-        SpellAbility gush = librarySize >= 2 && librarySize <= 4 && player.canDrawAmount(2) ? alternateGush() : null;
+        SpellAbility gush = gushReachesOracle(librarySize) ? alternateGush() : null;
         if (gush == null) { stage = Stage.NONE; return null; }
         if (player.getManaPool().getAmountOfColor(MagicColor.BLUE) < 2) {
             SpellAbility mana = floatBlue();
@@ -149,14 +169,14 @@ public final class CubeDoomsdayPlan {
         if (librarySize > 5 || !reachableByDrawing("Thassa's Oracle")) return null;
         gushRoute = false;
         reservedStar = null;
-        SpellAbility oracle = librarySize <= 2 ? playable("Thassa's Oracle") : null;
+        SpellAbility oracle = librarySize <= oracleThreshold(false) ? playable("Thassa's Oracle") : null;
         if (oracle != null) { stage = Stage.ORACLE; return oracle; }
         SpellAbility recall = librarySize >= 3 && player.canDrawAmount(3) ? playable("Ancestral Recall") : null;
         if (recall != null && CubeComboAi.canPayCost(new Cost("U U U", false), recall, player, false)) {
             stage = Stage.DRAW;
             return recall;
         }
-        SpellAbility gush = librarySize >= 2 && librarySize <= 4 && player.canDrawAmount(2) ? alternateGush() : null;
+        SpellAbility gush = gushReachesOracle(librarySize) ? alternateGush() : null;
         if (gush != null && CubeComboAi.canPayCost(new Cost("U U", false), gush, player, false)) {
             gushRoute = true;
             stage = Stage.STAR;
@@ -203,6 +223,10 @@ public final class CubeDoomsdayPlan {
                 stage = Stage.NONE; return null;
             }
             if (gushRoute) {
+                if (reservedStar == null) {
+                    stage = Stage.STAR;
+                    return advanceGush(librarySize);
+                }
                 SpellAbility star = player.canDrawAmount(3) && librarySize == 5 ? starAbility() : null;
                 if (star != null) { stage = Stage.STAR; return star; }
                 stage = Stage.NONE; return null;
@@ -218,7 +242,7 @@ public final class CubeDoomsdayPlan {
             return advanceGush(librarySize);
         }
         if (stage == Stage.DRAW) {
-            SpellAbility oracle = librarySize <= 2 ? playable("Thassa's Oracle") : null;
+            SpellAbility oracle = librarySize <= oracleThreshold(false) ? playable("Thassa's Oracle") : null;
             stage = oracle == null ? Stage.NONE : Stage.ORACLE;
             return oracle;
         }
@@ -232,22 +256,25 @@ public final class CubeDoomsdayPlan {
             return recovery;
         }
         // No unnecessary Doomsday on a library already small enough for the draw.
-        if (player.getLife() <= 1 || !player.canDrawAmount(3)
-                || !availableInOwnDeck("Thassa's Oracle")) return null;
+        if (player.getLife() <= 1 || !availableInOwnDeck("Thassa's Oracle")) return null;
         gushRoute = false; reservedStar = null;
         SpellAbility doom = playable("Doomsday");
         if (doom == null) return null;
-        if (inHand("Ancestral Recall") == null
+        if (!player.canDrawAmount(3) || inHand("Ancestral Recall") == null
                 || !CubeComboAi.canPayCost(new Cost("B B B U U U", false), doom, player, false)) {
             if (!availableInOwnDeck("Gush") || player.getCardsIn(ZoneType.Battlefield).stream()
                     .filter(c -> c.getType().hasSubtype("Island")).count() < 2) return null;
-            for (Card card : player.getCardsIn(ZoneType.Battlefield)) if (card.getName().equals("Chromatic Star")) {
-                reservedStar = card;
-                if (starAbility() != null) break;
-                reservedStar = null;
-            }
-            if (reservedStar == null) return null;
             gushRoute = true;
+            boolean direct = gushReachesOracle(5) && alternateGush() != null;
+            if (!direct) {
+                if (!player.canDrawAmount(3)) { gushRoute = false; return null; }
+                for (Card card : player.getCardsIn(ZoneType.Battlefield)) if (card.getName().equals("Chromatic Star")) {
+                    reservedStar = card;
+                    if (starAbility() != null) break;
+                    reservedStar = null;
+                }
+                if (reservedStar == null) { gushRoute = false; return null; }
+            }
             if (!withStarReserved(() -> CubeComboAi.canPayCost(new Cost("B B B U U", false), doom, player, false))) {
                 gushRoute = false; reservedStar = null; return null;
             }
