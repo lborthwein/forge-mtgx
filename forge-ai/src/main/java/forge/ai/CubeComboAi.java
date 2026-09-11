@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v40";
+    public static final String VERSION = "cube-combo-execution-v41";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -226,8 +226,15 @@ public final class CubeComboAi {
      * during a native search of our own library, using its legal fetch list.
      * No opponent decklist or future library order is inspected. */
     public static Card chooseTutorPartner(Player player, SpellAbility tutor, CardCollection legalChoices) {
-        if (!enabled(player) || tutor.getActivatingPlayer() != player
-                || !player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)) return null;
+        if (!enabled(player) || tutor.getActivatingPlayer() != player) return null;
+        // Kiki's haste route can finish this combat; the new Thopter bodies
+        // normally need the next turn. Preserve the available faster route.
+        Card immediate = chooseKikiTutorPartner(player, legalChoices);
+        return immediate != null ? immediate : CubeThopterPlan.chooseAssemblyCard(player, legalChoices);
+    }
+
+    private static Card chooseKikiTutorPartner(Player player, CardCollection legalChoices) {
+        if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)) return null;
         boolean haveKiki = false, havePartner = false;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown()) continue;
@@ -262,7 +269,7 @@ public final class CubeComboAi {
      * during Ponder resolution. Use native static restrictions and native cost
      * feasibility consistently for both hand alternatives and revealed cards.
      * The real later cast still passes the full native legality/payment path. */
-    private static boolean feasiblePartnerAfterSelection(Player player, Card card) {
+    static boolean feasiblePartnerAfterSelection(Player player, Card card) {
         SpellAbility original=card.getSpellPermanent();
         if(original==null)return false;
         SpellAbility spell=original.copy(player);
@@ -283,7 +290,9 @@ public final class CubeComboAi {
      * and non-mana costs need a richer allocation forecast; decline those
      * plans rather than counting the same resources twice. */
     public static TutorPlan planTutor(Player player) {
-        if (!enabled(player) || !player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)
+        boolean main1 = player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player);
+        String thopterMissing = CubeThopterPlan.missingPiece(player);
+        if (!enabled(player) || !(main1 || thopterMissing != null && player.getGame().getPhaseHandler().is(PhaseType.MAIN2, player))
                 || !player.getGame().getStack().isEmpty() || !player.getManaPool().isEmpty()
                 || player.cantWin() || player.hasKeyword("LimitSearchLibrary")) return null;
         for (Card hand : player.getCardsIn(ZoneType.Hand)) {
@@ -299,12 +308,13 @@ public final class CubeComboAi {
                         || !canPlayNative(tutor, player) || !player.canSearchLibraryWith(tutor, player)) continue;
                 for (var entry : player.getRegisteredPlayer().getDeck().getMain()) {
                     String name = entry.getKey().getName();
-                    if (!java.util.Set.of("Kiki-Jiki, Mirror Breaker", "Pestermite", "Deceiver Exarch",
-                            "Restoration Angel", "Zealous Conscripts").contains(name)
+                    if (!(name.equals(thopterMissing) || main1 && java.util.Set.of("Kiki-Jiki, Mirror Breaker", "Pestermite", "Deceiver Exarch",
+                            "Restoration Angel", "Zealous Conscripts").contains(name))
                             || !ownCopyOutside(player, name, ZoneType.Hand, ZoneType.Battlefield,
                                 ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command, ZoneType.Stack)) continue;
                     // A detached prototype: no game ID allocation or zone insertion.
                     Card forecast = forge.game.card.CardFactory.getCard(entry.getKey(), player, -1, player.getGame());
+                    if(name.equals(thopterMissing))CubeThopterPlan.addAssemblyPreviewRules(forecast,entry.getKey());
                     forecast.setZone(player.getZone(ZoneType.Library));
                     if (!forecast.isValid(tutor.getParamOrDefault("ChangeType", "Card").split(","), player, hand, tutor)
                             || chooseTutorPartner(player, tutor, new CardCollection(forecast)) == null) continue;

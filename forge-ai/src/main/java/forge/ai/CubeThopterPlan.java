@@ -6,10 +6,13 @@ import forge.game.ability.AbilityKey;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.card.CardFactory;
+import forge.game.card.CardCopyService;
+import forge.game.card.CardCollection;
 import forge.game.cost.CostSacrifice;
 import forge.game.cost.CostTapType;
 import forge.game.cost.PaymentDecision;
 import forge.game.player.Player;
+import forge.game.phase.PhaseType;
 import forge.game.spellability.SpellAbility;
 import forge.game.staticability.StaticAbilityDisableTriggers;
 import forge.game.staticability.StaticAbilityMode;
@@ -87,6 +90,110 @@ public final class CubeThopterPlan {
         return false;
     }
 
+    /** Exactly one missing piece, from our current visible battlefield. */
+    static String missingPiece(Player player) {
+        CubeThopterPlan plan=new CubeThopterPlan(player);
+        String missing=null;
+        for(String name:java.util.List.of(URZA,FOUNDRY,SWORD))if(plan.find(name)==null) {
+            if(missing!=null)return null;
+            missing=name;
+        }
+        return missing;
+    }
+
+    /** Negative-ID CardFactory previews omit intrinsic scripts. Restore just
+     * the printed variables, abilities and triggers this forecast inspects,
+     * from our registered card's public rules, using native parsers. This is
+     * still detached: never insert it into a zone or execute its abilities. */
+    static void addAssemblyPreviewRules(Card card,forge.item.PaperCard paper) {
+        if(card.getId()!=-1 || !java.util.List.of(URZA,FOUNDRY,SWORD).contains(card.getName()))
+            throw new IllegalArgumentException("Expected a detached Thopter assembly preview");
+        var face=paper.getRules().getMainPart();
+        for(var variable:face.getVariables())card.setSVar(variable.getKey(),variable.getValue());
+        for(String trigger:face.getTriggers())card.addTrigger(forge.game.trigger.TriggerHandler.parseTrigger(trigger,card,true,card.getCurrentState()));
+        forge.game.card.CardFactoryUtil.addAbilityFactoryAbilities(card,face.getAbilities());
+    }
+
+    /** The selection caller supplies only the cards the effect legally reveals.
+     * This method never enumerates library contents or their order. */
+    static Card chooseAssemblyCard(Player player,CardCollection legalChoices) {
+        var phase=player.getGame().getPhaseHandler();
+        if(!(phase.is(PhaseType.MAIN1,player)||phase.is(PhaseType.MAIN2,player))||player.cantWin())return null;
+        String missing=missingPiece(player);
+        if(missing==null)return null;
+        CubeThopterPlan plan=new CubeThopterPlan(player);
+        for(Card hand:player.getCardsIn(ZoneType.Hand))
+            if(!hand.isFaceDown() && hand.getName().equals(missing)
+                    && CubeComboAi.feasiblePartnerAfterSelection(player,hand))return null;
+        for(Card choice:legalChoices)
+            if(choice.getOwner()==player && !choice.isFaceDown() && choice.isInZone(ZoneType.Library)
+                    && choice.getName().equals(missing)) {
+                boolean supported=plan.supportsAssembly(choice);
+                boolean feasible=supported && CubeComboAi.feasiblePartnerAfterSelection(player,choice);
+                if(feasible)return choice;
+            }
+        return null;
+    }
+
+    /** Public native restrictions on the completed engine, before spending a
+     * cast/selection on it. Detached LKI gives activation checks the future
+     * battlefield zone; actual casts/activations still pass full native gates. */
+    private boolean supportsAssembly(Card piece) {
+        Card urza=URZA.equals(piece.getName())?piece:find(URZA);
+        Card foundry=FOUNDRY.equals(piece.getName())?piece:find(FOUNDRY);
+        Card sword=SWORD.equals(piece.getName())?piece:find(SWORD);
+        if(urza==null || foundry==null || sword==null || !sword.isArtifact() || sword.isToken()
+                || !recursionAvailable(sword))return false;
+        SpellAbility mana=ability(urza,ApiType.Mana),make=ability(foundry,ApiType.Token);
+        if(mana==null || make==null || !TOKEN.equals(make.getParam("TokenScript")))return false;
+        Card futureSword=CardCopyService.getLKICopy(sword);
+        futureSword.setLastKnownZone(player.getZone(ZoneType.Battlefield));
+        // canBeSacrificedBy also requires a live card identity, so it cannot
+        // validate a detached future piece. Use the native static predicate
+        // here; actual execution still requires the complete live-card check.
+        for(Card source:player.getGame().getCardsIn(ZoneType.STATIC_ABILITIES_SOURCE_ZONES)) {
+            if(source.isFaceDown() || !source.getView().canBeShownTo(player.getView()))continue;
+            for(var st:source.getStaticAbilities())
+                if(st.checkConditions(StaticAbilityMode.CantSacrifice)
+                        && forge.game.staticability.StaticAbilityCantSacrifice.applyCantSacrificeAbility(st,futureSword,make,false))return false;
+        }
+        for(SpellAbility sa:java.util.List.of(mana,make)) {
+            Card future=CardCopyService.getLKICopy(sa.getHostCard());
+            future.setLastKnownZone(player.getZone(ZoneType.Battlefield));
+            if(sa.isSuppressed() || future.isDetained() || !sa.checkRestrictions(future,player))return false;
+            for(Card source:player.getGame().getCardsIn(java.util.List.of(ZoneType.Battlefield,ZoneType.Command))) {
+                if(source.isFaceDown())continue;
+                for(var st:source.getStaticAbilities())
+                    if(st.hasParam("RemoveAllAbilities") && st.checkConditions(StaticAbilityMode.Continuous)
+                            && st.matchesValidParam("Affected",future))return false;
+            }
+        }
+        var cost=ComputerUtilMana.calculateManaCost(make.getPayCosts(),make,player,true,0,false);
+        return cost.getConvertedManaCost()==1 && cost.getGenericManaAmount()==1
+                && mana.getPayCosts().getCostParts().size()==1
+                && mana.getPayCosts().getCostParts().get(0) instanceof CostTapType tap
+                && tap.getAbilityAmount(mana)==1 && "Artifact".equals(tap.getType());
+    }
+
+    private SpellAbility assembleFromHand() {
+        var phase=player.getGame().getPhaseHandler();
+        if(!(phase.is(PhaseType.MAIN1,player)||phase.is(PhaseType.MAIN2,player)))return null;
+        String missing=missingPiece(player);
+        if(missing==null)return null;
+        for(Card card:player.getCardsIn(ZoneType.Hand)) {
+            if(card.isFaceDown() || !card.getName().equals(missing) || !supportsAssembly(card))continue;
+            var original=card.getSpellPermanent();
+            if(original==null)continue;
+            SpellAbility cast=original.copy(player);
+            if(CubeComboAi.canPlayNative(cast,player) && CubeComboAi.canPayCost(cast,player,false)) {
+                selected=cast;actions++;
+                System.err.println("CUBE_THOPTER_ASSEMBLY select-hand card="+card.getName());
+                return cast;
+            }
+        }
+        return null;
+    }
+
     public SpellAbility nextAction() {
         var game=player.getGame();
         int currentTurn=game.getPhaseHandler().getTurn();
@@ -102,7 +209,8 @@ public final class CubeThopterPlan {
             }
         }
         Card urza=find(URZA),foundry=find(FOUNDRY),sword=find(SWORD);
-        if(urza==null || foundry==null || sword==null || !sword.isArtifact() || sword.isToken())return null;
+        if(urza==null || foundry==null || sword==null)return assembleFromHand();
+        if(!sword.isArtifact() || sword.isToken())return null;
         long budget=0;
         for(Player opponent:player.getOpponents())
             budget+=2L+Math.max(0,opponent.getLife())+opponent.getCreaturesInPlay().size();
@@ -159,6 +267,6 @@ public final class CubeThopterPlan {
         if(selected==null || turn!=player.getGame().getPhaseHandler().getTurn() || stack.isEmpty())return false;
         var top=stack.peekAbility();
         return top!=null && top.getActivatingPlayer()==player
-                && (FOUNDRY.equals(top.getHostCard().getName()) || SWORD.equals(top.getHostCard().getName()));
+                && (FOUNDRY.equals(top.getHostCard().getName()) || SWORD.equals(top.getHostCard().getName()) || URZA.equals(top.getHostCard().getName()));
     }
 }
