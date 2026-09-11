@@ -11,6 +11,7 @@ import forge.game.card.Card;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.RegisteredPlayer;
+import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
 import forge.gui.GuiBase;
 import forge.gui.interfaces.IGuiBase;
@@ -53,13 +54,69 @@ public final class CubeThopterExecutionSmoke {
             "hand2-urza-foundry:kiki-hand", "hand2-urza-foundry:missing-two", "hand3-all");
     // Guard negatives on the one-piece path: the plan must start and finish.
     private static final List<String> GUARD_NEGATIVES = List.of("hand-foundry:sigarda", "hand-foundry:yasharn-graveyard");
+    // v43: a public cast-count prohibition must rule the same-turn forecast out
+    // and finish through two-turn deployment (checkpoint-27-registration).
+    private static final List<String> ASSEMBLY2_FORECAST = List.of("hand2-urza-foundry:rule-of-law");
+    private static final String FABLED = "Fabled Passage";
+    // v43 defect control found by the v42 do-no-harm whole-game panel, game
+    // dnh-wide-mtgx-s3066-16701373-o0-treat-p0-r0: the plan guard rejected the
+    // ordinary AI's own land play. The three pieces sit in exile so no plan can
+    // engage and the only decision under test is Default's land drop.
+    private static final List<String> LAND_DROP = List.of("land-drop:fabled-passage", "land-drop:graveyard-mayplay");
+    // Exact reproduction of the panel condition: Forge logged
+    // "PhaseHandler: AI looped too much with: [Play land by Serra Paragon (1)]", i.e. the
+    // rejected ability was a MayPlay land ability granted by Serra Paragon's static, whose
+    // ValidAfterStack$ Spell.cmcLE3 is copied onto the land half of the permission. A
+    // LandAbility never matches "Spell", so isLegalAfterStack() is false for it while
+    // canPlay() - the only check Forge's own land path makes - is true.
+    private static final List<String> LAND_DROP_MAYPLAY = List.of("land-drop:graveyard-mayplay");
+
+    /** Diagnostic counters live in the policy class. Read and reset them
+     * reflectively so this one test source compiles and runs against either
+     * the candidate policy build or the older matched-control build. They are
+     * diagnostics: no decision reads them. */
+    private static final java.util.Map<String, Class<?>> DIAGNOSTICS = new java.util.LinkedHashMap<>();
+    static {
+        DIAGNOSTICS.put("assemblySelections", forge.ai.CubeThopterPlan.class);
+        DIAGNOSTICS.put("assemblySameTurnForecasts", forge.ai.CubeThopterPlan.class);
+        DIAGNOSTICS.put("assemblyPartialForecasts", forge.ai.CubeThopterPlan.class);
+        DIAGNOSTICS.put("guardRejections", forge.ai.CubeComboPlayerController.class);
+        DIAGNOSTICS.put("ordinaryGuardDisagreements", forge.ai.CubeComboPlayerController.class);
+    }
+    private static java.lang.reflect.Field diagnosticField(String name) {
+        try {
+            var field = DIAGNOSTICS.get(name).getDeclaredField(name);
+            field.setAccessible(true);
+            return field;
+        } catch (NoSuchFieldException absent) { return null; }
+    }
+    private static int diagnostic(String name) {
+        var field = diagnosticField(name);
+        if (field == null) throw new AssertionError("policy build exposes no diagnostic counter " + name);
+        try { return field.getInt(null); } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
+    }
+    private static void resetDiagnostics() {
+        for (String name : DIAGNOSTICS.keySet()) {
+            var field = diagnosticField(name);
+            if (field == null) continue;
+            try { field.setInt(null, 0); } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
+        }
+    }
 
     private static boolean assemblyBase(String base) {
         return ASSEMBLY.contains(base) || base.startsWith("hand2-") || base.equals("hand3-all");
     }
     private static boolean mustAssemble(String control) {
         return ASSEMBLY.contains(control) || ASSEMBLY2.contains(control) || ASSEMBLY2_VARIANTS.contains(control)
+                || ASSEMBLY2_FORECAST.contains(control)
                 || GUARD_NEGATIVES.contains(control) || variant(control).equals("lethal-board") || variant(control).equals("kiki-hand");
+    }
+    /** Cases whose registered win requires casting a missing piece from hand,
+     * so the plan must make at least one hand-assembly selection in play. */
+    private static boolean handAssemblySelector(String control) {
+        return ASSEMBLY.contains(control) && control.startsWith("hand-") || ASSEMBLY2.contains(control)
+                || ASSEMBLY2_VARIANTS.contains(control) || ASSEMBLY2_FORECAST.contains(control)
+                || GUARD_NEGATIVES.contains(control);
     }
     private static boolean blockedAssembly(String control) {
         return ASSEMBLY_CONTROLS.contains(control) || SACRIFICE_CONTROLS.contains(control)
@@ -99,6 +156,11 @@ public final class CubeThopterExecutionSmoke {
                     result.add(new Placement("Pestermite",ZoneType.Library));
                 }
             }
+            // The only land Default can play, so chooseBestLandToPlay must pick it.
+            if(LAND_DROP_MAYPLAY.contains(control)) {
+                result.add(new Placement(FABLED,ZoneType.Graveyard));
+                result.add(new Placement("Serra Paragon",ZoneType.Battlefield));
+            } else if(control.split(":")[0].equals("land-drop"))result.add(new Placement(FABLED,ZoneType.Hand));
             if (control.equals("one-island")) result.add(new Placement("Island", ZoneType.Battlefield));
             if (control.equals("token-anthem")) result.add(new Placement("Intangible Virtue", ZoneType.Battlefield));
         } else if (control.equals("cursed-totem")) {
@@ -137,6 +199,7 @@ public final class CubeThopterExecutionSmoke {
 
     private static ZoneType pieceZone(String control,String piece) {
         String variant=variant(control);control=control.split(":")[0];
+        if(control.equals("land-drop"))return ZoneType.Exile;
         if(control.equals("hand3-all"))return ZoneType.Hand;
         if(control.startsWith("hand2-")) {
             String[] pair=control.substring(6).split("-");
@@ -178,7 +241,11 @@ public final class CubeThopterExecutionSmoke {
     }
 
     private static String swordZone(Player player) {
-        for (ZoneType z : ZONES) for (Card c : player.getCardsIn(z)) if (c.getName().equals(SWORD)) return z.name();
+        return zoneOf(player, SWORD);
+    }
+
+    private static String zoneOf(Player player, String name) {
+        for (ZoneType z : ZONES) for (Card c : player.getCardsIn(z)) if (c.getName().equals(name)) return z.name();
         return "missing";
     }
 
@@ -206,14 +273,20 @@ public final class CubeThopterExecutionSmoke {
         game.getTriggerHandler().resetActiveTriggers();
         BenchRandomAudit.install(10811 + seat * 100 + control.length());
         if(improved && Boolean.getBoolean("forge.test.probeThopterPurity")) probePurity(player,control,phase);
+        // The purity probe itself proposes actions; reset here so the counters
+        // below measure only the selections this policy makes during the game.
+        resetDiagnostics();
         String key = "arm=" + (improved ? "improved" : "baseline") + " seat=" + seat + " phase=" + phase + " control=" + control;
         System.out.println("THOPTER_FIXTURE " + key + " policy=" + forge.ai.CubeComboAi.VERSION + " infoPolicy=CLOSED_REPAIR registered=40 initialMana=0"
                 + " swordStartsTapped=" + player.getCardsIn(ZoneType.Battlefield).stream().anyMatch(c->c.getName().equals(SWORD)&&c.isTapped()));
         Set<Integer> stackIds = new HashSet<>();
         int steps = 0, activations = 0, returns = 0, resolvedReturns = 0, created = 0, maxMana = 0, maxTokens = 0, removals = 0;
+        int fabledTurn = -1;
+        String fabledStart = LAND_DROP_MAYPLAY.contains(control) ? "Graveyard" : "Hand";
         String previous = "";
         // Turns alternate: our turns are 1, 3, 5. Two-turn deployment needs our third turn for combat.
-        int turnBound = variant(control).equals("three-lands") ? 5 : 3;
+        // Keyed to the control, not the variant string: tutor-sword:rule-of-law keeps its turn-3 window.
+        int turnBound = variant(control).equals("three-lands") || ASSEMBLY2_FORECAST.contains(control) ? 5 : 3;
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= turnBound && steps < 600) {
             int before = tokens(player);
             String beforeSword = swordZone(player);
@@ -226,6 +299,11 @@ public final class CubeThopterExecutionSmoke {
                         || !sword.getEquipping().getType().hasSubtype("Thopter"))
                     throw new AssertionError("Sword must return and attach through native resolution");
             }
+            // Fabled Passage sacrifices itself to its own fetch ability, so it need not be
+            // observable on the battlefield at a step boundary. The land drop is the turn it
+            // leaves the zone it was played from; nothing here discards it instead.
+            if(LAND_DROP.contains(control) && fabledTurn<0 && !fabledStart.equals(zoneOf(player,FABLED)))
+                fabledTurn = game.getPhaseHandler().getTurn();
             created += Math.max(0, tokens(player) - before);
             maxTokens = Math.max(maxTokens, tokens(player));
             maxMana = Math.max(maxMana, player.getManaPool().totalMana());
@@ -266,6 +344,44 @@ public final class CubeThopterExecutionSmoke {
         if(improved && Boolean.getBoolean("forge.test.requireThopterAssembly") && variant(control).equals("kiki-tutor")
                 && (!player.hasWon() || phase==PhaseType.MAIN1 && game.getPhaseHandler().getTurn()!=1))
             throw new AssertionError("Slower Thopter selection must not postpone the ready Kiki win: "+key);
+        if(LAND_DROP.contains(control)) {
+            System.out.println("THOPTER_LANDDROP " + key + " fabledPassageTurn=" + fabledTurn
+                    + " playedFrom=" + fabledStart + " fabledZone=" + zoneOf(player,FABLED)
+                    + " lands=" + player.getCardsIn(ZoneType.Battlefield).stream().filter(Card::isLand).count());
+            if(improved) System.out.println("THOPTER_LAND_GUARD " + key
+                    + " guardRejections=" + diagnostic("guardRejections")
+                    + " ordinaryGuardDisagreements=" + diagnostic("ordinaryGuardDisagreements"));
+        }
+        if(improved && Boolean.getBoolean("forge.test.requireThopterAssembly")) {
+            int selections = diagnostic("assemblySelections");
+            // The guard must never reject anything here: it applies only to actions this
+            // policy proposed, and rejecting an ordinary land choice loops forever.
+            if(diagnostic("guardRejections")!=0)
+                throw new AssertionError("Plan guard rejected a chosen ability: "+key+" rejections="+diagnostic("guardRejections"));
+            if(LAND_DROP.contains(control) && fabledTurn<0)
+                throw new AssertionError("Ordinary land play must not be blocked by the plan guard: "+key);
+            // The MayPlay variant must actually reproduce the panel condition, otherwise this
+            // control would pass without exercising the guard-scope fix at all.
+            if(LAND_DROP_MAYPLAY.contains(control) && diagnostic("ordinaryGuardDisagreements")<=0)
+                throw new AssertionError("MayPlay land control did not reproduce the guard disagreement: "+key);
+            // review-v42 §5c: the ready Kiki route must keep priority for the whole
+            // MAIN1 case, not only at the single pre-game purity snapshot.
+            if(variant(control).equals("kiki-hand") && phase==PhaseType.MAIN1 && selections!=0)
+                throw new AssertionError("Ready Kiki route must keep priority over any hand assembly: "+key);
+            // hand3-all is a first-decision control only: once ordinary Default play casts one
+            // of the three pieces, two are missing and the two-piece path legitimately engages
+            // (review-v42 §5a), so its in-play selection count is deliberately unconstrained.
+            if(blockedAssembly(control) && !control.equals("hand3-all") && selections!=0)
+                throw new AssertionError("Blocked assembly must make no hand selection in play: "+key+" selections="+selections);
+            if(handAssemblySelector(control) && selections<=0)
+                throw new AssertionError("Registered hand assembly made no selection in play: "+key);
+            if(ASSEMBLY2_FORECAST.contains(control)) {
+                if(diagnostic("assemblySameTurnForecasts")!=0)
+                    throw new AssertionError("A public cast-count prohibition must not forecast a same-turn assembly: "+key);
+                if(diagnostic("assemblyPartialForecasts")<=0)
+                    throw new AssertionError("A public cast-count prohibition must take the partial two-turn path: "+key);
+            }
+        }
         if(control.equals("remove-foundry") && (removals!=1 || activations!=1 || player.hasWon()
                 || player.getCardsIn(ZoneType.Graveyard).stream().noneMatch(c->c.getName().equals(FOUNDRY))))
             throw new AssertionError("Scripted native removal must destroy Foundry and halt the loop");
@@ -287,9 +403,77 @@ public final class CubeThopterExecutionSmoke {
         for(var memory:forge.ai.AiCardMemory.MemorySet.values())
             result.put(memory.name(),forge.ai.AiCardMemory.getMemorySet(player,memory).stream().map(Card::getId).sorted().toList());
         result.put("board",player.getCardsIn(ZoneType.Battlefield).stream().map(c->c.getId()+":"+c.isTapped()+":"+c.getNetPower()+":"+c.getNetToughness()).toList());
-        result.put("actors",player.getCardsIn(ZoneType.Battlefield).stream().flatMap(c->c.getSpellAbilities().stream())
+        // Native source discovery sets actors on our hand cards' abilities too, so the
+        // restoration this probe checks must cover both zones (review-v42 §1).
+        List<Card> hosts=new ArrayList<>(player.getCardsIn(ZoneType.Battlefield));
+        hosts.addAll(player.getCardsIn(ZoneType.Hand));
+        result.put("actors",hosts.stream().flatMap(c->c.getSpellAbilities().stream())
                 .map(sa->sa.getHostCard().getId()+":"+(sa.getActivatingPlayer()==null?"null":sa.getActivatingPlayer().getId())).toList());
         return result;
+    }
+
+    private static boolean previewDeclineChecked;
+
+    /** The policy helper is package-private in forge.ai; invoke it reflectively so
+     * this test source works against either policy build. */
+    private static boolean previewRules(Card card,forge.item.PaperCard paper) {
+        try {
+            var method=forge.ai.CubeThopterPlan.class.getDeclaredMethod("addAssemblyPreviewRules",Card.class,forge.item.PaperCard.class);
+            method.setAccessible(true);
+            return (Boolean)method.invoke(null,card,paper);
+        } catch(ReflectiveOperationException e) { throw new AssertionError(e); }
+    }
+
+    /** Design D3, previously dropped: the preview-rules helper must decline
+     * anything that is not a detached preview of one of the three pieces —
+     * a live card and a detached non-piece — without throwing and without
+     * leaving rules behind. The helper declines on the live card identity, so
+     * the live Urza's zone is immaterial; prefer the battlefield copy and
+     * record the zone actually used. Runs once per JVM inside the purity
+     * window, so it is also covered by the state and RNG checks. */
+    private static void checkPreviewDecline(Player player) {
+        Card live=null; String zone="none";
+        for(ZoneType z:ZONES) { for(Card c:player.getCardsIn(z)) if(c.getName().equals(URZA)) { live=c; zone=z.name(); break; } if(live!=null)break; }
+        if(live==null)return;
+        var urzaPaper=Objects.requireNonNull(FModel.getMagicDb().getCommonCards().getCard(URZA));
+        if(live.getId()<0)throw new AssertionError("live Urza must have a real card id");
+        if(previewRules(live,urzaPaper))throw new AssertionError("preview rules must decline a live card");
+        var titanPaper=Objects.requireNonNull(FModel.getMagicDb().getCommonCards().getCard("Grave Titan"));
+        Card detached=forge.game.card.CardFactory.getCard(titanPaper,player,-1,player.getGame());
+        if(previewRules(detached,titanPaper))throw new AssertionError("preview rules must decline a non-piece preview");
+        if(!detached.getTriggers().isEmpty())throw new AssertionError("declined preview must keep no triggers: "+detached.getTriggers());
+        previewDeclineChecked=true;
+        System.out.println("THOPTER_PREVIEW_DECLINE live="+URZA+" liveZone="+zone+" detached=Grave Titan declined=true triggers="+detached.getTriggers().size());
+    }
+
+    /** Reproduction probe for the panel defect: print each native sub-check of the
+     * ordinary land ability separately, so a disagreement with the plan guard names
+     * itself. The cached LandAbility is taken from the card, never enumerated, so no
+     * id is allocated; setting the actor is restored by the payment probe, which the
+     * purity snapshot around this call verifies. */
+    private static void probeLandGuard(Player player,String control) {
+        // Hand variant only: the MayPlay ability of the graveyard variant is built during
+        // enumeration, which allocates ids, so that one is reported by the controller's own
+        // CUBE_ORDINARY_GUARD_DISAGREE line at the real decision point instead.
+        if(!LAND_DROP.contains(control) || LAND_DROP_MAYPLAY.contains(control))return;
+        Card land=null;
+        for(Card c:player.getCardsIn(ZoneType.Hand))if(c.getName().equals(FABLED)) { land=c; break; }
+        if(land==null)throw new AssertionError("land-drop fixture must start with "+FABLED+" in hand");
+        SpellAbility found=null;
+        for(SpellAbility sa:land.getSpellAbilities())if(sa.isLandAbility()) { found=sa; break; }
+        if(found==null) { System.out.println("THOPTER_LAND_PROBE control="+control+" landAbility=absent"); return; }
+        final SpellAbility ability=found; final Card host=land;
+        String line=forge.ai.CubeComboAi.probePayment(player,()->{
+            ability.setActivatingPlayer(player);
+            return " canPlay="+ability.canPlay()
+                    +" legalAfterStack="+ability.isLegalAfterStack()
+                    +" restrictions="+ability.checkRestrictions(host,player)
+                    +" canPlayLand="+player.canPlayLand(host,false,ability)
+                    +" mayPlay="+(ability.getMayPlay()!=null)
+                    +" landsPlayed="+player.getLandsPlayedThisTurn()+"/"+player.getMaxLandPlays()
+                    +" guard="+forge.ai.CubeComboAi.canPlayNative(ability,player);
+        },ability);
+        System.out.println("THOPTER_LAND_PROBE control="+control+" zone=Hand"+line);
     }
 
     private static void probePurity(Player player,String control,PhaseType phase) {
@@ -300,6 +484,8 @@ public final class CubeThopterExecutionSmoke {
             int tutors=0;
             if(assemblyBase(control.split(":")[0]))
                 for(int i=0;i<3;i++)if(forge.ai.CubeComboAi.planTutor(player)!=null)tutors++;
+            if(!previewDeclineChecked)checkPreviewDecline(player);
+            probeLandGuard(player,control);
             if(!before.equals(snapshot(player)))throw new AssertionError("Thopter plan probe changed native state: "+before+" -> "+snapshot(player));
             BenchRandomAudit.assertUnchanged(rng,"thopter-plan-preview");
             if(POSITIVES.contains(control) && selected!=3)throw new AssertionError("Positive purity case did not reach a proposed action");
@@ -307,7 +493,8 @@ public final class CubeThopterExecutionSmoke {
                     && !assemblyBase(control.split(":")[0]) && selected!=0)
                 throw new AssertionError("Blocked recursion must not propose a Thopter plan action: "+control);
             if((ASSEMBLY.contains(control) && control.startsWith("hand-") || ASSEMBLY2.contains(control)
-                    || ASSEMBLY2_VARIANTS.contains(control) || GUARD_NEGATIVES.contains(control)) && selected!=3)
+                    || ASSEMBLY2_VARIANTS.contains(control) || ASSEMBLY2_FORECAST.contains(control)
+                    || GUARD_NEGATIVES.contains(control)) && selected!=3)
                 throw new AssertionError("Hand assembly purity must reach the planner: "+control+" hand="+selected);
             if(blockedAssembly(control) && (selected!=0 || tutors!=0))
                 throw new AssertionError("Blocked assembly must not start a plan: "+control+" hand="+selected+" tutor="+tutors);
@@ -378,7 +565,7 @@ public final class CubeThopterExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
-            for (String name : List.of(URZA, FOUNDRY, SWORD, "Forest", "Island", "Cursed Totem", "Intangible Virtue", "Rest in Peace", "Torpor Orb", "Null Rod", "Serra Angel", "Disenchant", "Plains", "Swamp", "Demonic Tutor", "Grave Titan", "Wurmcoil Engine", "Humility", "Rule of Law", "Aven Mindcensor", "Kiki-Jiki, Mirror Breaker", "Pestermite", "Yasharn, Implacable Earth", "Sigarda, Host of Herons"))
+            for (String name : List.of(URZA, FOUNDRY, SWORD, "Forest", "Island", "Cursed Totem", "Intangible Virtue", "Rest in Peace", "Torpor Orb", "Null Rod", "Serra Angel", "Disenchant", "Plains", "Swamp", "Demonic Tutor", "Grave Titan", "Wurmcoil Engine", "Humility", "Rule of Law", "Aven Mindcensor", "Kiki-Jiki, Mirror Breaker", "Pestermite", "Yasharn, Implacable Earth", "Sigarda, Host of Herons", FABLED, "Serra Paragon"))
                 StaticData.instance().attemptToLoadCard(name);
             List<String> cases=args.length>2 ? switch(args[2]) {
                 case "assembly" -> ASSEMBLY;
@@ -390,12 +577,16 @@ public final class CubeThopterExecutionSmoke {
                 case "assembly2-variants" -> ASSEMBLY2_VARIANTS;
                 case "assembly2-controls" -> ASSEMBLY2_CONTROLS;
                 case "guard-negatives" -> GUARD_NEGATIVES;
+                case "assembly2-forecast" -> ASSEMBLY2_FORECAST;
+                case "land-drop" -> LAND_DROP;
                 case "ordinary-win2" -> List.of("hand2-foundry-sword:lethal-board");
                 default -> CONTROLS;
             } : CONTROLS;
             for (int seat = 0; seat < 2; seat++) for (PhaseType phase : List.of(PhaseType.MAIN1, PhaseType.MAIN2))
                 for (String control : cases)
                     run(args[1].equals("improved"), seat, phase, control);
+            if(args[1].equals("improved") && Boolean.getBoolean("forge.test.probeThopterPurity") && !previewDeclineChecked)
+                throw new AssertionError("design D3 preview-decline check never ran");
             System.out.println("THOPTER_SUITE_COMPLETE cases="+(4*cases.size()));
         } catch (Throwable failure) {
             failure.printStackTrace();

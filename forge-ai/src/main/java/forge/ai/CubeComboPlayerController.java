@@ -27,6 +27,14 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     private int comboSelectionChanges;
     private CubeComboAi.TutorPlan tutorPlan;
     private int comboTutorPlanCasts;
+    /** The action this policy proposed on the current priority pass, or null when
+     * the ordinary AI's own choice was taken. The native-legality guard applies to
+     * this object only; see {@link #playChosenSpellAbility}. */
+    private SpellAbility planAction;
+    /** Diagnostic only, never read by a decision: how often the guard rejected a
+     * plan action, and how often it would have disagreed with an ordinary land
+     * choice. Test-visible statics, read and reset reflectively by the fixture. */
+    static int guardRejections, ordinaryGuardDisagreements;
     /** Observability state only: rate limits for the stderr decision log. */
     private static final int DECISION_LINE_CAP = 40;
     private int decisionTurn = -1, decisionLines;
@@ -49,6 +57,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        planAction = null;
         if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell()) return null;
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
@@ -71,6 +80,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             }
         }
         List<SpellAbility> chosen = action == null ? super.chooseSpellAbilityToPlay() : List.of(action);
+        planAction = action;
         logDecision(plan, action, chosen, tutorConsulted);
         return chosen;
     }
@@ -130,11 +140,44 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         return "ordinary:" + ordinary.getHostCard().getName() + "/" + ordinary.getApi();
     }
 
+    /** The native-legality guard belongs to the actions this policy proposes. An
+     * ordinary Default choice must reach the unchanged native path: for a land
+     * ability {@link PlayerControllerAi#playChosenSpellAbility} reports the choice
+     * as handled even when it cannot resolve, so returning false makes PhaseHandler
+     * ask again, the ordinary AI re-chooses the same best land every priority pass,
+     * and the land is never played. Observed in the v42 do-no-harm whole-game panel,
+     * game dnh-wide-mtgx-s3066-16701373-o0-treat-p0-r0: 5,994
+     * native-legality-rejected lines for Fabled Passage and a turn-16 loss where the
+     * Default baseline of the same pairing and orientation won on turn 18.
+     *
+     * The guard is keyed to the proposed action object rather than to
+     * isLandAbility(), so no other ordinary choice can reach it either; the plan
+     * action covers the tutor plan and every *Plan.owns case, including
+     * CubeDoomsdayPlan, which exposes no owns() accessor. The extra breakdown
+     * diagnostic below is limited to land abilities because that is the only class
+     * whose rejection is silently non-fatal in PlayerControllerAi and therefore the
+     * only class whose disagreement needs naming. */
     @Override
     public boolean playChosenSpellAbility(SpellAbility ability) {
-        if (!CubeComboAi.canPlayNative(ability, getPlayer())) {
+        if (ability == planAction && !CubeComboAi.canPlayNative(ability, getPlayer())) {
+            guardRejections++;
             System.err.println("CUBE_COMBO native-legality-rejected card=" + ability.getHostCard().getName());
             return false;
+        }
+        if (ability != planAction && ability.isLandAbility() && !CubeComboAi.canPlayNative(ability, getPlayer())) {
+            ordinaryGuardDisagreements++;
+            Player me = getPlayer();
+            Card host = ability.getHostCard();
+            System.err.println("CUBE_ORDINARY_GUARD_DISAGREE card=" + host.getName()
+                    + " zone=" + (host.getZone() == null ? "none" : host.getZone().getZoneType())
+                    + " actor=" + (ability.getActivatingPlayer() == null ? "null" : "set")
+                    + " mayPlay=" + (ability.getMayPlay() != null)
+                    + " canPlay=" + ability.canPlay()
+                    + " legalAfterStack=" + ability.isLegalAfterStack()
+                    + " restrictions=" + ability.checkRestrictions(host, me)
+                    + " canPlayLand=" + me.canPlayLand(host, false, ability)
+                    + " landsPlayed=" + me.getLandsPlayedThisTurn() + "/" + me.getMaxLandPlays()
+                    + " phase=" + getGame().getPhaseHandler().getPhase());
         }
         if (tutorPlan != null && tutorPlan.tutor() == ability) {
             boolean played = CubeComboAi.withReservedSources(getPlayer(), tutorPlan.reservedSources(),

@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v42";
+    public static final String VERSION = "cube-combo-execution-v43";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -393,8 +393,10 @@ public final class CubeComboAi {
     }
 
     /** Account for public cast-count prohibitions after the first spell.
-     * Both actual casts still pass native legality; this is a forecast only. */
-    private static boolean castFitsAfter(Player player, SpellAbility first, SpellAbility second) {
+     * Both actual casts still pass native legality; this is a forecast only.
+     * Shared by planTutor and by the two-piece hand-assembly forecast, so a
+     * single prohibition rule covers every two-cast plan. */
+    static boolean castFitsAfter(Player player, SpellAbility first, SpellAbility second) {
         Card next = CardCopyService.getLKICopy(second.getHostCard());
         next.setLastKnownZone(player.getGame().getStackZone());
         Card prior = CardCopyService.getLKICopy(first.getHostCard());

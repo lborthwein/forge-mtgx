@@ -33,8 +33,24 @@ public final class CubeThopterPlan {
     /** Native sources forecast for the second assembly cast; held out of the
      * first cast's actual payment exactly as planTutor holds a tutor's reserve. */
     private CardCollection assemblyReserve;
+    /** The one selection {@link #assemblyReserve} was forecast for. play()
+     * applies the reserve only to this exact SpellAbility, so no later
+     * selection can ever be paid under another cast's reservation. */
+    private SpellAbility assemblyReserveFor;
+    /** Diagnostic only, never read by any decision: how many hand-assembly
+     * selections this policy has made, split by forecast label. The fixture
+     * reads and resets these reflectively so one test source works against
+     * either this policy build or an older matched-control build. */
+    static int assemblySelections, assemblySameTurnForecasts, assemblyPartialForecasts;
 
     public CubeThopterPlan(Player player) { this.player=player; }
+
+    /** Record a new selection. Any reserve forecast for a previous selection
+     * is invalidated here, so play() can never apply a stale reservation. */
+    private SpellAbility select(SpellAbility sa) {
+        selected=sa; actions++; assemblyReserve=null; assemblyReserveFor=null;
+        return sa;
+    }
 
     private Card find(String name) {
         for(Card card:player.getCardsIn(ZoneType.Battlefield))
@@ -209,7 +225,7 @@ public final class CubeThopterPlan {
             if(original==null)continue;
             SpellAbility cast=original.copy(player);
             if(CubeComboAi.canPlayNative(cast,player) && CubeComboAi.canPayCost(cast,player,false)) {
-                selected=cast;actions++;
+                select(cast);assemblySelections++;
                 System.err.println("CUBE_THOPTER_ASSEMBLY select-hand card="+card.getName());
                 return cast;
             }
@@ -252,9 +268,11 @@ public final class CubeThopterPlan {
      * disjoint-source forecast is meaningful; a ready Kiki route in MAIN1
      * keeps priority. When both are castable now, forecast both orders with
      * native disjoint sources and cast the first piece of a same-turn order;
-     * otherwise cast one castable piece and re-evaluate on the next decision.
-     * No sequence is pre-committed. */
+     * a public cast-count prohibition rules the same-turn order out, exactly as
+     * it does for planTutor's two casts. Otherwise cast one castable piece and
+     * re-evaluate on the next decision. No sequence is pre-committed. */
     private SpellAbility assembleTwoFromHand(java.util.List<String> missing) {
+        if(missing.size()!=2)return null;
         if(!player.getManaPool().isEmpty() || CubeComboAi.hasImmediateKikiRoute(player))return null;
         java.util.List<Card> pieces=new java.util.ArrayList<>();
         java.util.List<SpellAbility> casts=new java.util.ArrayList<>();
@@ -276,17 +294,19 @@ public final class CubeThopterPlan {
         if(!payable[preferred])preferred=1-preferred;
         if(payable[0] && payable[1])for(int first:new int[]{preferred,1-preferred}) {
             SpellAbility a=casts.get(first),b=casts.get(1-first);
+            if(!CubeComboAi.castFitsAfter(player,a,b))continue;
             var cost=ComputerUtilMana.calculateManaCost(b.getPayCosts(),b,player,true,0,false);
             CardCollection reserve=CubeComboAi.getManaSourcesToPayCost(cost,b,player,false);
             if(reserve!=null && CubeComboAi.withReservedSources(player,reserve,
                     ()->CubeComboAi.canPlayNative(a,player) && CubeComboAi.canPayCost(a,player,false))) {
-                selected=a;actions++;assemblyReserve=reserve;
+                select(a);assemblySelections++;assemblySameTurnForecasts++;
+                assemblyReserve=reserve;assemblyReserveFor=a;
                 System.err.println("CUBE_THOPTER_ASSEMBLY select-hand2 card="+pieces.get(first).getName()+" forecast=same-turn");
                 return a;
             }
         }
         SpellAbility a=casts.get(preferred);
-        selected=a;actions++;
+        select(a);assemblySelections++;assemblyPartialForecasts++;
         System.err.println("CUBE_THOPTER_ASSEMBLY select-hand2 card="+pieces.get(preferred).getName()+" forecast=partial");
         return a;
     }
@@ -294,7 +314,7 @@ public final class CubeThopterPlan {
     public SpellAbility nextAction() {
         var game=player.getGame();
         int currentTurn=game.getPhaseHandler().getTurn();
-        if(currentTurn!=turn) { turn=currentTurn; actions=0; selected=null; pending=null; assemblyReserve=null; }
+        if(currentTurn!=turn) { turn=currentTurn; actions=0; selected=null; pending=null; assemblyReserve=null; assemblyReserveFor=null; }
         if(failedTurn==turn || actions>=160 || !game.getStack().isEmpty() || player.cantWin())return null;
         if(pending!=null) {
             boolean failed=tokens()<=beforeTokens || find(SWORD)==null || player.getLife()<beforeLife;
@@ -329,15 +349,15 @@ public final class CubeThopterPlan {
             next=mana;
         } else next=make;
         if(!CubeComboAi.canPlayNative(next,player) || !CubeComboAi.canPayCost(next,player,false))return null;
-        selected=next; actions++; return next;
+        return select(next);
     }
 
     public boolean owns(SpellAbility sa) { return sa==selected; }
     public boolean play(SpellAbility sa) {
         beforeTokens=tokens(); beforeLife=player.getLife();
         int beforeMana=player.getManaPool().totalMana();
-        CardCollection reserve=sa==selected && assemblyReserve!=null?assemblyReserve:new CardCollection();
-        assemblyReserve=null;
+        CardCollection reserve=sa==assemblyReserveFor && assemblyReserve!=null?assemblyReserve:new CardCollection();
+        assemblyReserve=null; assemblyReserveFor=null;
         boolean played=CubeComboAi.withReservedSources(player,reserve,()->ComputerUtil.handlePlayingSpellAbility(player,sa,null,current->new AiCostDecision(player,current,false) {
             @Override public PaymentDecision visit(CostTapType cost) {
                 if(sa.getApi()==ApiType.Mana && current==sa && cost.getAbilityAmount(current)==1
