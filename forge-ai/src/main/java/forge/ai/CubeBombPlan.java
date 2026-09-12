@@ -95,7 +95,25 @@ import java.util.regex.Pattern;
  * GRANT on a public permanent, and {@link #take} still spends only ONE of them,
  * removing whatever that payment sacrifices from the real blocker pool.
  * Amendment 1's rule survives for a body that stays unqualified: it blocks
- * neither a flier nor a menace attacker.</p> */
+ * neither a flier nor a menace attacker.</p>
+ *
+ * <p><b>v62 cheat-in value.</b> v55's R2 gate was fitted to the bomb2 panel's
+ * losses, all of which were a vanilla beater chump-blocked for nothing, and it
+ * refused everything a payload does BESIDES unblocked damage. Breaching Emrakul
+ * wipes six permanents without winning the turn; Ashen Rider exiles one
+ * permanent on the way in and a second when the Breach's end-step SACRIFICE
+ * fires its dies trigger - {@code through_the_breach.txt} ships
+ * {@code AtEOT$ Sacrifice}, not an exile, which is the line term 4 rests on;
+ * Worldspine Wurm leaves three 5/5 bodies; Griselbrand's pay-7-draw-7 keeps
+ * seven cards after the body is gone. {@link #breachValueTier} replaces the
+ * lethal-only question with a floor over six independent terms, every one read
+ * from a PRINTED property - {@link Keyword#ANNIHILATOR}'s magnitude, a
+ * {@code ChangesZone} trigger of the card itself whose printed {@code Execute$}
+ * chain reaches {@link #VALUE_APIS}, a reanimation shape in our own hand, an
+ * activated {@code Draw} for a literal life payment - and never from a card
+ * name. The decline token {@code breach:not-lethal} becomes
+ * {@code breach:no-value}; the decision is unchanged wherever no term fires.
+ * Designed in {@code 2026-09-10-forge-combo-ai/design-v62-breach-value.md}.</p> */
 public final class CubeBombPlan {
     /** A creature worth cheating in. Emrakul, the Aeons Torn evaluates at about
      * 1020; 400 admits Griselbrand, Ulamog and Archon of Cruelty and excludes
@@ -123,9 +141,11 @@ public final class CubeBombPlan {
      * a hazard token {@code <line>:<hazard>} where {@code <line>} is
      * {@code depths}, {@code show-and-tell} or {@code breach} and
      * {@code <hazard>} is {@code legendary-bounce}, {@code land-destruction},
-     * {@code priest}, {@code no-attack-value} or {@code not-lethal} (the last is
-     * the v55 R2 gate; v55's {@code breach:payload-not-selectable} is retired by
-     * v56's payload hook and can no longer occur). The three routes are
+     * {@code priest}, {@code no-attack-value} or {@code no-value} (the last is
+     * v62's value floor, which REPLACES v55 R2's {@code not-lethal}: that token
+     * can no longer occur, exactly as v55's
+     * {@code breach:payload-not-selectable} was retired by v56's payload hook).
+     * The three routes are
      * consulted in order and each overwrites the token, so the LAST hazard
      * reached is the one reported; a pass that reaches no hazard at all
      * reports {@code no-bomb-line}. Every hazard is read from a PUBLIC
@@ -720,6 +740,332 @@ public final class CubeBombPlan {
         return best;
     }
 
+    // --------------------------------------- v62: the cheat-in value floor
+
+    /** v62. The (sub)ability APIs whose resolution is value against the
+     * opponent's public board, against the opponent themselves, or - for a
+     * trigger the end-step sacrifice fires - on ours. Read from the card's own
+     * printed script, so this is a property and not a card name.
+     *
+     * <p>Deliberately NOT the same list as v56 R4's {@link #BOARD_CHANGE_APIS},
+     * which answers a different question ("does a Show and Tell payoff change
+     * the board"). {@code GainLife} is in that list and not in this one -
+     * gaining life is not value taken from the opponent - and {@code Token} is
+     * in this one and not in that: term 4's registered example leaves bodies on
+     * OUR battlefield ({@code worldspine_wurm.txt},
+     * {@code SVar:TrigToken:DB$ Token | TokenAmount$ 3}). Keeping the two lists
+     * separate is what preserves every v56 R4 receipt.</p> */
+    private static final List<String> VALUE_APIS = List.of(
+            "Sacrifice", "SacrificeAll", "Discard", "LoseLife", "Draw", "Destroy", "DestroyAll", "Token");
+
+    /** The two zone-changing APIs, admitted ONLY when they move a permanent off
+     * a battlefield. That clause is the whole discriminator of term 3/4 and it
+     * was derived from the frozen scripts rather than assumed:
+     * {@code ashen_rider.txt} exiles with {@code Origin$ Battlefield} and is
+     * value, while {@code emrakul_the_aeons_torn.txt},
+     * {@code ulamog_the_infinite_gyre.txt} and {@code worldspine_wurm.txt} all
+     * carry a {@code ChangeZone(All) | Origin$ Graveyard | Destination$ Library}
+     * shuffle of their OWN owner's graveyard, which touches no public board and
+     * must count as zero. */
+    private static final List<String> VALUE_ZONE_APIS = List.of("ChangeZone", "ChangeZoneAll");
+
+    /** Annihilator N on the payload is worth the permanents it would actually
+     * take: {@code min(N, their public permanents)}, over the opponent it takes
+     * most from. Their PUBLIC battlefield only; a face-down permanent is
+     * counted but never identified. */
+    private int annihilatorTake(Card payload) {
+        int amount = payload.getKeywordMagnitude(Keyword.ANNIHILATOR);
+        if (amount <= 0) return 0;
+        int best = 0;
+        for (Player opponent : player.getOpponents()) {
+            int permanents = 0;
+            for (Card card : opponent.getCardsIn(ZoneType.Battlefield)) permanents++;
+            best = Math.max(best, Math.min(amount, permanents));
+        }
+        return best;
+    }
+
+    /** Is this one printed ability body a value effect? */
+    private static boolean valueEffect(String body) {
+        String api = scriptParam(body, "DB$");
+        if (api == null) return false;
+        if (VALUE_APIS.contains(api)) return true;
+        return VALUE_ZONE_APIS.contains(api) && "Battlefield".equals(scriptParam(body, "Origin$"));
+    }
+
+    /** Does this value effect have something to resolve against?
+     *
+     * <p>A non-targeted effect always does. A targeted one is passed when its
+     * {@code ValidTgts$} names a player or an opponent, or when an opponent
+     * controls at least one face-up permanent. The restriction string itself is
+     * NOT evaluated - the chain is read from printed SVar text and never
+     * instantiated, which is v56's own rule - so this is deliberately coarse and
+     * is registered as a limitation.</p> */
+    private boolean valueTargetAvailable(String body) {
+        String targets = scriptParam(body, "ValidTgts$");
+        if (targets == null) return true;
+        if (targets.contains("Player") || targets.contains("Opponent")) return true;
+        for (Player opponent : player.getOpponents())
+            for (Card card : opponent.getCardsIn(ZoneType.Battlefield))
+                if (!card.isFaceDown()) return true;
+        return false;
+    }
+
+    /** Walk a printed {@code Execute$} SVar chain, bounded exactly as
+     * {@link #etbChangesBoard} bounds its own, and answer whether any hop is a
+     * value effect with something to resolve against. */
+    private boolean chainHasValue(Card card, String svar) {
+        for (int hop = 0; hop < CHAIN_DEPTH && svar != null && !svar.isEmpty(); hop++) {
+            String body = card.getSVar(svar);
+            if (body == null || body.isEmpty()) break;
+            if (valueEffect(body) && valueTargetAvailable(body)) return true;
+            svar = scriptParam(body, "SubAbility$");
+        }
+        return false;
+    }
+
+    /** Term 3. A printed enters-the-battlefield trigger of the card itself that
+     * acts on the public board or on the opponent. Same trigger shape
+     * {@link #etbChangesBoard} matches; a different effect set. */
+    private boolean entersWithValue(Card card) {
+        for (Trigger trigger : card.getTriggers()) {
+            if (trigger.getMode() != TriggerType.ChangesZone) continue;
+            if (!"Battlefield".equals(trigger.getParam("Destination"))) continue;
+            if (!"Card.Self".equals(trigger.getParamOrDefault("ValidCard", ""))) continue;
+            if (chainHasValue(card, trigger.getParam("Execute"))) return true;
+        }
+        return false;
+    }
+
+    /** Term 4. A printed trigger the Breach's end-step SACRIFICE will fire: the
+     * card itself leaving OUR battlefield for the graveyard, or a
+     * {@code Sacrificed} trigger of itself.
+     *
+     * <p>{@code Destination$} is accepted as {@code Graveyard}, {@code Any} or
+     * absent - {@code sundering_titan.txt} writes its leave trigger as
+     * {@code Origin$ Battlefield | Destination$ Any} and a sacrifice does fire
+     * it. {@code Origin$ Battlefield} is REQUIRED, and that is what excludes the
+     * {@code Origin$ Any} graveyard-shuffle triggers Emrakul, Ulamog and
+     * Worldspine Wurm all carry.</p> */
+    private boolean diesWithValue(Card card) {
+        for (Trigger trigger : card.getTriggers()) {
+            if (!"Card.Self".equals(trigger.getParamOrDefault("ValidCard", ""))) continue;
+            if (trigger.getMode() == TriggerType.Sacrificed) {
+                if (chainHasValue(card, trigger.getParam("Execute"))) return true;
+                continue;
+            }
+            if (trigger.getMode() != TriggerType.ChangesZone) continue;
+            if (!"Battlefield".equals(trigger.getParamOrDefault("Origin", ""))) continue;
+            String destination = trigger.getParam("Destination");
+            if (destination != null && !"Graveyard".equals(destination) && !"Any".equals(destination)) continue;
+            if (chainHasValue(card, trigger.getParam("Execute"))) return true;
+        }
+        return false;
+    }
+
+    /** What our own board produces on its next untap: every one of our
+     * battlefield permanents with a no-cost mana ability, tapped or not. The
+     * reanimation follow-up is cast on a LATER turn, so the untapped-only count
+     * {@link #ownMana} uses would understate it while the line this turn is
+     * paying for the Breach. Own-visible only, and not a colour-aware payment. */
+    private int nextUntapMana() {
+        int sources = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown()) continue;
+            for (SpellAbility ability : card.getManaAbilities())
+                if (ability.getPayCosts() != null && ability.getPayCosts().getTotalMana().getCMC() == 0) { sources++; break; }
+        }
+        return sources;
+    }
+
+    /** The spell form of a reanimation: a creature card moved from a graveyard
+     * onto the battlefield. {@code reanimate.txt} and {@code persist.txt} name
+     * it with {@code ValidTgts$ Creature...}, {@code exhume.txt} with
+     * {@code ChangeType$ Creature}. */
+    private static boolean reanimationShape(SpellAbility sa) {
+        return sa.getApi() == ApiType.ChangeZone
+                && "Graveyard".equals(sa.getParam("Origin"))
+                && "Battlefield".equals(sa.getParam("Destination"))
+                && (sa.getParamOrDefault("ChangeType", "").startsWith("Creature")
+                        || sa.getParamOrDefault("ValidTgts", "").startsWith("Creature"));
+    }
+
+    /** The Aura form: a permanent whose own enters-trigger chain puts a CREATURE
+     * card from a graveyard onto the battlefield ({@code animate_dead.txt}
+     * {@code SVar:TrigReanimate}, {@code necromancy.txt} {@code SVar:RaiseDead}).
+     *
+     * <p>The creature clause is load-bearing and is the design's own wording
+     * ("on a creature"). Without it {@code titania_protector_of_argoth.txt} -
+     * whose enters trigger is the same {@code ChangeZone | Origin$ Graveyard |
+     * Destination$ Battlefield} shape but with {@code ValidTgts$ Land.YouCtrl} -
+     * would count as a reanimation follow-up for a creature it can never
+     * return. It is the ONLY such false positive among the cube's ten
+     * graveyard-to-battlefield permanents, and it is a real cube card.</p>
+     *
+     * <p>The creature is named two ways, both printed: the chain's own
+     * {@code ChangeType$} / {@code ValidTgts$} (Necromancy), or
+     * {@code Defined$ Enchanted} on a card whose printed
+     * {@code Enchant:Creature...} keyword says what it may be attached to
+     * (Animate Dead, which names no target in the chain at all).</p> */
+    private static boolean entersReanimates(Card card) {
+        for (Trigger trigger : card.getTriggers()) {
+            if (trigger.getMode() != TriggerType.ChangesZone) continue;
+            if (!"Battlefield".equals(trigger.getParam("Destination"))) continue;
+            if (!"Card.Self".equals(trigger.getParamOrDefault("ValidCard", ""))) continue;
+            String svar = trigger.getParam("Execute");
+            for (int hop = 0; hop < CHAIN_DEPTH && svar != null && !svar.isEmpty(); hop++) {
+                String body = card.getSVar(svar);
+                if (body == null || body.isEmpty()) break;
+                if ("ChangeZone".equals(scriptParam(body, "DB$"))
+                        && "Graveyard".equals(scriptParam(body, "Origin$"))
+                        && "Battlefield".equals(scriptParam(body, "Destination$"))
+                        && namesACreature(card, body)) return true;
+                svar = scriptParam(body, "SubAbility$");
+            }
+        }
+        return false;
+    }
+
+    /** Does this printed zone-change name a creature card? */
+    private static boolean namesACreature(Card card, String body) {
+        String type = scriptParam(body, "ChangeType$"), targets = scriptParam(body, "ValidTgts$");
+        if (type != null && type.startsWith("Creature") || targets != null && targets.startsWith("Creature")) return true;
+        return "Enchanted".equals(scriptParam(body, "Defined$")) && card.hasStartOfKeyword("Enchant:Creature");
+    }
+
+    /** Term 5's precondition, and the reason it is not simply "a big body".
+     * The Breach's end-step sacrifice only sets a reanimation up if the payload
+     * can REACH a graveyard and STAY there, and four of the cube's biggest
+     * bodies cannot:
+     *
+     * <ul>
+     * <li>{@code blightsteel_colossus.txt} replaces the move itself -
+     *     {@code R:Event$ Moved | Destination$ Graveyard | ValidCard$ Card.Self |
+     *     ReplaceWith$ DBShuffle}. A REPLACEMENT, not a trigger, so a
+     *     trigger-only test would miss it;</li>
+     * <li>{@code emrakul_the_aeons_torn.txt},
+     *     {@code ulamog_the_infinite_gyre.txt} and {@code worldspine_wurm.txt}
+     *     each carry {@code T:Mode$ ChangesZone | Origin$ Any |
+     *     Destination$ Graveyard | ValidCard$ Card.Self} executing a
+     *     {@code ChangeZone(All) | Origin$ Graveyard | Destination$ Library}
+     *     shuffle.</li>
+     * </ul>
+     *
+     * <p>Both shapes are recognised here, by printed property: a self
+     * replacement of a move to the graveyard, or a self trigger on reaching the
+     * graveyard whose chain moves it back OUT of the graveyard. Without this,
+     * a hand of Through the Breach + Blightsteel Colossus + a reanimation spell
+     * would rate tier 2 and cast for a body that shuffles itself away. Our own
+     * card's printed text only; public graveyard hate is NOT read (registered
+     * limitation, inherited from v52's hazard set).</p> */
+    private static boolean staysInGraveyard(Card card) {
+        for (var replacement : card.getReplacementEffects()) {
+            if (replacement.getMode() != forge.game.replacement.ReplacementType.Moved) continue;
+            if (!"Graveyard".equals(replacement.getParam("Destination"))) continue;
+            if (!replacement.getParamOrDefault("ValidCard", "").startsWith("Card.Self")) continue;
+            return false;
+        }
+        for (Trigger trigger : card.getTriggers()) {
+            if (trigger.getMode() != TriggerType.ChangesZone) continue;
+            if (!"Graveyard".equals(trigger.getParamOrDefault("Destination", ""))) continue;
+            if (!"Card.Self".equals(trigger.getParamOrDefault("ValidCard", ""))) continue;
+            String svar = trigger.getParam("Execute");
+            for (int hop = 0; hop < CHAIN_DEPTH && svar != null && !svar.isEmpty(); hop++) {
+                String body = card.getSVar(svar);
+                if (body == null || body.isEmpty()) break;
+                String api = scriptParam(body, "DB$");
+                if (VALUE_ZONE_APIS.contains(api)
+                        && "Graveyard".equals(scriptParam(body, "Origin$"))
+                        && !"Graveyard".equals(scriptParam(body, "Destination$"))) return false;
+                svar = scriptParam(body, "SubAbility$");
+            }
+        }
+        return true;
+    }
+
+    /** Term 5's first half. A reanimation spell or Aura in our OWN hand whose
+     * mana value our own board will produce on its next untap. Our hand and our
+     * battlefield only; the graveyard it would fetch from is not consulted,
+     * because the body this line is about is not in it yet. */
+    private boolean reanimationInHand() {
+        int mana = nextUntapMana();
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.isFaceDown() || card.getCMC() > mana) continue;
+            for (SpellAbility ability : card.getSpellAbilities())
+                if (ability.isSpell() && reanimationShape(ability)) return true;
+            if (card.isPermanent() && entersReanimates(card)) return true;
+        }
+        return false;
+    }
+
+    /** Term 6. A printed activated ability that draws for a literal life
+     * payment we can afford ({@code griselbrand.txt},
+     * {@code A:AB$ Draw | Cost$ PayLife<7> | NumCards$ 7}). The cards stay after
+     * the end-step sacrifice takes the body, which is the whole point. Our own
+     * life total only. */
+    private boolean drawsForLife(Card payload) {
+        for (SpellAbility ability : payload.getSpellAbilities()) {
+            if (!ability.isActivatedAbility() || ability.getApi() != ApiType.Draw) continue;
+            Cost cost = ability.getPayCosts();
+            if (cost == null) continue;
+            for (CostPart part : cost.getCostParts()) {
+                if (!(part instanceof CostPayLife)) continue;
+                Integer amount = literalAmount(part);
+                if (amount != null && player.getLife() > amount) return true;
+            }
+        }
+        return false;
+    }
+
+    /** v62's floor, as a tier so the payload ranking and the cast gate ask one
+     * question. 0 means "no value at all" - a vanilla beater the public board
+     * blocks for nothing, which is the only thing v62 still declines.
+     *
+     * <p>Tier 4 is v55 R2 / v56 R3 verbatim. Tier 3 is terms 2, 3 and 4 - the
+     * board the payload changes whether or not it connects. Tier 2 is terms 5
+     * and 6 - value that outlives the body. Own-visible only throughout.</p>
+     *
+     * <p>Term 5 asks {@link #staysInGraveyard} as well as the power floor,
+     * because a reanimation follow-up is worth nothing behind a body that
+     * shuffles itself out of the graveyard the moment the Breach sacrifices
+     * it.</p> */
+    private int breachValueTier(Card candidate, int manaLeft) {
+        if (!canAttackForValue(player, candidate, manaLeft)) return 0;
+        if (lethalForecast(candidate, manaLeft) != null) return 4;
+        if (annihilatorTake(candidate) >= 2) return 3;
+        if (entersWithValue(candidate) || diesWithValue(candidate)) return 3;
+        if (candidate.getNetPower() >= 7 && staysInGraveyard(candidate) && reanimationInHand()) return 2;
+        if (drawsForLife(candidate)) return 2;
+        return 0;
+    }
+
+    /** v62. The own-visible payload this Breach should take, or null when no
+     * candidate clears the floor.
+     *
+     * <p>{@link #bestLethalPayload} is asked FIRST and its answer is returned
+     * unchanged, so a hand that holds a lethal payload picks exactly the card
+     * v56 picked and every lethal row of every suite stays byte-identical. Only
+     * when it answers null are the lower tiers consulted, ranked by tier and
+     * then by {@link #rank}, the same ordering {@link #bestBomb} uses.</p>
+     *
+     * <p>The same ranking answers at propose time and at resolution
+     * ({@link #choosePayload}), over the same candidate set, exactly as v56
+     * arranged for the lethal one.</p> */
+    private Card bestValuePayload(SpellAbility ability, int manaLeft, List<Card> pool) {
+        Card lethal = bestLethalPayload(ability, manaLeft, pool);
+        if (lethal != null) return lethal;
+        Card best = null;
+        int bestTier = 0, bestRank = -1;
+        for (Card candidate : pool) {
+            int tier = breachValueTier(candidate, manaLeft);
+            if (tier <= 0) continue;
+            int value = rank(candidate);
+            if (tier < bestTier || tier == bestTier && value <= bestRank) continue;
+            best = candidate; bestTier = tier; bestRank = value;
+        }
+        return best;
+    }
+
     // ------------------------------------- v56 R4: the Show and Tell payoff
 
     /** The (sub)ability APIs that make an enter-the-battlefield trigger change
@@ -845,7 +1191,7 @@ public final class CubeBombPlan {
         List<Card> candidates = bombCandidates(source, breach);
         for (Card option : options) if (candidates.contains(option)) pool.add(option);
         if (pool.isEmpty()) return null;
-        return breach ? bestLethalPayload(source, payloadMana, pool) : bestShowAndTellPayload(pool);
+        return breach ? bestValuePayload(source, payloadMana, pool) : bestShowAndTellPayload(pool);
     }
 
     /** One decline line per turn, phase and reason. The full
@@ -1034,17 +1380,26 @@ public final class CubeBombPlan {
                 // v55 R2. The payload leaves at the beginning of the next end
                 // step (observed six times of nine), so a Breach that does not
                 // end the game spends two cards for one hit and hands the board
-                // straight back. Only cast when this turn's attack is lethal
-                // against the public board.
+                // straight back. v55 answered that with "only cast when this
+                // turn's attack is lethal against the public board"; v62 keeps
+                // the concern and replaces the answer.
                 //
                 // v56 R3: the question is no longer "is the body the native
                 // chooser will take lethal" but "is ANY own-visible payload
                 // lethal", because the resolution hook now takes that one. The
                 // not-lethal decline is unchanged for a hand where none is, and
                 // v55's payload-not-selectable decline becomes this cast.
-                if (bestLethalPayload(cast, manaLeft, bombCandidates(cast, true)) == null) {
-                    decline = "breach:not-lethal";
-                    declineOnce("breach:not-lethal");
+                //
+                // v62. The question is no longer "is any own-visible payload
+                // lethal" but "does any own-visible payload clear the value
+                // floor": annihilator against a public board, an enter or dies
+                // trigger the cheat-in and its end-step sacrifice will fire, a
+                // reanimation follow-up behind a real body, or an activated draw
+                // whose cards outlive the body. A hand with a lethal payload is
+                // unchanged, because the lethal ranking is asked first.
+                if (bestValuePayload(cast, manaLeft, bombCandidates(cast, true)) == null) {
+                    decline = "breach:no-value";
+                    declineOnce("breach:no-value");
                     continue;
                 }
                 armPayload(cast, manaLeft);
