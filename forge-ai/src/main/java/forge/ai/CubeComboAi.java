@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v61";
+    public static final String VERSION = "cube-combo-execution-v63";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -595,6 +595,53 @@ public final class CubeComboAi {
         return chosen;
     }
 
+    /** v63 C2 - the plan-completing piece for an ORDINARY-AI search that puts
+     * the fetched card in our own HAND (Demonic Tutor and every v57 admitted
+     * hand-destination shape). Called from
+     * {@code ChangeZoneAi.chooseCardToHiddenOriginChangeZone}, the one site
+     * that answers such a search, and only AFTER
+     * {@link #chooseTutorPartner} has already declined - so the Kiki route
+     * keeps its priority where both are one short, the control-transfer gate
+     * still applies to it, and {@link #planTutor}'s own forecast (which calls
+     * {@link #chooseTutorPartnerUngated}) does not move at all. Doomsday's pile
+     * decision is a {@code destination == Library} decision on a different API
+     * and is not reached here.
+     *
+     * <p>Every gate of {@link #choosePlanTutorPiece} is kept verbatim - our own
+     * MAIN1 or MAIN2 with nothing pending but this search, no unambiguous
+     * ordinary attack already lethal, the one fixed family order, the thopter
+     * family skipped because {@code CubeThopterPlan.chooseAssemblyCard} is
+     * already the caller's stricter tail, the offered list as the only library
+     * information read, our own non-face-down library card only, and the
+     * cheapest-CMC tie-break. Exactly ONE thing is dropped: the
+     * {@link #feasibleHalfAfterSelection} castability forecast.</p>
+     *
+     * <p>That forecast exists for the Kiki route, whose priority rests on haste
+     * copies finishing THIS combat. For a piece fetched to our own hand it is
+     * the wrong test: the card is not spent, it sits in our hand and is
+     * castable on a later turn, while the alternative is the native AI's own
+     * pick - the most expensive valid card, as {@code demonic_tutor.txt}
+     * documents. The measured shape is exactly that: the one-short ordinary
+     * Demonic Tutors that DID fetch the piece are the turns where the piece was
+     * already payable, and the ones that fetched Vendilion Clique or Echo of
+     * Eons are the early turns where it was not.</p>
+     *
+     * <p>A family two cards short returns an empty list, so this is parity
+     * whenever no family is exactly one piece short.</p> */
+    public static Card chooseHandTutorPiece(Player player, SpellAbility tutor, CardCollection legalChoices) {
+        if (!enabled(player) || tutor == null || tutor.getActivatingPlayer() != player) return null;
+        Card piece = choosePlanTutorPiece(player, legalChoices, false);
+        if (piece == null) return null;
+        // Unlike choosePlanTutorPiece, this method is never a forecast: it is
+        // called once, at the real selection, so the line it prints always
+        // describes a selection that actually happened.
+        System.err.println("CUBE_COMBO_SELECTION changed-hand-selection source="
+                + tutor.getHostCard().getName().replace(' ', '_')
+                + " phase=" + player.getGame().getPhaseHandler().getPhase()
+                + " partner=" + piece.getName().replace(' ', '_'));
+        return piece;
+    }
+
     /** The v42..v57 body of {@link #chooseTutorPartner}, verbatim. Split out so
      * that planTutor's own forecast keeps its own control-transfer gate and its
      * own decline token. */
@@ -625,6 +672,15 @@ public final class CubeComboAi {
      * CubeComboPlayerController.chooseSpellAbilityToPlay already uses; then the
      * Thopter assembly last, because its bodies need the next turn. */
     private static Card choosePlanTutorPiece(Player player, CardCollection legalChoices) {
+        return choosePlanTutorPiece(player, legalChoices, true);
+    }
+
+    /** @param forecastCastability v63 C2: whether a completing piece must also
+     * be castable after this selection resolves. True for every v45..v61
+     * caller, so their receipts are unchanged; false only for
+     * {@link #chooseHandTutorPiece}, where the piece is fetched to our own hand
+     * and is not spent by the selection. */
+    private static Card choosePlanTutorPiece(Player player, CardCollection legalChoices, boolean forecastCastability) {
         if (!ownPlanSelectionWindow(player) || lethalOrdinaryAttackNow(player)) return null;
         java.util.List<java.util.List<String>> families = planCompletingFamilies(player);
         for (int index = 0; index < families.size(); index++) {
@@ -650,7 +706,7 @@ public final class CubeComboAi {
                 // uses is the right test for one, and it is the same method.
                 // No v45..v57 family names a land, so this branch cannot move
                 // a v57 receipt.
-                if (!(card.isLand() ? landDropFitsAfter(player, card)
+                if (forecastCastability && !(card.isLand() ? landDropFitsAfter(player, card)
                         : feasibleHalfAfterSelection(player, card))) continue;
                 if (best == null || card.getCMC() < best.getCMC()) best = card;
             }

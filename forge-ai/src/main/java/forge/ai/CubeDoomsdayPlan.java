@@ -286,15 +286,67 @@ public final class CubeDoomsdayPlan {
         for (Player opponent : player.getOpponents())
             for (Card card : opponent.getCardsIn(ZoneType.Battlefield))
                 if (card.isCreature()) attackers.add(card);
-        int blockers = 0;
+        CardCollection blockers = new CardCollection();
         for (Card card : player.getCardsIn(ZoneType.Battlefield))
-            if (card.isCreature() && card.isUntapped() && CombatUtil.canBlockAtLeastOne(card, attackers)) blockers++;
-        java.util.List<Integer> powers = new java.util.ArrayList<>();
-        for (Card card : attackers) powers.add(Math.max(0, card.getNetPower()));
-        powers.sort(java.util.Comparator.reverseOrder());
+            if (card.isCreature() && card.isUntapped()) blockers.add(card);
+        // Attackers by descending power, so the greedy pass below takes the
+        // largest absorbable one first.
+        java.util.List<Card> ordered = new java.util.ArrayList<>(attackers);
+        ordered.sort(java.util.Comparator.comparingInt((Card card) -> Math.max(0, card.getNetPower())).reversed());
+        // assignment[b] = index in `ordered` of the attacker blocker b is
+        // currently assigned to, or -1.
+        int[] assignment = new int[blockers.size()];
+        java.util.Arrays.fill(assignment, -1);
         int clock = 0;
-        for (int i = blockers; i < powers.size(); i++) clock += powers.get(i);
+        for (int index = 0; index < ordered.size(); index++) {
+            Card attacker = ordered.get(index);
+            int power = Math.max(0, attacker.getNetPower());
+            if (!absorb(index, ordered, blockers, assignment, new boolean[blockers.size()])) clock += power;
+        }
         return clock < player.getLife() - (player.getLife() + 1) / 2;
+    }
+
+    /** v63 C4 (the v47 analysis section 4 R1). One augmenting-path step of
+     * Kuhn's algorithm: can this attacker be given a blocker, moving already
+     * assigned blockers along legal edges only? An edge exists iff native
+     * {@link CombatUtil#canBlock} permits that blocker against that attacker -
+     * the same native predicate v55's forecast uses, so "can't be blocked by
+     * creatures with power 2 or less", flying/reach and every other CantBlockBy
+     * static is honoured by the engine rather than restated here - and iff the
+     * attacker does not demand more than one blocker (menace), because this
+     * model assigns exactly one.
+     *
+     * <p>{@link #clockSurvivable} calls this with the attackers in descending
+     * power. The attacker sets that can be matched simultaneously form a
+     * transversal matroid, so greedy by weight with an independence test is the
+     * MAXIMUM absorbable power: the guard stays as optimistic as it can
+     * honestly be rather than over-declining.</p>
+     *
+     * <p>This is a strict tightening of v49 R1, which credited the {@code k}
+     * largest attackers to any {@code k} blockers that could block SOMETHING.
+     * The absorbed set has size {@code m <= k} (a matched blocker could block
+     * at least one attacker, so v49 R1 already counted it), and the sum of its
+     * powers is at most the sum of the {@code m} largest overall, hence at most
+     * the sum of the {@code k} largest. So the new clock is never smaller than
+     * the old one: no board v49 R1 refused can be newly committed, and with
+     * {@code k = 0} the two are identical. Everything v49 R1 ignores - trample,
+     * multiple blocks, removal, combat tricks - stays ignored.</p>
+     *
+     * <p>Public battlefields only; power and creature type are public even for
+     * a face-down permanent, so no hidden identity is read.</p> */
+    private boolean absorb(int attackerIndex, java.util.List<Card> ordered, CardCollection blockers,
+            int[] assignment, boolean[] visited) {
+        Card attacker = ordered.get(attackerIndex);
+        if (CombatUtil.getMinNumBlockersForAttacker(attacker, player) > 1) return false;
+        for (int b = 0; b < blockers.size(); b++) {
+            if (visited[b] || !CombatUtil.canBlock(attacker, blockers.get(b))) continue;
+            visited[b] = true;
+            if (assignment[b] < 0 || absorb(assignment[b], ordered, blockers, assignment, visited)) {
+                assignment[b] = attackerIndex;
+                return true;
+            }
+        }
+        return false;
     }
 
     /** v49 R2: own battlefield permanents that could pay one of Oracle's blue

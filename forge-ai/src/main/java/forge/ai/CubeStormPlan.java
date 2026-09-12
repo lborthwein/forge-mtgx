@@ -32,7 +32,8 @@ public final class CubeStormPlan {
      * {@code stack-not-empty}, {@code cant-win}, {@code action-cap},
      * {@code failed-this-turn}, {@code multiplayer},
      * {@code missing=<our own missing half>}, {@code cant-drain},
-     * {@code finisher-untargetable} or {@code no-resource-action}. The
+     * {@code finisher-untargetable}, {@code no-lethal-forecast} (v63) or
+     * {@code no-resource-action}. The
      * missing-half token names a card this plan cannot find in OUR OWN hand or
      * graveyard; no token names an opponent zone.</p> */
     private String decline = "other check=storm-plan";
@@ -186,6 +187,48 @@ public final class CubeStormPlan {
         return null;
     }
 
+    /** v63 C1 - an own-visible UPPER BOUND on the storm count this plan could
+     * reach this turn, counting only spells it can NAME right now, each
+     * physical card at most once:
+     *
+     * <ul>
+     * <li>our own HAND: every {@link #ROCKS} name, Dark Ritual, Cabal Ritual,
+     *     every {@link #DRAWS} name, and Yawgmoth's Will itself while it is in
+     *     hand and has not already been attempted this turn;</li>
+     * <li>our own GRAVEYARD, and only while the Will is still reachable this
+     *     turn, the same rock / ritual / cantrip names - replaying exactly
+     *     those is what this plan's own build does once the Will resolves;</li>
+     * <li>never Tendrils of Agony: it is the {@code +1} of the lethal test.</li>
+     * </ul>
+     *
+     * <p>It is a BOUND, not a promise. No mana, no native legality, no
+     * targeting and no counterspell risk is priced here - a board that passes
+     * may still fail to reach lethal, and that is deliberate: the gate exists
+     * to refuse a build that could not reach lethal even if everything worked,
+     * not to predict a win.</p>
+     *
+     * <p>The bound does not decay through the build, so a build this gate lets
+     * start cannot be stranded by it mid-turn: casting a counted spell raises
+     * {@code storm} by one and lowers the hand count by one, and a ritual or
+     * cantrip then enters the graveyard where it is counted again while the
+     * Will is reachable; the Lotus crack is an activation, not a spell.</p>
+     *
+     * <p>Own hand, own graveyard and the public storm count only.</p> */
+    private int reachableStormBound(int storm) {
+        boolean willReachable = will() != null || attemptedWill;
+        int countable = will() != null && !attemptedWill ? 1 : 0;
+        for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Graveyard)) {
+            if (zone == ZoneType.Graveyard && !willReachable) continue;
+            for (Card card : player.getCardsIn(zone)) {
+                if (card == excluded || card.isFaceDown()) continue;
+                String name = card.getName();
+                if (ROCKS.contains(name) || DRAWS.contains(name)
+                        || name.equals("Dark Ritual") || name.equals("Cabal Ritual")) countable++;
+            }
+        }
+        return storm + countable;
+    }
+
     public SpellAbility nextAction() {
         var game = player.getGame();
         var phase = game.getPhaseHandler();
@@ -214,6 +257,15 @@ public final class CubeStormPlan {
         int storm = game.getStack().getSpellsCastThisTurn().size();
         SpellAbility lethal = spell(finisher);
         if (lethal != null && 2L * (storm + 1) >= opponent.getLife() && target(lethal, opponent)) return select(lethal);
+        // v63 C1. Everything below this line SPENDS resources - rocks, the
+        // Lotus, rituals, cantrips, a setup spell and finally the deck's single
+        // most valuable card - toward the lethal test that has just failed, and
+        // before v63 nothing asked whether the build could reach it. Require
+        // the plan's OWN condition to be reachable from an own-visible upper
+        // bound on this turn's storm count, or decline and leave the ordinary
+        // AI's play untouched. The branch above is unchanged, so a position
+        // that can already win still wins on the same pass.
+        if (2L * (reachableStormBound(storm) + 1) < opponent.getLife()) return decline("no-lethal-forecast");
 
         for (String name : ROCKS) {
             SpellAbility rock = spell(name);
