@@ -93,12 +93,36 @@ public final class GameActionUtil {
         for (Card card : prospective.getGame().getCardsIn(ZoneType.STATIC_ABILITIES_SOURCE_ZONES))
             for (StaticAbility st : card.getStaticAbilities()) {
                 if (!st.checkConditions(StaticAbilityMode.Continuous)) continue;
+                // Match StaticAbilityContinuous.getAffectedCards: a CDA always
+                // affects only its own physical card, in every non-excluded
+                // zone. An unrelated Adeline on the stack cannot alter Valki's
+                // prospective face. LKI copies retain the same physical ID, so
+                // object-reference inequality is NOT sufficient to skip this.
+                if (st.isCharacteristicDefining()) {
+                    if (st.getHostCard().getId() != prospective.getId()) continue;
+                    if (st.hasParam("ExcludeZone") && ZoneType.listValueOf(st.getParam("ExcludeZone"))
+                            .stream().anyMatch(st.getHostCard()::isInZone)) continue;
+                    throw prospectiveEnumerationFailure(prospective, st);
+                }
                 if (st.hasParam("AffectedZone") && ZoneType.listValueOf(st.getParam("AffectedZone")).stream().noneMatch(prospective::isInZone)) continue;
                 if (!st.hasParam("AffectedZone") && !prospective.isInZone(ZoneType.Battlefield)) continue;
-                if (!st.hasParam("MayPlay") || !java.util.Set.of("Mode", "MayPlay", "MayPlayIgnoreType", "MayPlayIgnoreColor",
+                // EffectZone restricts where the effect's SOURCE is active.
+                // checkConditions above already enforces that through zonesCheck;
+                // it does not change the prospective card's characteristics.
+                if (!st.hasParam("MayPlay") || !java.util.Set.of("Mode", "EffectZone", "MayPlay", "MayPlayIgnoreType", "MayPlayIgnoreColor",
                         "Affected", "AffectedZone", "Description", "MayLookAt", "MayPlayText").containsAll(st.getMapParams().keySet()))
-                    throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: prospective face requires characteristic-layer simulation");
+                    throw prospectiveEnumerationFailure(prospective, st);
             }
+    }
+
+    private static IllegalStateException prospectiveEnumerationFailure(Card prospective, StaticAbility effect) {
+        // Private benchmark diagnostic only: retain the rejecting effect and
+        // prospective face, rather than guessing from the last visible action.
+        return new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: prospective face requires characteristic-layer simulation"
+                + "; prospective=" + prospective.getId() + ":" + prospective.getName()
+                + "; state=" + prospective.getCurrentStateName() + "; zone=" + prospective.getZone()
+                + "; effectSource=" + effect.getHostCard().getId() + ":" + effect.getHostCard().getName()
+                + "; effect=" + new java.util.TreeMap<>(effect.getMapParams()));
     }
 
     private GameActionUtil() {

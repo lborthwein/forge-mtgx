@@ -470,6 +470,10 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
      * canPlay(true) path allocates new IDs while testing optional variants. */
     public boolean canPlayForEnumeration() {
         if (canPlay()) return true;
+        // Spell.canPlayFromHost rejects this before every face, permission and
+        // cost check. Optional costs cannot move the host off the battlefield.
+        // Keep this tied to Spell, not spell-like wrappers or LandAbility.
+        if (this instanceof Spell && getHostCard().isInPlay()) return false;
         for (OptionalCostValue value : GameActionUtil.getOptionalCostValues(this, true))
             if (GameActionUtil.addOptionalCosts(this, Lists.newArrayList(value), true).canPlay()) return true;
         if (isActivatedAbility() && hasParam("AlternateCost"))

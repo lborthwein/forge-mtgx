@@ -56,6 +56,20 @@ public final class BenchSession {
     private final JsonRpcChannel channel;
     private String gameId = "g0";
     private forge.game.Game liveGame;
+    // Survives controller replacement/elimination and exceptions absorbed by Forge.
+    // Only the exact live game may poison its result; search copies must not.
+    private String integrityFailure;
+
+    public synchronized void noteIntegrityFailure(final forge.game.Game game, final int seat,
+            final String operation, final Throwable failure) {
+        if (game != null && game == liveGame && integrityFailure == null) {
+            integrityFailure = "seat " + seat + " " + operation + ": " + failure;
+        }
+    }
+
+    public synchronized String integrityFailure(final forge.game.Game game) {
+        return game == liveGame ? integrityFailure : null;
+    }
 
     /*
      * =======================================================================
@@ -164,7 +178,8 @@ public final class BenchSession {
         return liveGame;
     }
 
-    public void setLiveGame(final forge.game.Game liveGame) {
+    public synchronized void setLiveGame(final forge.game.Game liveGame) {
+        if (this.liveGame != liveGame) integrityFailure = null;
         this.liveGame = liveGame;
     }
 }

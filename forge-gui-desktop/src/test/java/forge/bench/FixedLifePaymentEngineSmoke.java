@@ -113,7 +113,7 @@ public final class FixedLifePaymentEngineSmoke {
     private static void completeControllerPath() {
         String answers = "{\"type\":\"answer\",\"id\":1,\"choice\":1}\n"
             + "{\"type\":\"answer\",\"id\":2,\"paymentVersion\":\"" + RulesPaymentDomain.PAYMENT_VERSION
-            + "\",\"sourceOrder\":[],\"spend\":[],\"lifePaid\":1}\n";
+            + "\",\"x\":0,\"sourceOrder\":[],\"spend\":[],\"lifePaid\":1}\n";
         var wire = new java.io.ByteArrayOutputStream();
         var session = new BenchSession(new JsonRpcChannel(new java.io.ByteArrayInputStream(
             answers.getBytes(java.nio.charset.StandardCharsets.UTF_8)), wire));

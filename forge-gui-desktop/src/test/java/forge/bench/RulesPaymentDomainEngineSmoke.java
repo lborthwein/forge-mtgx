@@ -46,6 +46,7 @@ public final class RulesPaymentDomainEngineSmoke {
     }
     private static JsonObject answer(List<String> order, List<String> tokens, int life) {
         var answer = new JsonObject(); answer.addProperty("paymentVersion", RulesPaymentDomain.PAYMENT_VERSION);
+        answer.addProperty("x", 0);
         var sourceOrder = new JsonArray(); for (String id : order) sourceOrder.add(id); answer.add("sourceOrder", sourceOrder);
         var spend = new JsonArray();
         for (int i = 0; i < tokens.size(); i++) {
@@ -63,6 +64,7 @@ public final class RulesPaymentDomainEngineSmoke {
     }
     private static JsonObject fromLegacy(JsonObject domainRequest, JsonObject legacy) {
         var answer = new JsonObject(); answer.addProperty("paymentVersion", RulesPaymentDomain.PAYMENT_VERSION);
+        answer.add("x", domainRequest.getAsJsonObject("cost").get("x"));
         answer.add("sourceOrder", legacy.getAsJsonArray("sources").deepCopy());
         answer.add("lifePaid", legacy.get("lifePaid"));
         var shards = domainRequest.getAsJsonObject("cost").getAsJsonArray("shards");

@@ -23,7 +23,6 @@ import com.google.common.collect.Multiset;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
-import forge.ai.ComputerUtilMana;
 import forge.card.MagicColor;
 import forge.card.CardStateName;
 import forge.game.Game;
@@ -71,8 +70,21 @@ public final class StateEncoder {
 
     /** Full seat-visible state for {@code seat}. */
     public static JsonObject encode(final Game game, final Player seat) {
+        return encode(game, seat, false);
+    }
+
+    /** Opt-in identity transport. Legacy callers and archived payloads retain their contract. */
+    public static JsonObject encodeWithStackInstances(final Game game, final Player seat) {
+        return encode(game, seat, true);
+    }
+
+    private static JsonObject encode(final Game game, final Player seat, final boolean stackInstances) {
         final PlayerView viewer = seat.getView();
         final JsonObject st = new JsonObject();
+        if (stackInstances) {
+            st.addProperty("stackIdentityVersion", "host-stack-instance-v1");
+            st.addProperty("stackOrder", "top-first");
+        }
 
         st.addProperty("turn", game.getPhaseHandler().getTurn());
         st.addProperty("phase", String.valueOf(game.getPhaseHandler().getPhase()));
@@ -90,7 +102,7 @@ public final class StateEncoder {
         st.add("players", players);
         st.add("life", life);
 
-        st.add("stack", encodeStack(game, viewer));
+        st.add("stack", encodeStack(game, viewer, stackInstances));
         st.add("combat", encodeCombat(game, viewer));
         return st;
     }
@@ -403,11 +415,22 @@ public final class StateEncoder {
         }
     }
 
-    private static JsonArray encodeStack(final Game game, final PlayerView viewer) {
+    private static JsonArray encodeStack(final Game game, final PlayerView viewer, final boolean stackInstances) {
         final JsonArray arr = new JsonArray();
+        final java.util.Map<Integer, SpellAbilityStackInstance> byAbility = new java.util.HashMap<>();
+        if (stackInstances) {
+            final java.util.Set<Integer> instanceIds = new java.util.HashSet<>();
+            for (SpellAbilityStackInstance entry : game.getStack()) {
+                if (entry.getId() < 0 || !instanceIds.add(entry.getId()) || entry.getSpellAbility() == null
+                        || byAbility.put(entry.getSpellAbility().getId(), entry) != null) {
+                    throw new IllegalStateException("Unsupported duplicate/missing stack identity");
+                }
+            }
+        }
         for (SpellAbilityStackInstance si : game.getStack()) {
             final JsonObject o = new JsonObject();
             o.addProperty("id", si.getId());
+            if (stackInstances) o.addProperty("spellAbilityId", si.getSpellAbility().getId());
             final Card src = si.getSourceCard();
             o.addProperty("name", src == null ? "?" : src.getName());
             o.addProperty("fid", src == null ? -1 : src.getId());
@@ -446,13 +469,27 @@ public final class StateEncoder {
                     }
                     for (SpellAbility tsa : tc.getTargetSpells()) {
                         final JsonObject ts = new JsonObject();
-                        ts.addProperty("stackId", tsa.getId());
+                        if (stackInstances) {
+                            final SpellAbilityStackInstance target = byAbility.get(tsa.getId());
+                            ts.addProperty("spellAbilityId", tsa.getId());
+                            if (target == null) {
+                                // MagicStack.hasFizzled uses the same absence of a live
+                                // matching SA. An older counter may retain this exact
+                                // engine object until resolution. No historical instance
+                                // ID is stored here; do not invent one or drop its target.
+                                ts.addProperty("targetState", "not-on-stack");
+                            } else {
+                                ts.addProperty("targetState", "on-stack");
+                                ts.addProperty("stackId", target.getId());
+                            }
+                        } else ts.addProperty("stackId", tsa.getId());
                         final Card th = tsa.getHostCard();
                         ts.addProperty("fid", th == null ? -1 : th.getId());
                         ts.addProperty("name", th == null ? "?" : th.getName());
                         tSpells.add(ts);
                     }
                 } catch (RuntimeException e) {
+                    if (stackInstances) throw e; // no partial/fabricated target references in the new contract
                     JsonRpcChannel.logErr("stack target enumeration failed", e);
                 }
             }
@@ -530,6 +567,42 @@ public final class StateEncoder {
 
     /** Face knowledge belongs to the receiving viewer, not the ability's actor. */
     public static JsonObject encodeSpellAbility(final SpellAbility sa, final PlayerView viewer) {
+        return encodeSpellAbility(sa, viewer, false);
+    }
+
+    /** Strict priority-menu X ranges are rules-checked, never AI estimates. */
+    public static JsonObject encodePriorityAbility(final SpellAbility sa, final PlayerView viewer) {
+        return encodeSpellAbility(sa, viewer, true);
+    }
+
+    /** Opt-in per-action rules domain. Call only for priority, before targets are chosen. */
+    public static JsonObject encodePriorityAbilityWithStackTargets(final SpellAbility sa, final PlayerView viewer) {
+        final JsonObject out=encodePriorityAbility(sa,viewer);
+        out.add("stackTargetDomain",PriorityStackTargetDomain.encode(sa));
+        return out;
+    }
+
+    /** Current priority observation; legacy entry points remain unchanged. */
+    public static JsonObject encodePriorityAbilityWithTargetDomains(final SpellAbility sa, final PlayerView viewer) {
+        final JsonObject out = encodePriorityAbilityWithStackTargets(sa, viewer);
+        out.add("boardTargetDomain", PriorityBoardTargetDomain.encode(sa));
+        if (sa != null && sa.isActivatedAbility() && !sa.isManaAbility())
+            out.add("activationIdentity", PriorityActivationIdentity.encode(sa));
+        // The host must identify which printed face this particular spell option casts.
+        // This is deliberately absent from legacy encoders and from non-spell menu items:
+        // an activated ability's host face is not a casting choice.
+        if (sa != null && sa.isSpell()) {
+            final JsonObject face = new JsonObject();
+            face.addProperty("version", "host-spell-face-v1");
+            face.addProperty("state", sa.getCardStateName().name());
+            face.addProperty("adventure", sa.isAdventure());
+            face.addProperty("omen", sa.isOmen());
+            out.add("spellFace", face);
+        }
+        return out;
+    }
+
+    private static JsonObject encodeSpellAbility(final SpellAbility sa, final PlayerView viewer, final boolean strictX) {
         final JsonObject o = new JsonObject();
         if (sa == null) {
             o.addProperty("pass", true);
@@ -565,7 +638,15 @@ public final class StateEncoder {
         // the same card. These fields say what actually differs.
         o.addProperty("optionKey", optionKey(sa));
         o.add("cost", encodeCost(sa));
-        o.add("x", encodeXRange(sa));
+        if (strictX && !sa.isLandAbility()) {
+            var cost=o.getAsJsonObject("cost");
+            cost.add("printedMana",cost.get("mana"));
+            var adjusted=forge.game.cost.CostAdjustment.benchmarkManaCost(sa);
+            if (adjusted==null) throw new RulesCostFeasibility.Unsupported("strict menu cost adjustment unavailable");
+            cost.addProperty("mana",adjusted.toString());
+            cost.addProperty("authority","rules-adjusted-symbolic-v1");
+        }
+        o.add("x", strictX ? encodeRulesXRange(sa) : encodeXRange(sa));
         o.add("modes", encodeModes(sa));
         if (sa.usesTargeting()) {
             o.addProperty("minTargets", sa.getMinTargets());
@@ -698,6 +779,21 @@ public final class StateEncoder {
      * activating player can actually pay for right now, not an unbounded integer — an X
      * spell with no ceiling is not a priceable option.
      */
+    private static JsonObject encodeRulesXRange(final SpellAbility sa) {
+        var out = new JsonObject();
+        boolean hasX = sa.getPayCosts() != null && sa.getPayCosts().getTotalMana().countX()>0;
+        out.addProperty("has",hasX);
+        if (hasX) {
+            var range=RulesCostFeasibility.announcementRange(sa.getActivatingPlayer(),sa);
+            if (range.max()<0) throw new RulesCostFeasibility.Unsupported("unpayable X action in priority menu");
+            int symbols=sa.getPayCosts().getTotalMana().countX();
+            out.addProperty("min",range.min()); out.addProperty("max",range.max()*symbols);
+            out.addProperty("symbols",symbols); out.addProperty("maxAnnounce",range.max());
+            out.addProperty("authority","rules-exact-generic-x-v1");
+        }
+        return out;
+    }
+
     private static JsonObject encodeXRange(final SpellAbility sa) {
         final JsonObject o = new JsonObject();
         boolean hasX = false;
@@ -723,20 +819,21 @@ public final class StateEncoder {
         return o;
     }
 
-    /** Mana available for X: the affordability estimate minus the cost's fixed pips. */
+    /** Legacy estimate minus fixed pips, not exact rules feasibility. Strict priority
+     * encoding uses the independently checked rules domain instead. */
     public static int xManaCeiling(final SpellAbility sa) {
         try {
             final Player p = sa.getActivatingPlayer();
             if (p == null) {
                 return 0;
             }
-            final int available = ComputerUtilMana.getAvailableManaEstimate(p);
+            final int available = LegacyManaEstimate.available(p);
             final int fixed = sa.getPayCosts() == null || sa.getPayCosts().hasNoManaCost()
                     ? 0 : sa.getPayCosts().getTotalMana().getCMC();
             return Math.max(0, available - fixed);
         } catch (RuntimeException e) {
             JsonRpcChannel.logErr("X ceiling estimate failed", e);
-            return 0;
+            throw new RulesCostFeasibility.Unsupported("Legacy X ceiling estimate failed: " + e.getClass().getSimpleName());
         }
     }
 
@@ -754,8 +851,9 @@ public final class StateEncoder {
     }
 
     /**
-     * The largest X the activating player can actually announce: mana-for-X divided by the
-     * number of {X} symbols. A {X}{X} card at 3 available mana announces X=1, not X=3.
+     * Legacy estimated X ceiling: mana-for-X divided by the number of {X} symbols.
+     * A {X}{X} card at 3 estimated available mana gives X=1, not X=3. Source coupling,
+     * color requirements and cost adjustment are not proved by this approximation.
      */
     public static int maxAnnounceableX(final SpellAbility sa) {
         return xManaCeiling(sa) / xSymbolCount(sa);

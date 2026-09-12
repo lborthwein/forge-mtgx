@@ -135,6 +135,13 @@ public final class BenchNullProbeWiringSmoke {
         same(stock, plain, "stock/null " + scenario);
         same(plain, probe, "null/probe " + scenario);
         JsonObject plainCounters = plain.counters().deepCopy(), probeCounters = probe.counters().deepCopy();
+        // The declared mode intentionally differs; all ownership buckets and
+        // actual call counts must still be equal, just like the engine state.
+        if (!plainCounters.getAsJsonObject("controllerCoverage").get("mode").getAsString().equals("null")
+                || !probeCounters.getAsJsonObject("controllerCoverage").get("mode").getAsString().equals("null-probe"))
+            throw new AssertionError("Controller coverage lost its actual mode identity");
+        plainCounters.getAsJsonObject("controllerCoverage").remove("mode");
+        probeCounters.getAsJsonObject("controllerCoverage").remove("mode");
         plainCounters.remove("instruments"); probeCounters.remove("instruments");
         if (!plainCounters.equals(probeCounters)) throw new AssertionError("Probe changed actual controller call counters");
         System.out.println("PASS lobby-created stock/null/null-probe " + scenario + " live=" + live

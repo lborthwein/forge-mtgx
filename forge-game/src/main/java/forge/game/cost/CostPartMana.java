@@ -81,6 +81,12 @@ public class CostPartMana extends CostPart {
         return this.cost;
     }
 
+    /** A literal zero, without a derived cost, repetition, X minimum or waterbend choice. */
+    public final boolean isUnmodifiedZero() {
+        return cost.isZero() && xMin == 0 && !isExiledCreatureCost
+                && !isEnchantedCreatureCost && !isCostPayAnyNumberOfTimes && maxWaterbend == null;
+    }
+
     public final int getAmountOfX() {
         return this.cost.countX();
     }
@@ -102,6 +108,9 @@ public class CostPartMana extends CostPart {
     public boolean isEnchantedCreatureCost() {
         return isEnchantedCreatureCost;
     }
+
+    /** Rules metadata, without evaluating or choosing the announced count. */
+    public boolean isPayAnyNumberOfTimes() { return isCostPayAnyNumberOfTimes; }
 
     @Override
     public boolean isReusable() { return true; }

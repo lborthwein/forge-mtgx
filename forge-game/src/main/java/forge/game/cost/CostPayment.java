@@ -191,6 +191,7 @@ public class CostPayment extends ManaConversionMatrix {
         final Game game = decisionMaker.getPlayer().getGame();
 
         for (final CostPart part : parts) {
+            if (decisionMaker.decideAtPayment(part)) continue;
             PaymentDecision decision = part.accept(decisionMaker);
             if (null == decision) return false;
 
@@ -211,7 +212,8 @@ public class CostPayment extends ManaConversionMatrix {
             try {
                 game.costPaymentStack.push(part, this);
 
-                if (!part.payAsDecided(decisionMaker.getPlayer(), decisions.get(part), this.ability, decisionMaker.isEffect())) {
+                PaymentDecision decision = decisionMaker.decideAtPayment(part) ? part.accept(decisionMaker) : decisions.get(part);
+                if (decision == null || !part.payAsDecided(decisionMaker.getPlayer(), decision, this.ability, decisionMaker.isEffect())) {
                     return false;
                 }
                 // abilities care what was used to pay for them

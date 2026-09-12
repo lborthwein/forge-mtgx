@@ -8,13 +8,30 @@ import forge.game.spellability.SpellAbility;
 /** Rules-only decisions for the bounded cost subset. Never invokes an AI. */
 final class RulesCostDecisionMaker extends CostDecisionMakerBase {
     private final Integer selectedLife;
+    private final java.util.function.Function<CostDiscard,java.util.List<forge.game.card.Card>> discardSelector;
+    private final java.util.function.Function<CostReturn,java.util.List<forge.game.card.Card>> returnSelector;
     RulesCostDecisionMaker(Player player, SpellAbility ability) {
         this(player, ability, null);
     }
     RulesCostDecisionMaker(Player player, SpellAbility ability, Integer selectedLife) {
-        super(player, false, ability, ability.getHostCard());
-        this.selectedLife = selectedLife;
+        this(player, ability, selectedLife, false);
     }
+    RulesCostDecisionMaker(Player player, SpellAbility ability, Integer selectedLife, boolean effect) {
+        this(player,ability,selectedLife,effect,null);
+    }
+    RulesCostDecisionMaker(Player player, SpellAbility ability, Integer selectedLife, boolean effect,
+            java.util.function.Function<CostDiscard,java.util.List<forge.game.card.Card>> discardSelector) {
+        this(player,ability,selectedLife,effect,discardSelector,null);
+    }
+    RulesCostDecisionMaker(Player player, SpellAbility ability, Integer selectedLife, boolean effect,
+            java.util.function.Function<CostDiscard,java.util.List<forge.game.card.Card>> discardSelector,
+            java.util.function.Function<CostReturn,java.util.List<forge.game.card.Card>> returnSelector) {
+        super(player, effect, ability, ability.getHostCard());
+        this.selectedLife = selectedLife;
+        this.discardSelector = discardSelector;
+        this.returnSelector = returnSelector;
+    }
+    @Override public boolean decideAtPayment(CostPart part) { return RulesDiscardCostDomain.supports(part) || RulesReturnCostDomain.supports(part); }
     @Override public boolean paysRightAfterDecision() { return false; }
     private PaymentDecision unsupported(CostPart cost) {
         throw new RulesCostFeasibility.Unsupported("execution cost " + cost.getClass().getSimpleName());
@@ -54,7 +71,19 @@ final class RulesCostDecisionMaker extends CostDecisionMakerBase {
     @Override public PaymentDecision visit(CostChooseColor cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostChooseCreatureType cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostCollectEvidence cost) { return unsupported(cost); }
-    @Override public PaymentDecision visit(CostDiscard cost) { return unsupported(cost); }
+    @Override public PaymentDecision visit(CostDiscard cost) {
+        if (RulesDiscardCostDomain.supports(cost)) {
+            if (discardSelector==null || isEffect()) return unsupported(cost);
+            require(cost);
+            return PaymentDecision.card(discardSelector.apply(cost));
+        }
+        if (!RulesCostFeasibility.isSingleSelfDiscard(cost) || !ability.isActivatedAbility()
+                || source != ability.getHostCard() || source.getOwner() != player
+                || player.getCardsIn(forge.game.zone.ZoneType.Hand).stream().noneMatch(c -> c == source))
+            return unsupported(cost);
+        require(cost);
+        return PaymentDecision.card(source);
+    }
     @Override public PaymentDecision visit(CostDamage cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostDraw cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostExile cost) { return unsupported(cost); }
@@ -76,7 +105,11 @@ final class RulesCostDecisionMaker extends CostDecisionMakerBase {
     @Override public PaymentDecision visit(CostGainLife cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostPromiseGift cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostPutCardToLib cost) { return unsupported(cost); }
-    @Override public PaymentDecision visit(CostReturn cost) { return unsupported(cost); }
+    @Override public PaymentDecision visit(CostReturn cost) {
+        if (!RulesReturnCostDomain.supports(cost) || returnSelector==null || isEffect()) return unsupported(cost);
+        require(cost);
+        return PaymentDecision.card(returnSelector.apply(cost));
+    }
     @Override public PaymentDecision visit(CostReveal cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostRevealChosen cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostRemoveAnyCounter cost) { return unsupported(cost); }

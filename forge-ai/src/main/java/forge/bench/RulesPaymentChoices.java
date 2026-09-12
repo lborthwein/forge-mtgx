@@ -77,7 +77,8 @@ public final class RulesPaymentChoices {
             // Never apply this to floating tokens or to two different activations.
             boolean interchangeableEarlier = false;
             for (int j = 0; j < i; j++) if (!used[j] && tokens.get(i).source() != null
-                    && tokens.get(i).source() == tokens.get(j).source() && tokens.get(i).color() == tokens.get(j).color()) {
+                    && tokens.get(i).source() == tokens.get(j).source()
+                    && tokens.get(i).source().equivalentUnits(tokens.get(i).outputIndex(), tokens.get(j).outputIndex())) {
                 interchangeableEarlier = true;
                 break;
             }

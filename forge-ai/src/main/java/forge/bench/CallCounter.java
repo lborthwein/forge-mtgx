@@ -32,6 +32,58 @@ import com.google.gson.JsonObject;
  * because only the second is a bridge defect.
  */
 public final class CallCounter {
+    public enum Ownership { HOST, FORCED, RULES, STOCK, UNCLASSIFIED }
+    private final Map<String, java.util.EnumMap<Ownership, Integer>> coverage = new TreeMap<>();
+    private String controllerMode;
+    private long generation;
+    private long nextInvocation;
+    /** Unclassified or stock-owned calls, retained until reset. This makes a
+     * successful outer rules operation insufficient to hide an unknown child. */
+    private final java.util.NavigableSet<Long> untrustedInvocations = new java.util.TreeSet<>();
+
+    /** One callback, not a mutable last-call slot. Nested invocations retain
+     * their own ownership; exceptions leave callbacks unclassified. */
+    public final class Invocation {
+        private final String method;
+        private final long born;
+        private final long id;
+        private boolean classified;
+        private Invocation(String method, long id) { this.method = method; this.born = generation; this.id = id; }
+        public void classify(Ownership owner) {
+            synchronized (CallCounter.this) {
+                if (owner == null || owner == Ownership.UNCLASSIFIED || classified || born != generation)
+                    throw new IllegalStateException("Invalid, repeated or stale controller ownership classification");
+                final var buckets = coverage.get(method);
+                if (buckets == null || buckets.get(Ownership.UNCLASSIFIED) < 1)
+                    throw new IllegalStateException("Controller ownership receipt lacks counted invocation");
+                buckets.merge(Ownership.UNCLASSIFIED, -1, Integer::sum);
+                buckets.merge(owner, 1, Integer::sum);
+                if (owner != Ownership.STOCK) untrustedInvocations.remove(id);
+                classified = true;
+            }
+        }
+
+        /** Call only after a rules-only wrapper successfully executes. Nested
+         * calls have their own receipts. An unknown/stock child leaves this
+         * wrapper unclassified; a parent receipt never erases that evidence.
+         * Unrelated concurrent later calls can only make this conservative. */
+        public boolean classifyRulesIfChildrenAccounted() {
+            synchronized (CallCounter.this) {
+                if (born != generation || classified)
+                    throw new IllegalStateException("Stale or repeated rules ownership receipt");
+                if (untrustedInvocations.higher(id) != null) return false;
+                classify(Ownership.RULES);
+                return true;
+            }
+        }
+    }
+
+    public synchronized void configureControllerMode(String mode) {
+        if (mode == null || !java.util.Set.of("bridge", "null", "null-probe").contains(mode)
+                || controllerMode != null && !controllerMode.equals(mode))
+            throw new IllegalArgumentException("Controller coverage mode is invalid or changed");
+        controllerMode = mode;
+    }
     private final Map<String, Integer> calls = new TreeMap<>();
     private final Map<String, Integer> delegatedRequested = new TreeMap<>();
     private final Map<String, Integer> delegatedRefused = new TreeMap<>();
@@ -43,7 +95,21 @@ public final class CallCounter {
     private final Map<String, Integer> instruments = new TreeMap<>();
 
     public synchronized void count(final String method) {
+        beginCall(method); // Legacy instrumentation does not establish ownership.
+    }
+
+    public synchronized Invocation beginCall(final String method) {
+        if (method == null || method.isBlank()) throw new IllegalArgumentException("Missing controller method");
         calls.merge(method, 1, Integer::sum);
+        final var buckets = coverage.computeIfAbsent(method, ignored -> {
+            final var result = new java.util.EnumMap<Ownership, Integer>(Ownership.class);
+            for (Ownership owner : Ownership.values()) result.put(owner, 0);
+            return result;
+        });
+        buckets.merge(Ownership.UNCLASSIFIED, 1, Integer::sum);
+        long id = ++nextInvocation;
+        untrustedInvocations.add(id);
+        return new Invocation(method, id);
     }
 
     /** Count a named observation that is not a controller call. */
@@ -83,6 +149,10 @@ public final class CallCounter {
     }
 
     public synchronized void reset() {
+        generation++;
+        untrustedInvocations.clear();
+        nextInvocation = 0;
+        coverage.clear();
         calls.clear();
         delegatedRequested.clear();
         delegatedRefused.clear();
@@ -98,6 +168,20 @@ public final class CallCounter {
         o.addProperty("totalCalls", totalCalls());
         o.addProperty("totalDelegatedRequested", total(delegatedRequested));
         o.addProperty("totalDelegatedRefused", total(delegatedRefused));
+        if (controllerMode != null) {
+            final var evidence = new JsonObject();
+            evidence.addProperty("schema", "forge-controller-coverage/1");
+            evidence.addProperty("mode", controllerMode);
+            final var methods = new JsonObject();
+            for (var entry : coverage.entrySet()) {
+                final var buckets = new JsonObject();
+                for (Ownership owner : Ownership.values())
+                    buckets.addProperty(owner.name().toLowerCase(java.util.Locale.ROOT), entry.getValue().get(owner));
+                methods.add(entry.getKey(), buckets);
+            }
+            evidence.add("methods", methods);
+            o.add("controllerCoverage", evidence);
+        }
         return o;
     }
 

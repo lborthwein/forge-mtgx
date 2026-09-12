@@ -20,7 +20,6 @@ package forge.bench;
 import com.google.common.collect.*;
 import forge.LobbyPlayer;
 import forge.ai.ComputerUtilAbility;
-import forge.ai.ComputerUtilMana;
 import forge.ai.PlayerControllerAi;
 import forge.card.ColorSet;
 import forge.card.ICardFace;
@@ -34,6 +33,7 @@ import forge.game.ability.AbilityUtils;
 import forge.game.ability.effects.RollDiceEffect;
 import forge.game.card.*;
 import forge.game.combat.Combat;
+import forge.game.combat.CombatDamageAssignment;
 import forge.game.combat.AttackConstraints;
 import forge.game.combat.AttackRequirement;
 import forge.game.combat.CombatUtil;
@@ -82,7 +82,8 @@ import java.util.function.Predicate;
  * <em>refusal</em>: the call falls through to {@code super} and is counted separately from
  * an answer that explicitly asked to delegate.
  */
-public class PlayerControllerBridge extends PlayerControllerAi {
+public class PlayerControllerBridge extends PlayerControllerAi implements forge.game.player.ScopedTriggerResolution,
+        forge.game.player.ScopedReplacementExecution, ScopedCombatDamageAssignment {
 
     private final BenchSession session;
     private final BenchSession.Mode mode;
@@ -98,8 +99,14 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      */
     private boolean buildingMenu = false;
     private SpellAbility pendingExternalAbility;
-    private RulesPaymentExecutor pendingExternalPayment;
+    private JsonObject pendingExternalAnswer;
     private RulesPaymentExecutor activeRulesPayment;
+    private boolean selectingExternalTargets;
+    private boolean announcingExternalAction;
+    private SpellAbility announcingExternalAbility;
+    private boolean failedExternalAction;
+    private CombatDamageAssignment activeCombatDamage;
+    private final Map<CombatDamageAssignment, CallCounter.Invocation> pendingCombatDamage = new IdentityHashMap<>();
 
     /**
      * The `ChangeZone` resolution currently walking its one-at-a-time loop, and how many
@@ -107,6 +114,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * a five-card pile reaches this controller as five separate single-card asks.
      */
     private SpellAbility zoneChangeRun = null;
+    private final KnownHandObservation knownHand;
+    private final RevealHistoryObservation revealHistory;
     private int zoneChangeChosen = 0;
 
     public PlayerControllerBridge(final Game game, final Player p, final LobbyPlayer lp,
@@ -117,6 +126,9 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         this.mode = mode;
         this.seat = seat;
         this.counters = counters;
+        this.knownHand = new KnownHandObservation(p);
+        this.revealHistory = new RevealHistoryObservation(p);
+        this.counters.configureControllerMode(mode.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'));
     }
 
     public CallCounter getCounters() {
@@ -158,7 +170,12 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         o.addProperty("seat", seat);
         if (withState) {
             try {
-                o.add("state", StateEncoder.encode(getGame(), getPlayer()));
+                final JsonObject state = StateEncoder.encodeWithStackInstances(getGame(), getPlayer());
+                if (mode == BenchSession.Mode.BRIDGE && isLiveGame()) {
+                    knownHand.augment(state);
+                    revealHistory.augment(state);
+                }
+                o.add("state", state);
             } catch (RuntimeException e) {
                 JsonRpcChannel.logErr("BENCH_INTEGRITY_FAILURE: state encoding failed", e);
                 throw e;
@@ -518,6 +535,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
     private void refuse(final String method, final String why) {
         counters.delegateRefused(method, why);
+        if (selectingExternalTargets || strictHostTargets) throw new RulesCostFeasibility.Unsupported("selected action " + method + ": " + why);
     }
 
     private static Integer optInt(final JsonObject o, final String key) {
@@ -529,6 +547,20 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         } catch (RuntimeException e) {
             return null;
         }
+    }
+
+    /** Exact scalar decoding for audited callbacks: Gson coercion is not a
+     * host decision. Keep legacy decoders untouched for non-migrated surfaces. */
+    private static Integer hostInteger(final JsonElement value) {
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()
+                || !value.getAsString().matches("0|[1-9][0-9]*")) return null;
+        try { return Integer.valueOf(value.getAsString()); }
+        catch (NumberFormatException invalid) { return null; }
+    }
+
+    private void requireHostChannel(final String operation) {
+        if (session.integrityFailure(getGame()) != null || session.getChannel().isClosed())
+            throw new RulesCostFeasibility.Unsupported(operation + " requires a healthy open host channel");
     }
 
     private static Boolean optBool(final JsonObject o, final String key) {
@@ -602,9 +634,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        count("chooseSpellAbilityToPlay");
+        if (failedExternalAction) throw new RulesCostFeasibility.Unsupported("prior controlled action failed; game cannot continue");
+        if (failedOptionalResolution) throw new RulesCostFeasibility.Unsupported("prior optional resolution failed; game cannot continue");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseSpellAbilityToPlay") : null;
         if (!bridged()) {
-            return super.chooseSpellAbilityToPlay();
+            final List<SpellAbility> out = super.chooseSpellAbilityToPlay();
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return out;
         }
         if (pendingExternalAbility != null) throw new RulesCostFeasibility.Unsupported("previous selected action was not executed");
         final PriorityDecision decision = buildPriorityDecision();
@@ -616,31 +652,46 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             final Echo e = takeEcho();
             final List<SpellAbility> out = super.chooseSpellAbilityToPlay();
             echo(e, echoPriority(menu, out));
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
             return out;
         }
-        final Integer choice = optInt(ans, "choice");
+        // Priority authority requires an actual integral JSON number. Gson's
+        // getAsInt coerces strings/arrays and truncates fractions or overflow;
+        // those must not become validated host actions (including pass zero).
+        Integer choice = null;
+        final JsonElement rawChoice = ans.get("choice");
+        if (rawChoice != null && rawChoice.isJsonPrimitive() && rawChoice.getAsJsonPrimitive().isNumber()) {
+            try { choice = rawChoice.getAsBigDecimal().intValueExact(); }
+            catch (NumberFormatException | ArithmeticException invalid) { /* existing explicit refusal below */ }
+        }
         if (choice == null || choice < 0 || choice > menu.size()) {
             refuse("chooseSpellAbilityToPlay", "choice out of range: " + choice);
-            return super.chooseSpellAbilityToPlay();
+            final List<SpellAbility> out = super.chooseSpellAbilityToPlay();
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return out;
         }
-        if (choice == 0) return null;
+        if (choice == 0) {
+            if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
+            return null;
+        }
         final SpellAbility chosen = menu.get(choice - 1);
         if (!chosen.canPlay()) {
             refuse("chooseSpellAbilityToPlay", "chosen ability is no longer playable: " + chosen);
-            return super.chooseSpellAbilityToPlay();
+            final List<SpellAbility> out = super.chooseSpellAbilityToPlay();
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return out;
         }
-        if (!announceX(chosen, ans) || !ensureTargets(chosen)) return super.chooseSpellAbilityToPlay();
-        if (!chosen.isLandAbility()) {
-            final RulesPaymentDomain payments = new RulesPaymentDomain(getPlayer(), chosen);
-            final JsonObject request = envelope(true);
-            for (var entry : payments.request().entrySet()) request.add(entry.getKey(), entry.getValue());
-            request.add("selectedAbility", StateEncoder.encodeSpellAbility(chosen, getPlayer().getView()));
-            final JsonObject selectedPayment = ask("payManaCost", "payment", request);
-            pendingExternalPayment = new RulesPaymentExecutor(getPlayer(), chosen, payments.select(selectedPayment));
-        }
+        announceX(chosen, ans);
+        if (chosen.isManaAbility()) new PriorityManaActivation(getPlayer(),chosen).select(ans);
+        else if (ans.has("manaOutput")) throw new RulesCostFeasibility.Unsupported("mana output supplied for non-mana action");
         pendingExternalAbility = chosen;
-        BenchActionAudit.selected(getGame(), seat, chosen, ans);
-        return Lists.newArrayList(chosen);
+        pendingExternalAnswer = ans.deepCopy();
+        BenchActionAudit.chosen(getGame(), seat, chosen, pendingExternalAnswer);
+        final List<SpellAbility> out = Lists.newArrayList(chosen);
+        // This invocation owns the action/X selection only. Modes, targets and
+        // payment are separate actual announcement calls; failure aborts game.
+        if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
+        return out;
     }
 
     private record PriorityDecision(List<SpellAbility> menu, JsonObject body, int[] diag) {}
@@ -658,11 +709,16 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.addProperty("rulesCostVersion", RulesCostFeasibility.VERSION);
         body.addProperty("paymentVersion", RulesCostFeasibility.PAYMENT_VERSION);
         body.addProperty("paymentControl", "host-complete-witness");
+        body.addProperty("priorityStackTargetsVersion", PriorityStackTargetDomain.VERSION);
+        body.addProperty("priorityBoardTargetsVersion", PriorityBoardTargetDomain.VERSION);
+        body.addProperty("priorityManaVersion", PriorityManaActivation.VERSION);
         body.add("menuDiag", menuDiagJson(diag, menu.size()));
         final JsonArray items = new JsonArray();
-        items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
+        items.add(StateEncoder.encodePriorityAbilityWithTargetDomains(null, getPlayer().getView())); // choice 0 is always pass
         for (SpellAbility sa : menu) {
-            items.add(StateEncoder.encodeSpellAbility(sa, getPlayer().getView()));
+            var item=StateEncoder.encodePriorityAbilityWithTargetDomains(sa, getPlayer().getView());
+            if(sa.isManaAbility())item.add("manaActivation",new PriorityManaActivation(getPlayer(),sa).request());
+            items.add(item);
         }
         body.add("menu", items);
         body.add("manaAbilities", manaAbilityChannel());
@@ -671,61 +727,24 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         return new PriorityDecision(menu, body, diag);
     }
 
-    /**
-     * Apply the host's announced X to the chosen ability (protocol v2.3).
-     *
-     * <p>Without this every {X} spell the bridged seat casts is announced at X=0, because
-     * Forge sets X inside {@code canPlayAI} — a path a host-chosen ability never goes down
-     * — and {@code XManaCostPaid} defaults to zero. Walking Ballista arrived as a 0/0 and
-     * died to state-based actions on the adjacent event; Forth Eorlingas! made no tokens.
-     * The announcement is read back by
-     * {@code ComputerUtilMana.calculateManaCost} via {@code calculateAmount(host, "X", sa)},
-     * so setting it here <em>is</em> the announcement.
-     *
-     * @return false when the answer should be refused and delegated
-     */
-    private boolean announceX(final SpellAbility chosen, final JsonObject ans) {
-        final Integer x = optInt(ans, "x");
-        if (x == null) {
-            return true; // no announcement offered; Forge's default of 0 stands
-        }
-        boolean hasX;
-        try {
-            hasX = chosen.costHasX()
-                    || (chosen.getPayCosts() != null && chosen.getPayCosts().hasXInAnyCostPart());
-        } catch (RuntimeException e) {
-            hasX = false;
-        }
+    /** Host choice, not a default or a strategic maximum. A bad announcement
+     * invalidates the action; never clamp, silently pick zero, or delegate. */
+    private void announceX(final SpellAbility chosen, final JsonObject ans) {
+        boolean hasX = chosen.getPayCosts()!=null && chosen.getPayCosts().getTotalMana().countX()>0;
         if (!hasX) {
-            // A decode mismatch: the host announced X for an ability that has none. Counted
-            // and delegated rather than ignored, so a TS-side menu-indexing bug cannot hide
-            // behind a field the JVM quietly drops.
-            refuse("chooseSpellAbilityToPlay", "answer announced x=" + x
-                    + " for an ability with no {X}: " + chosen);
-            return false;
+            if (ans.has("x")) throw new RulesCostFeasibility.Unsupported("X supplied for a non-X action");
+            return;
         }
-        final int ceiling = StateEncoder.maxAnnounceableX(chosen);
-        int clamped = Math.max(0, Math.min(x, ceiling));
-        // CR 601.2b: an X with a stated minimum may not be announced below it.
-        try {
-            if (chosen.getPayCosts() != null && chosen.getPayCosts().getCostMana() != null) {
-                clamped = Math.max(clamped, Math.min(ceiling, chosen.getPayCosts().getCostMana().getXMin()));
-            }
-        } catch (RuntimeException e) {
-            // no stated minimum available; the [0, ceiling] clamp stands
-        }
-        chosen.setXManaCostPaid(clamped);
+        var raw=ans.get("x");
+        if (raw==null || !raw.isJsonPrimitive() || !raw.getAsJsonPrimitive().isNumber()
+                || !raw.getAsString().matches("0|[1-9][0-9]{0,2}"))
+            throw new RulesCostFeasibility.Unsupported("explicit nonnegative integer X required");
+        int x=raw.getAsInt();
+        var range=RulesCostFeasibility.announcementRange(getPlayer(),chosen);
+        if (x<range.min() || x>range.max()) throw new RulesCostFeasibility.Unsupported("X outside exact payable range");
+        chosen.setXManaCostPaid(x);
         counters.instrument("x.announced");
-        if (clamped > 0) {
-            counters.instrument("x.announcedNonZero");
-        }
-        if (clamped != x) {
-            counters.instrument("x.clampedByJvm");
-            JsonRpcChannel.log("clamped announced X " + x + " -> " + clamped
-                    + " (ceiling " + ceiling + ", " + StateEncoder.xSymbolCount(chosen)
-                    + " {X} symbols) for " + chosen);
-        }
-        return true;
+        if (x>0) counters.instrument("x.announcedNonZero");
     }
 
     /**
@@ -739,26 +758,29 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * our priority menu have not been through {@code canPlayAI}, so without this step a
      * host-chosen targeted spell would reach the stack with no targets at all.
      *
-     * <p>Routing through {@link #chooseTargetsFor} means the host gets a {@code targets}
-     * ask, and a host that delegates falls back to Forge's own per-API targeting logic.
+     * <p>During controlled announcement, routing through {@link #chooseTargetsFor}
+     * requires an explicit host answer; delegation invalidates the game.
      */
-    private boolean ensureTargets(final SpellAbility root) {
+    private boolean ensureTargets(final SpellAbility root, final RulesCastingAuthorization announcement) {
         // A land play is not a spell/casting cost. Its rules permission is checked
         // by LandAbility.canPlay, including again immediately before execution.
         if (root.isLandAbility()) return true;
-        SpellAbility cur = root;
-        while (cur != null) {
-            if (cur.usesTargeting()) {
-                cur.clearTargets();
-                cur.setTargetingPlayer(getPlayer());
-                if (!chooseTargetsFor(cur) || !cur.isTargetNumberValid()) {
-                    refuse("chooseSpellAbilityToPlay", "could not legally target " + cur);
-                    return false;
-                }
-            }
-            cur = cur.getSubAbility();
+        try (var routing = TargetingPlayerRouting.open(root, getPlayer())) {
+            if (!root.setupTargets())
+                throw new RulesCostFeasibility.Unsupported("native target setup rejected selected action");
+            for (SpellAbility cur = root; cur != null; cur = cur.getSubAbility())
+                if (cur.usesTargeting() && !cur.isTargetNumberValid())
+                    throw new RulesCostFeasibility.Unsupported("native target setup returned invalid target count");
         }
-        if (!RulesCostFeasibility.requirePayable(getPlayer(), root)) {
+        // Match SpellAbility.setupTargets: mandatory target restrictions apply
+        // to the complete root/subability chain, not to each target group.
+        // A later group may satisfy the requirement (for example Flagbearer).
+        if (!forge.game.staticability.StaticAbilityMustTarget.meetsMustTargetRestriction(root)) {
+            throw new RulesCostFeasibility.Unsupported("selected action violates whole-chain mandatory target restriction");
+        }
+        final var cost = RulesCostFeasibility.assess(getPlayer(), root, announcement);
+        if (cost.status() == RulesCostFeasibility.Status.UNSUPPORTED) throw new RulesCostFeasibility.Unsupported(cost.reason());
+        if (cost.status() != RulesCostFeasibility.Status.PAYABLE) {
             refuse("chooseSpellAbilityToPlay", "cost became unpayable after targeting: " + root);
             return false;
         }
@@ -795,9 +817,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     }
 
     /**
-     * The legal action menu offered at priority. Mana abilities are excluded: Forge plays
-     * those during cost payment, never at priority, and offering them invites a
-     * non-terminating priority loop.
+     * The legal action menu offered at priority, including standalone mana
+     * activations. Loop/liveness controls must not erase legal action classes.
      */
     private List<SpellAbility> legalSpellAbilities() {
         return legalSpellAbilities(null);
@@ -806,9 +827,9 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     /**
      * v2.18 — THE MANA ABILITIES, ON A CHANNEL OF THEIR OWN.
      *
-     * <p>The exclusion documented one method above is right and stays: a mana ability is
-     * part of paying for something, not a thing to do at priority, and offering them
-     * invites a non-terminating loop. What was never true is the host's inference from it.
+     * <p>Historical metadata channel, retained for ability context even when a
+     * source is tapped or unavailable. It is NOT the executable action domain;
+     * playable standalone mana activations also appear in the priority menu.
      * The host builds {@code CardView.abilities} by walking THIS menu
      * ({@code answer.ts:publishAbilities}), so on the bench a permanent's mana abilities
      * are not in its ability list at all — measured on the host side, {@code isManaAbility}
@@ -878,7 +899,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             final CardCollection cards = ComputerUtilAbility.getAvailableCards(game, p);
             final List<SpellAbility> withVariants = BenchmarkAbilityEnumeration.spells(cards, p);
             for (SpellAbility sa : withVariants) {
-                if (sa.isManaAbility() || sa.isLandAbility()) {
+                if (sa.isLandAbility()) {
                     continue;
                 }
                 sa.setActivatingPlayer(p);
@@ -889,7 +910,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                     bump(diag, DIAG_TIMING);
                     continue;
                 }
-                if (!RulesCostFeasibility.requirePayable(p, sa)) {
+                if (!RulesCostFeasibility.requireMenuPayable(p, sa)) {
                     bump(diag, DIAG_UNAFFORDABLE);
                     continue;
                 }
@@ -1015,7 +1036,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      *
      * <p>{@code addExtraKeywordCost} passes {@code Integer.MAX_VALUE} for Multikicker, so
      * the raw {@code max} is not a range a host can price against. This is the affordable
-     * ceiling: mana left after the base cost, divided by the repeat's own mana cost.
+     * legacy estimated ceiling: mana left after the base cost, divided by the repeat's
+     * own mana cost. Observation purity does not make this exact rules feasibility.
      */
     private int affordableRepeats(final SpellAbility sa, final Cost cost, final int max) {
         int ceiling;
@@ -1027,14 +1049,14 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 // these as a yes/no with max 1 and we have no cheap affordability model.
                 ceiling = Math.min(max, 1);
             } else {
-                final int available = ComputerUtilMana.getAvailableManaEstimate(getPlayer());
+                final int available = LegacyManaEstimate.available(getPlayer());
                 final int base = sa.getPayCosts() == null || sa.getPayCosts().hasNoManaCost()
                         ? 0 : sa.getPayCosts().getTotalMana().getCMC();
                 ceiling = Math.min(max, Math.max(0, (available - base) / repeatMana));
             }
         } catch (RuntimeException e) {
             JsonRpcChannel.logErr("keyword-cost ceiling estimate failed", e);
-            ceiling = Math.min(max, 1);
+            throw new RulesCostFeasibility.Unsupported("Legacy keyword-cost ceiling estimate failed: " + e.getClass().getSimpleName());
         }
         return Math.max(0, ceiling);
     }
@@ -1203,7 +1225,28 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * the menu offers e.g. a counterspell with an empty stack. Every entry we offer must be
      * an action the host can actually complete.
      */
-    private static boolean hasEnoughTargets(final SpellAbility root) {
+    private static boolean hasEnoughTargets(final SpellAbility original) {
+        // Only enumeration copies receive prospective chooser metadata. In
+        // particular, this must not invoke setupTargets or either player's AI.
+        final SpellAbility root = original.copyForEnumeration(original.getActivatingPlayer());
+        for (SpellAbility choice = root; choice != null; choice = choice.getSubAbility())
+            if (choice.usesTargeting()) choice.setTargetingPlayer(TargetingPlayerRouting.chooser(choice));
+        if (root.getApi() == forge.game.ability.ApiType.Charm) {
+            // Exact ordinary single-mode choice; unresolved mode families must
+            // invalidate coverage, not be hidden from the action menu.
+            if (!"1".equals(root.getParamOrDefault("CharmNum", "1"))
+                    || !"1".equals(root.getParamOrDefault("MinCharmNum", "1"))
+                    || java.util.List.of("CanRepeatModes", "Random", "Chooser", "Optional", "ChoiceRestriction").stream().anyMatch(root::hasParam))
+                throw new RulesCostFeasibility.Unsupported("unsupported modal choice domain");
+            boolean viable = false;
+            final var copy = root.copyForEnumeration(root.getActivatingPlayer());
+            for (var option : copy.getAdditionalAbilityList("Choices")) {
+                if (option.hasParam("ModeCost") || option.getApi() == forge.game.ability.ApiType.Charm)
+                    throw new RulesCostFeasibility.Unsupported("unsupported modal cost or nested mode");
+                if (hasEnoughTargets(option)) viable = true;
+            }
+            if (!viable) return false;
+        }
         SpellAbility cur = root;
         while (cur != null) {
             if (cur.usesTargeting() && candidateCount(cur) < cur.getMinTargets()) {
@@ -1216,104 +1259,42 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
     @Override
     public void declareAttackers(final Player attacker, final Combat combat) {
-        count("declareAttackers");
-        if (!bridged()) {
-            super.declareAttackers(attacker, combat);
-            return;
+        final var invocation = isLiveGame() ? counters.beginCall("declareAttackers") : null;
+        if (mode == BenchSession.Mode.BRIDGE && isLiveGame()) {
+            declareHostCombat(attacker, combat, true, invocation); return;
         }
-        final CardCollection possible = new CardCollection();
-        for (Card c : attacker.getCreaturesInPlay()) {
-            if (CombatUtil.canAttack(c)) {
-                possible.add(c);
-            }
-        }
-        final List<GameEntity> defenders = new ArrayList<>(combat.getDefenders());
+        super.declareAttackers(attacker, combat);
+        if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+    }
 
-        final JsonObject body = envelope(true);
-        body.add("legalAttackers", StateEncoder.encodeCards(possible));
-        body.add("legalDefenders", StateEncoder.encodeEntities(defenders));
-        final JsonObject legalPairs = new JsonObject();
-        for (Card c : possible) {
-            final JsonArray defs = new JsonArray();
-            for (GameEntity d : defenders) {
-                if (CombatUtil.canAttack(c, d)) {
-                    defs.add(d.getId());
-                }
-            }
-            legalPairs.add(String.valueOf(c.getId()), defs);
-        }
-        body.add("legalPairs", legalPairs);
-        // v2.8: the same map with typed defender refs. `legalPairs` keeps bare ids for one
-        // minor version; these are unambiguous and are what an answer should echo.
-        final JsonObject legalPairsTyped = new JsonObject();
-        for (Card c : possible) {
-            final JsonArray defs = new JsonArray();
-            for (GameEntity d : defenders) {
-                if (CombatUtil.canAttack(c, d)) {
-                    defs.add(StateEncoder.entityRef(d));
-                }
-            }
-            legalPairsTyped.add(String.valueOf(c.getId()), defs);
-        }
-        body.add("legalPairsTyped", legalPairsTyped);
-        addAttackRequirements(body, combat, possible, defenders);
-
-        final JsonObject ans = ask("declareAttackers", "attackers", body);
-        if (ans == null) {
-            final Echo e = takeEcho();
-            super.declareAttackers(attacker, combat);
-            // The declaration is the return value here; `combat` IS the answer.
-            echo(e, echoAttackers(combat));
-            return;
-        }
-        if (!ans.has("pairs") || !ans.get("pairs").isJsonArray()) {
-            refuse("declareAttackers", "missing/!array 'pairs'");
-            super.declareAttackers(attacker, combat);
-            return;
-        }
-        combat.clearAttackers();
-        String bad = null;
-        // The defender side shares the players-and-cards id space (an opposing planeswalker
-        // or battle is a legal defender), so it takes a typed ref exactly like a target.
-        for (JsonElement pairEl : ans.getAsJsonArray("pairs")) {
-            if (!pairEl.isJsonArray() || pairEl.getAsJsonArray().size() != 2) {
-                bad = "each pair must be [attackerFid, defenderRef]: " + pairEl;
-                break;
-            }
-            final JsonArray pr = pairEl.getAsJsonArray();
-            final int attackerFid;
-            try {
-                attackerFid = pr.get(0).getAsInt();
-            } catch (RuntimeException e) {
-                bad = "attacker id is not a number: " + pr.get(0);
-                break;
-            }
-            final EntityRef dref = parseRef(pr.get(1), "declareAttackers");
-            if (dref == null) {
-                bad = "unparseable defender reference: " + pr.get(1);
-                break;
-            }
-            final Card c = findCard(possible, attackerFid);
-            final GameEntity d = findTyped(defenders, dref);
-            if (c == null || d == null) {
-                bad = "unknown attacker/defender " + attackerFid + "/" + refText(dref);
-                break;
-            }
-            if (!CombatUtil.canAttack(c, d)) {
-                bad = c.getName() + " cannot attack " + d;
-                break;
-            }
-            combat.addAttacker(c, d);
-        }
-        if (bad == null && !CombatUtil.validateAttackers(combat)) {
-            bad = "CombatUtil.validateAttackers rejected the declaration";
-        }
-        if (bad != null) {
-            combat.clearAttackers();
-            refuse("declareAttackers", bad);
-            super.declareAttackers(attacker, combat);
+    private void declareHostCombat(Player player, Combat combat, boolean attack, CallCounter.Invocation invocation) {
+        final String method = attack ? "declareAttackers" : "declareBlockers";
+        try {
+            requireHostChannel(method);
+            // Follow the engine's declarer routing, including effects that let
+            // another player declare. A simple player == getPlayer() would
+            // incorrectly reject those legitimate callbacks.
+            final Player declarer = Objects.requireNonNullElse(
+                    attack ? player.getDeclaresAttackers() : player.getDeclaresBlockers(), player);
+            if (player.getGame() != getGame() || declarer.getController() != this || combat != getGame().getCombat())
+                throw new RulesCostFeasibility.Unsupported("combat callback is not the live routed declaration");
+            var choice = new CombatDeclarationChoices(player, combat, attack);
+            var body = envelope(true);
+            choice.encode(body);
+            if (attack) addAttackRequirements(body, combat, choice.cards, choice.defenders);
+            var answer = ask(method, attack ? "attackers" : "blockers", body);
+            requireHostChannel(method);
+            var receipt = choice.apply(answer);
+            receipt.addProperty("game", session.getGameId());
+            receipt.addProperty("seat", seat);
+            JsonRpcChannel.log("[bench-combat] " + receipt);
+            invocation.classify(CallCounter.Ownership.HOST);
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, method, failure);
+            throw failure;
         }
     }
+
 
     /**
      * Attack requirements on the {@code attackers} ask (protocol v2.2).
@@ -1406,91 +1387,14 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
     @Override
     public void declareBlockers(final Player defender, final Combat combat) {
-        count("declareBlockers");
-        if (!bridged()) {
-            super.declareBlockers(defender, combat);
-            return;
+        final var invocation = isLiveGame() ? counters.beginCall("declareBlockers") : null;
+        if (mode == BenchSession.Mode.BRIDGE && isLiveGame()) {
+            declareHostCombat(defender, combat, false, invocation); return;
         }
-        final CardCollection possible = new CardCollection();
-        for (Card c : defender.getCreaturesInPlay()) {
-            if (CombatUtil.canBlock(c, combat)) {
-                possible.add(c);
-            }
-        }
-        final CardCollection attackers = combat.getAttackers();
-
-        final JsonObject body = envelope(true);
-        body.add("legalBlockers", StateEncoder.encodeCards(possible));
-        body.add("attackers", StateEncoder.encodeCards(attackers));
-        // Protocol v2. Forge validates a block declaration AS A WHOLE, so a single blocker
-        // on a menacing attacker refuses the entire step. The keyword list on each card
-        // now carries "Menace", but the requirement can also come from an effect with no
-        // keyword at all, so state the number outright.
-        final JsonObject minBlockers = new JsonObject();
-        for (Card a : attackers) {
-            try {
-                minBlockers.addProperty(String.valueOf(a.getId()),
-                        CombatUtil.getMinNumBlockersForAttacker(a, defender));
-            } catch (RuntimeException e) {
-                minBlockers.addProperty(String.valueOf(a.getId()), 1);
-            }
-        }
-        body.add("minBlockers", minBlockers);
-        final JsonObject legalPairs = new JsonObject();
-        for (Card b : possible) {
-            final JsonArray atk = new JsonArray();
-            for (Card a : attackers) {
-                if (CombatUtil.canBlock(a, b, combat)) {
-                    atk.add(a.getId());
-                }
-            }
-            legalPairs.add(String.valueOf(b.getId()), atk);
-        }
-        body.add("legalPairs", legalPairs);
-
-        final JsonObject ans = ask("declareBlockers", "blockers", body);
-        if (ans == null) {
-            final Echo e = takeEcho();
-            super.declareBlockers(defender, combat);
-            echo(e, echoBlockers(combat));
-            return;
-        }
-        final List<int[]> pairs = optPairs(ans, "pairs");
-        if (pairs == null) {
-            refuse("declareBlockers", "missing/!array 'pairs'");
-            super.declareBlockers(defender, combat);
-            return;
-        }
-        final CardCollection applied = new CardCollection();
-        String bad = null;
-        for (int[] pr : pairs) {
-            final Card b = findCard(possible, pr[0]);
-            final Card a = findCard(attackers, pr[1]);
-            if (b == null || a == null) {
-                bad = "unknown blocker/attacker " + pr[0] + "/" + pr[1];
-                break;
-            }
-            if (!CombatUtil.canBlock(a, b, combat)) {
-                bad = b.getName() + " cannot block " + a.getName();
-                break;
-            }
-            combat.addBlocker(a, b);
-            applied.add(b);
-        }
-        if (bad == null) {
-            final String problem = CombatUtil.validateBlocks(combat, defender);
-            if (problem != null) {
-                bad = "CombatUtil.validateBlocks: " + problem;
-            }
-        }
-        if (bad != null) {
-            for (Card b : applied) {
-                combat.undoBlockingAssignment(b);
-            }
-            refuse("declareBlockers", bad);
-            super.declareBlockers(defender, combat);
-        }
+        super.declareBlockers(defender, combat);
+        if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
     }
+
 
     /**
      * Play or draw (protocol v2.6).
@@ -1558,50 +1462,86 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      */
     @Override
     public CardCollectionView tuckCardsViaMulligan(final CardCollectionView hand, final int cardsToReturn) {
-        count("tuckCardsViaMulligan");
-        if (!bridged() || cardsToReturn <= 0) {
+        final var invocation = isLiveGame() ? counters.beginCall("tuckCardsViaMulligan") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
             return super.tuckCardsViaMulligan(hand, cardsToReturn);
         }
-        final CardCollection picked = askForCards("tuckCardsViaMulligan", hand,
-                cardsToReturn, cardsToReturn, "put on the bottom (London mulligan)", null);
-        if (picked == null) {
-            // `takeEcho()` is null on the REFUSAL branch of `askForCards` — `ask` clears
-            // the token whenever the host actually answered — so the echo fires only on a
-            // delegation, exactly as the ECHO block prescribes.
-            final Echo e = takeEcho();
-            final CardCollectionView out = super.tuckCardsViaMulligan(hand, cardsToReturn);
-            echo(e, echoCards(out));
-            return out;
+        try {
+        requireHostChannel("London bottom selection");
+        if (hand == null || cardsToReturn < 0 || cardsToReturn > hand.size())
+            throw new RulesCostFeasibility.Unsupported("invalid London bottom count/domain");
+        final var originals = new java.util.LinkedHashMap<Integer, Card>();
+        for (Card card : hand) {
+            if (card == null || card.getGame() != getGame() || !card.isInZone(ZoneType.Hand)
+                    || card.getOwner() != getPlayer() || originals.put(card.getId(), card) != null)
+                throw new RulesCostFeasibility.Unsupported("invalid London hand instance");
         }
+        if (cardsToReturn == 0) {
+            if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+            return new CardCollection();
+        }
+        final JsonObject body = envelope(true);
+        body.addProperty("title", "put on the bottom (London mulligan)");
+        body.addProperty("min", cardsToReturn); body.addProperty("max", cardsToReturn);
+        body.add("menu", StateEncoder.encodeCards(hand));
+        final var answer = ask("tuckCardsViaMulligan", "cardsChoice", body);
+        if (answer == null || !answer.has("choices") || !answer.get("choices").isJsonArray()
+                || answer.getAsJsonArray("choices").size() != cardsToReturn)
+            throw new RulesCostFeasibility.Unsupported("London bottom requires exact host card count");
+        final CardCollection picked = new CardCollection();
+        final var used = new java.util.HashSet<Integer>();
+        for (JsonElement raw : answer.getAsJsonArray("choices")) {
+            final Integer id = hostInteger(raw);
+            final Card card = id == null ? null : originals.get(id);
+            if (card == null || !used.add(id))
+                throw new RulesCostFeasibility.Unsupported("unknown/duplicate/nonintegral London card identity");
+            picked.add(card);
+        }
+        if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
         return picked;
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "London bottom selection", failure);
+            throw failure;
+        }
     }
 
     @Override
-    public boolean mulliganKeepHand(final Player p, final int cardsToReturn) {
-        count("mulliganKeepHand");
-        if (!bridged()) {
-            return super.mulliganKeepHand(p, cardsToReturn);
+    public boolean mulliganKeepHand(final Player firstPlayer, final int cardsToReturn) {
+        final var invocation = isLiveGame() ? counters.beginCall("mulliganKeepHand") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            return super.mulliganKeepHand(firstPlayer, cardsToReturn);
         }
+        try {
+        requireHostChannel("mulligan");
+        // MulliganService supplies the STARTING player to every controller,
+        // including the non-starting seat. This is not the decision's actor.
+        if (firstPlayer == null || !getGame().getPlayers().contains(firstPlayer) || cardsToReturn < 0)
+            throw new RulesCostFeasibility.Unsupported("invalid mulligan starting player/count");
         final JsonObject body = envelope(true);
         body.addProperty("cardsToReturn", cardsToReturn);
         body.add("hand", StateEncoder.encodeCards(getPlayer().getCardsIn(ZoneType.Hand)));
         final JsonObject ans = ask("mulliganKeepHand", "mulligan", body);
-        if (ans == null) {
-            final Echo e = takeEcho();
-            final boolean out = super.mulliganKeepHand(p, cardsToReturn);
-            echo(e, echoBool("keep", out));
-            return out;
+        if (ans == null) throw new RulesCostFeasibility.Unsupported("mulligan requires an explicit host answer");
+        Boolean keep = null;
+        if (ans.has("keep")) {
+            final var raw = ans.get("keep");
+            if (!raw.isJsonPrimitive() || !raw.getAsJsonPrimitive().isBoolean())
+                throw new RulesCostFeasibility.Unsupported("mulligan keep must be a JSON boolean");
+            keep = raw.getAsBoolean();
         }
-        Boolean keep = optBool(ans, "keep");
-        if (keep == null) {
-            final Integer choice = optInt(ans, "choice");
-            if (choice == null || choice < 0 || choice > 1) {
-                refuse("mulliganKeepHand", "expected boolean 'keep' or choice 0/1");
-                return super.mulliganKeepHand(p, cardsToReturn);
-            }
+        if (ans.has("choice")) {
+            final Integer choice = hostInteger(ans.get("choice"));
+            if (choice == null || choice > 1 || (keep != null && keep != (choice == 1)))
+                throw new RulesCostFeasibility.Unsupported("mulligan choice must be consistent integer 0/1");
             keep = choice == 1;
         }
+        if (keep == null) throw new RulesCostFeasibility.Unsupported("missing mulligan decision");
+        if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
         return keep;
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "mulligan decision", failure);
+            throw failure;
+        }
     }
 
     @Override
@@ -1644,20 +1584,70 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     public CardCollectionView chooseCardsForEffect(final CardCollectionView sourceList, final SpellAbility sa,
             final String title, final int min, final int max, final boolean isOptional,
             final Map<String, Object> params) {
-        count("chooseCardsForEffect");
-        if (!bridged()) {
-            return super.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
-        }
-        final CardCollection picked = askForCards("chooseCardsForEffect", sourceList,
-                isOptional ? 0 : min, max, title, sa);
-        if (picked == null) {
-            final Echo e = takeEcho();
-            final CardCollectionView out =
-                    super.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
-            echo(e, echoCards(out));
+        final var invocation = isLiveGame() ? counters.beginCall("chooseCardsForEffect") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            var out = super.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
             return out;
         }
-        return picked;
+        try {
+            requireHostChannel("effect card choice");
+            if (sourceList == null || min < 0 || max < min)
+                throw new RulesCostFeasibility.Unsupported("invalid effect card bounds");
+            final List<Card> domain = List.copyOf(sourceList);
+            final int lower = isOptional ? 0 : Math.min(min, domain.size());
+            final int upper = Math.min(max, domain.size());
+            final var identities = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<Card, Boolean>());
+            final var timestamps = new java.util.IdentityHashMap<Card, Long>();
+            final var zones = new java.util.IdentityHashMap<Card, forge.game.zone.Zone>();
+            final var fids = new java.util.HashSet<Integer>();
+            final var menu = new JsonArray();
+            for (Card card : domain) {
+                if (!identities.add(card) || !fids.add(card.getId()) || card.getGame() != getGame()
+                        || card.getZone() == null || card.getZone().getCards().stream().noneMatch(live -> live == card))
+                    throw new RulesCostFeasibility.Unsupported("invalid effect card identity");
+                var visible = knownHand.visible(card);
+                if (visible == null) throw new RulesCostFeasibility.Unsupported("effect card lacks visibility grant");
+                menu.add(visible);
+                timestamps.put(card, card.getGameTimestamp()); zones.put(card, card.getZone());
+            }
+            if (lower == upper && (upper == 0 || upper == domain.size())) {
+                if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+                return upper == 0 ? new CardCollection() : new CardCollection(domain);
+            }
+            var body = envelope(true);
+            body.addProperty("title", String.valueOf(title)); body.addProperty("min", lower); body.addProperty("max", upper);
+            body.addProperty("effectChoiceVersion", "host-card-domain-v1");
+            if (sa != null) {
+                body.addProperty("effectChoices", sa.getParamOrDefault("Choices", ""));
+                body.addProperty("effectChoiceZone", sa.getParamOrDefault("ChoiceZone", "Battlefield"));
+                body.addProperty("effectChoiceAmount", sa.getParamOrDefault("Amount", "1"));
+                body.addProperty("effectChoiceMinAmount", sa.getParamOrDefault("MinAmount", "1"));
+            }
+            body.add("menu", menu);
+            if (sa != null) body.add("ability", StateEncoder.encodeSpellAbility(sa));
+            var answer = ask("chooseCardsForEffect", "cardsChoice", body);
+            if (answer == null || !answer.has("choices") || !answer.get("choices").isJsonArray())
+                throw new RulesCostFeasibility.Unsupported("effect requires explicit card selection");
+            for (Card card : domain) if (timestamps.get(card) != card.getGameTimestamp() || zones.get(card) != card.getZone()
+                    || card.getZone() == null || card.getZone().getCards().stream().noneMatch(live -> live == card))
+                throw new RulesCostFeasibility.Unsupported("effect card domain changed during decision");
+            var picked = new CardCollection();
+            for (var id : answer.getAsJsonArray("choices")) {
+                Integer fid = hostInteger(id);
+                Card card = fid == null ? null : domain.stream().filter(c -> c.getId() == fid).findFirst().orElse(null);
+                if (card == null || picked.contains(card))
+                    throw new RulesCostFeasibility.Unsupported("effect choice has invalid or duplicate card ID");
+                picked.add(card);
+            }
+            if (picked.size() < lower || picked.size() > upper)
+                throw new RulesCostFeasibility.Unsupported("effect choice outside cardinality");
+            if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
+            return picked;
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "effect card choice", failure);
+            throw failure;
+        }
     }
 
     /** Shared {@code cardsChoice} round trip. Returns null to mean "delegate". */
@@ -1696,12 +1686,31 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         return picked;
     }
 
+    private boolean strictHostTargets;
+
     @Override
     public boolean chooseTargetsFor(final SpellAbility currentAbility) {
-        count("chooseTargetsFor");
-        if (!bridged() || currentAbility == null || !currentAbility.usesTargeting()) {
-            return super.chooseTargetsFor(currentAbility);
+        final var invocation = isLiveGame() ? counters.beginCall("chooseTargetsFor") : null;
+        TargetingPlayerRouting.requireController(currentAbility, getPlayer(), mode == BenchSession.Mode.BRIDGE && isLiveGame());
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            final boolean result = super.chooseTargetsFor(currentAbility);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return result;
         }
+        if (currentAbility == null || !currentAbility.usesTargeting() || !bridged())
+            throw new RulesCostFeasibility.Unsupported("live host target callback lacks ability or transport");
+        final boolean previous = strictHostTargets;
+        strictHostTargets = true;
+        try {
+            final boolean result = chooseHostTargets(currentAbility);
+            if (!result || !currentAbility.isTargetNumberValid())
+                throw new RulesCostFeasibility.Unsupported("host target callback returned invalid target count");
+            if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
+            return result;
+        } finally { strictHostTargets = previous; }
+    }
+
+    private boolean chooseHostTargets(final SpellAbility currentAbility) {
         final TargetRestrictions tgt = currentAbility.getTargetRestrictions();
         // Mixed-zone by construction: both branches are always enumerated and the menu is
         // their union. See stackCandidates/candidateCount.
@@ -1716,9 +1725,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final List<SpellAbilityStackInstance> stack = stackCandidates(currentAbility);
         final int min = currentAbility.getMinTargets();
         final int max = currentAbility.getMaxTargets();
+        if (preparingOptionalTrigger && min>0 && candidates.isEmpty() && stack.isEmpty())
+            throw new NoLegalOptionalTriggerTarget();
 
         final JsonObject body = envelope(true);
-        body.add("ability", StateEncoder.encodeSpellAbility(currentAbility));
+        body.add("ability", selectingExternalTargets
+                ? StateEncoder.encodePriorityAbility(currentAbility, getPlayer().getView())
+                : StateEncoder.encodeSpellAbility(currentAbility, getPlayer().getView()));
         final JsonArray menu = StateEncoder.encodeEntities(candidates);
         for (SpellAbilityStackInstance si : stack) {
             menu.add(StateEncoder.encodeStackCandidate(getGame(), si));
@@ -1737,19 +1750,26 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         // to the JVM's even split. `divideRemaining` is what is still unassigned, which is
         // what a re-entrant targeting pass actually has to work with.
         final boolean divided = currentAbility.isDividedAsYouChoose();
+        body.addProperty("targetAllocationVersion", "host-explicit-divide-v1");
+        // This callback replaces the entire target set below; previous divided
+        // allocations are not retained. The host must allocate the full total.
+        body.addProperty("targetSelectionMode", "replace-all");
         body.addProperty("dividedAsYouChoose", divided);
         if (divided) {
             final Integer total = currentAbility.getDividedValue();
             if (total == null) {
                 body.add("divideTotal", com.google.gson.JsonNull.INSTANCE);
+                body.add("allocationTotal", com.google.gson.JsonNull.INSTANCE);
             } else {
                 body.addProperty("divideTotal", total);
+                body.addProperty("allocationTotal", total);
             }
             body.addProperty("divideRemaining", currentAbility.getStillToDivide());
         }
 
         final JsonObject ans = ask("chooseTargetsFor", "targets", body);
         if (ans == null) {
+            if (strictHostTargets) throw new RulesCostFeasibility.Unsupported("explicit host targets required");
             final Echo e = takeEcho();
             final boolean out = super.chooseTargetsFor(currentAbility);
             // The chosen targets are on the ability, not in the return value.
@@ -1769,7 +1789,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final TargetChoices before = currentAbility.getTargets();
         currentAbility.resetTargets();
         for (JsonElement el : rawChoices) {
-            final EntityRef ref = parseRef(el, "chooseTargetsFor");
+            final EntityRef ref = parseTargetRef(el);
             if (ref == null) {
                 currentAbility.setTargets(before);
                 refuse("chooseTargetsFor", "unparseable target reference: " + el);
@@ -1791,13 +1811,39 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 return super.chooseTargetsFor(currentAbility);
             }
         }
-        final String divideProblem = applyDividedAllocation(currentAbility, ans);
+        final String divideProblem = applyDividedAllocation(currentAbility, ans, stack);
         if (divideProblem != null) {
             currentAbility.setTargets(before);
             refuse("chooseTargetsFor", divideProblem);
             return super.chooseTargetsFor(currentAbility);
         }
         return true;
+    }
+
+    /** Strict target-only decoding. Do not coerce strings, singleton arrays,
+     * fractions or overflowing values into another target's identity. The
+     * legacy exact-integer forms retain their existing namespace resolution;
+     * attacker references retain the unchanged parser above. */
+    private EntityRef parseTargetRef(final JsonElement el) {
+        if (el == null || el.isJsonNull()) return null;
+        final JsonObject object = el.isJsonObject() ? el.getAsJsonObject() : null;
+        final JsonElement rawId = object == null ? el : object.get("id");
+        if (rawId == null || !rawId.isJsonPrimitive() || !rawId.getAsJsonPrimitive().isNumber()) return null;
+        final int id;
+        try { id = rawId.getAsBigDecimal().intValueExact(); }
+        catch (NumberFormatException | ArithmeticException invalid) { return null; }
+        if (id < 0) return null;
+        String kind = null;
+        if (object != null && object.has("kind") && !object.get("kind").isJsonNull()) {
+            final JsonElement rawKind = object.get("kind");
+            if (!rawKind.isJsonPrimitive() || !rawKind.getAsJsonPrimitive().isString()) return null;
+            kind = rawKind.getAsString().trim().toLowerCase(Locale.ROOT);
+            if (!"player".equals(kind) && !"card".equals(kind) && !"spell".equals(kind)) return null;
+        }
+        // An id-only object is just as ambiguous as a bare integer. Preserve
+        // its legacy meaning, but do not let it evade compatibility accounting.
+        if (kind == null) counters.instrument("legacy.untypedRef");
+        return new EntityRef(kind, id);
     }
 
     /**
@@ -1808,19 +1854,27 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * targets without an allocation left that null, and the NPE escaped as a crashed game
      * stamped "Draw" -- three of fifteen bridged crashes in one campaign.
      *
-     * <p>The answer may carry {@code "divide": {"<targetId>": n}}; otherwise the amount is
-     * split evenly with the remainder on the first target, which is Forge's own convention
-     * ({@code PossibleTargetSelector}).
+     * <p>The host supplies every allocation using typed target keys. No even
+     * split or other policy is substituted for missing answers. Validate all
+     * fields before changing any divided metadata.
      *
      * @return null on success, or the reason to refuse
      */
-    private static String applyDividedAllocation(final SpellAbility sa, final JsonObject ans) {
+    private static String applyDividedAllocation(final SpellAbility sa, final JsonObject ans,
+            final List<SpellAbilityStackInstance> stack) {
         if (!sa.isDividedAsYouChoose()) {
             return null;
         }
+        if (!ans.has("targetAllocationVersion") || !ans.get("targetAllocationVersion").isJsonPrimitive()
+                || !ans.getAsJsonPrimitive("targetAllocationVersion").isString()
+                || !"host-explicit-divide-v1".equals(ans.get("targetAllocationVersion").getAsString()))
+            return "explicit target allocation version required";
+        if (!ans.has("divide") || !ans.get("divide").isJsonObject())
+            return "explicit 'divide' object required";
+        final JsonObject explicit = ans.getAsJsonObject("divide");
         final List<GameObject> chosen = Lists.newArrayList(sa.getTargets());
         if (chosen.isEmpty()) {
-            return null;
+            return explicit.size() == 0 ? null : "'divide' has entries without chosen targets";
         }
         final Integer totalObj = sa.getDividedValue();
         if (totalObj == null) {
@@ -1829,46 +1883,34 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             return "divided-as-you-choose ability with no total to divide: " + sa;
         }
         final int total = totalObj;
-        final JsonObject explicit = ans.has("divide") && ans.get("divide").isJsonObject()
-                ? ans.getAsJsonObject("divide") : null;
-        if (explicit != null) {
-            int sum = 0;
-            for (GameObject go : chosen) {
-                // Same flat id space as `choices`, so accept a typed key first
-                // ("card:1" / "player:1") and fall back to the bare id.
-                final String typedKey = kindOf(go) + ":" + idOf(go);
-                final String bareKey = String.valueOf(idOf(go));
-                final String key = explicit.has(typedKey) ? typedKey : bareKey;
-                if (!explicit.has(key)) {
-                    return "'divide' omits target " + typedKey;
-                }
-                final int n;
-                try {
-                    n = explicit.get(key).getAsInt();
-                } catch (RuntimeException e) {
-                    return "'divide' entry for " + key + " is not a number";
-                }
-                if (n < 1) {
-                    // CR 601.2d: every target must get at least one.
-                    return "'divide' gives " + n + " to target " + key;
-                }
-                sa.addDividedAllocation(go, n);
-                sum += n;
-            }
-            if (sum != total) {
-                return "'divide' allocates " + sum + " of " + total;
-            }
-            return null;
-        }
         if (total < chosen.size()) {
             return "cannot divide " + total + " among " + chosen.size() + " targets";
         }
-        final int each = total / chosen.size();
-        int leftover = total - each * chosen.size();
+        final Map<GameObject, Integer> allocation = new LinkedHashMap<>();
+        final Set<String> usedKeys = new HashSet<>();
+        long sum = 0;
         for (GameObject go : chosen) {
-            sa.addDividedAllocation(go, each + leftover);
-            leftover = 0;
+            String key = kindOf(go) + ":" + idOf(go);
+            if (go instanceof SpellAbility) {
+                // The wire names a stack INSTANCE, not SpellAbility.getId().
+                // Those sequences differ; resolve using the offered menu.
+                final var matches = stack.stream().filter(si -> si.getSpellAbility() == go).toList();
+                if (matches.size() != 1) return "ambiguous or absent allocated stack target";
+                key = "spell:" + (StateEncoder.SPELL_TARGET_ID_BASE + matches.get(0).getId());
+            }
+            if (!usedKeys.add(key) || !explicit.has(key)) return "duplicate or omitted allocated target " + key;
+            final JsonElement value = explicit.get(key);
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()
+                    || !value.getAsString().matches("[1-9][0-9]{0,9}"))
+                return "'divide' entry for " + key + " must be a positive integer";
+            final long n = value.getAsLong();
+            if (n > total) return "'divide' exceeds total for " + key;
+            allocation.put(go, (int) n);
+            sum += n;
         }
+        if (!usedKeys.equals(explicit.keySet())) return "'divide' has extra or untyped target keys";
+        if (sum != total) return "'divide' allocates " + sum + " of " + total;
+        for (var entry : allocation.entrySet()) sa.addDividedAllocation(entry.getKey(), entry.getValue());
         return null;
     }
 
@@ -1933,7 +1975,26 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     public <T extends GameEntity> T chooseSingleEntityForEffect(final FCollectionView<T> optionList,
             final DelayedReveal delayedReveal, final SpellAbility sa, final String title,
             final boolean isOptional, final Player relatedPlayer, final Map<String, Object> params) {
-        count("chooseSingleEntityForEffect");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseSingleEntityForEffect") : null;
+        final Player forced = TargetingPlayerRouting.forcedChooser(getPlayer(), sa, optionList,
+                title, isOptional, delayedReveal, relatedPlayer, params);
+        if (forced != null) {
+            if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+            return optionList.get(0);
+        }
+        if (mode == BenchSession.Mode.BRIDGE && isLiveGame() && optionList != null
+                && optionList.size() == 1 && !isOptional && delayedReveal == null) {
+            try {
+                requireHostChannel("mandatory singleton entity choice");
+                final T only = optionList.get(0);
+                if (only == null || only.getGame() != getGame())
+                    throw new RulesCostFeasibility.Unsupported("forced entity is not in this game");
+                if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+                return only;
+            } catch (RuntimeException | Error failure) {
+                session.noteIntegrityFailure(getGame(), seat, "forced entity choice", failure); throw failure;
+            }
+        }
         if (!bridged() || optionList == null || optionList.isEmpty()) {
             return super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional,
                     relatedPlayer, params);
@@ -2078,9 +2139,16 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public List<AbilitySub> chooseModeForAbility(final SpellAbility sa, final List<AbilitySub> possible,
             final int min, final int num, final boolean allowRepeat) {
-        count("chooseModeForAbility");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseModeForAbility") : null;
+        if (announcingExternalAction && sa != announcingExternalAbility)
+            throw new RulesCostFeasibility.Unsupported("mode choice belongs to a different controlled announcement");
+        if (announcingExternalAction && (mode != BenchSession.Mode.BRIDGE || !isLiveGame()
+                || session.getChannel().isClosed() || possible == null || possible.isEmpty()))
+            throw new RulesCostFeasibility.Unsupported("controlled mode choice requires actual open host domain");
         if (!bridged() || possible == null || possible.isEmpty()) {
-            return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            final var out = super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return out;
         }
         final JsonObject body = envelope(true);
         body.addProperty("min", min);
@@ -2101,6 +2169,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         body.add("menu", modes);
         final JsonObject ans = ask("chooseModeForAbility", "mode", body);
+        if (announcingExternalAction && ans == null)
+            throw new RulesCostFeasibility.Unsupported("explicit controlled mode answer required");
         if (ans == null) {
             final Echo e = takeEcho();
             final List<AbilitySub> out = super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
@@ -2108,7 +2178,18 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             // `indexOfIdentity` maps a repeated mode back to the same index, which is
             // what an answer with `allowRepeat` would itself have sent.
             echo(e, echoIndices(possible, out));
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
             return out;
+        }
+        if (announcingExternalAction) {
+            final var raw = ans.get("choices");
+            if (raw == null || !raw.isJsonArray()) throw new RulesCostFeasibility.Unsupported("explicit mode indices required");
+            for (var value : raw.getAsJsonArray()) {
+                if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber())
+                    throw new RulesCostFeasibility.Unsupported("mode index must be numeric integer");
+                try { value.getAsBigDecimal().intValueExact(); }
+                catch (ArithmeticException | NumberFormatException bad) { throw new RulesCostFeasibility.Unsupported("invalid mode index integer"); }
+            }
         }
         final List<Integer> idx = optIntList(ans, "choices");
         if (idx == null || idx.size() < min || idx.size() > num) {
@@ -2123,6 +2204,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             }
             picked.add(possible.get(i));
         }
+        if (invocation != null && announcingExternalAction)
+            invocation.classify(CallCounter.Ownership.HOST);
         return picked;
     }
 
@@ -2187,47 +2270,55 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(final CardCollection topN) {
-        count("arrangeForScry");
-        if (!bridged() || topN == null || topN.isEmpty()) {
+        final var invocation = isLiveGame() ? counters.beginCall("arrangeForScry") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
             return super.arrangeForScry(topN);
+        }
+        try {
+        requireHostChannel("scry");
+        if (topN == null) throw new RulesCostFeasibility.Unsupported("null scry domain");
+        if (topN.isEmpty()) {
+            if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+            return ImmutablePair.of(new CardCollection(), new CardCollection());
+        }
+        final var originals = new java.util.LinkedHashMap<Integer, Card>();
+        for (Card card : topN) {
+            if (card == null || card.getGame() != getGame() || originals.put(card.getId(), card) != null)
+                throw new RulesCostFeasibility.Unsupported("invalid/duplicate scry object");
         }
         final JsonObject body = envelope(true);
         body.add("menu", StateEncoder.encodeCards(topN));
         final JsonObject ans = ask("arrangeForScry", "scry", body);
-        if (ans == null) {
-            final Echo e = takeEcho();
-            final ImmutablePair<CardCollection, CardCollection> out = super.arrangeForScry(topN);
-            final JsonObject a = new JsonObject();
-            a.add("top", fidArray(out == null ? null : out.getLeft()));
-            a.add("bottom", fidArray(out == null ? null : out.getRight()));
-            echo(e, a);
-            return out;
-        }
-        final List<Integer> top = optIntList(ans, "top");
-        final List<Integer> bottom = optIntList(ans, "bottom");
-        if (top == null || bottom == null || top.size() + bottom.size() != topN.size()) {
-            refuse("arrangeForScry", "top+bottom must partition the " + topN.size() + " revealed cards");
-            return super.arrangeForScry(topN);
-        }
+        if (ans == null || !ans.has("top") || !ans.get("top").isJsonArray()
+                || !ans.has("bottom") || !ans.get("bottom").isJsonArray())
+            throw new RulesCostFeasibility.Unsupported("scry requires an explicit top/bottom partition");
+        final var top = ans.getAsJsonArray("top");
+        final var bottom = ans.getAsJsonArray("bottom");
+        if (top.size() + bottom.size() != originals.size())
+            throw new RulesCostFeasibility.Unsupported("scry partition size mismatch");
         final CardCollection toTop = new CardCollection();
         final CardCollection toBottom = new CardCollection();
-        for (int fid : top) {
-            final Card c = findCard(topN, fid);
-            if (c == null || toTop.contains(c)) {
-                refuse("arrangeForScry", "unknown/duplicate top card " + fid);
-                return super.arrangeForScry(topN);
-            }
+        final var used = new java.util.HashSet<Integer>();
+        for (JsonElement raw : top) {
+            final Integer fid = hostInteger(raw);
+            final Card c = fid == null ? null : originals.get(fid);
+            if (c == null || !used.add(fid))
+                throw new RulesCostFeasibility.Unsupported("unknown/duplicate/nonintegral scry top card");
             toTop.add(c);
         }
-        for (int fid : bottom) {
-            final Card c = findCard(topN, fid);
-            if (c == null || toTop.contains(c) || toBottom.contains(c)) {
-                refuse("arrangeForScry", "unknown/duplicate bottom card " + fid);
-                return super.arrangeForScry(topN);
-            }
+        for (JsonElement raw : bottom) {
+            final Integer fid = hostInteger(raw);
+            final Card c = fid == null ? null : originals.get(fid);
+            if (c == null || !used.add(fid))
+                throw new RulesCostFeasibility.Unsupported("unknown/duplicate/nonintegral scry bottom card");
             toBottom.add(c);
         }
+        if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
         return ImmutablePair.of(toTop, toBottom);
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "scry decision", failure);
+            throw failure;
+        }
     }
 
     @Override
@@ -2269,111 +2360,116 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         return out;
     }
 
+    @Override public boolean requiresCombatDamageAssignmentScope() {
+        return mode == BenchSession.Mode.BRIDGE && isLiveGame();
+    }
+
+    @Override public Map<Card, Integer> assignCombatDamageInScope(CombatDamageAssignment context) {
+        if (!requiresCombatDamageAssignmentScope() || context.controller != this || activeCombatDamage != null)
+            throw new RulesCostFeasibility.Unsupported("invalid combat damage scope");
+        activeCombatDamage = context;
+        try {
+            return assignCombatDamage(context.source, context.recipients, context.remaining,
+                    context.damage, context.defender, context.overrideOrder);
+        } finally { activeCombatDamage = null; }
+    }
+
+    @Override public void failCombatDamageAssignment(Throwable failure) {
+        session.noteIntegrityFailure(getGame(), seat, "combat damage assignment", failure);
+        pendingCombatDamage.clear();
+    }
+
+    @Override public void finishCombatDamageAssignment(CombatDamageAssignment context, CardDamageTable table) {
+        requireHostChannel("completed combat damage assignment");
+        if (!context.isComplete()) throw new RulesCostFeasibility.Unsupported("combat damage has not passed native aggregate verification");
+        var invocation = pendingCombatDamage.remove(context);
+        if (invocation == null) throw new RulesCostFeasibility.Unsupported("unowned combat damage completion");
+        JsonObject receipt = new JsonObject(), allocation = new JsonObject();
+        if (!context.isDeferred()) for (var e : context.accepted().entrySet())
+            allocation.addProperty(e.getKey() == null ? "-1" : String.valueOf(e.getKey().getId()), e.getValue());
+        receipt.addProperty("schema", "host-combat-damage-v1");
+        receipt.addProperty("scope", "native-aggregate-assignment-before-damage");
+        receipt.addProperty("operation", context.isDeferred() ? "defer" : "assign");
+        receipt.addProperty("game", session.getGameId()); receipt.addProperty("seat", seat);
+        receipt.addProperty("source", context.source.getId()); receipt.add("assign", allocation);
+        JsonRpcChannel.log("[bench-combat-damage] " + receipt);
+        invocation.classify(CallCounter.Ownership.HOST);
+    }
+
+    private static int exactDamageInteger(JsonElement value) {
+        if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()
+                || !value.getAsString().matches("0|[1-9][0-9]*"))
+            throw new RulesCostFeasibility.Unsupported("noncanonical combat damage amount");
+        try { return Integer.parseInt(value.getAsString()); }
+        catch (NumberFormatException failure) { throw new RulesCostFeasibility.Unsupported("combat damage overflow"); }
+    }
+
     @Override
     public Map<Card, Integer> assignCombatDamage(final Card attacker, final CardCollectionView blockers,
             final CardCollectionView remaining, final int damageDealt, final GameEntity defender,
             final boolean overrideOrder) {
-        count("assignCombatDamage");
-        if (!bridged()) {
-            return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
+        final var invocation = isLiveGame() ? counters.beginCall("assignCombatDamage") : null;
+        if (!requiresCombatDamageAssignmentScope()) {
+            var result = super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return result;
         }
-        final JsonObject body = envelope(true);
-        body.add("attacker", StateEncoder.encodeCardUnchecked(attacker));
-        body.add("menu", StateEncoder.encodeCards(blockers));
-        body.addProperty("damage", damageDealt);
-        body.addProperty("overrideOrder", overrideOrder);
-        body.addProperty("defenderId", defender == null ? -1 : defender.getId());
-        // v2.7: whether the -1 "excess through to the defender" key is legal at all here.
-        // Forge calls this for BLOCKERS too, dividing a blocker's damage among the
-        // attackers it blocks, and there `defender` is null.
-        body.addProperty("allowExcessToDefender", defender != null);
-        final JsonObject ans = ask("assignCombatDamage", "assignDamage", body);
-        if (ans == null) {
-            final Echo e = takeEcho();
-            final Map<Card, Integer> out = super.assignCombatDamage(attacker, blockers, remaining,
-                    damageDealt, defender, overrideOrder);
-            final JsonObject a = new JsonObject();
-            final JsonObject assign = new JsonObject();
-            if (out != null) {
-                for (Map.Entry<Card, Integer> en : out.entrySet()) {
-                    final int n = en.getValue() == null ? 0 : en.getValue();
-                    // ZERO ENTRIES ARE DROPPED, and that is canonicalisation rather than
-                    // loss. `Combat` treats a recipient absent from the map exactly as it
-                    // treats one assigned 0, the answer reader's own `total` sums the same
-                    // either way, and this side's `damage.droppedZeroExcess` instrument
-                    // already applies the rule to the `-1` slot. Keeping them would put
-                    // the echo in a shape the host's action grammar never emits, so an
-                    // imitation target and a policy's output would differ on a difference
-                    // that is not one — measured: 5 of 88 `assignDamage` echoes on the
-                    // 2026-08-27 smoke, every one of them an ask with `damage: 0`.
-                    if (n == 0) {
-                        continue;
-                    }
-                    // The null key is the excess-to-defender sentinel, and it is spelled
-                    // "-1" on the wire in both directions.
-                    assign.addProperty(en.getKey() == null ? "-1" : String.valueOf(en.getKey().getId()), n);
+        try {
+            requireHostChannel("combat damage assignment");
+            var context = activeCombatDamage;
+            if (context == null || context.source != attacker || context.recipients != blockers
+                    || context.remaining != remaining || context.damage != damageDealt
+                    || context.defender != defender || context.overrideOrder != overrideOrder)
+                throw new RulesCostFeasibility.Unsupported("combat damage lacks exact native context");
+            context.requireCurrent();
+            JsonObject body = envelope(true), lethal = new JsonObject();
+            body.addProperty("combatDamageVersion", "host-combat-damage-v1");
+            body.add("attacker", StateEncoder.encodeCardUnchecked(attacker));
+            body.add("menu", StateEncoder.encodeCards(blockers));
+            body.addProperty("damage", damageDealt); body.addProperty("overrideOrder", overrideOrder);
+            body.addProperty("dividedAsChosen", context.dividedAsChosen);
+            body.addProperty("allowExcessToDefender", context.allowDefender);
+            body.addProperty("mayDefer", context.mayDefer());
+            body.addProperty("defenderId", defender == null ? -1 : defender.getId());
+            if (defender != null) {
+                body.add("defender", StateEncoder.entityRef(defender));
+                body.addProperty("defenderKind", defender instanceof Player ? "player" : "card");
+            }
+            for (Card c : blockers) lethal.addProperty(String.valueOf(c.getId()), context.remainingLethal(c));
+            body.add("remainingLethal", lethal);
+            var answer = ask("assignCombatDamage", "assignDamage", body);
+            requireHostChannel("combat damage answer");
+            if (answer == null) throw new RulesCostFeasibility.Unsupported("combat damage host delegated/disconnected");
+            if (answer.has("defer")) {
+                if (!answer.get("defer").isJsonPrimitive() || !answer.get("defer").getAsJsonPrimitive().isBoolean()
+                        || !answer.get("defer").getAsBoolean() || answer.has("assign"))
+                    throw new RulesCostFeasibility.Unsupported("invalid combat damage defer");
+                context.accept(null);
+                pendingCombatDamage.put(context, invocation); // The phase must actually finish before this is certified.
+                return null;
+            }
+            if (!answer.has("assign") || !answer.get("assign").isJsonObject())
+                throw new RulesCostFeasibility.Unsupported("missing combat damage allocation");
+            Map<Card, Integer> proposed = new LinkedHashMap<>();
+            for (var e : answer.getAsJsonObject("assign").entrySet()) {
+                Card target = null;
+                if (!e.getKey().equals("-1")) {
+                    if (!e.getKey().matches("0|[1-9][0-9]*"))
+                        throw new RulesCostFeasibility.Unsupported("noncanonical combat recipient");
+                    int id;
+                    try { id = Integer.parseInt(e.getKey()); }
+                    catch (NumberFormatException invalid) { throw new RulesCostFeasibility.Unsupported("combat recipient overflow"); }
+                    for (Card c : blockers) if (c.getId() == id) target = c;
+                    if (target == null) throw new RulesCostFeasibility.Unsupported("unknown combat recipient");
                 }
+                proposed.put(target, exactDamageInteger(e.getValue()));
             }
-            a.add("assign", assign);
-            echo(e, a);
-            return out;
+            var result = context.accept(proposed);
+            pendingCombatDamage.put(context, invocation);
+            return result; // HOST classification waits for actual aggregate verification in Combat.
+        } catch (RuntimeException | Error failure) {
+            failCombatDamageAssignment(failure); throw failure;
         }
-        if (!ans.has("assign") || !ans.get("assign").isJsonObject()) {
-            refuse("assignCombatDamage", "missing 'assign' object");
-            return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
-        }
-        final Map<Card, Integer> out = new HashMap<>();
-        int total = 0;
-        for (Map.Entry<String, JsonElement> e : ans.getAsJsonObject("assign").entrySet()) {
-            final int amount;
-            final int fid;
-            try {
-                fid = Integer.parseInt(e.getKey());
-                amount = e.getValue().getAsInt();
-            } catch (RuntimeException ex) {
-                refuse("assignCombatDamage", "non-numeric assignment entry " + e.getKey());
-                return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
-            }
-            if (amount < 0) {
-                refuse("assignCombatDamage", "negative assignment to " + fid);
-                return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
-            }
-            total += amount;
-            // key -1 means "excess through to the defending player/planeswalker"
-            if (fid < 0) {
-                // FAIL CLOSED. Forge uses this same controller call to divide a BLOCKER's
-                // damage among the attackers it blocks, and passes defender == null there.
-                // Forwarding the sentinel makes Combat.assignBlockersDamage:750 call
-                // damageMap.put(blocker, null, n), which Guava rejects -- and the NPE
-                // escapes as a crashed game stamped "Draw". Ten of fifteen bridged crashes
-                // in one campaign were this. The sentinel never leaves this method unless
-                // there is a defender to receive it.
-                if (defender == null) {
-                    if (amount > 0) {
-                        refuse("assignCombatDamage", "answer routed " + amount
-                                + " to the defender, but this assignment has none"
-                                + " (blocker path, CR 510.1d)");
-                        return super.assignCombatDamage(attacker, blockers, remaining, damageDealt,
-                                defender, overrideOrder);
-                    }
-                    counters.instrument("damage.droppedZeroExcess");
-                    continue;
-                }
-                out.put(null, amount);
-                continue;
-            }
-            final Card target = findCard(blockers, fid);
-            if (target == null) {
-                refuse("assignCombatDamage", "unknown blocker " + fid);
-                return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
-            }
-            out.put(target, amount);
-        }
-        if (total != damageDealt) {
-            refuse("assignCombatDamage", "assigned " + total + " of " + damageDealt);
-            return super.assignCombatDamage(attacker, blockers, remaining, damageDealt, defender, overrideOrder);
-        }
-        return out;
     }
 
     // ------------------------------------------------------ counted delegations
@@ -2381,16 +2477,374 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     // point increments its own counter and delegates. This is the decision-surface
     // instrumentation; behaviour is byte-for-byte PlayerControllerAi.
 
+    /** Ordinary mandatory triggers use engine target setup, not Default's
+     * private strategic preparation. Enclosing rules callbacks receive ownership
+     * only after successful execution and independent accounting of every child.
+     */
+    @Override
+    protected boolean prepareSingleSa(final Card host, SpellAbility sa, boolean isMandatory) {
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame())
+            return super.prepareSingleSa(host, sa, isMandatory);
+        if (session.getChannel().isClosed())
+            throw new RulesCostFeasibility.Unsupported("trigger preparation requires an open host channel");
+        if (sa == null || sa.getHostCard() != host || sa.getActivatingPlayer() != getPlayer())
+            throw new RulesCostFeasibility.Unsupported("trigger preparation actor/source identity mismatch");
+        if (sa.isOptionalTrigger()) {
+            if (OptionalManaTriggerExecution.hasPaidUnderlying(sa)) OptionalManaTriggerExecution.require(getPlayer(), sa);
+            else OptionalZeroTriggerExecution.require(getPlayer(), sa);
+        }
+        else if (!isMandatory || (sa instanceof WrappedAbility wrapper && wrapper.getDecider() != null))
+            throw new RulesCostFeasibility.Unsupported("unowned trigger confirmation");
+        for (SpellAbility current = sa; current != null; current = current.getSubAbility()) {
+            boolean scopedRepeat = current == sa && sa.isOptionalTrigger()
+                    && OptionalManaTriggerExecution.hasPaidUnderlying(sa) && OptionalManaTriggerExecution.repeated(sa);
+            if (current.getApi() == forge.game.ability.ApiType.Charm || (current.hasParam("Announce") && !scopedRepeat) || current.costHasX())
+                throw new RulesCostFeasibility.Unsupported("modal/announced trigger preparation is not yet host controlled");
+        }
+        final boolean previous = selectingExternalTargets;
+        final boolean previousOptional = preparingOptionalTrigger;
+        preparingOptionalTrigger = sa.isOptionalTrigger();
+        selectingExternalTargets = true; // existing target refusals must fail closed, never call the AI
+        try {
+            // Forge walks subabilities, TargetingPlayer and MustTarget here.
+            // A failed setup is explicit unsupported coverage, not a silently
+            // dropped mandatory trigger. No outer RULES label is earned here.
+            if (!sa.setupTargets())
+                throw new RulesCostFeasibility.Unsupported("ordinary trigger target setup failed");
+            counters.instrument("hostTrigger.targetsPrepared");
+            return true;
+        } catch (NoLegalOptionalTriggerTarget empty) {
+            counters.instrument("hostTrigger.noLegalTarget");
+            return false;
+        } finally { selectingExternalTargets = previous; preparingOptionalTrigger = previousOptional; }
+    }
+
+    // Inherited public AI entry points bypassed the old abstract-surface list.
+    // Count the actual invocation, but do not claim forced/host ownership merely
+    // because a particular input happens to yield a constant answer.
+    @Override
+    public boolean acceptsDrawOffer() { count("acceptsDrawOffer"); return super.acceptsDrawOffer(); }
+    @Override
+    public CardCollectionView cheatShuffle(CardCollectionView cards) {
+        final var invocation = isLiveGame() ? counters.beginCall("cheatShuffle") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            var result = super.cheatShuffle(cards);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return result;
+        }
+        try {
+            requireHostChannel("shuffle completion");
+            if (cards == null || getGame().getRules().isAllowCheatShuffle())
+                throw new RulesCostFeasibility.Unsupported("benchmark requires unmodified engine shuffle");
+            // Player.shuffle already shuffled once with the engine RNG. This
+            // callback must not inspect/reorder the library or consult an AI.
+            if (invocation != null) invocation.classify(CallCounter.Ownership.RULES);
+            return cards;
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "shuffle completion", failure);
+            throw failure;
+        }
+    }
+    @Override
+    public boolean chooseBinary(SpellAbility sa, String question, BinaryChoiceType kind, Map<String, Object> params) {
+        count("chooseBinary"); return super.chooseBinary(sa, question, kind, params);
+    }
+    @Override
+    public int chooseNumber(SpellAbility sa, String title, int min, int max, Map<String, Object> params) {
+        count("chooseNumber"); return super.chooseNumber(sa, title, min, max, params);
+    }
+    @Override
+    public void setupAutoProfile(Deck deck) {
+        final var invocation = isLiveGame() ? counters.beginCall("setupAutoProfile") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) { super.setupAutoProfile(deck); return; }
+        try {
+            requireHostChannel("profile notification");
+            // A full-control host is not a Default combat policy. Do not infer
+            // or configure Forge aggression from its registered deck.
+            if (invocation != null) invocation.classify(CallCounter.Ownership.RULES);
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "profile notification", failure); throw failure;
+        }
+    }
+    @Override
+    public Map<DeckSection, List<? extends PaperCard>> complainCardsCantPlayWell(Deck deck) {
+        final var invocation = isLiveGame() ? counters.beginCall("complainCardsCantPlayWell") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) return super.complainCardsCantPlayWell(deck);
+        try {
+            requireHostChannel("deck diagnostic notification");
+            // Match uses this only for warning broadcasts. Calling super also
+            // configures Default's combat profile, which does not own this seat.
+            if (invocation != null) invocation.classify(CallCounter.Ownership.RULES);
+            return Collections.emptyMap();
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "deck diagnostic notification", failure); throw failure;
+        }
+    }
+    @Override
+    public void resetAtEndOfTurn() {
+        final var invocation = isLiveGame() ? counters.beginCall("resetAtEndOfTurn") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) { super.resetAtEndOfTurn(); return; }
+        try {
+            requireHostChannel("end-turn scratch cleanup");
+            // Clear transient reservations, not the separate revealed-hand ledger.
+            getAi().getCardMemory().clearAllRemembered();
+            if (invocation != null) invocation.classify(CallCounter.Ownership.RULES);
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "end-turn scratch cleanup", failure); throw failure;
+        }
+    }
+
     @Override
     public SpellAbility getAbilityToPlay(Card hostCard, List<SpellAbility> abilities, ITriggerEvent triggerEvent) { count("getAbilityToPlay"); return super.getAbilityToPlay(hostCard, abilities, triggerEvent); }
     @Override
-    public void playSpellAbilityNoStack(SpellAbility effectSA, boolean mayChoseNewTargets) { count("playSpellAbilityNoStack"); super.playSpellAbilityNoStack(effectSA, mayChoseNewTargets); }
+    public void playSpellAbilityNoStack(SpellAbility effectSA, boolean mayChoseNewTargets) {
+        final var invocation = isLiveGame() ? counters.beginCall("playSpellAbilityNoStack") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            super.playSpellAbilityNoStack(effectSA, mayChoseNewTargets); return;
+        }
+        try {
+        requireHostChannel("trigger no-stack execution");
+        if (activeReplacementExecution != null && effectSA.getReplacementEffect() != null) {
+            if (session.getChannel().isClosed())
+                throw new RulesCostFeasibility.Unsupported("replacement execution requires open host channel");
+            activeReplacementExecution.consume(getPlayer(),effectSA,mayChoseNewTargets);
+            var payment = new MandatoryZeroTriggerExecution(getPlayer(),effectSA,true,activeReplacementExecution);
+            prepareSingleSa(effectSA.getHostCard(),effectSA,true);
+            var previous = activeZeroTriggerPayment; activeZeroTriggerPayment=payment;
+            try { payment.payCost(); } finally { activeZeroTriggerPayment=previous; }
+            counters.instrument("hostReplacement.rulesNoStackExecution");
+            forge.game.ability.AbilityUtils.resolve(effectSA);
+            requireHostChannel("completed replacement execution");
+            if (invocation != null) invocation.classifyRulesIfChildrenAccounted();
+            return;
+        }
+        requireZeroTrigger(effectSA);
+        if (effectSA.isOptionalTrigger()) {
+            if (mayChoseNewTargets || (activeOptionalResolution==null && activeOptionalManaResolution==null))
+                throw new RulesCostFeasibility.Unsupported("optional effect requires exact native resolution authorization");
+            if (activeOptionalManaResolution != null) activeOptionalManaResolution.consume(getPlayer(), effectSA);
+            else activeOptionalResolution.consume(getPlayer(),effectSA);
+        }
+        if (mayChoseNewTargets) prepareSingleSa(effectSA.getHostCard(), effectSA, true);
+        if (activeOptionalManaResolution != null && activeOptionalManaResolution.repeated()) {
+            do {
+                payZeroTrigger(effectSA, true);
+                activeOptionalManaResolution.paymentCompleted();
+            } while (confirmTrigger(activeOptionalManaResolution.wrapper()));
+            activeOptionalManaResolution.finishRepeatedPayments();
+        } else payZeroTrigger(effectSA, true);
+        counters.instrument("hostTrigger.rulesNoStackExecution");
+        if (effectSA.getApi() == forge.game.ability.ApiType.Mana && activeRulesPayment == null) {
+            var previous = activeTriggeredManaChoice;
+            try (var scope = new TriggeredManaChoice(getPlayer(), effectSA)) {
+                activeTriggeredManaChoice = scope;
+                forge.game.ability.AbilityUtils.resolve(effectSA);
+                scope.finish();
+            } finally { activeTriggeredManaChoice = previous; }
+        } else forge.game.ability.AbilityUtils.resolve(effectSA);
+        requireHostChannel("completed trigger no-stack execution");
+        if (invocation != null) invocation.classifyRulesIfChildrenAccounted();
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "trigger no-stack execution", failure);
+            throw failure;
+        }
+        // Unknown/stock effect callbacks leave this enclosing call unclassified.
+    }
     @Override
-    public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) { count("orderSimultaneousSa"); return super.orderSimultaneousSa(activePlayerSAs); }
+    public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        final var invocation = isLiveGame() ? counters.beginCall("orderSimultaneousSa") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) return super.orderSimultaneousSa(activePlayerSAs);
+        try {
+            if (activePlayerSAs == null) throw new RulesCostFeasibility.Unsupported("null pending trigger list");
+            if (activePlayerSAs.size()<2) {
+                if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+                return activePlayerSAs;
+            }
+            var order = new TriggerOrderChoices(getPlayer(), activePlayerSAs);
+            while (order.needsChoice()) {
+                var request=envelope(true);
+                for(var field:order.request().entrySet())request.add(field.getKey(),field.getValue());
+                order.choose(ask("orderSimultaneousSa","triggerOrder",request));
+            }
+            var result=order.finish();
+            if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
+            return result;
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "simultaneous trigger ordering", failure);
+            throw failure;
+        }
+    }
     @Override
-    public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) { count("orderAndPlaySimultaneousSa"); super.orderAndPlaySimultaneousSa(activePlayerSAs); }
+    public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        final var invocation = isLiveGame() ? counters.beginCall("orderAndPlaySimultaneousSa") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            super.orderAndPlaySimultaneousSa(activePlayerSAs); return;
+        }
+        try {
+        requireHostChannel("simultaneous trigger execution");
+        // Reject already-known unsupported costs/preparation in the entire
+        // batch before asking its order or inserting any earlier trigger.
+        // Actual targets still must be selected at each insertion, when the
+        // previous triggers are on the stack; a later host failure invalidates
+        // the game, it is not a transaction rollback of those legal choices.
+        if (activePlayerSAs == null) throw new RulesCostFeasibility.Unsupported("null pending trigger list");
+        for (var ability : activePlayerSAs) requireZeroTrigger(ability);
+        for (var ability : orderSimultaneousSa(activePlayerSAs)) {
+            requireZeroTrigger(ability);
+            if (!prepareSingleSa(ability.getHostCard(), ability, true)) continue;
+            payZeroTrigger(ability, false);
+            getGame().getStack().add(ability);
+            counters.instrument("hostTrigger.rulesStackInsertion");
+        }
+        requireHostChannel("completed simultaneous trigger execution");
+        if (invocation != null) invocation.classifyRulesIfChildrenAccounted();
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "simultaneous trigger execution", failure);
+            throw failure;
+        }
+        // Target/order children retain independent receipts; unknowns block ours.
+    }
+
+    private MandatoryZeroTriggerExecution activeZeroTriggerPayment;
+    private RulesReplacementExecution activeReplacementExecution;
+
+    @Override public void withReplacementExecutionScope(forge.game.replacement.ReplacementEffect replacement,
+            SpellAbility ability, Runnable nativeExecution) {
+        if (mode!=BenchSession.Mode.BRIDGE || !isLiveGame()) { nativeExecution.run(); return; }
+        var previous=activeReplacementExecution;
+        try (var scope=new RulesReplacementExecution(getPlayer(),replacement,ability)) {
+            activeReplacementExecution=scope;
+            nativeExecution.run();
+            scope.finish();
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(),seat,"replacement execution",failure);
+            throw failure;
+        } finally { activeReplacementExecution=previous; }
+    }
+    private OptionalZeroTriggerExecution activeOptionalTriggerPayment;
+    private OptionalZeroTriggerExecution.Resolution activeOptionalResolution;
+    private OptionalManaTriggerExecution.Resolution activeOptionalManaResolution;
+    private OptionalManaTriggerExecution.WrapperPayment activeOptionalWrapperPayment;
+    private TriggeredManaChoice activeTriggeredManaChoice;
+    private boolean failedOptionalResolution;
+    private boolean preparingOptionalTrigger;
+    private static final class NoLegalOptionalTriggerTarget extends RuntimeException {}
+
+    @Override public boolean requiresTriggerResolutionScope(WrappedAbility ability) {
+        return mode==BenchSession.Mode.BRIDGE && isLiveGame() && ability.isOptionalTrigger();
+    }
+    @Override public void withTriggerResolutionScope(WrappedAbility ability, Runnable nativeResolution) {
+        if (!requiresTriggerResolutionScope(ability)) { nativeResolution.run(); return; }
+        var previous=activeOptionalResolution;
+        var previousPaid=activeOptionalManaResolution;
+        try {
+            if (session.getChannel().isClosed()) throw new RulesCostFeasibility.Unsupported("optional resolution requires open host");
+            if (OptionalManaTriggerExecution.hasPaidUnderlying(ability)) {
+                try (var scope = new OptionalManaTriggerExecution.Resolution(getPlayer(), ability)) {
+                    activeOptionalResolution = null; activeOptionalManaResolution = scope;
+                    nativeResolution.run(); scope.finish();
+                }
+            } else try (var scope=new OptionalZeroTriggerExecution.Resolution(getPlayer(),ability)) {
+                activeOptionalManaResolution = null;
+                activeOptionalResolution=scope;
+                nativeResolution.run();
+                scope.finish();
+            }
+        } catch (RuntimeException | Error failure) {
+            failedOptionalResolution=true;
+            session.noteIntegrityFailure(getGame(), seat, "optional trigger resolution", failure);
+            throw failure;
+        }
+        finally { activeOptionalResolution=previous; activeOptionalManaResolution=previousPaid; }
+    }
+
+    private void requireZeroTrigger(SpellAbility ability) {
+        if (session.getChannel().isClosed())
+            throw new RulesCostFeasibility.Unsupported("mandatory trigger execution requires an open host channel");
+        if (ability.isOptionalTrigger()) {
+            if (OptionalManaTriggerExecution.hasPaidUnderlying(ability)) OptionalManaTriggerExecution.require(getPlayer(), ability);
+            else OptionalZeroTriggerExecution.require(getPlayer(),ability);
+        }
+        else MandatoryZeroTriggerExecution.require(getPlayer(), ability);
+    }
+
+    private void payZeroTrigger(SpellAbility ability, boolean effect) {
+        if (ability.isOptionalTrigger() && OptionalManaTriggerExecution.hasPaidUnderlying(ability)) {
+            if (ability instanceof WrappedAbility wrapper && !effect) {
+                var payment = new OptionalManaTriggerExecution.WrapperPayment(getPlayer(), wrapper);
+                var previous = activeOptionalWrapperPayment; activeOptionalWrapperPayment = payment;
+                try { payment.payCost(); } finally { activeOptionalWrapperPayment = previous; }
+            } else {
+                if (!effect || activeOptionalManaResolution == null)
+                    throw new RulesCostFeasibility.Unsupported("paid trigger outside native accepted resolution");
+                activeOptionalManaResolution.requirePayment(getPlayer(), ability);
+                var assessment = RulesCostFeasibility.assess(getPlayer(), ability, null, activeOptionalManaResolution);
+                if (assessment.status() != RulesCostFeasibility.Status.PAYABLE || assessment.space() == null)
+                    throw new RulesCostFeasibility.Unsupported("accepted trigger payment unavailable: " + assessment.reason());
+                var domain = new RulesPaymentDomain(assessment.space(), getPlayer().getLife());
+                final JsonObject request = envelope(true);
+                for (var entry : domain.request().entrySet()) request.add(entry.getKey(), entry.getValue());
+                request.add("selectedAbility", StateEncoder.encodeSpellAbility(ability, getPlayer().getView()));
+                request.addProperty("paymentContext", "optional-trigger-resolution-v1");
+                if (activeOptionalManaResolution.repeated()) {
+                    request.addProperty("paymentContext", "repeated-trigger-resolution-v1");
+                    request.addProperty("completedPayments", activeOptionalManaResolution.completed());
+                }
+                var answer = ask("payManaCost", "payment", request);
+                var payment = new RulesPaymentExecutor(getPlayer(), ability, domain.select(answer), null, activeOptionalManaResolution);
+                var previous = activeRulesPayment; activeRulesPayment = payment;
+                try {
+                    if (!new CostPayment(ability.getPayCosts(), ability).payComputerCosts(payment.decisions(ability)))
+                        throw new RulesCostFeasibility.Unsupported("native optional trigger payment failed");
+                    payment.assertPaid();
+                } finally { activeRulesPayment = previous; }
+                counters.instrument("hostTrigger.rulesPaidResolution");
+            }
+            return;
+        }
+        if (ability.isOptionalTrigger()) {
+            var payment=new OptionalZeroTriggerExecution(getPlayer(),ability,effect);
+            var previous=activeOptionalTriggerPayment; activeOptionalTriggerPayment=payment;
+            try { payment.payCost(); } finally { activeOptionalTriggerPayment=previous; }
+            return;
+        }
+        var payment = new MandatoryZeroTriggerExecution(getPlayer(), ability, effect);
+        var previous = activeZeroTriggerPayment;
+        activeZeroTriggerPayment = payment;
+        try { payment.payCost(); }
+        finally { activeZeroTriggerPayment = previous; }
+    }
     @Override
-    public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) { count("playTrigger"); return super.playTrigger(host, wrapperAbility, isMandatory); }
+    public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) {
+        final var invocation = isLiveGame() ? counters.beginCall("playTrigger") : null;
+        if (mode == BenchSession.Mode.BRIDGE && isLiveGame()) {
+            try {
+            requireHostChannel("static trigger execution");
+            requireZeroTrigger(wrapperAbility);
+            if (!isMandatory || host != wrapperAbility.getHostCard() || !wrapperAbility.getTrigger().isStatic())
+                throw new RulesCostFeasibility.Unsupported("static trigger is not mandatory or source identity changed");
+            java.util.function.BooleanSupplier execute = () -> {
+                prepareSingleSa(host, wrapperAbility, true);
+                payZeroTrigger(wrapperAbility, true);
+                counters.instrument("hostTrigger.rulesStaticExecution");
+                forge.game.ability.AbilityUtils.resolve(wrapperAbility);
+                return true;
+            };
+            final boolean result = activeRulesPayment != null
+                ? activeRulesPayment.duringMandatoryTrigger(host, wrapperAbility, isMandatory, execute)
+                : execute.getAsBoolean();
+            requireHostChannel("completed static trigger execution");
+            if (invocation != null) invocation.classifyRulesIfChildrenAccounted();
+            return result;
+            } catch (RuntimeException | Error failure) {
+                session.noteIntegrityFailure(getGame(), seat, "static trigger execution", failure);
+                throw failure;
+            }
+        }
+        if (activeRulesPayment != null) return activeRulesPayment.duringMandatoryTrigger(host, wrapperAbility, isMandatory,
+                () -> super.playTrigger(host, wrapperAbility, isMandatory));
+        return super.playTrigger(host, wrapperAbility, isMandatory);
+    }
     @Override
     public boolean playSaFromPlayEffect(SpellAbility tgtSA) { count("playSaFromPlayEffect"); return super.playSaFromPlayEffect(tgtSA); }
     @Override
@@ -2426,7 +2880,45 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public boolean confirmStaticApplication(Card hostCard, PlayerActionConfirmMode mode, String message, String logic) { count("confirmStaticApplication"); return super.confirmStaticApplication(hostCard, mode, message, logic); }
     @Override
-    public boolean confirmTrigger(WrappedAbility sa) { count("confirmTrigger"); return super.confirmTrigger(sa); }
+    public boolean confirmTrigger(WrappedAbility sa) {
+        final var invocation=isLiveGame()?counters.beginCall("confirmTrigger"):null;
+        if(mode!=BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            final boolean out=super.confirmTrigger(sa);
+            if(invocation!=null)invocation.classify(CallCounter.Ownership.STOCK);
+            return out;
+        }
+        if((activeOptionalResolution==null && activeOptionalManaResolution==null) || session.getChannel().isClosed())
+            throw new RulesCostFeasibility.Unsupported("optional confirmation outside actual resolution");
+        SpellAbility displayed = sa;
+        if (activeOptionalManaResolution != null) {
+            activeOptionalManaResolution.requireConfirmation(getPlayer(), sa);
+            displayed = activeOptionalManaResolution.ability();
+            var assessment = RulesCostFeasibility.assess(getPlayer(), displayed, null, activeOptionalManaResolution);
+            if (assessment.status() == RulesCostFeasibility.Status.UNSUPPORTED)
+                throw new RulesCostFeasibility.Unsupported("optional trigger affordability unknown: " + assessment.reason());
+            if (assessment.status() == RulesCostFeasibility.Status.UNPAYABLE) {
+                activeOptionalManaResolution.answer(false);
+                if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+                return false;
+            }
+        } else activeOptionalResolution.requireConfirmation(getPlayer(),sa);
+        final JsonObject body=envelope(true);
+        body.addProperty("mode","Trigger"); body.addProperty("message",sa.getDescription());
+        body.add("ability",StateEncoder.encodeSpellAbility(displayed,getPlayer().getView()));
+        if (activeOptionalManaResolution != null && activeOptionalManaResolution.repeated()) {
+            body.addProperty("resolutionPaymentVersion", "native-repeated-mana-v1");
+            body.addProperty("unitCost", activeOptionalManaResolution.manaCost(getPlayer(), displayed).toString());
+            body.addProperty("completedPayments", activeOptionalManaResolution.completed());
+        }
+        final JsonObject answer=ask("confirmTrigger","confirm",body);
+        final JsonElement yes=answer==null?null:answer.get("yes");
+        if(yes==null || !yes.isJsonPrimitive() || !yes.getAsJsonPrimitive().isBoolean())
+            throw new RulesCostFeasibility.Unsupported("explicit boolean trigger confirmation required");
+        if (activeOptionalManaResolution != null) activeOptionalManaResolution.answer(yes.getAsBoolean());
+        else activeOptionalResolution.answer(yes.getAsBoolean());
+        if(invocation!=null)invocation.classify(CallCounter.Ownership.HOST);
+        return yes.getAsBoolean();
+    }
     @Override
     public List<Card> exertAttackers(List<Card> attackers) { count("exertAttackers"); return super.exertAttackers(attackers); }
     @Override
@@ -2436,19 +2928,161 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public CardCollection orderAttackers(Card blocker, CardCollection attackers) { count("orderAttackers"); return super.orderAttackers(blocker, attackers); }
     @Override
-    public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
+    public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addMsgSuffix) {
+        final var invocation = isLiveGame() ? counters.beginCall("reveal") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); return;
+        }
+        try {
+            requireHostChannel("reveal");
+            if (zone == ZoneType.Hand) {
+                knownHand.remember(cards, owner);
+                rememberClosedHandReveal(cards, owner);
+            }
+            revealHistory.remember(cards, zone, owner);
+            // The hand path also preserves current authorized characteristics.
+            // Names-only non-hand history is partial observation support: it
+            // must remain untrusted until richer reveal semantics are verified.
+            if (zone == ZoneType.Hand && invocation != null) invocation.classify(CallCounter.Ownership.RULES);
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "reveal", failure); throw failure;
+        }
+    }
     @Override
-    public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
+    public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addMsgSuffix) {
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            count("reveal"); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); return;
+        }
+        if (zone != ZoneType.Hand) {
+            final var invocation = counters.beginCall("reveal");
+            try {
+                requireHostChannel("reveal views");
+                revealHistory.rememberViews(cards, zone, owner);
+                // Deliberately UNCLASSIFIED: names-only delivery is not a
+                // complete ordered/characteristic observation certificate.
+            } catch (RuntimeException | Error failure) {
+                session.noteIntegrityFailure(getGame(), seat, "reveal views", failure); throw failure;
+            }
+            return;
+        }
+        var player = getGame().getPlayers().stream().filter(p -> p.getView() == owner).findFirst().orElse(null);
+        var live = new CardCollection();
+        try {
+            if (cards == null || player == null) throw new RulesCostFeasibility.Unsupported("invalid hand reveal views");
+            for (var view : cards) {
+                var card = view == null ? null : getGame().findByView(view);
+                if (card == null || card.getView() != view)
+                    throw new RulesCostFeasibility.Unsupported("hand reveal view lacks an exact live card");
+                live.add(card);
+            }
+        } catch (RuntimeException | Error failure) {
+            count("reveal"); session.noteIntegrityFailure(getGame(), seat, "hand reveal views", failure); throw failure;
+        }
+        reveal(live, zone, player, messagePrefix, addMsgSuffix);
+    }
     @Override
-    public void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value) { count("notifyOfValue"); super.notifyOfValue(saSource, realtedTarget, value); }
+    public void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value) { final var invocation = isLiveGame() ? counters.beginCall("notifyOfValue") : null; super.notifyOfValue(saSource, realtedTarget, value); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { count("arrangeForSurveil"); return super.arrangeForSurveil(topN); }
     @Override
     public boolean willPutCardOnTop(Card c) { count("willPutCardOnTop"); return super.willPutCardOnTop(c); }
     @Override
-    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) { count("orderMoveToZoneList"); return bridgedOrderMoveToZoneList(cards, destinationZone, source); }
+    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
+        final var invocation = isLiveGame() ? counters.beginCall("orderMoveToZoneList") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) return super.orderMoveToZoneList(cards, destinationZone, source);
+        try {
+            if (cards == null) throw new RulesCostFeasibility.Unsupported("null zone-order list");
+            if (cards.size() < 2) {
+                if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+                return cards;
+            }
+            if (session.getChannel().isClosed()) throw new RulesCostFeasibility.Unsupported("zone-order channel closed");
+            var ordered = bridgedOrderMoveToZoneList(cards, destinationZone, source);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
+            return ordered;
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "zone ordering", failure);
+            throw failure;
+        }
+    }
     @Override
-    public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) { count("chooseCardsToDiscardFrom"); return super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser); }
+    public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
+        final var invocation = isLiveGame() ? counters.beginCall("chooseCardsToDiscardFrom") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            var result = super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return result;
+        }
+        try {
+            if (session.integrityFailure(getGame()) != null || !bridged())
+                throw new RulesCostFeasibility.Unsupported("discard decision lacks live unfailed host");
+            if (playerDiscard == null || playerDiscard.getGame() != getGame() || sa == null
+                    || sa.getApi() != forge.game.ability.ApiType.Discard || validCards == null || visibleToChooser == null
+                    || min < 0 || max < min || max > validCards.size())
+                throw new RulesCostFeasibility.Unsupported("invalid discard decision domain");
+            final String discardMode = sa.getParamOrDefault("Mode", "TgtChoose");
+            if (playerDiscard != getPlayer() && !discardMode.startsWith("Look") && !discardMode.startsWith("Reveal"))
+                throw new RulesCostFeasibility.Unsupported("foreign hand discard lacks explicit visibility grant");
+            final Card source = sa.getHostCard();
+            if (source == null || source.isFaceDown() || source.getGame() != getGame()
+                    || !(source.isInZone(ZoneType.Stack) || source.isInZone(ZoneType.Battlefield) || source.isInZone(ZoneType.Graveyard)))
+                throw new RulesCostFeasibility.Unsupported("discard source is not publicly identified");
+            final List<Card> domain = List.copyOf(validCards), visible = List.copyOf(visibleToChooser);
+            final var params = java.util.Map.copyOf(sa.getMapParams());
+            var identities = new java.util.HashSet<Integer>();
+            for (Card c : visible) {
+                if (c == null || !identities.add(c.getId()) || c.getOwner() != playerDiscard
+                        || !c.isInZone(ZoneType.Hand) || playerDiscard.getCardsIn(ZoneType.Hand).stream().noneMatch(live -> live == c))
+                    throw new RulesCostFeasibility.Unsupported("invalid visible discard hand");
+            }
+            identities.clear();
+            for (Card c : domain) if (!identities.add(c.getId()) || visible.stream().noneMatch(v -> v == c))
+                throw new RulesCostFeasibility.Unsupported("discard domain not contained in visible hand");
+            if (max == 0 || min == domain.size() && max == domain.size()) {
+                if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+                return max == 0 ? new CardCollection() : new CardCollection(domain);
+            }
+            final JsonObject body = envelope(true);
+            body.addProperty("reason", "discard");
+            body.addProperty("discardVersion", "native-discard-v1");
+            body.addProperty("discardingSeat", getGame().getPlayers().indexOf(playerDiscard));
+            body.addProperty("discardMode", discardMode);
+            body.addProperty("discardCount", sa.getParamOrDefault("NumCards", "1"));
+            body.addProperty("discardValid", sa.getParamOrDefault("DiscardValid", "Card"));
+            body.addProperty("discardOptional", sa.hasParam("Optional"));
+            body.addProperty("discardAnyNumber", sa.hasParam("AnyNumber"));
+            body.addProperty("min", min); body.addProperty("max", max);
+            body.add("menu", StateEncoder.encodeCards(domain));
+            body.add("visibleCards", StateEncoder.encodeCards(visible));
+            body.add("discardSource", StateEncoder.encodeCardUnchecked(source));
+            body.add("ability", StateEncoder.encodeSpellAbility(sa));
+            final JsonObject answer = ask("chooseCardsToDiscardFrom", "cardsChoice", body);
+            if (answer == null || !answer.has("choices") || !answer.get("choices").isJsonArray())
+                throw new RulesCostFeasibility.Unsupported("discard requires explicit host card selection");
+            if (sa.getHostCard() != source || !params.equals(sa.getMapParams()))
+                throw new RulesCostFeasibility.Unsupported("discard source changed during decision");
+            for (Card c : visible) if (playerDiscard.getCardsIn(ZoneType.Hand).stream().noneMatch(live -> live == c))
+                throw new RulesCostFeasibility.Unsupported("discard hand changed during decision");
+            final CardCollection selected = new CardCollection();
+            for (var entry : answer.getAsJsonArray("choices")) {
+                if (!entry.isJsonPrimitive() || !entry.getAsJsonPrimitive().isNumber()
+                        || !entry.getAsString().matches("0|[1-9][0-9]*"))
+                    throw new RulesCostFeasibility.Unsupported("discard requires integer card IDs");
+                int fid = Integer.parseInt(entry.getAsString());
+                Card found = domain.stream().filter(c -> c.getId() == fid).findFirst().orElse(null);
+                if (found == null || selected.contains(found))
+                    throw new RulesCostFeasibility.Unsupported("discard has unknown or duplicate card ID");
+                selected.add(found);
+            }
+            if (selected.size() < min || selected.size() > max)
+                throw new RulesCostFeasibility.Unsupported("discard selection outside cardinality");
+            if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
+            return selected;
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "discard selection", failure);
+            throw failure;
+        }
+    }
     @Override
     public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String[] unlessTypes, SpellAbility sa) { count("chooseCardsToDiscardUnlessType"); return super.chooseCardsToDiscardUnlessType(min, hand, unlessTypes, sa); }
     @Override
@@ -2489,39 +3123,141 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     public Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) { count("vote"); return super.vote(sa, prompt, options, votes, forPlayer, optional); }
     @Override
     public boolean playChosenSpellAbility(SpellAbility sa) {
-        count("playChosenSpellAbility");
+        final var invocation = isLiveGame() ? counters.beginCall("playChosenSpellAbility") : null;
+        if (failedExternalAction) throw new RulesCostFeasibility.Unsupported("prior controlled action failed; game cannot continue");
         if (pendingExternalAbility == null) return super.playChosenSpellAbility(sa);
-        if (pendingExternalAbility != sa) throw new RulesCostFeasibility.Unsupported("selected/executed ability identity mismatch");
-        pendingExternalAbility = null;
+        final JsonObject selectedAnswer = pendingExternalAnswer;
         try {
+            if (pendingExternalAbility != sa) throw new RulesCostFeasibility.Unsupported("selected/executed ability identity mismatch");
+            pendingExternalAbility = null;
+            pendingExternalAnswer = null;
             if (sa.isLandAbility()) {
                 if (!sa.canPlay()) throw new RulesCostFeasibility.Unsupported("selected land no longer playable");
+                BenchActionAudit.selected(getGame(), seat, sa, selectedAnswer);
                 int id = sa.getHostCard().getId();
                 sa.resolve();
                 if (getPlayer().getCardsIn(ZoneType.Battlefield).stream().noneMatch(c -> c.getId() == id))
                     throw new RulesCostFeasibility.Unsupported("selected land did not enter battlefield");
+                // Executes the previously validated host choice; this callback
+                // does not itself make a host decision. Nested calls stay separate.
+                if (invocation != null) invocation.classify(CallCounter.Ownership.RULES);
                 return true;
             }
-            if (pendingExternalPayment == null) throw new RulesCostFeasibility.Unsupported("host payment witness missing");
-            activeRulesPayment = pendingExternalPayment;
-            pendingExternalPayment = null;
             if (!sa.canPlay()) throw new RulesCostFeasibility.Unsupported("selected spell no longer playable");
-            if (!forge.ai.ComputerUtil.handlePlayingSpellAbility(getPlayer(), sa, null, activeRulesPayment::decisions))
-                throw new RulesCostFeasibility.Unsupported("controlled action execution failed");
-            activeRulesPayment.assertPaid();
+            final RulesCostFeasibility.SourceChoice manaOutput;
+            if(sa.isManaAbility()) {
+                var domain=new PriorityManaActivation(getPlayer(),sa);domain.select(selectedAnswer);manaOutput=domain.selected();
+            } else manaOutput=null;
+            try (final var authorization = RulesCastingAuthorization.capture(getPlayer(), sa)) {
+                announcingExternalAction = true;
+                announcingExternalAbility = sa;
+                selectingExternalTargets = true;
+                if (!forge.ai.ComputerUtil.handlePlayingSpellAbilityControlled(getPlayer(), sa,
+                        new forge.ai.ComputerUtil.ControlledAnnouncement() {
+                            public void sourceMoved(Card original, Card returned, SpellAbility actual) {
+                                authorization.bind(original, returned, actual);
+                            }
+                            public forge.game.cost.CostDecisionMakerBase preparePayment(SpellAbility actual) {
+                                if (!ensureTargets(actual, authorization))
+                                    throw new RulesCostFeasibility.Unsupported("announced targets or complete cost invalid");
+                                final var payments = new RulesPaymentDomain(getPlayer(), actual, authorization);
+                                final JsonObject request = envelope(true);
+                                for (var entry : payments.request().entrySet()) request.add(entry.getKey(), entry.getValue());
+                                request.add("selectedAbility", StateEncoder.encodePriorityAbility(actual, getPlayer().getView()));
+                                final JsonObject answer = ask("payManaCost", "payment", request);
+                                activeRulesPayment = new RulesPaymentExecutor(getPlayer(), actual, payments.select(answer), authorization, null,
+                                        PlayerControllerBridge.this::chooseDiscardCost, PlayerControllerBridge.this::chooseReturnCost);
+                                BenchActionAudit.selected(getGame(), seat, actual, selectedAnswer);
+                                return activeRulesPayment.decisions(actual);
+                            }
+                            public void resolveMana(SpellAbility actual, Runnable nativeExecution) {
+                                if(manaOutput==null)throw new RulesCostFeasibility.Unsupported("unselected mana production");
+                                activeRulesPayment.resolveSelectedMana(actual,manaOutput,nativeExecution);
+                                BenchActionAudit.manaExecuted(getGame(),seat,actual,manaOutput);
+                            }
+                        })) throw new RulesCostFeasibility.Unsupported("controlled action execution failed");
+                activeRulesPayment.assertPaid();
+            }
             counters.instrument("rulesPayment.executed");
+            if (invocation != null) invocation.classify(CallCounter.Ownership.RULES);
             return true;
-        } catch (RuntimeException failure) {
+        } catch (RuntimeException | Error failure) {
+            failedExternalAction = true;
+            session.noteIntegrityFailure(getGame(), seat, "controlled action execution", failure);
             JsonRpcChannel.logErr("BENCH_INTEGRITY_FAILURE: controlled action execution failed", failure);
             throw failure;
-        } finally { activeRulesPayment = null; pendingExternalPayment = null; }
+        } finally { activeRulesPayment = null; announcingExternalAction = false; announcingExternalAbility = null; selectingExternalTargets = false; }
     }
     @Override
     public int chooseNumberForCostReduction(final SpellAbility sa, final int min, final int max) { count("chooseNumberForCostReduction"); return super.chooseNumberForCostReduction(sa, min, max); }
+
+    private List<Card> chooseReturnCost(RulesReturnCostDomain domain) {
+        var invocation=counters.beginCall("chooseReturnForCost");
+        try {
+            requireHostChannel("chooseReturnForCost");
+            if(domain.payer!=getPlayer() || domain.ability.getActivatingPlayer()!=getPlayer())
+                throw new RulesCostFeasibility.Unsupported("return-cost actor mismatch");
+            if(domain.forced()) {
+                var chosen=domain.forcedSelection();invocation.classify(CallCounter.Ownership.FORCED);return chosen;
+            }
+            var body=envelope(true);
+            for(var entry:domain.request().entrySet())body.add(entry.getKey(),entry.getValue());
+            var answer=ask("chooseReturnForCost","cardsChoice",body);
+            requireHostChannel("chooseReturnForCost");
+            var chosen=domain.select(answer);invocation.classify(CallCounter.Ownership.HOST);return chosen;
+        } catch(RuntimeException|Error failure) {
+            session.noteIntegrityFailure(getGame(),seat,"chooseReturnForCost",failure);throw failure;
+        }
+    }
+    private List<Card> chooseDiscardCost(RulesDiscardCostDomain domain) {
+        var invocation=counters.beginCall("chooseDiscardForCost");
+        try {
+            requireHostChannel("chooseDiscardForCost");
+            if(domain.payer!=getPlayer() || domain.ability.getActivatingPlayer()!=getPlayer())
+                throw new RulesCostFeasibility.Unsupported("discard-cost actor mismatch");
+            if(domain.forced()) {
+                var chosen=domain.forcedSelection();invocation.classify(CallCounter.Ownership.FORCED);return chosen;
+            }
+            var body=envelope(true);
+            for(var entry:domain.request().entrySet())body.add(entry.getKey(),entry.getValue());
+            var answer=ask("chooseDiscardForCost","cardsChoice",body);
+            requireHostChannel("chooseDiscardForCost");
+            var chosen=domain.select(answer);invocation.classify(CallCounter.Ownership.HOST);return chosen;
+        } catch(RuntimeException|Error failure) {
+            session.noteIntegrityFailure(getGame(),seat,"chooseDiscardForCost",failure);throw failure;
+        }
+    }
     @Override
     public boolean chooseFlipResult(SpellAbility sa, Player flipper, boolean call) { count("chooseFlipResult"); return super.chooseFlipResult(sa, flipper, call); }
     @Override
-    public byte chooseColor(String message, SpellAbility sa, ColorSet colors) { count("chooseColor"); return super.chooseColor(message, sa, colors); }
+    public byte chooseColor(String message, SpellAbility sa, ColorSet colors) {
+        if (isLiveGame() && activeRulesPayment != null) {
+            var invocation = counters.beginCall("chooseColor");
+            try {
+                byte color = activeRulesPayment.chooseSourceColor(sa, colors);
+                invocation.classify(CallCounter.Ownership.FORCED);
+                return color;
+            } catch (RuntimeException failure) {
+                session.noteIntegrityFailure(getGame(),seat,"chooseColor",failure);throw failure;
+            }
+        }
+        if (mode == BenchSession.Mode.BRIDGE && isLiveGame()) {
+            var invocation = counters.beginCall("chooseColor");
+            try {
+                requireHostChannel("trigger color choice");
+                if (activeTriggeredManaChoice == null)
+                    throw new RulesCostFeasibility.Unsupported("color choice outside represented native effect");
+                var request = envelope(true);
+                for (var entry : activeTriggeredManaChoice.request(sa, colors).entrySet()) request.add(entry.getKey(), entry.getValue());
+                byte color = activeTriggeredManaChoice.select(ask("chooseColor", "manaColor", request));
+                invocation.classify(CallCounter.Ownership.HOST);
+                return color;
+            } catch (RuntimeException | Error failure) {
+                session.noteIntegrityFailure(getGame(),seat,"chooseColor",failure);throw failure;
+            }
+        }
+        count("chooseColor"); return super.chooseColor(message, sa, colors);
+    }
     @Override
     public byte chooseColorAllowColorless(String message, Card c, ColorSet colors) { count("chooseColorAllowColorless"); return super.chooseColorAllowColorless(message, c, colors); }
     @Override
@@ -2535,7 +3271,25 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) { count("chooseCardsPile"); return super.chooseCardsPile(sa, pile1, pile2, faceUp); }
     @Override
-    public CounterType chooseCounterType(List<CounterType> options, SpellAbility sa, String prompt, Map<String, Object> params) { count("chooseCounterType"); return super.chooseCounterType(options, sa, prompt, params); }
+    public CounterType chooseCounterType(List<CounterType> options, SpellAbility sa, String prompt, Map<String, Object> params) {
+        final var invocation = isLiveGame() ? counters.beginCall("chooseCounterType") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            var result = super.chooseCounterType(options, sa, prompt, params);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return result;
+        }
+        try {
+            requireHostChannel("counter type choice");
+            if (options == null || options.stream().anyMatch(java.util.Objects::isNull))
+                throw new RulesCostFeasibility.Unsupported("invalid counter type domain");
+            if (options.size() > 1)
+                throw new RulesCostFeasibility.Unsupported("multiple counter types require native host policy correspondence");
+            if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+            return options.isEmpty() ? null : options.get(0);
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "counter type choice", failure); throw failure;
+        }
+    }
     @Override
     public String chooseKeywordForPump(List<String> options, SpellAbility sa, String prompt, Card tgtCard) { count("chooseKeywordForPump"); return super.chooseKeywordForPump(options, sa, prompt, tgtCard); }
     @Override
@@ -2547,25 +3301,95 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public String chooseProtectionType(SpellAbility sa, List<String> choices) { count("chooseProtectionType"); return super.chooseProtectionType(sa, choices); }
     @Override
-    public void revealAnte(String message, Multimap<Player, PaperCard> removedAnteCards) { count("revealAnte"); super.revealAnte(message, removedAnteCards); }
+    public void revealAnte(String message, Multimap<Player, PaperCard> removedAnteCards) { final var invocation = isLiveGame() ? counters.beginCall("revealAnte") : null; super.revealAnte(message, removedAnteCards); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
     @Override
-    public void revealAISkipCards(String message, Map<Player, Map<DeckSection, List<? extends PaperCard>>> deckCards) { count("revealAISkipCards"); super.revealAISkipCards(message, deckCards); }
+    public void revealAISkipCards(String message, Map<Player, Map<DeckSection, List<? extends PaperCard>>> deckCards) { final var invocation = isLiveGame() ? counters.beginCall("revealAISkipCards") : null; super.revealAISkipCards(message, deckCards); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
     @Override
-    public void revealUnsupported(Map<Player, List<PaperCard>> unsupported) { count("revealUnsupported"); super.revealUnsupported(unsupported); }
+    public void revealUnsupported(Map<Player, List<PaperCard>> unsupported) { final var invocation = isLiveGame() ? counters.beginCall("revealUnsupported") : null; super.revealUnsupported(unsupported); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
     @Override
     public List<CostPart> orderCosts(List<CostPart> costs) { count("orderCosts"); return super.orderCosts(costs); }
     @Override
-    public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) { count("payCostToPreventEffect"); return super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers); }
+    public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) {
+        final var invocation = isLiveGame() ? counters.beginCall("payCostToPreventEffect") : null;
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
+            boolean result = super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return result;
+        }
+        try {
+            requireHostChannel("resolution cost");
+            try (var scope = new EchoManaPayment(getPlayer(), cost, sa, alreadyPaid, allPayers)) {
+                var assessment = RulesCostFeasibility.assess(getPlayer(), sa, null, scope);
+                if (assessment.status() == RulesCostFeasibility.Status.UNSUPPORTED)
+                    throw new RulesCostFeasibility.Unsupported("echo affordability unknown: " + assessment.reason());
+                if (assessment.status() == RulesCostFeasibility.Status.UNPAYABLE) {
+                    scope.answer(false); scope.finish(false);
+                    if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+                    return false;
+                }
+                var confirm = envelope(true);
+                confirm.addProperty("resolutionPaymentVersion", "native-echo-mana-v1");
+                confirm.addProperty("unitCost", scope.manaCost(getPlayer(), sa).toString());
+                confirm.addProperty("completedPayments", 0);
+                confirm.add("ability", StateEncoder.encodeSpellAbility(sa, getPlayer().getView()));
+                var response = ask("payCostToPreventEffect", "confirm", confirm);
+                var yes = response == null ? null : response.get("yes");
+                if (yes == null || !yes.isJsonPrimitive() || !yes.getAsJsonPrimitive().isBoolean())
+                    throw new RulesCostFeasibility.Unsupported("explicit boolean echo decision required");
+                scope.answer(yes.getAsBoolean());
+                if (!yes.getAsBoolean()) {
+                    scope.finish(false);
+                    if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
+                    return false;
+                }
+                var domain = new RulesPaymentDomain(assessment.space(), getPlayer().getLife());
+                var request = envelope(true);
+                for (var entry : domain.request().entrySet()) request.add(entry.getKey(), entry.getValue());
+                request.add("selectedAbility", StateEncoder.encodeSpellAbility(sa, getPlayer().getView()));
+                request.addProperty("paymentContext", "echo-resolution-v1");
+                var answer = ask("payManaCost", "payment", request);
+                var payment = new RulesPaymentExecutor(getPlayer(), sa, domain.select(answer), null, scope);
+                var previous = activeRulesPayment; activeRulesPayment = payment;
+                try {
+                    if (!new CostPayment(cost, sa).payComputerCosts(payment.decisions(sa)))
+                        throw new RulesCostFeasibility.Unsupported("native echo cost payment failed");
+                    payment.assertPaid(); scope.finish(true);
+                } finally { activeRulesPayment = previous; }
+                if (invocation != null) invocation.classifyRulesIfChildrenAccounted();
+                counters.instrument("hostTrigger.rulesEchoPayment");
+                return true;
+            }
+        } catch (RuntimeException | Error failure) {
+            session.noteIntegrityFailure(getGame(), seat, "resolution cost", failure); throw failure;
+        }
+    }
     @Override
     public boolean payCostDuringRoll(Cost cost, SpellAbility sa) { count("payCostDuringRoll"); return super.payCostDuringRoll(cost, sa); }
     @Override
     public boolean payCombatCost(Card card, Cost cost, SpellAbility sa, String prompt) { count("payCombatCost"); return super.payCombatCost(card, cost, sa, prompt); }
     @Override
     public boolean payManaCost(ManaCost toPay, CostPartMana costPartMana, SpellAbility sa, String prompt, ManaConversionMatrix matrix, boolean effect) {
-        count("payManaCost");
+        final var invocation = isLiveGame() ? counters.beginCall("payManaCost") : null;
+        if (activeOptionalWrapperPayment != null) {
+            boolean paid = activeOptionalWrapperPayment.pay(toPay, costPartMana, sa, matrix, effect);
+            if (paid && invocation != null) invocation.classify(CallCounter.Ownership.RULES);
+            return paid;
+        }
+        if (activeOptionalTriggerPayment != null) {
+            boolean paid=activeOptionalTriggerPayment.pay(toPay,costPartMana,sa,matrix,effect);
+            if(invocation!=null)invocation.classify(CallCounter.Ownership.RULES);
+            return paid;
+        }
+        if (activeZeroTriggerPayment != null) {
+            boolean paid = activeZeroTriggerPayment.pay(toPay, costPartMana, sa, matrix, effect);
+            if (paid && invocation != null) invocation.classify(CallCounter.Ownership.RULES);
+            return paid;
+        }
         if (activeRulesPayment != null) {
             if (matrix != null) throw new RulesCostFeasibility.Unsupported("payment matrix not in witness");
-            return activeRulesPayment.pay(toPay, costPartMana, sa, effect);
+            final boolean paid = activeRulesPayment.pay(toPay, costPartMana, sa, effect);
+            if (paid && invocation != null) invocation.classify(CallCounter.Ownership.RULES);
+            return paid;
         }
         return super.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect);
     }
@@ -2816,16 +3640,12 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * the host's, where the pile is. A bridge that also reversed would be
      * indistinguishable from this one in the wire log and wrong in the game.
      *
-     * FAIL CLOSED. A non-permutation answer — the wrong arity, a duplicate, an
-     * fid that is not on the menu — is REFUSED and the call falls through to
-     * `super`, byte-identically to the pre-2.18 behaviour. So is a null answer,
-     * an unbridged session, a list of one, and a decider that is not our seat.
+     * The live bridge now fails the game on any non-permutation, delegation or
+     * closed transport. Only the explicit nonbridge path uses Default. A list
+     * shorter than two is forced; it does not invoke an AI decision.
      */
     private CardCollectionView bridgedOrderMoveToZoneList(final CardCollectionView cards,
             final ZoneType destinationZone, final SpellAbility source) {
-        if (!bridged() || cards == null || cards.size() < 2) {
-            return super.orderMoveToZoneList(cards, destinationZone, source);
-        }
         final JsonObject body = envelope(true);
         body.addProperty("destination", destinationZone == null ? "" : destinationZone.name());
         body.addProperty("count", cards.size());
@@ -2842,23 +3662,17 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             body.add("ability", StateEncoder.encodeSpellAbility(source));
         }
         final JsonObject ans = ask("orderMoveToZoneList", "orderZone", body);
-        if (ans == null) {
-            final Echo e = takeEcho();
-            final CardCollectionView out = super.orderMoveToZoneList(cards, destinationZone, source);
-            // MOVE ORDER, untransformed, exactly as an answer would be. The `topFirst`
-            // flip is the host's and stays the host's; echoing a reversed list would put
-            // the flip in two places and make one of them wrong.
-            echo(e, echoCards(out));
-            return out;
-        }
-        final List<Integer> ids = optIntList(ans, "choices");
-        if (ids == null) {
-            refuse("orderMoveToZoneList", "missing/!array 'choices'");
-            return super.orderMoveToZoneList(cards, destinationZone, source);
+        if (ans == null || !ans.has("choices") || !ans.get("choices").isJsonArray())
+            throw new RulesCostFeasibility.Unsupported("zone order requires a host permutation");
+        final List<Integer> ids = new ArrayList<>();
+        for (var value : ans.getAsJsonArray("choices")) {
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()
+                    || !value.getAsString().matches("0|[1-9][0-9]*"))
+                throw new RulesCostFeasibility.Unsupported("zone order requires integer card IDs");
+            ids.add(Integer.parseInt(value.getAsString()));
         }
         if (ids.size() != cards.size()) {
-            refuse("orderMoveToZoneList", "ordered " + ids.size() + " of " + cards.size());
-            return super.orderMoveToZoneList(cards, destinationZone, source);
+            throw new RulesCostFeasibility.Unsupported("zone order has wrong permutation size");
         }
         final CardCollection ordered = new CardCollection();
         for (int fid : ids) {
@@ -2870,8 +3684,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
                 }
             }
             if (found == null || ordered.contains(found)) {
-                refuse("orderMoveToZoneList", "unknown/duplicate card id " + fid);
-                return super.orderMoveToZoneList(cards, destinationZone, source);
+                throw new RulesCostFeasibility.Unsupported("zone order has unknown/duplicate card ID " + fid);
             }
             ordered.add(found);
         }
@@ -2879,10 +3692,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     }
 
     @Override
-    public void autoPassCancel() { count("autoPassCancel"); super.autoPassCancel(); }
+    public void autoPassCancel() { final var invocation = isLiveGame() ? counters.beginCall("autoPassCancel") : null; super.autoPassCancel(); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
     @Override
-    public void awaitNextInput() { count("awaitNextInput"); super.awaitNextInput(); }
+    public void awaitNextInput() { final var invocation = isLiveGame() ? counters.beginCall("awaitNextInput") : null; super.awaitNextInput(); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
     @Override
-    public void cancelAwaitNextInput() { count("cancelAwaitNextInput"); super.cancelAwaitNextInput(); }
+    public void cancelAwaitNextInput() { final var invocation = isLiveGame() ? counters.beginCall("cancelAwaitNextInput") : null; super.cancelAwaitNextInput(); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
 
 }

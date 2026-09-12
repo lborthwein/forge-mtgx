@@ -4,6 +4,34 @@ import java.util.EnumSet;
 import java.util.Set;
 
 public class GameRules {
+    /** Optional diagnostic observer; ordinary clients and AI search copies are
+     * outside its scope. It validates both seats without choosing their moves. */
+    public interface CombatDamageAudit {
+        boolean appliesTo(Game game);
+        void failed(Game game, Throwable failure);
+    }
+    private CombatDamageAudit combatDamageAudit;
+    public void setCombatDamageAudit(CombatDamageAudit audit) { combatDamageAudit = audit; }
+    public CombatDamageAudit getCombatDamageAudit() { return combatDamageAudit; }
+    public boolean auditsCombatDamage(Game game) {
+        return combatDamageAudit != null && combatDamageAudit.appliesTo(game);
+    }
+    /** Explicit reference lineage, not a claim that every AI path is audited. */
+    public enum AiInformationPolicy {
+        STOCK("stock-default-v1"), CLOSED_REPAIR("closed-decklist-repair-v1");
+        private final String id;
+        AiInformationPolicy(String id) { this.id = id; }
+        public String id() { return id; }
+        public static AiInformationPolicy parse(String id) {
+            for (var policy : values()) if (policy.id.equals(id)) return policy;
+            throw new IllegalArgumentException("Unknown AI information policy: " + id);
+        }
+    }
+    private AiInformationPolicy aiInformationPolicy = AiInformationPolicy.STOCK;
+    public AiInformationPolicy getAiInformationPolicy() { return aiInformationPolicy; }
+    public void setAiInformationPolicy(AiInformationPolicy policy) {
+        aiInformationPolicy = java.util.Objects.requireNonNull(policy);
+    }
     private final GameType gameType;
     private boolean manaBurn;
     private boolean orderCombatants;

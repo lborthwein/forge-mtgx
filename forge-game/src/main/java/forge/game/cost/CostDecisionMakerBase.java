@@ -20,6 +20,9 @@ public abstract class CostDecisionMakerBase implements ICostVisitor<PaymentDecis
 
     public Player getPlayer() { return player; }
     public abstract boolean paysRightAfterDecision();
+    /** Explicit controllers may need the post-mana state for a cost choice.
+     * Default computer visitors retain their original prepayment decisions. */
+    public boolean decideAtPayment(CostPart cost) { return false; }
     public boolean isEffect() {
         return effect;
     }

@@ -59,6 +59,7 @@ public final class SourceOutputTraitsEngineSmoke {
         }
         if (sourceId == null) throw new AssertionError("Expected red source absent");
         var answer = new JsonObject(); answer.addProperty("paymentVersion", RulesPaymentDomain.PAYMENT_VERSION);
+        answer.addProperty("x", 0);
         var order = new JsonArray(); order.add(sourceId); answer.add("sourceOrder", order);
         var spend = new JsonArray(); var allocation = new JsonObject(); allocation.addProperty("token", sourceId + ":0"); allocation.addProperty("shardIndex", 0); spend.add(allocation);
         answer.add("spend", spend); answer.addProperty("lifePaid", 0);

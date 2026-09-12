@@ -11,6 +11,7 @@ exec > >(tee "$observation_dir/fixture.log") 2>&1
 /opt/homebrew/opt/openjdk@17/bin/javac -cp "$observation_jar" -d "$observation_dir/classes" \
   "$observation_root/forge-ai/src/main/java/forge/bench/StateEncoder.java" \
   "$observation_root/forge-ai/src/main/java/forge/bench/PlayerControllerBridge.java" \
+  "$observation_root/forge-ai/src/main/java/forge/bench/CallCounter.java" \
   "$observation_root/forge-gui-desktop/src/test/java/forge/bench/ObservationIntegrityEngineSmoke.java"
 /opt/homebrew/opt/openjdk@17/bin/java -Xmx2g -Duser.home="$observation_dir/home" \
   -cp "$observation_dir/classes:$observation_jar" forge.bench.ObservationIntegrityEngineSmoke "$observation_root"

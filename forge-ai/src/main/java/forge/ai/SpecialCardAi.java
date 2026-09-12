@@ -392,6 +392,8 @@ public class SpecialCardAi {
         }
 
         public static String chooseCardViaKeyCard(final Player ai, final SpellAbility sa) {
+            // Opponent deck annotations are private even if some named cards are public.
+            if (AiKnownCardObservations.enabled(ai)) return null;
             boolean skipManaAbilities = sa.getParam("AILogic").equals("PithingNeedle");
             boolean skipLands = sa.getParam("AILogic").equals("PhyrexianRevoker");
             boolean knowHand = sa.getParam("AILogic").equals("SorcerousSpyglass");
@@ -458,7 +460,7 @@ public class SpecialCardAi {
             boolean knowHand = sa.getParam("AILogic").equals("SorcerousSpyglass");
 
             for (Player opp : ai.getOpponents()) {
-                for (Card c : opp.getAllCards()) {
+                for (Card c : AiKnownCardObservations.cardsKnownTo(ai, opp)) {
                     if (skipLands && c.isLand()) {
                         continue;
                     }
@@ -495,6 +497,11 @@ public class SpecialCardAi {
             }
 
             for (Card c : ai.getAllCards()) {
+                // Names added for own-card penalties are still candidate choices.
+                // Revoker cannot name a land, even when no opposing name scores.
+                if (skipLands && c.isLand()) {
+                    continue;
+                }
                 String name = c.getName();
                 int score = c.isInZone(ZoneType.Battlefield) ? -10 : -4;
 

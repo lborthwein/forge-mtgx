@@ -56,6 +56,11 @@ import java.util.stream.Collectors;
  */
 public class PlayerControllerAi extends PlayerController {
     private final AiController brains;
+    private final AiKnownCardObservations knownCardObservations;
+    final AiKnownCardObservations knownCardObservations() { return knownCardObservations; }
+    protected final void rememberClosedHandReveal(Iterable<Card> cards, Player owner) {
+        knownCardObservations.rememberHand(cards, owner);
+    }
 
     private boolean pilotsNonAggroDeck = false;
 
@@ -63,6 +68,7 @@ public class PlayerControllerAi extends PlayerController {
         super(game, p, lp);
 
         brains = new AiController(p, game);
+        knownCardObservations = new AiKnownCardObservations(p);
     }
 
     public boolean pilotsNonAggroDeck() {
@@ -497,6 +503,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addSuffix) {
+        if (zone == ZoneType.Hand) rememberClosedHandReveal(cards, owner);
         for (Card c : cards) {
             AiCardMemory.rememberCard(player, c, AiCardMemory.MemorySet.REVEALED_CARDS);
         }
@@ -504,6 +511,15 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addSuffix) {
+        if (zone == ZoneType.Hand && AiKnownCardObservations.enabled(player)) {
+            var live = new CardCollection();
+            for (CardView view : cards) {
+                var card = player.getGame().findByView(view);
+                if (card == null || card.getView() != view) throw new IllegalArgumentException("Invalid hand reveal view");
+                live.add(card);
+            }
+            rememberClosedHandReveal(live, player.getGame().getPlayers().stream().filter(p -> p.getView() == owner).findFirst().orElseThrow());
+        }
         for (CardView cv : cards) {
             AiCardMemory.rememberCard(player, player.getGame().findByView(cv), AiCardMemory.MemorySet.REVEALED_CARDS);
         }
@@ -1314,7 +1330,7 @@ public class PlayerControllerAi extends PlayerController {
         }
     }
 
-    private boolean prepareSingleSa(final Card host, SpellAbility sa, boolean isMandatory) {
+    protected boolean prepareSingleSa(final Card host, SpellAbility sa, boolean isMandatory) {
         if (sa.getApi() == ApiType.Charm) {
             if (!CharmEffect.makeChoices(sa)) {
                 return false;

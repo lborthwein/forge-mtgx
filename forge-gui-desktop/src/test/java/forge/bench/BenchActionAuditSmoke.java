@@ -44,6 +44,7 @@ public final class BenchActionAuditSmoke {
                 new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("Opponent", 1, 0, null, "Default")));
         final var game = new Match(new GameRules(GameType.Constructed), registered, "Action receipt fixture").createGame();
         final var player = game.getPlayers().get(0);
+        session.setLiveGame(game);
         game.setAge(GameStage.Play);
         game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player);
         StaticData.instance().attemptToLoadCard(name);
@@ -70,6 +71,7 @@ public final class BenchActionAuditSmoke {
             final var payment = new JsonObject();
             payment.addProperty("type", "answer"); payment.addProperty("id", 2);
             payment.addProperty("paymentVersion", RulesPaymentDomain.PAYMENT_VERSION); payment.addProperty("lifePaid", 0);
+            payment.addProperty("x", 0);
             final var order = new com.google.gson.JsonArray(); order.add(sourceId); payment.add("sourceOrder", order);
             final var spend = new com.google.gson.JsonArray(); final var allocation = new JsonObject();
             allocation.addProperty("token", sourceId + ":0"); allocation.addProperty("shardIndex", 0); spend.add(allocation); payment.add("spend", spend);
@@ -88,9 +90,12 @@ public final class BenchActionAuditSmoke {
             if (capture.toString(StandardCharsets.UTF_8).contains("engine-stack-add")
                     || capture.toString(StandardCharsets.UTF_8).contains("engine-land-played")) throw new AssertionError("Request falsely reported as executed");
             if (execute) player.getController().playChosenSpellAbility(chosen.get(0));
-            BenchActionAudit.finishGame(game);
+            BenchActionAudit.finishGame(game, session);
         } finally { System.setErr(stderr); }
         final String audit = capture.toString(StandardCharsets.UTF_8);
+        final var outcome = new JsonObject(); outcome.addProperty("winner", 0); outcome.addProperty("crashed", false);
+        BenchMain.guardIntegrityOutcome(session, game, outcome);
+        if (outcome.get("crashed").getAsBoolean() == execute) throw new AssertionError("Result admission disagrees with actual execution: " + outcome);
         if (execute) {
             if (audit.contains("BENCH_INTEGRITY_")) throw new AssertionError("Receipt failed: " + audit);
             if (!audit.contains(land ? "engine-land-played" : "engine-stack-add")) throw new AssertionError("No genuine engine event: " + audit);
@@ -99,6 +104,7 @@ public final class BenchActionAuditSmoke {
             final String summary = audit.lines().filter(l -> l.startsWith("[bench-action] ") && l.contains("\"kind\":\"summary\"")).findFirst().orElseThrow();
             final var row = JsonParser.parseString(summary.substring("[bench-action] ".length())).getAsJsonObject();
             if (row.get("observed").getAsInt() != 1 || row.get("unobserved").getAsInt() != 0) throw new AssertionError(summary);
+            if (row.get("chosen").getAsInt() != 1 || row.get("unannounced").getAsInt() != 0) throw new AssertionError("Priority choice not joined to announcement: " + summary);
         } else if (!audit.contains("BENCH_INTEGRITY_UNSUPPORTED ACTION_RECEIPT: selected action lacks engine event receipt")) {
             throw new AssertionError("Unexecuted selection was certified: " + audit);
         }
@@ -119,6 +125,7 @@ public final class BenchActionAuditSmoke {
             fixture("Savannah Lions", false, true);
             fixture("Plains", true, true);
             fixture("Savannah Lions", false, false);
+            fixture("Plains", true, false);
             System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }

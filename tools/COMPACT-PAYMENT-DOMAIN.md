@@ -1,5 +1,28 @@
 # Compact exact payment domain prototype — 2026-09-10
 
+## Current composite-production extension
+
+Current payment version is `rules-payment-v5-explicit-x`; the historical v4
+description below predates explicit X. Ordinary production retains
+`token-shard-domain-v1`. A source whose activation also produces an independently
+owned reflected bonus uses `token-shard-domain-v2-producers`: every source option
+then has `outputOrigins`, parallel to `output`, with `sourceFid`, `emission`,
+`persistent`, `combat`, and `snow`. `primary` identifies the activated source;
+`trigger:<id>` identifies the exact reflected emission. All outputs in this
+supported domain belong to the payer. A bonus is never attributed to the tapped
+source, even when both produce the same color. Legacy consumers must reject v2.
+
+Forecast and native callback receipts currently support mandatory static
+nonland, controller-owned, single-type reflection (the Kinnan ability shape).
+Multiple produced types still require an unimplemented host color choice.
+The TypeScript consumer retains emission distinctions and refuses an unresolved
+partial-spend provenance choice; successful full-cost fixtures are not a whole
+policy/engine certificate. See `ReflectedManaPaymentEngineSmoke` for actual
+producer/recipient/trait/pool-fault checks and `ProductionPaymentDomainEngineSmoke`
+for actual bridge casts. No benchmark acceptance gate is waived.
+
+## Historical v4 introduction
+
 `RulesPaymentDomain` replaces a list of every payment plan with the complete
 rules-assessed domain. The Java production bridge now uses it for the payment
 ask and validation; hello, priority and payment agree on
@@ -115,13 +138,30 @@ request mutation, wrong color, and malformed witnesses are covered.
 4. Run the full same-lineage null/probe and benchmark integrity gates before
    strength games. This representation is not whole-engine or policy parity.
 
-New legality finding retained, **not resolved by this hookup commit**: the
+New legality finding retained, **not resolved by the original hookup commit**: the
 actual Citadel/Sol Ring priority request offers both the legal one-life variant
 and an erroneous twice-applied two-life variant. The first production run v1
 stopped on the fixture's ambiguous-card check. V2 explicitly selects the intended
 one-life alternative to test payment execution, but does not certify that menu.
 The v2 `life-only` raw exported request preserves both variants. A separate
 general permission-enumeration repair and exact-menu regression are required.
+
+Follow-up permission repair: track already-expanded alternatives whose printed
+base cannot be played from its current zone. Expand additional/optional costs,
+but do not reapply alternative permissions to these leaves. Readonly face-down
+exile enumeration now supplies the same provenance; the stock overload is
+unchanged. `PermissionEnumerationEngineSmoke` compares against the independent
+stock single-pass rules API and executes both Citadel/Future Sight choices and
+both Burst Lightning kicker choices. The production Citadel fixture additionally
+requires exactly the legal pay1 variant, so extra pay2 options cannot pass.
+The face-down Expensive Taste variant is checked for exact enumeration and
+feasibility only: the retained `permission-enumeration-v1/fixture.log` found a
+separate nested engine-generated Forget trigger calling zero-mana payment while
+the selected spell's payment executor remains active. This unsupported execution
+gate is not repaired or certified by the permission-enumeration change.
+`2026-09-10-permission-enumeration-v2/fixture.log` passed all 14 integrated
+programs, including 51 new permission checks and 165 production symbolic-payment
+checks. V1 remains the failed execution evidence; no matches were run.
 
 TS native color-count payment also does not currently specify every possible
 source-to-shard allocation (for example two equal-color sources paying a colored

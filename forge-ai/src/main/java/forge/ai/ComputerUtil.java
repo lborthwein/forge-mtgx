@@ -77,6 +77,82 @@ import java.util.stream.Collectors;
  */
 public class ComputerUtil {
 
+    /** Trusted controlled-cast continuation. Default's entry points below are
+     * unchanged; the controller must finalize all choices before returning a
+     * cost decision maker, and failures are never converted to a pass. */
+    public interface ControlledAnnouncement {
+        void sourceMoved(Card original, Card returned, SpellAbility actual);
+        CostDecisionMakerBase preparePayment(SpellAbility actual);
+        default void resolveMana(SpellAbility actual, Runnable nativeExecution) { nativeExecution.run(); }
+    }
+
+    public static boolean handlePlayingSpellAbilityControlled(final Player player, final SpellAbility selected,
+            final ControlledAnnouncement announcement) {
+        final Game game = player.getGame();
+        final Card source = selected.getHostCard();
+        final Zone fromZone = game.getZoneOf(source);
+        final int position = fromZone == null ? -1 : fromZone.getCards().indexOf(source);
+        final CardStateName oldState = source.getCurrentStateName();
+        final boolean wasFaceDown = source.isFaceDown();
+        final List<Player> originalLookers = wasFaceDown && source.isInZone(ZoneType.Exile)
+                ? game.getPlayers().stream().filter(source::mayPlayerLook).collect(Collectors.toList())
+                : List.of();
+        if (announcement == null || selected.getActivatingPlayer() != player || source.getGame() != game
+                || fromZone == null || position < 0 || game.getStack().isFrozen() || !selected.canPlay())
+            throw new IllegalStateException("invalid controlled announcement entry");
+        SpellAbility actual = selected;
+        CostPayment payment = null;
+        // As in PlaySpellAbility: a rejected reused activation must never refund
+        // the previous activation's mana receipt.
+        actual.clearManaPaid();
+        actual.getPayingManaAbilities().clear();
+        game.setTopLibsCast(); // retain pre-announcement top-card visibility until casting finishes
+        try {
+            source.setSplitStateToPlayAbility(actual);
+            if (actual.isSpell() && !source.isCopiedSpell()) {
+                if (AbilityUtils.addSpliceEffects(actual) != actual)
+                    throw new IllegalStateException("unsupported controlled splice root replacement");
+                final Card returned = game.getAction().moveToStack(source, actual);
+                actual.setHostCard(returned);
+                announcement.sourceMoved(source, returned, actual);
+            } else announcement.sourceMoved(source, source, actual);
+            if (!actual.isCopied()) { actual.resetPaidHash(); actual.setPaidLife(0); }
+            if (GameActionUtil.addExtraKeywordCost(actual) != actual)
+                throw new IllegalStateException("unsupported controlled keyword-cost root replacement");
+            // Deliberately retain this AI-engine path's move→modes ordering,
+            // but modes and live-source targets now precede the payment witness.
+            if (actual.getApi() == ApiType.Charm && !CharmEffect.makeChoices(actual))
+                throw new IllegalStateException("controlled modal announcement has no legal choice");
+            payment = new CostPayment(actual.getPayCosts(), actual);
+            final CostDecisionMakerBase decisions = announcement.preparePayment(actual);
+            if (decisions == null || !actual.checkRestrictions(player) || !actual.canCastTiming(player)
+                    || !actual.isLegalAfterStack()) throw new IllegalStateException("controlled post-announcement legality failed");
+            game.getStack().freezeStack(actual);
+            if (!payment.payComputerCosts(decisions)) throw new IllegalStateException("controlled cost execution failed");
+            game.clearTopLibsCast(actual);
+            if (actual.isManaAbility()) {
+                final SpellAbility mana = actual;
+                announcement.resolveMana(mana, () -> game.getStack().addAndUnfreeze(mana));
+            } else game.getStack().addAndUnfreeze(actual);
+            return true;
+        } catch (RuntimeException failure) {
+            try {
+                // Native rollback needs the actual original zone, position,
+                // source and payment object. The controller still invalidates
+                // this game; rollback is not permission to continue a failed run.
+                if (payment == null) payment = new CostPayment(actual.getPayCosts(), actual);
+                GameActionUtil.rollbackAbility(actual, actual.isSpell() ? fromZone : null, position, payment, source);
+                final Card restored = game.getCardState(source);
+                if (wasFaceDown) {
+                    restored.turnFaceDown(true);
+                    if (restored.isInZone(ZoneType.Exile))
+                        for (Player viewer : originalLookers) restored.addMayLookFaceDownExile(viewer);
+                } else if (restored.getCurrentStateName() != oldState) restored.setState(oldState, true);
+            } catch (RuntimeException rollbackFailure) { failure.addSuppressed(rollbackFailure); }
+            throw failure;
+        } finally { game.clearTopLibsCast(actual); }
+    }
+
     public static boolean handlePlayingSpellAbility(final Player ai, SpellAbility sa, Consumer<SpellAbility> chooseTargets) {
         return handlePlayingSpellAbility(ai, sa, chooseTargets, ability -> new AiCostDecision(ai, ability, false));
     }

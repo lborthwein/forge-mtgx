@@ -71,6 +71,9 @@ public final class SourceLifePaymentEngineSmoke {
         BenchMenuStateAudit.assertUnchanged(before, game);
         var payment = new RulesPaymentExecutor(player, ability, witness);
         player.dangerouslySetController(new forge.ai.PlayerControllerAi(game, player, player.getLobbyPlayer()) {
+            @Override public byte chooseColor(String message, SpellAbility actual, forge.card.ColorSet colors) {
+                return payment.chooseSourceColor(actual, colors);
+            }
             @Override public boolean payManaCost(forge.card.mana.ManaCost cost, forge.game.cost.CostPartMana part,
                     SpellAbility actual, String prompt, forge.game.mana.ManaConversionMatrix matrix, boolean effect) {
                 if (matrix != null) throw new AssertionError("Unexpected mana conversion");
@@ -122,7 +125,7 @@ public final class SourceLifePaymentEngineSmoke {
             "unpayable painful source does not hide a free legal mana source");
     }
     private static void distinctUnsupported() {
-        for (String name : List.of("City of Brass", "Ancient Tomb", "Silent Clearing")) {
+        for (String name : List.of("City of Brass", "Ancient Tomb")) {
             var game = game(); var player = game.getPlayers().get(0);
             card(name, player, ZoneType.Battlefield); var ability = spell(player, "Sol Ring");
             game.getAction().checkStateEffects(true);
@@ -153,7 +156,7 @@ public final class SourceLifePaymentEngineSmoke {
     private static void production() {
         String answers = "{\"type\":\"answer\",\"id\":1,\"choice\":1}\n"
             + "{\"type\":\"answer\",\"id\":2,\"paymentVersion\":\"" + RulesPaymentDomain.PAYMENT_VERSION
-            + "\",\"sourceOrder\":[\"SOURCE\"],\"spend\":[{\"token\":\"SOURCE:0\",\"shardIndex\":0}],\"lifePaid\":1}\n";
+            + "\",\"x\":0,\"sourceOrder\":[\"SOURCE\"],\"spend\":[{\"token\":\"SOURCE:0\",\"shardIndex\":0}],\"lifePaid\":1}\n";
         // Prepare source id using real object/ability identity before binding input.
         var input = new java.io.PipedInputStream();
         var wire = new java.io.ByteArrayOutputStream();
@@ -195,6 +198,7 @@ public final class SourceLifePaymentEngineSmoke {
             FModel.initialize(null, prefs -> { prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); prefs.setPref(FPref.UI_LANGUAGE, "en-US"); return null; });
             BenchRandomAudit.install(401);
             execute("Mana Confluence", 1); execute("Myr Convert", 2);
+            execute("Silent Clearing", 1); execute("Horizon Canopy", 1);
             execute("Mana Confluence", 1, 1);
             aggregate(); skipAndZero(); distinctUnsupported(); replacements(); production();
             System.out.println("PASS all " + checks + " source-life checks; development only"); System.exit(0);

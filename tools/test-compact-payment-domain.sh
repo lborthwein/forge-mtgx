@@ -19,11 +19,13 @@ shasum -a 256 "$domain_jar"
   "$domain_root/forge-game/src/main/java/forge/game/spellability/SpellAbility.java" \
   "$domain_root/forge-game/src/main/java/forge/game/staticability/StaticAbilityAlternativeCost.java" \
   "$domain_root/forge-game/src/main/java/forge/game/cost/CostAdjustment.java" \
+  "$domain_root/forge-game/src/main/java/forge/game/cost/CostPartMana.java" \
   "$domain_root/forge-game/src/main/java/forge/game/mana/ManaCostBeingPaid.java" \
   "$domain_root/forge-game/src/main/java/forge/game/mana/ManaPool.java" \
   "$domain_root/forge-ai/src/main/java/forge/ai/ComputerUtil.java" \
   "$domain_root/forge-ai/src/main/java/forge/bench/StateEncoder.java" \
   "$domain_root/forge-ai/src/main/java/forge/bench/RulesCostFeasibility.java" \
+  "$domain_root/forge-ai/src/main/java/forge/bench/ReflectedManaProduction.java" \
   "$domain_root/forge-ai/src/main/java/forge/bench/RulesCostDecisionMaker.java" \
   "$domain_root/forge-ai/src/main/java/forge/bench/RulesPaymentExecutor.java" \
   "$domain_root/forge-ai/src/main/java/forge/bench/RulesPaymentChoices.java" \

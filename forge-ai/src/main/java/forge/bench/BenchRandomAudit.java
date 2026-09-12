@@ -22,6 +22,39 @@ import forge.util.MyRandom;
 public final class BenchRandomAudit {
     private BenchRandomAudit() { }
 
+    // Opt-in observation scope on the current benchmark thread only. No Default
+    // policy call is guarded unless a benchmark observer explicitly enters it.
+    private static final ThreadLocal<Integer> READ_ONLY_DEPTH = ThreadLocal.withInitial(() -> 0);
+    private static final ThreadLocal<Long> READ_ONLY_ATTEMPTS = ThreadLocal.withInitial(() -> 0L);
+
+    /** Reject random operations before they touch the seeded stream or Gaussian
+     * cache. This never replaces/restores/burns RNG state. Provider replacement
+     * remains an integrity error rather than an attempted repair. */
+    public static <T> T withoutRandomUse(final String scope, final java.util.function.Supplier<T> query) {
+        final Token before = begin(); // Missing recorder fails before evaluating the query.
+        final int previous = READ_ONLY_DEPTH.get();
+        final long previousAttempts = READ_ONLY_ATTEMPTS.get();
+        READ_ONLY_DEPTH.set(previous + 1);
+        try {
+            return query.get();
+        } finally {
+            final boolean attemptedRandom = READ_ONLY_ATTEMPTS.get() != previousAttempts;
+            if (previous == 0) READ_ONLY_DEPTH.remove(); else READ_ONLY_DEPTH.set(previous);
+            if (previous == 0) READ_ONLY_ATTEMPTS.remove();
+            assertUnchanged(before, scope);
+            // A lower-level catch must not turn forbidden random evaluation into
+            // a successful guessed estimate. Attempts are sticky through nesting.
+            if (attemptedRandom) throw failure(scope + " attempted random operation in read-only query");
+        }
+    }
+
+    private static void rejectReadOnlyOperation(final String operation) {
+        if (READ_ONLY_DEPTH.get() != 0) {
+            READ_ONLY_ATTEMPTS.set(READ_ONLY_ATTEMPTS.get() + 1);
+            throw failure("read-only benchmark query attempted " + operation);
+        }
+    }
+
     public static void install(final long seed) {
         MyRandom.setRandom(new AuditedRandom(seed));
     }
@@ -39,6 +72,7 @@ public final class BenchRandomAudit {
 
         @Override
         protected synchronized int next(final int bits) {
+            rejectReadOnlyOperation("next");
             final int value = super.next(bits);
             draws++;
             record((byte) 1, bits, Integer.toUnsignedLong(value));
@@ -47,6 +81,7 @@ public final class BenchRandomAudit {
 
         @Override
         public synchronized void setSeed(final long seed) {
+            rejectReadOnlyOperation("setSeed");
             super.setSeed(seed);
             stateTouches++;
             record((byte) 2, seed, 0);
@@ -54,6 +89,7 @@ public final class BenchRandomAudit {
 
         @Override
         public synchronized double nextGaussian() {
+            rejectReadOnlyOperation("nextGaussian");
             // The cached second Gaussian consumes no new raw bits but DOES
             // mutate RNG state, so a raw-bit counter alone misses this case.
             stateTouches++;

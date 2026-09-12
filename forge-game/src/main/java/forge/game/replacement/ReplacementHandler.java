@@ -358,7 +358,14 @@ public class ReplacementHandler {
             if (replacementEffect.getMode() != ReplacementType.DamageDone ||
                 (apiType == ApiType.ReplaceDamage || apiType == ApiType.ReplaceSplitDamage || apiType == ApiType.ReplaceEffect)) {
                 effectSA.setActivatingPlayer(host.getController());
-                player.getController().playSpellAbilityNoStack(effectSA, true);
+                final SpellAbility executing = effectSA;
+                final var controller = player.getController();
+                if (controller instanceof forge.game.player.ScopedReplacementExecution scoped) {
+                    scoped.withReplacementExecutionScope(replacementEffect, executing,
+                            () -> controller.playSpellAbilityNoStack(executing, true));
+                } else {
+                    controller.playSpellAbilityNoStack(executing, true);
+                }
             } else {
                 // The SA if buffered, but replacement result should be set to Replaced
                 runParams.put(AbilityKey.ReplacementResult, ReplacementResult.Replaced);

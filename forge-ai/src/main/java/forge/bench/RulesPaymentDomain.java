@@ -31,8 +31,15 @@ public final class RulesPaymentDomain {
         this(paymentSpace(payer, ability), payer.getLife());
     }
 
+    RulesPaymentDomain(Player payer, SpellAbility ability, RulesCastingAuthorization announcement) {
+        this(paymentSpace(payer, ability, announcement), payer.getLife());
+    }
+
     private static RulesCostFeasibility.PaymentSpace paymentSpace(Player payer, SpellAbility ability) {
-        var result = RulesCostFeasibility.assess(payer, ability);
+        return paymentSpace(payer, ability, null);
+    }
+    private static RulesCostFeasibility.PaymentSpace paymentSpace(Player payer, SpellAbility ability, RulesCastingAuthorization announcement) {
+        var result = RulesCostFeasibility.assess(payer, ability, announcement);
         if (result.status() != RulesCostFeasibility.Status.PAYABLE || result.space() == null)
             throw new RulesCostFeasibility.Unsupported("payment domain unavailable: " + result.reason());
         return result.space();
@@ -42,7 +49,7 @@ public final class RulesPaymentDomain {
     // visibility supports differential fixtures; it is not a host deserializer.
     RulesPaymentDomain(RulesCostFeasibility.PaymentSpace assessed, int lifeAvailable) {
         space = new RulesCostFeasibility.PaymentSpace(assessed.cost(), List.copyOf(assessed.shards()),
-                List.copyOf(assessed.pool()), assessed.sources().stream().map(List::copyOf).toList(), assessed.life());
+                List.copyOf(assessed.pool()), assessed.sources().stream().map(List::copyOf).toList(), assessed.life(), assessed.x());
         this.lifeAvailable = lifeAvailable;
         if (space.life() < 0 || (space.life() > 0 && lifeAvailable < space.life()))
             throw new RulesCostFeasibility.Unsupported("invalid assessed payment life budget");
@@ -65,7 +72,8 @@ public final class RulesPaymentDomain {
     private JsonObject encode() {
         var out = new JsonObject();
         out.addProperty("paymentVersion", PAYMENT_VERSION);
-        out.addProperty("representation", REPRESENTATION);
+        boolean composite = sources.values().stream().anyMatch(s -> !s.bonuses().isEmpty());
+        out.addProperty("representation", composite ? "token-shard-domain-v2-producers" : REPRESENTATION);
         out.addProperty("complete", true);
         out.addProperty("sourceOrderRequired", true);
         out.addProperty("sourceGroupRule", "at-most-one-option-per-group");
@@ -73,7 +81,12 @@ public final class RulesPaymentDomain {
         out.addProperty("producedTokenIdentity", "source-option-id:output-index");
         out.addProperty("lifeAvailable", lifeAvailable);
         var cost = new JsonObject();
-        cost.addProperty("mana", space.cost().toString()); cost.addProperty("x", 0); cost.addProperty("life", space.life());
+        cost.addProperty("mana", space.cost().toString()); cost.addProperty("x", space.x()); cost.addProperty("life", space.life());
+        var expanded = new forge.game.mana.ManaCostBeingPaid(space.cost());
+        if (space.cost().countX() > 0) expanded.setXManaCostPaid(space.x(), "1");
+        // Forge's empty ManaCostBeingPaid converts to NO_COST, which is not
+        // the same thing as the legal zero bill represented by this domain.
+        cost.addProperty("expandedMana", expanded.isPaid() ? "{0}" : expanded.toManaCost().toString());
         var shards = new JsonArray();
         for (var shard : space.shards()) shards.add(shard.name());
         cost.add("shards", shards); out.add("cost", cost);
@@ -106,6 +119,20 @@ public final class RulesPaymentDomain {
             var output = new JsonArray();
             for (int color : source.output()) output.add(MagicColor.toShortString((byte) color));
             item.add("output", output); options.add(item);
+            if (composite) {
+                var identities = new JsonArray();
+                for (int unit=0; unit<source.output().size(); unit++) {
+                    var identity = new JsonObject();
+                    identity.addProperty("sourceFid", source.producerId(unit));
+                    identity.addProperty("persistent", source.outputTraits(unit).persistent());
+                    identity.addProperty("combat", source.outputTraits(unit).combat());
+                    identity.addProperty("snow", source.outputTraits(unit).snow());
+                    // Distinguish two emissions even if the same card generated them.
+                    identity.addProperty("emission", unit < source.primaryCount() ? "primary" : "trigger:"+source.bonuses().get(unit-source.primaryCount()).trigger().getId());
+                    identities.add(identity);
+                }
+                item.add("outputOrigins", identities);
+            }
         }
         out.add("sourceOptions", options);
         return out;
@@ -118,7 +145,8 @@ public final class RulesPaymentDomain {
     public RulesCostFeasibility.PaymentWitness select(JsonObject answer) {
         try {
             if (answer == null || answer.has("delegate") || answer.has("choice")
-                    || !PAYMENT_VERSION.equals(string(answer.get("paymentVersion"))))
+                    || !PAYMENT_VERSION.equals(string(answer.get("paymentVersion")))
+                    || integer(answer.get("x")) != space.x())
                 throw new IllegalArgumentException("explicit symbolic payment version required; no delegate/legacy choice");
             var order = array(answer, "sourceOrder");
             var spend = array(answer, "spend");

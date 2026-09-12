@@ -1297,6 +1297,22 @@ public class AbilityUtils {
     //
     /////////////////////////////////////////////////////////////////////////////////////
     public static void resolve(final SpellAbility sa) {
+        if (sa instanceof forge.game.trigger.WrappedAbility wrapper
+                && sa.getActivatingPlayer().getController() instanceof forge.game.player.ScopedTriggerResolution scoped
+                && scoped.requiresTriggerResolutionScope(wrapper)) {
+            final boolean[] invoked = {false};
+            scoped.withTriggerResolutionScope(wrapper, () -> {
+                if (invoked[0]) throw new IllegalStateException("native trigger resolution invoked twice");
+                invoked[0] = true;
+                resolveWithoutControllerScope(sa);
+            });
+            if (!invoked[0]) throw new IllegalStateException("native trigger resolution was skipped");
+            return;
+        }
+        resolveWithoutControllerScope(sa);
+    }
+
+    private static void resolveWithoutControllerScope(final SpellAbility sa) {
         if (sa == null) {
             return;
         }

@@ -7469,8 +7469,14 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         }
 
         if (isFaceDown() && isInZone(ZoneType.Exile)) {
-            for (final SpellAbility sa : oState.getSpellAbilities()) {
-                abilities.addAll(GameActionUtil.getAlternativeCosts(readOnly ? sa.copyForEnumeration(player) : sa, player, false, readOnly));
+            for (final SpellAbility original : oState.getSpellAbilities()) {
+                SpellAbility sa = readOnly ? original.copyForEnumeration(player) : original;
+                List<SpellAbility> alternatives = GameActionUtil.getAlternativeCosts(sa, player, false, readOnly);
+                abilities.addAll(alternatives);
+                // The benchmark must know these are already-expanded leaves even
+                // though the hidden original is intentionally never offered.
+                // Preserve the stock AI/UI overload's existing map semantics.
+                if (readOnly && unhiddenAltCost != null) unhiddenAltCost.putAll(sa, alternatives);
             }
         }
         if (isFaceDown() && isInZone(ZoneType.Command)) {

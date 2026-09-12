@@ -114,6 +114,9 @@ public final class RulesCostFeasibilityEngineSmoke {
         var game = game(); var player = game.getPlayers().get(0);
         final RulesPaymentExecutor[] payment = {null};
         player.dangerouslySetController(new forge.ai.PlayerControllerAi(game, player, player.getLobbyPlayer()) {
+            @Override public byte chooseColor(String message, SpellAbility actual, forge.card.ColorSet colors) {
+                return payment[0].chooseSourceColor(actual, colors);
+            }
             @Override public boolean payManaCost(forge.card.mana.ManaCost toPay, forge.game.cost.CostPartMana part,
                     SpellAbility sa, String prompt, forge.game.mana.ManaConversionMatrix matrix, boolean effect) {
                 if (payment[0] == null || matrix != null) throw new AssertionError("Unexpected payment callback");
@@ -156,6 +159,9 @@ public final class RulesCostFeasibilityEngineSmoke {
         if (!spell.getHostCard().isInZone(ZoneType.Stack) || player.getManaPool().totalMana() != expectedFloating)
             throw new AssertionError("Actual stack/mana state differs from witness");
         if (alternate && (source.isTapped() || !other.isTapped())) throw new AssertionError("Ignored explicit alternate payment source");
+        if(sourceName.equals("Mana Vault") && (!source.isTapped() || !source.isInZone(ZoneType.Battlefield)
+                || source.getReplacementEffects().stream().noneMatch(r->r.getMode()==forge.game.replacement.ReplacementType.Untap)))
+            throw new AssertionError("Mana Vault payment must tap the source and preserve its untap restriction");
         if (sourceName.equals("Black Lotus")) {
             var emitted = List.copyOf(source.getManaAbilities().get(0).getManaPart().getLastManaProduced());
             if (emitted.size() != 3) throw new AssertionError("Lotus did not emit three actual mana objects");
@@ -198,6 +204,149 @@ public final class RulesCostFeasibilityEngineSmoke {
         checks++;
         System.out.println("PASS complete payment provenance, invalid-answer and floating-token checks");
     }
+
+    private static void untapScopeChecks() {
+        for(int seat=0;seat<2;seat++) {
+            var game=game();var payer=game.getPlayers().get(seat);
+            game.getPhaseHandler().devModeSet(PhaseType.MAIN1,payer);
+            var vault=card("Mana Vault",payer,ZoneType.Battlefield);
+            var spell=card("Sol Ring",payer,ZoneType.Hand).getFirstSpellAbility();
+            if(vault.getReplacementEffects().stream().noneMatch(r->r.getMode()==forge.game.replacement.ReplacementType.Untap))
+                throw new AssertionError("actual Mana Vault lacks untap replacement");
+            verify(payer,spell,PAYABLE,"untap replacement does not affect tap payment seat="+seat);
+            vault.setTapped(true);
+            verify(payer,spell,UNPAYABLE,"irrelevant untap replacement does not manufacture untapped mana seat="+seat);
+            var untap=forge.game.ability.AbilityFactory.getAbility("AB$ Mana | Cost$ Q | Produced$ C | Amount$ 1",vault);
+            verify(payer,untap,UNSUPPORTED,"actual untap cost remains outside admitted payment scope seat="+seat);
+        }
+    }
+    private static void reductionScopeChecks() {
+        for (int seat = 0; seat < 2; seat++) {
+            var game = game(); var player = game.getPlayers().get(seat);
+            game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player);
+            var host = card("Basalt Monolith", player, ZoneType.Battlefield);
+            host.setTapped(true);
+            var zirda = card("Zirda, the Dawnwaker", player, ZoneType.Battlefield);
+            // Literal costs: generic floor, colored requirements, and free costs.
+            String[] costs = {"4", "3", "2", "1", "0", "2 W", "1 W", "W"};
+            String[] expected = {"2", "1", "1", "1", "0", "W", "W", "W"};
+            game.getAction().checkStateEffects(true);
+            for (int i = 0; i < costs.length; i++) {
+                var sa = forge.game.ability.AbilityFactory.getAbility("AB$ Untap | Cost$ " + costs[i], host);
+                sa.setActivatingPlayer(player);
+                String before = state(game);
+                var rng = MyRandom.getRandom();
+                MyRandom.setRandom(new Random(1) { @Override protected int next(int bits) { throw new AssertionError("Reducer query consumed RNG"); } });
+                forge.game.cost.CostAdjustment.BenchmarkManaPrice price;
+                try { price = forge.game.cost.CostAdjustment.benchmarkManaPrice(sa); }
+                finally { MyRandom.setRandom(rng); }
+                if (price == null || !before.equals(state(game))) throw new AssertionError("Missing/mutating reduction quote");
+                var want = new forge.card.mana.ManaCost(expected[i]);
+                if (!RulesPaymentExecutor.sameManaCost(price.payable(), want)) throw new AssertionError("Reduction floor/colored cost: " + costs[i] + " got " + price);
+                var nativeCost = new forge.game.mana.ManaCostBeingPaid(price.beforeReduction());
+                if (!forge.game.cost.CostAdjustment.adjust(nativeCost, sa, player, null, false, false)
+                        || !RulesPaymentExecutor.sameManaCost(nativeCost.isPaid() ? forge.card.mana.ManaCost.ZERO : nativeCost.toManaCost(), price.payable()))
+                    throw new AssertionError("Stock/controlled reduction disagree");
+                checks++;
+            }
+            // The reducer must not affect spells, mana abilities, or opponents.
+            var spell = card("Sol Ring", player, ZoneType.Hand).getFirstSpellAbility(); spell.setActivatingPlayer(player);
+            if (forge.game.cost.CostAdjustment.benchmarkManaCost(spell).getGenericCost() != 1) throw new AssertionError("Zirda discounted a spell");
+            var other = card("Basalt Monolith", game.getPlayers().get(1-seat), ZoneType.Battlefield);
+            var otherUntap = other.getSpellAbilities().stream().filter(a -> a.getApi() == forge.game.ability.ApiType.Untap).findFirst().orElseThrow();
+            otherUntap.setActivatingPlayer(other.getController());
+            if (forge.game.cost.CostAdjustment.benchmarkManaCost(otherUntap).getGenericCost() != 3) throw new AssertionError("Zirda discounted opponent");
+            var manaAbility = forge.game.ability.AbilityFactory.getAbility("AB$ Mana | Cost$ 3 | Produced$ C | Amount$ 1", host);
+            manaAbility.setActivatingPlayer(player);
+            if (forge.game.cost.CostAdjustment.benchmarkManaCost(manaAbility).getGenericCost() != 3) throw new AssertionError("Zirda discounted mana ability");
+            checks += 3;
+            // Joint X/floor pricing must stay unsupported, not use unexpanded X.
+            var x = forge.game.ability.AbilityFactory.getAbility("AB$ Untap | Cost$ X", host);
+            x.setActivatingPlayer(player); x.setXManaCostPaid(4); x.setSVar("X", "Count$xPaid");
+            if (forge.game.cost.CostAdjustment.benchmarkManaCost(x) != null) throw new AssertionError("Unproven X reduction accepted");
+            checks++;
+            var extra = card("Sol Ring", player, ZoneType.Battlefield);
+            extra.addStaticAbility("Mode$ ReduceCost | ValidCard$ Card | ValidSpell$ Activated.!ManaAbility | Activator$ You | Amount$ 1 | MinMana$ 1");
+            var fixed = forge.game.ability.AbilityFactory.getAbility("AB$ Untap | Cost$ 4", host);
+            fixed.setActivatingPlayer(player);
+            for (boolean reverse : new boolean[]{false, true}) {
+                player.dangerouslySetController(new forge.ai.PlayerControllerAi(game, player, player.getLobbyPlayer()) {
+                    @Override public forge.game.staticability.StaticAbility chooseSingleStaticAbility(List<forge.game.staticability.StaticAbility> options) {
+                        return options.get(reverse ? options.size()-1 : 0);
+                    }
+                });
+                var price = forge.game.cost.CostAdjustment.benchmarkManaPrice(fixed);
+                if (price == null || price.payable().getGenericCost() != 1) throw new AssertionError("Joint same-floor reduction failed");
+                var nativeCost = new forge.game.mana.ManaCostBeingPaid(price.beforeReduction());
+                if (!forge.game.cost.CostAdjustment.adjust(nativeCost, fixed, player, null, false, false)
+                        || nativeCost.getGenericManaAmount() != 1) throw new AssertionError("Native reduction order differs");
+                checks++;
+            }
+            extra.addStaticAbility("Mode$ ReduceCost | ValidCard$ Card | ValidSpell$ Activated.!ManaAbility | Activator$ You | Amount$ 1");
+            if (forge.game.cost.CostAdjustment.benchmarkManaPrice(fixed) != null) throw new AssertionError("Distinct floors require explicit handling");
+            checks++;
+        }
+    }
+    private static void reductionPaymentBindingChecks() {
+        for (int seat = 0; seat < 2; seat++) for (boolean changedReducer : new boolean[]{false, true}) {
+            var game = game(); var player = game.getPlayers().get(seat);
+            var host = card("Basalt Monolith", player, ZoneType.Battlefield); host.setTapped(true);
+            var zirda = card("Zirda, the Dawnwaker", player, ZoneType.Battlefield);
+            var sa = host.getSpellAbilities().stream().filter(a -> a.getApi() == forge.game.ability.ApiType.Untap).findFirst().orElseThrow();
+            sa.setActivatingPlayer(player);
+            game.getAction().checkStateEffects(true);
+            for (int n = 0; n < 3; n++) player.getManaPool().addMana(new forge.game.mana.Mana(
+                    (byte)forge.card.mana.ManaAtom.COLORLESS, host, host.getManaAbilities().get(0).getManaPart(), player));
+            var choices = new RulesPaymentChoices(player, sa);
+            var answer = new com.google.gson.JsonObject(); answer.addProperty("choice", 0);
+            answer.add("sourceOrder", choices.request().getAsJsonArray("menu").get(0).getAsJsonObject().getAsJsonArray("sources").deepCopy());
+            var payment = new RulesPaymentExecutor(player, sa, choices.select(answer));
+            if (changedReducer) zirda.setController(game.getPlayers().get(1-seat), game.getNextTimestamp());
+            var before = state(game);
+            try {
+                payment.pay(new forge.card.mana.ManaCost(changedReducer ? "3" : "1"), sa.getPayCosts().getCostMana(), sa, false);
+                throw new AssertionError("Changed reducer or forged incoming quote accepted");
+            } catch (RulesCostFeasibility.Unsupported expected) { }
+            if (!before.equals(state(game))) throw new AssertionError("Rejected payment mutated game");
+            checks++;
+        }
+        for (int seat = 0; seat < 2; seat++) {
+            var game = game(); var player = game.getPlayers().get(seat);
+            var host = card("Basalt Monolith", player, ZoneType.Battlefield); host.setTapped(true);
+            host.addStaticAbility("Mode$ ReduceCost | ValidCard$ Card | ValidSpell$ Activated.!ManaAbility | Activator$ You | Amount$ 3");
+            var sa = host.getSpellAbilities().stream().filter(a -> a.getApi() == forge.game.ability.ApiType.Untap).findFirst().orElseThrow();
+            sa.setActivatingPlayer(player);
+            verify(player, sa, PAYABLE, "reduced-to-zero is payable, not absent mana cost seat=" + seat);
+            var choices = new RulesPaymentChoices(player, sa);
+            var answer = new com.google.gson.JsonObject(); answer.addProperty("choice", 0);
+            answer.add("sourceOrder", new com.google.gson.JsonArray());
+            var payment = new RulesPaymentExecutor(player, sa, choices.select(answer));
+            if (!payment.pay(new forge.card.mana.ManaCost("3"), sa.getPayCosts().getCostMana(), sa, false)) throw new AssertionError("Zero reduction payment failed");
+            payment.assertPaid();
+            if (player.getManaPool().totalMana() != 0 || !host.isTapped()) throw new AssertionError("Zero payment altered pool/untap effect");
+            checks++;
+        }
+    }
+    private static void selfSacrificeScopeChecks() {
+        for (int seat=0;seat<2;seat++) {
+            var game=game();var player=game.getPlayers().get(seat);
+            var source=card("Basalt Monolith",player,ZoneType.Battlefield);
+            for (String cost : new String[]{"1 Sac<1/CARDNAME>", "T Sac<2/CARDNAME>", "T Sac<1/Artifact>"}) {
+                var sa=forge.game.ability.AbilityFactory.getAbility("AB$ Untap | Cost$ "+cost,source);
+                verify(player,sa,UNSUPPORTED,"unmodeled pre-sacrifice mana or non-exact sacrifice "+cost+" seat="+seat);
+            }
+            var fetch=card("Fabled Passage",player,ZoneType.Battlefield);
+            var ability=fetch.getSpellAbilities().stream().filter(a -> a.getApi()==forge.game.ability.ApiType.ChangeZone).findFirst().orElseThrow();ability.setActivatingPlayer(player);
+            var result=RulesCostFeasibility.assess(player,ability);
+            if(result.status()!=PAYABLE)throw new AssertionError("Fabled Passage must have a witness: "+result.reason());
+            var payment=new RulesPaymentExecutor(player,ability,result.witness());
+            var before=state(game);
+            payment.pay(forge.card.mana.ManaCost.ZERO,new forge.game.cost.CostPartMana(forge.card.mana.ManaCost.ZERO,null),ability,false);
+            try {payment.assertPaid();throw new AssertionError("Skipped sacrifice falsely certified as paid");}
+            catch(RulesCostFeasibility.Unsupported expected) {checks++;}
+            if(!before.equals(state(game)))throw new AssertionError("Skipped-cost fault injection changed game");
+        }
+    }
     public static void main(String[] args) {
         try {
             // No screen/window needed to load card scripts. Unexpected GUI calls fail
@@ -222,6 +371,12 @@ public final class RulesCostFeasibilityEngineSmoke {
             spell("Esper Charm", new String[]{"Black Lotus"}, null, UNPAYABLE);
             spell("Lightning Bolt", new String[]{"Mana Confluence"}, null, PAYABLE);
             spell("Lightning Bolt", new String[]{"Mountain"}, "Mana Reflection", UNSUPPORTED);
+            spell("Mana Vault", new String[]{"Plains"}, null, PAYABLE);
+            spell("Mana Vault", new String[]{}, null, UNPAYABLE);
+            untapScopeChecks();
+            reductionScopeChecks();
+            reductionPaymentBindingChecks();
+            selfSacrificeScopeChecks();
             spell("Dismember", new String[]{"Swamp"}, null, UNSUPPORTED);
             var wallGame = game(); var wallPlayer = wallGame.getPlayers().get(0);
             var wall = card("Wall of Roots", wallPlayer, ZoneType.Battlefield);
@@ -260,6 +415,8 @@ public final class RulesCostFeasibilityEngineSmoke {
             executeWitness("Lightning Bolt", "Mountain", 0, false);
             executeWitness("Lightning Bolt", "Black Lotus", 2, false);
             executeWitness("Sol Ring", "Plains", 0, true);
+            executeWitness("Mana Vault", "Plains", 0, false);
+            executeWitness("Sol Ring", "Mana Vault", 2, false);
             paymentSurfaceChecks();
             castOnlyVersusPlay("Thief of Sanity", false);
             castOnlyVersusPlay("Decadent Dragon", true);

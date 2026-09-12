@@ -10,11 +10,13 @@ exec > >(tee "$fixture_dir/fixture.log") 2>&1
 /opt/homebrew/opt/openjdk@17/bin/javac -cp "$fixture_jar" -d "$fixture_dir/classes" \
   "$fixture_root/forge-game/src/main/java/forge/game/cost/CostAdjustment.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/RulesCostFeasibility.java" \
+  "$fixture_root/forge-ai/src/main/java/forge/bench/ReflectedManaProduction.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/BenchmarkOptionalCosts.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/BenchRandomAudit.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/BenchActionAudit.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/JsonRpcChannel.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/PlayerControllerBridge.java" \
+  "$fixture_root/forge-ai/src/main/java/forge/bench/CallCounter.java" \
   "$fixture_root/forge-gui-desktop/src/main/java/forge/bench/BenchMain.java" \
   "$fixture_root/forge-gui-desktop/src/test/java/forge/bench/BenchRandomAuditSmoke.java" \
   "$fixture_root/forge-gui-desktop/src/test/java/forge/bench/BenchRandomAuditMenuSmoke.java" \

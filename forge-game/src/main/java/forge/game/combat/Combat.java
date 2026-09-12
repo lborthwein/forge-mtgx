@@ -33,6 +33,8 @@ import forge.game.card.*;
 import forge.game.keyword.Keyword;
 import forge.game.player.Player;
 import forge.game.player.PlayerActionConfirmMode;
+import forge.game.player.PlayerController;
+import forge.game.player.ScopedCombatDamageAssignment;
 import forge.game.replacement.ReplacementType;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
@@ -702,7 +704,34 @@ public class Combat {
         }
     }
 
-    private boolean assignBlockersDamage(boolean firstStrikeDamage) {
+    private record PendingDamage(CombatDamageAssignment context, ScopedCombatDamageAssignment controller) {}
+
+    private Map<Card, Integer> requestDamage(PlayerController controller, Card source,
+            CardCollectionView recipients, CardCollectionView remaining, int damage, GameEntity defender,
+            boolean overrideOrder, boolean dividedAsChosen, boolean attacking, Card throughPlaneswalker,
+            List<PendingDamage> pending) {
+        final ScopedCombatDamageAssignment scoped = controller instanceof ScopedCombatDamageAssignment s
+                && s.requiresCombatDamageAssignmentScope() ? s : null;
+        if (scoped == null && !source.getGame().getRules().auditsCombatDamage(source.getGame()))
+            return controller.assignCombatDamage(source, recipients, remaining, damage, defender, overrideOrder);
+        try {
+            var context = new CombatDamageAssignment(this, controller, source, recipients, remaining,
+                    damage, defender, overrideOrder, dividedAsChosen, attacking, throughPlaneswalker, damageMap.get());
+            var map = scoped == null
+                    ? controller.assignCombatDamage(source, recipients, remaining, damage, defender, overrideOrder)
+                    : scoped.assignCombatDamageInScope(context);
+            // Validate stock/native answers too, but return their original map.
+            // This observer must not normalize or repair the reference AI's move.
+            if (scoped == null) context.accept(map);
+            pending.add(new PendingDamage(context, scoped));
+            return map;
+        } catch (RuntimeException | Error failure) {
+            if (scoped != null) scoped.failCombatDamageAssignment(failure);
+            throw failure;
+        }
+    }
+
+    private boolean assignBlockersDamage(boolean firstStrikeDamage, List<PendingDamage> pending) {
         // Assign damage by Blockers
         final CardCollection blockers = getAllBlockers();
         boolean assignedDamage = false;
@@ -748,7 +777,9 @@ public class Combat {
                     assigningPlayer = attackingPlayer;
 
                 assignedDamage = true;
-                Map<Card, Integer> map = assigningPlayer.getController().assignCombatDamage(blocker, attackers, null, damage, defender, divideCombatDamageAsChoose || assigningPlayer != blocker.getController() || !this.legacyOrderCombatants);
+                Map<Card, Integer> map = requestDamage(assigningPlayer.getController(), blocker, attackers, null,
+                        damage, defender, divideCombatDamageAsChoose || assigningPlayer != blocker.getController() || !this.legacyOrderCombatants,
+                        divideCombatDamageAsChoose, false, null, pending);
                 for (Entry<Card, Integer> dt : map.entrySet()) {
                     // Butcher Orgg
                     if (dt.getKey() == null && dt.getValue() > 0) {
@@ -763,10 +794,11 @@ public class Combat {
         return assignedDamage;
     }
 
-    private boolean assignAttackersDamage(boolean firstStrikeDamage) {
+    private boolean assignAttackersDamage(boolean firstStrikeDamage, List<PendingDamage> pending) {
         // Assign damage by Attackers
         CardCollection orderedBlockers = null;
         final CardCollection attackers = getAttackers();
+        final Set<Card> deferredWithoutProgress = new HashSet<>();
         boolean assignedDamage = false;
         while (!attackers.isEmpty()) {
             final Card attacker = attackers.getFirst();
@@ -851,7 +883,9 @@ public class Combat {
 
             assignedDamage = true;
             // If the Attacker is unblocked, or it's a trampler and has 0 blockers, deal damage to defender
+            Card throughPlaneswalker = null;
             if (defender instanceof Card && !((Card) defender).isBattle() && attacker.hasKeyword("Trample:Planeswalker")) {
+                throughPlaneswalker = (Card) defender;
                 if (orderedBlockers == null || orderedBlockers.isEmpty()) {
                     orderedBlockers = new CardCollection((Card) defender);
                 } else {
@@ -879,12 +913,17 @@ public class Combat {
                     damageMap.get().put(attacker, defender, damageDealt);
                 } // No damage happens if blocked but no blockers left
             } else {
-                Map<Card, Integer> map = assigningPlayer.getController().assignCombatDamage(attacker, orderedBlockers, attackers,
-                        damageDealt, defender, divideCombatDamageAsChoose || getAttackingPlayer() != assigningPlayer || !this.legacyOrderCombatants);
+                Map<Card, Integer> map = requestDamage(assigningPlayer.getController(), attacker, orderedBlockers, attackers,
+                        damageDealt, defender, divideCombatDamageAsChoose || getAttackingPlayer() != assigningPlayer || !this.legacyOrderCombatants,
+                        divideCombatDamageAsChoose, true, throughPlaneswalker, pending);
 
                 attackers.remove(attacker);
                 // player wants to assign another first
                 if (map == null) {
+                    if ((attacker.getGame().getRules().auditsCombatDamage(attacker.getGame())
+                            || assigningPlayer.getController() instanceof ScopedCombatDamageAssignment scoped
+                            && scoped.requiresCombatDamageAssignmentScope()) && !deferredWithoutProgress.add(attacker))
+                        throw new IllegalStateException("Combat damage integrity: repeated deferral without assignment progress");
                     // add to end
                     attackers.add(attacker);
                     continue;
@@ -904,6 +943,7 @@ public class Combat {
                     }
                 }
             } // if !hasFirstStrike ...
+            deferredWithoutProgress.clear();
         } // for
         return assignedDamage;
     }
@@ -921,8 +961,46 @@ public class Combat {
     }
 
     public final boolean assignCombatDamage(boolean firstStrikeDamage) {
-        boolean assignedDamage = assignAttackersDamage(firstStrikeDamage);
-        assignedDamage |= assignBlockersDamage(firstStrikeDamage);
+        final List<PendingDamage> pending = new ArrayList<>();
+        final Game assignmentGame = playerWhoAttacks.getGame();
+        final boolean benchmarkAudit = assignmentGame.getRules().auditsCombatDamage(assignmentGame);
+        final boolean audited = benchmarkAudit || assignmentGame.getPlayers().stream().anyMatch(p ->
+                p.getController() instanceof ScopedCombatDamageAssignment s && s.requiresCombatDamageAssignmentScope());
+        final CardDamageTable beforeTable = audited ? new CardDamageTable(damageMap.get()) : null;
+        final Map<Card, Map<Card, Integer>> beforeCards = new IdentityHashMap<>();
+        final CardCollection beforeFirstStrike = audited ? new CardCollection(combatantsThatDealtFirstStrikeDamage.get()) : null;
+        if (audited) for (Card card : playerWhoAttacks.getGame().getCardsIn(ZoneType.Battlefield))
+            beforeCards.put(card, new HashMap<>(card.getAssignedDamageMap()));
+        boolean assignedDamage;
+        try {
+            assignedDamage = assignAttackersDamage(firstStrikeDamage, pending);
+            assignedDamage |= assignBlockersDamage(firstStrikeDamage, pending);
+            // CR 510.1e: check aggregate damage only after all assignments.
+            // Do not reject a legal contribution from a later attacking creature.
+            for (var p : pending) p.context.verifyComplete(damageMap.get());
+            for (var p : pending) if (p.controller != null)
+                p.controller.finishCombatDamageAssignment(p.context, damageMap.get());
+        } catch (RuntimeException | Error failure) {
+            // Latch before cleanup: even a swallowed exception (or cleanup
+            // failure) must invalidate a stock-only benchmark result.
+            if (benchmarkAudit) assignmentGame.getRules().getCombatDamageAudit().failed(assignmentGame, failure);
+            // Restore assignment data before invalidating the game. This is not
+            // permission to resume it or a rollback of arbitrary replacement effects.
+            if (audited) {
+                damageMap.get().clear(); damageMap.get().putAll(beforeTable);
+                Set<Card> affected = new HashSet<>(beforeCards.keySet());
+                affected.addAll(playerWhoAttacks.getGame().getCardsIn(ZoneType.Battlefield));
+                for (Card card : affected) {
+                    card.clearAssignedDamage();
+                    for (var entry : beforeCards.getOrDefault(card, Collections.emptyMap()).entrySet())
+                        card.addAssignedDamage(entry.getValue(), entry.getKey());
+                }
+                combatantsThatDealtFirstStrikeDamage.get().clear();
+                combatantsThatDealtFirstStrikeDamage.get().addAll(beforeFirstStrike);
+            }
+            for (var p : pending) if (p.controller != null) p.controller.failCombatDamageAssignment(failure);
+            throw failure;
+        }
         if (!firstStrikeDamage) {
             // Clear first strike damage list since it doesn't matter anymore
             combatantsThatDealtFirstStrikeDamage.get().clear();

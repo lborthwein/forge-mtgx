@@ -9,10 +9,12 @@ mkdir -p "$fixture_dir/classes" "$fixture_dir/home"
 exec > >(tee "$fixture_dir/fixture.log") 2>&1
 /opt/homebrew/opt/openjdk@17/bin/javac -cp "$fixture_jar" -d "$fixture_dir/classes" \
   "$fixture_root/forge-game/src/main/java/forge/game/cost/CostAdjustment.java" \
+  "$fixture_root/forge-game/src/main/java/forge/game/cost/CostPartMana.java" \
   "$fixture_root/forge-game/src/main/java/forge/game/mana/ManaCostBeingPaid.java" \
   "$fixture_root/forge-game/src/main/java/forge/game/mana/ManaPool.java" \
   "$fixture_root/forge-ai/src/main/java/forge/ai/ComputerUtil.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/RulesCostFeasibility.java" \
+  "$fixture_root/forge-ai/src/main/java/forge/bench/ReflectedManaProduction.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/RulesCostDecisionMaker.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/RulesPaymentExecutor.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/RulesPaymentChoices.java" \
@@ -21,6 +23,7 @@ exec > >(tee "$fixture_dir/fixture.log") 2>&1
   "$fixture_root/forge-ai/src/main/java/forge/bench/BenchActionAudit.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/JsonRpcChannel.java" \
   "$fixture_root/forge-ai/src/main/java/forge/bench/PlayerControllerBridge.java" \
+  "$fixture_root/forge-ai/src/main/java/forge/bench/CallCounter.java" \
   "$fixture_root/forge-gui-desktop/src/main/java/forge/bench/BenchMain.java" \
   "$fixture_root/forge-gui-desktop/src/test/java/forge/bench/RulesCostFeasibilityEngineSmoke.java"
 /opt/homebrew/opt/openjdk@17/bin/java -Xmx2g -Duser.home="$fixture_dir/home" \

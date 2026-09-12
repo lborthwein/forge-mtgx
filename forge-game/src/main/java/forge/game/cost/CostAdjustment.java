@@ -35,10 +35,21 @@ import java.util.function.Predicate;
 public class CostAdjustment {
 
     /** Exact, bounded benchmark pricing. Null is unsupported, not unaffordable.
-     * Only literal generic increases are admitted in v1. The usual adjust methods
+     * The usual adjust methods
      * can mutate announcements, invoke controllers or temporarily modify the host.
      */
     public static ManaCost benchmarkManaCost(final SpellAbility sa) {
+        var price = benchmarkManaPrice(sa);
+        return price == null ? null : price.payable();
+    }
+
+    /** CostPayment applies raises before calling the controller, but generic
+     * reductions are normally applied inside that callback. Bind both stages so
+     * controlled payment cannot replace an unexpected incoming cost with a quote.
+     */
+    public record BenchmarkManaPrice(ManaCost beforeReduction, ManaCost payable) { }
+
+    public static BenchmarkManaPrice benchmarkManaPrice(final SpellAbility sa) {
         if (sa == null || sa.getPayCosts() == null || sa.getActivatingPlayer() == null
                 || sa.isCastFaceDown() || sa.isBestow() || sa.getHostCard().isCommander()
                 || sa.hasParam("RaiseCost") || sa.hasParam("ReduceCost")) return null;
@@ -47,19 +58,110 @@ public class CostAdjustment {
         active.addAll(sa.getActivatingPlayer().getGame().getCardsIn(ZoneType.Stack));
         active.addAll(sa.getActivatingPlayer().getGame().getCardsIn(ZoneType.Command));
         if (!active.contains(sa.getHostCard())) active.add(sa.getHostCard());
+        List<StaticAbility> reductions = new java.util.ArrayList<>();
+        Integer commonFloor = null;
+        SpellAbility permissionTaxQuote = null;
         for (Card card : active) for (StaticAbility st : card.getStaticAbilities()) {
-            if (st.checkMode(StaticAbilityMode.ReduceCost) || st.checkMode(StaticAbilityMode.SetCost)) return null;
+            if (st.checkMode(StaticAbilityMode.SetCost)) return null;
+            if (st.checkMode(StaticAbilityMode.ReduceCost)) {
+                // Fixed generic reducers sharing a floor commute. Optional,
+                // colored, variable, or differently floored reductions may
+                // require a real ordering/amount choice; never choose it here.
+                if (!st.getMapParams().keySet().stream().allMatch(k -> java.util.Set.of(
+                        "Mode", "Type", "ValidCard", "ValidSpell", "Activator", "Amount", "MinMana", "Description").contains(k))
+                        || !st.getParamOrDefault("Amount", "").matches("[0-9]{1,3}")
+                        || !st.getParamOrDefault("MinMana", "0").matches("[0-9]{1,3}")) return null;
+                if (checkRequirement(sa, st)) {
+                    // Expanding X and applying floors do not commute. Leave the
+                    // existing symbolic-X domain unchanged until modeled jointly.
+                    if (sa.getPayCosts().getTotalMana().countX() > 0) return null;
+                    int floor = Integer.parseInt(st.getParamOrDefault("MinMana", "0"));
+                    if (commonFloor != null && commonFloor != floor) return null;
+                    commonFloor = floor;
+                    reductions.add(st);
+                }
+                continue;
+            }
             if (!st.checkMode(StaticAbilityMode.RaiseCost)) continue;
+            if (benchmarkPermissionTax(st)) {
+                if (!sa.isSpell()) continue; // Native Type$ Spell requirement.
+                if (permissionTaxQuote == null) {
+                    permissionTaxQuote = sa;
+                    if (!sa.getHostCard().isInZone(ZoneType.Stack)) {
+                        // The native announcement installs these relationships
+                        // only after moving to the stack. Old/null CastSA on an
+                        // exile object is not the spell being priced. Project
+                        // only onto detached objects; never patch the live card.
+                        permissionTaxQuote = sa.copyForEnumeration(sa.getActivatingPlayer());
+                        Card projectedHost = CardCopyService.getLKICopy(sa.getHostCard());
+                        permissionTaxQuote.setHostCard(projectedHost);
+                        projectedHost.setCastSA(permissionTaxQuote);
+                        projectedHost.setCastFrom(sa.getHostCard().getLastKnownZone());
+                    }
+                }
+                // Exact native remembered/permission/origin tests and arithmetic.
+                // This fixed predicate is independent of X and chosen targets.
+                // On the actual stack host, use native announcement metadata as
+                // it stands; the payment executor compares it with the forecast.
+                applyRaiseCostAbility(adjusted, permissionTaxQuote, st);
+                continue;
+            }
             if (!st.getMapParams().keySet().stream().allMatch(k -> java.util.Set.of(
                     "Mode", "Type", "ValidCard", "ValidSpell", "Activator", "Amount", "Description").contains(k))
                     || !st.getParamOrDefault("Amount", "").matches("[0-9]{1,3}")) return null;
+            // The X range proof needs a constant tax across all announcements.
+            // Arbitrary ValidCard/ValidSpell predicates may inspect mana value,
+            // targets or cast state. Only these X-independent spell type tests
+            // are in the bounded generic-X slice (including real Thalia).
+            if (sa.getPayCosts().getTotalMana().countX()>0
+                    && (!"Spell".equals(st.getParamOrDefault("Type", ""))
+                        || !java.util.Set.of("Card", "Card.nonCreature", "Card.Creature")
+                            .contains(st.getParamOrDefault("ValidCard", "Card"))
+                        || st.hasParam("ValidSpell") || st.hasParam("Activator"))) return null;
             applyRaiseCostAbility(adjusted, sa, st);
         }
         CostPartMana mana = adjusted.getCostMana();
-        if (mana == null) return ManaCost.ZERO;
+        if (mana == null) return new BenchmarkManaPrice(ManaCost.ZERO, ManaCost.ZERO);
         if (mana.isExiledCreatureCost() || mana.isEnchantedCreatureCost() || mana.getMaxWaterbend() != null
-                || mana.getXMin() > 0) return null;
-        return mana.getMana();
+                || mana.getXMin() < 0 || (mana.getXMin()>0 && mana.getMana().countX()==0)) return null;
+        ManaCost before = mana.getMana();
+        if (reductions.isEmpty() || before.isNoCost() || before.isZero()) return new BenchmarkManaPrice(before, before);
+        // Same implementation as ordinary Forge payment, operating on a private
+        // cost value. No controller selection, RNG, or temporary card mutation.
+        ManaCostBeingPaid payable = new ManaCostBeingPaid(before);
+        int sum = 0;
+        for (StaticAbility st : reductions) sum += applyReduceCostAbility(st, sa, payable, sum);
+        payable.decreaseGenericMana(sum);
+        // ManaCostBeingPaid renders an empty shard set as NO_COST. Reduction
+        // to zero is payable {0}, not the absence of a payable mana cost.
+        return new BenchmarkManaPrice(before, payable.isPaid() ? ManaCost.ZERO : payable.toManaCost());
+    }
+
+    private static boolean benchmarkPermissionTax(StaticAbility st) {
+        return "Spell".equals(st.getParam("Type"))
+                && "Card.IsRemembered+CastSa Spell.MayPlaySource".equals(st.getParam("ValidCard"))
+                && "Exile".equals(st.getParam("AffectedZone"))
+                && st.getParamOrDefault("Amount", "").matches("[0-9]{1,3}")
+                && java.util.Set.of("Mode", "Type", "ValidCard", "AffectedZone", "Amount", "Description")
+                    .containsAll(st.getMapParams().keySet());
+    }
+
+    /** Expand only ordinary, explicitly announced mana X. Never chooses X,
+     * mutates a card, consults an AI, or reapplies cost modifiers. The symbolic
+     * argument must already be adjusted (forecast or actual payment callback).
+     */
+    public static ManaCostBeingPaid benchmarkExpandedMana(final SpellAbility sa, final ManaCost symbolic) {
+        if (sa == null || symbolic == null) return null;
+        ManaCostBeingPaid expanded = new ManaCostBeingPaid(symbolic);
+        if (symbolic.countX() == 0) return expanded;
+        Integer x = sa.getXManaCostPaid();
+        CostPartMana part = sa.getPayCosts() == null ? null : sa.getPayCosts().getCostMana();
+        if (part == null || x == null || x < part.getXMin() || x < 0 || x > 128
+                || !"Count$xPaid".equals(sa.getSVar("X")) || sa.hasParam("XAlternative")
+                || (sa.getXColor() != null && !"1".equals(sa.getXColor()))
+                || sa.getHostCard().hasKeyword("Spend only colored mana on X. No more than one mana of each color may be spent this way.")) return null;
+        expanded.setXManaCostPaid(x, "1");
+        return expanded;
     }
 
     public static Cost adjust(final Cost cost, final SpellAbility sa, boolean effect) {
