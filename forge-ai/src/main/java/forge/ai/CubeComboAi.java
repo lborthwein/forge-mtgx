@@ -248,7 +248,7 @@ public final class CubeComboAi {
         if (!enabled(player) || tutor == null || tutor.getActivatingPlayer() != player) return null;
         // Kiki's haste route can finish this combat; the new Thopter bodies
         // normally need the next turn. Preserve the available faster route.
-        Card immediate = chooseKikiTutorPartner(player, legalChoices);
+        Card immediate = chooseKikiTutorPartner(player, tutor, legalChoices);
         return immediate != null ? immediate : CubeThopterPlan.chooseAssemblyCard(player, legalChoices);
     }
 
@@ -277,19 +277,35 @@ public final class CubeComboAi {
         return false;
     }
 
-    /** Our own main phase with nothing pending but this very selection. A
-     * selection commits no mana and requires no same-turn cast, and for a
-     * search that writes the top of our library the fetched card is drawn on
-     * our next turn whichever main phase the search resolved in, so MAIN2 is
-     * admitted as well as MAIN1. This is not "any time": a selection made
-     * while another item waits on the stack can be answered before we ever
-     * draw the card - the pending item may shuffle, draw or remove the half we
-     * are pairing with - so the stack must hold at most our own single item
-     * (the resolving search itself). An empty stack is the planTutor forecast,
-     * which independently requires an empty stack. */
-    private static boolean ownSelectionWindow(Player player) {
+    /** A search of our own library that writes its top: Imperial Seal, Vampiric
+     * Tutor. The fetched card is drawn on our next turn whichever main phase
+     * the search resolved in, and native ChangeZoneAi refuses to cast such a
+     * tutor before MAIN2 at all, so MAIN1-only makes this route unreachable. */
+    private static boolean searchToTop(SpellAbility source) {
+        return source != null && source.getApi() == ApiType.ChangeZone
+                && "Library".equals(source.getParam("Destination"))
+                && "0".equals(source.getParam("LibraryPosition"));
+    }
+
+    /** Our own main phase with nothing pending but this very selection.
+     *
+     * MAIN2 is admitted for a search-to-top selection only. Everywhere else -
+     * a hand-destination tutor, a revealed-order effect, the planTutor
+     * forecast - the gate stays MAIN1, exactly as v42. The reason is that the
+     * Kiki route takes priority over a slower one because its haste copies can
+     * finish *this* combat, which is only true from MAIN1 (needsMoreCopies is
+     * MAIN1-only too). In MAIN2 no route is faster, so the phase relaxation has
+     * no business changing which card a hand-destination search finds.
+     *
+     * This is not "any time": a selection made while another item waits on the
+     * stack can be answered before we ever draw the card - the pending item may
+     * shuffle, draw or remove the half we are pairing with - so the stack must
+     * hold at most our own single item (the resolving search itself). An empty
+     * stack is the planTutor forecast, which independently requires one. */
+    private static boolean ownSelectionWindow(Player player, SpellAbility source) {
         var phases = player.getGame().getPhaseHandler();
-        if (!phases.is(PhaseType.MAIN1, player) && !phases.is(PhaseType.MAIN2, player)) return false;
+        if (!phases.is(PhaseType.MAIN1, player)
+                && !(searchToTop(source) && phases.is(PhaseType.MAIN2, player))) return false;
         var stack = player.getGame().getStack();
         if (stack.size() > 1) return false;
         for (var item : stack) if (item.getSpellAbility().getActivatingPlayer() != player) return false;
@@ -339,8 +355,8 @@ public final class CubeComboAi {
      * battlefield only, which is why the diagnosis found this route firing 0
      * times in 8 natural games while a half sat in hand. Only the offered
      * choice list is read from the library. */
-    private static Card chooseKikiTutorPartner(Player player, CardCollection legalChoices) {
-        if (!ownSelectionWindow(player) || lethalOrdinaryAttackNow(player)) return null;
+    private static Card chooseKikiTutorPartner(Player player, SpellAbility source, CardCollection legalChoices) {
+        if (!ownSelectionWindow(player, source) || lethalOrdinaryAttackNow(player)) return null;
         boolean haveKiki = false, havePartner = false;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown()) continue;

@@ -199,8 +199,13 @@ public final class CubeKikiTutorSmoke {
                 throw new AssertionError("N6: a card outside our own library must never be selected: " + control);
             if (Boolean.getBoolean("forge.test.requireKikiSelection")) {
                 // P1: the hand-aware positive. Matched v42 returns null here.
-                if (variant(control).equals("kiki-hand") && !selected.equals(BODY))
+                // Ponder is not a search-to-top, so its gate stays MAIN1 exactly
+                // as v42 (owner decision 2026-09-11).
+                boolean gateOpen = !control.startsWith("ponder:") || phase == PhaseType.MAIN1;
+                if (variant(control).equals("kiki-hand") && gateOpen && !selected.equals(BODY))
                     throw new AssertionError("P1: an engine half in hand must complete the pair: " + control + " got " + selected);
+                if (control.startsWith("ponder:") && phase != PhaseType.MAIN1 && !selected.equals("null"))
+                    throw new AssertionError("A revealed-order effect keeps the v42 MAIN1-only gate: " + selected);
                 // P5: the lethal gate declines; the same shape without lethality selects.
                 if (variant(control).equals("lethal-now") && phase == PhaseType.MAIN1 && !selected.equals("null"))
                     throw new AssertionError("P5: an available ordinary win must not be postponed: " + selected);
@@ -358,11 +363,18 @@ public final class CubeKikiTutorSmoke {
             // main phase. Its MUST-MOVE receipt is the own-decider controller
             // probe above; the in-game numbers are recorded, not asserted.
             boolean inGameCastReachable = !control.startsWith("vamp:");
+            // Ponder is not a search-to-top: its MAIN2 arm keeps the v42
+            // MAIN1-only gate and is recorded, not asserted (owner decision
+            // 2026-09-11). Its MAIN1 arm is the genuine MAIN1 firing.
+            boolean inGameFiringReachable = inGameCastReachable
+                    && !(control.startsWith("ponder:") && phase != PhaseType.MAIN1);
             if (inGameCastReachable && !tutorCast)
                 throw new AssertionError("MUST-MOVE: the native AI never cast the tutor: " + key);
-            if (inGameCastReachable && changes < 1)
+            if (inGameFiringReachable && changes < 1)
                 throw new AssertionError("MUST-MOVE: no selection was owned: " + key);
-            if (inGameCastReachable && !control.startsWith("ponder:") && !topAtResolution.equals(BODY))
+            if (control.startsWith("ponder:") && phase != PhaseType.MAIN1 && changes != 0)
+                throw new AssertionError("A revealed-order effect must keep the v42 MAIN1-only gate: " + key);
+            if (inGameFiringReachable && !control.startsWith("ponder:") && !topAtResolution.equals(BODY))
                 throw new AssertionError("MUST-MOVE: the pair-completing card was not selected: " + key + " top=" + topAtResolution);
             if (!List.of("Hand", "Battlefield", "Graveyard", "Exile").contains(bodyEnd))
                 throw new AssertionError("MUST-MOVE: the selected body never left the library: " + key + " bodyEnd=" + bodyEnd);
