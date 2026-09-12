@@ -5,7 +5,12 @@ import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.card.CardCopyService;
 import forge.game.card.CounterType;
+import forge.game.combat.CombatUtil;
 import forge.game.cost.Cost;
+import forge.game.cost.CostPart;
+import forge.game.cost.CostPartMana;
+import forge.game.cost.CostTap;
+import forge.game.keyword.Keyword;
 import forge.game.phase.PhaseHandler;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
@@ -16,6 +21,8 @@ import forge.game.staticability.StaticAbilityMode;
 import forge.game.trigger.Trigger;
 import forge.game.trigger.TriggerType;
 import forge.game.zone.ZoneType;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -40,7 +47,20 @@ import java.util.regex.Pattern;
  * way: Containment Priest by its uncast-entry replacement, Karakas by its
  * legendary-bounce activated ability, Wasteland/Strip Mine by their
  * sacrifice-to-destroy-a-land ability, and Ensnaring Bridge / Moat / Propaganda
- * not at all - those go through native {@code StaticAbilityCantAttackBlock}.</p> */
+ * not at all - those go through native {@code StaticAbilityCantAttackBlock}.</p>
+ *
+ * <p><b>v55 conversion gates.</b> The v52 policy reached these lines but did not
+ * convert them: over panel {@code 2026-09-12-bomb2-opening-panel-v52} the
+ * Through the Breach line fired nine times and ended the game twice, and the
+ * Depths route fired twice, both on turn 11
+ * ({@code 2026-09-12-bomb2-conversion-diagnosis/diagnosis.md} SS4). Two gates
+ * are added here, both reading only own-visible cards plus the opponent's
+ * PUBLIC battlefield, life and poison counters:
+ * {@link #attackEndsGame} (design R2/R3 - the Breach's payload leaves at end of
+ * turn, so a Breach that does not end the game spends two cards for one hit)
+ * and {@link #depthsLandAction} (design R6 - spend the land drops on the two
+ * halves of the Depths route before any other land). The design's R3 payload
+ * SELECTION and R4 are deliberately absent: see {@link #anyLethalPayload}.</p> */
 public final class CubeBombPlan {
     /** A creature worth cheating in. Emrakul, the Aeons Torn evaluates at about
      * 1020; 400 admits Griselbrand, Ulamog and Archon of Cruelty and excludes
@@ -50,6 +70,10 @@ public final class CubeBombPlan {
     /** Per-turn action cap, matching the other plans' bounded-action discipline. */
     private static final int ACTION_CAP = 4;
     private static final Pattern ZERO_COUNTER = Pattern.compile("Card\\.Self\\+counters_EQ0_(\\w+)");
+
+    /** Poison counters that kill a player, for the infect forecast. Forge's own
+     * state-based action uses the same number. */
+    private static final int LETHAL_POISON = 10;
 
     private final Player player;
     private SpellAbility selected;
@@ -64,7 +88,8 @@ public final class CubeBombPlan {
      * a hazard token {@code <line>:<hazard>} where {@code <line>} is
      * {@code depths}, {@code show-and-tell} or {@code breach} and
      * {@code <hazard>} is {@code legendary-bounce}, {@code land-destruction},
-     * {@code priest} or {@code no-attack-value}. The three routes are
+     * {@code priest}, {@code no-attack-value}, {@code not-lethal} or
+     * {@code payload-not-selectable} (the last two are the v55 R2 gate). The three routes are
      * consulted in order and each overwrites the token, so the LAST hazard
      * reached is the one reported; a pass that reaches no hazard at all
      * reports {@code no-bomb-line}. Every hazard is read from a PUBLIC
@@ -85,6 +110,9 @@ public final class CubeBombPlan {
         if (player.getOpponents().isEmpty()) return "no-opponent";
         return "phase";
     }
+    /** The last decline line printed, as turn/phase/reason, so a decline that
+     * repeats across the many priority passes of one phase prints once. */
+    private String declined = "";
 
     public CubeBombPlan(Player player) { this.player = player; }
 
@@ -256,8 +284,18 @@ public final class CubeBombPlan {
      * chooser will use at resolution, so the gate cannot promise a body that
      * Forge then declines to pick. */
     private Card bestBomb(SpellAbility ability, boolean creatureOnly) {
-        String type = ability.getParamOrDefault("ChangeType", "Card");
         Card best = null;
+        for (Card card : bombCandidates(ability, creatureOnly))
+            if (best == null || rank(card) > rank(best)) best = card;
+        return best;
+    }
+
+    /** Every own-visible card {@link #bestBomb} would consider, in hand order.
+     * Split out unchanged for v55's R3 forecast, which has to ask about the
+     * payloads the native chooser will NOT take as well as the one it will. */
+    private List<Card> bombCandidates(SpellAbility ability, boolean creatureOnly) {
+        String type = ability.getParamOrDefault("ChangeType", "Card");
+        List<Card> candidates = new ArrayList<>();
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
             if (card.isFaceDown() || creatureOnly && !card.isCreature()) continue;
             if (!card.isValid(type.split(","), player, ability.getHostCard(), ability)) continue;
@@ -267,9 +305,9 @@ public final class CubeBombPlan {
             if (!bomb) continue;
             // The legend rule would eat our own copy before it ever attacked.
             if (card.getType().isLegendary() && player.isCardInPlay(card.getName())) continue;
-            if (best == null || rank(card) > rank(best)) best = card;
+            candidates.add(card);
         }
-        return best;
+        return candidates;
     }
 
     /** One ordering for both halves of {@link #bestBomb}: a creature by the
@@ -277,6 +315,194 @@ public final class CubeBombPlan {
      * permanent by mana value, which is all that gate admits it on. */
     private static int rank(Card card) {
         return card.isCreature() ? ComputerUtilCard.evaluateCreature(card) : card.getCMC();
+    }
+
+    // ------------------------------------- v55 R2/R3: this turn's attack
+
+    /** One prospective attacker: what it deals unblocked, and the two rules
+     * that change where that damage lands. */
+    private record Strike(Card card, int damage, boolean infect, boolean trample) {}
+
+    private static Strike strike(Card card) {
+        return new Strike(card, Math.max(0, card.getNetPower()),
+                card.hasKeyword(Keyword.INFECT), card.hasKeyword(Keyword.TRAMPLE));
+    }
+
+    /** The card as it would exist on our battlefield, which is what the native
+     * blocking rules have to be asked about. Same LKI shape
+     * {@link #canAttackForValue} already uses. */
+    private Card prospective(Card card) {
+        Card copy = CardCopyService.getLKICopy(card);
+        copy.setLastKnownZone(player.getZone(ZoneType.Battlefield));
+        return copy;
+    }
+
+    /** Everything that could attack this turn if we take the line: the payload
+     * (the cheat-in gives it haste) plus our own untapped, unsick bodies
+     * already in play. Own-visible only. */
+    private List<Strike> ownStrikes(Card payload, int manaLeft) {
+        List<Strike> strikes = new ArrayList<>();
+        strikes.add(strike(prospective(payload)));
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || !card.isCreature() || card.isTapped() || card.isSick()) continue;
+            if (!canAttackForValue(player, card, manaLeft)) continue;
+            strikes.add(strike(card));
+        }
+        strikes.sort((a, b) -> b.damage() - a.damage());
+        return strikes;
+    }
+
+    /** An opponent permanent that can make a creature token at instant speed
+     * with the mana their PUBLIC battlefield can produce. Retrofitter Foundry
+     * made a Servo mid-combat and double-blocked the payload for zero in
+     * 783 s1, so the forecast owes the opponent one extra body.
+     *
+     * <p>Deliberately narrow: only a cost made of mana and a tap counts, so a
+     * token ability with a sacrifice or exile cost we cannot verify from the
+     * public board is never assumed payable (the Foundry's own Thopter and
+     * Construct abilities both sacrifice a token it does not have).</p> */
+    private static boolean tokenBlockerAvailable(Player opponent) {
+        int mana = publicMana(opponent);
+        for (Card card : opponent.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown()) continue;
+            for (SpellAbility ability : card.getSpellAbilities()) {
+                if (!ability.isActivatedAbility() || ability.getApi() != ApiType.Token) continue;
+                if (ability.isPwAbility() || ability.getRestrictions().isSorcerySpeed()) continue;
+                Cost cost = ability.getPayCosts();
+                if (cost == null) return true;
+                if (cost.hasTapCost() && card.isTapped()) continue;
+                boolean simple = true;
+                for (CostPart part : cost.getCostParts())
+                    if (!(part instanceof CostPartMana) && !(part instanceof CostTap)) simple = false;
+                if (!simple || cost.getTotalMana().getCMC() > mana) continue;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Could a body that does not exist yet block this attacker at all?
+     *
+     * <p>Amendment 1, on this run's probe-2 evidence. The design counts a
+     * public instant-speed token maker as one extra blocker outright. Measured,
+     * that costs wins the v52 policy already had: in {@code breach-foundry} and
+     * the turn-3 arm of {@code breach-foundry:one-land}, Retrofitter Foundry
+     * was up with mana, the payload was a 7/7 FLIER, the opponent never made a
+     * blocker it could have used, and v52 won those four rows while the
+     * unqualified rule declined them. The token's real characteristics cannot
+     * be read without instantiating it, which would take a card id and pin a
+     * token edition inside a live game, so the forecast assumes the weakest
+     * ordinary body instead - a ground creature, which is exactly what the
+     * Foundry's only payable ability makes ({@code {2}, {T}}: a 1/1 Servo; its
+     * flying Thopter costs a Servo it does not have). A lone token therefore
+     * cannot block a flier and cannot block a menace attacker. The Servo that
+     * actually chump-blocked in 783 s1 blocked Blightsteel Colossus, which has
+     * neither, so that case is unchanged.</p>
+     *
+     * <p>Limitation, registered: a token maker whose token flies or has reach
+     * is not modelled, and this forecast will over-cast against one.</p> */
+    private static boolean blockableByOrdinaryBody(Card attacker) {
+        return !attacker.hasKeyword(Keyword.FLYING) && !attacker.hasKeyword(Keyword.MENACE);
+    }
+
+    /** Untapped public mana sources, counted the way {@link #ownMana} counts
+     * ours. Their battlefield only - never their hand or library. */
+    private static int publicMana(Player opponent) {
+        int sources = 0;
+        for (Card card : opponent.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || !card.isUntapped()) continue;
+            for (SpellAbility ability : card.getManaAbilities()) {
+                if (ability.getPayCosts() != null && ability.getPayCosts().getTotalMana().getCMC() == 0) { sources++; break; }
+            }
+        }
+        return sources;
+    }
+
+    /** R2. Would this turn's attack end the game, judged against the opponent's
+     * PUBLIC board alone?
+     *
+     * <p>Blocking legality is native ({@link CombatUtil#canBlock}), so flying,
+     * reach, menace, protection and every printed "can't block" come from the
+     * rules rather than from a keyword list of ours. Blockers are handed to the
+     * biggest attacker first, which is the assignment that costs us the most.
+     * A blocked attacker deals nothing unless it tramples, and an attacker with
+     * infect deals poison rather than life damage - which is the whole Blightsteel
+     * Colossus case: 11 infect is ten poison counters, lethal from any life
+     * total if it connects (789 s1, the one Breach that converted).</p>
+     *
+     * <p>What it cannot see, by design: the opponent's hand. A combat trick or
+     * an instant-speed blocker from there beats this forecast, and that is a
+     * bound on the rule, not an input to it.</p> */
+    private boolean attackEndsGame(Card payload, int manaLeft) {
+        for (Player opponent : player.getOpponents()) {
+            if (attackEndsGame(payload, manaLeft, opponent)) return true;
+        }
+        return false;
+    }
+
+    private boolean attackEndsGame(Card payload, int manaLeft, Player opponent) {
+        List<Card> blockers = new ArrayList<>();
+        for (Card card : opponent.getCardsIn(ZoneType.Battlefield))
+            if (!card.isFaceDown() && card.isCreature()) blockers.add(card);
+        boolean token = tokenBlockerAvailable(opponent);
+        int life = 0, poison = 0;
+        for (Strike attacker : ownStrikes(payload, manaLeft)) {
+            Card blocker = null;
+            for (Card candidate : blockers)
+                if (CombatUtil.canBlock(attacker.card(), candidate)) { blocker = candidate; break; }
+            int through;
+            if (blocker != null) {
+                blockers.remove(blocker);
+                through = attacker.trample() ? Math.max(0, attacker.damage() - blocker.getNetToughness()) : 0;
+            } else if (token && blockableByOrdinaryBody(attacker.card())) {
+                // One unknown ordinary body: enough to eat an attacker, and
+                // enough toughness to matter only against trample.
+                token = false;
+                through = attacker.trample() ? Math.max(0, attacker.damage() - 1) : 0;
+            } else {
+                through = attacker.damage();
+            }
+            if (attacker.infect()) poison += through; else life += through;
+        }
+        if (poison > 0 && poison + opponent.getPoisonCounters() >= LETHAL_POISON) return true;
+        return life > 0 && life >= opponent.getLife();
+    }
+
+    /** R3, and the honest statement of what this run could NOT implement.
+     *
+     * <p>The design ranks payloads and asks the plan to Breach the one the
+     * opponent's board cannot block. The plan cannot make that choice. Through
+     * the Breach is a hidden-origin ChangeZone: the payload is picked at
+     * RESOLUTION by {@code ChangeZoneEffect} calling
+     * {@code chooseSingleCardForZoneChange} on the controller, and
+     * {@code CubeComboPlayerController} routes only {@code destination ==
+     * Library} decisions to plans, so the pick falls through to
+     * {@code ChangeZoneAi.chooseCardToHiddenOriginChangeZone}, i.e.
+     * {@code ComputerUtilCard.getBestAI} - the highest creature evaluation,
+     * which is exactly why all four zero-damage Breaches put in Blightsteel
+     * Colossus while a flier sat in hand. Steering it needs a hook in the
+     * controller, which this increment may not touch.</p>
+     *
+     * <p>So when some other own-visible payload would have been lethal and the
+     * one the chooser will take is not, the plan declines and says so, instead
+     * of casting into a body it knows will be blocked.</p> */
+    private boolean anyLethalPayload(SpellAbility ability, int manaLeft) {
+        for (Card candidate : bombCandidates(ability, true))
+            if (canAttackForValue(player, candidate, manaLeft) && attackEndsGame(candidate, manaLeft)) return true;
+        return false;
+    }
+
+    /** One decline line per turn, phase and reason. The full
+     * {@code CUBE_PLAN_DECLINE family=bomb} instrumentation the diagnosis asks
+     * for (R1) belongs to the controller and ships separately; this is the one
+     * reason R2 owes the log. */
+    private void declineOnce(String reason) {
+        PhaseHandler phases = player.getGame().getPhaseHandler();
+        String stamp = phases.getTurn() + "/" + phases.getPhase() + "/" + reason;
+        if (stamp.equals(declined)) return;
+        declined = stamp;
+        System.err.println("CUBE_BOMB_PLAN decline=" + reason
+                + " turn=" + phases.getTurn() + " phase=" + phases.getPhase());
     }
 
     // ------------------------------------------------ D4: the own-turn veto
@@ -422,10 +648,73 @@ public final class CubeBombPlan {
                 Card bomb = bestBomb(cast, true);
                 if (bomb == null) continue;
                 if (exiledOnUncastEntry(player)) { decline = "breach:priest"; continue; }
-                if (!canAttackForValue(player, bomb, manaLeftAfter(player, cast))) { decline = "breach:no-attack-value"; continue; }
+                int manaLeft = manaLeftAfter(player, cast);
+                if (!canAttackForValue(player, bomb, manaLeft)) { decline = "breach:no-attack-value"; continue; }
                 if (bomb.getType().isLegendary() && legendaryBounceVisible(player)) { decline = "breach:legendary-bounce"; continue; }
+                // v55 R2. The payload leaves at the beginning of the next end
+                // step (observed six times of nine), so a Breach that does not
+                // end the game spends two cards for one hit and hands the board
+                // straight back. Only cast when this turn's attack is lethal
+                // against the public board.
+                if (!attackEndsGame(bomb, manaLeft)) {
+                    String reason = anyLethalPayload(cast, manaLeft) ? "breach:payload-not-selectable" : "breach:not-lethal";
+                    decline = reason;
+                    declineOnce(reason);
+                    continue;
+                }
                 return audit("through-the-breach", cast);
             }
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------- v55 R6 action
+
+    /** R6. The Depths route's two halves are both LANDS, and the v52 policy
+     * never touched land drops: in 787 s0 both halves were own-visible from
+     * turn 3, the seat spent its drops on Thespian's Stage, Volcanic Island and
+     * Island while Dark Depths sat in hand, and the 20/20 arrived on turn 11 at
+     * 2 life instead of turn 7 at 18. When both halves are own-visible and a
+     * land drop is still available, the half still in hand is proposed ahead of
+     * the ordinary land choice; the clone activation stays D3's job.
+     *
+     * <p>Own-visible only: our hand and our battlefield. Nothing public is
+     * needed and nothing public is read.</p> */
+    private SpellAbility depthsLandAction() {
+        if (player.getLandsPlayedThisTurn() >= player.getMaxLandPlays() && !player.getMaxLandPlaysInfinite()) return null;
+        Card payoff = null, clone = null, inHand = null;
+        for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Battlefield))
+            for (Card card : player.getCardsIn(zone)) {
+                if (card.isFaceDown()) continue;
+                boolean isPayoff = zeroCounterPayoffType(card) != null;
+                boolean isClone = !isPayoff && hasLandCloneAbility(card);
+                if (!isPayoff && !isClone) continue;
+                if (isPayoff && payoff == null) payoff = card;
+                if (isClone && clone == null) clone = card;
+                // The payoff half is preferred when both are still in hand: it
+                // is the half the route waits on, and the clone half is useless
+                // until it has something to copy.
+                if (zone == ZoneType.Hand && (inHand == null || isPayoff && inHand != payoff)) inHand = card;
+            }
+        if (payoff == null || clone == null || inHand == null) return null;
+        if (inHand != payoff && inHand != clone) return null;
+        SpellAbility land = landPlay(inHand);
+        return land == null ? null : audit("depths-land", land);
+    }
+
+    private static boolean hasLandCloneAbility(Card card) {
+        for (SpellAbility ability : card.getSpellAbilities()) if (landCloneShape(ability)) return true;
+        return false;
+    }
+
+    /** This card's own native land play, or null. The same enumeration
+     * {@code AiController} uses for the ordinary land choice, so the object we
+     * propose is the object Forge would have played. */
+    private SpellAbility landPlay(Card card) {
+        if (!card.isLand() || !card.isInZone(ZoneType.Hand)) return null;
+        for (SpellAbility ability : card.getAllPossibleAbilities(player, true)) {
+            if (!ability.isLandAbility() || !CubeComboAi.canPlayNative(ability, player)) continue;
+            return ability;
         }
         return null;
     }
@@ -463,6 +752,9 @@ public final class CubeBombPlan {
                 || !(phases.is(PhaseType.MAIN1, player) || phases.is(PhaseType.MAIN2, player))) return decline(gateReason());
         decline = "no-bomb-line";
         SpellAbility action = depthsAction();
+        // v55 R6, after the clone activation itself (if the copy can be made
+        // now, making it beats sequencing) and before every other line.
+        if (action == null) action = depthsLandAction();
         if (action == null) action = showAndTellAction();
         // Through the Breach's body has haste but must still reach the attack
         // step, so this one line is precombat-only.
@@ -481,6 +773,22 @@ public final class CubeBombPlan {
     public boolean owns(SpellAbility ability) { return ability == selected; }
 
     public boolean play(SpellAbility ability) {
+        // v55 R6: a land play uses no stack, no payment and no targeting, and
+        // PlayerControllerAi has its own branch for exactly that. Mirrored here
+        // rather than routed through handlePlayingSpellAbility, which assumes a
+        // spell or an activated ability. A land we cannot actually play marks
+        // the turn failed so the plan can never re-propose it into the
+        // ask-again loop CubeComboPlayerController's guard documents.
+        if (ability.isLandAbility()) {
+            if (!ability.canPlay()) {
+                failedTurn = turn;
+                System.err.println("CUBE_BOMB_PLAN native-land-refused turn=" + turn
+                        + " card=" + ability.getHostCard().getName().replace(' ', '_'));
+                return false;
+            }
+            ability.resolve();
+            return true;
+        }
         boolean played = ComputerUtil.handlePlayingSpellAbility(player, ability, null);
         if (!played) {
             failedTurn = turn;
