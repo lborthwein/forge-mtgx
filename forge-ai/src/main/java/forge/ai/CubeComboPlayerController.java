@@ -491,6 +491,25 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         return super.confirmAction(ability, mode, message, options, cardToShow, params);
     }
 
+    /** v70 kitten family L - Eternal Witness's OptionalDecider$ You enter-the-
+     * battlefield return, the one optional trigger a Cube plan answers.
+     * {@link CubeKittenPlan#confirmFamilyTrigger} answers only {@code TRUE}, and
+     * only on its own partner's own graveyard-to-hand return with the whole win
+     * forecast already live; it returns {@code null} - "not ours" - in every
+     * other case, INCLUDING every refusal. So the ordinary path is not merely
+     * preserved, it is the only path that can ever produce a {@code false} here,
+     * and no other trigger confirmation this controller is asked is touched at
+     * all. Same contract, same shape, as the v66 {@code confirmAction} override
+     * above.
+     *
+     * <p>This method is the ONLY change v70 makes to this file.</p> */
+    @Override
+    public boolean confirmTrigger(forge.game.trigger.WrappedAbility wrapper) {
+        Boolean owned = kittenPlan.confirmFamilyTrigger(wrapper.getWrappedAbility());
+        if (owned != null) return owned;
+        return super.confirmTrigger(wrapper);
+    }
+
     @Override
     public boolean chooseBinary(SpellAbility ability, String question, BinaryChoiceType choice, Boolean defaultValue) {
         if (choice == BinaryChoiceType.TapOrUntap) {
