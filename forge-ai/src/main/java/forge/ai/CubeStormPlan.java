@@ -165,9 +165,38 @@ public final class CubeStormPlan {
         return false;
     }
 
-    private SpellAbility crackLotus() {
+    /** v72 R1 - the PRINTED property that makes a rock a SACRIFICE rock: an
+     * artifact one of whose own mana abilities pays for itself by sacrificing
+     * itself. Black Lotus, Lotus Petal and the Lion's Eye Diamond class all
+     * print exactly this; a Mox, Mana Crypt, Chrome Mox or Sol Ring does not.
+     *
+     * <p>Read off the card's own cost parts ({@code CostSacrifice} whose type
+     * is the source itself), never off its name, so a renamed reprint is
+     * treated on the same terms and a card that merely shares a name is not.
+     * Nothing else about the card is read, and no zone is assumed.</p> */
+    private static boolean sacrificeRock(Card card) {
+        if (card == null || card.isFaceDown() || !card.isArtifact()) return false;
+        for (SpellAbility mana : card.getManaAbilities()) {
+            forge.game.cost.Cost cost = mana.getPayCosts();
+            if (cost == null) continue;
+            for (forge.game.cost.CostPart part : cost.getCostParts())
+                if (part instanceof forge.game.cost.CostSacrifice && part.payCostFromSource()) return true;
+        }
+        return false;
+    }
+
+    /** v72 R1 - the battlefield rock this plan's own crack step would sacrifice,
+     * in the order it looks for one. Defined once so {@link #crackLotus} and
+     * {@link #reachableStormBound}'s battlefield term cannot drift apart: the
+     * bound may count a crack only where the build would actually take it. */
+    private Card battlefieldSacrificeRock() {
         Card lotus = find("Black Lotus", ZoneType.Battlefield);
         if (lotus == null) lotus = find("Lotus Petal", ZoneType.Battlefield);
+        return lotus;
+    }
+
+    private SpellAbility crackLotus() {
+        Card lotus = battlefieldSacrificeRock();
         if (lotus == null) return null;
         // Preserve the finisher's BB before making optional blue for cantrips.
         // Existing land mana can fund cantrips; a later black-consuming tutor
@@ -187,17 +216,36 @@ public final class CubeStormPlan {
         return null;
     }
 
-    /** v63 C1 - an own-visible UPPER BOUND on the storm count this plan could
-     * reach this turn, counting only spells it can NAME right now, each
-     * physical card at most once:
+    /** v63 C1, amended by v72 R1 - an own-visible UPPER BOUND on the storm count
+     * this plan could reach this turn, counting only spells it can NAME right
+     * now, and counting each of them as many times as this plan's OWN BUILD
+     * ORDER would actually cast it:
      *
      * <ul>
      * <li>our own HAND: every {@link #ROCKS} name, Dark Ritual, Cabal Ritual,
      *     every {@link #DRAWS} name, and Yawgmoth's Will itself while it is in
      *     hand and has not already been attempted this turn;</li>
+     * <li><b>v72 R1:</b> a hand card that is a SACRIFICE ROCK by the printed
+     *     property of {@link #sacrificeRock} counts <b>TWICE</b> while the Will
+     *     is reachable - once cast from hand, and once replayed out of the
+     *     graveyard the crack step put it in. This is not a new line of play:
+     *     the action order below is ROCKS, then {@code crackLotus}, then the
+     *     Will, then ROCKS again out of the graveyard, and the diagnosis
+     *     measured v60's only storm win (`storm-16702371-s1` t6) doing exactly
+     *     that - cast Black Lotus, crack it, cast the Will, cast Black Lotus
+     *     again. v63's "each physical card at most once" rule contradicted the
+     *     plan's own winning line and refused the one feasible lethal in the
+     *     v67 read (`storm-16702450-s0` t7: bound 3 against a need of 4);</li>
+     * <li><b>v72 R1:</b> a sacrifice rock already on our own BATTLEFIELD counts
+     *     ONCE while the Will is reachable - the crack is an activation, not a
+     *     cast, but it puts the rock in the graveyard where the Will replays it.
+     *     Only the one rock {@link #battlefieldSacrificeRock} would actually
+     *     crack is counted, so the bound cannot count a crack the build would
+     *     not take;</li>
      * <li>our own GRAVEYARD, and only while the Will is still reachable this
-     *     turn, the same rock / ritual / cantrip names - replaying exactly
-     *     those is what this plan's own build does once the Will resolves;</li>
+     *     turn, the same rock / ritual / cantrip names, once each - replaying
+     *     exactly those is what this plan's own build does once the Will
+     *     resolves;</li>
      * <li>never Tendrils of Agony: it is the {@code +1} of the lethal test.</li>
      * </ul>
      *
@@ -205,15 +253,28 @@ public final class CubeStormPlan {
      * targeting and no counterspell risk is priced here - a board that passes
      * may still fail to reach lethal, and that is deliberate: the gate exists
      * to refuse a build that could not reach lethal even if everything worked,
-     * not to predict a win.</p>
+     * not to predict a win. <b>v72 deliberately adds NO mana floor</b>: the
+     * diagnosis measured the obvious one ("afford the Will plus Tendrils from
+     * current sources") refusing v60's only storm win, which had zero untapped
+     * lands and reached lethal through a Lotus and rituals.</p>
+     *
+     * <p><b>v72 widens no vocabulary.</b> The names counted are v63's exactly;
+     * {@link #sacrificeRock} only changes how many times an already-counted
+     * hand card counts, and the battlefield term is restricted to the rock the
+     * crack step itself looks for. Adding a name to {@link #ROCKS} without
+     * teaching the build to cast it is the diagnosis's R2 hazard and is not
+     * done here.</p>
      *
      * <p>The bound does not decay through the build, so a build this gate lets
      * start cannot be stranded by it mid-turn: casting a counted spell raises
      * {@code storm} by one and lowers the hand count by one, and a ritual or
      * cantrip then enters the graveyard where it is counted again while the
-     * Will is reachable; the Lotus crack is an activation, not a spell.</p>
+     * Will is reachable; the Lotus crack is an activation, not a spell, and
+     * moves the rock from the battlefield term to the graveyard term at the
+     * same value.</p>
      *
-     * <p>Own hand, own graveyard and the public storm count only.</p> */
+     * <p>Own hand, own graveyard, own battlefield and the public storm count
+     * only.</p> */
     private int reachableStormBound(int storm) {
         boolean willReachable = will() != null || attemptedWill;
         int countable = will() != null && !attemptedWill ? 1 : 0;
@@ -222,10 +283,16 @@ public final class CubeStormPlan {
             for (Card card : player.getCardsIn(zone)) {
                 if (card == excluded || card.isFaceDown()) continue;
                 String name = card.getName();
-                if (ROCKS.contains(name) || DRAWS.contains(name)
-                        || name.equals("Dark Ritual") || name.equals("Cabal Ritual")) countable++;
+                if (!(ROCKS.contains(name) || DRAWS.contains(name)
+                        || name.equals("Dark Ritual") || name.equals("Cabal Ritual"))) continue;
+                countable++;
+                // v72 R1: cast from hand, cracked into the graveyard, replayed.
+                if (zone == ZoneType.Hand && willReachable && sacrificeRock(card)) countable++;
             }
         }
+        // v72 R1: the crack step's own rock, replayed once the Will resolves.
+        Card onBoard = willReachable ? battlefieldSacrificeRock() : null;
+        if (onBoard != null && onBoard != excluded && sacrificeRock(onBoard)) countable++;
         return storm + countable;
     }
 
@@ -273,8 +340,7 @@ public final class CubeStormPlan {
         }
         // Sacrifice before Will so the same known Lotus can be replayed.
         // Native legality forbids the activation under Null Rod, etc.
-        if ((will != null || attemptedWill) && (find("Black Lotus", ZoneType.Battlefield) != null
-                || find("Lotus Petal", ZoneType.Battlefield) != null)) {
+        if ((will != null || attemptedWill) && battlefieldSacrificeRock() != null) {
             SpellAbility mana = crackLotus();
             if (mana != null) return select(mana);
         }
@@ -319,6 +385,145 @@ public final class CubeStormPlan {
     /** A card name as one log token: our own missing half, never an opponent
      * card and never a library read. */
     private static String token(String name) { return name.replace(' ', '_'); }
+
+    // ---------------------------------------------------------------- v72
+
+    /** v72 C2 - the two terminals a graveyard route of this policy can end on,
+     * and the two replay engines that reach them out of OUR OWN graveyard.
+     * Tendrils is this plan's own finisher; Brain Freeze is
+     * {@link CubeBreachPlan}'s. The Will replays from the graveyard once;
+     * Underworld Breach grants escape to it for as long as it is in play. */
+    private static final List<String> HOLD_TERMINALS = List.of(TENDRILS, "Brain Freeze");
+    private static final List<String> HOLD_ENGINES = List.of(WILL, "Underworld Breach");
+    private static final ThreadLocal<String> HOLD_STAMP = new ThreadLocal<>();
+
+    /** The PRINTED shape of a graveyard-shuffling wheel: a {@code ChangeZoneAll}
+     * whose origin includes the graveyard and whose destination is the library
+     * or exile. Echo of Eons, Timetwister and Time Spiral all print exactly
+     * this; the card names appear nowhere in this class, so a renamed reprint
+     * is held on the same terms and a card that merely shares a name is not.
+     *
+     * <p>A spell that TARGETS is deliberately refused here: its controller
+     * chooses whose zones move, this guard does not read that choice, and the
+     * error points at RELEASE.</p> */
+    private static boolean graveyardShuffle(SpellAbility spell) {
+        if (spell.getApi() != forge.game.ability.ApiType.ChangeZoneAll || spell.usesTargeting()) return false;
+        String origin = spell.getParam("Origin"), destination = spell.getParam("Destination");
+        return origin != null && destination != null && origin.contains("Graveyard")
+                && (destination.equals("Library") || destination.equals("Exile"));
+    }
+
+    /** Exactly the cards of OUR OWN graveyard this spell would move, filtered by
+     * the spell's own printed {@code ChangeType} through the engine's own
+     * filter - the same call {@code ChangeZoneAllAi} already makes to build its
+     * {@code computerType} list. Our own graveyard only; no other zone of ours
+     * and no zone of the opponent's is read. */
+    private static forge.game.card.CardCollectionView movedFromOwnGraveyard(Player player, SpellAbility spell) {
+        return forge.game.ability.AbilityUtils.filterListByType(
+                player.getCardsIn(ZoneType.Graveyard), spell.getParam("ChangeType"), spell);
+    }
+
+    /** A gate piece where this seat can see it and could still use it: our own
+     * hand or our own battlefield. A card in the graveyard is deliberately NOT
+     * an engine - the Will cannot be cast from there by this plan, and a Breach
+     * in the graveyard grants escape to nothing. */
+    private static Card ownEngine(Player player, String name) {
+        for (ZoneType zone : List.of(ZoneType.Battlefield, ZoneType.Hand))
+            for (Card card : player.getCardsIn(zone))
+                if (!card.isFaceDown() && name.equals(card.getName())) return card;
+        return null;
+    }
+
+    /** v72 C2 - refuse the ORDINARY AI's cast of OUR OWN graveyard-shuffling
+     * wheel (Echo of Eons, Timetwister, Time Spiral - recognised by the printed
+     * {@link #graveyardShuffle} shape and never by name) while a storm or Breach
+     * route whose gate pieces sit in OUR OWN GRAVEYARD is own-visibly reachable.
+     *
+     * <p>This is the second half of the diagnosis's one over-conservative
+     * decline. On {@code storm-16702450-s0} t7 the v63 gate refused a lethal it
+     * could have taken (R1 fixes that), and on the very next pass the ordinary
+     * AI cast Echo of Eons and shuffled Tendrils of Agony and Yawgmoth's Will
+     * out of our graveyard; from that pass to the end of the game the storm
+     * token was {@code missing=Tendrils_of_Agony} and we died on t12. The cast
+     * threw away the route, exactly as v68's Breach cast threw away a gate
+     * piece, and this guard is v68's {@code holdBreach} in the sorcery/draw
+     * decision path.</p>
+     *
+     * <p>Every clause must hold, and a failed clause means DEFAULT BEHAVIOUR
+     * with no log line at all, so a released position is byte-identical:</p>
+     * <ol>
+     * <li>our own spell, not a copy, our own card, in OUR OWN HAND - a wheel
+     *     cast out of the graveyard (v64's escaped Timetwister) is the Breach
+     *     route firing and is never refused;</li>
+     * <li>the printed graveyard-shuffle shape, and it does not target;</li>
+     * <li>stack empty, our own MAIN1/MAIN2, one opponent, and we can still win;</li>
+     * <li>a TERMINAL of a graveyard route is among the cards of our own
+     *     graveyard this spell would actually move;</li>
+     * <li>no route can fire this turn - asked of a FRESH {@link CubeStormPlan}
+     *     and a fresh {@link CubeBreachPlan}, whose only asymmetry with the live
+     *     ones ({@code failedTurn} unset) can make them propose where the live
+     *     plan declined, which RELEASES;</li>
+     * <li>an ENGINE is own-visible where it could still be used - in play, or
+     *     in our hand and castable within v61 H1's unchanged two land drops.</li>
+     * </ol>
+     *
+     * <p>Clause 4 is checked BEFORE the two plan probes on purpose: on a board
+     * with no terminal in our graveyard this predicate returns on pure zone
+     * reads and runs no probe at all, which is why it cannot perturb any
+     * position it does not refuse.</p>
+     *
+     * <p>Own hand, own battlefield, own graveyard and both public life totals
+     * only. OUR OWN LIBRARY IS NEVER READ - not its contents, not its order,
+     * not its size - and neither is our registered decklist; the opponent's
+     * hidden zones are never touched and a face-down card is never identified.
+     * The probes of clause 5 read exactly what {@code nextAction} already reads
+     * on every pass, and every payment query inside them runs through
+     * {@link CubeComboAi#probePayment}, which snapshots and restores memory,
+     * mana-pool conversion state and ability actor/target state.</p> */
+    public static boolean holdWheel(Player player, SpellAbility spell) {
+        if (spell == null || !spell.isSpell() || spell.isCopied()) return false;
+        Card host = spell.getHostCard();
+        if (host == null || host.isFaceDown() || host.getOwner() != player
+                || host.getController() != player || !host.isInZone(ZoneType.Hand)) return false;
+        if (!graveyardShuffle(spell)) return false;
+        var game = player.getGame();
+        var phase = game.getPhaseHandler();
+        if (!game.getStack().isEmpty() || player.cantWin() || player.getOpponents().size() != 1
+                || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))) return false;
+        Card terminal = null;
+        for (Card card : movedFromOwnGraveyard(player, spell))
+            if (!card.isFaceDown() && HOLD_TERMINALS.contains(card.getName())) { terminal = card; break; }
+        if (terminal == null) return false;
+        if (new CubeStormPlan(player).nextAction() != null) return false;
+        if (new CubeBreachPlan(player).nextAction() != null) return false;
+        for (String name : HOLD_ENGINES) {
+            Card engine = ownEngine(player, name);
+            if (engine == null) continue;
+            String reason = engine.isInZone(ZoneType.Battlefield) ? "engine-in-play"
+                    : CubeComboAi.castableWithinTwoDrops(player, engine.getManaCost()) ? "engine-in-hand" : null;
+            if (reason == null) continue;
+            holdLine(player, "CUBE_STORM_HOLD reason=" + reason + " engine=" + token(engine.getName())
+                    + " terminal=" + token(terminal.getName()));
+            return true;
+        }
+        return false;
+    }
+
+    /** One {@code CUBE_STORM_HOLD} line per (seat, turn, phase), the v53/v61
+     * {@code twinLine} budget reproduced here for the same reason v68's
+     * {@code holdLine} reproduced it: {@code CubeComboAi} is not this
+     * increment's file to restructure. The budget suppresses the LINE, never
+     * the hold. Observability only: the identity stamp is compared, never
+     * printed, and no decision reads any of it. There is deliberately NO
+     * release line - a release IS the Default action and every preserved log
+     * has to stay byte-identical. */
+    private static void holdLine(Player player, String line) {
+        var phases = player.getGame().getPhaseHandler();
+        String stamp = System.identityHashCode(player) + ":" + phases.getTurn() + ":" + phases.getPhase();
+        if (stamp.equals(HOLD_STAMP.get())) return;
+        HOLD_STAMP.set(stamp);
+        System.err.println(line);
+    }
 
     public boolean owns(SpellAbility ability) { return ability == selected; }
 
