@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v50";
+    public static final String VERSION = "cube-combo-execution-v51";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
