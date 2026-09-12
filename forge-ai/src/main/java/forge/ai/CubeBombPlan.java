@@ -1,5 +1,7 @@
 package forge.ai;
 
+import forge.StaticData;
+import forge.card.CardRules;
 import forge.game.GameEntity;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
@@ -9,6 +11,8 @@ import forge.game.combat.CombatUtil;
 import forge.game.cost.Cost;
 import forge.game.cost.CostPart;
 import forge.game.cost.CostPartMana;
+import forge.game.cost.CostPayLife;
+import forge.game.cost.CostSacrifice;
 import forge.game.cost.CostTap;
 import forge.game.keyword.Keyword;
 import forge.game.phase.PhaseHandler;
@@ -75,7 +79,23 @@ import java.util.regex.Pattern;
  * an ability this plan proposed on this turn ({@link #ownsPayloadChoice}); Show
  * and Tell's opponent-side choice is made by the opponent's own controller and
  * is never reached from here. With the hook, v55's
- * {@code breach:payload-not-selectable} decline becomes a cast.</p> */
+ * {@code breach:payload-not-selectable} decline becomes a cast.</p>
+ *
+ * <p><b>v58 blocker forecast.</b> v55 and v56 gave the opponent at most one
+ * hypothetical instant-speed blocker, found by a cost filter that admitted only
+ * mana and a tap, and modelled it as an ordinary GROUND body (v55 Amendment 1).
+ * Both halves were wrong in one observed receipt: Retrofitter Foundry's
+ * {@code {1}, {T}, Sacrifice a Servo} is payable from the PUBLIC board and the
+ * Thopter it makes has printed flying, and in {@code breach-foundry} seat 0/1
+ * MAIN2 the opponent made exactly that Thopter at declare-attackers and blocked
+ * the 7/7 the Breach had just paid for. {@link #publicPayment} now answers the
+ * whole cost against their battlefield and life, {@link #tokenBody} reads the
+ * token's printed characteristics out of the static token rules without
+ * instantiating it, {@link #grantedBody} covers an instant-speed flying/reach
+ * GRANT on a public permanent, and {@link #take} still spends only ONE of them,
+ * removing whatever that payment sacrifices from the real blocker pool.
+ * Amendment 1's rule survives for a body that stays unqualified: it blocks
+ * neither a flier nor a menace attacker.</p> */
 public final class CubeBombPlan {
     /** A creature worth cheating in. Emrakul, the Aeons Torn evaluates at about
      * 1020; 400 admits Griselbrand, Ulamog and Archon of Cruelty and excludes
@@ -370,57 +390,222 @@ public final class CubeBombPlan {
         return strikes;
     }
 
-    /** An opponent permanent that can make a creature token at instant speed
-     * with the mana their PUBLIC battlefield can produce. Retrofitter Foundry
-     * made a Servo mid-combat and double-blocked the payload for zero in
-     * 783 s1, so the forecast owes the opponent one extra body.
+    /** One blocker the opponent does not have yet but could produce at instant
+     * speed from PUBLIC information alone: the printed characteristics that
+     * decide whether it can block, and the public permanents its cost would
+     * consume on the way.
      *
-     * <p>Deliberately narrow: only a cost made of mana and a tap counts, so a
-     * token ability with a sacrifice or exile cost we cannot verify from the
-     * public board is never assumed payable (the Foundry's own Thopter and
-     * Construct abilities both sacrifice a token it does not have).</p> */
-    private static boolean tokenBlockerAvailable(Player opponent) {
-        int mana = publicMana(opponent);
-        for (Card card : opponent.getCardsIn(ZoneType.Battlefield)) {
-            if (card.isFaceDown()) continue;
-            for (SpellAbility ability : card.getSpellAbilities()) {
-                if (!ability.isActivatedAbility() || ability.getApi() != ApiType.Token) continue;
-                if (ability.isPwAbility() || ability.getRestrictions().isSorcerySpeed()) continue;
-                Cost cost = ability.getPayCosts();
-                if (cost == null) return true;
-                if (cost.hasTapCost() && card.isTapped()) continue;
-                boolean simple = true;
-                for (CostPart part : cost.getCostParts())
-                    if (!(part instanceof CostPartMana) && !(part instanceof CostTap)) simple = false;
-                if (!simple || cost.getTotalMana().getCMC() > mana) continue;
-                return true;
-            }
+     * <p>v55 and v56 carried a single boolean here and modelled whatever it
+     * found as one ordinary GROUND body (Amendment 1). That is the defect this
+     * increment fixes: Retrofitter Foundry's flying Thopter costs
+     * {@code {1}, {T}, Sacrifice a Servo}, the sacrifice is as public as their
+     * untapped lands, and the token it makes has printed flying. In
+     * {@code breach-foundry} seat 0/1 MAIN2 the opponent made exactly that
+     * Thopter at declare-attackers and ate a 7/7 Griselbrand the Breach had
+     * just paid for.</p> */
+    private record Hypothetical(boolean flying, boolean reach, int toughness, List<Card> consumed) {}
+
+    /** The cost amount that means "not a literal": anything the public board
+     * cannot count, such as {@code X} or a script variable. */
+    private static Integer literalAmount(CostPart part) {
+        try {
+            return part.convertAmount();
+        } catch (RuntimeException e) {
+            return null;
         }
+    }
+
+    /** R1. Can the opponent pay every part of this cost from what a spectator
+     * can see, and which of their public permanents would that payment consume?
+     *
+     * <p>Returns null when any part is not verifiable. The allowlist is four
+     * parts and is deliberately closed: mana (counted as untapped public
+     * sources), the ability's own {@code {T}}, a sacrifice of public permanents,
+     * and a life payment against their public life total. Every other cost part
+     * - exile, discard, counter removal, tapping other permanents - keeps v55's
+     * stance and makes the ability unpayable, because verifying it would need
+     * their hand, their library or a hidden choice.</p>
+     *
+     * <p>A sacrificed permanent need not be untapped. The Servo that paid for
+     * the Thopter in the observed receipt had attacked on the previous turn and
+     * was tapped; only {@link CostTap} reads tapped-ness, and only of the
+     * ability's own host.</p> */
+    private static List<Card> publicPayment(Card host, SpellAbility ability, Player opponent, int mana) {
+        Cost cost = ability.getPayCosts();
+        List<Card> consumed = new ArrayList<>();
+        if (cost == null) return consumed;
+        if (cost.getTotalMana().getCMC() > mana) return null;
+        for (CostPart part : cost.getCostParts()) {
+            if (part instanceof CostPartMana) continue;
+            if (part instanceof CostTap) {
+                if (host.isTapped()) return null;
+                continue;
+            }
+            if (part instanceof CostPayLife) {
+                Integer amount = literalAmount(part);
+                if (amount == null || opponent.getLife() <= amount) return null;
+                continue;
+            }
+            if (!(part instanceof CostSacrifice)) return null;
+            Integer amount = literalAmount(part);
+            if (amount == null || amount < 0) return null;
+            int found = 0;
+            if (part.payCostFromSource()) {
+                if (consumed.contains(host)) return null;
+                consumed.add(host);
+                found = amount == 0 ? 0 : 1;
+                if (found < amount) return null;
+                continue;
+            }
+            String[] types = part.getType().split(";");
+            for (Card candidate : opponent.getCardsIn(ZoneType.Battlefield)) {
+                if (found >= amount) break;
+                if (candidate.isFaceDown() || consumed.contains(candidate)) continue;
+                if (!candidate.isValid(types, opponent, host, ability)) continue;
+                consumed.add(candidate);
+                found++;
+            }
+            if (found < amount) return null;
+        }
+        return consumed;
+    }
+
+    /** R2. The body this {@code Token} ability would put onto their battlefield,
+     * or null when it makes no blocker.
+     *
+     * <p>Read from the token's own RULES in the static card database rather
+     * than instantiated: {@code TokenDb.getRules()} is the same map
+     * {@code containsRule} answers from, keyed by the {@code TokenScript$} name
+     * the ability already carries, and reading it allocates nothing. The v55
+     * objection stands against {@link forge.game.card.token.TokenInfo#getProtoType}
+     * specifically, which calls {@code CardFactory.getCard} - taking a card id -
+     * and pins a token edition for the whole game.</p>
+     *
+     * <p>Three ability params override the printed card and are read from the
+     * ability: {@code PumpKeywords$} (keywords the token gets as it is made),
+     * {@code TokenToughness$} (a literal only) and {@code TokenTapped$} - a
+     * token that enters tapped is no blocker at all.</p> */
+    private static Hypothetical tokenBody(SpellAbility ability, List<Card> consumed) {
+        if (ability.hasParam("TokenTapped")) return null;
+        String script = ability.getParam("TokenScript");
+        if (script == null || script.isEmpty()) return null;
+        CardRules rules = StaticData.instance().getAllTokens().getRules().get(script.split(",")[0].trim());
+        if (rules == null || !rules.getType().isCreature()) return null;
+        boolean flying = false, reach = false;
+        for (String keyword : rules.getMainPart().getKeywords()) {
+            if ("Flying".equalsIgnoreCase(keyword)) flying = true;
+            if ("Reach".equalsIgnoreCase(keyword)) reach = true;
+        }
+        String pumped = ability.getParam("PumpKeywords");
+        if (pumped != null) for (String keyword : pumped.split(" & ")) {
+            if ("Flying".equalsIgnoreCase(keyword)) flying = true;
+            if ("Reach".equalsIgnoreCase(keyword)) reach = true;
+        }
+        int toughness = rules.getMainPart().getIntToughness();
+        String override = ability.getParam("TokenToughness");
+        if (override != null) try {
+            toughness = Integer.parseInt(override.trim());
+        } catch (NumberFormatException ignored) {
+            // A calculated toughness is not public arithmetic; keep the printed one.
+        }
+        return new Hypothetical(flying, reach, Math.max(0, toughness), consumed);
+    }
+
+    /** R3. Does this ability give a creature flying or reach at instant speed?
+     * A permanent that pumps an existing body into a blocker for the payload is
+     * the same hazard as one that makes a new body. */
+    private static boolean grantsEvasion(SpellAbility ability) {
+        if (ability.getApi() != ApiType.Pump) return false;
+        String keywords = ability.getParam("KW");
+        if (keywords == null) return false;
+        for (String keyword : keywords.split(" & "))
+            if ("Flying".equalsIgnoreCase(keyword) || "Reach".equalsIgnoreCase(keyword)) return true;
         return false;
     }
 
-    /** Could a body that does not exist yet block this attacker at all?
+    /** R3's modelled answer: their own best untapped creature, given reach.
+     * Reach is enough to block a flier and claims nothing about attacking. The
+     * creature is CONSUMED - a body pumped to block the payload is not also
+     * blocking something else. */
+    private static Hypothetical grantedBody(Card host, SpellAbility ability, Player opponent, List<Card> consumed) {
+        boolean self = "Self".equals(ability.getParam("Defined")) || ability.getParam("Defined") == null && !ability.usesTargeting();
+        String targets = ability.getParamOrDefault("ValidTgts", "");
+        if (!self && !targets.contains("Creature")) return null;
+        Card best = null;
+        for (Card candidate : opponent.getCardsIn(ZoneType.Battlefield)) {
+            if (candidate.isFaceDown() || !candidate.isCreature() || !candidate.isUntapped()) continue;
+            if (consumed.contains(candidate)) continue;
+            if (self && candidate != host) continue;
+            if (best == null || candidate.getNetToughness() > best.getNetToughness()) best = candidate;
+        }
+        if (best == null) return null;
+        List<Card> all = new ArrayList<>(consumed);
+        all.add(best);
+        return new Hypothetical(false, true, Math.max(0, best.getNetToughness()), all);
+    }
+
+    /** Every instant-speed blocker the opponent's PUBLIC board could produce,
+     * in battlefield order. Their battlefield, life and poison only - never
+     * their hand, never their library. */
+    private static List<Hypothetical> instantBlockers(Player opponent) {
+        int mana = publicMana(opponent);
+        List<Hypothetical> bodies = new ArrayList<>();
+        for (Card card : opponent.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown()) continue;
+            for (SpellAbility ability : card.getSpellAbilities()) {
+                if (!ability.isActivatedAbility()) continue;
+                if (ability.isPwAbility() || ability.getRestrictions().isSorcerySpeed()) continue;
+                boolean token = ability.getApi() == ApiType.Token;
+                if (!token && !grantsEvasion(ability)) continue;
+                List<Card> consumed = publicPayment(card, ability, opponent, mana);
+                if (consumed == null) continue;
+                Hypothetical body = token ? tokenBody(ability, consumed)
+                        : grantedBody(card, ability, opponent, consumed);
+                if (body != null) bodies.add(body);
+            }
+        }
+        return bodies;
+    }
+
+    /** Could this modelled body block that attacker?
      *
-     * <p>Amendment 1, on this run's probe-2 evidence. The design counts a
-     * public instant-speed token maker as one extra blocker outright. Measured,
-     * that costs wins the v52 policy already had: in {@code breach-foundry} and
-     * the turn-3 arm of {@code breach-foundry:one-land}, Retrofitter Foundry
-     * was up with mana, the payload was a 7/7 FLIER, the opponent never made a
-     * blocker it could have used, and v52 won those four rows while the
-     * unqualified rule declined them. The token's real characteristics cannot
-     * be read without instantiating it, which would take a card id and pin a
-     * token edition inside a live game, so the forecast assumes the weakest
-     * ordinary body instead - a ground creature, which is exactly what the
-     * Foundry's only payable ability makes ({@code {2}, {T}}: a 1/1 Servo; its
-     * flying Thopter costs a Servo it does not have). A lone token therefore
-     * cannot block a flier and cannot block a menace attacker. The Servo that
-     * actually chump-blocked in 783 s1 blocked Blightsteel Colossus, which has
-     * neither, so that case is unchanged.</p>
+     * <p>A body that does not exist yet cannot go through
+     * {@link CombatUtil#canBlock}, so this is the same two-keyword test v55
+     * asked - now asked against the body's PRINTED characteristics rather than
+     * against Amendment 1's assumed ground creature. Amendment 1's rule
+     * survives exactly where it still applies: an unqualified body, one whose
+     * token rules could not be read or which carries neither flying nor reach,
+     * still blocks neither a flier nor a menace attacker.</p>
      *
-     * <p>Limitation, registered: a token maker whose token flies or has reach
-     * is not modelled, and this forecast will over-cast against one.</p> */
-    private static boolean blockableByOrdinaryBody(Card attacker) {
-        return !attacker.hasKeyword(Keyword.FLYING) && !attacker.hasKeyword(Keyword.MENACE);
+     * <p>The menace half is kept conservative on purpose: pairing two
+     * hypothetical bodies is not modelled, and one body never blocks a menace
+     * attacker.</p> */
+    private static boolean blocks(Hypothetical body, Card attacker) {
+        if (attacker.hasKeyword(Keyword.MENACE)) return false;
+        if (attacker.hasKeyword(Keyword.FLYING)) return body.flying() || body.reach();
+        return true;
+    }
+
+    /** R4. Spend the opponent's ONE hypothetical body on this attacker, if any
+     * of the modelled bodies can block it.
+     *
+     * <p>The cap of one is exactly v55's allowance, so v58 can only ever hand
+     * the opponent a BETTER body, never more of them. Taking a body removes the
+     * public permanents its cost consumes from the real blocker pool - the
+     * Servo that is sacrificed for a Thopter is no longer a blocker itself -
+     * and empties the candidate list, because only one is ever paid for.</p> */
+    private static Hypothetical take(List<Hypothetical> bodies, List<Card> blockers, Card attacker) {
+        for (Hypothetical body : bodies) {
+            if (!blocks(body, attacker)) continue;
+            boolean available = true;
+            for (Card spent : body.consumed())
+                if (spent.isCreature() && !blockers.contains(spent)) available = false;
+            if (!available) continue;
+            blockers.removeAll(body.consumed());
+            bodies.clear();
+            return body;
+        }
+        return null;
     }
 
     /** Untapped public mana sources, counted the way {@link #ownMana} counts
@@ -474,7 +659,7 @@ public final class CubeBombPlan {
         List<Card> blockers = new ArrayList<>();
         for (Card card : opponent.getCardsIn(ZoneType.Battlefield))
             if (!card.isFaceDown() && card.isCreature()) blockers.add(card);
-        boolean token = tokenBlockerAvailable(opponent);
+        List<Hypothetical> instants = instantBlockers(opponent);
         int life = 0, poison = 0, payloadThrough = 0;
         boolean payloadUnblocked = false;
         for (Strike attacker : ownStrikes(payload, manaLeft)) {
@@ -483,14 +668,15 @@ public final class CubeBombPlan {
                 if (CombatUtil.canBlock(attacker.card(), candidate)) { blocker = candidate; break; }
             int through;
             boolean unblocked = false;
+            Hypothetical made = blocker != null ? null : take(instants, blockers, attacker.card());
             if (blocker != null) {
                 blockers.remove(blocker);
                 through = attacker.trample() ? Math.max(0, attacker.damage() - blocker.getNetToughness()) : 0;
-            } else if (token && blockableByOrdinaryBody(attacker.card())) {
-                // One unknown ordinary body: enough to eat an attacker, and
-                // enough toughness to matter only against trample.
-                token = false;
-                through = attacker.trample() ? Math.max(0, attacker.damage() - 1) : 0;
+            } else if (made != null) {
+                // ONE body the opponent does not have yet, now with the printed
+                // characteristics of whatever their public board can actually
+                // make. Its toughness matters only against trample.
+                through = attacker.trample() ? Math.max(0, attacker.damage() - made.toughness()) : 0;
             } else {
                 through = attacker.damage();
                 unblocked = true;

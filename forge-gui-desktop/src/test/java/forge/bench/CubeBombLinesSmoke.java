@@ -1,6 +1,9 @@
 package forge.bench;
 
 import forge.StaticData;
+import forge.card.CardEdition;
+import forge.card.CardRules;
+import forge.card.GamePieceType;
 import forge.deck.Deck;
 import forge.game.Game;
 import forge.game.GameRules;
@@ -8,12 +11,15 @@ import forge.game.GameStage;
 import forge.game.GameType;
 import forge.game.Match;
 import forge.game.card.Card;
+import forge.game.card.CardFactory;
 import forge.game.card.CounterType;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.RegisteredPlayer;
 import forge.game.zone.ZoneType;
 import forge.gui.GuiBase;
+import forge.item.IPaperCard;
+import forge.item.PaperToken;
 import forge.gui.interfaces.IGuiBase;
 import forge.localinstance.properties.ForgePreferences.FPref;
 import forge.model.FModel;
@@ -61,6 +67,10 @@ public final class CubeBombLinesSmoke {
     private static final String BEAST = "Questing Beast";
     private static final String SPIDER = "Giant Spider";
     private static final String BEARS = "Grizzly Bears";
+    /** v58: the token script whose printed body the blocker forecast has to
+     * read. `c_1_1_a_servo` is what Retrofitter Foundry's {2}, {T} ability makes
+     * and what its flying-Thopter ability sacrifices. */
+    private static final String SERVO = "c_1_1_a_servo";
 
     /** Prepared positions (a)-(g) of the owner's question. Each is legal and
      * already assembled: the only thing under observation is whether Default
@@ -137,7 +147,13 @@ public final class CubeBombLinesSmoke {
             "sat-atraxa-low-life",         // B7 R4's position at 3 life, recorded
             "sat-beater-parity",           // B8 Show and Tell must not move
             "depths-sequence",             // B9 R6 land-drop sequencing
-            "depths-sequence:half");       // B10 half the pair: R6 must not fire
+            "depths-sequence:half",        // B10 half the pair: R6 must not fire
+            // v58 blocker-forecast cases. APPENDED, so every preserved row of
+            // this suite keeps its position in the seat/phase loop as well as
+            // its own seed.
+            "breach-foundry:thopter",      // C1 the sacrifice IS payable and the token FLIES
+            "breach-foundry:no-servo",     // C2 nothing to sacrifice: no flier, the line converts
+            "breach-foundry:tapped-out");  // C3 the mana half is unpayable: no flier either
 
     /** v56 payload cases (registration.md, suite `payload`). P1-P7 of
      * design-v56-bomb-payload.md. P1, P3, P4 and P5 are positions the v55
@@ -164,7 +180,9 @@ public final class CubeBombLinesSmoke {
     private static int opponentLife(String control) {
         return switch (control) {
             case "breach-choice:low-life", "breach-reach" -> 7;
-            case "breach-foundry", "breach-foundry:one-land" -> 6;
+            case "breach-foundry", "breach-foundry:one-land",
+                 "breach-foundry:thopter", "breach-foundry:no-servo",
+                 "breach-foundry:tapped-out" -> 6;
             default -> 20;
         };
     }
@@ -350,7 +368,10 @@ public final class CubeBombLinesSmoke {
                 case "breach-reach" -> result.add(new Placement(SPIDER, ZoneType.Battlefield));
                 case "breach-foundry" -> {
                     result.add(new Placement(FOUNDRY, ZoneType.Battlefield));
-                    int forests = variant.equals("one-land") ? 1 : 2;
+                    // v58: `tapped-out` is the mana half of the Thopter cost on
+                    // its own - the Servo is there, the {1} is not. Every other
+                    // variant keeps v55's land counts exactly.
+                    int forests = variant.equals("one-land") ? 1 : variant.equals("tapped-out") ? 0 : 2;
                     for (int i = 0; i < forests; i++) result.add(new Placement("Forest", ZoneType.Battlefield));
                 }
                 case "sat-archon" -> result.add(new Placement(BEAST, ZoneType.Battlefield));
@@ -391,6 +412,33 @@ public final class CubeBombLinesSmoke {
         return result;
     }
 
+    /** v58: board state that is NOT a registered deck card. The Servo the
+     * Foundry's flying-Thopter ability sacrifices is a token, and a token has no
+     * paper card to register, so these are placed AFTER the 40-card assertion in
+     * {@link #populate} and no preserved case's `registered=40` line moves.
+     * Opponent side only; every other case gets an empty list. */
+    private static List<String> tokens(boolean owner, String control) {
+        if (owner) return List.of();
+        return switch (control) {
+            case "breach-foundry:thopter", "breach-foundry:tapped-out" -> List.of(SERVO);
+            default -> List.of();
+        };
+    }
+
+    /** One token onto a battlefield, built straight from the token's RULES with
+     * a fixed unknown edition. Deliberately NOT
+     * {@code TokenDb.getToken(script)}, which picks an art variant with
+     * {@code Aggregates.random} - the fixture must not consume the shared RNG
+     * while it is setting a position up. */
+    private static Card token(Player player, String script) {
+        CardRules rules = Objects.requireNonNull(
+                StaticData.instance().getAllTokens().getRules().get(script), script);
+        PaperToken paper = new PaperToken(rules, CardEdition.UNKNOWN, script, "", IPaperCard.NO_ARTIST_NAME);
+        Card card = CardFactory.getCard(paper, player, player.getGame());
+        card.setGamePieceType(GamePieceType.TOKEN);
+        return card;
+    }
+
     private static Deck deck(boolean owner, String control) {
         Deck result = new Deck("bomb-lines diagnostic");
         for (Placement p : placements(owner, control)) result.getMain().add(p.name(), 1);
@@ -417,6 +465,12 @@ public final class CubeBombLinesSmoke {
         if (!actual.equals(registered) || actual.values().stream().mapToInt(Integer::intValue).sum() != 40)
             throw new AssertionError("registration mismatch " + control + " actual=" + actual + " registered=" + registered);
         if (player.getManaPool().totalMana() != 0) throw new AssertionError("initial mana must be empty");
+        for (String script : tokens(owner, control)) {
+            Card card = token(player, script);
+            card.setGameTimestamp(player.getGame().getNextTimestamp());
+            player.getZone(ZoneType.Battlefield).add(card);
+            card.setSickness(false);
+        }
     }
 
     private static String zoneOf(Player player, String name) {
