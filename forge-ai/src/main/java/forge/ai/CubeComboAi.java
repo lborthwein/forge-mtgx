@@ -207,6 +207,145 @@ public final class CubeComboAi {
         return TWIN_PARTNERS.contains(card.getName());
     }
 
+    /** v67 - a clone-class creature's own printed ETB copy choice, or null.
+     * The SHAPE, never a name: a {@code Moved} replacement onto the battlefield
+     * for this very card whose overriding ability is a {@code Clone} carrying a
+     * {@code Choices$} list and no target. Phyrexian Metamorph and Phantasmal
+     * Image are the cube's only two such cards today; the property test is
+     * still the contract.
+     *
+     * <p>A card that has ALREADY entered as a copy no longer answers this: the
+     * clone effect replaced its characteristics. That is exactly why a
+     * Metamorph which copied a Pestermite is seen as a Pestermite by
+     * {@link #untapBody}, {@link #copyPartner}, {@link #untapSource},
+     * {@link #twinAuraTarget} and {@link #needsMoreCopies} with no special case
+     * in any of them.</p>
+     *
+     * <p>Printed characteristics only - no zone, no controller, no game
+     * state.</p> */
+    static SpellAbility cloneChoice(Card card) {
+        if (card == null || card.isFaceDown()) return null;
+        for (forge.game.replacement.ReplacementEffect effect : card.getReplacementEffects()) {
+            if (effect.getMode() != forge.game.replacement.ReplacementType.Moved || effect.isSuppressed()
+                    || !"Battlefield".equals(effect.getParam("Destination"))
+                    || !"Card.Self".equals(effect.getParam("ValidCard"))) continue;
+            SpellAbility clone = effect.getOverridingAbility();
+            if (clone != null && clone.getApi() == ApiType.Clone && clone.hasParam("Choices")
+                    && !clone.usesTargeting()) return clone;
+        }
+        return null;
+    }
+
+    /** v67 R1 - whether the copy this clone makes would carry a "when this
+     * creature becomes the target of a spell or ability, sacrifice it" clause.
+     * Phantasmal Image's does, and it breaks EVERY Kiki/Twin route: Kiki's
+     * ability TARGETS the body it copies, and under the engine Aura the copy
+     * token's own untap trigger targets the enchanted body, so the clone is
+     * sacrificed before either resolves and no loop runs. Such a clone is
+     * refused rather than steered.
+     *
+     * <p>The clause lives in an SVar, so it has to be parsed through the native
+     * trigger factory to be tested at all; the cheap {@code contains}
+     * pre-filter is there so no unrelated SVar reaches that parser, exactly as
+     * {@link #engineAura} does for the engine Aura's granted ability. A parse
+     * that fails reads as "carries the clause", which can only withhold a
+     * steer, never invent one.</p> */
+    static boolean sacsWhenTargeted(SpellAbility clone) {
+        if (clone == null || !clone.hasParam("AddTriggers")) return false;
+        Card host = clone.getHostCard();
+        if (host == null) return true;
+        for (String svar : clone.getParam("AddTriggers").split(" & ")) {
+            String printed = host.getSVar(svar);
+            if (printed == null || !printed.contains("BecomesTarget")) continue;
+            try {
+                forge.game.trigger.Trigger trigger =
+                        forge.game.trigger.TriggerHandler.parseTrigger(printed, host, false);
+                if (trigger != null && trigger.getMode() == forge.game.trigger.TriggerType.BecomesTarget
+                        && "Card.Self".equals(trigger.getParam("ValidTarget"))) return true;
+            } catch (RuntimeException unparsed) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** v67 R4 - a Kiki/Twin engine a clone body could actually feed: a
+     * Kiki-Jiki we control whose copy ability is live, or an engine half
+     * ({@link #engineHalf} - Kiki-Jiki or Splinter Twin) in our own hand that
+     * {@link #feasibleHalfAfterSelection} prices. Our own battlefield and our
+     * own hand only. */
+    private static boolean cloneEngineRoute(Player player) {
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || !card.getName().equals("Kiki-Jiki, Mirror Breaker")) continue;
+            if (card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
+                    && sa.copy(player).checkRestrictions(card, player))) return true;
+        }
+        for (Card card : player.getCardsIn(ZoneType.Hand))
+            if (!card.isFaceDown() && engineHalf(card) && feasibleHalfAfterSelection(player, card)) return true;
+        return false;
+    }
+
+    /** v67 - the card our OWN clone-class creature should enter as a copy of,
+     * or null to leave the ordinary AI's choice exactly where it was.
+     *
+     * <p>The catalogue's own Kiki + Phyrexian Metamorph line (row
+     * {@code 618-3734--112}) is deliberately NOT implemented: its steps copy
+     * Kiki-Jiki, and each iteration trades the Kiki we had for the hasty
+     * legend-rule survivor, so it produces infinite ETB/LTB/death triggers and
+     * no damage at all - and this cube holds no death- or ETB-drain outlet to
+     * convert them. What v67 chooses instead is the copy that makes the clone
+     * an UNTAP BODY, after which the loop is the file's existing, measured one:
+     * Kiki (or the engine Aura) copies the body, the hasty copy's ETB untaps
+     * the engine, and {@link #needsMoreCopies} bounds the combat.</p>
+     *
+     * <p>Refusals, each for a printed reason: a clone whose copy would carry a
+     * self-sacrifice-on-target clause ({@link #sacsWhenTargeted}); a board with
+     * no engine we control or could cast ({@link #cloneEngineRoute}); and an
+     * offered list with no untap body in it. Restoration Angel is not accepted
+     * as a clone body: its route is {@link #selectBlinkSource}, which needs a
+     * tapped, non-token Kiki, a precondition a fresh clone does not create.</p>
+     *
+     * <p>The offered list is the native legal-choice list. It is scanned in
+     * {@link #TWIN_PARTNERS} order so the preference is the file's single
+     * existing list and cannot drift from the recognisers. The opponent's
+     * battlefield is public and is read only through that offered list.</p> */
+    public static Card chooseCloneBody(Player player, SpellAbility clone, Iterable<Card> options) {
+        if (!enabled(player) || clone == null || options == null) return null;
+        if (clone.getApi() != ApiType.Clone || !clone.hasParam("Choices") || clone.usesTargeting()
+                || !clone.isReplacementAbility()) return null;
+        Card host = clone.getHostCard();
+        if (host == null || host.isFaceDown() || host.getOwner() != player
+                || host.getController() != player) return null;
+        if (sacsWhenTargeted(clone) || !cloneEngineRoute(player)) return null;
+        for (String name : TWIN_PARTNERS)
+            for (Card option : options)
+                if (option != null && !option.isFaceDown() && option.getName().equals(name)) return option;
+        return null;
+    }
+
+    /** v67 - a clone-class card in our OWN HAND that could still enter as a
+     * Twin partner: it has a printed copy choice, that copy carries no
+     * self-sacrifice clause, and an untap body is already on SOME battlefield
+     * for it to copy under the clone's own printed {@code Choices$}.
+     *
+     * <p>This is the ONLY place the clone extension touches the hand-side
+     * recognisers ({@link #hasImmediateKikiRoute}, {@link #kikiCompletingNames},
+     * {@link #holdTwinAura}). No battlefield scan anywhere in this file
+     * changes: a clone that has already copied a partner is NAMED as that
+     * partner and {@link #untapBody} already answers yes.</p>
+     *
+     * <p>Both battlefields are read, and only as public zones: the question is
+     * which bodies exist to be copied, which is what the clone's own
+     * {@code Choices$} asks. No hidden zone, no decklist, no library.</p> */
+    static boolean cloneAsPartner(Player player, Card card) {
+        SpellAbility clone = cloneChoice(card);
+        if (clone == null || sacsWhenTargeted(clone)) return false;
+        String[] choices = clone.getParam("Choices").split(",");
+        for (Card body : player.getGame().getCardsIn(ZoneType.Battlefield))
+            if (!body.isFaceDown() && untapBody(body) && body.isValid(choices, player, card, clone)) return true;
+        return false;
+    }
+
     public static Card copyPartner(Player player, SpellAbility ability) {
         if (!enabled(player) || !copyEngine(ability)) return null;
         Card source = ability.getHostCard();
@@ -362,7 +501,9 @@ public final class CubeComboAi {
             if (!card.isFaceDown() && untapBody(card)) return false;
         Card uncastable = null;
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
-            if (card.isFaceDown() || !untapBody(card)) continue;
+            // v67: a clone-class card counts exactly as an untap body here -
+            // H1 prices it with the unchanged castableWithinTwoDrops below.
+            if (card.isFaceDown() || !untapBody(card) && !cloneAsPartner(player, card)) continue;
             if (castableWithinTwoDrops(player, card.getManaCost())) {
                 twinLine(player, "CUBE_TWIN_HOLD reason=partner-in-hand partner=" + token(card.getName()));
                 return true;
@@ -739,7 +880,7 @@ public final class CubeComboAi {
         if (engine) return java.util.List.of();
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
             if (card.isFaceDown()) continue;
-            boolean half = engineHalf(card), untap = untapBody(card);
+            boolean half = engineHalf(card), untap = untapBody(card) || cloneAsPartner(player, card);
             // The feasibility probe is the expensive half, so it runs only for
             // a card that is actually one of the two roles - the same ordering
             // chooseKikiTutorPartner already uses.
@@ -768,7 +909,10 @@ public final class CubeComboAi {
         if (haveKiki == havePartner) return false;
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
             if (card.isFaceDown()) continue;
-            if ((haveKiki && (untapBody(card) || card.getName().equals("Restoration Angel"))
+            // v67: a clone-class card in hand is a partner-in-waiting when a
+            // body exists for it to copy - cloneAsPartner, and nothing else.
+            if ((haveKiki && (untapBody(card) || card.getName().equals("Restoration Angel")
+                        || cloneAsPartner(player, card))
                     || havePartner && card.getName().equals("Kiki-Jiki, Mirror Breaker"))
                     && feasiblePartnerAfterSelection(player, card)) return true;
         }

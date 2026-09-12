@@ -3,6 +3,7 @@ package forge.ai.ability;
 import forge.ai.AiAbilityDecision;
 import forge.ai.AiPlayDecision;
 import forge.ai.ComputerUtilCard;
+import forge.ai.CubeComboAi;
 import forge.ai.SpellAbilityAi;
 import forge.game.Game;
 import forge.game.ability.AbilityUtils;
@@ -174,6 +175,20 @@ public class CloneAi extends SpellAbilityAi {
     @Override
     protected Card chooseSingleCard(Player ai, SpellAbility sa, Iterable<Card> options, boolean isOptional,
             Player targetedPlayer, Map<String, Object> params) {
+        // v67: the versioned cube policy picks the body that completes a Kiki
+        // or Splinter Twin loop when our own clone-class creature is choosing
+        // what to enter as a copy of. This is the one place Forge asks the AI
+        // that question (CloneEffect.resolve -> chooseSingleEntityForEffect).
+        // Gated on CubeComboAi.enabled(ai), so the Default arm never reaches
+        // it; a null answer falls through to the unchanged native choice below
+        // and every check under it is untouched.
+        if (CubeComboAi.enabled(ai)) {
+            Card body = CubeComboAi.chooseCloneBody(ai, sa, options);
+            if (body != null) {
+                return body;
+            }
+        }
+
         final Card host = sa.getHostCard();
         final String name = host.getName();
         final Player ctrl = host.getController();
