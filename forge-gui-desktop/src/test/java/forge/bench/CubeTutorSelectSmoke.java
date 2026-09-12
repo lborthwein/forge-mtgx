@@ -48,6 +48,17 @@ public final class CubeTutorSelectSmoke {
     private static final String FUEL = "Ponder";
     private static final String KIKI = "Kiki-Jiki, Mirror Breaker", BODY = "Pestermite";
     private static final String DOOMSDAY = "Doomsday", ORACLE = "Thassa's Oracle", TWIN = "Splinter Twin";
+    // v74 - the 16702429-s1 board of
+    // runs/2026-09-12-doom-worsened-pair-v67/diagnosis.md section 7, and its
+    // one-card route variant. STRIX carries a single blue pip (devotion 3, one
+    // short); TRUENAME carries three (devotion 5). STAR is the Gush route's
+    // enabler, held in our HAND on purpose, because the route needs it on the
+    // battlefield. CLIQUE is the decoy and the only creature in the library, so
+    // the ordinary AI's own answer is that body - the card the measured
+    // steering displaced in 7 of 11 games - deterministically.
+    private static final String STRIX = "Baleful Strix", TRUENAME = "True-Name Nemesis";
+    private static final String MOX = "Mox Jet", STAR = "Chromatic Star", GUSH = "Gush";
+    private static final String CLIQUE = "Vendilion Clique";
     private static final String DECOY = "Grave Titan", SPELL_DECOY = "Echo of Eons";
     private static final String MINDCENSOR = "Aven Mindcensor", BEAR = "Grizzly Bears";
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
@@ -87,17 +98,52 @@ public final class CubeTutorSelectSmoke {
      * <ul>
      * <li>{@code demonic:reach-tendrils} MUST-MOVE - Storm one short of
      *     Tendrils with no black source anywhere in the 40.</li>
-     * <li>{@code demonic:reach-doomsday} MUST-MOVE - the Doomsday family one
-     *     short, Thassa's Oracle in hand, no black source for {@code BBB}.</li>
+     * <li>{@code demonic:reach-doomsday} MUST-NOT-MOVE as of v74 - the
+     *     Doomsday family one short, no black source for {@code BBB}. v63
+     *     registered it as a MUST-MOVE; the board it actually carries is the
+     *     NO-ROUTE shape, and re-registering it honestly is part of v74. Its
+     *     eight battlefield permanents are all lands, so
+     *     {@code CubeDoomsdayPlan.oracleThreshold(false)} is 2 - two short of
+     *     the >= 4 the Oracle-not-in-hand branch needs - Ancestral Recall is
+     *     nowhere and Gush is not in the 40, so the plan's own act-time logic
+     *     declines {@code no-pile-route} on this board no matter how much mana
+     *     arrives. v63 varied the MANA dimension and asserted the fetch anyway;
+     *     that assertion is exactly the behaviour that lost
+     *     {@code doom-16702429-s1}.</li>
      * <li>{@code demonic:reach-twin} MUST-MOVE, MAIN1 only - an untap body on
      *     our battlefield, no engine anywhere, and no red source for Splinter
      *     Twin's {@code 2UR}.</li>
      * <li>{@code demonic:reach-two-short} MUST-NOT-MOVE - both Storm halves in
      *     our library, so no family is exactly one piece short.</li>
+     * </ul>
+     *
+     * <p>v74 adds the registered PAIR of diagnosis section 7, both on the
+     * measured {@code doom-16702429-s1} board and differing in exactly ONE
+     * battlefield card, so the gate is not measured as "turn C2 off":</p>
+     *
+     * <ul>
+     * <li>{@code demonic:reach-doomsday-no-route} MUST-NOT-MOVE - Baleful Strix
+     *     plus Mox Jet (one blue pip, {@code oracleThreshold(false) == 3}, one
+     *     short of the 4 the Oracle-not-in-hand branch needs), Chromatic Star in
+     *     HAND rather than on the battlefield so the Gush route falls through,
+     *     and exactly two Island-subtype lands so the Gush prerequisite ITSELF
+     *     passes - Gush is in the 40, the Islands are there - and the failure
+     *     lands precisely on the Star's zone, which is the measured
+     *     {@code no-pile-route}. Unlike {@code demonic:reach-doomsday}, whose
+     *     board has no route kit at all, every route here is one card away and
+     *     the one card is in the wrong place. v74 must let the ordinary fetch
+     *     stand.</li>
+     * <li>{@code demonic:reach-doomsday-route} MUST-MOVE - the same 40 cards
+     *     with Baleful Strix swapped for True-Name Nemesis (three blue pips,
+     *     threshold 5) and nothing else changed. The plan's own natural route 2
+     *     is live, so the steering fires and converts. This is the
+     *     {@code 16702437-s0} shape, the one steered board in the measured
+     *     stratum whose act-time route was already live.</li>
      * </ul> */
     private static final List<String> HAND_REACH_MOVE =
-            List.of("demonic:reach-tendrils", "demonic:reach-doomsday", "demonic:reach-twin");
-    private static final List<String> HAND_REACH_HOLD = List.of("demonic:reach-two-short");
+            List.of("demonic:reach-tendrils", "demonic:reach-doomsday-route", "demonic:reach-twin");
+    private static final List<String> HAND_REACH_HOLD = List.of("demonic:reach-two-short",
+            "demonic:reach-doomsday", "demonic:reach-doomsday-no-route");
     private static final List<String> HAND_REACH =
             java.util.stream.Stream.concat(HAND_REACH_MOVE.stream(), HAND_REACH_HOLD.stream()).toList();
 
@@ -133,7 +179,7 @@ public final class CubeTutorSelectSmoke {
             case "freeze-missing" -> FREEZE;
             case "breach-missing", "type-restricted" -> BREACH;
             case "will-missing" -> WILL;
-            case "reach-doomsday" -> DOOMSDAY;
+            case "reach-doomsday", "reach-doomsday-no-route", "reach-doomsday-route" -> DOOMSDAY;
             case "reach-twin" -> TWIN;
             default -> TENDRILS;
         };
@@ -203,9 +249,33 @@ public final class CubeTutorSelectSmoke {
         int swamps = variant.equals("colour-unreachable") ? 0 : variant.startsWith("reach-") ? 1 : 4;
         boolean red = !variant.equals("reach-twin");
         String filler = "Island";
-        for (int i = 0; i < 4; i++) result.add(new Placement(i < swamps ? "Swamp" : "Island", ZoneType.Battlefield));
-        for (int i = 0; i < 3; i++) result.add(new Placement(filler, ZoneType.Battlefield));
-        result.add(new Placement(red ? "Mountain" : "Island", ZoneType.Battlefield));
+        // v74's registered pair keeps the eight lands and the `reach-` colour
+        // discipline, and fixes the two counts its routes actually read:
+        // EXACTLY TWO Island-subtype lands, which is the Gush route's own
+        // prerequisite AND the `ownBlueSources() >= 2` natural route 2 needs,
+        // and exactly ONE Swamp, which with Mox Jet leaves TWO black sources -
+        // enough for Demonic Tutor's own {1}{B}, one short of Doomsday's
+        // {B}{B}{B}, and a land drop or two away from it (two Swamps sit in the
+        // library). The remaining five are Mountains: they add no blue pip and
+        // no black source, so neither count can drift.
+        //
+        // Keeping {B}{B}{B} one source short THIS turn is deliberate and is
+        // what makes these boards a test of the C2 site at all. With the piece
+        // castable now, the v45..v61 layer above C2 - chooseTutorPartner ->
+        // choosePlanTutorPiece(forecastCastability=true) - answers FIRST, in
+        // ChangeZoneAi before chooseHandTutorPiece is ever called, and v74
+        // deliberately does not change that layer. Every other `reach-` board
+        // is one short for the same reason.
+        boolean doomBoard = variant.startsWith("reach-doomsday-");
+        if (doomBoard) {
+            for (int i = 0; i < 2; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+            result.add(new Placement("Swamp", ZoneType.Battlefield));
+            for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+        } else {
+            for (int i = 0; i < 4; i++) result.add(new Placement(i < swamps ? "Swamp" : "Island", ZoneType.Battlefield));
+            for (int i = 0; i < 3; i++) result.add(new Placement(filler, ZoneType.Battlefield));
+            result.add(new Placement(red ? "Mountain" : "Island", ZoneType.Battlefield));
+        }
         List<String> library = new ArrayList<>();
         // The decoy goes in first, so it - not the piece - starts on top of the
         // library: it is the card Forge's own imperial_seal.txt says the
@@ -213,7 +283,7 @@ public final class CubeTutorSelectSmoke {
         // Mystical Tutor only ever offers instants and sorceries, so its decoy
         // has to be one, or its decline would be an empty offered list rather
         // than a real choice not taken.
-        library.add(control.startsWith("mystical:") ? SPELL_DECOY : DECOY);
+        library.add(control.startsWith("mystical:") ? SPELL_DECOY : doomBoard ? CLIQUE : DECOY);
         switch (variant) {
             case "freeze-missing" -> {
                 result.add(new Placement(BREACH, ZoneType.Battlefield));
@@ -266,6 +336,25 @@ public final class CubeTutorSelectSmoke {
             // ordinary AI cannot cast it as a body and close the gate between
             // the tutor's cast and its resolution.
             case "reach-doomsday" -> { result.add(new Placement(ORACLE, ZoneType.Graveyard)); library.add(DOOMSDAY); }
+            // v74's pair. Identical placements apart from the one creature:
+            // Baleful Strix (one blue pip) against True-Name Nemesis (three).
+            // The Oracle sits in our own graveyard for the same reason
+            // `reach-doomsday` puts it there. Gush is in our library so
+            // availableInOwnDeck("Gush") passes and the Gush route reaches its
+            // Chromatic Star test; the Star is in our HAND, which is where the
+            // measured game left it from turn 2 to turn 15, so the route dies
+            // exactly where it died in play.
+            case "reach-doomsday-no-route", "reach-doomsday-route" -> {
+                result.add(new Placement(ORACLE, ZoneType.Graveyard));
+                result.add(new Placement(variant.equals("reach-doomsday-route") ? TRUENAME : STRIX, ZoneType.Battlefield));
+                result.add(new Placement(MOX, ZoneType.Battlefield));
+                result.add(new Placement(STAR, ZoneType.Hand));
+                library.add(GUSH);
+                library.add(DOOMSDAY);
+                // {B}{B}{B} really is a land drop or two away, so the shortfall
+                // the plan would print for it is the one kind v74 accepts.
+                for (int i = 0; i < 2; i++) library.add("Swamp");
+            }
             case "reach-twin" -> { result.add(new Placement(BODY, ZoneType.Battlefield)); library.add(TWIN); }
             case "reach-two-short" -> { library.add(WILL); library.add(TENDRILS); }
             default -> throw new AssertionError("unknown variant " + variant);
@@ -673,7 +762,8 @@ public final class CubeTutorSelectSmoke {
                 return null;
             });
             for (String name : List.of(BREACH, FREEZE, LED, WILL, TENDRILS, FUEL, KIKI, BODY, DECOY, SPELL_DECOY,
-                    MINDCENSOR, BEAR, DOOMSDAY, ORACLE, TWIN, "Demonic Tutor", "Imperial Seal", "Vampiric Tutor",
+                    MINDCENSOR, BEAR, DOOMSDAY, ORACLE, TWIN, STRIX, TRUENAME, MOX, STAR, GUSH, CLIQUE,
+                    "Demonic Tutor", "Imperial Seal", "Vampiric Tutor",
                     "Mystical Tutor", "Island", "Swamp", "Mountain", "Forest"))
                 StaticData.instance().attemptToLoadCard(name);
             List<String> cases = args.length > 2 ? switch (args[2]) {

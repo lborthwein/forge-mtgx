@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v70";
+    public static final String VERSION = "cube-combo-execution-v74";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -825,7 +825,10 @@ public final class CubeComboAi {
      * whenever no family is exactly one piece short.</p> */
     public static Card chooseHandTutorPiece(Player player, SpellAbility tutor, CardCollection legalChoices) {
         if (!enabled(player) || tutor == null || tutor.getActivatingPlayer() != player) return null;
-        Card piece = choosePlanTutorPiece(player, legalChoices, false);
+        // v74: the one C2 caller, and the only caller that asks for the
+        // convertibility gate. Every v45..v61 caller still passes false/false
+        // and keeps its receipts byte for byte.
+        Card piece = choosePlanTutorPiece(player, legalChoices, false, true);
         if (piece == null) return null;
         // Unlike choosePlanTutorPiece, this method is never a forecast: it is
         // called once, at the real selection, so the line it prints always
@@ -833,8 +836,42 @@ public final class CubeComboAi {
         System.err.println("CUBE_COMBO_SELECTION changed-hand-selection source="
                 + tutor.getHostCard().getName().replace(' ', '_')
                 + " phase=" + player.getGame().getPhaseHandler().getPhase()
-                + " partner=" + piece.getName().replace(' ', '_'));
+                + " partner=" + piece.getName().replace(' ', '_')
+                + " displaced=" + displacedOrdinaryPick(player, legalChoices, piece));
         return piece;
+    }
+
+    /** v74 observability - diagnosis section 6's one-line recommendation. The
+     * marker recorded what the steering CHOSE and never what it displaced, so
+     * establishing that 7 of 11 steerings cost us a Vendilion Clique took an
+     * elimination argument across two arms instead of a grep.
+     *
+     * <p>This is a deterministic own-visible PROXY for the ordinary answer, not
+     * a re-run of it: native {@code ChangeZoneAi}'s own tail calls
+     * {@code CardLists.shuffle(fetchList)} and would consume bench RNG, which
+     * would change the very game it is reporting on. What it prints is the
+     * documented SHAPE of that answer, in the two steps the tail itself takes
+     * for a search to our own hand: it drops the lands and prefers a creature
+     * ({@code chooseCreature}), and where no creature is offered it takes the
+     * best of what is left - {@code demonic_tutor.txt}'s own comment says the
+     * AI "will generally look for the most expensive castable thing in the
+     * library". Cost is the ordering here, with ties broken by name so the line
+     * is reproducible; native's creature comparison is an evaluation rather
+     * than a cost, so on a board offering several creatures this names the
+     * class of card displaced rather than guaranteeing the exact one.
+     * Our own library and the offered list only; never an opponent zone, and
+     * never read by a decision.</p> */
+    private static String displacedOrdinaryPick(Player player, CardCollection legalChoices, Card chosen) {
+        Card best = null;
+        for (int pass = 0; pass < 3 && best == null; pass++) for (Card card : legalChoices) {
+            if (card == chosen || card.getOwner() != player || card.isFaceDown() || !card.isInZone(ZoneType.Library)) continue;
+            // Pass 0 the creatures, pass 1 the other nonlands, pass 2 whatever
+            // is left - the order native's own tail falls through.
+            if (pass == 0 && !card.isCreature() || pass == 1 && (card.isCreature() || card.isLand())) continue;
+            if (best == null || card.getCMC() > best.getCMC()
+                    || card.getCMC() == best.getCMC() && card.getName().compareTo(best.getName()) < 0) best = card;
+        }
+        return best == null ? "none" : best.getName().replace(' ', '_');
     }
 
     /** The v42..v57 body of {@link #chooseTutorPartner}, verbatim. Split out so
@@ -867,7 +904,7 @@ public final class CubeComboAi {
      * CubeComboPlayerController.chooseSpellAbilityToPlay already uses; then the
      * Thopter assembly last, because its bodies need the next turn. */
     private static Card choosePlanTutorPiece(Player player, CardCollection legalChoices) {
-        return choosePlanTutorPiece(player, legalChoices, true);
+        return choosePlanTutorPiece(player, legalChoices, true, false);
     }
 
     /** @param forecastCastability v63 C2: whether a completing piece must also
@@ -875,7 +912,8 @@ public final class CubeComboAi {
      * caller, so their receipts are unchanged; false only for
      * {@link #chooseHandTutorPiece}, where the piece is fetched to our own hand
      * and is not spent by the selection. */
-    private static Card choosePlanTutorPiece(Player player, CardCollection legalChoices, boolean forecastCastability) {
+    private static Card choosePlanTutorPiece(Player player, CardCollection legalChoices, boolean forecastCastability,
+            boolean requireConversion) {
         if (!ownPlanSelectionWindow(player) || lethalOrdinaryAttackNow(player)) return null;
         java.util.List<java.util.List<String>> families = planCompletingFamilies(player);
         for (int index = 0; index < families.size(); index++) {
@@ -905,6 +943,10 @@ public final class CubeComboAi {
                         : feasibleHalfAfterSelection(player, card))) continue;
                 if (best == null || card.getCMC() < best.getCMC()) best = card;
             }
+            // v74: the convertibility gate. `continue` rather than `return
+            // null`, so a refused family hands the decision to the next one in
+            // the fixed order exactly as an empty family already does.
+            if (best != null && requireConversion && !familyConverts(player, index, best)) continue;
             // Deliberately silent. chooseTutorPartner is also the forecast
             // planTutor runs before it casts anything, so a line printed here
             // would announce selections that never happen. The controller
@@ -917,6 +959,48 @@ public final class CubeComboAi {
 
     /** Index of the thopter family in {@link #planCompletingFamilies}. */
     private static final int THOPTER_FAMILY = 3;
+
+    /** Index of the doomsday family in {@link #planCompletingFamilies}. */
+    private static final int DOOMSDAY_FAMILY = 8;
+
+    /** v74 - would the family at {@code index} actually CONVERT this piece, or
+     * is its entry gate the only thing that is true?
+     *
+     * <p>{@link #choosePlanTutorPiece} has always asked each family for its own
+     * completing names, and each family answers with its ENTRY gate alone -
+     * every one of those methods says so in its own javadoc. For a
+     * hand-destination search v63's C2 then dropped the castability forecast
+     * too, which left the entry gate as the whole test. In a deck built around
+     * one of these families that gate is true on nearly every turn, and the
+     * measured result was a tutor spent on a combo piece with no live route in
+     * 9 of 11 steerings (diagnosis section 5).</p>
+     *
+     * <p>The right test is the family's OWN act-time logic, run against the
+     * hand we would have after the search resolves, accepting only a
+     * {@code mana:} shortfall - the one thing a later turn fixes on its own.
+     * <b>Exactly one family exposes such a predicate: Doomsday</b>, through
+     * v74's {@link CubeDoomsdayPlan#wouldConvert}. It is also the family the
+     * measured defect is in, and the family whose act-time declines
+     * ({@code no-pile-route}) are structural rather than mana.</p>
+     *
+     * <p>The other eight families in {@link #planCompletingFamilies} - Breach,
+     * Storm, Kiki, Thopter, Bomb, Monolith, Kitten, Top - expose
+     * {@code completingPieceNames(Player)} and nothing else: their act-time
+     * logic is an instance {@code nextAction()} evaluated against the LIVE hand,
+     * which cannot be asked about a hypothetical one, and which prints markers
+     * and advances plan stages besides. They therefore KEEP their v63 behaviour
+     * here, unchanged and byte for byte, and this method returns true for them.
+     * Giving each of them its own {@code wouldConvert} is the obvious follow-up
+     * and is out of this increment's file scope.</p>
+     *
+     * <p>The hypothetical hand is our own live hand plus the offered card. No
+     * zone is written, nothing is printed, and no RNG is consumed.</p> */
+    private static boolean familyConverts(Player player, int index, Card piece) {
+        if (index != DOOMSDAY_FAMILY) return true;
+        java.util.List<Card> hand = new java.util.ArrayList<>(player.getCardsIn(ZoneType.Hand));
+        hand.add(piece);
+        return CubeDoomsdayPlan.wouldConvert(player, hand);
+    }
 
     /** v60 - every family's completing names, in ONE fixed order, built once
      * and shared by the two consumers so they cannot drift: Breach, Storm,

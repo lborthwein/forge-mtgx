@@ -82,7 +82,18 @@ public final class CubeDoomsdayPlan {
 
     public CubeDoomsdayPlan(Player player) { this.player = player; }
 
+    /** v74: when non-null, {@link #inHand} reads THIS collection instead of our
+     * own live hand. Set by {@link #wouldConvert} alone, on a throwaway plan
+     * object it constructs itself, so every live decision path - every
+     * {@link #nextAction}, every route, every bridge - sees {@code null} here
+     * and reads the real hand exactly as v43..v73 did. */
+    private java.util.Collection<Card> handOverride;
+
     private Card inHand(String name) {
+        if (handOverride != null) {
+            for (Card card : handOverride) if (card.getName().equals(name)) return card;
+            return null;
+        }
         for (Card card : player.getCardsIn(ZoneType.Hand)) if (card.getName().equals(name)) return card;
         return null;
     }
@@ -929,6 +940,103 @@ public final class CubeDoomsdayPlan {
                 || player.getCardsIn(ZoneType.Library).size() <= 5 || player.getLife() <= 1)
             return java.util.List.of();
         return java.util.List.of("Doomsday");
+    }
+
+    /** v74 - the CONVERTIBILITY test {@link #completingPieceNames} is not and
+     * was never meant to be. The entry gate above answers "is this family one
+     * named card short"; this answers "with that card in our hand, would this
+     * plan's own act-time logic still refuse, for a reason a later turn does
+     * not fix". It exists because v63's C2 hand steering consulted only the
+     * entry gate - which in a Doomsday deck is true on essentially every turn -
+     * and so spent 11 of 11 measured Demonic Tutors on a Doomsday, of which 7
+     * never produced a cast and 7 displaced a body the deck needed. See
+     * runs/2026-09-12-doom-worsened-pair-v67/diagnosis.md sections 2, 5 and 6.
+     *
+     * <p>The routes below are {@link #pileAction}'s and {@link #naturalRoute}'s
+     * own, in {@link #pileAction}'s own evaluation order, with exactly ONE
+     * class of gate dropped: every MANA gate. A mana shortfall really is the
+     * one thing a later turn fixes on its own - and the measured declines were
+     * not mana ({@code mana:} appeared once, transiently) but
+     * {@code no-pile-route}, a devotion and route-enabler shortfall that
+     * waiting does not fix. So a board that is short only {@code BBB} still
+     * accepts the steering, exactly as C2 intended; a board with no live route
+     * no longer does.</p>
+     *
+     * <p>Concretely, and reusing this class's own predicates: Ancestral Recall
+     * in hand with three draws left (the Recall route); or Gush in our own deck
+     * with two Island-subtype lands on our own battlefield and then either Gush
+     * itself in hand at a pile-sized library or a Chromatic Star of ours on the
+     * battlefield (the Gush route - note that the Star must be IN PLAY, which
+     * is exactly the shortfall the measured game had); or
+     * {@link #oracleThreshold} >= 5 with Thassa's Oracle in hand, or >= 4
+     * without it plus a draw and {@link #ownBlueSources} >= 2 (the two natural
+     * routes).</p>
+     *
+     * <p>Three deliberate scoping decisions, each recorded rather than
+     * discovered later:</p>
+     * <ul>
+     * <li>No payment probe is run. {@link #playable}, {@link #starAbility} and
+     *     {@link #alternateGush} all call {@code canPayCost}, and
+     *     {@link #ownVisibleBlack} asks a LIVE mana ability {@code canProduce};
+     *     {@link #completingPieceNames}' own javadoc records why that is not
+     *     acceptable in a predicate consulted per tutor candidate. Every read
+     *     here is a structural one, and {@link #ownBlueSources} copies the
+     *     ability with us as the activator for the same reason it already
+     *     does.</li>
+     * <li>The turn-local act-time gates are NOT part of this test:
+     *     {@code better-attack}, {@code clock}, {@code stack-not-empty} and
+     *     {@code phase}. They describe this turn, not the route, and the
+     *     selection site has already applied its own window and its own
+     *     {@code lethalOrdinaryAttackNow} test. {@code oracle-etb-disabled} IS
+     *     applied, on the two natural routes alone, because that is where
+     *     {@link #naturalRoute} applies it.</li>
+     * <li>The library size read is the LIVE one, matching
+     *     {@link #completingPieceNames}, not the post-fetch size, so this
+     *     predicate can never contradict the gate it filters.</li>
+     * </ul>
+     *
+     * <p>Own hand (the hypothetical one), own battlefield, own graveyard, our
+     * own library SIZE and our own registered deck composition. Nothing
+     * hidden, no RNG, no state change, and nothing printed.</p>
+     *
+     * @param hypotheticalHand our own hand as it would be AFTER the search
+     * resolves - the live hand plus the card being considered. */
+    static boolean wouldConvert(Player player, java.util.Collection<Card> hypotheticalHand) {
+        CubeDoomsdayPlan plan = new CubeDoomsdayPlan(player);
+        plan.handOverride = hypotheticalHand;
+        return plan.routeLiveApartFromMana();
+    }
+
+    /** {@link #wouldConvert}'s body, an instance method so it reads through
+     * this class's own predicates and the {@link #handOverride}. */
+    private boolean routeLiveApartFromMana() {
+        // The entry gate, re-read against the hypothetical hand.
+        if (inHand("Doomsday") == null || player.getLife() <= 1 || !availableInOwnDeck("Thassa's Oracle")
+                || player.getCardsIn(ZoneType.Library).size() <= 5) return false;
+        // pileAction's Recall route, without its B B B U U U payment.
+        if (player.canDrawAmount(3) && inHand("Ancestral Recall") != null) return true;
+        // pileAction's Gush route, without its B B B U U payment: the deck
+        // prerequisite, the two Islands, and then either the direct Gush or the
+        // battlefield Chromatic Star the reservation needs.
+        long islands = player.getCardsIn(ZoneType.Battlefield).stream()
+                .filter(card -> card.getType().hasSubtype("Island")).count();
+        if (availableInOwnDeck("Gush") && islands >= 2
+                && (inHand("Gush") != null && gushReachesOracle(5) || ownStarInPlay() != null)) return true;
+        // naturalRoute's two routes, with its own thresholds and its own
+        // trigger-disabled gate, without its B B B U U / B B B payment.
+        if (oracleTriggerDisabled()) return false;
+        int threshold = oracleThreshold(false);
+        if (inHand("Thassa's Oracle") != null) return threshold >= 5;
+        return threshold >= 4 && player.canDrawAmount(1) && ownBlueSources() >= 2;
+    }
+
+    /** The Chromatic Star {@link #pileAction} would reserve for the Gush route,
+     * found by the same battlefield scan it uses, minus the {@link
+     * #starAbility} payment probe. Own public battlefield only. */
+    private Card ownStarInPlay() {
+        for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (!card.isFaceDown() && card.getName().equals("Chromatic Star")) return card;
+        return null;
     }
 
     public SpellAbility nextAction() {
