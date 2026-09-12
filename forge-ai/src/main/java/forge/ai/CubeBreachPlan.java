@@ -36,7 +36,19 @@ import java.util.function.Supplier;
  * them optionally paid for by our own Hullbreacher's Treasures). Every route
  * forecasts a win from own-visible information BEFORE its first irreversible
  * action, and the v41 route is evaluated first on every pass so a line that
- * already wins is never postponed.</p> */
+ * already wins is never postponed.</p>
+ *
+ * <p>v75 adds R0 {@link #breachSequence} IN FRONT of them: the breach2 opening
+ * panel measured {@code planEntryActions = 0} - Underworld Breach reached our
+ * own battlefield on 35 passes and every one of those entries was the ORDINARY
+ * AI's cast - and the Breach sacrifices itself at the beginning of the end
+ * step, so R1 and R2, which both require it already on the battlefield, were
+ * strictly downstream of a cast this plan never made. R0 makes the entry the
+ * plan's own, on a board where the R1 forecast proves the terminal over the
+ * post-Breach counts. v75 also broadens the tutor-facing completing name
+ * ({@link #completingPieceNames}), adds this family's
+ * {@link #wouldConvert} predicate for v74's steering gate, and counts
+ * colourless mana in {@link #wheelTerminal}'s pool.</p> */
 public final class CubeBreachPlan {
     private static final String BREACH = "Underworld Breach", LED = "Lion's Eye Diamond", FREEZE = "Brain Freeze";
     private static final List<String> ENGINES = List.of("Black Lotus", LED, "Lotus Petal");
@@ -93,6 +105,11 @@ public final class CubeBreachPlan {
      * route writes a token ONLY when its own route card is own-visible and
      * {@link #breachReady} is true; otherwise the token the v41 route wrote
      * stands unchanged, which is what preserves every pre-v64 decline line.
+     * v75 adds {@code sequence-no-gain}, {@code sequence-engine-disabled} and
+     * {@code sequence-unaffordable} under the same discipline: R0 writes none
+     * of them unless an Underworld Breach is in OUR OWN HAND and a High Tide
+     * is own-visible on the same pass, so every pre-v75 decline line stands
+     * byte for byte.
      * {@code wheel-draw-denied} names the class of opposing permanent, read
      * from the public battlefield, never a hand or a library.</p> */
     private String decline = "other check=breach-plan";
@@ -134,8 +151,18 @@ public final class CubeBreachPlan {
      * {@link #escapeChoices} is byte-identical there. */
     private Set<String> routeKeys = Set.of();
 
+    /** v75, predicate-only: a HYPOTHETICAL hand this instance reads instead of
+     * our own live one. Set by {@link #wouldConvert} alone, on a throwaway plan
+     * object it constructs itself, so every live decision path - every
+     * {@link #nextAction}, every route, every bridge - sees {@code null} here
+     * and reads the real hand exactly as v41..v74 did. The same shape as v74's
+     * {@code CubeDoomsdayPlan.handOverride}. */
+    private java.util.Collection<Card> handOverride;
+
     private Card find(String name, ZoneType zone) {
-        for (Card card : player.getCardsIn(zone))
+        Iterable<Card> cards = handOverride != null && zone == ZoneType.Hand
+                ? handOverride : player.getCardsIn(zone);
+        for (Card card : cards)
             if (card != excluded && !card.isFaceDown() && name.equals(card.getName())) return card;
         return null;
     }
@@ -193,9 +220,110 @@ public final class CubeBreachPlan {
      *
      * <p>Deliberately still the v41 gate in v64: the new routes get no tutor
      * selection, because this predicate and {@link #discardProtectedCards} are
-     * read by four other suites whose receipts must not move.</p> */
+     * read by four other suites whose receipts must not move.</p>
+     *
+     * <p><b>v75</b> adds exactly one clause, in {@link #completingNames}, and
+     * only where {@link #missingPieces} answers nothing at all. The breach2
+     * panel measured {@code missing=Brain_Freeze} on 264 of 370 breach
+     * declines - 71% - on a deck holding three admitted tutors, and the
+     * singleton terminal was never fetched: with the Breach and a Lotus-type
+     * engine in our own hand below the hand route's fuel gate the v41 count
+     * makes the gate TWO halves short, so this method named nothing and no
+     * tutor could be steered, while the plan's own decline on the same pass
+     * read {@code missing=Brain_Freeze}. {@link #discardProtectedCards} keeps
+     * calling {@link #missingPieces} and does not see the clause: its contract
+     * is the last obtainable copy of a gate that is ALREADY complete, which is
+     * a different question and is read by four suites whose receipts must not
+     * move.</p> */
     static java.util.List<String> completingPieceNames(Player player) {
-        return new CubeBreachPlan(player).missingPieces();
+        return new CubeBreachPlan(player).completingNames();
+    }
+
+    /** v75 - {@link #missingPieces} plus the Brain Freeze clause. Named only
+     * when the v41 gate reports nothing, no Brain Freeze is own-visible to
+     * this plan at all, a Lotus-type fuel source IS own-visible, and an
+     * Underworld Breach is in our own hand or on our own battlefield. A copy
+     * in the GRAVEYARD is deliberately not counted, for v68's own recorded
+     * reason: an Underworld Breach there grants escape to nothing. Own hand,
+     * battlefield and graveyard and our own library SIZE only. */
+    private java.util.List<String> completingNames() {
+        java.util.List<String> v41 = missingPieces();
+        if (!v41.isEmpty() || freeze() != null || engine() == null) return v41;
+        return breachEntryLive(fuel()) && millableOpponent() ? java.util.List.of(FREEZE) : v41;
+    }
+
+    /** v75 - is a usable Underworld Breach reachable THIS TURN apart from the
+     * mana? Three ways, and the third is what v75 itself adds:
+     * <ol>
+     * <li>{@link #breachReady}: already on our own battlefield, or in our own
+     *     hand under the v41 hand route's own {@code fuel >= 6} and
+     *     {@code library >= 4} gate;</li>
+     * <li>(the same method, hand branch) - kept verbatim, so nothing the v41
+     *     route admits is narrowed here;</li>
+     * <li><b>R0</b>: in our own hand with a High Tide own-visible and at least
+     *     one untapped Island. {@link #breachSequence} enters from that board
+     *     and needs NO graveyard fuel at all, which is exactly why the fuel
+     *     threshold can be dropped in this branch and only in this branch.</li>
+     * </ol>
+     *
+     * <p>Our own hand, battlefield and graveyard and our own library SIZE
+     * only.</p> */
+    private boolean breachEntryLive(int fuel) {
+        if (breachReady(fuel)) return true;
+        return find(BREACH, ZoneType.Hand) != null && routeCard(TIDE) != null && islands() >= 1;
+    }
+
+    /** The opponent half of {@link #freezeRoute}'s {@code no-mill-route}
+     * clause, as a predicate: one opponent, we can still win, their library is
+     * not empty and they can lose to being milled. Public zones only. */
+    private boolean millableOpponent() {
+        if (player.cantWin() || player.getOpponents().size() != 1) return false;
+        Player opponent = player.getOpponents().get(0);
+        return !opponent.getCardsIn(ZoneType.Library).isEmpty()
+                && !opponent.cantLoseCheck(GameLossReason.Milled);
+    }
+
+    /** v75 - the v74 convertibility predicate for THIS family, the same shape
+     * as {@code CubeDoomsdayPlan.wouldConvert}: would the v41 Brain Freeze
+     * route actually be live against the hand we would hold after a search
+     * resolves, apart from the mana? Read by
+     * {@code CubeComboAi.familyConverts}, which is reached only from v63's C2
+     * hand-destination path. No zone is written, nothing is printed and no RNG
+     * is consumed. */
+    static boolean wouldConvert(Player player, java.util.Collection<Card> hypotheticalHand) {
+        CubeBreachPlan plan = new CubeBreachPlan(player);
+        plan.handOverride = hypotheticalHand;
+        return plan.routeLiveApartFromMana();
+    }
+
+    /** {@link #wouldConvert}'s body, an instance method so it reads through
+     * this class's own predicates and the {@link #handOverride}.
+     *
+     * <p>Every clause is one of {@link #freezeRoute}'s own STRUCTURAL declines
+     * - {@code no-mill-route}, {@code missing=Brain_Freeze},
+     * {@code finisher-untargetable}, {@code missing=Lotus-engine} and
+     * {@code breach-not-ready:fuel=<n>} - and the mana declines
+     * ({@code breach-unaffordable}, {@code engine-unaffordable},
+     * {@code freeze-unaffordable}) are the ones deliberately dropped, exactly
+     * as v74 drops Doomsday's payment.</p>
+     *
+     * <p><b>The fuel threshold is kept where it is the only entry.</b>
+     * {@code breach-not-ready:fuel=<n>} is not a mana shortfall: it counts
+     * non-key cards in our own graveyard, it is the threshold
+     * {@link #breachReady} itself publishes, and v68's hold already treats it
+     * as a real horizon. A later turn does not supply it the way it supplies an
+     * untapped land, and dropping it outright would reintroduce in this family
+     * the very defect v74 measured in Doomsday - a tutor spent on a combo piece
+     * with no live route. {@link #breachEntryLive} therefore keeps it for the
+     * v41 hand route and drops it ONLY down R0's own entry, which needs no
+     * fuel because the High Tide, not the graveyard, is what pays.</p> */
+    private boolean routeLiveApartFromMana() {
+        if (!millableOpponent()) return false;
+        Player opponent = player.getOpponents().get(0);
+        Card freeze = freeze();
+        if (freeze == null || !freezeTargetable(freeze, opponent)) return false;
+        if (engine() == null) return false;
+        return breachEntryLive(fuel());
     }
 
     private java.util.List<String> missingPieces() {
@@ -374,7 +502,15 @@ public final class CubeBreachPlan {
         // already win this" clause - the two-sided forecast of tideRoute and
         // franticRoute - and because neither writes a token, or an action, on a
         // board with no High Tide own-visible.
-        SpellAbility action = tideRoute(opponent, fuel, storm);
+        // v75 R0 runs in front of R1/R2 for the reason their own comment
+        // gives about the v41 route: it is the only route that can put OUR OWN
+        // Underworld Breach on the battlefield below the hand route's fuel
+        // gate, and R1/R2 cannot evaluate at all until it has. It writes
+        // nothing and does nothing on a board with no Breach in our own hand
+        // and no High Tide own-visible.
+        SpellAbility action = breachSequence(opponent, fuel, storm);
+        if (action != null) return action;
+        action = tideRoute(opponent, fuel, storm);
         if (action != null) return action;
         action = franticRoute(opponent, fuel, storm);
         if (action != null) return action;
@@ -589,6 +725,148 @@ public final class CubeBreachPlan {
         return false;
     }
 
+    /** v75: mana sources we control that this plan's BLUE forecast does not
+     * already count - untapped non-Treasure permanents carrying a zero-cost
+     * mana ability that is playable and payable right now and that cannot make
+     * blue. They are what pays for Underworld Breach before a High Tide is
+     * worth anything, and counting them is what stops {@link #breachSequence}
+     * charging the Breach to the Islands the Tide is about to double. */
+    private int nonBlueSources() {
+        int count = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || isTreasure(card) || key(card)) continue;
+            if (floatFrom(card, "U", MagicColor.BLUE) != null) continue;
+            if (zeroCostMana(card)) count++;
+        }
+        return count;
+    }
+
+    /** Does this permanent carry a zero-cost mana ability we could use right
+     * now? The same legality and payment discipline {@link #floatFrom} applies,
+     * without the colour question. */
+    private boolean zeroCostMana(Card card) {
+        for (SpellAbility original : card.getManaAbilities()) {
+            SpellAbility ability = original.copy(player);
+            if (!CubeComboAi.canPlayNative(ability, player) || ability.getPayCosts().getTotalMana().getCMC() != 0
+                    || !CubeComboAi.canPayCost(ability, player, false)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    /** v75: mana we can make right now that is COLOURLESS and no colour at all
+     * - Sol Ring, Mana Crypt, Ancient Tomb - plus floating colourless. These
+     * raise real castability ({@code canPayCost} prices them) but never raise
+     * {@link #colorMana}, which is what {@link #wheelTerminal}'s pool was built
+     * from, so the v64 forecast counted them at ZERO and could answer
+     * {@code wheel-no-terminal} on a board that pays for the wheel. Registered
+     * as a known conservatism before the breach2 panel ran
+     * ({@code 2026-09-12-breach2-dev-deck/rationale.md}, item 4).
+     *
+     * <p>Counted once each. Treasures are excluded because {@link #treasures}
+     * already counts them; a source that can make ANY colour is excluded
+     * because {@link #colorMana} already counts it wherever its colour
+     * matters.</p> */
+    private int colorlessSources() {
+        int count = player.getManaPool().getAmountOfColor(MagicColor.COLORLESS);
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || isTreasure(card) || key(card)) continue;
+            if (colorlessOnly(card)) count++;
+        }
+        return count;
+    }
+
+    private boolean colorlessOnly(Card card) {
+        for (SpellAbility original : card.getManaAbilities()) {
+            SpellAbility ability = original.copy(player);
+            if (!CubeComboAi.canPlayNative(ability, player) || ability.getPayCosts().getTotalMana().getCMC() != 0
+                    || !CubeComboAi.canPayCost(ability, player, false)) continue;
+            var mana = ability.getManaPart();
+            if (!mana.canProduce("C", ability)) continue;
+            boolean colored = false;
+            for (String symbol : List.of("W", "U", "B", "R", "G"))
+                if (mana.canProduce(symbol, ability)) colored = true;
+            if (!colored) return true;
+        }
+        return false;
+    }
+
+    /** R0 - v75's Breach sequencing. The breach2 opening panel measured
+     * {@code planEntryActions = 0}: this plan never once cast its own
+     * Underworld Breach in 32 games, while the ordinary AI cast it 9 times at
+     * moments of its own choosing. Because the Breach sacrifices itself at the
+     * beginning of the end step, R1 and R2 - which both require it ALREADY on
+     * the battlefield - were strictly downstream of an entry this plan did not
+     * make, and fired 0 times on 35 passes with the Breach down.
+     *
+     * <p>R0's only action is the Breach cast itself. The High Tide, the Frantic
+     * Search and the terminal are taken afterwards by the unchanged R1/R2,
+     * from a board where the Breach really is on the battlefield. The
+     * alternative - relaxing R1's own gate to "or we would cast it this turn" -
+     * is deliberately NOT taken: R1 would then resolve a High Tide with the
+     * Breach still in hand, and a Tide spent in front of an unaffordable Breach
+     * is exactly the wasted card v68's hold exists to refuse.</p>
+     *
+     * <p>Gate discipline, as in v64: a board with no Underworld Breach in OUR
+     * OWN HAND, or no High Tide own-visible, returns null with NO token and no
+     * action, so every pre-v75 decline line is preserved byte for byte.
+     * Frantic Search alone is not admitted, because R2's own gate needs a
+     * RESOLVED High Tide.</p>
+     *
+     * <p>When the forecast fails, R0 declines and v68's {@link #holdBreach}
+     * governs the ordinary AI's cast exactly as before - clause 5 asks a fresh
+     * probe for an action and still gets none. When the forecast succeeds the
+     * probe now proposes the Breach and the hold RELEASES, which is correct:
+     * the cast is no longer a wasted card.</p> */
+    private SpellAbility breachSequence(Player opponent, int fuel, int storm) {
+        if (find(BREACH, ZoneType.Battlefield) != null) return null;
+        Card breach = find(BREACH, ZoneType.Hand);
+        if (breach == null) return null;
+        Card tide = routeCard(TIDE);
+        if (tide == null) return null;
+        int remaining = opponent.getCardsIn(ZoneType.Library).size();
+        Card freeze = freeze();
+        if (freeze == null || remaining == 0 || opponent.cantLoseCheck(GameLossReason.Milled)
+                || !freezeTargetable(freeze, opponent)) return routeDecline("sequence-no-gain");
+        int blue = player.getManaPool().getAmountOfColor(MagicColor.BLUE);
+        int islands = islands(), other = Math.max(0, colorMana("U", MagicColor.BLUE) - blue - islands);
+        // The Breach's own cost comes out of the mana this blue forecast does
+        // NOT count first, then out of the single blue sources, and only last
+        // out of the Islands - each of which is worth two once the Tide has
+        // resolved, so spending them first would both misprice the line and be
+        // the payment the native engine is least likely to choose.
+        int cost = breach.getCMC();
+        cost -= Math.min(nonBlueSources(), cost);
+        int take = Math.min(other, cost); other -= take; cost -= take;
+        take = Math.min(blue, cost); blue -= take; cost -= take;
+        take = Math.min(islands, cost); islands -= take; cost -= take;
+        // The Tide's own {U}, priced exactly as R1 prices it.
+        int islandPays = blue == 0 && other == 0 ? 1 : 0;
+        if (islands < islandPays || blue + islands + other < 1) return routeDecline("sequence-no-gain");
+        int routeFuel = fuel - graveyardRouteCards();
+        int tideCost = tide.isInZone(ZoneType.Graveyard) ? escapeCost(tide) : 0;
+        Card engine = engine();
+        boolean fromHand = find(FREEZE, ZoneType.Hand) != null;
+        // The Breach and the Tide are both spells cast this turn, so the storm
+        // the terminal will see is two higher than the one on this pass.
+        if (!enoughToMill(routeFuel - tideCost,
+                blue + 2 * (islands - islandPays) + other - (1 - islandPays),
+                engine, fromHand, storm + 2, remaining)) return routeDecline("sequence-no-gain");
+        // An on-board disabled engine is not a reason to spend the Breach -
+        // freezeRoute's own clause, in this route's token namespace.
+        if (engine != null && engine.isInPlay() && crack(engine) == null)
+            return routeDecline("sequence-engine-disabled");
+        routeKeys = Set.copyOf(ROUTE_CARDS);
+        reservedEngine = engine != null && engine.isInPlay() ? engine : null;
+        SpellAbility entry = select(reserveEngine(() -> spell(breach)));
+        if (entry == null) {
+            routeKeys = Set.of();
+            reservedEngine = null;
+            return routeDecline("sequence-unaffordable");
+        }
+        return entry;
+    }
+
     /** R1 - High Tide as fuel for the v41 Brain Freeze terminal. Gated on a
      * Breach already on our battlefield and a High Tide own-visible, so no
      * board without a High Tide can reach a v64 token. Casts the Tide only
@@ -792,17 +1070,31 @@ public final class CubeBreachPlan {
         Card breachInHand = find(BREACH, ZoneType.Battlefield) == null ? find(BREACH, ZoneType.Hand) : null;
         int pool = Math.max(0, colorMana("R", MagicColor.RED)
                 - (breachInHand == null ? 0 : breachInHand.getCMC()));
+        // v75: the colourless half of the pool. The subtraction above is
+        // deliberately NOT allowed to draw on it, which over-charges red by up
+        // to the Breach's generic half and can only WITHHOLD a proposal.
+        int colorless = colorlessSources();
         int f = fuel - graveyardRouteCards(), s = storm, treasure = treasures();
         int ourLibrary = player.getCardsIn(ZoneType.Library).size();
         int opponentLibrary = opponent.getCardsIn(ZoneType.Library).size();
         int hand = player.getCardsIn(ZoneType.Hand).size() - (breachInHand == null ? 0 : 1);
         for (int iteration = 0; iteration < 8; iteration++) {
             if (ourLibrary < WHEEL_DRAW) return null;
-            int need = 3; // {2}{R}
-            int fromPool = Math.min(pool, need);
-            pool -= fromPool; need -= fromPool;
-            int fromTreasure = Math.min(treasure, need);
-            treasure -= fromTreasure; need -= fromTreasure;
+            // v75: the wheel's cost is priced as its printed shape rather
+            // than as a lump of three, so the COLOURLESS half of the pool can
+            // pay the generic half. Red pays the coloured symbol first, then a
+            // Treasure; the generic half is then paid from colourless mana,
+            // from what is left of the red, and from Treasures. With
+            // colorless == 0 every residual here is arithmetically identical to
+            // v64's two lines, which is what keeps every existing wheel row
+            // byte for byte.
+            int colored = 1, generic = 2; // {2}{R}
+            int take = Math.min(pool, colored); pool -= take; colored -= take;
+            take = Math.min(treasure, colored); treasure -= take; colored -= take;
+            take = Math.min(colorless, generic); colorless -= take; generic -= take;
+            take = Math.min(pool, generic); pool -= take; generic -= take;
+            take = Math.min(treasure, generic); treasure -= take; generic -= take;
+            int need = colored + generic;
             while (need > 0) {
                 if (engineYield == 0) return null;
                 if (!engineInPlay) {
@@ -824,11 +1116,11 @@ public final class CubeBreachPlan {
             if (hullbreacher) treasure += WHEEL_DRAW;
             else opponentLibrary = Math.max(0, opponentLibrary - WHEEL_DRAW);
             if (millable && 3L * (s + 1) >= opponentLibrary && opponentLibrary > 0
-                    && payable(1, 1, blue, f, treasure, engineYield, engineEscape, freezeEscape)) return "freeze";
+                    && payable(1, 1, blue, f, treasure, engineYield, engineEscape, freezeEscape, colorless)) return "freeze";
             if (drainable && 2L * (s + 1) >= life
-                    && payable(2, 2, black, f, treasure, engineYield, engineEscape, tendrilsEscape)) return "tendrils";
+                    && payable(2, 2, black, f, treasure, engineYield, engineEscape, tendrilsEscape, colorless)) return "tendrils";
             if (oracle != null && ourLibrary == 0
-                    && payable(0, 2, blue, f, treasure, engineYield, engineEscape, oracleEscape)) return "oracle";
+                    && payable(0, 2, blue, f, treasure, engineYield, engineEscape, oracleEscape, colorless)) return "oracle";
         }
         return null;
     }
@@ -838,13 +1130,19 @@ public final class CubeBreachPlan {
      * fuel; a Treasure is one mana of any colour, and one more Lotus-type
      * activation is available when enough fuel is left over for both escapes.
      * Sources that cannot make the required colour are deliberately not counted
-     * toward the generic half either, which understates the pool. */
+     * toward a coloured symbol.
+     *
+     * <p>v75 closes the understatement this method's own v64 comment named:
+     * {@code colorless} - what is left of {@link #colorlessSources} after the
+     * wheel itself has been paid for - is counted toward the GENERIC half and
+     * never toward a coloured symbol. With {@code colorless == 0} the answer is
+     * v64's, bit for bit.</p> */
     private static boolean payable(int generic, int colored, int sources, int fuel, int treasure,
-                                   int engineYield, int engineEscape, int terminalEscape) {
+                                   int engineYield, int engineEscape, int terminalEscape, int colorless) {
         if (fuel < terminalEscape) return false;
         int extra = engineYield > 0 && fuel >= terminalEscape + engineEscape ? engineYield : 0;
         int available = sources + treasure + extra;
-        return available >= colored && available >= generic + colored;
+        return available >= colored && available + colorless >= generic + colored;
     }
 
     // ---------------------------------------------------------------- v68
