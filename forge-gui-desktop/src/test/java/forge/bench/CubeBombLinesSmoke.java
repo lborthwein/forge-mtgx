@@ -75,6 +75,18 @@ public final class CubeBombLinesSmoke {
      * read. `c_1_1_a_servo` is what Retrofitter Foundry's {2}, {T} ability makes
      * and what its flying-Thopter ability sacrifices. */
     private static final String SERVO = "c_1_1_a_servo";
+    /** v71 Tinker positions. Tinker is the library->battlefield cheat-in the
+     * census names; Portal to Phyrexia and Blightsteel Colossus are the two
+     * payloads its own printed script can reach; Juggernaut is the valueless
+     * one (two printed STATIC abilities, no trigger at all, 5 power); the
+     * Ornithopter is the expendable artifact the sacrifice is paid with and
+     * Sensei's Divining Top the piece another plan owns. */
+    private static final String TINKER = "Tinker";
+    private static final String PORTAL = "Portal to Phyrexia";
+    private static final String JUGGERNAUT = "Juggernaut";
+    private static final String ORNITHOPTER = "Ornithopter";
+    private static final String PETAL = "Lotus Petal";
+    private static final String TOP = "Sensei's Divining Top";
 
     /** Prepared positions (a)-(g) of the owner's question. Each is legal and
      * already assembled: the only thing under observation is whether Default
@@ -199,6 +211,23 @@ public final class CubeBombLinesSmoke {
             "value-ulamog:reanimate",      // V11 term 5 ALONE passes the gate
             "value-blightsteel:reanimate");// V12 the shuffle replacement blocks term 5
 
+    /** v71 Tinker cases (registration.md, suite `tinker`). Every one is a NEW
+     * base, so no preserved row of any suite can move. T1/T1b are the
+     * MUST-MOVE pair and T1b is the library-ORDER control: the same
+     * composition with the payload thirty cards deeper must produce the same
+     * decision. T7 is the census's claim (c), recorded rather than asserted -
+     * `CubeBombPlan` is said to admit and prefer Portal under Show and Tell
+     * already. */
+    private static final List<String> TINKER_CASES = List.of(
+            "tinker-portal",          // T1 the library holds Portal; the opponent has three creatures
+            "tinker-portal:deep",     // T1b the same composition, the payload 30 cards deeper
+            "tinker-blightsteel",     // T2 Blightsteel AND Portal in the library: which is fetched
+            "tinker-vanilla",         // T3 the library's only artifact is a vanilla beater
+            "tinker-sac-safe",        // T4 an expendable artifact beside the piece
+            "tinker-sac-choice",      // T5 only a spent Petal beside the piece
+            "tinker-no-sac",          // T6 no artifact on our battlefield at all
+            "showtell-portal");       // T7 the census's claim (c), RECORDED
+
     /** Registered starting life. 20 everywhere else, and no preserved row ever
      * calls setLife. */
     private static int ownLife(String control) {
@@ -232,6 +261,13 @@ public final class CubeBombLinesSmoke {
             "value-annihilator", "value-ashen", "value-wurm", "value-griselbrand",
             "value-sneak-choice", "value-ulamog", "value-blightsteel"));
 
+    /** v71: the bases suite `tinker` owns. Same by-base opponent switch the
+     * conversion suite uses, kept separate so no preserved control's
+     * placements are touched. */
+    private static final Set<String> TINKER_BASES = new HashSet<>(List.of(
+            "tinker-portal", "tinker-blightsteel", "tinker-vanilla",
+            "tinker-sac-safe", "tinker-sac-choice", "tinker-no-sac", "showtell-portal"));
+
     private static String base(String control) { return control.split(":")[0]; }
     private static String variant(String control) { return control.contains(":") ? control.split(":", 2)[1] : ""; }
 
@@ -250,6 +286,13 @@ public final class CubeBombLinesSmoke {
             case "value-griselbrand" -> GRISELBRAND;
             case "value-ulamog" -> ULAMOG;
             case "value-blightsteel" -> BLIGHTSTEEL;
+            // v71: the card whose arrival on OUR battlefield is the point of
+            // the Tinker line. For `tinker-blightsteel` that is the bigger of
+            // the two library artifacts, which is what claim (b) is about.
+            case "tinker-blightsteel" -> BLIGHTSTEEL;
+            case "tinker-vanilla" -> JUGGERNAUT;
+            case "tinker-portal", "tinker-sac-safe", "tinker-sac-choice",
+                 "tinker-no-sac", "showtell-portal" -> PORTAL;
             default -> EMRAKUL;
         };
     }
@@ -459,6 +502,62 @@ public final class CubeBombLinesSmoke {
                     if (!variant.equals("half")) result.add(new Placement("Mountain", ZoneType.Hand));
                     for (int i = 0; i < 3; i++) result.add(new Placement("Forest", ZoneType.Battlefield));
                 }
+                // ------------------------------------- v71 Tinker positions
+                case "tinker-portal", "tinker-sac-safe", "tinker-sac-choice", "tinker-no-sac" -> {
+                    // T1/T4/T5/T6. One Tinker, three Islands for its {2}{U},
+                    // and Portal to Phyrexia as the library's ONLY artifact, so
+                    // the fetch itself has no choice to make and the row is
+                    // about the CAST. The battlefield artifact is what changes:
+                    //   tinker-portal    an expendable Ornithopter alone
+                    //   tinker-sac-safe  the Ornithopter beside a plan piece
+                    //   tinker-sac-choice  a Lotus Petal beside that piece -
+                    //     the Petal is excluded BY NAME from tinker.txt's own
+                    //     `Artifact.cmcEQ0+...+!namedLotus Petal` preference
+                    //     tier, so the native payment reaches the {1} tier and
+                    //     the piece is what it would take
+                    //   tinker-no-sac    no artifact at all: the cost is unpayable
+                    result.add(new Placement(TINKER, ZoneType.Hand));
+                    if (!base.equals("tinker-no-sac"))
+                        result.add(new Placement(base.equals("tinker-sac-choice") ? PETAL : ORNITHOPTER,
+                                ZoneType.Battlefield));
+                    if (base.equals("tinker-sac-safe") || base.equals("tinker-sac-choice"))
+                        result.add(new Placement(TOP, ZoneType.Battlefield));
+                    for (int i = 0; i < 3; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+                    // T1b: the SAME library composition with the payload thirty
+                    // cards deeper. A decision that reads composition and not
+                    // order must be identical on both rows.
+                    if (variant.equals("deep"))
+                        for (int i = 0; i < 30; i++) result.add(new Placement("Forest", ZoneType.Library));
+                    result.add(new Placement(PORTAL, ZoneType.Library));
+                }
+                case "tinker-blightsteel" -> {
+                    // T2. Both payloads in the library. Census claim (b) is that
+                    // Forge's own hidden-origin chooser takes the most expensive
+                    // artifact, which is Blightsteel Colossus (12) over Portal
+                    // to Phyrexia (9).
+                    result.add(new Placement(TINKER, ZoneType.Hand));
+                    result.add(new Placement(ORNITHOPTER, ZoneType.Battlefield));
+                    for (int i = 0; i < 3; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+                    result.add(new Placement(BLIGHTSTEEL, ZoneType.Library));
+                    result.add(new Placement(PORTAL, ZoneType.Library));
+                }
+                case "tinker-vanilla" -> {
+                    // T3. The library's only artifact is a vanilla beater: two
+                    // printed STATIC abilities, no trigger, 5 power, and a
+                    // public 2/2 to block it. Nothing here clears a value floor.
+                    result.add(new Placement(TINKER, ZoneType.Hand));
+                    result.add(new Placement(ORNITHOPTER, ZoneType.Battlefield));
+                    for (int i = 0; i < 3; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+                    result.add(new Placement(JUGGERNAUT, ZoneType.Library));
+                }
+                case "showtell-portal" -> {
+                    // T7. The census's claim (c): Show and Tell with Portal to
+                    // Phyrexia in HAND, against an opponent with three creatures
+                    // for Portal's enters trigger to take.
+                    result.add(new Placement(SHOWTELL, ZoneType.Hand));
+                    result.add(new Placement(PORTAL, ZoneType.Hand));
+                    for (int i = 0; i < 4; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+                }
                 default -> throw new AssertionError("unknown line " + base);
             }
         } else if (CONVERSION_BASES.contains(base)) {
@@ -524,6 +623,27 @@ public final class CubeBombLinesSmoke {
                 case "value-ulamog", "value-blightsteel" -> result.add(new Placement(BEAST, ZoneType.Battlefield));
                 // breach-pick-infect and sneak-choice give the opponent no
                 // board at all: an empty public battlefield is the position.
+                default -> { }
+            }
+        } else if (TINKER_BASES.contains(base)) {
+            // v71: three creatures wherever the payload's enters trigger is
+            // what the row is about (Portal to Phyrexia makes each opponent
+            // sacrifice three), one blocker where the question is whether a
+            // vanilla beater is worth fetching, and nothing at all where the
+            // row is about the fetch itself.
+            switch (base) {
+                case "tinker-portal", "tinker-sac-safe", "tinker-sac-choice", "tinker-no-sac" -> {
+                    for (int i = 0; i < 3; i++) result.add(new Placement(BEARS, ZoneType.Battlefield));
+                }
+                case "showtell-portal" -> {
+                    for (int i = 0; i < 3; i++) result.add(new Placement(BEARS, ZoneType.Battlefield));
+                    // v52 2(e): Forge's hidden-origin gate refuses Show and Tell
+                    // when any named player's origin zone is EMPTY, so the
+                    // opponent is given a permanent to put in. This is the same
+                    // `opp-hand` shape the v52 suite already registers.
+                    result.add(new Placement(SPIDER, ZoneType.Hand));
+                }
+                case "tinker-vanilla" -> result.add(new Placement(BEARS, ZoneType.Battlefield));
                 default -> { }
             }
         } else {
@@ -665,8 +785,40 @@ public final class CubeBombLinesSmoke {
         return (int) player.getCardsIn(ZoneType.Battlefield).stream().filter(Card::isToken).count();
     }
 
+    /** v71: our own battlefield artifacts, sorted. The Tinker row's whole
+     * sacrifice question is which of these is gone at the end, so it is read
+     * from the zone before and after, exactly the way every other receipt in
+     * this fixture is read. */
+    private static List<String> ownArtifacts(Player player) {
+        List<String> names = new ArrayList<>();
+        for (Card c : player.getCardsIn(ZoneType.Battlefield))
+            if (c.isArtifact()) names.add(c.isFaceDown() ? "face-down" : c.getName().replace(' ', '_'));
+        java.util.Collections.sort(names);
+        return names;
+    }
+
+    /** Public creature count, for Portal to Phyrexia's enters trigger. */
+    private static int creatures(Player player) {
+        return (int) player.getCardsIn(ZoneType.Battlefield).stream().filter(Card::isCreature).count();
+    }
+
+    /** Our own graveyard, sorted - where the sacrificed artifact and the spent
+     * Tinker both end up. */
+    private static String ownGraveyard(Player player) {
+        List<String> names = new ArrayList<>();
+        for (Card c : player.getCardsIn(ZoneType.Graveyard)) names.add(c.getName().replace(' ', '_'));
+        java.util.Collections.sort(names);
+        return String.join(";", names);
+    }
+
+    /** How many artifact cards our own library still holds. Read AFTER the game
+     * by the fixture, never by policy code. */
+    private static int libraryArtifacts(Player player) {
+        return (int) player.getCardsIn(ZoneType.Library).stream().filter(Card::isArtifact).count();
+    }
+
     private static void run(boolean improved, int seat, PhaseType phase, String control, boolean conversion,
-            boolean payload, boolean value) {
+            boolean payload, boolean value, boolean tinker) {
         List<RegisteredPlayer> players = new ArrayList<>();
         for (int s = 0; s < 2; s++) players.add(new RegisteredPlayer(deck(s == seat, control)).setPlayer(
                 improved && s == seat ? new forge.ai.LobbyPlayerCubeComboAi("Combo-" + s) : defaultAi(s)));
@@ -692,6 +844,28 @@ public final class CubeBombLinesSmoke {
                 + " infoPolicy=CLOSED_REPAIR registered=40 initialMana=0 payoff=" + payoff(control).replace(' ', '_')
                 + " startIce=" + minIce(player));
         printHints(key, player);
+        // v71: the printed shape of every artifact this position makes a
+        // decision about, read straight off the Card the policy reads. The
+        // expendability rule (no activated ability other than a mana ability,
+        // no printed trigger) and the payload tier are both statements about
+        // these numbers, so the fixture prints them rather than asserting a
+        // rule it cannot see. Tinker suite only.
+        if (tinker) for (ZoneType zone : List.of(ZoneType.Battlefield, ZoneType.Library))
+            for (Card c : player.getCardsIn(zone)) {
+                if (!c.isArtifact()) continue;
+                int activated = 0, manaAbilities = 0;
+                for (var sa : c.getSpellAbilities()) {
+                    if (!sa.isActivatedAbility()) continue;
+                    activated++;
+                    if (sa.isManaAbility()) manaAbilities++;
+                }
+                System.out.println("BOMB_SHAPE " + key + " zone=" + zone + " card=" + c.getName().replace(' ', '_')
+                        + " cmc=" + c.getCMC() + " triggers=" + c.getTriggers().size()
+                        + " statics=" + c.getStaticAbilities().size()
+                        + " replacements=" + c.getReplacementEffects().size()
+                        + " activated=" + activated + " manaAbilities=" + manaAbilities
+                        + " token=" + c.isToken());
+            }
         Set<Integer> stackIds = new HashSet<>();
         int steps = 0, stageClones = 0, depthsRemovals = 0, hexmageRemovals = 0, sneakActivations = 0;
         int breachCasts = 0, showTellCasts = 0, reanimations = 0, naturalOrders = 0, karakasBounces = 0, wastelands = 0;
@@ -710,6 +884,11 @@ public final class CubeBombLinesSmoke {
         // it had tapped to attack" is a different receipt from "never cast",
         // and only a turn can tell them apart.
         int breachTurn = -1, showtellTurn = -1, maritTurn = -1;
+        // v71 tinker receipts, computed ONLY for the tinker suite so that no
+        // preserved suite's step loop does anything new.
+        int tinkerCasts = 0, tinkerTurn = -1;
+        List<String> artifactsStart = tinker ? ownArtifacts(player) : List.of();
+        int oppCreaturesStart = tinker ? creatures(opponent) : -1;
         // v56 P7, Amendment 3: the FIRST non-land permanent to reach the
         // opponent's public battlefield, and the turn it did. That is their own
         // Show and Tell put-in, read where the choice is made rather than at the
@@ -768,6 +947,10 @@ public final class CubeBombLinesSmoke {
                 if (ours && host.equals(SHOWTELL) && sa.isSpell()) {
                     showTellCasts++;
                     if (showtellTurn < 0) showtellTurn = game.getPhaseHandler().getTurn();
+                }
+                if (ours && host.equals(TINKER) && sa.isSpell()) {
+                    tinkerCasts++;
+                    if (tinkerTurn < 0) tinkerTurn = game.getPhaseHandler().getTurn();
                 }
                 if (ours && (host.equals(REANIMATE) || host.equals(ANIMATE)) && sa.isSpell()) reanimations++;
                 if (ours && host.equals(ORDER) && sa.isSpell()) naturalOrders++;
@@ -844,6 +1027,31 @@ public final class CubeBombLinesSmoke {
                     + " reanimateZone=" + zoneOf(player, REANIMATE)
                     + " oppPermanents=[" + publicPermanents(opponent) + "]"
                     + " ownPermanents=[" + publicPermanents(player) + "]");
+        // v71: one more line, emitted for the tinker cases ONLY, so BOMB_RESULT
+        // and every earlier increment's own line keep exactly the fields they
+        // registered and every preserved row of every other suite stays
+        // byte-comparable. `sacrificed` is the difference between our own
+        // battlefield artifacts before and after - the only place the cost's
+        // choice is visible.
+        if (tinker) {
+            List<String> remaining = ownArtifacts(player), sacrificed = new ArrayList<>(artifactsStart);
+            for (String name : remaining) sacrificed.remove(name);
+            System.out.println("BOMB_TINKER " + key
+                    + " tinkerCasts=" + tinkerCasts + " tinkerTurn=" + tinkerTurn
+                    + " artifactsStart=[" + String.join(";", artifactsStart) + "]"
+                    + " sacrificed=[" + String.join(";", sacrificed) + "]"
+                    + " portalZone=" + zoneOf(player, PORTAL)
+                    + " blightsteelZone=" + zoneOf(player, BLIGHTSTEEL)
+                    + " juggernautZone=" + zoneOf(player, JUGGERNAUT)
+                    + " topZone=" + zoneOf(player, TOP)
+                    + " tinkerZone=" + zoneOf(player, TINKER)
+                    + " libraryArtifacts=" + libraryArtifacts(player)
+                    + " oppCreaturesStart=" + oppCreaturesStart
+                    + " oppCreaturesEnd=" + creatures(opponent)
+                    + " ownPermanents=[" + publicPermanents(player) + "]"
+                    + " oppPermanents=[" + publicPermanents(opponent) + "]"
+                    + " ownGraveyard=[" + ownGraveyard(player) + "]");
+        }
     }
 
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
@@ -872,7 +1080,9 @@ public final class CubeBombLinesSmoke {
                     BLIGHTSTEEL, ARCHON, ATRAXA, WURM, ULAMOG, FOUNDRY, BEAST, SPIDER,
                     "Forest", "Island", "Mountain", "Swamp", "Plains",
                     // v62, APPENDED so no previously loaded name changes place.
-                    ASHEN))
+                    ASHEN,
+                    // v71, APPENDED for the same reason.
+                    TINKER, PORTAL, JUGGERNAUT, ORNITHOPTER, PETAL, TOP))
                 StaticData.instance().attemptToLoadCard(name);
             List<String> cases = args.length > 2 ? switch (args[2]) {
                 case "lines" -> LINES;
@@ -886,17 +1096,19 @@ public final class CubeBombLinesSmoke {
                 case "conversion" -> CONVERSION;
                 case "payload" -> PAYLOAD;
                 case "value" -> VALUE;
+                case "tinker" -> TINKER_CASES;
                 default -> { var all = new ArrayList<>(LINES); all.addAll(CONTROLS); yield all; }
             } : LINES;
             boolean payload = args.length > 2 && args[2].equals("payload");
             boolean value = args.length > 2 && args[2].equals("value");
+            boolean tinkerSuite = args.length > 2 && args[2].equals("tinker");
             // BOMB_CONV carries the turn of each gated action, which every
             // payload case and every value case needs too, so the v55 line is
             // emitted for all three suites; BOMB_PICK is the payload suite's own
             // and BOMB_VALUE is the value suite's own.
             boolean conversion = payload || value || args.length > 2 && args[2].equals("conversion");
             for (int seat = 0; seat < 2; seat++) for (PhaseType phase : List.of(PhaseType.MAIN1, PhaseType.MAIN2))
-                for (String control : cases) run(args[1].equals("improved"), seat, phase, control, conversion, payload, value);
+                for (String control : cases) run(args[1].equals("improved"), seat, phase, control, conversion, payload, value, tinkerSuite);
             System.out.println("BOMB_SUITE_COMPLETE cases=" + (4 * cases.size()));
         } catch (Throwable failure) {
             failure.printStackTrace();

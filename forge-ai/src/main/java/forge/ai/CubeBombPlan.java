@@ -113,7 +113,33 @@ import java.util.regex.Pattern;
  * activated {@code Draw} for a literal life payment - and never from a card
  * name. The decline token {@code breach:not-lethal} becomes
  * {@code breach:no-value}; the decision is unchanged wherever no term fires.
- * Designed in {@code 2026-09-10-forge-combo-ai/design-v62-breach-value.md}.</p> */
+ * Designed in {@code 2026-09-10-forge-combo-ai/design-v62-breach-value.md}.</p>
+ *
+ * <p><b>v71 the artifact half of the cheat-in family.</b> The CubeCobra synergy
+ * census makes Tinker the rank-1 drafted-with partner of eight cube cards, six
+ * of them payloads, and this class was blind to it: {@code tinker.txt} is
+ * {@code Origin$ Library}, {@code ChangeType$ Artifact} and carries no
+ * {@code AILogic}, so it matches neither {@link #cheatInShape} nor
+ * {@link #showAndTellShape}. The increment's own claims probe
+ * ({@code 2026-09-12-tinker-v71/control-1}) overturned the premise of building
+ * a route for it: Default already CASTS Tinker, on turn 1, in every payable
+ * position of both seats and both mains, and its hidden-origin chooser already
+ * fetches the most expensive artifact. What Default gets wrong is what it is
+ * willing to spend two cards on ({@code tinker-vanilla}: Tinker plus an
+ * Ornithopter for a 5/3 into a board that already blocks it) and what it pays
+ * with ({@code tinker-sac-choice}: {@code tinker.txt}'s own
+ * {@code SVar:AIPreference:SacCost$} excludes Lotus Petal BY NAME from its
+ * {@code Artifact.cmcEQ0} tier, so the payment reaches the {@code cmcEQ1} tier
+ * and sacrifices Sensei's Divining Top - a piece {@link CubeTopPlan} owns -
+ * with the Petal still on the battlefield). v71 is therefore a VETO arm in the
+ * v52 D4 idiom, not a proposal arm: {@link #declineArtifactFetch} refuses the
+ * ordinary cast when no artifact in our own library clears a value floor
+ * written in the v62 terms ({@code tinker:no-value}) or when the artifact the
+ * NATIVE payment would take is not expendable ({@code tinker:sac-piece}).
+ * Our library is read as an unordered COMPOSITION - derivable from our own
+ * registered decklist less our own visible zones - and never as an ORDER: the
+ * scan is sorted by name and every tie breaks by name. Designed in
+ * {@code 2026-09-12-tinker-v71/design.md}.</p> */
 public final class CubeBombPlan {
     /** A creature worth cheating in. Emrakul, the Aeons Torn evaluates at about
      * 1020; 400 admits Griselbrand, Ulamog and Archon of Cruelty and excludes
@@ -202,6 +228,39 @@ public final class CubeBombPlan {
                 && "Hand".equals(sa.getParam("Origin"))
                 && "Battlefield".equals(sa.getParam("Destination"))
                 && "Player".equals(sa.getParam("DefinedPlayer"));
+    }
+
+    /** v71 R1. Tinker: a spell that sacrifices an artifact as an additional
+     * cost and searches our own LIBRARY for an artifact to put onto the
+     * battlefield. Recognised by printed property, never by name.
+     *
+     * <p>The two ARTIFACT clauses are load-bearing. {@code natural_order.txt}
+     * is the same {@code Origin$ Library | Destination$ Battlefield} spell with
+     * a sacrifice cost - and is a registered position in this very fixture
+     * ({@code natural-order-hoof}) - but its {@code ChangeType$ Creature.Green}
+     * and {@code Sac<1/Creature.Green>} keep it out of this shape, which is
+     * exactly the narrowing this increment wants: the census's design brief is
+     * about the artifact half of the family.</p> */
+    private static boolean tinkerShape(SpellAbility sa) {
+        return sa.isSpell() && sa.getApi() == ApiType.ChangeZone && !sa.usesTargeting()
+                && "Library".equals(sa.getParam("Origin"))
+                && "Battlefield".equals(sa.getParam("Destination"))
+                && sa.getParamOrDefault("ChangeType", "").startsWith("Artifact")
+                && artifactSacrifice(sa) != null;
+    }
+
+    /** The {@code Sac<1/Artifact>} part of a cost, or null. A cost that
+     * sacrifices the spell's own host, or names the original host, is not an
+     * artifact we choose and is refused here. */
+    private static CostSacrifice artifactSacrifice(SpellAbility sa) {
+        Cost cost = sa.getPayCosts();
+        if (cost == null) return null;
+        for (CostPart part : cost.getCostParts()) {
+            if (!(part instanceof CostSacrifice sacrifice)) continue;
+            if (sacrifice.payCostFromSource() || !sacrifice.getType().startsWith("Artifact")) continue;
+            return sacrifice;
+        }
+        return null;
     }
 
     /** Dark Depths' shape: a permanent whose own {@code Mode$ Always} trigger
@@ -998,6 +1057,57 @@ public final class CubeBombPlan {
         return false;
     }
 
+    /** v71. A STANDING reanimation engine, by printed property: a permanent
+     * whose own printed UPKEEP trigger, or whose own printed activated ability,
+     * moves a CREATURE card from a graveyard onto the battlefield - with no
+     * spell, no card and (for the trigger half) no mana.
+     *
+     * <p>{@code portal_to_phyrexia.txt} carries
+     * {@code T:Mode$ Phase | Phase$ Upkeep | ValidPlayer$ You} executing
+     * {@code DB$ ChangeZone | Origin$ Graveyard | Destination$ Battlefield |
+     * ValidTgts$ Creature}; {@code recurring_nightmare.txt} carries the
+     * activated form. v62's term 5 asked only for a reanimation SPELL in our
+     * own hand; a permanent that does it every upkeep for free is strictly
+     * stronger and was not recognised. The creature clause is
+     * {@link #namesACreature}, the same predicate {@link #entersReanimates}
+     * uses and for the same reason (Titania returns LANDS with this shape).</p> */
+    private static boolean standingEngine(Card card) {
+        for (Trigger trigger : card.getTriggers()) {
+            if (trigger.getMode() != TriggerType.Phase) continue;
+            if (!"Upkeep".equals(trigger.getParam("Phase"))) continue;
+            if (!"You".equals(trigger.getParamOrDefault("ValidPlayer", ""))) continue;
+            String svar = trigger.getParam("Execute");
+            for (int hop = 0; hop < CHAIN_DEPTH && svar != null && !svar.isEmpty(); hop++) {
+                String body = card.getSVar(svar);
+                if (body == null || body.isEmpty()) break;
+                if ("ChangeZone".equals(scriptParam(body, "DB$"))
+                        && "Graveyard".equals(scriptParam(body, "Origin$"))
+                        && "Battlefield".equals(scriptParam(body, "Destination$"))
+                        && namesACreature(card, body)) return true;
+                svar = scriptParam(body, "SubAbility$");
+            }
+        }
+        for (SpellAbility ability : card.getSpellAbilities()) {
+            if (!ability.isActivatedAbility() || ability.getApi() != ApiType.ChangeZone) continue;
+            if (!"Graveyard".equals(ability.getParam("Origin"))
+                    || !"Battlefield".equals(ability.getParam("Destination"))) continue;
+            if (ability.getParamOrDefault("ValidTgts", "").startsWith("Creature")
+                    || ability.getParamOrDefault("ChangeType", "").startsWith("Creature")) return true;
+        }
+        return false;
+    }
+
+    /** v71. Term 5's first half, widened from "a reanimation spell in our own
+     * hand" to "or a standing engine already on our own battlefield". Our hand
+     * and our battlefield only. Inert wherever no such permanent is in play,
+     * which is every fixture this policy has ever run. */
+    private boolean reanimationAvailable() {
+        if (reanimationInHand()) return true;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (!card.isFaceDown() && standingEngine(card)) return true;
+        return false;
+    }
+
     /** Term 6. A printed activated ability that draws for a literal life
      * payment we can afford ({@code griselbrand.txt},
      * {@code A:AB$ Draw | Cost$ PayLife<7> | NumCards$ 7}). The cards stay after
@@ -1034,7 +1144,7 @@ public final class CubeBombPlan {
         if (lethalForecast(candidate, manaLeft) != null) return 4;
         if (annihilatorTake(candidate) >= 2) return 3;
         if (entersWithValue(candidate) || diesWithValue(candidate)) return 3;
-        if (candidate.getNetPower() >= 7 && staysInGraveyard(candidate) && reanimationInHand()) return 2;
+        if (candidate.getNetPower() >= 7 && staysInGraveyard(candidate) && reanimationAvailable()) return 2;
         if (drawsForLife(candidate)) return 2;
         return 0;
     }
@@ -1207,6 +1317,166 @@ public final class CubeBombPlan {
                 + " turn=" + phases.getTurn() + " phase=" + phases.getPhase());
     }
 
+    // ------------------------------------- v71: the library->battlefield veto
+
+    /** v71 R2. What one artifact in our own library is worth fetching, as a
+     * tier in the v62 idiom. Every term is a printed property of the candidate
+     * plus the PUBLIC board; nothing reads an opponent's hand or library.
+     *
+     * <ul>
+     * <li><b>3</b> - {@link #entersWithValue}, v62's term 3 verbatim and
+     *     type-agnostic (Portal to Phyrexia's {@code DB$ Sacrifice}, Sundering
+     *     Titan's {@code DB$ DestroyAll}, Myr Battlesphere's {@code DB$ Token}),
+     *     or {@link #standingEngine}, the term-5 extension.</li>
+     * <li><b>2</b> - bomb-class by THIS class's own threshold, the one
+     *     {@link #bombCandidates} already applies to a card in hand
+     *     ({@code evaluateCreature >= BOMB_EVALUATION} or
+     *     {@code CMC >= BOMB_CMC}): Blightsteel Colossus, Triplicate Titan,
+     *     Sundering Titan.</li>
+     * <li><b>1</b> - the card completes another plan's line, asked through the
+     *     accessor that plan already exposes
+     *     ({@link CubeTopPlan#completingPieceNames}) - Bolas's Citadel and
+     *     Mystic Forge, and only while the Top plan is one permission short.
+     *     No Top plan internals are read and no Top plan file is edited.</li>
+     * <li><b>0</b> - anything else. A vanilla beater is not worth two cards.</li>
+     * </ul> */
+    private int tinkerPayloadTier(Card candidate) {
+        if (entersWithValue(candidate) || standingEngine(candidate)) return 3;
+        if (candidate.isCreature() && ComputerUtilCard.evaluateCreature(candidate) >= BOMB_EVALUATION
+                || candidate.getCMC() >= BOMB_CMC) return 2;
+        if (CubeTopPlan.completingPieceNames(player).contains(candidate.getName())) return 1;
+        return 0;
+    }
+
+    /** v71 R2. The best payload our own library's COMPOSITION offers this
+     * spell, or null when none clears the floor.
+     *
+     * <p><b>Composition, never order.</b> The candidates are sorted BY NAME and
+     * every tie breaks by name (the comparison is strict), so the answer cannot
+     * depend on where a card sits in the library - which is the whole reason
+     * reading the zone at all is admissible: our registered decklist is
+     * own-visible and so is every other zone our own cards can be in, so the
+     * library's composition is derivable from own-visible information. Its
+     * order is not, and is not read. {@code tinker-portal:deep} is the
+     * registered witness.</p> */
+    private Card bestTinkerPayload(SpellAbility cast) {
+        String type = cast.getParamOrDefault("ChangeType", "Card");
+        List<Card> candidates = new ArrayList<>();
+        for (Card card : player.getCardsIn(ZoneType.Library)) {
+            if (card.isValid(type.split(","), player, cast.getHostCard(), cast)) candidates.add(card);
+        }
+        candidates.sort(java.util.Comparator.comparing(Card::getName));
+        Card best = null;
+        int bestTier = 0, bestRank = -1;
+        for (Card candidate : candidates) {
+            int tier = tinkerPayloadTier(candidate);
+            if (tier <= 0) continue;
+            int value = rank(candidate);
+            if (tier < bestTier || tier == bestTier && value <= bestRank) continue;
+            best = candidate; bestTier = tier; bestRank = value;
+        }
+        return best;
+    }
+
+    /** v71. Is this one of our own permanents expendable - a rock or a blank
+     * body whose loss the board does not feel?
+     *
+     * <p>By printed property: no printed trigger, no printed replacement, and
+     * no activated ability other than a mana ability. Ornithopter, a Mox, Sol
+     * Ring and Lotus Petal pass; Sensei's Divining Top (two activated non-mana
+     * abilities), Bolas's Citadel, Mystic Forge and Retrofitter Foundry do not.
+     * A token always passes - it is not a card and cannot be drawn again.</p>
+     *
+     * <p><b>Static abilities are deliberately NOT consulted, and probe-1 is the
+     * reason.</b> The first draft of this predicate also required
+     * {@code getStaticAbilities().isEmpty()} and refused EVERY position: Forge
+     * attaches an intrinsic static ability for a printed KEYWORD, so a plain
+     * Ornithopter reports {@code statics=1} for its Flying
+     * ({@code BOMB_SHAPE ... card=Ornithopter triggers=0 statics=1
+     * replacements=0 activated=0}, probe-2, which is why that line is in the
+     * fixture). A printed {@code S:} line and a keyword's own static cannot be
+     * told apart from the live card, so the clause is dropped rather than
+     * guessed at. The consequence is registered: an artifact whose ONLY printed
+     * ability is a static one - a Torpor Orb, an Ensnaring Bridge - counts as
+     * expendable here.</p> */
+    private static boolean expendable(Card card) {
+        if (card.isToken()) return true;
+        if (!card.getTriggers().isEmpty() || !card.getReplacementEffects().isEmpty()) return false;
+        for (SpellAbility ability : card.getSpellAbilities())
+            if (ability.isActivatedAbility() && !ability.isManaAbility()) return false;
+        return true;
+    }
+
+    /** v71. Which of our own permanents the NATIVE payment would sacrifice for
+     * this cost, forecast exactly rather than guessed: the same read-only query
+     * {@code AiCostDecision.visit(CostSacrifice)} makes at payment time, with
+     * the cost part's own type and amount and the ability's own target. The
+     * plan cannot CHOOSE the sacrifice - that choice lives in
+     * {@code ComputerUtil.chooseSacrificeType}, outside this increment's file
+     * budget - so it can only refuse a cast whose payment would take a card
+     * another plan is relying on. Registered as a limitation. */
+    private static forge.game.card.CardCollection forecastSacrifice(Player ai, SpellAbility cast) {
+        CostSacrifice sacrifice = artifactSacrifice(cast);
+        if (sacrifice == null) return null;
+        return ComputerUtil.chooseSacrificeType(ai, sacrifice.getType(), cast, cast.getTargetCard(), false,
+                sacrifice.getAbilityAmount(cast), null);
+    }
+
+    /** Observability only: the last {@code tinker:} decline printed, as
+     * (this Tinker object, turn, phase, reason), so the line prints once per
+     * position rather than once per priority pass. The object's identity is
+     * part of the KEY and never of the OUTPUT, which is what keeps two games in
+     * one JVM from suppressing each other's line. Never read by a decision. */
+    private static String tinkerDeclined = "";
+
+    private static void declineTinkerOnce(Player ai, SpellAbility cast, String reason) {
+        PhaseHandler phases = ai.getGame().getPhaseHandler();
+        String stamp = System.identityHashCode(cast.getHostCard()) + "/" + phases.getTurn()
+                + "/" + phases.getPhase() + "/" + reason;
+        if (stamp.equals(tinkerDeclined)) return;
+        tinkerDeclined = stamp;
+        System.err.println("CUBE_BOMB_PLAN decline=" + reason
+                + " card=" + cast.getHostCard().getName().replace(' ', '_')
+                + " turn=" + phases.getTurn() + " phase=" + phases.getPhase());
+    }
+
+    /** v71. The veto. Refuse an ordinary Tinker cast for exactly two reasons,
+     * both read from our own zones and the public board:
+     *
+     * <ol>
+     * <li>{@code tinker:no-value} - no artifact in our own library clears
+     *     {@link #tinkerPayloadTier}'s floor. The claims probe's
+     *     {@code tinker-vanilla} row is the case: Default spends Tinker, an
+     *     Ornithopter and {@code {2}{U}} on a 5/3 the public board already
+     *     blocks.</li>
+     * <li>{@code tinker:sac-piece} - the artifact the native payment would take
+     *     is not {@link #expendable}. The probe's {@code tinker-sac-choice} row
+     *     is the case: the card's own preference list skips the Lotus Petal by
+     *     name and eats Sensei's Divining Top instead.</li>
+     * </ol>
+     *
+     * <p>Reached through the generic hook this class already owns at
+     * {@code SpellAbilityAi:87} rather than through the v52 D4 hook, which sits
+     * inside {@code ChangeZoneAi}'s {@code AILogic$ BeforeCombat} branch that
+     * Tinker never enters. Gated on {@link CubeComboAi#enabled}, so the Default
+     * arm is byte-identical.</p> */
+    private static boolean declineArtifactFetch(Player ai, SpellAbility sa) {
+        if (!tinkerShape(sa)) return false;
+        CubeBombPlan plan = new CubeBombPlan(ai);
+        if (plan.bestTinkerPayload(sa) == null) {
+            declineTinkerOnce(ai, sa, "tinker:no-value");
+            return true;
+        }
+        forge.game.card.CardCollection payment = forecastSacrifice(ai, sa);
+        if (payment == null) return false;
+        for (Card card : payment) {
+            if (expendable(card)) continue;
+            declineTinkerOnce(ai, sa, "tinker:sac-piece");
+            return true;
+        }
+        return false;
+    }
+
     // ------------------------------------------------ D4: the own-turn veto
 
     /** D4. Decline a {@code AILogic$ BeforeCombat} cheat-in that cannot pay off.
@@ -1273,6 +1543,13 @@ public final class CubeBombPlan {
      * counters" case where this route wins - registered rather than guarded.
      * (2) We could not reach zero this turn anyway.</p> */
     static boolean declineCounterRemoval(Player ai, SpellAbility sa) {
+        // v71. This method's call site is the policy's only GENERIC one - every
+        // ability of a cube-combo seat passes through it - so the Tinker veto
+        // is asked here, first and in its own method. The RemoveCounter clause
+        // below is untouched and every D3 receipt with it. The method's NAME is
+        // now narrower than what it does; renaming it needs SpellAbilityAi.java,
+        // which is outside this increment's file budget (registered follow-up).
+        if (CubeComboAi.enabled(ai) && declineArtifactFetch(ai, sa)) return true;
         if (!CubeComboAi.enabled(ai) || sa.getApi() != ApiType.RemoveCounter
                 || !sa.isActivatedAbility() || sa.usesTargeting()) return false;
         Card host = sa.getHostCard();
