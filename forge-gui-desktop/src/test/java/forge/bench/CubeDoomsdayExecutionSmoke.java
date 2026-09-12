@@ -1174,6 +1174,101 @@ public final class CubeDoomsdayExecutionSmoke {
         }
     }
 
+    private static final boolean PITCH_STRICT = Boolean.getBoolean("forge.test.requireComboPitch");
+
+    /** v63 C3, from the v60 Doomsday/Storm loss diagnosis section 5. Force of
+     * Will's alternative cost is {@code PayLife<1> ExileFromHand<1/Card.Blue+Other>};
+     * the card to exile is chosen by {@code AiCostDecision.visit(CostExile)} ->
+     * {@code ComputerUtil.chooseExileFromList}, which sorts by power ascending
+     * and takes the first. Thassa's Oracle is a 1/3, so a blue 3/1 in the same
+     * hand loses that sort and the Oracle is the card that leaves - which is
+     * what {@code doom-16702353-s0} and {@code doom-16702351-s0} did, closing
+     * every Doomsday route for the rest of the game.
+     *
+     * <ul>
+     * <li>{@code pitch-alternative} MUST-MOVE: Force of Will, Thassa's Oracle
+     *     and Vendilion Clique in hand, Doomsday still in our library, so the
+     *     Doomsday family is exactly one piece short. v61 exiles the Oracle;
+     *     v63 exiles the Clique.</li>
+     * <li>{@code pitch-only-piece} MUST-NOT-MOVE: the Oracle is the only other
+     *     blue card, so it is exiled anyway - this is a preference between
+     *     legal pitches, never a refusal to cast Force of Will.</li>
+     * <li>{@code pitch-redundant} MUST-NOT-MOVE: a second Oracle in our own
+     *     graveyard, a zone {@code availableInOwnDeck} already accepts, so the
+     *     hand copy is not the last one and is not defended.</li>
+     * <li>{@code pitch-no-plan} MUST-NOT-MOVE: our life is 1, so
+     *     {@code CubeDoomsdayPlan.completingPieceNames} reports nothing at all
+     *     and no family is one piece short - parity with the ordinary AI.</li>
+     * </ul> */
+    private static final List<String> PITCH_CASES =
+            List.of("pitch-alternative", "pitch-only-piece", "pitch-redundant", "pitch-no-plan");
+
+    /** The card each case must NOT have exiled, or "none" where the ordinary
+     * choice stands. */
+    private static String pitchKept(String kase) {
+        return kase.equals("pitch-alternative") ? "Thassa's Oracle" : "none";
+    }
+
+    /** A read-only receipt of one cost decision. Nothing is cast and no game
+     * action is taken: the fixture builds the board, resolves Force of Will's
+     * own alternative-cost SpellAbility through the native enumeration
+     * ({@code getAllPossibleAbilities(..., readOnly = true)}) and asks the
+     * native AI cost decision which card it would exile. Both arms run it, so
+     * the Default answer is the control in the same log. */
+    private static void pitchRun(int seat, String kase) {
+        List<Placement> own = new ArrayList<>(), other = new ArrayList<>();
+        for (int i = 0; i < 3; i++) own.add(new Placement("Island", ZoneType.Battlefield, false));
+        own.add(new Placement("Force of Will", ZoneType.Hand, false));
+        own.add(new Placement("Thassa's Oracle", ZoneType.Hand, false));
+        if (!kase.equals("pitch-only-piece")) own.add(new Placement("Vendilion Clique", ZoneType.Hand, false));
+        if (kase.equals("pitch-redundant")) own.add(new Placement("Thassa's Oracle", ZoneType.Graveyard, false));
+        own.add(new Placement("Doomsday", ZoneType.Library, false));
+        for (int i = 0; i < 25; i++) own.add(new Placement("Forest", ZoneType.Library, false));
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        other.add(new Placement("Grizzly Bears", ZoneType.Battlefield, false));
+        while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player p = game.getPlayers().get(seat);
+        if (kase.equals("pitch-no-plan")) p.setLife(1, null);
+        game.getAction().checkStateEffects(true);
+        game.getTriggerHandler().resetActiveTriggers();
+        BenchRandomAudit.install(0); // Fixed constructed fixture, not a sampled opening.
+        Card force = null;
+        for (Card card : p.getCardsIn(ZoneType.Hand)) if (card.getName().equals("Force of Will")) force = card;
+        if (force == null) throw new AssertionError("Force of Will missing from the prepared hand: " + kase);
+        forge.game.spellability.SpellAbility alternative = null;
+        forge.game.cost.CostExile exile = null;
+        for (forge.game.spellability.SpellAbility candidate : force.getAllPossibleAbilities(p, false, null, true)) {
+            if (candidate.getPayCosts() == null) continue;
+            for (forge.game.cost.CostPart part : candidate.getPayCosts().getCostParts())
+                if (part instanceof forge.game.cost.CostExile costExile
+                        && costExile.getFrom() != null && costExile.getFrom().contains(ZoneType.Hand)
+                        && !costExile.payCostFromSource()) { alternative = candidate; exile = costExile; }
+            if (exile != null) break;
+        }
+        if (alternative == null) throw new AssertionError("no exile-from-hand alternative cost found: " + kase);
+        alternative.setActivatingPlayer(p);
+        var before = p.getCardsIn(ZoneType.Hand).size();
+        var decision = new forge.ai.AiCostDecision(p, alternative, false).visit(exile);
+        String chosen = decision == null || decision.cards.isEmpty() ? "none"
+                : decision.cards.getFirst().getName().replace(' ', '_');
+        if (p.getCardsIn(ZoneType.Hand).size() != before)
+            throw new AssertionError("the pitch probe moved a card: " + kase);
+        System.out.println("PITCH_PROPOSAL suite=pitch improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " case=" + kase + " life=" + p.getLife()
+                + " hand=" + p.getCardsIn(ZoneType.Hand).size()
+                + " mustKeep=" + pitchKept(kase).replace(' ', '_')
+                + " exiled=" + chosen);
+        if (!improved || !PITCH_STRICT) return;
+        if (!pitchKept(kase).equals("none") && chosen.equals(pitchKept(kase).replace(' ', '_')))
+            throw new AssertionError("the pitch took the gate piece: " + kase + " exiled=" + chosen);
+        if (kase.equals("pitch-alternative") && !chosen.equals("Vendilion_Clique"))
+            throw new AssertionError("pitch-alternative expected Vendilion Clique, got " + chosen);
+        if (List.of("pitch-only-piece", "pitch-redundant", "pitch-no-plan").contains(kase)
+                && !chosen.equals("Thassa's_Oracle"))
+            throw new AssertionError(kase + " must keep the ordinary AI's own choice, got " + chosen);
+    }
+
     private static final boolean TIGHTEN_STRICT = Boolean.getBoolean("forge.test.requireDoomsdayTighten");
     private static final boolean DISCARD_STRICT = Boolean.getBoolean("forge.test.requireComboDiscard");
 
@@ -1185,9 +1280,29 @@ public final class CubeDoomsdayExecutionSmoke {
     private static final List<String> TIGHTEN_CASES = List.of("clock-chump", "clock-absorbed",
             "one-blue-source", "two-blue-sources", "petal-only-blue", "petal-consumed", "tapped-two-sources");
 
+    /** v63 C4 (the v47 analysis section 4 R1). Two route-2 boards that isolate
+     * whether a credited blocker can LEGALLY block the attacker it is credited
+     * against. Their own suite, so `tighten` stays byte-identical.
+     *
+     * <ul>
+     * <li>{@code clock-evasion} MUST-MOVE, the {@code doom-16702356-s1} shape:
+     *     a Questing Beast 4/4 ("can't be blocked by creatures with power 2 or
+     *     less") beside an Elder Gargaroth 6/6, our two untapped 1/1s, our life
+     *     8 so {@code lifeAfter} is 4. v49 R1 credits both blockers because
+     *     each can block SOMETHING, absorbs 6 + 4 and reads clock 0; a legal
+     *     assignment absorbs only the Gargaroth and reads clock 4, which is not
+     *     less than 4.</li>
+     * <li>{@code clock-evasion-blockable} MUST-NOT-MOVE: the Questing Beast
+     *     alone against the same two 1/1s at life 12. Neither 1/1 can block it,
+     *     so v49 R1 credited no blocker either - clock 4 &lt; 6 in BOTH
+     *     versions. This is the control that shows the tightening does not
+     *     over-decline a board the old guard already priced honestly.</li>
+     * </ul> */
+    private static final List<String> EVASION_CASES = List.of("clock-evasion", "clock-evasion-blockable");
+
     private static boolean tightenProposes(String kase) {
         return switch (kase) {
-            case "clock-absorbed", "two-blue-sources", "tapped-two-sources" -> true;
+            case "clock-absorbed", "two-blue-sources", "tapped-two-sources", "clock-evasion-blockable" -> true;
             default -> false;
         };
     }
@@ -1256,11 +1371,22 @@ public final class CubeDoomsdayExecutionSmoke {
         }
         if (kase.equals("clock-absorbed"))
             for (int i = 0; i < 2; i++) other.add(new Placement("Grizzly Bears", ZoneType.Battlefield, false));
+        // v63 C4. Questing Beast carries the printed CantBlockBy this case is
+        // about; Elder Gargaroth is the attacker the same two 1/1s CAN block,
+        // so the two of them separate "credited" from "legal".
+        if (kase.equals("clock-evasion")) {
+            other.add(new Placement("Questing Beast", ZoneType.Battlefield, false));
+            other.add(new Placement("Elder Gargaroth", ZoneType.Battlefield, false));
+        }
+        if (kase.equals("clock-evasion-blockable"))
+            other.add(new Placement("Questing Beast", ZoneType.Battlefield, false));
         while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
         Game game = fixtureGame(own, other, seat);
         Player p = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
         if (kase.equals("clock-chump")) p.setLife(4, null);
         if (kase.equals("clock-absorbed")) p.setLife(12, null);
+        if (kase.equals("clock-evasion")) p.setLife(8, null);
+        if (kase.equals("clock-evasion-blockable")) p.setLife(12, null);
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
         // Premises, computed from the same public reads the guard uses and
@@ -1289,6 +1415,21 @@ public final class CubeDoomsdayExecutionSmoke {
                     + " unabsorbed=" + unabsorbed + " lifeAfter=" + lifeAfter);
         if (kase.equals("clock-absorbed") && !(blockers == 2 && clockTotal > 0 && unabsorbed < lifeAfter))
             throw new AssertionError("clock-absorbed premise: blockers=" + blockers + " unabsorbed=" + unabsorbed);
+        // v63 C4 premises, stated in v49 R1's own arithmetic - the count these
+        // boards are built to contradict.
+        if (kase.equals("clock-evasion") && !(blockers == 2 && clockTotal == 10 && unabsorbed == 0 && lifeAfter == 4))
+            throw new AssertionError("clock-evasion premise: blockers=" + blockers + " clock=" + clockTotal
+                    + " unabsorbed=" + unabsorbed + " lifeAfter=" + lifeAfter);
+        // The premise block's `blockers` is the coarse public read - our own
+        // untapped creatures - and deliberately does NOT restate the guard's
+        // legality test, which is the thing under test. `unabsorbed` is
+        // therefore 0 on both boards, and the v49 R1 count it stands in for is
+        // 0 on clock-evasion (two blockers credited against 6 + 4) and 4 on
+        // clock-evasion-blockable (no blocker can block the only attacker, so
+        // v49 R1 credits none either - which is why that row must not move).
+        if (kase.equals("clock-evasion-blockable") && !(blockers == 2 && clockTotal == 4 && unabsorbed == 0 && lifeAfter == 6))
+            throw new AssertionError("clock-evasion-blockable premise: blockers=" + blockers + " clock=" + clockTotal
+                    + " unabsorbed=" + unabsorbed + " lifeAfter=" + lifeAfter);
         int expectedBlue = switch (kase) {
             case "one-blue-source" -> 1;
             case "petal-only-blue", "petal-consumed" -> 0;
@@ -1520,6 +1661,21 @@ public final class CubeDoomsdayExecutionSmoke {
                 }
                 System.out.println("JACE_SUITE_COMPLETE suite=jace improved=" + improved
                         + " policy=" + policy() + " cases=" + 4 * JACE_CASES.size());
+                return;
+            }
+            if (suite.equals("evasion")) {
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++) for (String kase : EVASION_CASES) tightenRun(seat, kase);
+                }
+                System.out.println("EVASION_SUITE_COMPLETE suite=evasion improved=" + improved
+                        + " policy=" + policy() + " cases=" + 4 * EVASION_CASES.size());
+                return;
+            }
+            if (suite.equals("pitch")) {
+                for (int seat = 0; seat < 2; seat++) for (String kase : PITCH_CASES) pitchRun(seat, kase);
+                System.out.println("PITCH_SUITE_COMPLETE suite=pitch improved=" + improved
+                        + " policy=" + policy() + " cases=" + 2 * PITCH_CASES.size());
                 return;
             }
             if (suite.equals("tighten")) {

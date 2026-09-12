@@ -1490,6 +1490,15 @@ public class ChangeZoneAi extends SpellAbilityAi {
         if (destination == ZoneType.Hand && origin.contains(ZoneType.Library) && player == decider) {
             Card comboPartner = CubeComboAi.chooseTutorPartner(player, sa, fetchList);
             if (comboPartner != null) return comboPartner;
+            // v63 C2. The same hook, one step further: a search that puts the
+            // fetched card in our own HAND does not spend it, so a plan piece
+            // that is not castable THIS turn is still the right fetch. Only
+            // reached when the line above has already declined, so the Kiki
+            // route keeps its priority. Everything below - keyCards, the
+            // AILogic branches and getBestAI - is unchanged and still answers
+            // every board where no family is exactly one piece short.
+            Card planPiece = CubeComboAi.chooseHandTutorPiece(player, sa, fetchList);
+            if (planPiece != null) return planPiece;
         }
         List<String> keyCards = player.getRegisteredPlayer().getDeck().getKeyCards();
         String position = sa.getParamOrDefault("LibraryPosition", null);

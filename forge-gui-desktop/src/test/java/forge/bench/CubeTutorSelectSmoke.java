@@ -47,6 +47,7 @@ public final class CubeTutorSelectSmoke {
     private static final String WILL = "Yawgmoth's Will", TENDRILS = "Tendrils of Agony";
     private static final String FUEL = "Ponder";
     private static final String KIKI = "Kiki-Jiki, Mirror Breaker", BODY = "Pestermite";
+    private static final String DOOMSDAY = "Doomsday", ORACLE = "Thassa's Oracle", TWIN = "Splinter Twin";
     private static final String DECOY = "Grave Titan", SPELL_DECOY = "Echo of Eons";
     private static final String MINDCENSOR = "Aven Mindcensor", BEAR = "Grizzly Bears";
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
@@ -67,6 +68,46 @@ public final class CubeTutorSelectSmoke {
     private static final List<String> MUST_NOT_MOVE = List.of(
             "demonic:kiki-priority", "mystical:colour-unreachable", "mystical:type-restricted",
             "demonic:two-short", "demonic:lethal-now", "demonic:search-limit", "demonic:gate-open");
+
+    /** v63 C2, its own case set so every pre-existing arm of this suite stays
+     * byte-identical. All four are HAND-destination searches (Demonic Tutor)
+     * on boards where the completing piece is NOT castable this turn, which is
+     * exactly the state the v57..v61 {@code feasibleHalfAfterSelection}
+     * forecast refused and the native AI then answered with the most expensive
+     * valid card (Grave Titan here; Vendilion Clique and Echo of Eons in the
+     * measured games).
+     *
+     * <p>The divergence between the two destinations is deliberate and is the
+     * whole content of C2: {@code mystical:colour-unreachable} above, a
+     * search-to-top on the same Storm shape, KEEPS its v57 answer of "null",
+     * because a card written to the top of our library is drawn on a later turn
+     * through the ordinary draw and the selection is the whole decision, while
+     * a card fetched to our own HAND is not spent by the selection at all.</p>
+     *
+     * <ul>
+     * <li>{@code demonic:reach-tendrils} MUST-MOVE - Storm one short of
+     *     Tendrils with no black source anywhere in the 40.</li>
+     * <li>{@code demonic:reach-doomsday} MUST-MOVE - the Doomsday family one
+     *     short, Thassa's Oracle in hand, no black source for {@code BBB}.</li>
+     * <li>{@code demonic:reach-twin} MUST-MOVE, MAIN1 only - an untap body on
+     *     our battlefield, no engine anywhere, and no red source for Splinter
+     *     Twin's {@code 2UR}.</li>
+     * <li>{@code demonic:reach-two-short} MUST-NOT-MOVE - both Storm halves in
+     *     our library, so no family is exactly one piece short.</li>
+     * </ul> */
+    private static final List<String> HAND_REACH_MOVE =
+            List.of("demonic:reach-tendrils", "demonic:reach-doomsday", "demonic:reach-twin");
+    private static final List<String> HAND_REACH_HOLD = List.of("demonic:reach-two-short");
+    private static final List<String> HAND_REACH =
+            java.util.stream.Stream.concat(HAND_REACH_MOVE.stream(), HAND_REACH_HOLD.stream()).toList();
+
+    private static boolean handReach(String control) { return HAND_REACH.contains(control); }
+    private static boolean mustMove(String control) {
+        return MUST_MOVE.contains(control) || HAND_REACH_MOVE.contains(control);
+    }
+    private static boolean mustNotMove(String control) {
+        return MUST_NOT_MOVE.contains(control) || HAND_REACH_HOLD.contains(control);
+    }
 
     private record Placement(String name, ZoneType zone) {}
 
@@ -92,6 +133,8 @@ public final class CubeTutorSelectSmoke {
             case "freeze-missing" -> FREEZE;
             case "breach-missing", "type-restricted" -> BREACH;
             case "will-missing" -> WILL;
+            case "reach-doomsday" -> DOOMSDAY;
+            case "reach-twin" -> TWIN;
             default -> TENDRILS;
         };
     }
@@ -101,7 +144,7 @@ public final class CubeTutorSelectSmoke {
      * a Kiki pair and a Storm gate are both one short, and the faster route -
      * haste copies that can finish this very combat - must still win. */
     private static String expected(String control) {
-        if (MUST_MOVE.contains(control)) return piece(control);
+        if (mustMove(control)) return piece(control);
         return variant(control).equals("kiki-priority") ? BODY : "null";
     }
 
@@ -120,7 +163,9 @@ public final class CubeTutorSelectSmoke {
      * v45 gate, and a Storm piece is then a legitimate answer. This scoping was
      * decided after the MAIN2 row was first seen; see checkpoint.md. */
     private static boolean scopedToMain1(String control) {
-        return List.of("lethal-now", "kiki-priority").contains(variant(control));
+        // `reach-twin` joins them for the same reason: kikiCompletingNames is
+        // MAIN1-only, exactly as chooseKikiTutorPartner and needsMoreCopies are.
+        return List.of("lethal-now", "kiki-priority", "reach-twin").contains(variant(control));
     }
 
     private static boolean asserted(String control, PhaseType phase) {
@@ -147,11 +192,20 @@ public final class CubeTutorSelectSmoke {
         // this control: with Underworld Breach on our battlefield a Lotus-type
         // in our graveyard escapes for {0} and makes any colour, which the
         // first run of this suite demonstrated in play.
-        boolean black = !variant.equals("colour-unreachable");
+        // v63 C2: every `reach-` variant is a board on which the completing
+        // piece is provably uncastable this turn - no black source for
+        // Tendrils' 2BB or Doomsday's BBB, no red source for Splinter Twin's
+        // 2UR - which is the state v57..v61's castability forecast refused.
+        // Exactly ONE black source on a `reach-` board: enough for Demonic
+        // Tutor's own {1}{B}, never enough for Tendrils' {2}{B}{B} or
+        // Doomsday's {B}{B}{B}. Zero would make the tutor itself uncastable and
+        // there would be no in-game decision to read at all.
+        int swamps = variant.equals("colour-unreachable") ? 0 : variant.startsWith("reach-") ? 1 : 4;
+        boolean red = !variant.equals("reach-twin");
         String filler = "Island";
-        for (int i = 0; i < 4; i++) result.add(new Placement(black ? "Swamp" : "Island", ZoneType.Battlefield));
+        for (int i = 0; i < 4; i++) result.add(new Placement(i < swamps ? "Swamp" : "Island", ZoneType.Battlefield));
         for (int i = 0; i < 3; i++) result.add(new Placement(filler, ZoneType.Battlefield));
-        result.add(new Placement("Mountain", ZoneType.Battlefield));
+        result.add(new Placement(red ? "Mountain" : "Island", ZoneType.Battlefield));
         List<String> library = new ArrayList<>();
         // The decoy goes in first, so it - not the piece - starts on top of the
         // library: it is the card Forge's own imperial_seal.txt says the
@@ -206,6 +260,14 @@ public final class CubeTutorSelectSmoke {
                 result.add(new Placement(TENDRILS, ZoneType.Hand));
                 library.add(TENDRILS);
             }
+            case "reach-tendrils" -> { result.add(new Placement(WILL, ZoneType.Hand)); library.add(TENDRILS); }
+            // The Oracle sits in our own GRAVEYARD, a zone
+            // CubeDoomsdayPlan.availableInOwnDeck already accepts, so the
+            // ordinary AI cannot cast it as a body and close the gate between
+            // the tutor's cast and its resolution.
+            case "reach-doomsday" -> { result.add(new Placement(ORACLE, ZoneType.Graveyard)); library.add(DOOMSDAY); }
+            case "reach-twin" -> { result.add(new Placement(BODY, ZoneType.Battlefield)); library.add(TWIN); }
+            case "reach-two-short" -> { library.add(WILL); library.add(TENDRILS); }
             default -> throw new AssertionError("unknown variant " + variant);
         }
         for (String name : library) result.add(new Placement(name, ZoneType.Library));
@@ -275,6 +337,20 @@ public final class CubeTutorSelectSmoke {
 
     private static String named(Card card) { return card == null ? "null" : card.getName().replace(' ', '_'); }
 
+    /** v63 C2's entry point, called reflectively so this same fixture source
+     * compiles and runs against the frozen v61 classes, where the method does
+     * not exist, and records {@code absent} instead of failing. That control
+     * run is the differential evidence for the new case set. */
+    private static String handTutorPiece(Player player, SpellAbility search, CardCollection choices) {
+        try {
+            var method = Class.forName("forge.ai.CubeComboAi").getMethod("chooseHandTutorPiece",
+                    Player.class, SpellAbility.class, CardCollection.class);
+            return named((Card) method.invoke(null, player, search, choices));
+        } catch (ReflectiveOperationException | LinkageError absent) {
+            return "absent";
+        }
+    }
+
     /** Deterministic, non-game receipts for the predicate table. The first
      * block is read-only on the live game: the snapshot is compared before and
      * after and the bench RNG boundary must not move. The controller-level and
@@ -319,6 +395,28 @@ public final class CubeTutorSelectSmoke {
                 SpellAbility theirs = tutor.getSpellAbilities().get(0).copy(opponent);
                 foreignActor = named(forge.ai.CubeComboAi.chooseTutorPartner(player, theirs, choices));
             }
+            // v63 C2. Printed only for the new case set, so every pre-existing
+            // arm of this suite keeps its exact line shape. `selected` above is
+            // chooseTutorPartner on its own, which still declines on these
+            // boards: the layering is the receipt.
+            if (handReach(control) && search != null && !choices.isEmpty()) {
+                String reached = handTutorPiece(player, search, choices);
+                CardCollection subset = new CardCollection();
+                for (Card card : choices) if (!card.getName().equals(piece(control))) subset.add(card);
+                String withheld = subset.isEmpty() ? "no-probe" : handTutorPiece(player, search, subset);
+                SpellAbility theirSearch = tutor.getSpellAbilities().get(0).copy(opponent);
+                String theirActor = handTutorPiece(player, theirSearch, choices);
+                System.out.println("TUTOR_SELECT_PROPOSAL " + key + " name=hand-reach outcome=" + reached
+                        + " partnerAlone=" + selected + " expected=" + expected(control).replace(' ', '_')
+                        + " withheldSubset=" + withheld + " foreignActor=" + theirActor);
+                if (!List.of("null", "absent").contains(theirActor))
+                    throw new AssertionError("another player's search must never be steered: " + key);
+                if (!List.of("null", "no-probe", "absent").contains(withheld))
+                    throw new AssertionError("a withheld piece must not be assumed present: " + key);
+                if (Boolean.getBoolean("forge.test.requirePlanTutorSelection") && asserted(control, phase)
+                        && !reached.equals(expected(control).replace(' ', '_')))
+                    throw new AssertionError("hand-reach: expected " + expected(control) + " got " + reached + " " + key);
+            }
             if (!before.equals(snapshot(player)))
                 throw new AssertionError("selection probe changed native state: " + before + " -> " + snapshot(player));
             BenchRandomAudit.assertUnchanged(rng, "plan-tutor-selection-preview");
@@ -333,11 +431,16 @@ public final class CubeTutorSelectSmoke {
             if (!List.of("null", "no-probe").contains(foreignActor))
                 throw new AssertionError("another player's search must never be steered: " + key);
             if (Boolean.getBoolean("forge.test.requirePlanTutorSelection") && asserted(control, phase)) {
-                if (!selected.equals(expected(control).replace(' ', '_')))
-                    throw new AssertionError("predicate: expected " + expected(control) + " got " + selected + " " + key);
+                // The new hand-reach controls are about the layer BELOW
+                // chooseTutorPartner, which still declines on them by design;
+                // their own assertion is in the hand-reach block above.
+                String want = handReach(control) ? "null" : expected(control).replace(' ', '_');
+                if (!selected.equals(want))
+                    throw new AssertionError("predicate: expected " + want + " got " + selected + " " + key);
                 // The offered-subset guarantee: with the piece withheld, the
                 // Kiki route may still answer, but no plan piece may be invented.
-                String allowed = variant(control).equals("kiki-priority") ? BODY.replace(' ', '_') : "null";
+                String allowed = variant(control).equals("kiki-priority") && !handReach(control)
+                        ? BODY.replace(' ', '_') : "null";
                 if (!List.of("no-probe", allowed).contains(restricted))
                     throw new AssertionError("a withheld piece must not be assumed present: " + restricted + " " + key);
             }
@@ -524,7 +627,9 @@ public final class CubeTutorSelectSmoke {
         // as dropped in-game control components, exactly as v45 recorded them.
         boolean inGameReachable = !control.startsWith("vamp:")
                 && !(searchToTop(control) && phase == PhaseType.MAIN1);
-        if (MUST_MOVE.contains(control) && inGameReachable) {
+        // `asserted` scopes the two MAIN1-only shapes; no pre-v63 MUST-MOVE
+        // control is MAIN1-only, so this clause changes none of them.
+        if (mustMove(control) && inGameReachable && asserted(control, phase)) {
             if (!tutorCast) throw new AssertionError("MUST-MOVE: the native AI never cast the tutor: " + key);
             if (searchToTop(control)) {
                 if (!topAtResolution.equals(piece.replace(' ', '_')))
@@ -538,7 +643,7 @@ public final class CubeTutorSelectSmoke {
         // a win rate.
         if (control.equals("demonic:freeze-missing") && !won)
             throw new AssertionError("MUST-MOVE: the Breach plan did not finish after the fetch: " + key);
-        if (MUST_NOT_MOVE.contains(control)) {
+        if (mustNotMove(control)) {
             // Two controls are MAIN1 facts by construction; see scopedToMain1.
             boolean scoped = asserted(control, phase);
             // The receipt is the state at the moment the search resolved, not
@@ -568,12 +673,13 @@ public final class CubeTutorSelectSmoke {
                 return null;
             });
             for (String name : List.of(BREACH, FREEZE, LED, WILL, TENDRILS, FUEL, KIKI, BODY, DECOY, SPELL_DECOY,
-                    MINDCENSOR, BEAR, "Demonic Tutor", "Imperial Seal", "Vampiric Tutor", "Mystical Tutor",
-                    "Island", "Swamp", "Mountain", "Forest"))
+                    MINDCENSOR, BEAR, DOOMSDAY, ORACLE, TWIN, "Demonic Tutor", "Imperial Seal", "Vampiric Tutor",
+                    "Mystical Tutor", "Island", "Swamp", "Mountain", "Forest"))
                 StaticData.instance().attemptToLoadCard(name);
             List<String> cases = args.length > 2 ? switch (args[2]) {
                 case "must-move" -> MUST_MOVE;
                 case "must-not-move" -> MUST_NOT_MOVE;
+                case "hand-reach" -> HAND_REACH;
                 default -> java.util.stream.Stream.concat(MUST_MOVE.stream(), MUST_NOT_MOVE.stream()).toList();
             } : java.util.stream.Stream.concat(MUST_MOVE.stream(), MUST_NOT_MOVE.stream()).toList();
             for (int seat = 0; seat < 2; seat++) for (PhaseType phase : List.of(PhaseType.MAIN1, PhaseType.MAIN2))
