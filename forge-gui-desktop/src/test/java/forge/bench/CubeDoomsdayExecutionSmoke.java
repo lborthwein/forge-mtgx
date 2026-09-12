@@ -379,6 +379,7 @@ public final class CubeDoomsdayExecutionSmoke {
             // puts them straight into the graveyard and the pips vanish.
             if (p.name().equals("Jace, the Mind Sculptor")) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 3);
             if (p.name().equals("Liliana of the Veil")) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 3);
+            if (p.name().equals("Jace, Wielder of Mysteries")) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 4);
         }
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
@@ -943,6 +944,236 @@ public final class CubeDoomsdayExecutionSmoke {
     }
 
     // ------------------------------------------------------------------ v49
+    private static final boolean JACE_STRICT = Boolean.getBoolean("forge.test.requireJaceFinish");
+
+    /** v51 route J. Every case specifies zones, tapped states and life totals -
+     * never a game action - exactly like {@link #tightenRun}, and lives in its
+     * own suite so that every pre-existing suite log stays byte-identical. */
+    private static final List<String> JACE_CASES = List.of("wheel", "jar", "gris-doomsday",
+            "gris-no-doomsday", "jar-no-doomsday", "timetwister", "time-spiral", "echo",
+            "gris-life-seven", "no-jace", "cant-win", "narset", "short-mana", "jace-hand", "lethal-board");
+
+    /** The registered proposal for each case. `lethal-board` is deliberately
+     * split by main: `lethalOnBoard(true)` is MAIN1-only by design, so the same
+     * board is a refusal in MAIN1 and a commitment in MAIN2. */
+    private static String jaceProposal(String kase, boolean second) {
+        return switch (kase) {
+            case "wheel", "jar", "gris-doomsday" -> "Doomsday";
+            case "gris-no-doomsday" -> "Griselbrand";
+            case "jar-no-doomsday" -> "Memory Jar";
+            case "lethal-board" -> second ? "Doomsday" : "none";
+            default -> "none";
+        };
+    }
+
+    /** The three refill decoys: each shuffles hand and graveyard back into the
+     * library before drawing seven, so each must be refused by the chain
+     * predicate rather than by a mana shortfall. */
+    private static String jaceDecoy(String kase) {
+        return switch (kase) {
+            case "timetwister" -> "Timetwister";
+            case "time-spiral" -> "Time Spiral";
+            case "echo" -> "Echo of Eons";
+            default -> null;
+        };
+    }
+
+    /** The plan's own route-J action count, read reflectively so this same
+     * source can run against the frozen v50 classes, where the field does not
+     * exist, and record -1 instead of failing. */
+    private static int jaceFinishCount(boolean reset) {
+        try {
+            var field = Class.forName("forge.ai.CubeDoomsdayPlan").getDeclaredField("jaceFinishes");
+            field.setAccessible(true);
+            int value = field.getInt(null);
+            if (reset) field.setInt(null, 0);
+            return value;
+        } catch (final ReflectiveOperationException | LinkageError absent) {
+            return -1;
+        }
+    }
+
+    /** Premise helper: is this hand card's printed spell playable and payable
+     * right now? Used only to assert that a refusal under test is the
+     * predicate's and not a mana shortfall. */
+    private static boolean handSpellPayable(final Player p, final String name) {
+        for (final Card card : p.getCardsIn(ZoneType.Hand)) {
+            if (!card.getName().equals(name)) continue;
+            for (final var original : card.getSpellAbilities()) {
+                if (!original.isSpell()) continue;
+                final var spell = original.copy(p);
+                return forge.ai.CubeComboAi.canPlayNative(spell, p)
+                        && forge.ai.CubeComboAi.canPayCost(spell, p, false);
+            }
+        }
+        return false;
+    }
+
+    private static boolean jaceNoDoomsday(String kase) {
+        return kase.equals("gris-no-doomsday") || kase.equals("jar-no-doomsday") || kase.equals("gris-life-seven");
+    }
+
+    private static List<Placement> jaceLayout(String kase) {
+        List<Placement> own = new ArrayList<>();
+        String decoy = jaceDecoy(kase);
+        boolean noDoomsday = jaceNoDoomsday(kase);
+        // The win replacement itself. `no-jace` swaps it for a land; `jace-hand`
+        // leaves it in hand, where a live-battlefield detector must not see it.
+        if (kase.equals("no-jace")) own.add(new Placement("Forest", ZoneType.Battlefield, false));
+        else own.add(new Placement("Jace, Wielder of Mysteries",
+                kase.equals("jace-hand") ? ZoneType.Hand : ZoneType.Battlefield, false));
+        if (!noDoomsday) own.add(new Placement("Doomsday", ZoneType.Hand, false));
+        // The two no-Doomsday Griselbrand cases differ in exactly one registered
+        // variable - life 8 versus life 7 - so Griselbrand enters TAPPED in both:
+        // its draw has no tap cost, but an untapped 7/7 lifelinker would attack
+        // in the combat step between MAIN1 and MAIN2 and hand the life-7 board a
+        // seven-point lifelink windfall, which is a second variable.
+        if (kase.startsWith("gris")) own.add(new Placement("Griselbrand", ZoneType.Battlefield,
+                kase.equals("gris-no-doomsday") || kase.equals("gris-life-seven")));
+        else if (kase.startsWith("jar")) own.add(new Placement("Memory Jar", ZoneType.Battlefield, false));
+        else own.add(new Placement(decoy == null ? "Wheel of Fortune" : decoy, ZoneType.Hand, false));
+        // Mana: Doomsday's own BBB always, plus exactly what that case's
+        // finisher or decoy costs, so no refusal can be a mana shortfall in
+        // disguise. `short-mana` is the one case that deliberately is one.
+        for (int i = 0; i < 3; i++) own.add(new Placement("Swamp", ZoneType.Battlefield, false));
+        if (decoy != null) {
+            for (int i = 0; i < 2; i++) own.add(new Placement("Island", ZoneType.Battlefield, false));
+            for (int i = 0; i < 4; i++) own.add(new Placement("Forest", ZoneType.Battlefield, false));
+        } else if (!kase.startsWith("gris") && !kase.startsWith("jar")) {
+            if (kase.equals("jace-hand"))
+                for (int i = 0; i < 4; i++) own.add(new Placement("Island", ZoneType.Battlefield, false));
+            if (!kase.equals("short-mana")) own.add(new Placement("Mountain", ZoneType.Battlefield, false));
+            for (int i = 0; i < 2; i++) own.add(new Placement("Forest", ZoneType.Battlefield, false));
+        }
+        if (kase.equals("lethal-board")) own.add(new Placement("Old One Eye", ZoneType.Battlefield, false));
+        for (int i = 0; i < (noDoomsday ? 6 : 25); i++) own.add(new Placement("Forest", ZoneType.Library, false));
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        return own;
+    }
+
+    private static void jaceRun(int seat, String kase) {
+        List<Placement> own = jaceLayout(kase), other = new ArrayList<>();
+        if (kase.equals("cant-win")) other.add(new Placement("Platinum Angel", ZoneType.Battlefield, false));
+        if (kase.equals("narset")) other.add(new Placement("Narset, Parter of Veils", ZoneType.Battlefield, false));
+        while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player p = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
+        if (kase.equals("gris-no-doomsday")) p.setLife(8, null);
+        if (kase.equals("gris-life-seven")) p.setLife(7, null);
+        if (kase.equals("lethal-board")) opponent.setLife(5, null);
+        game.getAction().checkStateEffects(true);
+        game.getTriggerHandler().resetActiveTriggers();
+        boolean noDoomsday = jaceNoDoomsday(kase);
+        String decoy = jaceDecoy(kase);
+        // Premises, computed from the same public reads the gate uses and
+        // asserted before the plan is consulted.
+        int librarySize = p.getCardsIn(ZoneType.Library).size();
+        if (librarySize != (noDoomsday ? 6 : 25))
+            throw new AssertionError("Library premise " + kase + ": " + librarySize);
+        if (kase.equals("cant-win") != p.cantWin())
+            throw new AssertionError("Win-prohibition premise wrong for " + kase);
+        if (kase.equals("narset") ? p.canDrawAmount(6) || !p.canDrawAmount(1) : !p.canDrawAmount(6))
+            throw new AssertionError("Draw premise wrong for " + kase);
+        if (decoy != null && !handSpellPayable(p, decoy))
+            throw new AssertionError("Decoy must be payable, so the refusal is the chain's: " + kase);
+        if (kase.equals("short-mana") && handSpellPayable(p, "Wheel of Fortune"))
+            throw new AssertionError("short-mana premise: Wheel must NOT be payable");
+        if (kase.equals("jace-hand") && !handSpellPayable(p, "Jace, Wielder of Mysteries"))
+            throw new AssertionError("jace-hand premise: Jace must be payable, so the refusal is the zone's");
+        if (List.of("wheel", "no-jace", "cant-win", "narset", "lethal-board").contains(kase)
+                && !handSpellPayable(p, "Wheel of Fortune"))
+            throw new AssertionError("Wheel premise wrong for " + kase);
+        if (kase.equals("gris-no-doomsday") && p.getLife() != 8 || kase.equals("gris-life-seven") && p.getLife() != 7)
+            throw new AssertionError("Life premise wrong for " + kase + ": " + p.getLife());
+        if (kase.equals("gris-no-doomsday") || kase.equals("gris-life-seven")) {
+            for (Card c : p.getCardsIn(ZoneType.Battlefield))
+                if (c.getName().equals("Griselbrand") && c.isUntapped())
+                    throw new AssertionError("Griselbrand must be tapped in " + kase + ": no lifelink windfall");
+        }
+        if (kase.equals("lethal-board")) {
+            int power = 0;
+            for (Card c : p.getCardsIn(ZoneType.Battlefield)) if (c.isCreature()) power += Math.max(0, c.getNetPower());
+            boolean blocker = false;
+            for (Card c : opponent.getCardsIn(ZoneType.Battlefield)) if (c.isCreature() && c.isUntapped()) blocker = true;
+            if (blocker || power < opponent.getLife())
+                throw new AssertionError("lethal-board premise: power=" + power + " oppLife=" + opponent.getLife());
+        }
+        String expected = jaceProposal(kase, main2);
+        boolean mustMove = !expected.equals("none");
+        BenchRandomAudit.install(0); // Fixed constructed fixture, not a sampled opening.
+        var proposed = new forge.ai.CubeDoomsdayPlan(p).nextAction();
+        String action = proposed == null ? "none" : proposed.getHostCard().getName();
+        System.out.println("JACE_PROPOSAL suite=jace improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " main2=" + main2 + " case=" + kase
+                + " life=" + p.getLife() + " oppLife=" + opponent.getLife() + " library=" + librarySize
+                + " mustMove=" + mustMove + " expected=" + expected.replace(' ', '_')
+                + " action=" + action.replace(' ', '_'));
+        if (improved && JACE_STRICT && !expected.equals(action))
+            throw new AssertionError("Jace proposal mismatch: " + kase + " main2=" + main2 + " -> " + action);
+        // The proposal probe above constructs a plan in BOTH arms, so reset here:
+        // every recorded jaceFinishes is the in-game count only.
+        jaceFinishCount(true);
+        int steps = 0, limit = 1500;
+        boolean doom = false, pile = false;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps++ < limit) {
+            game.getPhaseHandler().mainLoopStep();
+            if (!doom && has(p, ZoneType.Graveyard, "Doomsday")) doom = true;
+            pile |= doom && p.getCardsIn(ZoneType.Library).size() == 5;
+        }
+        int finishes = jaceFinishCount(true);
+        int endTurn = game.getPhaseHandler().getTurn();
+        boolean jaceWin = p.getOutcome() != null
+                && "Jace, Wielder of Mysteries".equals(p.getOutcome().altWinSourceName);
+        System.out.println("JACE_RESULT suite=jace improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " main2=" + main2 + " case=" + kase + " mustMove=" + mustMove
+                + " proposed=" + action.replace(' ', '_') + " doomsdayCast=" + doom + " fiveCardPile=" + pile
+                + " jaceFinishes=" + finishes + " won=" + p.hasWon() + " jaceWin=" + jaceWin
+                + " gameOver=" + game.isGameOver() + " life=" + p.getLife() + " oppLife=" + opponent.getLife()
+                + " library=" + p.getCardsIn(ZoneType.Library).size() + " endTurn=" + endTurn + " steps=" + steps);
+        if (steps >= limit) throw new AssertionError("Jace step budget: " + kase);
+        if (improved && JACE_STRICT) {
+            // Two invariants that hold on EVERY row, whatever tier it is in.
+            // Route J never pays a life cost it cannot survive - a finish at
+            // zero or less life would be a state-based loss before the draws
+            // resolved - and route J never acts unless the win replacement is
+            // genuinely live on our own battlefield.
+            if (jaceWin && p.getLife() <= 0)
+                throw new AssertionError("Route J finished at non-positive life: " + kase + " " + p.getLife());
+            if (finishes > 0 && !has(p, ZoneType.Battlefield, "Jace, Wielder of Mysteries"))
+                throw new AssertionError("Route J acted with no live win replacement: " + kase);
+            if (mustMove) {
+                if (!jaceWin) throw new AssertionError("Route J did not finish: " + kase + " main2=" + main2);
+                if (doom != expected.equals("Doomsday"))
+                    throw new AssertionError("Doomsday use mismatch: " + kase + " main2=" + main2);
+                if (doom && !pile) throw new AssertionError("Route J never reached a five-card pile: " + kase);
+            } else if (kase.equals("gris-life-seven")) {
+                // Proposal-asserted, result recorded: Griselbrand's own printed
+                // lifelink untaps on our next turn, attacks, and puts our life
+                // back above the seven the gate refuses, at which point
+                // activating is correct. The sharp claim that survives is that
+                // the finish cannot happen on the PREPARED turn, because
+                // nothing on that turn can lift a life total of seven.
+                if (jaceWin && endTurn <= 1)
+                    throw new AssertionError("Route J finished at life 7 on the prepared turn: " + kase);
+            } else if (!kase.equals("lethal-board") && !kase.equals("jace-hand")) {
+                // `lethal-board` in MAIN1 and `jace-hand` are proposal-asserted
+                // for the same kind of reason: the ordinary AI, which this
+                // change does not own, can legitimately move the board out from
+                // under the prepared premise - past MAIN1 into MAIN2, or by
+                // casting the Jace that is sitting in hand. `doomsdayCast` is
+                // recorded rather than asserted for the same reason: the Default
+                // arm casts Doomsday of its own accord on several of these
+                // boards, so it is not a property of this plan at all.
+                if (jaceWin) throw new AssertionError("Unexpected route-J win: " + kase);
+                if (finishes > 0) throw new AssertionError("Route J acted despite " + kase + ": " + finishes);
+            }
+        }
+        if (!improved && JACE_STRICT) {
+            if (finishes > 0) throw new AssertionError("Default arm must take no route-J action: " + kase);
+            if (jaceWin) throw new AssertionError("Default arm must not win through the Jace replacement: " + kase);
+        }
+    }
+
     private static final boolean TIGHTEN_STRICT = Boolean.getBoolean("forge.test.requireDoomsdayTighten");
     private static final boolean DISCARD_STRICT = Boolean.getBoolean("forge.test.requireComboDiscard");
 
@@ -1282,6 +1513,15 @@ public final class CubeDoomsdayExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
+            if (suite.equals("jace")) {
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++) for (String kase : JACE_CASES) jaceRun(seat, kase);
+                }
+                System.out.println("JACE_SUITE_COMPLETE suite=jace improved=" + improved
+                        + " policy=" + policy() + " cases=" + 4 * JACE_CASES.size());
+                return;
+            }
             if (suite.equals("tighten")) {
                 for (boolean second : new boolean[] {false, true}) {
                     main2 = second;

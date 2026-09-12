@@ -5,6 +5,7 @@ import forge.card.MagicColor;
 import forge.card.mana.ManaCost;
 import forge.card.mana.ManaCostShard;
 import forge.game.GameActionUtil;
+import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
 import forge.game.card.CardCollectionView;
@@ -12,6 +13,7 @@ import forge.game.cost.Cost;
 import forge.game.combat.CombatUtil;
 import forge.game.cost.CostReturn;
 import forge.game.mana.ManaCostBeingPaid;
+import forge.game.replacement.ReplacementType;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
@@ -24,12 +26,18 @@ import java.util.function.Supplier;
  * Doomsday's own BBB plus public devotion alone, to reach Oracle, optionally
  * bridged by a mana-only card in hand when black is the only thing missing. The
  * search and ordering hooks see only choices the resolving spell legally
- * exposes. Other piles are not yet supported by this planner. */
+ * exposes. Other piles are not yet supported by this planner.
+ *
+ * <p>v51 adds route J, a devotion-free finish that needs no pile decision at
+ * all: a printed "you win instead of drawing from an empty library"
+ * replacement live on our own battlefield, plus an ability that draws past a
+ * five-card pile without shuffling the library back first. It is evaluated
+ * after every route above it.</p> */
 public final class CubeDoomsdayPlan {
-    private enum Stage { NONE, RITUAL, DOOMSDAY, STAR, DRAW, ORACLE }
+    private enum Stage { NONE, RITUAL, DOOMSDAY, STAR, DRAW, ORACLE, JACE, FINISH }
     private final Player player;
     private Stage stage = Stage.NONE;
-    private int turn = -1, doomsdayId = -1, ritualId = -1, ritualTurn = -1;
+    private int turn = -1, doomsdayId = -1, ritualId = -1, ritualTurn = -1, finisherId = -1;
     private boolean oracleSelected, gushSelected, gushRoute;
     private Card reservedStar;
     /** Observability only: the token for the check that already declined the
@@ -51,7 +59,14 @@ public final class CubeDoomsdayPlan {
      * whenever no bridge is found; when a bridge exists but a gate refuses it,
      * the bridge reports that gate's existing token
      * ({@code oracle-etb-disabled}, {@code better-attack}, {@code clock}), and
-     * a second bridge in one turn reports {@code other check=ritual-spent}.</p> */
+     * a second bridge in one turn reports {@code other check=ritual-spent}.</p>
+     *
+     * <p>v51 adds exactly one token, {@code other check=jace-finisher}, and it
+     * is reachable only from route J's own {@link Stage#JACE}/{@link
+     * Stage#FINISH} passes. Route J is evaluated after every other route, so on
+     * a board with no live empty-draw win replacement the token the routes above
+     * set is what is printed, unchanged; the only other token route J can set is
+     * the pre-existing {@code better-attack}.</p> */
     private String decline = "other check=doomsday-plan";
     public String declineReason() { return decline; }
     /** Diagnostic only, never read by a decision: how many times the ritual
@@ -59,6 +74,11 @@ public final class CubeDoomsdayPlan {
      * reset reflectively by the fixture, exactly like
      * {@link CubeComboPlayerController#guardRejections}. */
     static int ritualBridges;
+    /** Diagnostic only, never read by a decision: how many times v51's route J
+     * actually proposed an action (a Doomsday it committed for the Jace finish,
+     * or the finisher itself). Test-visible static, read and reset reflectively
+     * by the fixture, exactly like {@link #ritualBridges}. */
+    static int jaceFinishes;
 
     public CubeDoomsdayPlan(Player player) { this.player = player; }
 
@@ -400,7 +420,11 @@ public final class CubeDoomsdayPlan {
                 || (stage == Stage.DOOMSDAY && top.getHostCard().getId() == doomsdayId)
                 || stage == Stage.STAR && reservedStar != null && top.getHostCard().getId() == reservedStar.getId()
                 || stage == Stage.DRAW && top.getHostCard().getName().equals(gushRoute ? "Gush" : "Ancestral Recall")
-                || stage == Stage.ORACLE && top.getHostCard().getName().equals("Thassa's Oracle"));
+                || stage == Stage.ORACLE && top.getHostCard().getName().equals("Thassa's Oracle")
+                // v51 route J: the object, not the name. Both stages are cleared
+                // by the next priority pass, which re-derives from live state.
+                || stage == Stage.JACE && top.getHostCard().getId() == doomsdayId
+                || stage == Stage.FINISH && top.getHostCard().getId() == finisherId);
     }
 
     /** Pile routes needing no Recall, Gush or Star: Doomsday's own BBB plus
@@ -600,6 +624,214 @@ public final class CubeDoomsdayPlan {
         return null;
     }
 
+    /** v51 route J, section A of design v51. Is a "you win instead of drawing
+     * from an empty library" replacement live on a permanent we control right
+     * now? Recognised by printed property the way {@link CubeTopPlan} already
+     * recognises its life-gain replacements and its cast-from-top permissions,
+     * never by card name: this matches Jace, Wielder of Mysteries and
+     * Laboratory Maniac, whose {@code R:} lines are identical, and matches
+     * nothing else.
+     *
+     * <p>Only unhidden battlefield permanents are examined - a face-down
+     * permanent has no abilities - and no hand, library or hidden face is
+     * touched.</p>
+     *
+     * <p>Neither {@code canReplace} nor {@code requirementsCheck} may be used
+     * here, and that is a measured fact rather than a caution: both run
+     * {@code meetsCommonRequirements}, so both evaluate this effect's own
+     * {@code IsPresent$ Card.YouOwn | PresentZone$ Library | PresentCompare$
+     * EQ0} - which is precisely the empty library route J is engineering, and
+     * is therefore false while the library still has cards in it. Asked before
+     * the pile is drawn through, both answer "no" on a live Jace. The
+     * diagnostic that established this is recorded in this run's
+     * {@code diag/} folder.</p>
+     *
+     * <p>What replaces them is the v50 allow-list idiom
+     * ({@link CubeTopPlan#drainPerOwnDraw}): the effect's whole parameter map
+     * must be a subset of the printed set below, so an effect carrying any
+     * requirement this plan cannot forecast - {@code PlayerTurn},
+     * {@code ActivePhases}, a second {@code IsPresent}, a condition SVar - is
+     * refused outright rather than approximated. Native {@link
+     * forge.game.TriggerReplacementBase#zonesCheck} and {@code isSuppressed}
+     * still gate the effect.</p> */
+    private static final java.util.Set<String> WIN_REPLACEMENT_PARAMS = java.util.Set.of(
+            "Event", "ActiveZones", "ValidPlayer", "IsPresent", "PresentZone", "PresentCompare",
+            "ReplaceWith", "Description");
+
+    private boolean emptyDrawWinLive() {
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown()) continue;
+            for (var replacement : card.getReplacementEffects()) {
+                if (replacement.isSuppressed() || replacement.getMode() != ReplacementType.Draw) continue;
+                if (!WIN_REPLACEMENT_PARAMS.containsAll(replacement.getMapParams().keySet())) continue;
+                if (!"You".equals(replacement.getParam("ValidPlayer"))
+                        || !"Card.YouOwn".equals(replacement.getParam("IsPresent"))
+                        || !"Library".equals(replacement.getParam("PresentZone"))
+                        || !"EQ0".equals(replacement.getParam("PresentCompare"))) continue;
+                SpellAbility win = replacement.getOverridingAbility();
+                if (win == null || win.getApi() != ApiType.WinsGame || !"You".equals(win.getParam("Defined"))) continue;
+                if (win.getSubAbility() != null || !replacement.zonesCheck(card.getZone())) continue;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** How many cards this ability would draw for us in one resolution, or 0
+     * when it is not a draw-past-the-pile finisher. The whole
+     * {@link SpellAbility#getSubAbility} chain is walked and the chain is
+     * refused outright if any link carries {@code Destination$ Library} or
+     * {@code Shuffle$ True} - that one clause is what separates Wheel of
+     * Fortune and Memory Jar, which draw past the pile, from Timetwister, Time
+     * Spiral and Echo of Eons, which refill the library first and win nothing.
+     *
+     * <p>A draw link counts only with a {@code Defined} that includes us
+     * ({@code You}, or {@code Player} for the symmetric draw-sevens) and a
+     * literal positive integer {@code NumCards}. A computed or absent amount is
+     * refused rather than guessed, which is also what keeps Jace's own
+     * {@code +1} - a targeted mill with an implicit single draw - out of this
+     * route.</p> */
+    private int drawsInChain(SpellAbility ability) {
+        int draws = 0;
+        for (SpellAbility link = ability; link != null; link = link.getSubAbility()) {
+            if ("True".equals(link.getParam("Shuffle")) || "Library".equals(link.getParam("Destination"))) return 0;
+            if (link.getApi() != ApiType.Draw) continue;
+            String defined = link.getParamOrDefault("Defined", "You");
+            if (!defined.equals("You") && !defined.equals("Player")) return 0;
+            String amount = link.getParamOrDefault("NumCards", "");
+            if (!amount.chars().allMatch(Character::isDigit) || amount.isEmpty()) return 0;
+            int cards = Integer.parseInt(amount);
+            if (cards <= 0) return 0;
+            draws += cards;
+        }
+        return draws;
+    }
+
+    /** A cost that pays life must leave us alive: state-based actions would
+     * kill us before any of the draws resolved. Property-based - every
+     * {@link forge.game.cost.CostPayLife} part of the ability's own printed
+     * cost, never a card name. When Doomsday is part of the route the life
+     * total is read after Doomsday's own loss, using the same
+     * {@code life - ceil(life / 2)} formula {@link #clockSurvivable} uses. A
+     * non-literal amount is refused rather than evaluated. */
+    private boolean survivesLifeCost(SpellAbility ability, boolean afterDoomsday) {
+        int life = player.getLife();
+        if (afterDoomsday) life -= (life + 1) / 2;
+        int paid = 0;
+        for (var part : ability.getPayCosts().getCostParts()) {
+            if (!(part instanceof forge.game.cost.CostPayLife)) continue;
+            Integer amount = part.convertAmount();
+            if (amount == null) return false;
+            paid += amount;
+        }
+        return life > paid;
+    }
+
+    /** Would Doomsday and this finisher both be payable out of one board? One
+     * native probe over the combined mana, exactly the {@link
+     * #payableAfterBridge} idiom, so a single source cannot pay for both
+     * halves. The finisher's own full cost is checked separately because its
+     * non-mana parts - Memory Jar's tap and self-sacrifice, Griselbrand's life
+     * - are not mana at all; the two results are ANDed, so this can only ever
+     * decline more than the combined probe alone, never commit where it
+     * refuses. Nothing is cast, tapped or changed. */
+    private boolean bothPayable(SpellAbility doom, SpellAbility finisher) {
+        ManaCost extra = finisher.getPayCosts().getTotalMana();
+        ManaCostBeingPaid combined = new ManaCostBeingPaid(doom.getPayCosts().getTotalMana());
+        for (ManaCostShard shard : extra) combined.increaseShard(shard, 1);
+        combined.increaseGenericMana(extra.getGenericCost());
+        return CubeComboAi.canPayManaCost(combined, doom, player, false);
+    }
+
+    /** The finisher this board offers right now, or null. Hand spells first,
+     * then activated abilities of permanents we control, in zone order.
+     * {@code libraryAfter} is the library size the finisher would face: the
+     * current size when it is cast alone, and exactly five behind a Doomsday
+     * ({@code doomsday.txt ChangeNum$ 5}). We need one more draw than that, and
+     * native {@link Player#canDrawAmount} is asked for exactly that many - the
+     * gate that refuses an opposing Narset, Parter of Veils. */
+    private SpellAbility pickFinisher(int libraryAfter, SpellAbility doom) {
+        if (!player.canDrawAmount(libraryAfter + 1)) return null;
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            SpellAbility found = finisherOn(card, true, libraryAfter, doom);
+            if (found != null) return found;
+        }
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            SpellAbility found = finisherOn(card, false, libraryAfter, doom);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private SpellAbility finisherOn(Card card, boolean spell, int libraryAfter, SpellAbility doom) {
+        if (card.isFaceDown() || !spell && card.getController() != player) return null;
+        for (SpellAbility original : card.getSpellAbilities()) {
+            if (original.isSpell() != spell) continue;
+            if (!spell && original.isManaAbility()) continue;
+            SpellAbility ability = original.copy(player);
+            // Route J makes no targeting decision, so an ability that needs one
+            // is not one it may take.
+            if (ability.usesTargeting()) continue;
+            if (drawsInChain(ability) <= libraryAfter) continue;
+            if (!survivesLifeCost(ability, doom != null)) continue;
+            if (!CubeComboAi.canPlayNative(ability, player) || !CubeComboAi.canPayCost(ability, player, false)) continue;
+            if (doom != null && !bothPayable(doom, ability)) continue;
+            return ability;
+        }
+        return null;
+    }
+
+    /** Design v51 section B, route J: reach an empty-library draw while a
+     * printed "you win instead" replacement is live on our own battlefield.
+     * Either the library is already small enough and the finisher is cast
+     * alone, or Doomsday cuts it to five first.
+     *
+     * <p>Evaluated LAST, after every existing route has declined, so each
+     * pre-existing decline keeps its own token and every currently-green board
+     * still takes its current route. The first check is
+     * {@link #emptyDrawWinLive}, so a board with no such replacement leaves the
+     * caller's receipt byte for byte.</p>
+     *
+     * <p>No pile-content decision is made: {@link #ownsPileDecision} still
+     * answers only for {@link Stage#DOOMSDAY}, so the ordinary AI picks the
+     * five and {@link #orderPile} is never consulted. Route J passes no turn,
+     * so {@link #clockSurvivable} is not the right guard and
+     * {@link #lethalOnBoard}'s same-turn form is. Own-visible information only:
+     * our own battlefield and hand, our library SIZE, our life, and both public
+     * battlefields.</p> */
+    private SpellAbility jaceRoute(int librarySize) {
+        if (!emptyDrawWinLive() || player.cantWin()) return null;
+        SpellAbility doom = null;
+        SpellAbility finisher = pickFinisher(librarySize, null);
+        if (finisher == null) {
+            // Doomsday's ChangeNum$ 5 is the only thing it would change here,
+            // so a library already at five or fewer gains nothing from it.
+            if (librarySize <= 5 || player.getLife() <= 1) return null;
+            doom = playable("Doomsday");
+            if (doom == null) return null;
+            finisher = pickFinisher(5, doom);
+            if (finisher == null) return null;
+        }
+        if (lethalOnBoard(true)) { decline = "better-attack"; return null; }
+        turn = player.getGame().getPhaseHandler().getTurn();
+        jaceFinishes++;
+        System.err.println("CUBE_COMBO jace-finish card=" + finisher.getHostCard().getName()
+                + " draws=" + drawsInChain(finisher) + " library=" + librarySize
+                + " doomsday=" + (doom != null));
+        if (doom == null) {
+            finisherId = finisher.getHostCard().getId();
+            stage = Stage.FINISH;
+            return finisher;
+        }
+        gushRoute = false;
+        reservedStar = null;
+        doomsdayId = doom.getHostCard().getId();
+        oracleSelected = false;
+        gushSelected = false;
+        stage = Stage.JACE;
+        return doom;
+    }
+
     private SpellAbility commitDoomsday(SpellAbility doom) {
         turn = player.getGame().getPhaseHandler().getTurn();
         doomsdayId = doom.getHostCard().getId();
@@ -621,6 +853,27 @@ public final class CubeDoomsdayPlan {
         // (or a Lotus Petal on the battlefield), so the plan starts over here
         // from live state and the ordinary entry gates decide again.
         if (stage == Stage.RITUAL) stage = Stage.NONE;
+        // v51 route J owns its own two stages. Both re-derive every gate from
+        // live state, exactly as the ritual bridge does: a countered Doomsday
+        // or a removed Jace leaves the plan declining rather than holding a
+        // remembered pile, and the pile itself is never remembered at all.
+        if (stage == Stage.JACE || stage == Stage.FINISH) {
+            stage = Stage.NONE;
+            SpellAbility finish = jaceRoute(librarySize);
+            if (finish == null) decline = "other check=jace-finisher";
+            return finish;
+        }
+        SpellAbility pile = pileAction(librarySize);
+        if (pile != null) return pile;
+        // v51 route J, evaluated LAST so that every decline token the routes
+        // above set is preserved byte for byte on every board that has no live
+        // empty-draw win replacement.
+        return jaceRoute(librarySize);
+    }
+
+    /** Every pre-v51 route, unchanged. Split out of {@link #nextAction} only so
+     * that route J can be evaluated strictly after all of them. */
+    private SpellAbility pileAction(int librarySize) {
         if (stage == Stage.DOOMSDAY) {
             if (librarySize > 5 || inHand("Doomsday") != null || inHand("Thassa's Oracle") == null && !oracleSelected) {
                 stage = Stage.NONE; decline = "other check=pile-not-resolved"; return null;
