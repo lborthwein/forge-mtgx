@@ -26,6 +26,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     private final CubeThopterPlan thopterPlan;
     private final CubeBombPlan bombPlan;
     private final CubeDrawOutPlan drawOutPlan; // v66 drawout
+    private final CubeReanimatorPlan reanimatorPlan; // v73 reanimator
     private int comboSelectionChanges;
     private CubeComboAi.TutorPlan tutorPlan;
     private int comboTutorPlanCasts;
@@ -53,7 +54,8 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
      * consulted prefix. */
     private static final List<String> PLAN_ORDER =
             List.of("doomsday", "breach", "storm", "monolith", "kitten", "top", "thopter", "bomb",
-                    "drawout"); // v66 drawout
+                    "drawout", // v66 drawout
+                    "reanimator"); // v73 reanimator
     private int decisionTurn = -1, decisionLines;
     private PhaseType decisionPhase;
     private boolean declinedDoomsday, declinedTutor;
@@ -61,6 +63,10 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
      * v54 adds. Index matches {@link #PLAN_ORDER}; slot 0 (doomsday) is unused
      * because {@link #declinedDoomsday} already owns that line. */
     private final boolean[] declinedFamily = new boolean[PLAN_ORDER.size()];
+    /** v73. The one accessor the {@code ChangeZoneAi.isPreferredTarget} hook
+     * needs: the SPELL form's reanimation target is chosen inside that method
+     * and no controller hook exists for it. */
+    public CubeReanimatorPlan reanimatorPlan() { return reanimatorPlan; }
     public int getComboSelectionChanges() { return comboSelectionChanges; }
     public int getComboTutorPlanCasts() { return comboTutorPlanCasts; }
     public CubeComboPlayerController(Game game, Player player, LobbyPlayer lobby) {
@@ -76,12 +82,13 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         thopterPlan = new CubeThopterPlan(player);
         bombPlan = new CubeBombPlan(player);
         drawOutPlan = new CubeDrawOutPlan(player); // v66 drawout
+        reanimatorPlan = new CubeReanimatorPlan(player); // v73 reanimator
     }
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         planAction = null;
-        if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell()) return null; // v66 drawout
+        if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
@@ -103,6 +110,13 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         // outright on the single-resolution case CubeDoomsdayPlan route J owns,
         // so every existing family keeps its selection order byte-identical.
         if (action == null && (action = drawOutPlan.nextAction()) != null) plan = "drawout";
+        // v73 reanimator: registered LAST of the plans, before the tutor
+        // forecast, for the same reason v66 registered the draw-out family
+        // there. It proposes only a graveyard TUTOR - a card no earlier plan
+        // owns - so every existing family keeps its selection order
+        // byte-identical, and a log gains exactly one decline line per
+        // (turn, phase) at which the draw-out family also declined.
+        if (action == null && (action = reanimatorPlan.nextAction()) != null) plan = "reanimator";
         if (action == null) {
             tutorConsulted = true;
             tutorPlan = CubeComboAi.planTutor(getPlayer());
@@ -189,6 +203,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             case 6: return thopterPlan.declineReason();
             case 7: return bombPlan.declineReason();
             case 8: return drawOutPlan.declineReason(); // v66 drawout
+            case 9: return reanimatorPlan.declineReason(); // v73 reanimator
             default: return "other check=unknown-family";
         }
     }
@@ -269,6 +284,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (thopterPlan.owns(ability)) return thopterPlan.play(ability);
         if (bombPlan.owns(ability)) return bombPlan.play(ability);
         if (drawOutPlan.owns(ability)) return drawOutPlan.play(ability); // v66 drawout
+        if (reanimatorPlan.owns(ability)) return reanimatorPlan.play(ability); // v73 reanimator
         return doomsdayPlan.withReservedDrawSource(ability, () -> super.playChosenSpellAbility(ability));
     }
 
@@ -326,8 +342,70 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
                 return payload;
             }
             return ordinary;
+        } else if (destination == ZoneType.Graveyard && ownsSearchPayloadChoice(source, origin, choices, decider)) {
+            // v73. Entomb / Unmarked Grave: our own library searched for one
+            // card that goes to our own graveyard. `entomb.txt` carries no
+            // AILogic, so the native chooser is getBestAI -> and, over a whole
+            // library, getMostExpensivePermanentAI - a plain max(CMC) that in
+            // this cube lands on Emrakul, whose own trigger then shuffles the
+            // graveyard away. Same contract as the v56 branch above: the
+            // ordinary answer is computed FIRST and kept unless the plan
+            // strictly prefers a different card, so an agreeing position stays
+            // byte-identical, random stream included.
+            List<Card> options = new ArrayList<>(choices);
+            Card ordinary = super.chooseSingleCardForZoneChange(destination, origin, source, choices, delayedReveal,
+                    prompt, optional, decider);
+            Card payload = reanimatorPlan.chooseSearchPayload(options);
+            if (payload != null && payload != ordinary) {
+                reanimatorPlan.recordSearchSelection(payload, ordinary, source.getHostCard().getName());
+                return payload;
+            }
+            return ordinary;
+        } else if (destination == ZoneType.Battlefield && ownsGraveyardReturnChoice(source, origin, choices, decider)) {
+            // v73. The HIDDEN reanimation form - Exhume, Shallow Grave, Corpse
+            // Dance - whose card is chosen at resolution rather than targeted.
+            // Exhume returns a creature for EACH player; the opponent's half is
+            // decided by the opponent's own controller with `decider` set to
+            // them, so it never reaches this class, and the first clause of the
+            // predicate refuses it if it somehow did.
+            List<Card> options = new ArrayList<>(choices);
+            Card ordinary = super.chooseSingleCardForZoneChange(destination, origin, source, choices, delayedReveal,
+                    prompt, optional, decider);
+            Card returned = reanimatorPlan.chooseGraveyardReturn(source, options);
+            if (returned != null && returned != ordinary) return returned;
+            return ordinary;
         }
         return super.chooseSingleCardForZoneChange(destination, origin, source, choices, delayedReveal, prompt, optional, decider);
+    }
+
+    /** v73. May the reanimator plan answer this graveyard-tutor selection?
+     * Every clause is a restriction and all must hold: the chooser is US, the
+     * resolving ability is OURS, the offered cards are OUR OWN cards in OUR OWN
+     * library, and the plan recognises the printed search shape with a
+     * reanimation spell own-visible ({@link CubeReanimatorPlan#ownsSearchSelection}).
+     * No opponent zone is read here or in the plan, and the plan never iterates
+     * our library: the offered list is the effect's own. */
+    private boolean ownsSearchPayloadChoice(SpellAbility source, List<ZoneType> origin, CardCollection choices,
+            Player decider) {
+        return decider == getPlayer() && source != null && source.getActivatingPlayer() == getPlayer()
+                && origin != null && origin.size() == 1 && origin.contains(ZoneType.Library)
+                && choices != null && !choices.isEmpty()
+                && choices.stream().allMatch(c -> c.getOwner() == getPlayer() && c.isInZone(ZoneType.Library))
+                && reanimatorPlan.ownsSearchSelection(source);
+    }
+
+    /** v73. May the reanimator plan answer this graveyard-to-battlefield
+     * selection? Same restriction discipline: the chooser is US, the ability is
+     * OURS, the origin is a graveyard, and every offered card is one WE own. A
+     * graveyard is a PUBLIC zone, so the offered list is information this seat
+     * already has; the OWN-owner clause is what keeps Exhume's opponent half out
+     * of this plan even when it is our spell that is resolving. */
+    private boolean ownsGraveyardReturnChoice(SpellAbility source, List<ZoneType> origin, CardCollection choices,
+            Player decider) {
+        return decider == getPlayer() && source != null && source.getActivatingPlayer() == getPlayer()
+                && origin != null && origin.contains(ZoneType.Graveyard)
+                && choices != null && !choices.isEmpty()
+                && choices.stream().allMatch(c -> c.getOwner() == getPlayer() && c.isInZone(ZoneType.Graveyard));
     }
 
     /** May the bomb plan answer this zone-change choice?
@@ -461,8 +539,36 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (p != getPlayer() || sa == null || sa.getActivatingPlayer() != getPlayer()
                 || ordinary == null || ordinary.isEmpty() || validCards == null) return ordinary;
         CardCollection reserved = reservedDiscardCards();
-        if (reserved.isEmpty()) return ordinary;
+        if (reserved.isEmpty()) return reanimatorDiscardChoice(validCards, ordinary, sa.getHostCard().getName());
         return ownDiscardChoice(validCards, ordinary, reserved, sa.getHostCard().getName());
+    }
+
+    /** v73. The looting discard PREFERENCE, appended after v49's reserved-card
+     * swap and asked only when that swap changed nothing, so no v49 receipt can
+     * move. Census section 6.3: {@code AiController.getCardsToDiscard} has no
+     * rule tying a reanimation spell in hand to a payload - its only reanimator
+     * awareness is the {@code IsReanimatorCard} PROTECTION guard, which is dead
+     * in this cube. A CMC-8 Archon is discarded here only incidentally, as
+     * "unplayable by CMC", the same rule that would pitch a land.
+     *
+     * <p>Exactly ONE ordinary pick is exchanged and the choice's SIZE is
+     * unchanged - v49's contract verbatim. The plan supplies both halves: the
+     * payload worth pitching ({@link CubeReanimatorPlan#chooseDiscardPayload})
+     * and the pick it replaces ({@link CubeReanimatorPlan#leastValuedDiscard}),
+     * both ranked by the same printed value terms, so the swap is deterministic
+     * over the list the ordinary AI produced.</p> */
+    private CardCollection reanimatorDiscardChoice(CardCollectionView validCards, CardCollection ordinary,
+            String source) {
+        List<Card> offered = new ArrayList<>();
+        for (Card card : validCards) offered.add(card);
+        Card payload = reanimatorPlan.chooseDiscardPayload(offered, new ArrayList<>(ordinary));
+        if (payload == null) return ordinary;
+        Card replaced = reanimatorPlan.leastValuedDiscard(new ArrayList<>(ordinary));
+        if (replaced == null || replaced == payload) return ordinary;
+        CardCollection result = new CardCollection();
+        for (Card chosen : ordinary) result.add(chosen == replaced ? payload : chosen);
+        reanimatorPlan.recordDiscardSwap(payload, replaced, source);
+        return result;
     }
 
     /** The cleanup-step discard to maximum hand size: our own choice over our
@@ -472,8 +578,9 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         CardCollectionView ordinary = super.chooseCardsToDiscardToMaximumHandSize(numDiscard);
         if (ordinary == null || ordinary.isEmpty()) return ordinary;
         CardCollection reserved = reservedDiscardCards();
-        if (reserved.isEmpty()) return ordinary;
-        return ownDiscardChoice(new CardCollection(getPlayer().getCardsIn(ZoneType.Hand)), ordinary, reserved, "cleanup");
+        CardCollection hand = new CardCollection(getPlayer().getCardsIn(ZoneType.Hand));
+        if (reserved.isEmpty()) return reanimatorDiscardChoice(hand, new CardCollection(ordinary), "cleanup");
+        return ownDiscardChoice(hand, ordinary, reserved, "cleanup");
     }
 
     /** v66 drawout - design-v51 section C item 3, the Oath of Druids optional
