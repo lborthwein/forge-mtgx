@@ -35,6 +35,11 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
      * plan action, and how often it would have disagreed with an ordinary land
      * choice. Test-visible statics, read and reset reflectively by the fixture. */
     static int guardRejections, ordinaryGuardDisagreements;
+    /** Diagnostic only, never read by a decision: how often v49's discard
+     * ownership actually swapped one card of an ordinary discard choice for
+     * another. Test-visible static, read and reset reflectively by the fixture,
+     * exactly like {@link #guardRejections}. */
+    static int comboDiscardSwaps;
     /** Observability state only: rate limits for the stderr decision log. */
     private static final int DECISION_LINE_CAP = 40;
     private int decisionTurn = -1, decisionLines;
@@ -274,6 +279,87 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             }
         }
         return ordinary;
+    }
+
+    /** v49 discard ownership. Which cards in our own hand a plan is currently
+     * relying on, from the plans' own stage/gate predicates - never a card-name
+     * rule and never an always-preserve rule:
+     *
+     * <ul>
+     * <li>Doomsday: only while the plan is still holding a pile it built and
+     *     waiting for the Oracle that pile put on top
+     *     ({@link CubeDoomsdayPlan#discardProtectedCards}). This is the v47
+     *     analysis's 16701482-s0 mode: our own looter drew the pile's Oracle
+     *     and the ordinary discard policy pitched it, with no gate reading a
+     *     hazard that was own-visible the whole time.</li>
+     * <li>Breach and Storm: only the Breach-diagnosis C2 shape - the gate is
+     *     already exactly one card short, and this hand card is the last copy
+     *     of the OTHER half that the plan's own zone definitions can reach, so
+     *     discarding it would put the gate two short. Deliberately NOT extended
+     *     to "never discard a combo piece".</li>
+     * </ul>
+     *
+     * Empty when no plan is in such a state, which is the common case: then
+     * this class returns the ordinary AI's own choice object untouched. */
+    private CardCollection reservedDiscardCards() {
+        CardCollection reserved = new CardCollection();
+        reserved.addAll(doomsdayPlan.discardProtectedCards());
+        reserved.addAll(CubeBreachPlan.discardProtectedCards(getPlayer()));
+        reserved.addAll(CubeStormPlan.discardProtectedCards(getPlayer()));
+        return reserved;
+    }
+
+    /** Swap each reserved card out of the ordinary discard choice for a legal
+     * alternative, keeping the choice's size exactly as the ordinary AI set it.
+     * Only the CHOICE of what to discard is owned: the loot activation itself
+     * is an ordinary decision and is never blocked, and where the discard is
+     * forced - no unreserved valid card left to take instead - the reserved
+     * card is kept in the choice and native rules proceed. */
+    private CardCollection ownDiscardChoice(CardCollectionView validCards, CardCollectionView ordinary,
+            CardCollection reserved, String source) {
+        CardCollection result = new CardCollection();
+        for (Card chosen : ordinary) {
+            if (!reserved.contains(chosen)) { result.add(chosen); continue; }
+            Card alternative = null;
+            for (Card candidate : validCards) {
+                if (reserved.contains(candidate) || result.contains(candidate) || ordinary.contains(candidate)) continue;
+                alternative = candidate;
+                break;
+            }
+            if (alternative == null) { result.add(chosen); continue; }
+            result.add(alternative);
+            comboDiscardSwaps++;
+            System.err.println("CUBE_COMBO_DISCARD kept=" + chosen.getName() + " discarded=" + alternative.getName()
+                    + " source=" + source + " phase=" + getGame().getPhaseHandler().getPhase());
+        }
+        return result;
+    }
+
+    /** Our own effect asking us which of our own cards to discard - a loot, a
+     * Frantic Search, a rummage. The ordinary AI still makes the choice; this
+     * only re-picks the cards a plan is relying on. Another player's effect and
+     * another player's hand are never touched, so no opponent decision and no
+     * hidden zone is read. */
+    @Override
+    public CardCollection chooseCardsToDiscardFrom(Player p, SpellAbility sa, CardCollection validCards, int min, int max,
+            CardCollectionView visibleToChooser) {
+        CardCollection ordinary = super.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser);
+        if (p != getPlayer() || sa == null || sa.getActivatingPlayer() != getPlayer()
+                || ordinary == null || ordinary.isEmpty() || validCards == null) return ordinary;
+        CardCollection reserved = reservedDiscardCards();
+        if (reserved.isEmpty()) return ordinary;
+        return ownDiscardChoice(validCards, ordinary, reserved, sa.getHostCard().getName());
+    }
+
+    /** The cleanup-step discard to maximum hand size: our own choice over our
+     * own hand, with no spell ability behind it. Same ownership, same limits. */
+    @Override
+    public CardCollectionView chooseCardsToDiscardToMaximumHandSize(int numDiscard) {
+        CardCollectionView ordinary = super.chooseCardsToDiscardToMaximumHandSize(numDiscard);
+        if (ordinary == null || ordinary.isEmpty()) return ordinary;
+        CardCollection reserved = reservedDiscardCards();
+        if (reserved.isEmpty()) return ordinary;
+        return ownDiscardChoice(new CardCollection(getPlayer().getCardsIn(ZoneType.Hand)), ordinary, reserved, "cleanup");
     }
 
     @Override
