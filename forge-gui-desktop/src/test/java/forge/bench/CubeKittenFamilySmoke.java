@@ -75,6 +75,7 @@ public final class CubeKittenFamilySmoke {
             case "no-loop" -> null;
             case "costly-loop" -> "Sol Ring";
             case "discard-loop" -> "Lion's Eye Diamond";
+            case "mox" -> "Chrome Mox";
             default -> "Lotus Petal";
         };
         if (loop != null) cards.add(new Entry(loop, home(route)));
@@ -148,7 +149,7 @@ public final class CubeKittenFamilySmoke {
         // candidate MUST-MOVE row that failed to convert is caught below by
         // its own win assertion instead.
         if (candidate && Boolean.getBoolean("forge.test.requireKittenFamily")) {
-            if (control.equals("none") && (!p.hasWon() || familyActions < 2 || blinks < 3
+            if ((control.equals("none") || control.equals("mox")) && (!p.hasWon() || familyActions < 2 || blinks < 3
                     || partnerObjects.size() < 3 || shots < 1))
                 throw new AssertionError("Expected native Kitten family win: " + key);
             if (MUST_NOT_MOVE.contains(control) && (p.hasWon() || familyActions != 0))
@@ -161,6 +162,15 @@ public final class CubeKittenFamilySmoke {
         // bounced off the stack, so its activated ability is never paid), and
         // only a graveyard recursion route has to read that cost at all.
         if (route.equals("lurrus")) controls.add("discard-loop");
+        // Chrome Mox is the second MUST-MOVE row of the family-M route and the
+        // one that DISCRIMINATES. It is a printed {0} noncreature card, so the
+        // plan's own predicate takes it, but its script carries
+        // `NeedsToPlayVar:Z GE1` over the nonartifact, nonland, coloured cards
+        // in hand -- and in this loop the hand holds nothing else -- so the
+        // ordinary chooser will not cast it at all. The catalogue row is
+        // 1170-3634-4966, one of the two family-M rows that is complete in the
+        // 96-deck drafted census.
+        if (route.equals("venser")) controls.add("mox");
         return controls;
     }
     public static void main(String[] args) {
