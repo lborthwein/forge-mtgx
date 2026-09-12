@@ -51,6 +51,16 @@ public final class CubeBombLinesSmoke {
     private static final String ANIMATE = "Animate Dead";
     private static final String ELVES = "Llanowar Elves";
     private static final String MARIT = "Marit Lage";
+    // v55 conversion positions (design-v55-bomb-conversion.md, fixture table).
+    private static final String BLIGHTSTEEL = "Blightsteel Colossus";
+    private static final String ARCHON = "Archon of Cruelty";
+    private static final String ATRAXA = "Atraxa, Grand Unifier";
+    private static final String WURM = "Worldspine Wurm";
+    private static final String ULAMOG = "Ulamog, the Ceaseless Hunger";
+    private static final String FOUNDRY = "Retrofitter Foundry";
+    private static final String BEAST = "Questing Beast";
+    private static final String SPIDER = "Giant Spider";
+    private static final String BEARS = "Grizzly Bears";
 
     /** Prepared positions (a)-(g) of the owner's question. Each is legal and
      * already assembled: the only thing under observation is whether Default
@@ -110,9 +120,48 @@ public final class CubeBombLinesSmoke {
             "showtell-emrakul:priest",
             "reanimate-griselbrand:rip-empty");
 
+    /** v55 conversion cases (registration.md, suite `conversion`). B1-B10 of
+     * design-v55-bomb-conversion.md plus B5b, the 789 s1 position the R2 gate
+     * must KEEP: one untapped land cannot pay the Foundry's {2}, so no extra
+     * blocker exists and the attack is lethal. Each case is a new position, so
+     * none of them can disturb a preserved row. */
+    private static final List<String> CONVERSION = List.of(
+            "breach-blightsteel",          // B1 no public blocker, 11 infect = 10 poison
+            "breach-blightsteel:ground",   // B2 a 2/2 blocker: trample leaves 9 poison
+            "breach-choice",               // B3 no own-visible payload is lethal
+            "breach-choice:low-life",      // B3b a flier WOULD be lethal; the chooser takes Blightsteel
+            "breach-reach",                // B4 the reach blocker stops the flier
+            "breach-foundry",              // B5 an instant-speed token maker with mana up
+            "breach-foundry:one-land",     // B5b the same maker without the mana
+            "sat-archon",                  // B6 R4's position, recorded
+            "sat-atraxa-low-life",         // B7 R4's position at 3 life, recorded
+            "sat-beater-parity",           // B8 Show and Tell must not move
+            "depths-sequence",             // B9 R6 land-drop sequencing
+            "depths-sequence:half");       // B10 half the pair: R6 must not fire
+
+    /** Registered starting life. 20 everywhere else, and no preserved row ever
+     * calls setLife. */
+    private static int ownLife(String control) {
+        return control.equals("sat-atraxa-low-life") ? 3 : 20;
+    }
+
+    private static int opponentLife(String control) {
+        return switch (control) {
+            case "breach-choice:low-life", "breach-reach" -> 7;
+            case "breach-foundry", "breach-foundry:one-land" -> 6;
+            default -> 20;
+        };
+    }
+
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone) {}
+
+    /** The bases suite `conversion` owns. Membership, not the variant switch,
+     * decides the opponent's board for these positions. */
+    private static final Set<String> CONVERSION_BASES = new HashSet<>(List.of(
+            "breach-blightsteel", "breach-choice", "breach-reach", "breach-foundry",
+            "sat-archon", "sat-atraxa-low-life", "sat-beater-parity", "depths-sequence"));
 
     private static String base(String control) { return control.split(":")[0]; }
     private static String variant(String control) { return control.contains(":") ? control.split(":", 2)[1] : ""; }
@@ -120,9 +169,14 @@ public final class CubeBombLinesSmoke {
     /** The card whose arrival on the battlefield is the point of the line. */
     private static String payoff(String control) {
         return switch (base(control)) {
-            case "depths-stage", "depths-hexmage", "depths-hexmage-bf" -> MARIT;
+            case "depths-stage", "depths-hexmage", "depths-hexmage-bf", "depths-sequence" -> MARIT;
             case "reanimate-griselbrand" -> GRISELBRAND;
             case "natural-order-hoof" -> HOOF;
+            case "breach-blightsteel", "breach-choice" -> BLIGHTSTEEL;
+            case "breach-reach", "breach-foundry" -> GRISELBRAND;
+            case "sat-archon" -> ARCHON;
+            case "sat-atraxa-low-life" -> ATRAXA;
+            case "sat-beater-parity" -> WURM;
             default -> EMRAKUL;
         };
     }
@@ -191,7 +245,73 @@ public final class CubeBombLinesSmoke {
                     for (int i = 0; i < 5; i++) result.add(new Placement(ELVES, ZoneType.Battlefield));
                     if (!noMana) for (int i = 0; i < 4; i++) result.add(new Placement("Forest", ZoneType.Battlefield));
                 }
+                // ---------------------------------------- v55 conversion positions
+                case "breach-blightsteel" -> {
+                    result.add(new Placement(BREACH, ZoneType.Hand));
+                    result.add(new Placement(BLIGHTSTEEL, ZoneType.Hand));
+                    for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                }
+                case "breach-choice" -> {
+                    result.add(new Placement(BREACH, ZoneType.Hand));
+                    result.add(new Placement(BLIGHTSTEEL, ZoneType.Hand));
+                    result.add(new Placement(GRISELBRAND, ZoneType.Hand));
+                    for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                }
+                case "breach-reach", "breach-foundry" -> {
+                    result.add(new Placement(BREACH, ZoneType.Hand));
+                    result.add(new Placement(GRISELBRAND, ZoneType.Hand));
+                    for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                }
+                case "sat-archon" -> {
+                    result.add(new Placement(SHOWTELL, ZoneType.Hand));
+                    result.add(new Placement(ULAMOG, ZoneType.Hand));
+                    result.add(new Placement(ARCHON, ZoneType.Hand));
+                    for (int i = 0; i < 3; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+                }
+                case "sat-atraxa-low-life" -> {
+                    result.add(new Placement(SHOWTELL, ZoneType.Hand));
+                    result.add(new Placement(WURM, ZoneType.Hand));
+                    result.add(new Placement(ATRAXA, ZoneType.Hand));
+                    for (int i = 0; i < 4; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+                }
+                case "sat-beater-parity" -> {
+                    result.add(new Placement(SHOWTELL, ZoneType.Hand));
+                    result.add(new Placement(WURM, ZoneType.Hand));
+                    for (int i = 0; i < 4; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+                }
+                case "depths-sequence" -> {
+                    // Both halves in hand, three ordinary lands already down and
+                    // two ordinary lands in hand competing for the drops. This
+                    // is 787 s0's shape: draw was never the problem, sequencing
+                    // was.
+                    result.add(new Placement(DEPTHS, ZoneType.Hand));
+                    if (!variant.equals("half")) result.add(new Placement(STAGE, ZoneType.Hand));
+                    result.add(new Placement("Island", ZoneType.Hand));
+                    if (!variant.equals("half")) result.add(new Placement("Mountain", ZoneType.Hand));
+                    for (int i = 0; i < 3; i++) result.add(new Placement("Forest", ZoneType.Battlefield));
+                }
                 default -> throw new AssertionError("unknown line " + base);
+            }
+        } else if (CONVERSION_BASES.contains(base)) {
+            // v55: the conversion positions put the whole opponent board here,
+            // by base rather than by variant, so no preserved control's
+            // placements are touched.
+            switch (base) {
+                case "breach-blightsteel" -> {
+                    if (variant.equals("ground")) result.add(new Placement(BEARS, ZoneType.Battlefield));
+                }
+                case "breach-choice" -> result.add(new Placement(BEAST, ZoneType.Battlefield));
+                case "breach-reach" -> result.add(new Placement(SPIDER, ZoneType.Battlefield));
+                case "breach-foundry" -> {
+                    result.add(new Placement(FOUNDRY, ZoneType.Battlefield));
+                    int forests = variant.equals("one-land") ? 1 : 2;
+                    for (int i = 0; i < forests; i++) result.add(new Placement("Forest", ZoneType.Battlefield));
+                }
+                case "sat-archon" -> result.add(new Placement(BEAST, ZoneType.Battlefield));
+                case "sat-atraxa-low-life" -> {
+                    for (int i = 0; i < 2; i++) result.add(new Placement(BEARS, ZoneType.Battlefield));
+                }
+                default -> { }
             }
         } else {
             String permanent = switch (variant) {
@@ -279,7 +399,7 @@ public final class CubeBombLinesSmoke {
         System.out.println("BOMB_HINT " + key + line);
     }
 
-    private static void run(boolean improved, int seat, PhaseType phase, String control) {
+    private static void run(boolean improved, int seat, PhaseType phase, String control, boolean conversion) {
         List<RegisteredPlayer> players = new ArrayList<>();
         for (int s = 0; s < 2; s++) players.add(new RegisteredPlayer(deck(s == seat, control)).setPlayer(
                 improved && s == seat ? new forge.ai.LobbyPlayerCubeComboAi("Combo-" + s) : defaultAi(s)));
@@ -290,6 +410,11 @@ public final class CubeBombLinesSmoke {
         Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
         populate(player, true, control);
         populate(opponent, false, control);
+        // v55: three conversion positions turn on a life total (a lethal forecast
+        // is a statement about the opponent's life). Only those rows call
+        // setLife at all, so no preserved row can move.
+        if (ownLife(control) != 20) player.setLife(ownLife(control), null);
+        if (opponentLife(control) != 20) opponent.setLife(opponentLife(control), null);
         game.setAge(GameStage.Play);
         game.getPhaseHandler().setupFirstTurn(player, () -> game.getPhaseHandler().devModeSet(phase, player));
         game.getAction().checkStateEffects(true);
@@ -309,12 +434,27 @@ public final class CubeBombLinesSmoke {
         // sneak row; the guarded arm must show 0.
         int offTurnCheatIns = 0;
         int lowestIce = minIce(player), maxMarit = 0;
+        // v55 R6 receipt: the turn each half of the Depths route reached our
+        // battlefield from our hand. Read from zones, not from plan internals,
+        // so both arms are measured the same way. -1 = never played.
+        int depthsLandTurn = -1, stageLandTurn = -1;
+        // v55: the TURN each conversion line actually happened on. R2 is a gate
+        // on a turn's attack, so "declined while the blocker was up, cast once
+        // it had tapped to attack" is a different receipt from "never cast",
+        // and only a turn can tell them apart.
+        int breachTurn = -1, showtellTurn = -1, maritTurn = -1;
         String previous = "";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps < 600) {
             game.getPhaseHandler().mainLoopStep();
             steps++;
             int ice = minIce(player);
             if (ice >= 0) lowestIce = lowestIce < 0 ? ice : Math.min(lowestIce, ice);
+            if (depthsLandTurn < 0 && countOnBattlefield(player, DEPTHS) > 0)
+                depthsLandTurn = game.getPhaseHandler().getTurn();
+            if (stageLandTurn < 0 && countOnBattlefield(player, STAGE) > 0)
+                stageLandTurn = game.getPhaseHandler().getTurn();
+            if (maritTurn < 0 && countOnBattlefield(player, MARIT) > 0)
+                maritTurn = game.getPhaseHandler().getTurn();
             maxMarit = Math.max(maxMarit, countOnBattlefield(player, MARIT));
             for (var item : game.getStack()) if (stackIds.add(item.getId())) {
                 var sa = item.getSpellAbility();
@@ -332,8 +472,14 @@ public final class CubeBombLinesSmoke {
                         && !game.getPhaseHandler().isPlayerTurn(player)) offTurnCheatIns++;
                 if (ours && host.equals(HEXMAGE) && sa.isActivatedAbility()) hexmageRemovals++;
                 if (ours && host.equals(SNEAK) && sa.isActivatedAbility()) sneakActivations++;
-                if (ours && host.equals(BREACH) && sa.isSpell()) breachCasts++;
-                if (ours && host.equals(SHOWTELL) && sa.isSpell()) showTellCasts++;
+                if (ours && host.equals(BREACH) && sa.isSpell()) {
+                    breachCasts++;
+                    if (breachTurn < 0) breachTurn = game.getPhaseHandler().getTurn();
+                }
+                if (ours && host.equals(SHOWTELL) && sa.isSpell()) {
+                    showTellCasts++;
+                    if (showtellTurn < 0) showtellTurn = game.getPhaseHandler().getTurn();
+                }
                 if (ours && (host.equals(REANIMATE) || host.equals(ANIMATE)) && sa.isSpell()) reanimations++;
                 if (ours && host.equals(ORDER) && sa.isSpell()) naturalOrders++;
                 if (!ours && host.equals("Karakas") && sa.isActivatedAbility()) karakasBounces++;
@@ -364,6 +510,22 @@ public final class CubeBombLinesSmoke {
                 + " payoffZone=" + zoneOf(player, payoff(control))
                 + " emrakulZone=" + zoneOf(player, EMRAKUL)
                 + " life=" + player.getLife() + " opponentLife=" + opponent.getLife());
+        // v55: one extra line, emitted for the conversion cases ONLY, so that
+        // BOMB_RESULT keeps exactly the fields v52 registered and every
+        // preserved row stays byte-comparable.
+        if (conversion)
+            System.out.println("BOMB_CONV " + key + " depthsLandTurn=" + depthsLandTurn
+                    + " stageLandTurn=" + stageLandTurn + " maritTurn=" + maritTurn
+                    + " breachTurn=" + breachTurn + " showtellTurn=" + showtellTurn
+                    + " oppPoison=" + opponent.getPoisonCounters()
+                    + " blightsteelZone=" + zoneOf(player, BLIGHTSTEEL)
+                    + " griselbrandZone=" + zoneOf(player, GRISELBRAND)
+                    + " archonZone=" + zoneOf(player, ARCHON)
+                    + " atraxaZone=" + zoneOf(player, ATRAXA)
+                    + " ulamogZone=" + zoneOf(player, ULAMOG)
+                    + " wurmZone=" + zoneOf(player, WURM)
+                    + " breachZone=" + zoneOf(player, BREACH)
+                    + " showtellZone=" + zoneOf(player, SHOWTELL));
     }
 
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
@@ -388,7 +550,8 @@ public final class CubeBombLinesSmoke {
             });
             for (String name : List.of(DEPTHS, STAGE, HEXMAGE, SNEAK, BREACH, SHOWTELL, EMRAKUL, GRISELBRAND,
                     HOOF, ORDER, REANIMATE, ANIMATE, ELVES, "Containment Priest", "Karakas", "Wasteland",
-                    "Rest in Peace", "Torpor Orb", "Ensnaring Bridge", "Grizzly Bears",
+                    "Rest in Peace", "Torpor Orb", "Ensnaring Bridge", BEARS,
+                    BLIGHTSTEEL, ARCHON, ATRAXA, WURM, ULAMOG, FOUNDRY, BEAST, SPIDER,
                     "Forest", "Island", "Mountain", "Swamp", "Plains"))
                 StaticData.instance().attemptToLoadCard(name);
             List<String> cases = args.length > 2 ? switch (args[2]) {
@@ -400,10 +563,12 @@ public final class CubeBombLinesSmoke {
                 case "order" -> List.of("natural-order-hoof");
                 case "bombs" -> BOMBS;
                 case "guards" -> GUARDS;
+                case "conversion" -> CONVERSION;
                 default -> { var all = new ArrayList<>(LINES); all.addAll(CONTROLS); yield all; }
             } : LINES;
+            boolean conversion = args.length > 2 && args[2].equals("conversion");
             for (int seat = 0; seat < 2; seat++) for (PhaseType phase : List.of(PhaseType.MAIN1, PhaseType.MAIN2))
-                for (String control : cases) run(args[1].equals("improved"), seat, phase, control);
+                for (String control : cases) run(args[1].equals("improved"), seat, phase, control, conversion);
             System.out.println("BOMB_SUITE_COMPLETE cases=" + (4 * cases.size()));
         } catch (Throwable failure) {
             failure.printStackTrace();
