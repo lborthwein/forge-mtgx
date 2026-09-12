@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v58";
+    public static final String VERSION = "cube-combo-execution-v59";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -70,15 +70,34 @@ public final class CubeComboAi {
     }
 
     /** Setter propagates to descendants, so restore parents first and then
-     * each child's exact original actor (which may differ from its parent). */
+     * each child's exact original actor (which may differ from its parent).
+     *
+     * <p><b>v59 R2.</b> The probed ability's TARGET LIST is snapshotted and
+     * restored alongside the actor and the mana express choice. Seven plan sites
+     * call {@code resetTargets()} / {@code getTargets().add(...)} on live
+     * abilities; the ordinary-path divergence diagnosis rules them out as the
+     * cause of any observed divergence but names them as real unrestored state,
+     * inert today only because those families decline at their entry gates on the
+     * decks measured. Restoring here makes the probe window's purity guarantee
+     * independent of which deck is loaded. Registered scope: the snapshot is
+     * taken at {@link #probePayment} ENTRY, so residue a plan creates BEFORE it
+     * calls a probe is outside this guarantee.</p> */
     private static final class ProbeAbilityState {
         private final SpellAbility ability;
         private final Player actor;
         private final String express;
+        /** The live target list as found, and a copy of its contents. Every
+         * policy mutation site detaches first ({@code resetTargets()} installs a
+         * fresh object), so re-seating this reference restores identity AND
+         * contents; the copy covers a bare in-place {@code getTargets().add}. */
+        private final forge.game.spellability.TargetChoices targets;
+        private final forge.game.spellability.TargetChoices targetsAsFound;
         private final java.util.List<ProbeAbilityState> children = new java.util.ArrayList<>();
         ProbeAbilityState(SpellAbility ability) {
             this.ability = ability; actor = ability.getActivatingPlayer();
             express = ability.getManaPart() == null ? null : ability.getManaPart().getExpressChoice();
+            targets = ability.getTargets();
+            targetsAsFound = targets == null ? null : targets.clone();
             if (ability.getSubAbility() != null) children.add(new ProbeAbilityState(ability.getSubAbility()));
             for (SpellAbility child : ability.getAdditionalAbilities().values()) children.add(new ProbeAbilityState(child));
             for (var list : ability.getAdditionalAbilityLists().values())
@@ -87,7 +106,37 @@ public final class CubeComboAi {
         void restore() {
             ability.setActivatingPlayer(actor);
             if (ability.getManaPart() != null) ability.getManaPart().setExpressChoice(express);
+            if (targets != null) {
+                // The probe swapped the object in (resetTargets installs a fresh
+                // one): re-seat the original, which restores identity and, because
+                // the mutations then went to the NEW object, its contents too.
+                if (ability.getTargets() != targets) ability.setTargets(targets);
+                // A bare getTargets().add with no preceding reset mutates the very
+                // object held here. Refill it IN PLACE so the live TargetChoices
+                // identity is preserved in every case.
+                if (!sameTargets(targets, targetsAsFound)) refill(targets, targetsAsFound);
+            }
             for (var child : children) child.restore();
+        }
+        /** Element-by-element by IDENTITY. {@code TargetChoices.contains} compares
+         * cards by game timestamp and {@code ForwardingList.equals} delegates to an
+         * {@code FCollection}, so neither answers "is this the same list". */
+        private static boolean sameTargets(forge.game.spellability.TargetChoices live,
+                forge.game.spellability.TargetChoices found) {
+            if (live.size() != found.size()) return false;
+            for (int index = 0; index < live.size(); index++) if (live.get(index) != found.get(index)) return false;
+            return true;
+        }
+        /** {@code removeAll} is the override that also clears the divided and
+         * card-controller maps; {@code add} re-populates the controller map. */
+        private static void refill(forge.game.spellability.TargetChoices live,
+                forge.game.spellability.TargetChoices found) {
+            live.removeAll(new java.util.ArrayList<>(live));
+            for (forge.game.GameObject object : found) {
+                live.add(object);
+                Integer divided = found.getDividedValue(object);
+                if (divided != null) live.addDividedAllocation(object, divided);
+            }
         }
     }
 

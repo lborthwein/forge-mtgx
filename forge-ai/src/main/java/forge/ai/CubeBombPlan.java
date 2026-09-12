@@ -873,18 +873,37 @@ public final class CubeBombPlan {
      * attack, and the end-step trigger sacrificed it for nothing
      * ({@code sneakActivations=1 opponentLife=20 emrakulZone=Library}).</p>
      *
-     * <p>Kept simple on purpose: our own turn, MAIN1 or the beginning of combat,
-     * an empty stack, attackers not yet declared, a body that can actually
-     * attack, and no public uncast-entry exile. The "unless it wins or blocks
-     * lethal at instant speed" exception the brief allows is deliberately NOT
-     * implemented - this is a veto arm, and a veto that never invents a line is
-     * worth more here than one that models a combat it cannot verify.</p> */
+     * <p>Kept simple on purpose: our own turn, a phase no later than the
+     * beginning of combat, an empty stack, attackers not yet declared, a body
+     * that can actually attack, and no public uncast-entry exile. The "unless it
+     * wins or blocks lethal at instant speed" exception the brief allows is
+     * deliberately NOT implemented - this is a veto arm, and a veto that never
+     * invents a line is worth more here than one that models a combat it cannot
+     * verify.</p>
+     *
+     * <p><b>v59 R1, the window.</b> v52 wrote the phase test as a whitelist of
+     * MAIN1 and COMBAT_BEGIN, which also refused our OWN upkeep and draw steps.
+     * The registered defect was the OPPONENT'S upkeep, and the isPlayerTurn line
+     * above already covers it. The ordinary-path divergence diagnosis
+     * ({@code 2026-09-12-ordinary-path-divergence-diagnosis}) attributes 11 of 11
+     * D4 divergences to those two steps - Default acted at our own UPKEEP (9) or
+     * DRAW (2) - and in 10 of them the candidate re-took the IDENTICAL action one
+     * priority later at MAIN1. The only effect was that one MyRandom roll was not
+     * made, desynchronising the matched pair's shared seeded stream for the rest
+     * of the game. The window is now the native gate's own test, {@code not after
+     * COMBAT_BEGIN}, so the veto no longer differs from Default on a pass where it
+     * has nothing to say. A body cheated in at our upkeep has haste from the
+     * script's own {@code SubAbility$ DBPump} and still reaches the attack step;
+     * at upkeep we have not yet drawn or made a land drop, so the value test below
+     * sees no MORE mana than it would at MAIN1 - conservative, never looser.</p> */
     public static boolean declineCheatIn(Player ai, SpellAbility sa) {
         if (!CubeComboAi.enabled(ai) || !cheatInShape(sa)) return false;
         PhaseHandler phases = ai.getGame().getPhaseHandler();
         if (!phases.isPlayerTurn(ai)) return true;
-        if (!phases.is(PhaseType.MAIN1, ai) && !phases.is(PhaseType.COMBAT_BEGIN, ai)) return true;
+        if (phases.getPhase().isAfter(PhaseType.COMBAT_BEGIN)) return true;
         if (!ai.getGame().getStack().isEmpty()) return true;
+        // Implied by the line above, and kept verbatim: "we already declared
+        // attackers" is one of v52 D4's registered predicates in its own words.
         if (phases.getPhase().isAfter(PhaseType.COMBAT_DECLARE_ATTACKERS)) return true;
         if (exiledOnUncastEntry(ai)) return true;
         Card bomb = new CubeBombPlan(ai).bestBomb(sa, true);
