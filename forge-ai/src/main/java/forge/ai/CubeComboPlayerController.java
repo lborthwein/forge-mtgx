@@ -43,9 +43,22 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     static int comboDiscardSwaps;
     /** Observability state only: rate limits for the stderr decision log. */
     private static final int DECISION_LINE_CAP = 40;
+    /** v54 observability: the order in which {@link #chooseSpellAbilityToPlay}
+     * consults the plans. It is a READ of that method's existing short-circuit
+     * chain, never a driver of it: the chain below is unchanged, and this list
+     * only tells {@link #logDecision} which plans were actually asked on this
+     * pass. A plan at index i was consulted exactly when no plan before it
+     * produced an action, so the winning plan's index is the length of the
+     * consulted prefix. */
+    private static final List<String> PLAN_ORDER =
+            List.of("doomsday", "breach", "storm", "monolith", "kitten", "top", "thopter", "bomb");
     private int decisionTurn = -1, decisionLines;
     private PhaseType decisionPhase;
     private boolean declinedDoomsday, declinedTutor;
+    /** One decline line per family per (turn, phase), for the seven families
+     * v54 adds. Index matches {@link #PLAN_ORDER}; slot 0 (doomsday) is unused
+     * because {@link #declinedDoomsday} already owns that line. */
+    private final boolean[] declinedFamily = new boolean[PLAN_ORDER.size()];
     public int getComboSelectionChanges() { return comboSelectionChanges; }
     public int getComboTutorPlanCasts() { return comboTutorPlanCasts; }
     public CubeComboPlayerController(Game game, Player player, LobbyPlayer lobby) {
@@ -112,6 +125,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (turn != decisionTurn || phase != decisionPhase) {
             decisionTurn = turn; decisionPhase = phase; decisionLines = 0;
             declinedDoomsday = false; declinedTutor = false;
+            java.util.Arrays.fill(declinedFamily, false);
         }
         if (++decisionLines > DECISION_LINE_CAP) return;
         int oppLife = 0;
@@ -129,6 +143,44 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (tutorConsulted && !declinedTutor && tutorPlan == null) {
             declinedTutor = true;
             System.err.println("CUBE_PLAN_DECLINE family=kiki-tutor reason=" + CubeComboAi.lastTutorDecline());
+        }
+        logFamilyDeclines(plan);
+    }
+
+    /** v54: the same line, same cap and same condition, for the seven families
+     * that used to decline silently. Appended after the two pre-existing
+     * decline lines, so removing these lines restores the pre-v54 log exactly.
+     *
+     * <p>Only a plan that was CONSULTED on this very pass may be reported, so
+     * no stale token can reach the log: {@link #chooseSpellAbilityToPlay}
+     * short-circuits, and a plan after the winner was never asked. The winner's
+     * index in {@link #PLAN_ORDER} is therefore the consulted prefix; when no
+     * plan won (the label is {@code none} or {@code tutor}) every plan was
+     * consulted. Each reported plan set its token inside the {@code nextAction}
+     * call this pass already made.</p> */
+    private void logFamilyDeclines(String plan) {
+        int winner = PLAN_ORDER.indexOf(plan);
+        int consulted = winner < 0 ? PLAN_ORDER.size() : winner + 1;
+        for (int family = 1; family < consulted; family++) {
+            if (family == winner || declinedFamily[family]) continue;
+            declinedFamily[family] = true;
+            System.err.println("CUBE_PLAN_DECLINE family=" + PLAN_ORDER.get(family)
+                    + " reason=" + familyDeclineReason(family));
+        }
+    }
+
+    /** The token each plan already recorded for the {@code nextAction} call
+     * this pass made. Pure accessor; never consulted by a decision. */
+    private String familyDeclineReason(int family) {
+        switch (family) {
+            case 1: return breachPlan.declineReason();
+            case 2: return stormPlan.declineReason();
+            case 3: return monolithPlan.declineReason();
+            case 4: return kittenPlan.declineReason();
+            case 5: return topPlan.declineReason();
+            case 6: return thopterPlan.declineReason();
+            case 7: return bombPlan.declineReason();
+            default: return "other check=unknown-family";
         }
     }
 

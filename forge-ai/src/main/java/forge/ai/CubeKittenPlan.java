@@ -28,6 +28,40 @@ public final class CubeKittenPlan {
     private boolean active;
     private String rockName;
     private long teferiBefore;
+    /** Observability only: the token for the check that already declined the
+     * most recent {@link #nextAction}. Never read by a decision, exactly like
+     * {@link CubeDoomsdayPlan#declineReason}.
+     *
+     * <p>Grammar, one token per (turn, phase): {@code phase},
+     * {@code stack-not-empty}, {@code cant-win}, {@code action-cap},
+     * {@code failed-this-turn}, {@code stopped-no-progress},
+     * {@code missing=<our own missing piece(s)>}, {@code no-known-oracle},
+     * {@code mana:UU/<have>} where {@code <have>} is
+     * {@link CubeComboAi#ownVisibleMana} (our own untapped lands plus our own
+     * floating mana), {@code library-empty}, {@code cant-draw} or
+     * {@code no-rock-route}. Our own library SIZE is own-visible; no token
+     * reads library contents or order, and none names an opponent zone.</p> */
+    private String decline="other check=kitten-plan";
+    public String declineReason() {return decline;}
+    private SpellAbility decline(String reason) {decline=reason;return null;}
+    /** Names the first true clause of the opening guard, re-reading only the
+     * same pure getters in the same order, after that guard has already
+     * decided to decline. */
+    private String gateReason() {
+        var phase=player.getGame().getPhaseHandler();
+        if(failedTurn==turn) return "failed-this-turn";
+        if(actions>=200) return "action-cap";
+        if(player.cantWin()) return "cant-win";
+        if(!player.getGame().getStack().isEmpty()) return "stack-not-empty";
+        return "phase";
+    }
+    /** Our own missing engine pieces, from our own battlefield only. */
+    private String missingToken(Card kitten,Card teferi) {
+        StringBuilder names=new StringBuilder();
+        if(kitten==null) names.append(KITTEN.replace(' ','_'));
+        if(teferi==null) {if(names.length()>0) names.append(';');names.append(TEFERI.replace(' ','_'));}
+        return names.toString();
+    }
     public CubeKittenPlan(Player player) {this.player=player;}
 
     private Card find(String name,ZoneType zone) {
@@ -166,7 +200,8 @@ public final class CubeKittenPlan {
         var game=player.getGame();var phase=game.getPhaseHandler();
         if(turn!=phase.getTurn()) {turn=phase.getTurn();actions=0;active=false;selected=null;pending=null;rockName=null;}
         if(failedTurn==turn||actions>=200||player.cantWin()||!game.getStack().isEmpty()
-                ||!(phase.is(PhaseType.MAIN1,player)||phase.is(PhaseType.MAIN2,player))) return null;
+                ||!(phase.is(PhaseType.MAIN1,player)||phase.is(PhaseType.MAIN2,player))) return decline(gateReason());
+        decline="other check=kitten-plan";
         int library=player.getCardsIn(ZoneType.Library).size();
         Card kitten=find(KITTEN,ZoneType.Battlefield), teferi=find(TEFERI,ZoneType.Battlefield);
         if(pending!=null) {
@@ -174,21 +209,23 @@ public final class CubeKittenPlan {
                 || pending.getHostCard().getName().equals(rockName)&&pending.isSpell()
                    && (teferi==null||teferi.getGameTimestamp()==teferiBefore);
             pending=null;
-            if(stalled) {failedTurn=turn;active=false;System.err.println("CUBE_KITTEN_PLAN stopped-no-progress turn="+turn);return null;}
+            if(stalled) {failedTurn=turn;active=false;System.err.println("CUBE_KITTEN_PLAN stopped-no-progress turn="+turn);return decline("stopped-no-progress");}
         }
-        if(kitten==null||teferi==null||!knownOracle()) {active=false;return null;}
+        if(kitten==null||teferi==null||!knownOracle()) {active=false;
+            return decline(kitten==null||teferi==null?"missing="+missingToken(kitten,teferi):"no-known-oracle");}
         // Do not draw toward a finisher whose colored cost cannot currently
         // be funded. This tests resources only; it does not inspect Oracle's
         // position in the library or pretend it is presently castable.
         if(!CubeComboAi.canPayCost(new forge.game.cost.Cost("U U",false),
-                teferi.getSpellAbilities().get(0).copy(player),player,false)) {active=false;return null;}
+                teferi.getSpellAbilities().get(0).copy(player),player,false)) {active=false;
+            return decline("mana:UU/"+CubeComboAi.ownVisibleMana(player));}
         // <=2 is conservative Oracle's own UU devotion, not an estimate of
         // hidden cards or an assertion that its trigger cannot be stopped.
         if(library<=2) {
             SpellAbility finish=spell(find(ORACLE,ZoneType.Hand));
             if(finish!=null) return choose(finish);
         }
-        if(library==0||!player.canDrawAmount(1)) {active=false;return null;}
+        if(library==0||!player.canDrawAmount(1)) {active=false;return decline(library==0?"library-empty":"cant-draw");}
         List<String> rocks=new ArrayList<>();
         for(ZoneType zone:List.of(ZoneType.Battlefield,ZoneType.Hand))
             for(Card card:player.getCardsIn(zone))
@@ -211,7 +248,7 @@ public final class CubeKittenPlan {
             SpellAbility cast=spell(find(name,ZoneType.Hand));
             if(cast!=null) return chooseRock(name,cast);
         }
-        active=false;return null;
+        active=false;return decline("no-rock-route");
     }
 
     public boolean chooseBlink(SpellAbility sa) {

@@ -30,6 +30,38 @@ public final class CubeTopPlan {
     private boolean drain;
     /** The drain permanent the last drain-route pass recognized, if any. */
     private Card drainOutlet;
+    /** Observability only: the tokens for the checks that already declined the
+     * most recent {@link #nextAction}. Never read by a decision, exactly like
+     * {@link CubeDoomsdayPlan#declineReason}. This plan has TWO routes, both of
+     * which are consulted on a declining pass, so both are reported: the
+     * combined reason is {@code shot:<token>,drain:<token>}. A decline before
+     * either route is entered is a single plain token instead.
+     *
+     * <p>Grammar. Plain tokens: {@code phase}, {@code stack-not-empty},
+     * {@code cant-win}, {@code action-cap}, {@code failed-this-turn},
+     * {@code multiplayer}, {@code stopped-no-progress}. Per-route tokens:
+     * {@code no-outlet}, {@code outlet-unusable}, {@code no-life-gain},
+     * {@code no-loop-action}. Every one names our own battlefield, our own
+     * hand, our own library SIZE, our own life or the public opposing life;
+     * none reads an opponent's hand, library contents or library order.</p> */
+    private String decline = "other check=top-plan";
+    private String shotDecline = "other check=shot-route", drainDecline = "other check=drain-route";
+    public String declineReason() { return decline; }
+    private SpellAbility decline(String reason) { decline = reason; return null; }
+    private SpellAbility declineShot(String reason) { shotDecline = reason; return null; }
+    private SpellAbility declineDrain(String reason) { drainDecline = reason; return null; }
+    /** Names the first true clause of the opening guard, re-reading only the
+     * same pure getters in the same order, after that guard has already
+     * decided to decline. */
+    private String gateReason() {
+        var phase = player.getGame().getPhaseHandler();
+        if (failedTurn == turn) return "failed-this-turn";
+        if (actions >= 200) return "action-cap";
+        if (player.cantWin()) return "cant-win";
+        if (!player.getGame().getStack().isEmpty()) return "stack-not-empty";
+        if (!(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))) return "phase";
+        return "multiplayer";
+    }
 
     /** A native permission to play the top card of our own library, found by
      * the shape of a continuous static ability we control. {@code lifeCost} is
@@ -226,7 +258,8 @@ public final class CubeTopPlan {
         }
         if (failedTurn == turn || actions >= 200 || player.cantWin() || !game.getStack().isEmpty()
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))
-                || player.getOpponents().size() != 1) return null;
+                || player.getOpponents().size() != 1) return decline(gateReason());
+        shotDecline = "other check=shot-route"; drainDecline = "other check=drain-route";
         Player opponent = player.getOpponents().get(0);
         if (pending != null) {
             // Every iteration must make public progress. On the drain route the
@@ -243,12 +276,14 @@ public final class CubeTopPlan {
             if (stalled) {
                 failedTurn = turn;
                 System.err.println("CUBE_TOP_PLAN stopped-no-progress turn=" + turn);
-                return null;
+                return decline("stopped-no-progress");
             }
         }
         SpellAbility shot = shotRoute(opponent);
         if (shot != null) return shot;
-        return drainRoute(opponent);
+        SpellAbility drainAction = drainRoute(opponent);
+        if (drainAction == null) decline = "shot:" + shotDecline + ",drain:" + drainDecline;
+        return drainAction;
     }
 
     /** The life-shot outlet, unchanged: accumulate life with the Reservoir's
@@ -257,7 +292,8 @@ public final class CubeTopPlan {
         Card reservoir = find(RESERVOIR, ZoneType.Battlefield);
         SpellAbility shot = ability(reservoir, ApiType.DealDamage);
         if (shot == null || opponent.getLife() <= 0 || opponent.getLife() > 50
-                || opponent.cantLoseForZeroOrLessLife() || !opponent.canLoseLife() || !shot.canTarget(opponent)) return null;
+                || opponent.cantLoseForZeroOrLessLife() || !opponent.canLoseLife() || !shot.canTarget(opponent))
+            return declineShot(shot == null ? "no-outlet" : "outlet-unusable");
         shot.resetTargets(); shot.getTargets().add(opponent);
         // Forecast only activation restrictions here: canPlay() also checks
         // the fifty-life payment that this plan has not accumulated yet.
@@ -265,9 +301,9 @@ public final class CubeTopPlan {
         if (!shot.isTargetNumberValid() || !StaticAbilityMustTarget.meetsMustTargetRestriction(shot)
                 || shot.isSuppressed() || reservoir.isDetained()
                 || !shot.getRestrictions().canPlay(reservoir, shot)
-                || !shot.isLegalAfterStack() || !shot.checkRestrictions(reservoir, player)) return null;
+                || !shot.isLegalAfterStack() || !shot.checkRestrictions(reservoir, player)) return declineShot("outlet-unusable");
         if (player.getLife() > 50 && payable(shot)) return select(shot, false);
-        if (!knownLifeGainWorks(reservoir)) return null;
+        if (!knownLifeGainWorks(reservoir)) return declineShot("no-life-gain");
         // A native zero-cost/refunded recast preserves life for the finish.
         // This is a preference among feasible complete-loop plans, not a
         // blanket Mystic gate: an absent/suppressed reducer or unpaid seed
@@ -276,7 +312,7 @@ public final class CubeTopPlan {
             SpellAbility next = nextLoopAction(permission, 0);
             if (next != null) return select(next, false);
         }
-        return null;
+        return declineShot("no-loop-action");
     }
 
     /** The draw-drain outlet, reached only when no life-shot line is available.
@@ -294,13 +330,14 @@ public final class CubeTopPlan {
             if (amount > 0) { drainOutlet = card; break; }
         }
         if (drainOutlet == null || opponent.getLife() <= 0
-                || opponent.cantLoseForZeroOrLessLife() || !opponent.canLoseLife()) return null;
+                || opponent.cantLoseForZeroOrLessLife() || !opponent.canLoseLife())
+            return declineDrain(drainOutlet == null ? "no-outlet" : "outlet-unusable");
         int need = (opponent.getLife() + amount - 1) / amount;
         for (Permission permission : permissions()) {
             SpellAbility next = nextLoopAction(permission, need);
             if (next != null) return select(next, true);
         }
-        return null;
+        return declineDrain("no-loop-action");
     }
 
     /** Count-only reach estimate for the drain outlet, not a claim of a forced

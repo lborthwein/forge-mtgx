@@ -20,6 +20,34 @@ public final class CubeMonolithPlan {
     private int measuredGain;
     private SpellAbility pending;
     private int countersBefore, lifeBefore;
+    /** Observability only: the token for the check that already declined the
+     * most recent {@link #nextAction}. Never read by a decision, exactly like
+     * {@link CubeDoomsdayPlan#declineReason}.
+     *
+     * <p>Grammar, one token per (turn, phase): {@code phase},
+     * {@code stack-not-empty}, {@code cant-win}, {@code action-cap},
+     * {@code failed-this-turn}, {@code multiplayer},
+     * {@code stopped-no-progress}, {@code cant-damage}, {@code no-outlet},
+     * {@code outlet-unusable}, {@code outlet-untargetable},
+     * {@code cost-unreadable}, {@code outlet-disabled},
+     * {@code unpayable:outlet}, {@code no-untapper} or
+     * {@code no-engine-gain}. Every one names our own battlefield/hand or a
+     * public quantity; none names an opponent zone.</p> */
+    private String decline = "other check=monolith-plan";
+    public String declineReason() { return decline; }
+    private SpellAbility decline(String reason) { decline = reason; return null; }
+    /** Names the first true clause of the opening guard, re-reading only the
+     * same pure getters in the same order. Called only after that guard has
+     * already decided to decline, so it can change nothing. */
+    private String gateReason(int cap) {
+        var phase = player.getGame().getPhaseHandler();
+        if (failedTurn == turn) return "failed-this-turn";
+        if (actions >= cap) return "action-cap";
+        if (player.cantWin()) return "cant-win";
+        if (!player.getGame().getStack().isEmpty()) return "stack-not-empty";
+        if (!(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))) return "phase";
+        return "multiplayer";
+    }
 
     public CubeMonolithPlan(Player player) { this.player = player; }
 
@@ -59,7 +87,8 @@ public final class CubeMonolithPlan {
         }
         if (failedTurn == turn || actions >= 512 || player.cantWin() || !game.getStack().isEmpty()
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))
-                || player.getOpponents().size() != 1) return null;
+                || player.getOpponents().size() != 1) return decline(gateReason(512));
+        decline = "other check=monolith-plan";
         Player opponent = player.getOpponents().get(0);
         if (pending != null) {
             // Replacements, prevention, or interaction may defeat the route.
@@ -73,17 +102,18 @@ public final class CubeMonolithPlan {
             if (stalled) {
                 failedTurn = turn;
                 System.err.println("CUBE_MONOLITH_PLAN stopped-no-progress turn=" + turn);
-                return null;
+                return decline("stopped-no-progress");
             }
         }
-        if (!opponent.canLoseLife() || opponent.getLife() <= 0 || opponent.getLife() > 128) return null;
+        if (!opponent.canLoseLife() || opponent.getLife() <= 0 || opponent.getLife() > 128) return decline("cant-damage");
         Card outlet = find("Walking Ballista", ZoneType.Battlefield);
         boolean inHand = outlet == null;
         if (inHand) outlet = find("Walking Ballista", ZoneType.Hand);
         SpellAbility shot = ability(outlet, ApiType.DealDamage);
-        if (shot == null || !shot.canTarget(opponent)) return null;
+        if (shot == null || !shot.canTarget(opponent))
+            return decline(outlet == null ? "no-outlet" : shot == null ? "outlet-unusable" : "outlet-untargetable");
         shot.resetTargets(); shot.getTargets().add(opponent);
-        if (!shot.isTargetNumberValid() || !StaticAbilityMustTarget.meetsMustTargetRestriction(shot)) return null;
+        if (!shot.isTargetNumberValid() || !StaticAbilityMustTarget.meetsMustTargetRestriction(shot)) return decline("outlet-untargetable");
         int counters = inHand ? 0 : outlet.getCounters(CounterEnumType.P1P1);
         if (!inHand && counters >= opponent.getLife() && payable(shot)) return select(shot);
 
@@ -100,15 +130,15 @@ public final class CubeMonolithPlan {
             int each = genericCost(spend, 0);
             required = each < 0 ? -1 : each * Math.max(0, opponent.getLife() - counters);
         }
-        if (required < 0 || spend == null) return null;
+        if (required < 0 || spend == null) return decline("cost-unreadable");
         // A disabled outlet must not turn a profitable engine into an endless
         // plan. Native static restrictions apply even before we can pay it.
-        if (!CubeComboAi.canPlayNative(spend, player)) return null;
-        if (player.getManaPool().totalMana() >= required) return payable(spend) ? select(spend) : null;
+        if (!CubeComboAi.canPlayNative(spend, player)) return decline("outlet-disabled");
+        if (player.getManaPool().totalMana() >= required) return payable(spend) ? select(spend) : decline("unpayable:outlet");
 
         boolean kinnan = find("Kinnan, Bonder Prodigy", ZoneType.Battlefield) != null;
         boolean zirda = find("Zirda, the Dawnwaker", ZoneType.Battlefield) != null;
-        if (!kinnan && !zirda) return null;
+        if (!kinnan && !zirda) return decline("no-untapper");
         for (String name : new String[]{"Basalt Monolith", "Grim Monolith"}) {
             Card engine = find(name, ZoneType.Battlefield);
             SpellAbility untap = ability(engine, ApiType.Untap);
@@ -127,7 +157,7 @@ public final class CubeMonolithPlan {
                 }
             }
         }
-        return null;
+        return decline("no-engine-gain");
     }
 
     public boolean owns(SpellAbility sa) { return sa == selected; }

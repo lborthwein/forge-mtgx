@@ -36,6 +36,41 @@ public final class CubeBreachPlan {
     private final Map<SpellAbility, Player> copyTargets = new IdentityHashMap<>();
     private Card reservedEngine;
     private int turn = -1, actions, failedTurn = -1;
+    /** Observability only: the token for the check that already declined the
+     * most recent {@link #nextAction}. Never read by a decision, exactly like
+     * {@link CubeDoomsdayPlan#declineReason}.
+     *
+     * <p>Grammar, one token per (turn, phase): {@code phase},
+     * {@code stack-not-empty}, {@code cant-win}, {@code action-cap},
+     * {@code failed-this-turn}, {@code multiplayer}, {@code no-mill-route},
+     * {@code missing=<our own missing half>},
+     * {@code finisher-untargetable}, {@code breach-not-ready:fuel=<n>},
+     * {@code engine-disabled}, {@code breach-unaffordable},
+     * {@code engine-unaffordable}, {@code freeze-unaffordable},
+     * {@code no-self-mill-room} or {@code target-illegal}. {@code fuel} is the
+     * count of non-key cards in OUR OWN graveyard, which is the quantity
+     * {@link #breachReady} already reads. The opponent's mill room is a public
+     * quantity this plan already consults, and the token deliberately reports
+     * only the route word, never the number.</p> */
+    private String decline = "other check=breach-plan";
+    public String declineReason() { return decline; }
+    private SpellAbility decline(String reason) { decline = reason; return null; }
+    /** Names the first true clause of the opening guard, re-reading only the
+     * same pure getters in the same order, after that guard has already
+     * decided to decline. */
+    private String gateReason() {
+        var phase = player.getGame().getPhaseHandler();
+        if (failedTurn == turn) return "failed-this-turn";
+        if (actions >= 64) return "action-cap";
+        if (player.cantWin()) return "cant-win";
+        if (!player.getGame().getStack().isEmpty()) return "stack-not-empty";
+        if (!(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))) return "phase";
+        return "multiplayer";
+    }
+
+    /** A card name as one log token: our own missing half, never an opponent
+     * card and never a library read. */
+    private static String token(String name) { return name.replace(' ', '_'); }
 
     public CubeBreachPlan(Player player) { this.player = player; }
 
@@ -257,30 +292,33 @@ public final class CubeBreachPlan {
         }
         if (failedTurn == turn || actions >= 64 || player.cantWin() || !game.getStack().isEmpty()
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))
-                || player.getOpponents().size() != 1) return null;
+                || player.getOpponents().size() != 1) return decline(gateReason());
+        decline = "other check=breach-plan";
         Player opponent = player.getOpponents().get(0);
         int remaining = opponent.getCardsIn(ZoneType.Library).size();
-        if (remaining == 0 || opponent.cantLoseCheck(GameLossReason.Milled)) return null;
+        if (remaining == 0 || opponent.cantLoseCheck(GameLossReason.Milled)) return decline("no-mill-route");
         Card engine = engine();
         boolean fromHand = find(FREEZE, ZoneType.Hand) != null;
         Card freeze = freeze();
-        if (freeze == null || engine == null) return null;
+        if (freeze == null || engine == null)
+            return decline("missing=" + (freeze == null ? token(FREEZE) : "Lotus-engine"));
         // A mill-out isn't a plan if its eventual target is currently illegal.
         boolean targetable = false;
         for (SpellAbility original : freeze.getSpellAbilities()) {
             SpellAbility ability = original.copy(player);
             if (ability.isSpell() && ability.canTarget(opponent)) targetable = true;
         }
-        if (!targetable) return null;
+        if (!targetable) return decline("finisher-untargetable");
         int blue = player.getManaPool().getAmountOfColor(MagicColor.BLUE);
         int fuel = fuel(), storm = game.getStack().getSpellsCastThisTurn().size();
         if (find(BREACH, ZoneType.Battlefield) == null) {
             Card breach = find(BREACH, ZoneType.Hand);
-            if (!breachReady(fuel)) return null;
+            if (!breachReady(fuel)) return decline("breach-not-ready:fuel=" + fuel);
             // An on-board disabled engine is not a reason to spend Breach.
-            if (engine.isInPlay() && crack(engine) == null) return null;
+            if (engine.isInPlay() && crack(engine) == null) return decline("engine-disabled");
             reservedEngine = engine.isInPlay() ? engine : null;
-            return select(reserveEngine(() -> spell(breach)));
+            SpellAbility entry = select(reserveEngine(() -> spell(breach)));
+            return entry == null ? decline("breach-unaffordable") : entry;
         }
         if (blue < 2) {
             SpellAbility floating = floatBlue();
@@ -289,17 +327,21 @@ public final class CubeBreachPlan {
             int activations = (2 - blue + yield - 1) / yield;
             int escapes = Math.max(0, activations - (engine.isInPlay() || engine.isInZone(ZoneType.Hand) ? 1 : 0));
             int freezeFuel = fromHand && !engine.getName().equals(LED) ? 0 : 3;
-            if (fuel >= 3 * escapes + freezeFuel) return select(engine.isInPlay() ? crack(engine) : spell(engine));
+            if (fuel >= 3 * escapes + freezeFuel) {
+                SpellAbility blueSource = select(engine.isInPlay() ? crack(engine) : spell(engine));
+                if (blueSource == null) return decline("engine-unaffordable");
+                return blueSource;
+            }
         }
         SpellAbility cast = spell(freeze);
-        if (cast == null) return null;
+        if (cast == null) return decline("freeze-unaffordable");
         int copies = storm + 1, selfCopies = 0;
         if (3 * copies < remaining && !enoughToMill(fuel, blue, engine, fromHand, storm, remaining)) {
             // Copies may target different players. Find the minimum self-mill
             // that replenishes enough fuel for the remaining opponent kill;
             // never force an entire storm batch into our nearly empty library.
             int maxSelf = Math.min(copies, Math.max(0, (player.getCardsIn(ZoneType.Library).size() - 1) / 3));
-            if (maxSelf == 0) return null;
+            if (maxSelf == 0) return decline("no-self-mill-room");
             int payment = 0;
             for (var part : cast.getPayCosts().getCostParts()) if (part instanceof CostExile cost)
                 payment += cost.getAbilityAmount(cast);
@@ -313,10 +355,10 @@ public final class CubeBreachPlan {
             }
         }
         Player target = selfCopies > 0 ? player : opponent;
-        if (!cast.canTarget(target)) return null;
+        if (!cast.canTarget(target)) return decline("target-illegal");
         cast.resetTargets();
         cast.getTargets().add(target);
-        if (!cast.isTargetNumberValid() || !StaticAbilityMustTarget.meetsMustTargetRestriction(cast)) return null;
+        if (!cast.isTargetNumberValid() || !StaticAbilityMustTarget.meetsMustTargetRestriction(cast)) return decline("target-illegal");
         freezeTarget = target;
         freezeOpponent = opponent;
         selfCopiesRemaining = Math.max(0, selfCopies - 1); // the original already has its target
