@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v60";
+    public static final String VERSION = "cube-combo-execution-v61";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -196,9 +196,15 @@ public final class CubeComboAi {
         return ability.checkRestrictions(host, player);
     }
 
+    /** The three untap bodies of the Kiki/Twin family, as ONE list so the
+     * battlefield/hand recogniser and v61's H2 reach test cannot drift apart.
+     * Restoration Angel blinks rather than untaps and is deliberately absent:
+     * it is a Kiki partner only, never a Twin partner. */
+    static final java.util.List<String> TWIN_PARTNERS =
+            java.util.List.of("Pestermite", "Deceiver Exarch", "Zealous Conscripts");
+
     private static boolean untapBody(Card card) {
-        return card.getName().equals("Pestermite") || card.getName().equals("Deceiver Exarch")
-                || card.getName().equals("Zealous Conscripts");
+        return TWIN_PARTNERS.contains(card.getName());
     }
 
     public static Card copyPartner(Player player, SpellAbility ability) {
@@ -317,40 +323,212 @@ public final class CubeComboAi {
         return ready != null ? ready : any;
     }
 
-    /** v53 D2 - hold the engine Aura while its partner is in our own hand and
-     * none is on our battlefield. An Aura spent on a non-partner is destroyed
-     * for the rest of the game, which is what the v50 drafted read observed;
-     * declining the cast costs a turn of a Pump aura instead.
+    /** v53 D2, conditioned by v61's H1 and H2 - hold the engine Aura only while
+     * the partner it needs is one we can still DEPLOY. An Aura spent on a
+     * non-partner is destroyed for the rest of the game, which is what the v50
+     * drafted read observed; declining the cast costs a turn of a Pump aura
+     * instead. v53 conditioned that decline on the partner's PRESENCE in our
+     * own hand alone, and named both gaps in its own limitations:
      *
-     * Conditioned on our own hand: the opponent's hand, library and decklist
-     * are never touched, and a face-down card is never identified. It does not
-     * fire when a partner is already on our battlefield (D1 repairs the target
-     * instead), when the only creature held is a Kiki-only partner such as
-     * Restoration Angel, or when no partner is held at all. Whether the partner
-     * is castable is deliberately NOT forecast - see the design's limitations.
+     * <p><b>H1 (castability).</b> A partner in our own hand earns the hold only
+     * if {@link #castableWithinTwoDrops} says we could cast it in principle from
+     * own-visible resources within two land drops. Otherwise the hold does not
+     * fire at all and the ordinary AI proceeds unchanged (Default behaviour),
+     * with one {@code CUBE_TWIN_RELEASE} line naming the partner it would have
+     * been held for. The hand scan continues past an uncastable partner, so a
+     * hand holding one of each still holds, for the castable one.</p>
      *
-     * Observability: at most one stderr line per (turn, phase) for this seat.
-     * The line names a card in our own hand only. */
+     * <p><b>H2 (tutor).</b> With NO partner on our battlefield and NONE in our
+     * hand - the position the enriched read observed, Imperial Recruiter beside
+     * Splinter Twin - the Aura is held when a tutor we could cast or activate
+     * could NAME a Twin partner under its printed {@code ChangeType}. H1 and H2
+     * can never both fire on one call: H2 is reached only when the hand scan
+     * found no partner at all.</p>
+     *
+     * <p>Conditioned on our own hand and our own battlefield: the opponent's
+     * hand, library and decklist are never touched, a face-down card is never
+     * identified, and OUR OWN LIBRARY IS NEVER READ - not its contents, not its
+     * order, not its size, and not our registered decklist. It does not fire
+     * when a partner is already on our battlefield (D1 repairs the target
+     * instead) or when the only creature held is a Kiki-only partner such as
+     * Restoration Angel.</p>
+     *
+     * <p>Observability: at most one stderr line per (turn, phase) for this seat,
+     * exactly v53's budget. The line names a card in our own hand or a permanent
+     * we control, never a card in any hidden zone.</p> */
     public static boolean holdTwinAura(Player player, SpellAbility aura) {
         if (!ownEngineAuraCast(player, aura)) return false;
         for (Card card : player.getCardsIn(ZoneType.Battlefield))
             if (!card.isFaceDown() && untapBody(card)) return false;
+        Card uncastable = null;
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
             if (card.isFaceDown() || !untapBody(card)) continue;
-            var phases = player.getGame().getPhaseHandler();
-            String stamp = System.identityHashCode(player) + ":" + phases.getTurn() + ":" + phases.getPhase();
-            if (!stamp.equals(TWIN_HOLD_STAMP.get())) {
-                TWIN_HOLD_STAMP.set(stamp);
-                System.err.println("CUBE_TWIN_HOLD partnerInHand=" + card.getName());
+            if (castableWithinTwoDrops(player, card.getManaCost())) {
+                twinLine(player, "CUBE_TWIN_HOLD reason=partner-in-hand partner=" + token(card.getName()));
+                return true;
             }
-            return true;
+            if (uncastable == null) uncastable = card;
+        }
+        if (uncastable != null) {
+            // H1 release: this is exactly the position v53/v60 held in.
+            twinLine(player, "CUBE_TWIN_RELEASE reason=partner-uncastable partner=" + token(uncastable.getName()));
+            return false;
+        }
+        String tutor = twinTutorOwnVisible(player);
+        if (tutor == null) return false;
+        twinLine(player, "CUBE_TWIN_HOLD reason=tutor-in-hand tutor=" + token(tutor));
+        return true;
+    }
+
+    /** Card names reach the log with spaces replaced, so one stderr line stays
+     * one whitespace-separated record for the readout's multiset comparison. */
+    private static String token(String name) { return name.replace(' ', '_'); }
+
+    /** One CUBE_TWIN_* line per (turn, phase) for this seat, hold and release
+     * sharing the single v53 budget so the line COUNT of a phase cannot move.
+     * Observability bookkeeping only; the identity stamp is compared, never
+     * printed, and no decision reads it. */
+    private static void twinLine(Player player, String line) {
+        var phases = player.getGame().getPhaseHandler();
+        String stamp = System.identityHashCode(player) + ":" + phases.getTurn() + ":" + phases.getPhase();
+        if (stamp.equals(TWIN_HOLD_STAMP.get())) return;
+        TWIN_HOLD_STAMP.set(stamp);
+        System.err.println(line);
+    }
+
+    private static final ThreadLocal<String> TWIN_HOLD_STAMP = new ThreadLocal<>();
+
+    /** v61 H1 - could we pay this cost in principle, from own-visible resources,
+     * within two land drops? Two independent tests, both deliberately coarse:
+     *
+     * <p><b>Colour.</b> Every shard that names a colour must have a producer -
+     * a permanent we control with a mana ability, or a LAND IN OUR OWN HAND. A
+     * hybrid shard is satisfied by either of its colours; generic, colourless
+     * and snow shards impose nothing. Tapped state is NOT read here: a source
+     * tapped now untaps before the partner is cast, and reading it would make
+     * the answer depend on which phase we happen to be asked in.</p>
+     *
+     * <p><b>Quantity.</b> {@code CMC <= untapped mana permanents we control + 2},
+     * the two land drops of the contract. A source that produces two mana counts
+     * once and a tapped-but-usable source counts zero: both errors point the
+     * same way as the colour test, at a release rather than a hold.</p>
+     *
+     * <p>This is a forecast, not a payment: no native affordability probe is
+     * run, nothing is reserved, and no ability is activated. Our own
+     * battlefield and our own hand only.</p> */
+    static boolean castableWithinTwoDrops(Player player, forge.card.mana.ManaCost cost) {
+        if (cost == null || cost.isNoCost()) return false;
+        for (forge.card.mana.ManaCostShard shard : cost) {
+            byte colors = shard.getColorMask();
+            if (colors != 0 && !ownColorSource(player, colors)) return false;
+        }
+        return cost.getCMC() <= untappedManaSources(player) + 2;
+    }
+
+    /** A producer of any one of these colours among our own lands and rocks in
+     * play - any permanent we control carrying a mana ability - or among the
+     * lands in our own hand. */
+    private static boolean ownColorSource(Player player, byte colors) {
+        for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (!card.isFaceDown() && producesAny(card, colors)) return true;
+        for (Card card : player.getCardsIn(ZoneType.Hand))
+            if (!card.isFaceDown() && card.isLand() && producesAny(card, colors)) return true;
+        return false;
+    }
+
+    /** PRINTED mana production only: the ability's {@code Produced} text as
+     * written. {@code Any} produces every colour and a {@code Combo} list
+     * produces the colours it names. A colour chosen or computed at resolution
+     * ({@code Chosen}, {@code Special}, {@code ManaReflected}) reads as
+     * producing nothing - deliberately, because the alternative,
+     * {@code AbilityManaPart.mana(sa)}, writes an express choice through
+     * {@code ManaEffect.handleSpecialMana}, and this must stay a forecast. The
+     * error can only release a hold a richer forecast would keep. */
+    private static boolean producesAny(Card card, byte colors) {
+        for (SpellAbility mana : card.getManaAbilities()) {
+            var part = mana.getManaPart();
+            String produced = part == null ? null : part.getOrigProduced();
+            if (produced == null) continue;
+            if (produced.contains("Any")) return true;
+            for (byte color : forge.card.MagicColor.WUBRG)
+                if ((colors & color) != 0 && produced.contains(forge.card.MagicColor.toShortString(color))) return true;
         }
         return false;
     }
 
-    /** Observability bookkeeping for {@link #holdTwinAura} only. Never read by
-     * a decision; the identity stamp is compared, never printed. */
-    private static final ThreadLocal<String> TWIN_HOLD_STAMP = new ThreadLocal<>();
+    /** Untapped permanents we control that carry at least one mana ability -
+     * the cube's lands and rocks. Own public battlefield only. */
+    private static int untappedManaSources(Player player) {
+        int sources = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (!card.isFaceDown() && card.isUntapped() && !card.getManaAbilities().isEmpty()) sources++;
+        return sources;
+    }
+
+    /** v61 H2 - the name of an admitted tutor, own-visible and affordable under
+     * H1's test, whose printed {@code ChangeType} could name a Twin partner.
+     *
+     * <p>The shapes are v57/v60's, reused rather than restated: a card in our
+     * own hand whose printed ETB trigger is a one-card
+     * {@link #librarySearchToHand} and whose own cast is mana-only; a plain
+     * search spell in our own hand; and an activated search of a permanent we
+     * control whose cost {@link #admittedActivationCost} admits. Hand order then
+     * battlefield order, the order {@link #widenedShapes} already uses.</p>
+     *
+     * <p>Native timing ({@code canPlayNative}) is deliberately NOT consulted:
+     * the question is whether the tutor is deployable in principle, the same
+     * question H1 asks of a partner, not whether it could be cast in this exact
+     * window.</p> */
+    private static String twinTutorOwnVisible(Player player) {
+        for (Card hand : player.getCardsIn(ZoneType.Hand)) {
+            if (hand.isFaceDown()) continue;
+            SpellAbility own = ownSpellOf(hand);
+            SpellAbility etb = etbLibrarySearch(player, hand);
+            if (etb != null && own != null && own.isSpell() && manaOnly(own)
+                    && reachesTwinPartner(player, etb)
+                    && castableWithinTwoDrops(player, hand.getManaCost())) return hand.getName();
+            for (SpellAbility search : hand.getSpellAbilities()) {
+                if (!search.isSpell() || !librarySearchToHand(search) || search.getSubAbility() != null
+                        || !manaOnly(search) || !reachesTwinPartner(player, search)) continue;
+                if (castableWithinTwoDrops(player, hand.getManaCost())) return hand.getName();
+            }
+        }
+        for (Card permanent : player.getCardsIn(ZoneType.Battlefield)) {
+            if (permanent.isFaceDown() || permanent.getController() != player) continue;
+            for (SpellAbility search : permanent.getSpellAbilities()) {
+                if (!search.isActivatedAbility() || !librarySearchToHand(search)) continue;
+                if (search.getSubAbility() != null && !controlTransferSub(search)) continue;
+                if (search.getPayCosts() == null || !admittedActivationCost(player, search)
+                        || !reachesTwinPartner(player, search)) continue;
+                if (castableWithinTwoDrops(player, search.getPayCosts().getTotalMana())) return permanent.getName();
+            }
+        }
+        return null;
+    }
+
+    /** Whether this search's PRINTED {@code ChangeType} admits any Twin partner
+     * NAME, tested the way {@link #planFor} tests a fetch candidate: a detached
+     * preview card (id -1, never inserted into a zone, never activated) built
+     * from the global card database BY NAME, not from our library and not from
+     * our registered decklist. Imperial Recruiter's {@code Creature.powerLE2}
+     * therefore admits Pestermite and Deceiver Exarch and refuses the 3-power
+     * Zealous Conscripts - exactly the restriction v57 registered - and Trinket
+     * Mage's {@code Artifact.cmcLE1} admits none of the three.
+     *
+     * <p>A name the card database has not loaded is skipped rather than
+     * guessed, which can only withhold a hold, never invent one.</p> */
+    private static boolean reachesTwinPartner(Player player, SpellAbility search) {
+        String[] types = search.getParamOrDefault("ChangeType", "Card").split(",");
+        Card host = search.getHostCard();
+        for (String name : TWIN_PARTNERS) {
+            forge.item.PaperCard paper = forge.StaticData.instance().getCommonCards().getCard(name);
+            if (paper == null) continue;
+            Card preview = forge.game.card.CardFactory.getCard(paper, player, -1, player.getGame());
+            preview.setZone(player.getZone(ZoneType.Library));
+            if (preview.isValid(types, player, host, search)) return true;
+        }
+        return false;
+    }
 
     public static Card untapSource(Player player, SpellAbility trigger) {
         if (!enabled(player) || !untapBody(trigger.getHostCard()) || !trigger.usesTargeting()) return null;
