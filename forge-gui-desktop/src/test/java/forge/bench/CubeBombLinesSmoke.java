@@ -67,6 +67,10 @@ public final class CubeBombLinesSmoke {
     private static final String BEAST = "Questing Beast";
     private static final String SPIDER = "Giant Spider";
     private static final String BEARS = "Grizzly Bears";
+    /** v62 value payloads. Ashen Rider is the term 3 + term 4 card: its printed
+     * script carries BOTH an enters trigger and a dies trigger executing the
+     * same `DB$ ChangeZone | Origin$ Battlefield | Destination$ Exile`. */
+    private static final String ASHEN = "Ashen Rider";
     /** v58: the token script whose printed body the blocker forecast has to
      * read. `c_1_1_a_servo` is what Retrofitter Foundry's {2}, {T} ability makes
      * and what its flying-Thopter ability sacrifices. */
@@ -171,6 +175,30 @@ public final class CubeBombLinesSmoke {
             "sneak-choice",                // P6 an ordinary cheat-in the plan does not own
             "sat-opp-hand");               // P7 the opponent's own Show and Tell choice
 
+    /** v62 value cases (registration.md, suite `value`). V1-V9 of
+     * design-v62-breach-value.md. Five are NEW positions; V5 and V7 re-use the
+     * v55 conversion positions verbatim, because their whole point is parity
+     * with a row v55 already registered. The design lists V7 and V8 as two rows
+     * of the same board (`breach-blightsteel`, opponent at 20 with no
+     * permanents, hand Through the Breach + Blightsteel Colossus), so that
+     * position appears ONCE and answers both. */
+    private static final List<String> VALUE = List.of(
+            "value-annihilator",           // V1 annihilator 6 against four public permanents
+            "value-ashen",                 // V2 an ETB and a dies trigger, two exiles
+            "value-ashen:reanimate",       // V3 the same, plus the reanimation follow-up
+            "value-wurm",                  // V4 the dies trigger leaves three 5/5 tokens
+            "breach-blightsteel:ground",   // V5 v55 B2 parity: still declines, new token
+            "value-griselbrand",           // V6 pay 7 life, draw 7: the cards outlive the body
+            "breach-blightsteel",          // V7/V8 v55 B1 parity: lethal, unchanged
+            "value-sneak-choice",          // V9 ordinary Sneak activation, RECORDED
+            // Amendment 1: term 5's own witness and its two negatives. A
+            // reanimation follow-up is worth nothing behind a body that cannot
+            // reach a graveyard and stay there, and four of the cube's biggest
+            // bodies cannot.
+            "value-ulamog",                // V10 the same board WITHOUT the follow-up: declines
+            "value-ulamog:reanimate",      // V11 term 5 ALONE passes the gate
+            "value-blightsteel:reanimate");// V12 the shuffle replacement blocks term 5
+
     /** Registered starting life. 20 everywhere else, and no preserved row ever
      * calls setLife. */
     private static int ownLife(String control) {
@@ -198,7 +226,11 @@ public final class CubeBombLinesSmoke {
             "sat-archon", "sat-atraxa-low-life", "sat-beater-parity", "depths-sequence",
             // v56 adds its three new bases to the same by-base opponent switch,
             // so no preserved control's placements are touched here either.
-            "breach-pick-infect", "sneak-choice", "sat-opp-hand"));
+            "breach-pick-infect", "sneak-choice", "sat-opp-hand",
+            // v62 adds its five new bases to the same by-base opponent switch,
+            // so no preserved control's placements are touched here either.
+            "value-annihilator", "value-ashen", "value-wurm", "value-griselbrand",
+            "value-sneak-choice", "value-ulamog", "value-blightsteel"));
 
     private static String base(String control) { return control.split(":")[0]; }
     private static String variant(String control) { return control.contains(":") ? control.split(":", 2)[1] : ""; }
@@ -213,7 +245,11 @@ public final class CubeBombLinesSmoke {
             case "breach-reach", "breach-foundry" -> GRISELBRAND;
             case "sat-archon", "sat-opp-hand" -> ARCHON;
             case "sat-atraxa-low-life" -> ATRAXA;
-            case "sat-beater-parity" -> WURM;
+            case "sat-beater-parity", "value-wurm" -> WURM;
+            case "value-ashen" -> ASHEN;
+            case "value-griselbrand" -> GRISELBRAND;
+            case "value-ulamog" -> ULAMOG;
+            case "value-blightsteel" -> BLIGHTSTEEL;
             default -> EMRAKUL;
         };
     }
@@ -343,6 +379,75 @@ public final class CubeBombLinesSmoke {
                     result.add(new Placement(ARCHON, ZoneType.Hand));
                     for (int i = 0; i < 3; i++) result.add(new Placement("Island", ZoneType.Battlefield));
                 }
+                // ------------------------------------- v62 value positions
+                case "value-annihilator" -> {
+                    // V1. Emrakul's printed `K:Annihilator:6` against four
+                    // public permanents. 15 power cannot kill from 20, so v61
+                    // declines; the permanents the attack takes are the value.
+                    result.add(new Placement(BREACH, ZoneType.Hand));
+                    result.add(new Placement(EMRAKUL, ZoneType.Hand));
+                    for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                }
+                case "value-ashen" -> {
+                    // V2/V3. Ashen Rider exiles a permanent as it enters and a
+                    // second one when Through the Breach's end-step SACRIFICE
+                    // (`AtEOT$ Sacrifice`, not an exile) fires its dies trigger.
+                    // `:reanimate` adds the follow-up spell and the sixth land
+                    // that pays for it after the untap.
+                    result.add(new Placement(BREACH, ZoneType.Hand));
+                    result.add(new Placement(ASHEN, ZoneType.Hand));
+                    if (variant.equals("reanimate")) result.add(new Placement(REANIMATE, ZoneType.Hand));
+                    for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                    if (variant.equals("reanimate")) result.add(new Placement("Swamp", ZoneType.Battlefield));
+                }
+                case "value-wurm" -> {
+                    // V4. The dies trigger leaves three 5/5 trample tokens on
+                    // OUR battlefield after the body is sacrificed.
+                    result.add(new Placement(BREACH, ZoneType.Hand));
+                    result.add(new Placement(WURM, ZoneType.Hand));
+                    for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                }
+                case "value-griselbrand" -> {
+                    // V6. Pay 7 life, draw 7. Nothing about the attack is
+                    // lethal; the seven cards stay after the sacrifice.
+                    result.add(new Placement(BREACH, ZoneType.Hand));
+                    result.add(new Placement(GRISELBRAND, ZoneType.Hand));
+                    for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                }
+                case "value-ulamog", "value-blightsteel" -> {
+                    // V10/V11/V12. Term 5's witness and its two negatives, on one
+                    // board: an opponent whose blocker has VIGILANCE, so it never
+                    // taps and the attack is never lethal on any turn - the only
+                    // thing that can pass the gate is the reanimation follow-up.
+                    //
+                    // Ulamog, the Ceaseless Hunger is the clean witness the cube
+                    // holds: its exile is `T:Mode$ SpellCast`, a CAST trigger the
+                    // Breach never fires, so terms 3 and 4 are zero; it has no
+                    // annihilator, no activated draw, and - unlike Emrakul,
+                    // Ulamog the Infinite Gyre, Worldspine Wurm and Blightsteel
+                    // Colossus - no graveyard-to-library shuffle. There is no
+                    // trigger-less 7+ power creature in the cube at all.
+                    //
+                    // Blightsteel Colossus is the negative: same 11 power, same
+                    // follow-up in hand, but `R:Event$ Moved | Destination$
+                    // Graveyard | ValidCard$ Card.Self` shuffles it away before
+                    // any reanimation could reach it.
+                    result.add(new Placement(BREACH, ZoneType.Hand));
+                    result.add(new Placement(base.equals("value-ulamog") ? ULAMOG : BLIGHTSTEEL, ZoneType.Hand));
+                    if (variant.equals("reanimate")) result.add(new Placement(REANIMATE, ZoneType.Hand));
+                    for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                    if (variant.equals("reanimate")) result.add(new Placement("Swamp", ZoneType.Battlefield));
+                }
+                case "value-sneak-choice" -> {
+                    // V9. An ORDINARY Sneak Attack activation with two payloads
+                    // in hand. RECORDED, not asserted: this increment does not
+                    // widen `ownsPayloadChoice`, so the plan owns no choice here
+                    // and the ordinary AI's pick stands (registered deviation).
+                    result.add(new Placement(SNEAK, ZoneType.Battlefield));
+                    result.add(new Placement(EMRAKUL, ZoneType.Hand));
+                    result.add(new Placement(BLIGHTSTEEL, ZoneType.Hand));
+                    for (int i = 0; i < 4; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                }
                 case "depths-sequence" -> {
                     // Both halves in hand, three ordinary lands already down and
                     // two ordinary lands in hand competing for the drops. This
@@ -385,6 +490,38 @@ public final class CubeBombLinesSmoke {
                     result.add(new Placement(SPIDER, ZoneType.Hand));
                     result.add(new Placement(BEARS, ZoneType.Hand));
                 }
+                // ------------------------------------- v62 value positions
+                case "value-annihilator" -> {
+                    // V1: four public permanents, two of them blockers. Emrakul
+                    // flies, so neither Bears can actually block it - what the
+                    // board is for is annihilator's sacrifice count.
+                    for (int i = 0; i < 2; i++) result.add(new Placement(BEARS, ZoneType.Battlefield));
+                    for (int i = 0; i < 2; i++) result.add(new Placement("Forest", ZoneType.Battlefield));
+                }
+                case "value-ashen" -> {
+                    // V2/V3: two NONLAND permanents, one of them a blocker.
+                    // Retrofitter Foundry is the non-blocker: with no land
+                    // beside it, its {2},{T} is unpayable on turn 1, and it is
+                    // a legal target for both of Ashen Rider's exiles.
+                    result.add(new Placement(BEARS, ZoneType.Battlefield));
+                    result.add(new Placement(FOUNDRY, ZoneType.Battlefield));
+                }
+                case "value-wurm" -> {
+                    for (int i = 0; i < 3; i++) result.add(new Placement(BEARS, ZoneType.Battlefield));
+                }
+                // V6: one blocker that can block a flier. Giant Spider's printed
+                // reach is what makes the Griselbrand attack worth nothing, so
+                // term 6 is the only thing that can pass the gate.
+                case "value-griselbrand" -> result.add(new Placement(SPIDER, ZoneType.Battlefield));
+                case "value-sneak-choice" -> {
+                    // V9: four public permanents and no blocker at all.
+                    for (int i = 0; i < 4; i++) result.add(new Placement("Forest", ZoneType.Battlefield));
+                }
+                // V10-V12: Questing Beast's printed VIGILANCE is what makes this
+                // a permanent decline rather than v55 Amendment 2's one-turn
+                // one - it attacks and stays a blocker, exactly as it does in
+                // the v55 `breach-choice` control.
+                case "value-ulamog", "value-blightsteel" -> result.add(new Placement(BEAST, ZoneType.Battlefield));
                 // breach-pick-infect and sneak-choice give the opponent no
                 // board at all: an empty public battlefield is the position.
                 default -> { }
@@ -521,7 +658,15 @@ public final class CubeBombLinesSmoke {
         return String.join(";", names);
     }
 
-    private static void run(boolean improved, int seat, PhaseType phase, String control, boolean conversion, boolean payload) {
+    /** Our own battlefield tokens, which is where v62's term 4 receipt lives:
+     * Worldspine Wurm's dies trigger leaves three 5/5 bodies behind after the
+     * Breach's end-step sacrifice has taken the Wurm itself. */
+    private static int ownTokens(Player player) {
+        return (int) player.getCardsIn(ZoneType.Battlefield).stream().filter(Card::isToken).count();
+    }
+
+    private static void run(boolean improved, int seat, PhaseType phase, String control, boolean conversion,
+            boolean payload, boolean value) {
         List<RegisteredPlayer> players = new ArrayList<>();
         for (int s = 0; s < 2; s++) players.add(new RegisteredPlayer(deck(s == seat, control)).setPlayer(
                 improved && s == seat ? new forge.ai.LobbyPlayerCubeComboAi("Combo-" + s) : defaultAi(s)));
@@ -572,10 +717,21 @@ public final class CubeBombLinesSmoke {
         // so the end-state board is a read of OUR payload, not of their choice.
         String oppFirstPermanent = "none";
         int oppFirstTurn = -1;
+        // v62 value receipts. Read from zones after each step, exactly the way
+        // the v55/v56 receipts above are read, and computed ONLY for the value
+        // suite so that no preserved suite's step loop does anything new.
+        int oppPermanentsStart = value ? opponent.getCardsIn(ZoneType.Battlefield).size() : -1;
+        int oppPermanentsMin = oppPermanentsStart, maxOwnHand = value ? player.getCardsIn(ZoneType.Hand).size() : -1;
+        int maxOwnTokens = value ? ownTokens(player) : -1;
         String previous = "";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps < 600) {
             game.getPhaseHandler().mainLoopStep();
             steps++;
+            if (value) {
+                oppPermanentsMin = Math.min(oppPermanentsMin, opponent.getCardsIn(ZoneType.Battlefield).size());
+                maxOwnHand = Math.max(maxOwnHand, player.getCardsIn(ZoneType.Hand).size());
+                maxOwnTokens = Math.max(maxOwnTokens, ownTokens(player));
+            }
             int ice = minIce(player);
             if (ice >= 0) lowestIce = lowestIce < 0 ? ice : Math.min(lowestIce, ice);
             if (depthsLandTurn < 0 && countOnBattlefield(player, DEPTHS) > 0)
@@ -670,6 +826,24 @@ public final class CubeBombLinesSmoke {
                     + " oppPermanents=[" + publicPermanents(opponent) + "]"
                     + " oppHandSize=" + opponent.getCardsIn(ZoneType.Hand).size()
                     + " ownPermanents=[" + publicPermanents(player) + "]");
+        // v62: one more line, emitted for the value cases ONLY, so BOMB_RESULT,
+        // the v55 BOMB_CONV line and the v56 BOMB_PICK line all keep exactly the
+        // fields their own increment registered and every preserved row of every
+        // other suite stays byte-comparable.
+        if (value)
+            System.out.println("BOMB_VALUE " + key
+                    + " oppPermanentsStart=" + oppPermanentsStart
+                    + " oppPermanentsMin=" + oppPermanentsMin
+                    + " oppPermanentsEnd=" + opponent.getCardsIn(ZoneType.Battlefield).size()
+                    + " oppExileEnd=" + opponent.getCardsIn(ZoneType.Exile).size()
+                    + " maxOwnTokens=" + maxOwnTokens
+                    + " ownTokensEnd=" + ownTokens(player)
+                    + " maxOwnHand=" + maxOwnHand
+                    + " ownHandEnd=" + player.getCardsIn(ZoneType.Hand).size()
+                    + " ashenZone=" + zoneOf(player, ASHEN)
+                    + " reanimateZone=" + zoneOf(player, REANIMATE)
+                    + " oppPermanents=[" + publicPermanents(opponent) + "]"
+                    + " ownPermanents=[" + publicPermanents(player) + "]");
     }
 
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
@@ -696,7 +870,9 @@ public final class CubeBombLinesSmoke {
                     HOOF, ORDER, REANIMATE, ANIMATE, ELVES, "Containment Priest", "Karakas", "Wasteland",
                     "Rest in Peace", "Torpor Orb", "Ensnaring Bridge", BEARS,
                     BLIGHTSTEEL, ARCHON, ATRAXA, WURM, ULAMOG, FOUNDRY, BEAST, SPIDER,
-                    "Forest", "Island", "Mountain", "Swamp", "Plains"))
+                    "Forest", "Island", "Mountain", "Swamp", "Plains",
+                    // v62, APPENDED so no previously loaded name changes place.
+                    ASHEN))
                 StaticData.instance().attemptToLoadCard(name);
             List<String> cases = args.length > 2 ? switch (args[2]) {
                 case "lines" -> LINES;
@@ -709,15 +885,18 @@ public final class CubeBombLinesSmoke {
                 case "guards" -> GUARDS;
                 case "conversion" -> CONVERSION;
                 case "payload" -> PAYLOAD;
+                case "value" -> VALUE;
                 default -> { var all = new ArrayList<>(LINES); all.addAll(CONTROLS); yield all; }
             } : LINES;
             boolean payload = args.length > 2 && args[2].equals("payload");
+            boolean value = args.length > 2 && args[2].equals("value");
             // BOMB_CONV carries the turn of each gated action, which every
-            // payload case needs too, so the v55 line is emitted for both
-            // suites; BOMB_PICK is the payload suite's own.
-            boolean conversion = payload || args.length > 2 && args[2].equals("conversion");
+            // payload case and every value case needs too, so the v55 line is
+            // emitted for all three suites; BOMB_PICK is the payload suite's own
+            // and BOMB_VALUE is the value suite's own.
+            boolean conversion = payload || value || args.length > 2 && args[2].equals("conversion");
             for (int seat = 0; seat < 2; seat++) for (PhaseType phase : List.of(PhaseType.MAIN1, PhaseType.MAIN2))
-                for (String control : cases) run(args[1].equals("improved"), seat, phase, control, conversion, payload);
+                for (String control : cases) run(args[1].equals("improved"), seat, phase, control, conversion, payload, value);
             System.out.println("BOMB_SUITE_COMPLETE cases=" + (4 * cases.size()));
         } catch (Throwable failure) {
             failure.printStackTrace();
