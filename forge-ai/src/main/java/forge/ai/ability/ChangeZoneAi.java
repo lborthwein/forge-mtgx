@@ -1179,9 +1179,24 @@ public class ChangeZoneAi extends SpellAbilityAi {
                     // ordinary decision reaches this line and leaves it
                     // unchanged. Same guard shape as the Kitten blink hook above
                     // and CubeBombPlan.declineCheatIn below.
-                    Card preferred = forge.ai.CubeReanimatorPlan.preferReanimationTarget(ai, sa, list, choice);
-                    if (preferred != null) {
-                        choice = preferred;
+                    //
+                    // v77 D1. The STRUCTURAL half of the scope fix. v73 placed
+                    // the call after the ternary, so it also re-ranked the
+                    // getBestRemovalTargetAI arm -- every BOUNCE, EXILE
+                    // removal, tuck and blink, whose origin contains the
+                    // battlefield. A reanimation has Origin$ Graveyard and can
+                    // never take that arm, so restricting the call to the
+                    // getMostExpensivePermanentAI arm removes nothing the hook
+                    // was registered for. CubeReanimatorPlan carries the
+                    // authoritative printed-shape gate (reanimationShape); this
+                    // guard makes the confinement visible in the file that had
+                    // to be corrected, and holds even if a later caller reaches
+                    // the plan by another path.
+                    if (!origin.contains(ZoneType.Battlefield)) {
+                        Card preferred = forge.ai.CubeReanimatorPlan.preferReanimationTarget(ai, sa, list, choice);
+                        if (preferred != null) {
+                            choice = preferred;
+                        }
                     }
                     if (choice.isCreature() && origin.contains(ZoneType.Graveyard)) {
                         // Karmic Guide can chain another creature
