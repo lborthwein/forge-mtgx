@@ -13,6 +13,14 @@ import forge.game.zone.ZoneType;
  * fabricated mana, counters, damage or priority skips. This recognizes the
  * named engines, but measures each tap and prices untaps through native costs. */
 public final class CubeMonolithPlan {
+    /** The names {@link #nextAction} already looks for, as the roles of this
+     * plan's entry gate. Used only by {@link #completingPieceNames}; the
+     * decision code keeps its own literals unchanged. */
+    private static final String OUTLET = "Walking Ballista";
+    private static final java.util.List<String> UNTAPPERS =
+            java.util.List.of("Kinnan, Bonder Prodigy", "Zirda, the Dawnwaker");
+    private static final java.util.List<String> ENGINES =
+            java.util.List.of("Basalt Monolith", "Grim Monolith");
     private final Player player;
     private int turn = -1, actions, failedTurn = -1;
     private SpellAbility selected;
@@ -78,6 +86,31 @@ public final class CubeMonolithPlan {
     }
 
     private SpellAbility select(SpellAbility sa) { selected = sa; actions++; return sa; }
+
+
+    /** v60 - the three roles this plan's entry gate needs, by the same names
+     * and the same zones {@link #nextAction} reads them in: the Walking Ballista
+     * outlet (our own battlefield or our own hand - the plan casts it from
+     * hand itself), an untapper on our own battlefield, and a Monolith engine
+     * on our own battlefield. Empty unless exactly one role is missing.
+     *
+     * <p>Deliberately the entry gate only, exactly as
+     * {@code CubeStormPlan.completingPieceNames} states for its own downstream
+     * gate: the untap arithmetic {@link #nextAction} applies
+     * ({@code expectedGain > cost}) prices an ability on a card that is ON the
+     * battlefield, and is not re-derived here for a card that is not, so the
+     * engine role can name a Monolith the plan later declines. Own battlefield
+     * and own hand only; a face-down card is never identified.</p> */
+    static java.util.List<String> completingPieceNames(Player player) {
+        CubeMonolithPlan plan = new CubeMonolithPlan(player);
+        boolean outlet = plan.find(OUTLET, ZoneType.Battlefield) != null || plan.find(OUTLET, ZoneType.Hand) != null;
+        boolean untapper = false, engine = false;
+        for (String name : UNTAPPERS) if (plan.find(name, ZoneType.Battlefield) != null) untapper = true;
+        for (String name : ENGINES) if (plan.find(name, ZoneType.Battlefield) != null) engine = true;
+        if ((outlet ? 1 : 0) + (untapper ? 1 : 0) + (engine ? 1 : 0) != 2) return java.util.List.of();
+        if (!outlet) return java.util.List.of(OUTLET);
+        return untapper ? ENGINES : UNTAPPERS;
+    }
 
     public SpellAbility nextAction() {
         var game = player.getGame();

@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v57";
+    public static final String VERSION = "cube-combo-execution-v60";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -348,6 +348,30 @@ public final class CubeComboAi {
      * during a native search of our own library, using its legal fetch list.
      * No opponent decklist or future library order is inspected. */
     public static Card chooseTutorPartner(Player player, SpellAbility tutor, CardCollection legalChoices) {
+        Card chosen = chooseTutorPartnerUngated(player, tutor, legalChoices);
+        // v60 - v57 section 8's first limitation, closed. A search whose
+        // SubAbility chain hands the searching permanent to an OPPONENT
+        // (Wishclaw Talisman) gives them the next activation, so steering it is
+        // only worth the trade when the fetched card wins this very turn. This
+        // is the same test - fetchWinsThisTurn - that planTutor has applied to
+        // its own control-transfer plan since v57, applied now to the
+        // ordinary-AI-initiated activation as well, which is the site v57
+        // deliberately left open.
+        //
+        // planFor calls the UNGATED variant, so planTutor's own
+        // `subability:not-same-turn` token and its candidate loop are
+        // unchanged; and a search with no such SubAbility - every other tutor
+        // in the cube, the search-to-top selections and the
+        // RearrangeTopOfLibrary ordering - never reaches this clause.
+        if (chosen != null && tutor != null && controlTransferSub(tutor)
+                && !fetchWinsThisTurn(player, chosen)) return null;
+        return chosen;
+    }
+
+    /** The v42..v57 body of {@link #chooseTutorPartner}, verbatim. Split out so
+     * that planTutor's own forecast keeps its own control-transfer gate and its
+     * own decline token. */
+    private static Card chooseTutorPartnerUngated(Player player, SpellAbility tutor, CardCollection legalChoices) {
         if (!enabled(player) || tutor == null || tutor.getActivatingPlayer() != player) return null;
         // Kiki's haste route can finish this combat; the new Thopter bodies
         // normally need the next turn. Preserve the available faster route.
@@ -375,8 +399,15 @@ public final class CubeComboAi {
      * Thopter assembly last, because its bodies need the next turn. */
     private static Card choosePlanTutorPiece(Player player, CardCollection legalChoices) {
         if (!ownPlanSelectionWindow(player) || lethalOrdinaryAttackNow(player)) return null;
-        for (java.util.List<String> family : java.util.List.of(
-                CubeBreachPlan.completingPieceNames(player), CubeStormPlan.completingPieceNames(player))) {
+        java.util.List<java.util.List<String>> families = planCompletingFamilies(player);
+        for (int index = 0; index < families.size(); index++) {
+            // The thopter family is deliberately skipped: chooseAssemblyCard
+            // already runs as this method's caller's tail and is strictly
+            // stricter (supportsAssembly plus a hand-copy check), so a looser
+            // thopter family ahead of it could select a piece the assembly
+            // refuses. See CubeThopterPlan.completingPieceNames.
+            if (index == THOPTER_FAMILY) continue;
+            java.util.List<String> family = families.get(index);
             if (family.isEmpty()) continue;
             Card best = null;
             for (Card card : legalChoices) {
@@ -385,7 +416,15 @@ public final class CubeComboAi {
                 // The same payability forecast the Kiki halves use: a piece we
                 // could not cast after this selection resolves - an
                 // unreachable colour above all - must not consume the choice.
-                if (!feasibleHalfAfterSelection(player, card)) continue;
+                //
+                // v60: a completing piece that is a LAND is PLAYED, not cast,
+                // so that forecast finds no spell for it at all and would
+                // refuse every land outright. The land-drop forecast planFor
+                // uses is the right test for one, and it is the same method.
+                // No v45..v57 family names a land, so this branch cannot move
+                // a v57 receipt.
+                if (!(card.isLand() ? landDropFitsAfter(player, card)
+                        : feasibleHalfAfterSelection(player, card))) continue;
                 if (best == null || card.getCMC() < best.getCMC()) best = card;
             }
             // Deliberately silent. chooseTutorPartner is also the forecast
@@ -398,13 +437,90 @@ public final class CubeComboAi {
         return null;
     }
 
+    /** Index of the thopter family in {@link #planCompletingFamilies}. */
+    private static final int THOPTER_FAMILY = 3;
+
+    /** v60 - every family's completing names, in ONE fixed order, built once
+     * and shared by the two consumers so they cannot drift: Breach, Storm,
+     * Kiki, Thopter, Bomb, Monolith, Kitten, Top, Doomsday.
+     *
+     * <p>Breach and Storm stay first and in that order - the order
+     * {@code CubeComboPlayerController.chooseSpellAbilityToPlay} already runs
+     * their actions and the order v45's {@link #choosePlanTutorPiece} already
+     * used. Every family added here is strictly later, and every one of them
+     * returns an EMPTY list unless its own gate is exactly one role short, so
+     * on a board where only a Breach or Storm piece is missing both consumers
+     * make the identical choice and set the identical decline token as v57.</p>
+     *
+     * <p>Each family computes its own answer from its own zone definitions -
+     * own hand, own battlefield, own graveyard, our own library SIZE, our own
+     * registered deck composition and PUBLIC zones. No library contents or
+     * order, no opponent hand, and a face-down card is never identified.</p> */
+    private static java.util.List<java.util.List<String>> planCompletingFamilies(Player player) {
+        return java.util.List.of(
+                CubeBreachPlan.completingPieceNames(player),
+                CubeStormPlan.completingPieceNames(player),
+                kikiCompletingNames(player),
+                CubeThopterPlan.completingPieceNames(player),
+                CubeBombPlan.completingPieceNames(player),
+                CubeMonolithPlan.completingPieceNames(player),
+                CubeKittenPlan.completingPieceNames(player),
+                CubeTopPlan.completingPieceNames(player),
+                CubeDoomsdayPlan.completingPieceNames(player));
+    }
+
     /** Every name a family with a native plan currently reports as its one
-     * missing piece, Breach before Storm. Used by {@link #planTutor} to decide
-     * whether casting a tutor for a piece is worth forecasting at all. */
+     * missing piece, in {@link #planCompletingFamilies}' order. Used by
+     * {@link #planTutor} to decide whether casting a tutor for a piece is worth
+     * forecasting at all, and by {@link #protectedPieceNames}. */
     static java.util.List<String> planCompletingNames(Player player) {
-        java.util.List<String> names = new java.util.ArrayList<>(CubeBreachPlan.completingPieceNames(player));
-        names.addAll(CubeStormPlan.completingPieceNames(player));
+        java.util.List<String> names = new java.util.ArrayList<>();
+        for (java.util.List<String> family : planCompletingFamilies(player)) names.addAll(family);
         return names;
+    }
+
+    /** v60 - the ONE Kiki/Twin name {@link #chooseKikiTutorPartner} cannot
+     * reach, and deliberately nothing else. That method already answers this
+     * family for every name it accepts and runs FIRST inside
+     * {@link #chooseTutorPartner}; its fetch test for the engine half is
+     * {@code Kiki-Jiki} by name, while {@link #engineHalf} already accepts
+     * Splinter Twin for a card in our own hand. The gap is therefore exactly
+     * Splinter Twin as a card to fetch, and this method is additive only.
+     *
+     * <p>Conditions: our own MAIN1 - the Kiki route's priority rests on haste
+     * copies finishing THIS combat, which is why {@link #chooseKikiTutorPartner}
+     * keeps v45's MAIN1 selection window and {@link #needsMoreCopies} is
+     * MAIN1-only, and not relaxing it here keeps the phase semantics
+     * identical; an UNTAP BODY own-visible on our own battlefield or castable
+     * from our own hand (Restoration Angel blinks rather than untaps and is a
+     * Kiki-only partner, exactly as {@link #twinAuraTarget} documents, so a
+     * Twin spent on it would be destroyed for the rest of the game); and NO
+     * engine half own-visible at all - no live copy ability on our own
+     * battlefield, which also covers a creature already enchanted by a Twin,
+     * and no Kiki-Jiki or Splinter Twin feasible in our own hand.</p>
+     *
+     * <p>Own battlefield and own hand only.</p> */
+    private static java.util.List<String> kikiCompletingNames(Player player) {
+        if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)) return java.util.List.of();
+        boolean body = false, engine = false;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown()) continue;
+            if (untapBody(card)) body = true;
+            if (card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
+                    && sa.copy(player).checkRestrictions(card, player))) engine = true;
+        }
+        if (engine) return java.util.List.of();
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.isFaceDown()) continue;
+            boolean half = engineHalf(card), untap = untapBody(card);
+            // The feasibility probe is the expensive half, so it runs only for
+            // a card that is actually one of the two roles - the same ordering
+            // chooseKikiTutorPartner already uses.
+            if (!half && !untap || !feasibleHalfAfterSelection(player, card)) continue;
+            if (half) return java.util.List.of();
+            body = true;
+        }
+        return body ? java.util.List.of("Splinter Twin") : java.util.List.of();
     }
 
     /** A Kiki pair that can finish this combat: the copy engine is on our
@@ -645,7 +761,18 @@ public final class CubeComboAi {
         // discipline below is unchanged, floating mana still declines, and the
         // v45 candidate set is still MAIN1-only.
         java.util.List<String> planPieces = planCompletingNames(player);
-        boolean main2Route = thopterMissing != null || !planPieces.isEmpty();
+        // v60: the MAIN2 relaxation stays exactly v45/v57's set. It was
+        // registered for the thopter piece and for the Breach and Storm gates,
+        // whose plans act in MAIN2 and whose pieces are usable in that very
+        // MAIN2. Widening it to all nine families would change the decline
+        // token of every MAIN2 board where ANY family is one role short -
+        // including suites that hold no tutor at all and are not about
+        // tutoring. That is a separate decision and is deliberately not taken
+        // in this increment; the wider piece set applies in our own MAIN1,
+        // where this guard already passed.
+        boolean main2Route = thopterMissing != null
+                || !CubeBreachPlan.completingPieceNames(player).isEmpty()
+                || !CubeStormPlan.completingPieceNames(player).isEmpty();
         if (!enabled(player) || !(main1 || main2Route && player.getGame().getPhaseHandler().is(PhaseType.MAIN2, player))
                 || !player.getGame().getStack().isEmpty() || !player.getManaPool().isEmpty()
                 || player.cantWin() || player.hasKeyword("LimitSearchLibrary")) {
@@ -883,14 +1010,31 @@ public final class CubeComboAi {
             if(pass == 1 && !addPlanPiecePreviewRules(forecast, entry.getKey(), planPieces))continue;
             forecast.setZone(player.getZone(ZoneType.Library));
             if (!forecast.isValid(search.getParamOrDefault("ChangeType", "Card").split(","), player, host, search)
-                    || chooseTutorPartner(player, search, new CardCollection(forecast)) == null) continue;
+                    || chooseTutorPartnerUngated(player, search, new CardCollection(forecast)) == null) continue;
             if (controlTransfer && !fetchWinsThisTurn(player, forecast)) {
                 tutorDecline("subability:not-same-turn");
                 continue;
             }
             forecast.setZone(player.getZone(ZoneType.Hand));
             SpellAbility piece = ownSpellOf(forecast);
-            if (piece == null) continue;
+            if (piece == null) {
+                // v60: a completing piece that is a LAND is PLAYED, not cast -
+                // ownSpellOf finds nothing for it and v57 reached this line only
+                // to `continue`. The second-cast forecast becomes a land-drop
+                // forecast. A land drop costs no mana, so NOTHING is reserved
+                // and the tutor's own payment is unchanged; a cast-count
+                // prohibition does not apply to a land play, so castFitsAfter is
+                // not the right test and is deliberately not called. The drop
+                // itself is proposed on a later pass by
+                // CubeBombPlan.depthsLandAction and passes full native legality
+                // through its own landPlay. Every pass-0 legacy name and every
+                // Breach/Storm piece is a nonland, so no v57 receipt can move.
+                if (!landDropFitsAfter(player, forecast)) continue;
+                tutorDecline("mana:" + (tutor.getHostCard().getCMC() + forecast.getCMC()) + "/" + ownVisibleMana(player));
+                if (CubeComboAi.canPayCost(tutor, player, false))
+                    return new TutorPlan(tutor, new CardCollection(), name);
+                continue;
+            }
             SpellAbility creature = piece.copy(player);
             if (!manaOnly(creature) || !castFitsAfter(player, tutor, creature)) continue;
             var cost = ComputerUtilMana.calculateManaCost(creature.getPayCosts(), creature, player, true, 0, false);
@@ -900,6 +1044,17 @@ public final class CubeComboAi {
                     () -> CubeComboAi.canPayCost(tutor, player, false))) return new TutorPlan(tutor, reserve, name);
         }
         return null;
+    }
+
+    /** v60 - the land-drop half of the second-piece forecast: what has to fit
+     * for a completing piece that is a LAND is our own land drop, not a mana
+     * cost. Deliberately COARSER than {@link #castFitsAfter}: it does not run
+     * native legality on a detached preview, because the real land play still
+     * passes the full native path at the moment it is proposed. Our own public
+     * land-play counters only. */
+    private static boolean landDropFitsAfter(Player player, Card forecast) {
+        return forecast.isLand() && (player.getMaxLandPlaysInfinite()
+                || player.getLandsPlayedThisTurn() < player.getMaxLandPlays());
     }
 
     static boolean manaOnly(SpellAbility sa) {

@@ -21,6 +21,11 @@ import forge.game.zone.ZoneType;
 public final class CubeTopPlan {
     private static final String TOP = "Sensei's Divining Top",
             BIRGI = "Birgi, God of Storytelling", RESERVOIR = "Aetherflux Reservoir";
+    /** The cube's two top-of-library play permissions, as FETCH CANDIDATES
+     * only. {@link #permissions} still decides, by static shape on the live
+     * card, whether a permission is actually granted. */
+    private static final java.util.List<String> PERMISSION_NAMES =
+            java.util.List.of("Bolas's Citadel", "Mystic Forge");
     private final Player player;
     private int turn = -1, actions, failedTurn = -1;
     private SpellAbility selected, pending;
@@ -248,6 +253,39 @@ public final class CubeTopPlan {
                 }
             }
         return true;
+    }
+
+
+    /** v60 - the three roles this plan's entry gate needs: Sensei's Divining
+     * Top own-visible (our own battlefield or our own hand - {@link
+     * #nextLoopAction} reads both), a top-of-library play permission on our own
+     * battlefield ({@link #permissions}), and a win outlet on our own
+     * battlefield (the Reservoir's life shot, or a draw-drain permanent by
+     * {@link #drainPerOwnDraw}). Empty unless exactly one role is missing.
+     *
+     * <p>The permission is recognised by the SHAPE of a static on a live card,
+     * which is exactly why a card we do not have cannot be recognised that way.
+     * When the permission is the missing role, and only then, this method falls
+     * back to the cube's two members by name. That is the one place in this
+     * family where a name list stands in for a property test, and it is
+     * confined to naming a fetch candidate: whether the fetched card actually
+     * grants the permission is still decided by {@link #permissions} on the
+     * live card, after it is on the battlefield.</p>
+     *
+     * <p>Own battlefield, own hand and our own library SIZE only; no library
+     * contents or order, no opponent zone, no face-down identity. Entry gate
+     * only - the {@code enoughDraws} / {@code enoughDrain} reach forecasts are
+     * this plan's business on the turn it acts.</p> */
+    static java.util.List<String> completingPieceNames(Player player) {
+        CubeTopPlan plan = new CubeTopPlan(player);
+        boolean top = plan.find(TOP, ZoneType.Battlefield) != null || plan.find(TOP, ZoneType.Hand) != null;
+        boolean permission = !plan.permissions().isEmpty();
+        boolean outlet = plan.find(RESERVOIR, ZoneType.Battlefield) != null;
+        if (!outlet) for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (plan.drainPerOwnDraw(card) > 0) { outlet = true; break; }
+        if ((top ? 1 : 0) + (permission ? 1 : 0) + (outlet ? 1 : 0) != 2) return java.util.List.of();
+        if (!top) return java.util.List.of(TOP);
+        return permission ? java.util.List.of(RESERVOIR) : PERMISSION_NAMES;
     }
 
     public SpellAbility nextAction() {

@@ -61,11 +61,21 @@ public final class CubeTutorShapeSmoke {
      * policy plays it, and the completing piece is the card fetched. */
     private static final List<String> MUST_MOVE = List.of(
             "recruiter:kiki", "imperial:pestermite", "stoneforge:sword",
-            "spellseeker:freeze", "wishclaw:kiki-partner");
+            "spellseeker:freeze", "wishclaw:kiki-partner",
+            // v60 amendment 1, registered in
+            // runs/2026-09-12-completing-pieces-v60/registration.md section 6:
+            // this row was v57's honest limit - "the Depths/Stage pair is the
+            // bomb family, which planCompletingNames does not consult" - and
+            // v60 consults it. Expedition Map's printed ChangeType$ Land admits
+            // Thespian's Stage, the bomb family reports it as the Depths
+            // route's one missing half, and the piece is a LAND, so the
+            // forecast is a land drop rather than a second cast. The shape was
+            // already admitted in v57; only the piece set moved.
+            "map:depths");
     /** Every registered refusal, one per reason the widening can refuse for. */
     private static final List<String> MUST_NOT_MOVE = List.of(
             "trinket:sword", "imperial:conscripts", "wishclaw:plan-piece",
-            "vorinclex:changenum2", "map:depths", "recruiter:gate-open");
+            "vorinclex:changenum2", "recruiter:gate-open");
 
     private record Placement(String name, ZoneType zone) {}
 
@@ -113,7 +123,16 @@ public final class CubeTutorShapeSmoke {
      * the same hook Demonic Tutor uses - and the refusal happens one level up,
      * in planTutor's control-transfer gate. */
     private static String expected(String control) {
-        return MUST_MOVE.contains(control) || variant(control).equals("plan-piece") ? piece(control) : "null";
+        // v60 amendment, registered in
+        // runs/2026-09-12-completing-pieces-v60/registration.md section 6: the
+        // `plan-piece` clause recorded exactly the limitation v57's section 8
+        // named first - the hook steering an ordinary-AI-initiated Wishclaw
+        // search with no same-turn test - and v60 closes it by putting
+        // fetchWinsThisTurn on chooseTutorPartner itself. The refusal now
+        // happens at the hook as well as one level up in planTutor, so the hook
+        // answers null. planTutor's own `subability:not-same-turn` token, which
+        // expectedReason still asserts, is unchanged.
+        return MUST_MOVE.contains(control) ? piece(control) : "null";
     }
 
     /** The decline token planTutor must report for a refusal, as the controller
@@ -130,7 +149,7 @@ public final class CubeTutorShapeSmoke {
             case "vorinclex:changenum2" -> "other check=no-tutor-in-hand";
             // The shape IS admitted; the forecast then finds no piece it can
             // both fetch (printed ChangeType) and complete a route with.
-            case "trinket:sword", "imperial:conscripts", "map:depths", "recruiter:gate-open"
+            case "trinket:sword", "imperial:conscripts", "recruiter:gate-open"
                     -> "other check=no-partner-route";
             // Wishclaw's SubAbility gate: the fetch would open a gate but does
             // not win this turn, and the opponent gets the next activation.
@@ -240,10 +259,12 @@ public final class CubeTutorShapeSmoke {
                 library.add(BEAR);
                 library.add(KIKI);
             }
-            // Expedition Map's shape IS admitted; its ChangeType is Land, and
-            // the Depths/Stage pair belongs to the bomb family, which
-            // planTutor's planCompletingNames does not consult. Registered as
-            // the honest limit of the widening.
+            // Expedition Map's shape IS admitted and its ChangeType is Land.
+            // Under v57 this was the honest limit of the widening, because the
+            // Depths/Stage pair belongs to the bomb family and
+            // planCompletingNames did not consult it; under v60 it does, so
+            // this board is a MUST-MOVE and the fetched Stage is played as a
+            // land drop.
             case "depths" -> {
                 result.add(new Placement(DEPTHS, ZoneType.Battlefield));
                 library.add("Forest");

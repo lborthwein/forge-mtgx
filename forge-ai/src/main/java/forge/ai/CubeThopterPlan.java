@@ -158,6 +158,28 @@ public final class CubeThopterPlan {
         return missing.size()==1?missing.get(0):null;
     }
 
+
+    /** v60 - which single card, fetched from our own library, would complete
+     * this plan's entry gate: Urza, Thopter Foundry and Sword of the Meek, each
+     * on our own battlefield. Empty unless exactly one is missing. Reads our
+     * own battlefield only, through {@link #missingPieces}, so the predicate
+     * cannot drift from the plan's own definition of the gate.
+     *
+     * <p>This is by construction REDUNDANT, and is here so that all nine
+     * families answer one contract. {@code CubeComboAi.planTutor} already
+     * classifies the thopter piece in its pass-0 legacy set, so it is excluded
+     * from pass 1 by the very test that selects pass 1;
+     * {@code protectedPieceNames} already adds it; {@code main2Route} already
+     * has it as a clause; and the family is deliberately NOT offered to
+     * {@code choosePlanTutorPiece}, because {@link #chooseAssemblyCard} already
+     * runs as that method's tail and is strictly stricter ({@link
+     * #supportsAssembly} plus a hand-copy check). The regression asserts the
+     * redundancy rather than assuming it.</p> */
+    static java.util.List<String> completingPieceNames(Player player) {
+        String missing=missingPiece(player);
+        return missing==null?java.util.List.of():java.util.List.of(missing);
+    }
+
     /** Negative-ID CardFactory previews omit intrinsic scripts. Restore just
      * the printed variables, abilities and triggers this forecast inspects,
      * from our registered card's public rules, using native parsers. Not
