@@ -165,12 +165,43 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     @Override
     public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility source,
             CardCollection choices, DelayedReveal delayedReveal, String prompt, boolean optional, Player decider) {
-        if (decider == getPlayer() && destination == ZoneType.Library && doomsdayPlan.ownsPileDecision(source)) {
-            if (delayedReveal != null) reveal(delayedReveal);
-            Card selected = doomsdayPlan.choosePileCard(choices);
-            if (selected != null) return selected;
+        if (decider == getPlayer() && destination == ZoneType.Library) {
+            if (doomsdayPlan.ownsPileDecision(source)) {
+                // Doomsday keeps priority on this API: no plan may steal another
+                // plan's decision, so the search branch below is only reached
+                // when the pile decision is not ours.
+                if (delayedReveal != null) reveal(delayedReveal);
+                Card selected = doomsdayPlan.choosePileCard(choices);
+                if (selected != null) return selected;
+            } else if (ownsSearchToTopSelection(source, origin, choices)) {
+                if (delayedReveal != null) reveal(delayedReveal);
+                Card partner = CubeComboAi.chooseTutorPartner(getPlayer(), source, new CardCollection(choices));
+                if (partner != null) {
+                    comboSelectionChanges++;
+                    System.err.println("CUBE_COMBO_SELECTION changed-search-selection source=" + source.getHostCard().getName()
+                            + " phase=" + getGame().getPhaseHandler().getPhase() + " partner=" + partner.getName());
+                    return partner;
+                }
+            }
         }
         return super.chooseSingleCardForZoneChange(destination, origin, source, choices, delayedReveal, prompt, optional, decider);
+    }
+
+    /** Our own search of our own library that writes the top of it - Imperial
+     * Seal, Vampiric Tutor. The card is drawn on our next turn, so the
+     * selection is the whole decision; v42 left it to the ordinary AI, which
+     * fetches the most expensive valid card (the behaviour Forge's own
+     * imperial_seal.txt documents). Restricted to LibraryPosition 0 because a
+     * search to the bottom or to a random position tells us nothing we could
+     * act on. The offered list is the only library information read, and every
+     * card in it must be one of ours that the effect already lets us see. */
+    private boolean ownsSearchToTopSelection(SpellAbility source, List<ZoneType> origin, CardCollection choices) {
+        return source != null && source.getActivatingPlayer() == getPlayer()
+                && source.getApi() == forge.game.ability.ApiType.ChangeZone
+                && origin != null && origin.size() == 1 && origin.contains(ZoneType.Library)
+                && "0".equals(source.getParam("LibraryPosition"))
+                && choices != null && !choices.isEmpty()
+                && choices.stream().allMatch(c -> c.getOwner() == getPlayer() && c.isInZone(ZoneType.Library));
     }
 
     @Override

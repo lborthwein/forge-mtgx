@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v42";
+    public static final String VERSION = "cube-combo-execution-v45";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -245,7 +245,7 @@ public final class CubeComboAi {
      * during a native search of our own library, using its legal fetch list.
      * No opponent decklist or future library order is inspected. */
     public static Card chooseTutorPartner(Player player, SpellAbility tutor, CardCollection legalChoices) {
-        if (!enabled(player) || tutor.getActivatingPlayer() != player) return null;
+        if (!enabled(player) || tutor == null || tutor.getActivatingPlayer() != player) return null;
         // Kiki's haste route can finish this combat; the new Thopter bodies
         // normally need the next turn. Preserve the available faster route.
         Card immediate = chooseKikiTutorPartner(player, legalChoices);
@@ -277,30 +277,93 @@ public final class CubeComboAi {
         return false;
     }
 
+    /** Our own main phase with nothing pending but this very selection. A
+     * selection commits no mana and requires no same-turn cast, and for a
+     * search that writes the top of our library the fetched card is drawn on
+     * our next turn whichever main phase the search resolved in, so MAIN2 is
+     * admitted as well as MAIN1. This is not "any time": a selection made
+     * while another item waits on the stack can be answered before we ever
+     * draw the card - the pending item may shuffle, draw or remove the half we
+     * are pairing with - so the stack must hold at most our own single item
+     * (the resolving search itself). An empty stack is the planTutor forecast,
+     * which independently requires an empty stack. */
+    private static boolean ownSelectionWindow(Player player) {
+        var phases = player.getGame().getPhaseHandler();
+        if (!phases.is(PhaseType.MAIN1, player) && !phases.is(PhaseType.MAIN2, player)) return false;
+        var stack = player.getGame().getStack();
+        if (stack.size() > 1) return false;
+        for (var item : stack) if (item.getSpellAbility().getActivatingPlayer() != player) return false;
+        return true;
+    }
+
+    /** An unambiguous ordinary win already available this combat: our own
+     * attack-ready creatures out-power every opponent, and no opponent
+     * controls a creature or a planeswalker that could block or absorb. This
+     * exists so a selection never takes credit for a game the ordinary AI was
+     * about to win; it is deliberately narrow and is not a combat evaluator.
+     * MAIN1 only - after combat there is no attack left this turn. Own
+     * battlefield and both public life totals only. */
+    private static boolean lethalOrdinaryAttackNow(Player player) {
+        if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)) return false;
+        int power = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || !card.isCreature() || card.isTapped()
+                    || card.isSick() && !card.hasKeyword(forge.game.keyword.Keyword.HASTE)
+                    || card.hasKeyword(forge.game.keyword.Keyword.DEFENDER)) continue;
+            power += Math.max(0, card.getNetPower());
+        }
+        if (power <= 0 || player.getOpponents().isEmpty()) return false;
+        for (Player opponent : player.getOpponents()) {
+            if (opponent.getLife() > power || !opponent.getCreaturesInPlay().isEmpty()) return false;
+            for (Card card : opponent.getCardsIn(ZoneType.Battlefield)) if (card.isPlaneswalker()) return false;
+        }
+        return true;
+    }
+
+    /** The engine half of a Kiki pair as a card we could still deploy:
+     * Kiki-Jiki itself, or Splinter Twin, which grants the copy ability to the
+     * creature it enchants. Recognised by name only for a card in our own
+     * hand; a battlefield engine is recognised by its actual copy ability. */
+    private static boolean engineHalf(Card card) {
+        return card.getName().equals("Kiki-Jiki, Mirror Breaker") || card.getName().equals("Splinter Twin");
+    }
+
+    private static boolean partnerHalf(Card card) {
+        return untapBody(card) || card.getName().equals("Restoration Angel");
+    }
+
+    /** Complete a Kiki pair that is one card short. Each half may be on our
+     * own battlefield or in our own hand; a hand half counts only when it is
+     * castable after this selection resolves (colour included), so a pair we
+     * could not actually cast never consumes the selection. v42 read the
+     * battlefield only, which is why the diagnosis found this route firing 0
+     * times in 8 natural games while a half sat in hand. Only the offered
+     * choice list is read from the library. */
     private static Card chooseKikiTutorPartner(Player player, CardCollection legalChoices) {
-        if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)) return null;
+        if (!ownSelectionWindow(player) || lethalOrdinaryAttackNow(player)) return null;
         boolean haveKiki = false, havePartner = false;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown()) continue;
             if (card.getName().equals("Kiki-Jiki, Mirror Breaker")
                     && card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
                         && sa.copy(player).checkRestrictions(card, player))) haveKiki = true;
-            if (untapBody(card) || card.getName().equals("Restoration Angel")) havePartner = true;
+            if (partnerHalf(card)) havePartner = true;
         }
-        if (haveKiki == havePartner) return null;
-        // A different interchangeable partner in hand also completes the pair.
-        // Do not spend a selection on a redundant body merely because its name differs.
+        // A half in our own hand is just as real as one on the battlefield, but
+        // only if we can pay for it. This also subsumes the v42 redundancy
+        // check: a complementary half already held makes both flags true and
+        // the selection is declined rather than spent on a duplicate.
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
             if (card.isFaceDown()) continue;
-            if ((haveKiki && (untapBody(card) || card.getName().equals("Restoration Angel"))
-                    || havePartner && card.getName().equals("Kiki-Jiki, Mirror Breaker"))
-                    && feasiblePartnerAfterSelection(player, card)) return null;
+            boolean engine = engineHalf(card), partner = partnerHalf(card);
+            if (!engine && !partner || !feasibleHalfAfterSelection(player, card)) continue;
+            haveKiki |= engine; havePartner |= partner;
         }
+        if (haveKiki == havePartner) return null;
         Card best = null;
         for (Card card : legalChoices) {
             if (card.getOwner() != player || card.isFaceDown() || !card.isInZone(ZoneType.Library)) continue;
-            boolean partner = untapBody(card) || card.getName().equals("Restoration Angel");
-            if (!(haveKiki && partner || havePartner && card.getName().equals("Kiki-Jiki, Mirror Breaker"))) continue;
+            if (!(haveKiki && partnerHalf(card) || havePartner && card.getName().equals("Kiki-Jiki, Mirror Breaker"))) continue;
             if (player.getCardsIn(ZoneType.Hand).stream().anyMatch(c -> c.getName().equals(card.getName()))) continue;
             if (!feasiblePartnerAfterSelection(player, card)) continue;
             if (best == null || card.getCMC() < best.getCMC()) best = card;
@@ -314,7 +377,23 @@ public final class CubeComboAi {
      * feasibility consistently for both hand alternatives and revealed cards.
      * The real later cast still passes the full native legality/payment path. */
     static boolean feasiblePartnerAfterSelection(Player player, Card card) {
-        SpellAbility original=card.getSpellPermanent();
+        return feasibleCastAfterSelection(player, card, card.getSpellPermanent());
+    }
+
+    /** Splinter Twin is an Aura: its cast is CardState.getAuraSpell(), not a
+     * SpellPermanent, so the permanent-only resolution above finds nothing for
+     * it. Resolve the half's own spell first, then run the identical forecast.
+     * Targeting is deliberately not forecast here - the creature this Aura
+     * will enchant is exactly the body the selection is about to fetch - and
+     * the real later cast still passes the full native legality path. */
+    private static boolean feasibleHalfAfterSelection(Player player, Card card) {
+        SpellAbility original = card.getSpellPermanent();
+        if (original == null)
+            for (SpellAbility candidate : card.getSpellAbilities()) if (candidate.isSpell()) { original = candidate; break; }
+        return feasibleCastAfterSelection(player, card, original);
+    }
+
+    private static boolean feasibleCastAfterSelection(Player player, Card card, SpellAbility original) {
         if(original==null)return false;
         SpellAbility spell=original.copy(player);
         Card prospective=CardCopyService.getLKICopy(card);
