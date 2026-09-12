@@ -34,13 +34,25 @@ import java.util.stream.Collectors;
  */
 public final class CubeTopExecutionSmoke {
     private static final int STEP_LIMIT = 600;
+    /** Strict mode for the `drain` suite. Off, the suite records what a policy
+     * decides instead of asserting it, which is what the matched-v49 control
+     * needs. */
+    private static final boolean REQUIRE_DRAIN = Boolean.getBoolean("forge.test.requireTopDrain");
+    /** The seven registered `drain` boards, in registration order. */
+    private static final List<String> DRAIN_CONTROLS = List.of(
+            "crawler-citadel", "crawler-mystic-helm", "crawler-sheoldred",
+            "sheoldred-only", "crawler-helm-birgi", "crawler-beyond-budget", "crawler-low-life");
+    private static final List<String> DRAIN_POSITIVE = List.of(
+            "crawler-citadel", "crawler-mystic-helm", "crawler-sheoldred");
+    private static boolean drainSuite;
     private static boolean improved;
     private static PhaseType initialPhase;
     private static String engine = "citadel";
     private static final List<String> CARD_NAMES = List.of(
             "Bolas's Citadel", "Sensei's Divining Top", "Aetherflux Reservoir",
             "Island", "Forest", "Null Rod", "Rule of Law", "Sulfuric Vortex",
-            "Leyline of Sanctity", "Platinum Angel", "Narset, Parter of Veils", "Counterspell", "Opt", "Mystic Forge", "Helm of Awakening", "Birgi, God of Storytelling", "Sphere of Resistance", "Dress Down");
+            "Leyline of Sanctity", "Platinum Angel", "Narset, Parter of Veils", "Counterspell", "Opt", "Mystic Forge", "Helm of Awakening", "Birgi, God of Storytelling", "Sphere of Resistance", "Dress Down",
+            "Psychosis Crawler", "Sheoldred, the Apocalypse");
 
     private static void loadCardsOnce() {
         for (final String name : CARD_NAMES) {
@@ -77,6 +89,7 @@ public final class CubeTopExecutionSmoke {
 
     private record Placement(String name, ZoneType zone) {}
     private static List<Placement> placements(boolean owner, String control) {
+        if (drainSuite) return drainPlacements(owner, control);
         List<Placement> cards = new ArrayList<>();
         if (owner) {
             if (!control.equals("missing-citadel")) cards.add(new Placement(engine.equals("citadel") ? "Bolas's Citadel" : "Mystic Forge", ZoneType.Battlefield));
@@ -112,6 +125,159 @@ public final class CubeTopExecutionSmoke {
         while (cards.size() < 40) cards.add(new Placement("Forest", owner ? ZoneType.Graveyard : ZoneType.Library));
         if (cards.size() != 40) throw new AssertionError("non-40 fixture");
         return cards;
+    }
+
+    /**
+     * Boards for the `drain` suite. No Aetherflux Reservoir anywhere: the win,
+     * where there is one, has to come from a draw-drain permanent. The three
+     * cards in hand are uncastable on every board (no white source) and exist
+     * only so Psychosis Crawler, whose power is our hand size, is not a 0/0.
+     */
+    private static List<Placement> drainPlacements(final boolean owner, final String control) {
+        List<Placement> cards = new ArrayList<>();
+        if (owner) {
+            boolean citadel = !List.of("crawler-mystic-helm", "crawler-helm-birgi").contains(control);
+            if (citadel) cards.add(new Placement("Bolas's Citadel", ZoneType.Battlefield));
+            if (control.equals("crawler-mystic-helm")) {
+                cards.add(new Placement("Mystic Forge", ZoneType.Battlefield));
+                cards.add(new Placement("Helm of Awakening", ZoneType.Battlefield));
+            }
+            if (control.equals("crawler-helm-birgi")) {
+                cards.add(new Placement("Helm of Awakening", ZoneType.Battlefield));
+                cards.add(new Placement("Birgi, God of Storytelling", ZoneType.Battlefield));
+            }
+            cards.add(new Placement("Sensei's Divining Top", ZoneType.Battlefield));
+            if (!control.equals("sheoldred-only")) cards.add(new Placement("Psychosis Crawler", ZoneType.Battlefield));
+            if (List.of("crawler-sheoldred", "sheoldred-only").contains(control))
+                cards.add(new Placement("Sheoldred, the Apocalypse", ZoneType.Battlefield));
+            for (int i = 0; i < 3; i++) cards.add(new Placement("Leyline of Sanctity", ZoneType.Hand));
+            for (int i = 0; i < 8; i++) cards.add(new Placement("Island", citadel || i == 0 ? ZoneType.Battlefield : ZoneType.Graveyard));
+            for (int i = 0; i < 20; i++) cards.add(new Placement("Forest", ZoneType.Library));
+        }
+        while (cards.size() < 40) cards.add(new Placement("Forest", owner ? ZoneType.Graveyard : ZoneType.Library));
+        if (cards.size() != 40) throw new AssertionError("non-40 fixture");
+        return cards;
+    }
+
+    /** One `drain` row. Same rig as run(): the native controller selects every
+     * action through mainLoopStep(), and this method only records and checks. */
+    private static void drainRun(final int seat, final String control) {
+        final Game game = game(seat, control);
+        final Player player = game.getPlayers().get(seat);
+        final Player opponent = game.getPlayers().get(1 - seat);
+        populate(player, opponent, control);
+        final int opponentLife = control.equals("crawler-beyond-budget") ? 40 : 8;
+        opponent.setLife(opponentLife, null);
+        if (control.equals("crawler-low-life")) player.setLife(5, null);
+        game.getAction().checkStateEffects(true);
+        game.getTriggerHandler().resetActiveTriggers();
+        BenchRandomAudit.install(20812 + seat * 100 + control.length());
+
+        // Public premises, asserted before the controller is ever consulted.
+        final int startingLife = player.getLife();
+        if (!has(player, ZoneType.Battlefield, "Sensei's Divining Top")
+                || has(player, ZoneType.Battlefield, "Aetherflux Reservoir")
+                || player.getCardsIn(ZoneType.Library).size() != 20
+                || opponent.getLife() != opponentLife
+                || startingLife != (control.equals("crawler-low-life") ? 5 : 20)
+                || has(player, ZoneType.Battlefield, "Psychosis Crawler") == control.equals("sheoldred-only")
+                || has(player, ZoneType.Battlefield, "Sheoldred, the Apocalypse")
+                    != List.of("crawler-sheoldred", "sheoldred-only").contains(control)
+                || has(player, ZoneType.Battlefield, "Bolas's Citadel")
+                    == List.of("crawler-mystic-helm", "crawler-helm-birgi").contains(control))
+            throw new AssertionError("drain premise mismatch " + control);
+
+        System.out.println("TOP_DRAIN_FIXTURE seat=" + seat + " control=" + control
+                + " controller=" + (improved ? "CubeCombo" : "Default") + " policy=" + forge.ai.CubeComboAi.VERSION
+                + " phase=" + initialPhase + " infoPolicy=CLOSED_REPAIR"
+                + " ownBattlefield=" + names(player, ZoneType.Battlefield)
+                + " ownHand=" + names(player, ZoneType.Hand)
+                + " life=" + startingLife + " opponentLife=" + opponent.getLife());
+
+        final Set<Integer> stackIds = new HashSet<>();
+        int steps = 0, libraryCasts = 0, topActivations = 0, drainTriggers = 0, sustainTriggers = 0;
+        int lifePaid = 0, reservoirActivations = 0;
+        String firstFailure = null;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 1 && steps < STEP_LIMIT) {
+            final int step = ++steps;
+            try {
+                game.getPhaseHandler().mainLoopStep();
+            } catch (final Throwable failure) {
+                firstFailure = failure.getClass().getSimpleName() + ": " + String.valueOf(failure.getMessage());
+                System.out.println("NATIVE_FAILURE seat=" + seat + " control=" + control
+                        + " step=" + step + " failure=" + firstFailure);
+                break;
+            }
+            for (final var item : game.getStack()) {
+                final var ability = item.getSpellAbility();
+                if (!stackIds.add(item.getId()) || ability.getActivatingPlayer() != player) continue;
+                final Card host = ability.getHostCard();
+                if (ability.isSpell()) {
+                    if (host.getName().equals("Sensei's Divining Top") && host.getCastFrom() != null
+                            && host.getCastFrom().getZoneType() == ZoneType.Library) {
+                        libraryCasts++;
+                        if (ability.getMayPlay() == null) throw new AssertionError("library recast without a native permission");
+                        final boolean paidWithLife = ability.getPayCosts().getCostParts().stream()
+                                .anyMatch(part -> part instanceof forge.game.cost.CostPayLife);
+                        if (paidWithLife != ability.getMayPlay().getHostCard().getName().equals("Bolas's Citadel"))
+                            throw new AssertionError("permission and payment disagree: "
+                                    + ability.getMayPlay().getHostCard().getName() + " lifePaid=" + ability.getAmountLifePaid());
+                    }
+                    lifePaid += Math.max(0, ability.getAmountLifePaid());
+                    System.out.println("NATIVE_CAST seat=" + seat + " control=" + control + " step=" + step
+                            + " card=" + host.getName()
+                            + " castFrom=" + (host.getCastFrom() == null ? "unknown" : host.getCastFrom().getZoneType())
+                            + " permission=" + (ability.getMayPlay() == null ? "none" : ability.getMayPlay().getHostCard().getName())
+                            + " payCosts=" + ability.getPayCosts() + " lifePaid=" + ability.getAmountLifePaid()
+                            + " life=" + player.getLife() + " opponentLife=" + opponent.getLife());
+                } else if (ability.isActivatedAbility() && ability.getParent() == null) {
+                    if (host.getName().equals("Sensei's Divining Top")) topActivations++;
+                    if (host.getName().equals("Aetherflux Reservoir")) reservoirActivations++;
+                    System.out.println("NATIVE_ACTIVATION seat=" + seat + " control=" + control + " step=" + step
+                            + " source=" + host.getName() + " payCosts=" + ability.getPayCosts());
+                } else if (ability.isTrigger()) {
+                    if (host.getName().equals("Psychosis Crawler")) drainTriggers++;
+                    if (host.getName().equals("Sheoldred, the Apocalypse")) sustainTriggers++;
+                    System.out.println("NATIVE_TRIGGER seat=" + seat + " control=" + control + " step=" + step
+                            + " source=" + host.getName());
+                }
+            }
+        }
+        if (firstFailure == null && steps >= STEP_LIMIT) firstFailure = "step budget exhausted";
+        if (firstFailure != null) throw new AssertionError(firstFailure);
+
+        final boolean positive = DRAIN_POSITIVE.contains(control);
+        if (improved && REQUIRE_DRAIN) {
+            if (positive) {
+                if (!player.hasWon() || opponent.getLife() > 0)
+                    throw new AssertionError("registered drain finish missing " + control
+                            + " won=" + player.hasWon() + " opponentLife=" + opponent.getLife());
+                if (drainTriggers < opponentLife || libraryCasts < opponentLife - 1)
+                    throw new AssertionError("drain loop too short " + control
+                            + " drainTriggers=" + drainTriggers + " libraryCasts=" + libraryCasts);
+                if (reservoirActivations != 0) throw new AssertionError("no Reservoir is on these boards");
+                if (control.equals("crawler-citadel") && lifePaid != libraryCasts)
+                    throw new AssertionError("Citadel recasts must each pay one actual life: " + lifePaid + "/" + libraryCasts);
+                if (control.equals("crawler-mystic-helm") && lifePaid != 0)
+                    throw new AssertionError("Mystic Forge recasts must pay no life: " + lifePaid);
+                if (control.equals("crawler-sheoldred")
+                        && (sustainTriggers < drainTriggers || player.getLife() <= startingLife))
+                    throw new AssertionError("Sheoldred must sustain the life payments: life=" + player.getLife()
+                            + " sustainTriggers=" + sustainTriggers);
+            } else if (player.hasWon() || libraryCasts != 0) {
+                throw new AssertionError("control must not run the loop " + control
+                        + " won=" + player.hasWon() + " libraryCasts=" + libraryCasts);
+            }
+        }
+        System.out.println("TOP_DRAIN_RESULT seat=" + seat + " control=" + control + " phase=" + initialPhase
+                + " arm=" + (improved ? "improved" : "baseline") + " policy=" + forge.ai.CubeComboAi.VERSION
+                + " registered=" + (positive ? "must-move" : "must-not-move")
+                + " won=" + player.hasWon() + " gameOver=" + game.isGameOver() + " steps=" + steps
+                + " libraryCasts=" + libraryCasts + " topActivations=" + topActivations
+                + " drainTriggers=" + drainTriggers + " sustainTriggers=" + sustainTriggers
+                + " reservoirActivations=" + reservoirActivations + " lifePaid=" + lifePaid
+                + " playerLife=" + player.getLife() + " opponentLife=" + opponent.getLife()
+                + " firstFailure=" + firstFailure);
     }
 
     private static Deck registeredDeck(final boolean owner, final String control) {
@@ -377,6 +543,17 @@ public final class CubeTopExecutionSmoke {
                 return null;
             });
             loadCardsOnce();
+            if (args.length > 3 && args[3].equals("drain")) {
+                drainSuite = true;
+                int cases = 0;
+                for (int seat = 0; seat < 2; seat++) for (PhaseType phase : List.of(PhaseType.MAIN1, PhaseType.MAIN2)) {
+                    initialPhase = phase;
+                    for (String control : DRAIN_CONTROLS) { drainRun(seat, control); cases++; }
+                }
+                System.out.println("TOP_DRAIN_SUITE_COMPLETE suite=drain improved=" + improved
+                        + " policy=" + forge.ai.CubeComboAi.VERSION + " cases=" + cases);
+                return;
+            }
             if (args.length > 3 && args[3].equals("engines")) {
                 for (String family : List.of("mystic-helm", "mystic-birgi")) {
                     engine = family;
