@@ -48,6 +48,14 @@ public class AttachAi extends SpellAbilityAi {
         final Cost abCost = sa.getPayCosts();
         final Card source = sa.getHostCard();
 
+        // v53 D2: the versioned cube policy holds its engine Aura while that
+        // Aura's own partner is in our hand and none is on our battlefield.
+        // An Aura spent on a non-partner is gone for the rest of the game.
+        // Gated on CubeComboAi.enabled(ai): the Default arm never reaches it.
+        if (CubeComboAi.enabled(ai) && CubeComboAi.holdTwinAura(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         // TODO: improve this so that the AI can use a flash aura buff as a means of killing opposing creatures and gaining card advantage
         if (source.hasKeyword("MayFlashSac") && !ai.canCastSorcery()) {
             return new AiAbilityDecision(0, AiPlayDecision.TimingRestrictions);
@@ -1361,7 +1369,16 @@ public class AttachAi extends SpellAbilityAi {
         // Filter AI-specific targets if provided
         prefList = ComputerUtil.filterAITgts(sa, aiPlayer, prefList, true);
 
-        Card c = attachGeneralAI(aiPlayer, sa, prefList, mandatory, attachSource, sa.getParam("AILogic"));
+        // v53 D1: the versioned cube policy puts its engine Aura on its own
+        // Twin partner instead of on whatever the Pump logic likes best, which
+        // is how the v50 drafted read lost a fully-assembled line to a Young
+        // Pyromancer. Gated on CubeComboAi.enabled(aiPlayer); a null answer
+        // falls through to the unchanged native choice, and every downstream
+        // check below is untouched.
+        Card c = CubeComboAi.enabled(aiPlayer) ? CubeComboAi.twinAuraTarget(aiPlayer, sa, prefList) : null;
+        if (c == null) {
+            c = attachGeneralAI(aiPlayer, sa, prefList, mandatory, attachSource, sa.getParam("AILogic"));
+        }
 
         AiController aic = ((PlayerControllerAi)aiPlayer.getController()).getAi();
         if (c != null && attachSource.isEquipment()

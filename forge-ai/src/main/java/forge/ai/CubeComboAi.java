@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v52";
+    public static final String VERSION = "cube-combo-execution-v53";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -199,6 +199,109 @@ public final class CubeComboAi {
                         && c.isUntapped() && !c.isSick() && c.getNetPower() > 0).count();
         return readyCopies < budget && ability.getActivationsThisTurn() < 64;
     }
+
+    /** v53 D1/D2 - the engine Aura, recognised by printed property rather than
+     * by name: an Aura that enchants a creature and whose continuous static
+     * grants that creature an activated CopyPermanent with a tap cost,
+     * {@code Defined$ Self}, {@code AddKeywords$ Haste} and {@code AtEOT$} -
+     * the same {@link #copyEngine} contract the battlefield recogniser already
+     * applies to the granted ability once it is live. Splinter Twin is the only
+     * such card in the cube today; the property test is still the contract.
+     *
+     * The granted ability lives in an SVar, so it has to be parsed through the
+     * native ability factory to be tested at all. The cheap {@code contains}
+     * pre-filter is there so no unrelated SVar is ever handed to that parser;
+     * the parsed ability, not the string, is the actual test. Printed
+     * characteristics only - no zone, controller or game state is read here. */
+    static boolean engineAura(Card card) {
+        if (card == null || card.isFaceDown() || !card.isAura()) return false;
+        boolean enchantsCreature = false;
+        for (forge.game.keyword.KeywordInterface keyword : card.getKeywords(forge.game.keyword.Keyword.ENCHANT)) {
+            String[] parts = keyword.getOriginal().split(":");
+            if (parts.length > 1 && parts[1].contains("Creature")) { enchantsCreature = true; break; }
+        }
+        if (!enchantsCreature) return false;
+        for (forge.game.staticability.StaticAbility statik : card.getStaticAbilities()) {
+            if (!statik.checkMode(forge.game.staticability.StaticAbilityMode.Continuous)
+                    || !statik.hasParam("AddAbility")) continue;
+            for (String svar : statik.getParam("AddAbility").split(" & ")) {
+                String printed = card.getSVar(svar);
+                if (printed == null || !printed.contains("CopyPermanent")) continue;
+                SpellAbility granted = forge.game.ability.AbilityFactory.getAbility(card, svar);
+                if (granted != null && copyEngine(granted) && "Self".equals(granted.getParam("Defined"))) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Our own cast of the engine Aura from our own hand. Shared entry guard of
+     * both v53 decisions, so neither can fire on an opponent's spell, on a
+     * copy already on the battlefield, or on any other Aura. */
+    private static boolean ownEngineAuraCast(Player player, SpellAbility aura) {
+        if (!enabled(player) || aura == null || !aura.isSpell()) return false;
+        Card source = aura.getHostCard();
+        return source != null && source.getOwner() == player && source.isInZone(ZoneType.Hand)
+                && engineAura(source);
+    }
+
+    /** v53 D1 - the creature the engine Aura should enchant: a Twin partner we
+     * control, taken from the native candidate list the ordinary AI already
+     * built. A Twin partner is an untap body (Pestermite, Deceiver Exarch,
+     * Zealous Conscripts); Restoration Angel blinks rather than untaps, so it
+     * is a Kiki partner only and is deliberately not accepted here.
+     *
+     * Preference is a partner that could actually tap for the granted ability
+     * on the turn the Aura lands - untapped, and either not summoning sick or
+     * hasty - then any legal partner. Reads our own battlefield through the
+     * candidate list; a creature we do not control is refused, never chosen, so
+     * the opponent's board is only ever used to say no. Returning null leaves
+     * the unchanged native choice in place. */
+    public static Card twinAuraTarget(Player player, SpellAbility aura, Iterable<Card> candidates) {
+        if (!ownEngineAuraCast(player, aura)) return null;
+        Card ready = null, any = null;
+        for (Card card : candidates) {
+            if (card == null || card.isFaceDown() || card.getController() != player || !untapBody(card)) continue;
+            if (any == null) any = card;
+            if (ready == null && card.isUntapped()
+                    && (!card.isSick() || card.hasKeyword(forge.game.keyword.Keyword.HASTE))) ready = card;
+        }
+        return ready != null ? ready : any;
+    }
+
+    /** v53 D2 - hold the engine Aura while its partner is in our own hand and
+     * none is on our battlefield. An Aura spent on a non-partner is destroyed
+     * for the rest of the game, which is what the v50 drafted read observed;
+     * declining the cast costs a turn of a Pump aura instead.
+     *
+     * Conditioned on our own hand: the opponent's hand, library and decklist
+     * are never touched, and a face-down card is never identified. It does not
+     * fire when a partner is already on our battlefield (D1 repairs the target
+     * instead), when the only creature held is a Kiki-only partner such as
+     * Restoration Angel, or when no partner is held at all. Whether the partner
+     * is castable is deliberately NOT forecast - see the design's limitations.
+     *
+     * Observability: at most one stderr line per (turn, phase) for this seat.
+     * The line names a card in our own hand only. */
+    public static boolean holdTwinAura(Player player, SpellAbility aura) {
+        if (!ownEngineAuraCast(player, aura)) return false;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (!card.isFaceDown() && untapBody(card)) return false;
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.isFaceDown() || !untapBody(card)) continue;
+            var phases = player.getGame().getPhaseHandler();
+            String stamp = System.identityHashCode(player) + ":" + phases.getTurn() + ":" + phases.getPhase();
+            if (!stamp.equals(TWIN_HOLD_STAMP.get())) {
+                TWIN_HOLD_STAMP.set(stamp);
+                System.err.println("CUBE_TWIN_HOLD partnerInHand=" + card.getName());
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /** Observability bookkeeping for {@link #holdTwinAura} only. Never read by
+     * a decision; the identity stamp is compared, never printed. */
+    private static final ThreadLocal<String> TWIN_HOLD_STAMP = new ThreadLocal<>();
 
     public static Card untapSource(Player player, SpellAbility trigger) {
         if (!enabled(player) || !untapBody(trigger.getHostCard()) || !trigger.usesTargeting()) return null;
