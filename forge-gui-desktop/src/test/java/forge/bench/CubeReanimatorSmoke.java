@@ -55,6 +55,54 @@ import java.util.*;
  * <li><b>ordinary-parity</b> - no reanimation card anywhere. PARITY.</li>
  * </ul>
  *
+ * <p>v76 appends seven AURA-form rows. The aura form's target is chosen in
+ * {@code AttachAi.attachAIReanimatePreference} by
+ * {@code ComputerUtilCard.getBestCreatureAI} - a BODY SCORE - which is census
+ * section 6.4 and v73's registered limitation 1. Appended, so every v73 row
+ * keeps its name and therefore its {@code BenchRandomAudit} seed.</p>
+ * <ul>
+ * <li><b>aura-value</b> - Animate Dead with Ashen Rider and a value-free body
+ *     of HIGHER mana value and a higher body score in OUR graveyard. The
+ *     control takes the 9/9; v76 takes the one whose printed triggers change
+ *     the board.</li>
+ * <li><b>aura-necromancy</b> - the same board with Necromancy. RECORDED, not
+ *     equated: Necromancy is NOT an Aura on the stack and carries no
+ *     {@code AttachAILogic}; its target is its ETB trigger's targeted
+ *     {@code RaiseDead}, which is v73's spell-form hook. The row measures that
+ *     correction to census 6.4 rather than asserting it from a read.</li>
+ * <li><b>aura-opponent-grave</b> - our graveyard holds only the value-free
+ *     body and the opponent's PUBLIC graveyard holds the value one. Animate
+ *     Dead enchants a creature card in ANY graveyard, so v76 takes theirs -
+ *     strictly better, and denied to them.</li>
+ * <li><b>aura-single</b> - one legal target. MUST-NOT-MOVE: a single candidate
+ *     is not a choice.</li>
+ * <li><b>aura-agree</b> - two tier-3 bodies. The ranking AGREES with the
+ *     ordinary answer and must return null rather than "change" to the same
+ *     card. MUST-NOT-MOVE.</li>
+ * <li><b>aura-worldgorger</b> - the lock piece beside a real payload. Animate
+ *     Dead's printed {@code AttachAITgts:Creature.!namedWorldgorger Dragon} is
+ *     applied by {@code ComputerUtil.filterAITgts} BEFORE the list the plan
+ *     ranks, so BOTH arms must leave it alone. MUST-NOT-MOVE.</li>
+ * <li><b>portal-value</b> / <b>portal-reverse</b> - Portal to Phyrexia on our
+ *     battlefield and one candidate in EACH graveyard, then the two swapped.
+ *     Its upkeep trigger is a PHASE trigger whose {@code TrigChange} is a
+ *     targeted {@code Graveyard -> Battlefield} {@code ValidTgts$ Creature} with
+ *     {@code GainControl$ True} - a THIRD entry shape into v73's
+ *     {@code ChangeZoneAi.isPreferredTarget} hook, after a spell and after
+ *     Necromancy's ChangesZone trigger, and the first one no fixture covered.
+ *     The value ranking must take the tier-3 body from WHICHEVER graveyard holds
+ *     it, including the opponent's public one. Both arms, because the hook is
+ *     v73's.</li>
+ * <li><b>portal-single</b> - the same engine with ONE legal target anywhere.
+ *     PARITY: a single candidate is not a choice, so the ranking declines and
+ *     the ordinary answer stands.</li>
+ * <li><b>aura-shuffler</b> - Emrakul and a Grizzly Bears in our graveyard. The
+ *     aura form must NOT reuse v73's {@code staysInGraveyard} refusal: the card
+ *     is already in a graveyard and the aura is taking it OUT. Both arms must
+ *     return EMRAKUL; a plan that reused {@code payloadTier} would reanimate
+ *     the Bears. MUST-NOT-MOVE.</li>
+ * </ul>
+ *
  * <p>Assertions are gated on {@code -Dforge.test.requireReanimator} so the
  * identical source runs unasserted against the matched pre-v73 classes as a
  * control; those classes have no such counters and each reports -1.</p> */
@@ -65,12 +113,20 @@ public final class CubeReanimatorSmoke {
         EXHUME = "Exhume", PERSIST = "Persist", LOOTER = "Jace, Vryn's Prodigy",
         ASHEN = "Ashen Rider", GRISELBRAND = "Griselbrand", EMRAKUL = "Emrakul, the Aeons Torn",
         TITAN = "Grave Titan", ARCHON = "Archon of Cruelty", FATTY = "Bygone Colossus",
-        BEARS = "Grizzly Bears", SWAMP = "Swamp", FOREST = "Forest";
+        BEARS = "Grizzly Bears", SWAMP = "Swamp", FOREST = "Forest",
+        // v76 aura form.
+        NECROMANCY = "Necromancy", WORLDGORGER = "Worldgorger Dragon",
+        // v76 addendum: the standing trigger engine.
+        PORTAL = "Portal to Phyrexia";
     private static final List<String> MUST_MOVE =
         List.of("entomb-stable", "loot-payload", "target-value", "persist-legendary",
-                "entomb-sequence", "entomb-endstep");
+                "entomb-sequence", "entomb-endstep",
+                "aura-value", "aura-opponent-grave",
+                "portal-value", "portal-reverse");
     private static final List<String> MUST_NOT_MOVE =
-        List.of("entomb-no-spell", "loot-no-spell", "ordinary-parity");
+        List.of("entomb-no-spell", "loot-no-spell", "ordinary-parity",
+                "aura-single", "aura-agree", "aura-worldgorger", "aura-shuffler",
+                "portal-single");
 
     /** -1 means the classes under test have no such counter at all, which is
      * what the matched pre-v73 control arm reports. The plan class is resolved
@@ -96,7 +152,11 @@ public final class CubeReanimatorSmoke {
     private static int[] counters(boolean reset) {
         return new int[] {counter("planActions", reset), counter("entombSelections", reset),
                 counter("discardSwaps", reset), counter("targetChanges", reset),
-                counter("symmetryDeclines", reset), counter("holds", reset)};
+                counter("symmetryDeclines", reset), counter("holds", reset),
+                // v76. -1 against the pre-v76 control classes, which have the
+                // plan class but not this field: the designed no-such-field
+                // signal, one step finer than v73's no-such-class one.
+                counter("auraTargets", reset)};
     }
     private static forge.item.PaperCard paper(String name) {
         if (loaded.add(name)) StaticData.instance().attemptToLoadCard(name);
@@ -163,6 +223,68 @@ public final class CubeReanimatorSmoke {
                 cards.add(new Entry(EMRAKUL, ZoneType.Library));
                 cards.add(new Entry(ASHEN, ZoneType.Library));
             }
+            // ------------------------------------------------ v76 aura rows
+            case "aura-value" -> {
+                cards.add(new Entry(ANIMATE, ZoneType.Hand));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(FATTY, ZoneType.Graveyard));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+            }
+            case "aura-necromancy" -> {
+                cards.add(new Entry(NECROMANCY, ZoneType.Hand));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(FATTY, ZoneType.Graveyard));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+            }
+            // Our graveyard holds ONLY the value-free body; the payload is in
+            // the opponent's PUBLIC graveyard (see opposing()).
+            case "aura-opponent-grave" -> {
+                cards.add(new Entry(ANIMATE, ZoneType.Hand));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(FATTY, ZoneType.Graveyard));
+            }
+            case "aura-single" -> {
+                cards.add(new Entry(ANIMATE, ZoneType.Hand));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+            }
+            case "aura-agree" -> {
+                cards.add(new Entry(ANIMATE, ZoneType.Hand));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+                cards.add(new Entry(ARCHON, ZoneType.Graveyard));
+            }
+            case "aura-worldgorger" -> {
+                cards.add(new Entry(ANIMATE, ZoneType.Hand));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(WORLDGORGER, ZoneType.Graveyard));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+            }
+            case "aura-shuffler" -> {
+                cards.add(new Entry(ANIMATE, ZoneType.Hand));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(EMRAKUL, ZoneType.Graveyard));
+                cards.add(new Entry(BEARS, ZoneType.Graveyard));
+            }
+            // ------------------------------------- v76 addendum: Portal rows
+            // The engine is placed directly on our battlefield, so its ETB
+            // ("each opponent sacrifices three creatures") never fires and the
+            // only thing under test is the UPKEEP trigger's target.
+            case "portal-value" -> {
+                cards.add(new Entry(PORTAL, ZoneType.Battlefield));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+            }
+            case "portal-reverse" -> {
+                cards.add(new Entry(PORTAL, ZoneType.Battlefield));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(FATTY, ZoneType.Graveyard));
+            }
+            case "portal-single" -> {
+                cards.add(new Entry(PORTAL, ZoneType.Battlefield));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+            }
             default -> { // ordinary-parity
                 cards.add(new Entry(BEARS, ZoneType.Hand));
                 for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
@@ -179,6 +301,14 @@ public final class CubeReanimatorSmoke {
         List<Entry> cards = new ArrayList<>();
         for (int i = 0; i < 3; i++) cards.add(new Entry(BEARS, ZoneType.Battlefield));
         if (control.equals("exhume-symmetry")) cards.add(new Entry(ARCHON, ZoneType.Graveyard));
+        // v76: the one row whose payload is in the opponent's PUBLIC graveyard.
+        if (control.equals("aura-opponent-grave")) cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+        // v76 addendum. portal-value puts the value-free body in the PUBLIC
+        // graveyard and the payload in ours; portal-reverse swaps them, so the
+        // ranking has to reach across into the opponent's graveyard to be right.
+        // portal-single leaves this graveyard creature-free on purpose.
+        if (control.equals("portal-value")) cards.add(new Entry(FATTY, ZoneType.Graveyard));
+        if (control.equals("portal-reverse")) cards.add(new Entry(ASHEN, ZoneType.Graveyard));
         for (int i = 0; i < 20; i++) cards.add(new Entry(FOREST, ZoneType.Library));
         while (cards.size() < 40) cards.add(new Entry(FOREST, ZoneType.Graveyard));
         return cards;
@@ -203,6 +333,21 @@ public final class CubeReanimatorSmoke {
             for (Card c : player.getCardsIn(zone)) if (c.getName().equals(name)) return zone.name();
         }
         return "missing";
+    }
+
+    /** v76. The card our reanimation AURA is attached to - the DIRECT witness
+     * of the decision under test. Needed because Animate Dead's own
+     * reanimation is {@code Defined$ Enchanted}, i.e. UNTARGETED, so v73's
+     * {@code returned=} set (built from {@code sa.getTargets()}) is empty on
+     * every Animate Dead row. Necromancy's {@code RaiseDead} IS targeted, so
+     * that row populates both fields and they cross-check each other. */
+    private static String auraOn(Player player) {
+        for (Card c : player.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.getName().equals(ANIMATE) && !c.getName().equals(NECROMANCY)) continue;
+            Card host = c.getAttachedTo();
+            return host == null ? "unattached" : host.getName().replace(' ', '_');
+        }
+        return "none";
     }
 
     private static void run(int seat, String control, boolean candidate) {
@@ -261,14 +406,14 @@ public final class CubeReanimatorSmoke {
         int[] c = counters(true);
         System.out.println("REANIMATOR_RESULT " + key
             + " planActions=" + c[0] + " entombSelections=" + c[1] + " discardSwaps=" + c[2] + " targetChanges=" + c[3]
-            + " symmetryDeclines=" + c[4] + " holds=" + c[5]
+            + " symmetryDeclines=" + c[4] + " holds=" + c[5] + " auraTargets=" + c[6]
             + " searches=" + searches + " searchTurn=" + searchTurn + " searchPhase=" + searchPhase
             + " reanimations=" + reanimations + " discards=" + discards
             + " graveyardSeen=[" + String.join(";", graveyardSeen).replace(' ', '_') + "]"
             + " returned=[" + String.join(";", returned).replace(' ', '_') + "]"
             + " ashen=" + zoneOf(p, ASHEN) + " emrakul=" + zoneOf(p, EMRAKUL)
             + " griselbrand=" + zoneOf(p, GRISELBRAND) + " titan=" + zoneOf(p, TITAN)
-            + " fatty=" + zoneOf(p, FATTY)
+            + " fatty=" + zoneOf(p, FATTY) + " auraOn=" + auraOn(p)
             + " oppPermanents=" + opp.getCardsIn(ZoneType.Battlefield).size()
             + " oppExile=" + opp.getCardsIn(ZoneType.Exile).size()
             + " life=" + p.getLife() + " opponentLife=" + opp.getLife()
@@ -276,7 +421,8 @@ public final class CubeReanimatorSmoke {
         if (!candidate || !Boolean.getBoolean("forge.test.requireReanimator")) return;
 
         // MUST-NOT-MOVE: no action of ANY kind, not merely no win.
-        if (MUST_NOT_MOVE.contains(control) && (c[0] != 0 || c[1] != 0 || c[2] != 0 || c[3] != 0 || c[4] != 0 || c[5] != 0))
+        if (MUST_NOT_MOVE.contains(control)
+                && (c[0] != 0 || c[1] != 0 || c[2] != 0 || c[3] != 0 || c[4] != 0 || c[5] != 0 || c[6] != 0))
             throw new AssertionError("Reanimator control moved: " + key + " counters=" + Arrays.toString(c));
         switch (control) {
             // The payload is RECORDED, not named: the rule under test is the
@@ -324,16 +470,77 @@ public final class CubeReanimatorSmoke {
                     throw new AssertionError("Search was not held to the opponent's end step: " + key
                         + " searchPhase=" + searchPhase);
             }
+            // ------------------------------------------------ v76 aura rows
+            case "aura-value" -> {
+                if (c[6] < 1 || !auraOn(p).equals("Ashen_Rider"))
+                    throw new AssertionError("Aura took the body score: " + key + " auraOn=" + auraOn(p));
+            }
+            // RECORDED: the counter is NOT asserted, because the correction this
+            // row measures is that Necromancy's target is v73's spell-form hook,
+            // not the aura one. The OUTCOME is asserted.
+            case "aura-necromancy" -> {
+                if (auraOn(p).equals("Bygone_Colossus") || returned.contains(FATTY))
+                    throw new AssertionError("Necromancy took the body score: " + key + " auraOn=" + auraOn(p));
+            }
+            case "aura-opponent-grave" -> {
+                if (c[6] < 1 || !auraOn(p).equals("Ashen_Rider"))
+                    throw new AssertionError("Aura ignored the public graveyard: " + key + " auraOn=" + auraOn(p));
+            }
+            // One legal candidate is not a choice; the ordinary answer stands.
+            case "aura-single" -> {
+                if (!auraOn(p).equals("Ashen_Rider"))
+                    throw new AssertionError("Single-target aura row moved: " + key + " auraOn=" + auraOn(p));
+            }
+            // The ranking agrees with the ordinary answer and must say so by
+            // returning null, not by "changing" to the same card.
+            case "aura-agree" -> {
+                if (!auraOn(p).equals("Archon_of_Cruelty"))
+                    throw new AssertionError("Aura disagreed on an agreed board: " + key + " auraOn=" + auraOn(p));
+            }
+            // The lock piece is removed by the aura's OWN printed AttachAITgts
+            // before the plan sees the list.
+            case "aura-worldgorger" -> {
+                if (auraOn(p).equals("Worldgorger_Dragon"))
+                    throw new AssertionError("Aura took the lock piece: " + key);
+                if (!auraOn(p).equals("Ashen_Rider"))
+                    throw new AssertionError("Aura took no payload at all: " + key + " auraOn=" + auraOn(p));
+            }
+            // The aura form must NOT reuse v73's staysInGraveyard refusal.
+            case "aura-shuffler" -> {
+                if (!auraOn(p).equals("Emrakul,_the_Aeons_Torn"))
+                    throw new AssertionError("Aura refused a body that is ALREADY in the graveyard: "
+                        + key + " auraOn=" + auraOn(p));
+            }
+            // ------------------------------------- v76 addendum: Portal rows
+            // v73's hook, reached from a PHASE trigger. The counter asserted is
+            // targetChanges (c[3]), NOT auraTargets: Portal to Phyrexia is not
+            // an Aura and never reaches AttachAi.
+            case "portal-value", "portal-reverse" -> {
+                if (c[3] < 1 || !returned.contains(ASHEN) || returned.contains(FATTY))
+                    throw new AssertionError("Portal took the expensive body: " + key + " returned=" + returned);
+                if (!zoneOf(p, ASHEN).equals("Battlefield"))
+                    throw new AssertionError("Portal returned nothing: " + key);
+            }
+            case "portal-single" -> {
+                if (!returned.contains(ASHEN) || !zoneOf(p, ASHEN).equals("Battlefield"))
+                    throw new AssertionError("Portal's single legal target was not taken: " + key
+                        + " returned=" + returned);
+            }
             default -> { }
         }
-        if (MUST_MOVE.contains(control) && c[0] + c[1] + c[2] + c[3] + c[4] + c[5] == 0)
+        if (MUST_MOVE.contains(control) && c[0] + c[1] + c[2] + c[3] + c[4] + c[5] + c[6] == 0)
             throw new AssertionError("Reanimator row took no action: " + key);
     }
 
     private static List<String> controls() {
         return List.of("entomb-stable", "entomb-no-spell", "loot-payload", "loot-no-spell",
             "target-value", "exhume-symmetry", "persist-legendary", "entomb-sequence",
-            "entomb-endstep", "ordinary-parity");
+            "entomb-endstep", "ordinary-parity",
+            // v76, APPENDED so every v73 row keeps its name and its seed.
+            "aura-value", "aura-necromancy", "aura-opponent-grave", "aura-single",
+            "aura-agree", "aura-worldgorger", "aura-shuffler",
+            // v76 addendum, APPENDED again for the same reason.
+            "portal-value", "portal-reverse", "portal-single");
     }
 
     public static void main(String[] args) {
