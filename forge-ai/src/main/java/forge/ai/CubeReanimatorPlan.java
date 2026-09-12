@@ -451,9 +451,39 @@ public final class CubeReanimatorPlan {
      * <p>Static and guarded on {@link CubeComboAi#enabled} because the one place
      * Forge chooses this target is inside {@code ChangeZoneAi.isPreferredTarget},
      * where no controller hook exists. A Default seat can never reach the
-     * ranking.</p> */
+     * ranking.</p>
+     *
+     * <p><b>v77 D1. The SHAPE gate, which v73 omitted.</b>
+     * {@code ChangeZoneAi.isPreferredTarget} reaches its target chooser for
+     * EVERY known-origin zone change whose {@code destination == Battlefield}
+     * OR whose {@code origin} contains {@code Battlefield}, and it picks by
+     * {@code getBestRemovalTargetAI} on the second of those - a BOUNCE, an
+     * EXILE removal, a tuck or a blink. v73 hooked the line AFTER the ternary,
+     * so {@link #payloadTier} - a ranking whose whole content is "prefer a body
+     * that STAYS in the graveyard" - was overriding the removal chooser on
+     * abilities that are not reanimation at all. The v74 pooled read measured
+     * it: eleven {@code CUBE_REANIMATOR target=… instead=…} lines with
+     * {@code target != instead} on the Thopter deck, every one of them sourced
+     * from Jace, the Mind Sculptor's {@code -1} ({@code Origin$ Battlefield |
+     * Destination$ Hand}), bouncing Tough Cookie over Vorinclex and
+     * Reclamation Sage over Tireless Tracker. Those outcomes did not move, but
+     * they are CHANGED DECISIONS outside this hook's registered scope.
+     *
+     * <p>The gate is {@link #reanimationShape}, the same printed predicate the
+     * plan's entry test, its hidden-form chooser and its discard filter already
+     * use: {@code ApiType.ChangeZone}, {@code Origin$ Graveyard},
+     * {@code Destination$ Battlefield}, a creature {@code ChangeType}/
+     * {@code ValidTgts}. It admits every form v73 and amendment 1 registered -
+     * the SPELL (Reanimate, Persist, From the Catacombs), Necromancy's targeted
+     * {@code RaiseDead} ChangesZone trigger, and Portal to Phyrexia's upkeep
+     * PHASE trigger - and refuses every shape whose target is chosen by
+     * {@code getBestRemovalTargetAI}, because such an ability necessarily has
+     * {@code Origin$ Battlefield} and so cannot have {@code Origin$
+     * Graveyard}. {@code ChangeZoneAi} carries the matching structural guard at
+     * the call site.</p> */
     public static Card preferReanimationTarget(Player ai, SpellAbility sa, Iterable<Card> list, Card ordinary) {
         if (!CubeComboAi.enabled(ai) || sa == null || sa.getActivatingPlayer() != ai) return null;
+        if (!reanimationShape(sa)) return null; // v77 D1: reanimation only, never bounce/exile/tuck.
         CubeReanimatorPlan plan = ((CubeComboPlayerController) ai.getController()).reanimatorPlan();
         return plan == null ? null : plan.preferTarget(sa, list, ordinary);
     }

@@ -103,6 +103,31 @@ import java.util.*;
  *     the Bears. MUST-NOT-MOVE.</li>
  * </ul>
  *
+ * <p>v77 appends three SCOPE rows. v73 hooked
+ * {@code ChangeZoneAi.isPreferredTarget} AFTER the
+ * {@code origin.contains(Battlefield) ? getBestRemovalTargetAI :
+ * getMostExpensivePermanentAI} ternary, so its {@code payloadTier} ranking also
+ * re-ranked BOUNCE and EXILE-REMOVAL targets. The v74 pooled read measured
+ * eleven such changed picks, every one from Jace, the Mind Sculptor's
+ * {@code -1}. Appended, so every v73 and v76 row keeps its name and its
+ * {@code BenchRandomAudit} seed.</p>
+ * <ul>
+ * <li><b>bounce-jace</b> - Jace, the Mind Sculptor on our battlefield at its
+ *     printed loyalty behind two vanilla 0/8 defenders, and exactly Tough
+ *     Cookie and Vorinclex on the opponent's. The {@code -1} is {@code Origin$
+ *     Battlefield | Destination$ Hand}, which is not
+ *     {@code reanimationShape}, so the plan must take no action:
+ *     MUST-NOT-MOVE, and the pick must equal the Default arm's.</li>
+ * <li><b>exile-swords</b> - the same board with Swords to Plowshares in hand,
+ *     {@code Origin$ Battlefield | Destination$ Exile}. The SECOND shape that
+ *     reaches the same native chooser. MUST-NOT-MOVE.</li>
+ * <li><b>bounce-reanimate</b> - both decisions on ONE board: Jace beside
+ *     Reanimate, with a value body and a more expensive value-free body in our
+ *     graveyard. The reanimation must still be ranked by the value terms and
+ *     the bounce beside it must not be, which is the separation the gate
+ *     makes.</li>
+ * </ul>
+ *
  * <p>Assertions are gated on {@code -Dforge.test.requireReanimator} so the
  * identical source runs unasserted against the matched pre-v73 classes as a
  * control; those classes have no such counters and each reports -1.</p> */
@@ -117,16 +142,35 @@ public final class CubeReanimatorSmoke {
         // v76 aura form.
         NECROMANCY = "Necromancy", WORLDGORGER = "Worldgorger Dragon",
         // v76 addendum: the standing trigger engine.
-        PORTAL = "Portal to Phyrexia";
+        PORTAL = "Portal to Phyrexia",
+        // v77 scope rows. The bounce source is the one the v74 pooled read
+        // measured (Jace, the Mind Sculptor's -1); the two bodies are the pair
+        // that read disagreed on, and the exile-removal source is the
+        // Swords-class shape that reaches the SAME native chooser.
+        JACE_TMS = "Jace, the Mind Sculptor", SWORDS = "Swords to Plowshares",
+        COOKIE = "Tough Cookie", VORINCLEX = "Vorinclex", PLAINS = "Plains",
+        WALL = "Wall of Stone";
+    /** v77. The rows whose opponent board is the CONTROLLED removal-target
+     * pair rather than the shared three Grizzly Bears. Every pre-v77 row keeps
+     * the shared board, byte for byte. */
+    private static final List<String> V77_SCOPE =
+        List.of("bounce-jace", "exile-swords", "bounce-reanimate");
     private static final List<String> MUST_MOVE =
         List.of("entomb-stable", "loot-payload", "target-value", "persist-legendary",
                 "entomb-sequence", "entomb-endstep",
                 "aura-value", "aura-opponent-grave",
-                "portal-value", "portal-reverse");
+                "portal-value", "portal-reverse",
+                // v77: the reanimation half of the mixed board must still rank.
+                "bounce-reanimate");
     private static final List<String> MUST_NOT_MOVE =
         List.of("entomb-no-spell", "loot-no-spell", "ordinary-parity",
                 "aura-single", "aura-agree", "aura-worldgorger", "aura-shuffler",
-                "portal-single");
+                "portal-single",
+                // v77. A BOUNCE and an EXILE removal are not reanimation, so
+                // the plan must take no action and change no selection on
+                // either board. Under v76 both of these rows MOVE -- that is
+                // the defect, and the matched control measures it.
+                "bounce-jace", "exile-swords");
 
     /** -1 means the classes under test have no such counter at all, which is
      * what the matched pre-v73 control arm reports. The plan class is resolved
@@ -285,6 +329,35 @@ public final class CubeReanimatorSmoke {
                 for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
                 cards.add(new Entry(ASHEN, ZoneType.Graveyard));
             }
+            // ------------------------------------------- v77 scope rows
+            // The bounce engine is placed directly on our battlefield with its
+            // printed starting loyalty, so the only decision under test is
+            // which creature the -1 returns.
+            // The two vanilla 0/8 defenders are what keep Jace ALIVE long
+            // enough to spend the -1: probe-1 measured that with an open board
+            // the ordinary AI takes the +2 on turn 1 and Jace is dead to the
+            // 6/6 before a bounce is ever offered, so the row was inert. They
+            // are our own permanents, and the -1's candidate list is filtered
+            // to the OPPONENT'S creatures, so they cannot enter the decision
+            // under test.
+            case "bounce-jace" -> {
+                cards.add(new Entry(JACE_TMS, ZoneType.Battlefield));
+                for (int i = 0; i < 2; i++) cards.add(new Entry(WALL, ZoneType.Battlefield));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+            }
+            case "exile-swords" -> {
+                cards.add(new Entry(SWORDS, ZoneType.Hand));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(PLAINS, ZoneType.Battlefield));
+            }
+            // Both decisions on ONE board: the reanimation must still be ranked
+            // by the value terms, and the bounce beside it must not be.
+            case "bounce-reanimate" -> {
+                cards.add(new Entry(JACE_TMS, ZoneType.Battlefield));
+                cards.add(new Entry(REANIMATE, ZoneType.Hand));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(FATTY, ZoneType.Graveyard));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+            }
             default -> { // ordinary-parity
                 cards.add(new Entry(BEARS, ZoneType.Hand));
                 for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
@@ -299,6 +372,21 @@ public final class CubeReanimatorSmoke {
      * against; a PUBLIC graveyard threat only for the symmetry row. */
     private static List<Entry> opposing(String control) {
         List<Entry> cards = new ArrayList<>();
+        // v77. The scope rows need a CONTROLLED removal-target list, so they
+        // replace the shared three-Bears board with exactly the pair the v74
+        // pooled read disagreed on: Tough Cookie, whose printed enters-trigger
+        // makes a Food token and so scores payloadTier 3, and Vorinclex, a 6/6
+        // trample/reach whose enters-trigger is a Library -> Hand fetch and so
+        // scores payloadTier 1. getBestRemovalTargetAI ranks them the other way
+        // round, which is precisely the disagreement under test. Returning here
+        // leaves every pre-v77 row's board untouched.
+        if (V77_SCOPE.contains(control)) {
+            cards.add(new Entry(COOKIE, ZoneType.Battlefield));
+            cards.add(new Entry(VORINCLEX, ZoneType.Battlefield));
+            for (int i = 0; i < 20; i++) cards.add(new Entry(FOREST, ZoneType.Library));
+            while (cards.size() < 40) cards.add(new Entry(FOREST, ZoneType.Graveyard));
+            return cards;
+        }
         for (int i = 0; i < 3; i++) cards.add(new Entry(BEARS, ZoneType.Battlefield));
         if (control.equals("exhume-symmetry")) cards.add(new Entry(ARCHON, ZoneType.Graveyard));
         // v76: the one row whose payload is in the opponent's PUBLIC graveyard.
@@ -319,12 +407,23 @@ public final class CubeReanimatorSmoke {
         for (Entry e : entries) deck.getMain().add(paper(e.name()), 1);
         return deck;
     }
-    private static void populate(Player player, List<Entry> entries) {
+    private static void populate(Player player, List<Entry> entries) { populate(player, entries, ""); }
+    /** v77. {@code control} is passed so the ONE new setup step -- a
+     * planeswalker put straight onto the battlefield needs its printed starting
+     * loyalty, which the zone write does not supply -- is gated on the rows
+     * that introduce one. No pre-v77 row plays a planeswalker, so the gate is
+     * provably inert for them rather than merely inert in fact. */
+    private static void populate(Player player, List<Entry> entries, String control) {
         for (Entry e : entries) {
             Card c = Card.fromPaperCard(paper(e.name()), player);
             c.setGameTimestamp(player.getGame().getNextTimestamp());
             player.getZone(e.zone()).add(c);
             c.setSickness(false);
+            if (V77_SCOPE.contains(control) && e.zone() == ZoneType.Battlefield && c.isPlaneswalker()) {
+                String printed = c.getCurrentState().getBaseLoyalty();
+                c.setCounters(forge.game.card.CounterEnumType.LOYALTY,
+                    printed == null || printed.isEmpty() ? 0 : Integer.parseInt(printed));
+            }
         }
     }
     private static String zoneOf(Player player, String name) {
@@ -362,7 +461,7 @@ public final class CubeReanimatorSmoke {
         game.setAge(GameStage.Play);
         Player p = game.getPlayers().get(seat), opp = game.getPlayers().get(1 - seat);
         game.getPhaseHandler().setupFirstTurn(p, () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, p));
-        populate(p, own); populate(opp, other);
+        populate(p, own, control); populate(opp, other, control);
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
         BenchRandomAudit.install(97900 + seat * 100 + control.length());
@@ -414,6 +513,12 @@ public final class CubeReanimatorSmoke {
             + " ashen=" + zoneOf(p, ASHEN) + " emrakul=" + zoneOf(p, EMRAKUL)
             + " griselbrand=" + zoneOf(p, GRISELBRAND) + " titan=" + zoneOf(p, TITAN)
             + " fatty=" + zoneOf(p, FATTY) + " auraOn=" + auraOn(p)
+            // v77. The DIRECT witnesses of the two decisions the scope fix is
+            // about, read on the OPPONENT'S side because that is whose
+            // permanents a bounce and an exile removal move. `missing` on every
+            // pre-v77 row, which is what makes them inert additions.
+            + " oppCookie=" + zoneOf(opp, COOKIE) + " oppVorinclex=" + zoneOf(opp, VORINCLEX)
+            + " swords=" + zoneOf(p, SWORDS) + " jace=" + zoneOf(p, JACE_TMS)
             + " oppPermanents=" + opp.getCardsIn(ZoneType.Battlefield).size()
             + " oppExile=" + opp.getCardsIn(ZoneType.Exile).size()
             + " life=" + p.getLife() + " opponentLife=" + opp.getLife()
@@ -526,6 +631,44 @@ public final class CubeReanimatorSmoke {
                     throw new AssertionError("Portal's single legal target was not taken: " + key
                         + " returned=" + returned);
             }
+            // ------------------------------------------- v77 scope rows
+            // The two MUST-NOT-MOVE rows are already covered by the blanket
+            // all-counters-zero check above; what is asserted here is the
+            // OUTCOME, so a build that suppressed the receipt while still
+            // changing the pick would be caught.
+            //
+            // Tough Cookie must NOT be the one taken: it is payloadTier 3 and
+            // Vorinclex is payloadTier 1, so v73's ranking prefers it, while
+            // getBestRemovalTargetAI -- the chooser that owns this decision --
+            // prefers the 6/6. The row does not assert WHICH card Default's
+            // chooser takes; it asserts that the plan did not substitute its
+            // own, and readout-v77 equates the pick against the Default arm and
+            // against the matched control.
+            case "bounce-jace" -> {
+                // The row must not go inert: a -1 that never fires proves
+                // nothing about the target it would have taken.
+                if (!zoneOf(opp, COOKIE).equals("Hand") && !zoneOf(opp, VORINCLEX).equals("Hand"))
+                    throw new AssertionError("No bounce was ever made: " + key);
+                if (zoneOf(opp, COOKIE).equals("Hand"))
+                    throw new AssertionError("The reanimation ranking chose a BOUNCE target: "
+                        + key + " oppCookie=" + zoneOf(opp, COOKIE) + " oppVorinclex=" + zoneOf(opp, VORINCLEX));
+            }
+            case "exile-swords" -> {
+                if (!zoneOf(opp, COOKIE).equals("Exile") && !zoneOf(opp, VORINCLEX).equals("Exile"))
+                    throw new AssertionError("No exile removal was ever cast: " + key);
+                if (zoneOf(opp, COOKIE).equals("Exile"))
+                    throw new AssertionError("The reanimation ranking chose an EXILE-REMOVAL target: "
+                        + key + " oppCookie=" + zoneOf(opp, COOKIE) + " oppVorinclex=" + zoneOf(opp, VORINCLEX));
+            }
+            // The reanimation half of a board that also offers a bounce. The
+            // ranking must still fire, and must still take the value body.
+            case "bounce-reanimate" -> {
+                if (c[3] < 1 || !returned.contains(ASHEN) || returned.contains(FATTY))
+                    throw new AssertionError("Reanimate stopped ranking beside a bounce: "
+                        + key + " returned=" + returned);
+                if (zoneOf(opp, COOKIE).equals("Hand"))
+                    throw new AssertionError("The bounce beside the reanimation was re-ranked: " + key);
+            }
             default -> { }
         }
         if (MUST_MOVE.contains(control) && c[0] + c[1] + c[2] + c[3] + c[4] + c[5] + c[6] == 0)
@@ -540,7 +683,10 @@ public final class CubeReanimatorSmoke {
             "aura-value", "aura-necromancy", "aura-opponent-grave", "aura-single",
             "aura-agree", "aura-worldgorger", "aura-shuffler",
             // v76 addendum, APPENDED again for the same reason.
-            "portal-value", "portal-reverse", "portal-single");
+            "portal-value", "portal-reverse", "portal-single",
+            // v77, APPENDED again so every pre-v77 row keeps its name and
+            // therefore its BenchRandomAudit seed.
+            "bounce-jace", "exile-swords", "bounce-reanimate");
     }
 
     public static void main(String[] args) {
