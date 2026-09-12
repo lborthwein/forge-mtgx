@@ -139,7 +139,21 @@ import java.util.regex.Pattern;
  * Our library is read as an unordered COMPOSITION - derivable from our own
  * registered decklist less our own visible zones - and never as an ORDER: the
  * scan is sorted by name and every tie breaks by name. Designed in
- * {@code 2026-09-12-tinker-v71/design.md}.</p> */
+ * {@code 2026-09-12-tinker-v71/design.md}.</p>
+ *
+ * <p><b>v79 the sacrifice is CHOSEN, not refused.</b> v71's single largest
+ * registered limitation was that {@code tinker:sac-piece} throws the whole
+ * Tinker away rather than spend a Lotus Petal, because the choice lives in
+ * {@code ComputerUtil.chooseSacrificeType} and {@code AiCostDecision}, outside
+ * that increment's file budget. v79 owns {@code AiCostDecision} and adds one
+ * preference between LEGAL PAYMENTS in the v63 C3 idiom:
+ * {@link #preferSpareArtifact} keeps the ordinary AI's own decision untouched
+ * unless it takes a card a plan is relying on, and otherwise re-runs the SAME
+ * native chooser with those cards passed to its own {@code exclude} parameter.
+ * The forecast and the payment call one predicate, so they cannot disagree;
+ * {@code tinker:sac-piece} survives only where no admissible payment exists at
+ * all. Scoped by {@link #ownsTinkerSacrifice} - see
+ * {@code 2026-09-12-tinker-sacrifice-v79/design.md} section 1.1.</p> */
 public final class CubeBombPlan {
     /** A creature worth cheating in. Emrakul, the Aeons Torn evaluates at about
      * 1020; 400 admits Griselbrand, Ulamog and Archon of Cruelty and excludes
@@ -1410,16 +1424,132 @@ public final class CubeBombPlan {
     /** v71. Which of our own permanents the NATIVE payment would sacrifice for
      * this cost, forecast exactly rather than guessed: the same read-only query
      * {@code AiCostDecision.visit(CostSacrifice)} makes at payment time, with
-     * the cost part's own type and amount and the ability's own target. The
-     * plan cannot CHOOSE the sacrifice - that choice lives in
-     * {@code ComputerUtil.chooseSacrificeType}, outside this increment's file
-     * budget - so it can only refuse a cast whose payment would take a card
-     * another plan is relying on. Registered as a limitation. */
+     * the cost part's own type and amount and the ability's own target.
+     *
+     * <p><b>v79.</b> v71 could only REFUSE a cast whose payment would take a
+     * card another plan is relying on, because the choice itself lives in
+     * {@code ComputerUtil.chooseSacrificeType} and {@code AiCostDecision},
+     * which were outside that increment's file budget. v79 owns
+     * {@code AiCostDecision} and CHOOSES: this method still returns the NATIVE
+     * answer, unchanged and unchanged in its call, and
+     * {@link #preferSpareArtifact} decides whether that answer stands.</p> */
     private static forge.game.card.CardCollection forecastSacrifice(Player ai, SpellAbility cast) {
         CostSacrifice sacrifice = artifactSacrifice(cast);
         if (sacrifice == null) return null;
         return ComputerUtil.chooseSacrificeType(ai, sacrifice.getType(), cast, cast.getTargetCard(), false,
                 sacrifice.getAbilityAmount(cast), null);
+    }
+
+    /** v79. Is this one of our own permanents something the policy is willing
+     * to SPEND to pay a {@link #tinkerShape} cost?
+     *
+     * <p>Three clauses, every one a restriction:</p>
+     * <ul>
+     * <li>it is not the payload we intend to fetch. The sacrifice pool is our
+     *     own BATTLEFIELD and {@link #bestTinkerPayload} reads our own LIBRARY,
+     *     so the two pools are DISJOINT BY CONSTRUCTION and this clause can
+     *     never fire for this shape. It is a guard, not a decision, and it is
+     *     registered as one;</li>
+     * <li>its name is not one a family currently reports as its completing
+     *     piece, asked through the accessor {@link CubeComboAi} already exposes
+     *     ({@link CubeComboAi#planCompletingNames}). No plan's internals are
+     *     read and no plan file is edited. Near-vacuous for a battlefield
+     *     sacrifice - a name a family is MISSING is by definition not on our
+     *     battlefield - and checked anyway, uniformly with the v63 C3 pitch
+     *     rule;</li>
+     * <li>{@link #expendable}, v71's printed-property predicate, unchanged.
+     *     That is the clause that actually names Sensei's Divining Top, a
+     *     Thopter/Retrofitter Foundry, a Sword's {@code Equip}, a Monolith's
+     *     {@code {4}: untap}, Bolas's Citadel and Mystic Forge - by printed
+     *     property, never by card name.</li>
+     * </ul> */
+    private static boolean spendable(Card card, Card payload, java.util.Set<String> pieces) {
+        if (card == payload) return false;
+        if (pieces.contains(card.getName())) return false;
+        return expendable(card);
+    }
+
+    /** v79. The payment this policy wants for a {@link #tinkerShape} cost:
+     * {@code ordinary} when every card in it is {@link #spendable}, the same
+     * NATIVE chooser's answer over the same battlefield with the unspendable
+     * cards EXCLUDED when it is not, and {@code null} when no admissible
+     * payment exists at all.
+     *
+     * <p><b>A preference between legal payments, never a refusal to pay.</b>
+     * Exactly the v63 C3 shape: the ordinary AI's own decision is computed by
+     * the caller FIRST and is returned untouched unless it holds something a
+     * plan is relying on. The re-run uses
+     * {@code ComputerUtil.chooseSacrificeType}'s OWN {@code exclude} parameter,
+     * so the ordering among the alternatives is still the ordinary AI's - the
+     * card's own {@code AIPreference SacCost$} tiers, then
+     * {@code ComputerUtilCard.getWorstAI} - and v79 writes no second ranking
+     * that could disagree with the first.</p>
+     *
+     * <p>On the {@code tinker-sac-choice} board that is the whole increment:
+     * with Sensei's Divining Top excluded, all five of {@code tinker.txt}'s
+     * preference tiers are empty (Lotus Petal is excluded from the
+     * {@code cmcEQ0} tier BY NAME and matches no later tier),
+     * {@code getCardPreference} returns null, and the {@code getWorstAI}
+     * fallback returns the Petal - the only card left.</p>
+     *
+     * <p>Both chooser calls are deterministic - {@code getCardPreference} and
+     * {@code getWorstAI}/{@code getCheapestPermanentAI} read printed properties
+     * and evaluations and draw no random number - so the extra call cannot
+     * desynchronise the matched pair's seeded stream (the v59 R1 hazard).</p> */
+    static forge.game.card.CardCollectionView preferSpareArtifact(Player ai, SpellAbility cast,
+            CostSacrifice cost, int amount, boolean effect, forge.game.card.CardCollectionView ordinary) {
+        if (ordinary == null || ordinary.isEmpty()) return null;
+        Card payload = new CubeBombPlan(ai).bestTinkerPayload(cast);
+        java.util.Set<String> pieces = new java.util.HashSet<>(CubeComboAi.planCompletingNames(ai));
+        // The ordinary decision stands, AS THE SAME OBJECT, whenever it takes
+        // nothing the policy is keeping. Returning it by identity is what lets
+        // the caller tell "untouched" from "swapped" without a second ranking.
+        boolean clean = true;
+        for (Card card : ordinary) if (!spendable(card, payload, pieces)) { clean = false; break; }
+        if (clean) return ordinary;
+        forge.game.card.CardCollection exclude = new forge.game.card.CardCollection();
+        for (Card card : ai.getCardsIn(ZoneType.Battlefield))
+            if (!spendable(card, payload, pieces)) exclude.add(card);
+        forge.game.card.CardCollection swapped = ComputerUtil.chooseSacrificeType(ai, cost.getType(), cast,
+                cast.getTargetCard(), effect, amount, exclude);
+        if (swapped == null || swapped.size() < amount) return null;
+        for (Card card : swapped) if (!spendable(card, payload, pieces)) return null;
+        return swapped;
+    }
+
+    /** v79. Does the bomb plan own this seat's payment of this cost part?
+     *
+     * <p>Five clauses, stated in
+     * {@code 2026-09-12-tinker-sacrifice-v79/design.md} section 1.1 and all of
+     * them restrictions. The load-bearing one is the LAST: the plan's own value
+     * floor must pass. {@link #declineArtifactFetch} refuses the cast outright
+     * when it does not ({@code tinker:no-value}), so "the floor passes" is
+     * exactly the state in which the plan's veto path examined this cast and
+     * let it through. On a floor-failing cast - one the plan refuses - the
+     * payment is left to Default untouched, and there is no third state.</p>
+     *
+     * <p><b>Amendment 1, measured rather than guessed.</b> The {@code cost}
+     * test was first written as OBJECT IDENTITY against
+     * {@link #artifactSacrifice}. probe-1 swapped nothing anywhere, and
+     * probe-2's {@code CUBE_COMBO_SACPROBE} diagnostic says why: every other
+     * clause held on all twenty visits
+     * ({@code spell=true ours=true shape=true payload=Portal to Phyrexia}) and
+     * the identity test reported {@code ownSac=other} on every one of them -
+     * the payment is handed a COPY of the cost part, so the object the visitor
+     * sees is never the object this {@link SpellAbility}'s own
+     * {@code getPayCosts()} holds. The test is written against the part's own
+     * PRINTED properties instead: not paid from the source, and the same type
+     * and amount as this spell's own artifact sacrifice. That is exactly as
+     * narrow - {@link #tinkerShape} admits only a spell whose cost carries such
+     * a part, and two parts agreeing on type and amount are interchangeable by
+     * definition.</p> */
+    static boolean ownsTinkerSacrifice(Player ai, SpellAbility cast, CostSacrifice cost) {
+        if (!CubeComboAi.enabled(ai) || cast == null || cost == null || !cast.isSpell()) return false;
+        if (cast.getActivatingPlayer() != ai || !tinkerShape(cast)) return false;
+        CostSacrifice own = artifactSacrifice(cast);
+        if (own == null || cost.payCostFromSource() || !cost.getType().equals(own.getType())) return false;
+        if (!java.util.Objects.equals(cost.getAmount(), own.getAmount())) return false;
+        return new CubeBombPlan(ai).bestTinkerPayload(cast) != null;
     }
 
     /** Observability only: the last {@code tinker:} decline printed, as
@@ -1449,10 +1579,15 @@ public final class CubeBombPlan {
      *     {@code tinker-vanilla} row is the case: Default spends Tinker, an
      *     Ornithopter and {@code {2}{U}} on a 5/3 the public board already
      *     blocks.</li>
-     * <li>{@code tinker:sac-piece} - the artifact the native payment would take
-     *     is not {@link #expendable}. The probe's {@code tinker-sac-choice} row
-     *     is the case: the card's own preference list skips the Lotus Petal by
-     *     name and eats Sensei's Divining Top instead.</li>
+     * <li>{@code tinker:sac-piece} - NO admissible payment exists at all
+     *     ({@link #preferSpareArtifact} returns null). v71 refused here
+     *     whenever the NATIVE payment would take a non-{@link #expendable}
+     *     card, which threw the whole Tinker away on the probe's
+     *     {@code tinker-sac-choice} board - Lotus Petal beside Sensei's
+     *     Divining Top, the Petal skipped BY NAME by the card's own preference
+     *     list. v79 spends the Petal there instead, and this decline survives
+     *     only where the swap has nowhere to go
+     *     ({@code tinker-sac-only-piece}).</li>
      * </ol>
      *
      * <p>Reached through the generic hook this class already owns at
@@ -1468,9 +1603,15 @@ public final class CubeBombPlan {
             return true;
         }
         forge.game.card.CardCollection payment = forecastSacrifice(ai, sa);
+        // The cost is unpayable: that is the native rules' business, not the
+        // policy's, and v71's `tinker-no-sac` row rests on this line.
         if (payment == null) return false;
-        for (Card card : payment) {
-            if (expendable(card)) continue;
+        // v79. v71 refused here whenever the NATIVE payment would take a piece.
+        // It now refuses only when NO admissible payment exists - the same
+        // predicate the payment hook in AiCostDecision applies, so the forecast
+        // and the payment cannot disagree by construction.
+        CostSacrifice sacrifice = artifactSacrifice(sa);
+        if (preferSpareArtifact(ai, sa, sacrifice, sacrifice.getAbilityAmount(sa), false, payment) == null) {
             declineTinkerOnce(ai, sa, "tinker:sac-piece");
             return true;
         }

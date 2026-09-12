@@ -597,7 +597,58 @@ public class AiCostDecision extends CostDecisionMakerBase {
 
         final AiController aic = ((PlayerControllerAi)player.getController()).getAi();
         CardCollectionView list = aic.chooseSacrificeType(cost.getType(), ability, isEffect(), c, null);
+        list = preferSpareTinkerSacrifice(cost, c, list);
         return list == null ? null : PaymentDecision.card(list);
+    }
+
+    /** v79, from {@code 2026-09-12-tinker-v71}'s registered follow-up 1. The
+     * artifact our own seat spends to pay Tinker's additional
+     * {@code Sac<1/Artifact>} cost.
+     *
+     * <p>{@code tinker.txt}'s own {@code SVar:AIPreference:SacCost$} excludes
+     * Lotus Petal BY NAME from its {@code Artifact.cmcEQ0} tier and the Petal
+     * matches no later tier, so on a board of Lotus Petal + Sensei's Divining
+     * Top the native payment reaches the {@code cmcEQ1} tier and takes the
+     * TOP - a piece {@code CubeTopPlan} owns - with the Petal untouched. v71
+     * could only REFUSE that cast ({@code tinker:sac-piece}) and so threw the
+     * whole Tinker away; this chooses the Petal instead.</p>
+     *
+     * <p><b>Same shape as v63's {@link #preferNonPieceExile}, deliberately.</b>
+     * This is a PREFERENCE BETWEEN LEGAL PAYMENTS and never a refusal to pay:
+     * the ordinary AI's own decision is computed FIRST, above, and is returned
+     * untouched unless it holds a card a plan is relying on; when no admissible
+     * alternative exists the ordinary decision stands and native rules proceed.
+     * A preference hook must never make a cast the engine has already begun
+     * unpayable - so {@code null} from
+     * {@link CubeBombPlan#preferSpareArtifact} degrades to Default here rather
+     * than refusing. That state is unreachable while the forecast and the
+     * payment agree, because {@code CubeBombPlan.declineArtifactFetch} calls
+     * the SAME method and refuses the cast when it returns null.</p>
+     *
+     * <p>Scope: {@link CubeBombPlan#ownsTinkerSacrifice} - a cube-combo seat,
+     * OUR OWN spell, v71's printed {@code tinkerShape}, a cost part with the same
+     * printed type and amount as that spell's own artifact sacrifice (NOT object
+     * identity - the payment is handed a COPY; see that method's Amendment 1),
+     * and the bomb plan's value floor passing, which is exactly the state in
+     * which that plan's veto path examined this cast and let it through. Gated
+     * on {@code CubeComboAi.enabled} first, so the Default arm is byte-identical.</p>
+     *
+     * <p>Own battlefield only; no opponent zone is read, and the payload test
+     * reads our own library exactly as {@code CubeBombPlan}'s v71 value floor
+     * already does.</p> */
+    private CardCollectionView preferSpareTinkerSacrifice(CostSacrifice cost, int amount, CardCollectionView ordinary) {
+        if (ordinary == null || ordinary.isEmpty() || !CubeComboAi.enabled(player)) return ordinary;
+        if (!CubeBombPlan.ownsTinkerSacrifice(player, ability, cost)) return ordinary;
+        CardCollectionView swapped = CubeBombPlan.preferSpareArtifact(player, ability, cost, amount, isEffect(), ordinary);
+        // null: no admissible payment. Never a refusal here - see above.
+        // identity: the ordinary decision was already admissible and stands, so
+        // no receipt is printed and the log cannot move.
+        if (swapped == null || swapped == ordinary) return ordinary;
+        for (Card card : ordinary)
+            System.err.println("CUBE_COMBO_SACRIFICE kept=" + card.getName().replace(' ', '_')
+                    + " spent=" + swapped.getFirst().getName().replace(' ', '_')
+                    + " source=" + source.getName().replace(' ', '_'));
+        return swapped;
     }
 
     @Override
