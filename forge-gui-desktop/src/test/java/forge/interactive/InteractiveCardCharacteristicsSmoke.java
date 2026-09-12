@@ -16,6 +16,8 @@ import forge.game.Match;
 import forge.game.ability.AbilityFactory;
 import forge.game.ability.AbilityUtils;
 import forge.game.card.Card;
+import forge.game.card.CardFactory;
+import forge.card.GamePieceType;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.RegisteredPlayer;
@@ -153,6 +155,16 @@ public final class InteractiveCardCharacteristicsSmoke {
             var handCard = card("Lightning Bolt", human, ZoneType.Hand);
             var forgeHand = card("Swords to Plowshares", forge, ZoneType.Hand);
 
+            // The Undercity, in the command zone, standing in its first room —
+            // the object the browser needs in order to draw "you are here".
+            // Built the way VentureEffect builds one: a dungeon is a token, not a
+            // common card, so `getCommonCards` does not have it.
+            var dungeon = CardFactory.getCard(
+                    StaticData.instance().getAllTokens().getToken("undercity", "CLB"), human, game);
+            dungeon.setGamePieceType(GamePieceType.DUNGEON);
+            game.getAction().moveToCommand(dungeon, null);
+            dungeon.setCurrentRoom("Secret Entrance");
+
             // A face-down 2/2 whose real face is WHITE: the opponent's is redacted, and our
             // own is shown to us but must still gain nothing.
             var forgeFaceDown = card("Exalted Angel", forge, ZoneType.Battlefield);
@@ -187,6 +199,17 @@ public final class InteractiveCardCharacteristicsSmoke {
             check(!redacted.toString().contains("Exalted"), "opponent face-down leaks name");
             expectNothingNew(redacted, "opponent face-down Exalted Angel");
             expectNothingNew(find(view, 0, "battlefield", ownFaceDown.getId()), "own face-down Exalted Angel");
+            // A dungeon: a public command-zone object whose whole state is the
+            // room it is standing in. Without `currentRoom` the browser can
+            // draw the Undercity but not where anybody is on it.
+            JsonObject dungeonJson = find(view, 0, "command", dungeon.getId());
+            check("Secret Entrance".equals(dungeonJson.get("currentRoom").getAsString()),
+                    "dungeon currentRoom: " + dungeonJson);
+            System.out.println("PASS Undercity in the command zone reports currentRoom=\""
+                    + dungeonJson.get("currentRoom").getAsString() + "\"");
+            check(!find(view, 0, "battlefield", solRing.getId()).has("currentRoom"), "Sol Ring has a room");
+            System.out.println("PASS a permanent that is not a dungeon carries no currentRoom");
+
             JsonArray forgeHandJson = view.getAsJsonArray("players").get(1).getAsJsonObject().getAsJsonArray("hand");
             check(forgeHandJson.size() == 0, "opponent hand enumerated: " + forgeHandJson);
             check(!view.toString().contains("Swords to Plowshares") && forgeHand.getId() > 0, "opponent hand card leaked");
@@ -194,6 +217,7 @@ public final class InteractiveCardCharacteristicsSmoke {
 
             // The bench wire (StateEncoder) used by bridged seats is unchanged.
             var bench = StateEncoder.encode(game, human).toString();
+            check(!bench.contains("\"currentRoom\""), "bench wire gained currentRoom");
             for (String key : NEW_KEYS) check(!bench.contains("\"" + key + "\""), "bench wire gained " + key);
             System.out.println("PASS bench StateEncoder wire carries none of " + NEW_KEYS);
 

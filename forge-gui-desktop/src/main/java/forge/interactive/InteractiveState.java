@@ -242,6 +242,17 @@ final class InteractiveState {
             final boolean token = card.isToken();
             added.addProperty("isToken", token);
             added.addProperty("tokenScript", token ? tokenScript(card) : null);
+            /*
+             * The room a dungeon is standing in, by its printed name. A dungeon
+             * is a public command-zone object whose whole state is which room
+             * is current, and without it the browser can draw the map but not
+             * where anyone is on it — the owner had to know the Undercity by
+             * heart. Empty for everything that is not a dungeon.
+             */
+            final String room = card.getCurrentRoom();
+            if (room != null && !room.isEmpty()) {
+                added.addProperty("currentRoom", room);
+            }
         } catch (RuntimeException e) {
             System.err.println("[forge.interactive] characteristic encoding failed for card "
                     + card.getId() + ": " + e);
