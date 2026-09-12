@@ -16,7 +16,12 @@ import java.util.function.Supplier;
  * minus known unavailable cards. Each draw, bounce and blink resolves normally. */
 public final class CubeKittenPlan {
     private static final String KITTEN="Displacer Kitten", TEFERI="Teferi, Time Raveler", ORACLE="Thassa's Oracle";
-    private static final List<String> ROCKS=List.of("Sol Ring","Mana Crypt","Grim Monolith","Basalt Monolith");
+    /** Printed-script keys a plain repeatable mana ability may carry. An ability
+     * with any other key (conditions, activation limits, zones, sub-abilities)
+     * is left uncounted rather than assumed harmless, so the predicate can only
+     * ever be narrower than the script it reads. */
+    private static final java.util.Set<String> MANA_KEYS=java.util.Set.of(
+        "AB","Cost","Produced","Amount","Activation","PrecostDesc","StackDescription","SpellDescription");
     private final Player player;
     private int turn=-1, actions, failedTurn=-1, libraryBefore;
     private SpellAbility selected, pending;
@@ -69,6 +74,93 @@ public final class CubeKittenPlan {
         return null;
     }
     private SpellAbility choose(SpellAbility sa) {selected=sa;actions++;active=true;return sa;}
+    /** Diagnostic only, never read by a decision: how many actions the plan took
+     * on a rock it selected by the printed property. Test-visible static, read
+     * and reset reflectively by the fixture, exactly like
+     * {@link CubeDoomsdayPlan#ritualBridges}. */
+    static int planRockActions;
+    private SpellAbility chooseRock(String name,SpellAbility sa) {rockName=name;planRockActions++;return choose(sa);}
+
+    /** Charge-style counters the rock can spend on the iteration we are about to
+     * run: what Sunburst will give it when it next enters, which is the number
+     * of distinct colours we can currently pay with, capped by its own cost.
+     * No card names and no library reads. */
+    private int countersAvailable(Card card,forge.game.card.CounterType type) {
+        // Counters the rock will carry the next time it enters the battlefield,
+        // not what it happens to hold halfway through an iteration: the loop
+        // replays the rock every time round, and a card whose counters nothing
+        // restores is read as entering with none.
+        if(!card.hasKeyword(forge.game.keyword.Keyword.SUNBURST)) return 0;
+        int colors=0;
+        for(byte color:forge.card.MagicColor.WUBRG) {
+            String shorthand=forge.card.MagicColor.toShortString(color);
+            if(player.getManaPool().getAmountOfColor(color)>0) {colors++;continue;}
+            for(Card source:player.getCardsIn(ZoneType.Battlefield)) {
+                if(source.isTapped()) continue;
+                if(source.getManaAbilities().stream().anyMatch(a->a.copy(player).canProduce(shorthand))) {colors++;break;}
+            }
+        }
+        return Math.min(colors,card.getManaCost().getCMC());
+    }
+
+    /** Mana the artifact yields on one loop iteration once it re-enters the
+     * battlefield untapped with its counters restored, read from the card's own
+     * printed mana abilities. An ability whose cost is anything but tapping and
+     * removing counters is not counted: the loop has to bounce the very same
+     * permanent back, so it may not be sacrificed or exiled to pay. */
+    private int perIteration(Card card) {
+        int best=0;
+        for(SpellAbility original:card.getManaAbilities()) {
+            SpellAbility mana=original.copy(player);
+            if(mana.getManaPart()==null||mana.getPayCosts()==null
+                ||!MANA_KEYS.containsAll(mana.getMapParams().keySet())) continue;
+            if(mana.getRestrictions().isMetalcraft()) {
+                // Metalcraft has to hold at the moment of tapping, which is after
+                // this card itself is on the battlefield. Our own artifacts only.
+                int artifacts=card.isInPlay()?0:1;
+                for(Card own:player.getCardsIn(ZoneType.Battlefield)) if(own.isArtifact()) artifacts++;
+                if(artifacts<3) continue;
+            } else if(mana.getMapParams().containsKey("Activation")) continue;
+            int activations=-1; boolean readable=true;
+            for(forge.game.cost.CostPart part:mana.getPayCosts().getCostParts()) {
+                if(part instanceof forge.game.cost.CostTap) continue;
+                if(part instanceof forge.game.cost.CostRemoveCounter remove) {
+                    int each=remove.getAbilityAmount(mana);
+                    int limit=each<1?0:countersAvailable(card,remove.counter)/each;
+                    activations=activations<0?limit:Math.min(activations,limit);
+                    continue;
+                }
+                readable=false;break;
+            }
+            if(!readable) continue;
+            best=Math.max(best,(activations<0?1:activations)*mana.amountOfManaGenerated(true));
+        }
+        return best;
+    }
+
+    /** The printed property the replay loop needs, in place of a name list: a
+     * noncreature artifact that, once it re-enters the battlefield, produces at
+     * least the mana one iteration costs - which is replaying the rock itself,
+     * every other step of the iteration being free. */
+    private boolean rock(Card card) {
+        return card.isArtifact()&&!card.isCreature()&&!card.isLand()
+            &&perIteration(card)>=card.getManaCost().getCMC();
+    }
+
+    /** An "add one mana of any colour" rock is asked for a colour our floating
+     * mana does not already hold. This is only a preference over a choice the
+     * controller is entitled to make; it keeps a replay that counts the colours
+     * spent (Sunburst) from losing counters. Colourless rocks never reach it. */
+    private void broadenColor(SpellAbility sa) {
+        var part=sa.getManaPart();
+        if(part==null||!part.isAnyMana()) return;
+        for(byte color:forge.card.MagicColor.WUBRG) {
+            if(player.getManaPool().getAmountOfColor(color)==0) {
+                part.setExpressChoice(forge.card.MagicColor.toShortString(color));
+                return;
+            }
+        }
+    }
 
     public SpellAbility nextAction() {
         var game=player.getGame();var phase=game.getPhaseHandler();
@@ -79,7 +171,7 @@ public final class CubeKittenPlan {
         Card kitten=find(KITTEN,ZoneType.Battlefield), teferi=find(TEFERI,ZoneType.Battlefield);
         if(pending!=null) {
             boolean stalled=pending.getHostCard().getName().equals(TEFERI) && library>=libraryBefore
-                || ROCKS.contains(pending.getHostCard().getName())&&pending.isSpell()
+                || pending.getHostCard().getName().equals(rockName)&&pending.isSpell()
                    && (teferi==null||teferi.getGameTimestamp()==teferiBefore);
             pending=null;
             if(stalled) {failedTurn=turn;active=false;System.err.println("CUBE_KITTEN_PLAN stopped-no-progress turn="+turn);return null;}
@@ -97,7 +189,11 @@ public final class CubeKittenPlan {
             if(finish!=null) return choose(finish);
         }
         if(library==0||!player.canDrawAmount(1)) {active=false;return null;}
-        for(String name:ROCKS) {
+        List<String> rocks=new ArrayList<>();
+        for(ZoneType zone:List.of(ZoneType.Battlefield,ZoneType.Hand))
+            for(Card card:player.getCardsIn(zone))
+                if(!card.isFaceDown()&&rock(card)&&!rocks.contains(card.getName())) rocks.add(card.getName());
+        for(String name:rocks) {
             Card rock=find(name,ZoneType.Battlefield);
             if(rock!=null) {
                 SpellAbility bounce=bounce(teferi,rock);
@@ -105,15 +201,15 @@ public final class CubeKittenPlan {
                 // Capture useful rock mana BEFORE returning it to hand.
                 for(SpellAbility original:rock.getManaAbilities()) {
                     SpellAbility mana=original.copy(player);
-                    if(payable(mana)) {rockName=name;return choose(mana);}
+                    if(payable(mana)) return chooseRock(name,mana);
                 }
                 // An ordinary replay must be affordable without consuming
                 // Oracle's reserved blue sources. Current pool covers the
                 // named rock's printed cost; actual cast checks follow.
-                if(player.getManaPool().totalMana()>=rock.getManaCost().getCMC()) {rockName=name;return choose(bounce);}
+                if(player.getManaPool().totalMana()>=rock.getManaCost().getCMC()) return chooseRock(name,bounce);
             }
             SpellAbility cast=spell(find(name,ZoneType.Hand));
-            if(cast!=null) {rockName=name;return choose(cast);}
+            if(cast!=null) return chooseRock(name,cast);
         }
         active=false;return null;
     }
@@ -123,7 +219,7 @@ public final class CubeKittenPlan {
             ||!sa.getHostCard().getName().equals(KITTEN)||sa.getApi()!=ApiType.ChangeZone
             ||!"Exile".equals(sa.getParam("Destination"))) return false;
         Object cause=sa.getRootAbility().getTriggeringObject(forge.game.ability.AbilityKey.SpellAbility);
-        if(selected==null||!selected.isSpell()||!ROCKS.contains(selected.getHostCard().getName())
+        if(selected==null||!selected.isSpell()||!selected.getHostCard().getName().equals(rockName)
             ||!(cause instanceof SpellAbility cast)||cast.getActivatingPlayer()!=player
             ||cast.getHostCard()!=selected.getHostCard()) return false;
         Card teferi=find(TEFERI,ZoneType.Battlefield);
@@ -135,6 +231,7 @@ public final class CubeKittenPlan {
     public boolean play(SpellAbility sa) {
         libraryBefore=player.getCardsIn(ZoneType.Library).size();
         Card teferi=find(TEFERI,ZoneType.Battlefield);teferiBefore=teferi==null?-1:teferi.getGameTimestamp();
+        broadenColor(sa);
         boolean ok=reserveBlue(sa,()->ComputerUtil.handlePlayingSpellAbility(player,sa,null,current->new AiCostDecision(player,current,false)));
         if(ok&&!sa.isManaAbility()) pending=sa;
         if(!ok) {failedTurn=turn;active=false;}
