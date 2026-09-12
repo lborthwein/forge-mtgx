@@ -25,6 +25,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     private final CubeTopPlan topPlan;
     private final CubeThopterPlan thopterPlan;
     private final CubeBombPlan bombPlan;
+    private final CubeDrawOutPlan drawOutPlan; // v66 drawout
     private int comboSelectionChanges;
     private CubeComboAi.TutorPlan tutorPlan;
     private int comboTutorPlanCasts;
@@ -51,7 +52,8 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
      * produced an action, so the winning plan's index is the length of the
      * consulted prefix. */
     private static final List<String> PLAN_ORDER =
-            List.of("doomsday", "breach", "storm", "monolith", "kitten", "top", "thopter", "bomb");
+            List.of("doomsday", "breach", "storm", "monolith", "kitten", "top", "thopter", "bomb",
+                    "drawout"); // v66 drawout
     private int decisionTurn = -1, decisionLines;
     private PhaseType decisionPhase;
     private boolean declinedDoomsday, declinedTutor;
@@ -73,12 +75,13 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         topPlan = new CubeTopPlan(player);
         thopterPlan = new CubeThopterPlan(player);
         bombPlan = new CubeBombPlan(player);
+        drawOutPlan = new CubeDrawOutPlan(player); // v66 drawout
     }
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         planAction = null;
-        if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell()) return null;
+        if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell()) return null; // v66 drawout
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
@@ -95,6 +98,11 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         // owns no piece any earlier plan can want, and placing it here keeps
         // every existing family's selection order byte-identical.
         if (action == null && (action = bombPlan.nextAction()) != null) plan = "bomb";
+        // v66 drawout: registered LAST of the plans, before the tutor forecast.
+        // It owns no piece any earlier plan can want, and its own gate declines
+        // outright on the single-resolution case CubeDoomsdayPlan route J owns,
+        // so every existing family keeps its selection order byte-identical.
+        if (action == null && (action = drawOutPlan.nextAction()) != null) plan = "drawout";
         if (action == null) {
             tutorConsulted = true;
             tutorPlan = CubeComboAi.planTutor(getPlayer());
@@ -180,6 +188,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             case 5: return topPlan.declineReason();
             case 6: return thopterPlan.declineReason();
             case 7: return bombPlan.declineReason();
+            case 8: return drawOutPlan.declineReason(); // v66 drawout
             default: return "other check=unknown-family";
         }
     }
@@ -259,6 +268,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (topPlan.owns(ability)) return topPlan.play(ability);
         if (thopterPlan.owns(ability)) return thopterPlan.play(ability);
         if (bombPlan.owns(ability)) return bombPlan.play(ability);
+        if (drawOutPlan.owns(ability)) return drawOutPlan.play(ability); // v66 drawout
         return doomsdayPlan.withReservedDrawSource(ability, () -> super.playChosenSpellAbility(ability));
     }
 
@@ -464,6 +474,21 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         CardCollection reserved = reservedDiscardCards();
         if (reserved.isEmpty()) return ordinary;
         return ownDiscardChoice(new CardCollection(getPlayer().getCardsIn(ZoneType.Hand)), ordinary, reserved, "cleanup");
+    }
+
+    /** v66 drawout - design-v51 section C item 3, the Oath of Druids optional
+     * dig. {@link CubeDrawOutPlan#confirmDig} answers only {@code TRUE}, and only
+     * on its own printed shape on our own upkeep with the whole win forecast
+     * live; it returns {@code null} - "not ours" - in every other case,
+     * INCLUDING every refusal. So the ordinary path is not merely preserved, it
+     * is the only path that can ever produce a {@code false} here, and no other
+     * confirmation this controller is asked is touched at all. */
+    @Override
+    public boolean confirmAction(SpellAbility ability, forge.game.player.PlayerActionConfirmMode mode, String message,
+            List<String> options, Card cardToShow, java.util.Map<String, Object> params) {
+        Boolean owned = drawOutPlan.confirmDig(ability);
+        if (owned != null) return owned;
+        return super.confirmAction(ability, mode, message, options, cardToShow, params);
     }
 
     @Override
