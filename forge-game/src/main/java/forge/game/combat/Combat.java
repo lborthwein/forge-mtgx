@@ -721,7 +721,12 @@ public class Combat {
 
             CardCollection attackers = attackersOrderedForDamageAssignment.get().get(blocker);
 
+            // If potential damage is 0, continue along
+            // CR 510.1a: a blocking creature with 0 or less power assigns no combat damage.
             final int damage = blocker.getNetCombatDamage();
+            if (damage <= 0) {
+                continue;
+            }
 
             if (attackers != null && !attackers.isEmpty()) {
                 Player attackingPlayer = getAttackingPlayer();
