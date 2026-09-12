@@ -34,6 +34,13 @@ import java.util.function.Supplier;
  *       over; the loop object is a free permanent that sacrifices itself for
  *       its own activated ability and so returns to the graveyard each
  *       iteration. Catalogue family N.</li>
+ *   <li>{@code witness} (v70) - a partner whose enter-the-battlefield trigger
+ *       returns a targeted card from our own GRAVEYARD to our hand. The blink
+ *       resolves before the spell that caused it, so the spell we are casting is
+ *       on the STACK and can never be the card returned: the loop alternates TWO
+ *       ritual-shaped spells, one in hand and one in the graveyard, swapping
+ *       zones every pass. The trigger is optional, and this plan owns the
+ *       answer ({@link #confirmFamilyTrigger}). Catalogue family L.</li>
  * </ul>
  *
  * <p>Both produce an unbounded count of spells cast this turn and nothing else
@@ -58,6 +65,10 @@ public final class CubeKittenPlan {
     /** v65 family-route state. All null/false outside a family route, so every
      * pre-v65 position takes exactly the pre-v65 path. */
     private String familyRoute, partnerName, loopName, outletName;
+    /** v70 witness route only: the card in our own GRAVEYARD this iteration's
+     * partner trigger must fetch, held by identity. Null on every other route
+     * and outside a family route. */
+    private Card loopReturn;
     private long partnerBefore;
     private boolean familyPartnerSeen, forecastLogged;
     /** Observability only: the token for the check that already declined the
@@ -276,7 +287,7 @@ public final class CubeKittenPlan {
     public SpellAbility nextAction() {
         var game=player.getGame();var phase=game.getPhaseHandler();
         if(turn!=phase.getTurn()) {turn=phase.getTurn();actions=0;active=false;selected=null;pending=null;rockName=null;
-            familyRoute=null;partnerName=null;loopName=null;outletName=null;forecastLogged=false;}
+            familyRoute=null;partnerName=null;loopName=null;outletName=null;loopReturn=null;forecastLogged=false;}
         if(failedTurn==turn||actions>=200||player.cantWin()||!game.getStack().isEmpty()
                 ||!(phase.is(PhaseType.MAIN1,player)||phase.is(PhaseType.MAIN2,player))) return decline(gateReason());
         decline="other check=kitten-plan";
@@ -418,6 +429,73 @@ public final class CubeKittenPlan {
         return null;
     }
 
+    /** v70 - catalogue family L's partner, by shape: an enter-the-battlefield
+     * trigger on this very card that returns a TARGETED card from our own
+     * GRAVEYARD to its owner's hand.
+     *
+     * <p>Unlike family M's partner this one MAY be optional. v65 refused an
+     * {@code OptionalDecider} because whether the restore happened at all was
+     * not the plan's to forecast; v70 owns that answer
+     * ({@link #confirmFamilyTrigger}), so it is no longer a reason to refuse.
+     * The GRAVEYARD origin is what forces the two-spell alternation: Kitten's
+     * blink resolves before the spell that caused it, so the spell we are
+     * casting is still on the stack - never in the graveyard - when the partner
+     * re-enters, and the card it returns must be a DIFFERENT one.</p> */
+    private boolean graveyardRestorer(Card card) {
+        for(var trigger:card.getTriggers()) {
+            if(trigger.isSuppressed()) continue;
+            if(!"ChangesZone".equals(trigger.getParam("Mode"))
+                ||!"Battlefield".equals(trigger.getParamOrDefault("Destination",""))
+                ||!"Card.Self".equals(trigger.getParamOrDefault("ValidCard",""))) continue;
+            var script=effect(card,trigger.getParamOrDefault("Execute",""));
+            if(!"ChangeZone".equals(script.get("DB"))||!"Hand".equals(script.getOrDefault("Destination",""))
+                ||script.getOrDefault("ValidTgts","").isEmpty()) continue;
+            if("Graveyard".equals(script.getOrDefault("Origin",""))) return true;
+        }
+        return false;
+    }
+
+    /** A net this plan may not read at all. */
+    private static final int UNREADABLE=Integer.MIN_VALUE;
+    /** The mana a loop spell adds when it resolves, less what casting it costs.
+     *
+     * <p>Readable only for a spell whose WHOLE ability chain is mana production
+     * and which targets nothing anywhere in that chain. Both halves are
+     * deliberately narrower than the catalogue. A chain with any other part is
+     * an effect this plan would have to model - catalogue row
+     * {@code 864-1170-2196-2701} alternates a ritual with Frantic Search, whose
+     * {@code Mode$ TgtChoose} discard would discard, from our own hand, the very
+     * card the partner just returned. A chain that targets is a choice this plan
+     * does not own - row {@code 802-864-1170-1414--52} alternates a ritual with
+     * Snap, whose only creature targets in an L position are Displacer Kitten and
+     * the partner itself, and bouncing either ENDS the loop.</p> */
+    private int ritualNet(SpellAbility sa) {
+        if(sa==null||!sa.isSpell()) return UNREADABLE;
+        int cost=castCost(sa);
+        if(cost<0) return UNREADABLE;
+        int produced=0;
+        for(SpellAbility part=sa;part!=null;part=part.getSubAbility()) {
+            if(part.usesTargeting()||part.getApi()!=ApiType.Mana||part.getManaPart()==null) return UNREADABLE;
+            produced+=part.amountOfManaGenerated(true);
+        }
+        return produced-cost;
+    }
+    /** This card's own ritual-shaped spell, or null. {@code live} requires it to
+     * be castable right now, which is what we ask of the card in our own HAND; a
+     * card in our own GRAVEYARD is read for its PRINTED shape alone, exactly as
+     * {@link #sacrificesItself} reads one there. Noncreature is Displacer
+     * Kitten's own printed condition, not a preference. */
+    private SpellAbility ritualSpell(Card card,boolean live) {
+        if(card==null||card.isFaceDown()||card.isLand()||card.isCreature()) return null;
+        for(SpellAbility original:live?card.getAllPossibleAbilities(player,false,null,true):card.getSpellAbilities()) {
+            SpellAbility sa=original.copy(player);
+            if(!sa.isSpell()||ritualNet(sa)==UNREADABLE) continue;
+            if(live&&!payable(sa)) continue;
+            return sa;
+        }
+        return null;
+    }
+
     /** The outlet, by printed shape on a permanent we already control: a
      * spell-cast trigger gaining us life equal to the spells WE have cast this
      * turn, beside an activated ability whose entire cost is one fixed life
@@ -471,18 +549,24 @@ public final class CubeKittenPlan {
         return null;
     }
 
+    /** What casting this spell costs, in mana, after Forge's own cost
+     * adjustment - or -1 when that is not a fixed amount of mana this plan may
+     * read: any non-mana cost part, or an X, makes it unreadable and the card
+     * is refused rather than guessed at. */
+    private int castCost(SpellAbility sa) {
+        if(sa==null||sa.getPayCosts()==null) return -1;
+        var adjusted=forge.game.cost.CostAdjustment.adjust(sa.getPayCosts(),sa,false);
+        if(adjusted==null) return -1;
+        for(var part:adjusted.getCostParts()) if(!(part instanceof forge.game.cost.CostPartMana)) return -1;
+        var mana=ComputerUtilMana.calculateManaCost(adjusted,sa,player,true,0,false);
+        if(mana==null||mana.getXcounter()!=0) return -1;
+        return mana.getConvertedManaCost();
+    }
     /** Zero after Forge's own cost adjustment, with no X and no non-mana part.
      * A loop object bounced off the stack never resolves and so can never pay
      * for itself; one recast from the graveyard every iteration may not consume
      * mana either. Both are the same printed property. */
-    private boolean free(SpellAbility sa) {
-        if(sa.getPayCosts()==null) return false;
-        var adjusted=forge.game.cost.CostAdjustment.adjust(sa.getPayCosts(),sa,false);
-        if(adjusted==null) return false;
-        for(var part:adjusted.getCostParts()) if(!(part instanceof forge.game.cost.CostPartMana)) return false;
-        var mana=ComputerUtilMana.calculateManaCost(adjusted,sa,player,true,0,false);
-        return mana!=null&&mana.getXcounter()==0&&mana.getConvertedManaCost()==0;
-    }
+    private boolean free(SpellAbility sa) {return castCost(sa)==0;}
     /** A free noncreature spell in our own hand. Noncreature is Displacer
      * Kitten's own printed condition, not a preference. */
     private SpellAbility freeHandSpell() {
@@ -555,6 +639,14 @@ public final class CubeKittenPlan {
             if(card.isFaceDown()||card.isLand()) continue;
             if(graveyardPermission(card)!=null) {partner=card;route="lurrus";break;}
         }
+        // v70, and LAST: the three partner shapes are disjoint (a stack bouncer
+        // needs Stack among its origins and no OptionalDecider, a permission is
+        // a MayPlay static), so scanning the new one after the two v65 routes
+        // cannot change any position either of those already recognised.
+        if(partner==null) for(Card card:player.getCardsIn(ZoneType.Battlefield)) {
+            if(card.isFaceDown()||card.isLand()) continue;
+            if(graveyardRestorer(card)) {partner=card;route="witness";break;}
+        }
         if(partner==null) return null;
         familyPartnerSeen=true; familyRoute=route; partnerName=partner.getName();
         // One public life total to aim at. A larger table needs a plan that
@@ -566,11 +658,37 @@ public final class CubeKittenPlan {
         outletName=shot.card().getName();
         SpellAbility fire=shotAbility(shot,opponent);
         if(fire==null) return familyDecline("outlet-untargetable");
-        String name; SpellAbility loop;
+        String name; SpellAbility loop; int cycleNet=0;
         if(route.equals("venser")) {
             loop=freeHandSpell();
             if(loop==null) return familyDecline("no-loop-object");
             name=loop.getHostCard().getName();
+        } else if(route.equals("witness")) {
+            // The alternation. `A` is a ritual-shaped spell in our own hand we
+            // can cast right now; `B` is a DIFFERENT ritual-shaped card already
+            // in our own graveyard, because the one we are casting will be on
+            // the stack when the partner re-enters. Next pass the two have
+            // swapped zones and the same search finds the mirror pair, so the
+            // route needs no memory of which half it is on.
+            SpellAbility best=null; Card bestReturn=null; int bestNet=UNREADABLE; boolean handSeen=false;
+            for(Card card:player.getCardsIn(ZoneType.Hand)) {
+                SpellAbility cast=ritualSpell(card,true);
+                if(cast==null) continue;
+                handSeen=true;
+                int netA=ritualNet(cast);
+                for(Card yard:player.getCardsIn(ZoneType.Graveyard)) {
+                    if(yard==card) continue;
+                    SpellAbility printed=ritualSpell(yard,false);
+                    if(printed==null) continue;
+                    int sum=netA+ritualNet(printed);
+                    if(best==null||sum>bestNet) {bestNet=sum;best=cast;bestReturn=yard;}
+                }
+            }
+            if(best==null) return familyDecline(handSeen?"no-loop-partner":"no-loop-object");
+            // A cycle that loses mana is not a loop. Refused BEFORE the first
+            // cast, which is this route's only irreversible action.
+            if(bestNet<0) return familyDecline("net-negative");
+            name=best.getHostCard().getName(); loop=best; loopReturn=bestReturn; cycleNet=bestNet;
         } else {
             // Mid-iteration the loop object is already on the battlefield and
             // owes us only its own sacrifice; otherwise it is recast.
@@ -590,7 +708,10 @@ public final class CubeKittenPlan {
         // Forecast, before the first action of the loop: our own life, the
         // opponent's public life and the public count of the spells WE have
         // cast this turn. Nothing hidden, and nothing about the library.
-        int perIteration=route.equals("venser")?1:2;
+        // One plan action per iteration on the venser and witness routes - the
+        // blink, the partner's own trigger and the outlet's lifegain trigger are
+        // triggers, not actions. The lurrus route also has to sacrifice.
+        int perIteration=route.equals("lurrus")?2:1;
         int shots=Math.max(1,(int)Math.ceil(opponent.getLife()/(double)shot.damage()));
         long need=(long)shot.lifeCost()*shots+1L;
         int budget=(200-actions-shots)/perIteration;
@@ -611,6 +732,11 @@ public final class CubeKittenPlan {
                 +" partner="+partnerName.replace(' ','_')+" loop="+name.replace(' ','_')
                 +" outlet="+outletName.replace(' ','_')+" casts="+casts+" shots="+shots
                 +" need="+need+" life="+player.getLife()+" opponent="+opponent.getLife());
+            // A SECOND line, emitted only by the v70 route, so the v65 forecast
+            // line above keeps the shape its own frozen logs recorded.
+            if(route.equals("witness")) System.err.println("CUBE_KITTEN_FAMILY witness turn="+turn
+                +" cast="+name.replace(' ','_')+" return="+loopReturn.getName().replace(' ','_')
+                +" cycleNet="+cycleNet);
         }
         return chooseFamily(name,casts==0?fire:loop);
     }
@@ -647,6 +773,16 @@ public final class CubeKittenPlan {
             System.err.println("CUBE_KITTEN_PLAN blink-partner turn="+turn+" route="+familyRoute+" target="+partner.getId());
             return true;
         }
+        // v70 - the witness route's restore comes out of our own GRAVEYARD, and
+        // goes to the card this plan chose, held by identity. Placed before the
+        // v65 branch, which reads the loop object off the STACK instead.
+        if("witness".equals(familyRoute)&&sa.getHostCard().getName().equals(partnerName)
+            &&"Hand".equals(sa.getParam("Destination"))&&"Graveyard".equals(sa.getParam("Origin"))) {
+            if(loopReturn==null||loopReturn.getZone()==null||!loopReturn.getZone().is(ZoneType.Graveyard)
+                ||!target(sa,loopReturn)) return false;
+            System.err.println("CUBE_KITTEN_PLAN return-graveyard turn="+turn+" card="+loopReturn.getName().replace(' ','_'));
+            return true;
+        }
         if(sa.getHostCard().getName().equals(partnerName)&&"Hand".equals(sa.getParam("Destination"))) {
             Card object=selected.getHostCard();
             if(object.getZone()==null||!object.getZone().is(ZoneType.Stack)||!target(sa,object)) return false;
@@ -654,6 +790,28 @@ public final class CubeKittenPlan {
             return true;
         }
         return false;
+    }
+
+    /** v70 - the one optional trigger this plan answers, and the answer is
+     * always TRUE: the witness route's own graveyard return, on a turn this plan
+     * already owns the loop and has already forecast the win (the forecast runs
+     * before the first cast, so {@code active} on this route implies it).
+     *
+     * <p>Every other case returns {@code null} - "not ours" - INCLUDING every
+     * refusal, exactly as {@code CubeDrawOutPlan.confirmDig} does for v66's
+     * optional dig. So the ordinary {@code PlayerControllerAi} answer is the
+     * only one that can ever be {@code false} here, and an ordinary Eternal
+     * Witness enter-the-battlefield trigger in a position this plan does not own
+     * is answered byte-identically to the way it was before v70.</p> */
+    public Boolean confirmFamilyTrigger(SpellAbility sa) {
+        if(sa==null||!active||!"witness".equals(familyRoute)||partnerName==null
+            ||turn!=player.getGame().getPhaseHandler().getTurn()
+            ||sa.getActivatingPlayer()!=player) return null;
+        if(!sa.getHostCard().getName().equals(partnerName)||sa.getApi()!=ApiType.ChangeZone
+            ||!"Hand".equals(sa.getParam("Destination"))||!"Graveyard".equals(sa.getParam("Origin"))) return null;
+        if(loopReturn==null||loopReturn.getZone()==null||!loopReturn.getZone().is(ZoneType.Graveyard)) return null;
+        System.err.println("CUBE_KITTEN_PLAN confirm-return turn="+turn+" card="+loopReturn.getName().replace(' ','_'));
+        return Boolean.TRUE;
     }
 
     public boolean owns(SpellAbility sa) {return sa==selected;}
