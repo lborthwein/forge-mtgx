@@ -56,11 +56,26 @@ import java.util.regex.Pattern;
  * ({@code 2026-09-12-bomb2-conversion-diagnosis/diagnosis.md} SS4). Two gates
  * are added here, both reading only own-visible cards plus the opponent's
  * PUBLIC battlefield, life and poison counters:
- * {@link #attackEndsGame} (design R2/R3 - the Breach's payload leaves at end of
+ * {@link #lethalForecast} (design R2/R3 - the Breach's payload leaves at end of
  * turn, so a Breach that does not end the game spends two cards for one hit)
  * and {@link #depthsLandAction} (design R6 - spend the land drops on the two
- * halves of the Depths route before any other land). The design's R3 payload
- * SELECTION and R4 are deliberately absent: see {@link #anyLethalPayload}.</p> */
+ * halves of the Depths route before any other land).</p>
+ *
+ * <p><b>v56 payload selection.</b> v55 could see that a different own-visible
+ * payload would be lethal and could not make the native chooser take it, because
+ * a hidden-origin ChangeZone picks its card at RESOLUTION through
+ * {@code PlayerController.chooseSingleCardForZoneChange}. v56 adds that hook in
+ * {@link CubeComboPlayerController}, and this class supplies the two rankings it
+ * asks for: {@link #bestLethalPayload} (design R3 - among our own hand, the
+ * payload whose forecast attack ends the game, unblockable infect first and then
+ * the highest forecast damage) and {@link #bestShowAndTellPayload} (design R4 -
+ * a printed enter-the-battlefield trigger that changes the board, then a flying
+ * lifelink/deathtouch body while we are behind on life, otherwise the ordinary
+ * AI's own choice). The hook answers only for OUR OWN cards from OUR OWN hand on
+ * an ability this plan proposed on this turn ({@link #ownsPayloadChoice}); Show
+ * and Tell's opponent-side choice is made by the opponent's own controller and
+ * is never reached from here. With the hook, v55's
+ * {@code breach:payload-not-selectable} decline becomes a cast.</p> */
 public final class CubeBombPlan {
     /** A creature worth cheating in. Emrakul, the Aeons Torn evaluates at about
      * 1020; 400 admits Griselbrand, Ulamog and Archon of Cruelty and excludes
@@ -88,8 +103,9 @@ public final class CubeBombPlan {
      * a hazard token {@code <line>:<hazard>} where {@code <line>} is
      * {@code depths}, {@code show-and-tell} or {@code breach} and
      * {@code <hazard>} is {@code legendary-bounce}, {@code land-destruction},
-     * {@code priest}, {@code no-attack-value}, {@code not-lethal} or
-     * {@code payload-not-selectable} (the last two are the v55 R2 gate). The three routes are
+     * {@code priest}, {@code no-attack-value} or {@code not-lethal} (the last is
+     * the v55 R2 gate; v55's {@code breach:payload-not-selectable} is retired by
+     * v56's payload hook and can no longer occur). The three routes are
      * consulted in order and each overwrites the token, so the LAST hazard
      * reached is the one reported; a pass that reaches no hazard at all
      * reports {@code no-bomb-line}. Every hazard is read from a PUBLIC
@@ -320,12 +336,14 @@ public final class CubeBombPlan {
     // ------------------------------------- v55 R2/R3: this turn's attack
 
     /** One prospective attacker: what it deals unblocked, and the two rules
-     * that change where that damage lands. */
-    private record Strike(Card card, int damage, boolean infect, boolean trample) {}
+     * that change where that damage lands. {@code payload} marks the one body
+     * the line would put onto the battlefield, so v56's R3 ranking can read what
+     * that body specifically contributes without re-running the forecast. */
+    private record Strike(Card card, int damage, boolean infect, boolean trample, boolean payload) {}
 
-    private static Strike strike(Card card) {
+    private static Strike strike(Card card, boolean payload) {
         return new Strike(card, Math.max(0, card.getNetPower()),
-                card.hasKeyword(Keyword.INFECT), card.hasKeyword(Keyword.TRAMPLE));
+                card.hasKeyword(Keyword.INFECT), card.hasKeyword(Keyword.TRAMPLE), payload);
     }
 
     /** The card as it would exist on our battlefield, which is what the native
@@ -342,11 +360,11 @@ public final class CubeBombPlan {
      * already in play. Own-visible only. */
     private List<Strike> ownStrikes(Card payload, int manaLeft) {
         List<Strike> strikes = new ArrayList<>();
-        strikes.add(strike(prospective(payload)));
+        strikes.add(strike(prospective(payload), true));
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown() || !card.isCreature() || card.isTapped() || card.isSick()) continue;
             if (!canAttackForValue(player, card, manaLeft)) continue;
-            strikes.add(strike(card));
+            strikes.add(strike(card, false));
         }
         strikes.sort((a, b) -> b.damage() - a.damage());
         return strikes;
@@ -432,25 +450,39 @@ public final class CubeBombPlan {
      *
      * <p>What it cannot see, by design: the opponent's hand. A combat trick or
      * an instant-speed blocker from there beats this forecast, and that is a
-     * bound on the rule, not an input to it.</p> */
-    private boolean attackEndsGame(Card payload, int manaLeft) {
+     * bound on the rule, not an input to it.</p>
+     *
+     * <p>Returns the first opponent this payload's attack would kill, with what
+     * the payload itself contributed, or null when no opponent dies. Same loop,
+     * same order and the same two lethality tests v55's {@code attackEndsGame}
+     * shipped - "not null" is v55's answer exactly; the two extra fields are
+     * read only by v56's R3 ranking.</p> */
+    private Forecast lethalForecast(Card payload, int manaLeft) {
         for (Player opponent : player.getOpponents()) {
-            if (attackEndsGame(payload, manaLeft, opponent)) return true;
+            Forecast forecast = forecast(payload, manaLeft, opponent);
+            if (forecast.lethal()) return forecast;
         }
-        return false;
+        return null;
     }
 
-    private boolean attackEndsGame(Card payload, int manaLeft, Player opponent) {
+    /** What one prospective attack does to one opponent: whether it ends the
+     * game, and - for the R3 tie-break - what the payload body itself put
+     * through and whether anything blocked it at all. */
+    private record Forecast(boolean lethal, int payloadThrough, boolean payloadUnblocked) {}
+
+    private Forecast forecast(Card payload, int manaLeft, Player opponent) {
         List<Card> blockers = new ArrayList<>();
         for (Card card : opponent.getCardsIn(ZoneType.Battlefield))
             if (!card.isFaceDown() && card.isCreature()) blockers.add(card);
         boolean token = tokenBlockerAvailable(opponent);
-        int life = 0, poison = 0;
+        int life = 0, poison = 0, payloadThrough = 0;
+        boolean payloadUnblocked = false;
         for (Strike attacker : ownStrikes(payload, manaLeft)) {
             Card blocker = null;
             for (Card candidate : blockers)
                 if (CombatUtil.canBlock(attacker.card(), candidate)) { blocker = candidate; break; }
             int through;
+            boolean unblocked = false;
             if (blocker != null) {
                 blockers.remove(blocker);
                 through = attacker.trample() ? Math.max(0, attacker.damage() - blocker.getNetToughness()) : 0;
@@ -461,35 +493,173 @@ public final class CubeBombPlan {
                 through = attacker.trample() ? Math.max(0, attacker.damage() - 1) : 0;
             } else {
                 through = attacker.damage();
+                unblocked = true;
             }
+            if (attacker.payload()) { payloadThrough = through; payloadUnblocked = unblocked; }
             if (attacker.infect()) poison += through; else life += through;
         }
-        if (poison > 0 && poison + opponent.getPoisonCounters() >= LETHAL_POISON) return true;
-        return life > 0 && life >= opponent.getLife();
+        boolean lethal = poison > 0 && poison + opponent.getPoisonCounters() >= LETHAL_POISON
+                || life > 0 && life >= opponent.getLife();
+        return new Forecast(lethal, payloadThrough, payloadUnblocked);
     }
 
-    /** R3, and the honest statement of what this run could NOT implement.
+    /** R3. The own-visible payload this turn's attack should actually use.
      *
-     * <p>The design ranks payloads and asks the plan to Breach the one the
-     * opponent's board cannot block. The plan cannot make that choice. Through
-     * the Breach is a hidden-origin ChangeZone: the payload is picked at
-     * RESOLUTION by {@code ChangeZoneEffect} calling
-     * {@code chooseSingleCardForZoneChange} on the controller, and
-     * {@code CubeComboPlayerController} routes only {@code destination ==
-     * Library} decisions to plans, so the pick falls through to
-     * {@code ChangeZoneAi.chooseCardToHiddenOriginChangeZone}, i.e.
-     * {@code ComputerUtilCard.getBestAI} - the highest creature evaluation,
-     * which is exactly why all four zero-damage Breaches put in Blightsteel
-     * Colossus while a flier sat in hand. Steering it needs a hook in the
-     * controller, which this increment may not touch.</p>
+     * <p>v55 could only ask whether the payload the native chooser was going to
+     * take happened to be lethal, and declined
+     * ({@code breach:payload-not-selectable}) when a different one in our own
+     * hand was - all four zero-damage Breaches of the panel put in Blightsteel
+     * Colossus while a flier sat in hand. v56 chooses instead: every candidate
+     * the cheat-in could legally take is forecast the same way, only the lethal
+     * ones qualify, and among those an unblockable infect body comes first -
+     * eleven infect damage is ten poison counters, lethal from any life total,
+     * which is exactly 789 s1 - then the highest damage the payload itself puts
+     * through. Own-visible only: our own hand and the opponent's PUBLIC board,
+     * life and poison.</p>
      *
-     * <p>So when some other own-visible payload would have been lethal and the
-     * one the chooser will take is not, the plan declines and says so, instead
-     * of casting into a body it knows will be blocked.</p> */
-    private boolean anyLethalPayload(SpellAbility ability, int manaLeft) {
-        for (Card candidate : bombCandidates(ability, true))
-            if (canAttackForValue(player, candidate, manaLeft) && attackEndsGame(candidate, manaLeft)) return true;
+     * <p>The same ranking answers at propose time (the R2 gate below) and at
+     * resolution ({@link #choosePayload}), over the same candidate set, so the
+     * plan can never cast into a body the hook would then decline to take.</p> */
+    private Card bestLethalPayload(SpellAbility ability, int manaLeft, List<Card> pool) {
+        Card best = null;
+        int bestTier = -1, bestThrough = -1;
+        for (Card candidate : pool) {
+            if (!canAttackForValue(player, candidate, manaLeft)) continue;
+            Forecast forecast = lethalForecast(candidate, manaLeft);
+            if (forecast == null) continue;
+            int tier = candidate.hasKeyword(Keyword.INFECT) && forecast.payloadUnblocked() ? 1 : 0;
+            if (tier < bestTier || tier == bestTier && forecast.payloadThrough() <= bestThrough) continue;
+            best = candidate; bestTier = tier; bestThrough = forecast.payloadThrough();
+        }
+        return best;
+    }
+
+    // ------------------------------------- v56 R4: the Show and Tell payoff
+
+    /** The (sub)ability APIs that make an enter-the-battlefield trigger change
+     * the board on resolution rather than promise a later attack. Read from the
+     * card's own printed script, so this is a property, not a card name. */
+    private static final List<String> BOARD_CHANGE_APIS =
+            List.of("Sacrifice", "Discard", "LoseLife", "Draw", "Destroy", "GainLife");
+    /** How far the printed {@code SubAbility$} chain is followed. Bounded so a
+     * malformed or cyclic script cannot spin here. */
+    private static final int CHAIN_DEPTH = 8;
+
+    /** R4, tier 1. Does this card have a printed enter-the-battlefield trigger
+     * that changes the board when it resolves?
+     *
+     * <p>Show and Tell is symmetric and the payload has no haste (9 of 9 panel
+     * actions: the payload never attacked that turn), so a vanilla beater has to
+     * survive a full opponent turn AND the free permanent the opponent just
+     * received. The one Show and Tell that won its own game put in Archon of
+     * Cruelty, whose trigger forced the opponent to sacrifice the permanent that
+     * same Show and Tell had just given it
+     * ({@code 2026-09-12-bomb2-conversion-diagnosis/diagnosis.md} R4).</p>
+     *
+     * <p>Recognised by shape: a {@code ChangesZone} trigger of the card itself
+     * with {@code Destination$ Battlefield}, whose executed ability chain names
+     * one of {@link #BOARD_CHANGE_APIS}. The chain is read from the printed SVar
+     * text rather than instantiated, so nothing is allocated and no trigger
+     * state is touched - the v55 lesson from {@code TokenInfo.getProtoType}.</p>
+     *
+     * <p>Limitation, registered: a wording whose board change hides behind
+     * another API (Atraxa, Grand Unifier's reveal-and-take chain is
+     * {@code PeekAndReveal}/{@code RepeatEach}/{@code ChangeZone}) is NOT
+     * recognised here and reaches tier 2 or the ordinary chooser instead.</p> */
+    private static boolean etbChangesBoard(Card card) {
+        for (Trigger trigger : card.getTriggers()) {
+            if (trigger.getMode() != TriggerType.ChangesZone) continue;
+            if (!"Battlefield".equals(trigger.getParam("Destination"))) continue;
+            if (!"Card.Self".equals(trigger.getParamOrDefault("ValidCard", ""))) continue;
+            String svar = trigger.getParam("Execute");
+            for (int hop = 0; hop < CHAIN_DEPTH && svar != null && !svar.isEmpty(); hop++) {
+                String body = card.getSVar(svar);
+                if (body == null || body.isEmpty()) break;
+                if (BOARD_CHANGE_APIS.contains(scriptParam(body, "DB$"))) return true;
+                svar = scriptParam(body, "SubAbility$");
+            }
+        }
         return false;
+    }
+
+    /** One {@code Key$ value} field of a printed ability script, or null. */
+    private static String scriptParam(String body, String key) {
+        for (String part : body.split("\\|")) {
+            String field = part.trim();
+            if (!field.startsWith(key + " ")) continue;
+            return field.substring(key.length() + 1).trim();
+        }
+        return null;
+    }
+
+    /** R4, tier 2. A flier that also gains us life or kills what it blocks, while
+     * we are the player who is behind. 775 s1 is the registered case: at 3 life
+     * facing four attackers the plan put in Worldspine Wurm - the most expensive
+     * permanent - over Atraxa, Grand Unifier, and died the following turn. Our
+     * own life and the opponent's PUBLIC life only. */
+    private boolean stabilisesLowLife(Card card) {
+        if (!card.isCreature() || !card.hasKeyword(Keyword.FLYING)) return false;
+        if (!card.hasKeyword(Keyword.LIFELINK) && !card.hasKeyword(Keyword.DEATHTOUCH)) return false;
+        for (Player opponent : player.getOpponents()) if (player.getLife() < opponent.getLife()) return true;
+        return false;
+    }
+
+    /** R4. The payload Show and Tell should put in, or null to leave the choice
+     * to the ordinary AI - which is tier 3 of the design's ranking and is what
+     * a hand of ordinary beaters still gets. */
+    private Card bestShowAndTellPayload(List<Card> pool) {
+        Card best = null;
+        int bestTier = 0;
+        for (Card candidate : pool) {
+            int tier = etbChangesBoard(candidate) ? 2 : stabilisesLowLife(candidate) ? 1 : 0;
+            if (tier <= bestTier) continue;
+            best = candidate; bestTier = tier;
+        }
+        return best;
+    }
+
+    // ------------------------------- v56: the resolution-time payload choice
+
+    /** The host card and turn of the cheat-in whose payload this plan proposed,
+     * and the mana the R2 gate forecast would be left. {@code -1} means no
+     * payload choice is ours. */
+    private int payloadHostId = -1, payloadTurn = -1, payloadMana;
+
+    private void armPayload(SpellAbility cast, int manaLeft) {
+        payloadHostId = cast.getHostCard().getId();
+        payloadTurn = player.getGame().getPhaseHandler().getTurn();
+        payloadMana = manaLeft;
+    }
+
+    /** Is this resolving ability the one whose payload this plan proposed on
+     * this turn? Keyed to the host card's id, exactly as
+     * {@code CubeDoomsdayPlan.ownsPileDecision} keys the pile decision, so no
+     * other ability - and no other player's ability - can answer true. Show and
+     * Tell's opponent-side choice is made by the opponent's own controller and
+     * never reaches this class at all. */
+    public boolean ownsPayloadChoice(SpellAbility source) {
+        return payloadHostId >= 0 && source != null && source.getHostCard() != null
+                && source.getHostCard().getId() == payloadHostId
+                && payloadTurn == player.getGame().getPhaseHandler().getTurn();
+    }
+
+    /** The card this plan wants put onto the battlefield from the offered list,
+     * or null to keep the ordinary AI's own choice.
+     *
+     * <p>{@code options} is the native fetch list as the effect offered it - our
+     * own hand, already filtered by the spell's printed {@code ChangeType} - and
+     * is narrowed here to the same bomb candidates the propose-time gate ranked,
+     * so the two rankings cannot disagree. Called only from
+     * {@link CubeComboPlayerController#chooseSingleCardForZoneChange} and only
+     * after {@link #ownsPayloadChoice}.</p> */
+    public Card choosePayload(SpellAbility source, List<Card> options) {
+        boolean breach = source.isSpell() && cheatInShape(source);
+        if (!breach && !showAndTellShape(source)) return null;
+        List<Card> pool = new ArrayList<>();
+        List<Card> candidates = bombCandidates(source, breach);
+        for (Card option : options) if (candidates.contains(option)) pool.add(option);
+        if (pool.isEmpty()) return null;
+        return breach ? bestLethalPayload(source, payloadMana, pool) : bestShowAndTellPayload(pool);
     }
 
     /** One decline line per turn, phase and reason. The full
@@ -630,6 +800,11 @@ public final class CubeBombPlan {
                 // Default refuse the spell when it is best.
                 if (exiledOnUncastEntry(player)) { decline = "show-and-tell:priest"; continue; }
                 if (bomb.getType().isLegendary() && legendaryBounceVisible(player)) { decline = "show-and-tell:legendary-bounce"; continue; }
+                // v56 R4: the payload is picked at resolution, so the choice is
+                // claimed here and answered by choosePayload. No gate above
+                // changes: which payoff we take is a better question than
+                // whether to cast, and v55's cast decision is preserved.
+                armPayload(cast, manaLeftAfter(player, cast));
                 return audit("show-and-tell", cast);
             }
         }
@@ -656,12 +831,18 @@ public final class CubeBombPlan {
                 // end the game spends two cards for one hit and hands the board
                 // straight back. Only cast when this turn's attack is lethal
                 // against the public board.
-                if (!attackEndsGame(bomb, manaLeft)) {
-                    String reason = anyLethalPayload(cast, manaLeft) ? "breach:payload-not-selectable" : "breach:not-lethal";
-                    decline = reason;
-                    declineOnce(reason);
+                //
+                // v56 R3: the question is no longer "is the body the native
+                // chooser will take lethal" but "is ANY own-visible payload
+                // lethal", because the resolution hook now takes that one. The
+                // not-lethal decline is unchanged for a hand where none is, and
+                // v55's payload-not-selectable decline becomes this cast.
+                if (bestLethalPayload(cast, manaLeft, bombCandidates(cast, true)) == null) {
+                    decline = "breach:not-lethal";
+                    declineOnce("breach:not-lethal");
                     continue;
                 }
+                armPayload(cast, manaLeft);
                 return audit("through-the-breach", cast);
             }
         }

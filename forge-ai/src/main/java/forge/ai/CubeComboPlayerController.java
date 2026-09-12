@@ -290,8 +290,53 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
                     return partner;
                 }
             }
+        } else if (destination == ZoneType.Battlefield && ownsPayloadChoice(source, origin, choices, decider)) {
+            // v56. A hidden-origin ChangeZone to the battlefield picks its card
+            // HERE, at resolution - which is why v55's bomb plan could see that
+            // a different own-visible payload was lethal and could not make the
+            // chooser take it. The Library branch above is untouched: a plan
+            // never steals another plan's decision, and these two destinations
+            // are disjoint.
+            //
+            // The ordinary answer is computed FIRST and kept unless the plan
+            // actually prefers a different card. That is deliberate: the native
+            // chooser shuffles the offered list, so asking it either way leaves
+            // the random stream exactly as the matched control left it, and a
+            // position where the plan agrees with it stays byte-identical.
+            List<Card> options = new ArrayList<>(choices);
+            Card ordinary = super.chooseSingleCardForZoneChange(destination, origin, source, choices, delayedReveal,
+                    prompt, optional, decider);
+            Card payload = bombPlan.choosePayload(source, options);
+            if (payload != null && payload != ordinary) {
+                System.err.println("CUBE_BOMB_PLAN payload=" + payload.getName().replace(' ', '_')
+                        + " instead=" + (ordinary == null ? "none" : ordinary.getName().replace(' ', '_'))
+                        + " source=" + source.getHostCard().getName().replace(' ', '_')
+                        + " turn=" + getGame().getPhaseHandler().getTurn()
+                        + " phase=" + getGame().getPhaseHandler().getPhase());
+                return payload;
+            }
+            return ordinary;
         }
         return super.chooseSingleCardForZoneChange(destination, origin, source, choices, delayedReveal, prompt, optional, decider);
+    }
+
+    /** May the bomb plan answer this zone-change choice?
+     *
+     * <p>Every clause is a restriction, and all of them must hold: the chooser
+     * is US, the resolving ability is OURS, the offered cards are OUR OWN cards
+     * in OUR OWN hand, and the bomb plan proposed that very ability on this turn
+     * ({@link CubeBombPlan#ownsPayloadChoice}). Show and Tell lets EACH player
+     * put in a permanent; the opponent's half is decided by the opponent's own
+     * controller with {@code decider} set to the opponent, so it never reaches
+     * this class - and if it somehow did, the first clause refuses it. No
+     * opponent hand, library or decklist is read here or in the plan.</p> */
+    private boolean ownsPayloadChoice(SpellAbility source, List<ZoneType> origin, CardCollection choices, Player decider) {
+        return decider == getPlayer() && source != null && source.getActivatingPlayer() == getPlayer()
+                && origin != null && origin.size() == 1 && origin.contains(ZoneType.Hand)
+                && choices != null && !choices.isEmpty()
+                && choices.stream().allMatch(c -> c.getOwner() == getPlayer() && c.getController() == getPlayer()
+                        && c.isInZone(ZoneType.Hand))
+                && bombPlan.ownsPayloadChoice(source);
     }
 
     /** Our own search of our own library that writes the top of it - Imperial
