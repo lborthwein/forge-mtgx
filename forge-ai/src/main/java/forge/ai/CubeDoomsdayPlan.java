@@ -2,6 +2,8 @@ package forge.ai;
 
 import forge.card.ColorSet;
 import forge.card.MagicColor;
+import forge.card.mana.ManaCost;
+import forge.card.mana.ManaCostShard;
 import forge.game.GameActionUtil;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
@@ -9,6 +11,7 @@ import forge.game.card.CardCollectionView;
 import forge.game.cost.Cost;
 import forge.game.combat.CombatUtil;
 import forge.game.cost.CostReturn;
+import forge.game.mana.ManaCostBeingPaid;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
@@ -18,14 +21,15 @@ import forge.game.zone.ZoneType;
 import java.util.function.Supplier;
 
 /** Native Doomsday plans using Recall, Star/Gush, Gush with public devotion, or
- * Doomsday's own BBB plus public devotion alone, to reach Oracle. The search and
- * ordering hooks see only choices the resolving spell legally exposes. Other
- * piles are not yet supported by this planner. */
+ * Doomsday's own BBB plus public devotion alone, to reach Oracle, optionally
+ * bridged by a mana-only card in hand when black is the only thing missing. The
+ * search and ordering hooks see only choices the resolving spell legally
+ * exposes. Other piles are not yet supported by this planner. */
 public final class CubeDoomsdayPlan {
-    private enum Stage { NONE, DOOMSDAY, STAR, DRAW, ORACLE }
+    private enum Stage { NONE, RITUAL, DOOMSDAY, STAR, DRAW, ORACLE }
     private final Player player;
     private Stage stage = Stage.NONE;
-    private int turn = -1, doomsdayId = -1;
+    private int turn = -1, doomsdayId = -1, ritualId = -1, ritualTurn = -1;
     private boolean oracleSelected, gushSelected, gushRoute;
     private Card reservedStar;
     /** Observability only: the token for the check that already declined the
@@ -40,9 +44,21 @@ public final class CubeDoomsdayPlan {
      * {@code better-attack}, {@code clock}, or {@code other check=<name>}. The
      * older {@code mana:6/<have>} token was a mislabel: it was emitted where
      * Doomsday itself was unplayable, with a constant borrowed from the Recall
-     * route's cost string and a colour-blind {@code <have>}.</p> */
+     * route's cost string and a colour-blind {@code <have>}.</p>
+     *
+     * <p>v46 adds no token. The ritual bridge is entered only where
+     * {@code mana:BBB/<black>} was already the answer, so that stays the token
+     * whenever no bridge is found; when a bridge exists but a gate refuses it,
+     * the bridge reports that gate's existing token
+     * ({@code oracle-etb-disabled}, {@code better-attack}, {@code clock}), and
+     * a second bridge in one turn reports {@code other check=ritual-spent}.</p> */
     private String decline = "other check=doomsday-plan";
     public String declineReason() { return decline; }
+    /** Diagnostic only, never read by a decision: how many times the ritual
+     * bridge actually proposed a bridge card. Test-visible static, read and
+     * reset reflectively by the fixture, exactly like
+     * {@link CubeComboPlayerController#guardRejections}. */
+    static int ritualBridges;
 
     public CubeDoomsdayPlan(Player player) { this.player = player; }
 
@@ -66,6 +82,16 @@ public final class CubeDoomsdayPlan {
             }
             return spell;
         }
+        return null;
+    }
+
+    /** The printed spell of a hand card, playable or not. Cost reads only:
+     * unlike {@link #playable} this deliberately skips legality and payment, so
+     * it must never be returned as an action. */
+    private SpellAbility handSpell(String name) {
+        Card card = inHand(name);
+        if (card == null) return null;
+        for (SpellAbility original : card.getSpellAbilities()) if (original.isSpell()) return original.copy(player);
         return null;
     }
 
@@ -315,7 +341,8 @@ public final class CubeDoomsdayPlan {
     public boolean waitingForOwnSpell() {
         if (stage == Stage.NONE || player.getGame().getStack().isEmpty()) return false;
         SpellAbility top = player.getGame().getStack().peekAbility();
-        return top.getActivatingPlayer() == player && ((stage == Stage.DOOMSDAY && top.getHostCard().getId() == doomsdayId)
+        return top.getActivatingPlayer() == player && ((stage == Stage.RITUAL && top.getHostCard().getId() == ritualId)
+                || (stage == Stage.DOOMSDAY && top.getHostCard().getId() == doomsdayId)
                 || stage == Stage.STAR && reservedStar != null && top.getHostCard().getId() == reservedStar.getId()
                 || stage == Stage.DRAW && top.getHostCard().getName().equals(gushRoute ? "Gush" : "Ancestral Recall")
                 || stage == Stage.ORACLE && top.getHostCard().getName().equals("Thassa's Oracle"));
@@ -358,6 +385,157 @@ public final class CubeDoomsdayPlan {
         return commitDoomsday(doom);
     }
 
+    /** A mana-only bridge card in hand: a ritual spell that adds mana as it
+     * resolves (Dark Ritual, Cabal Ritual), or a permanent spell whose own mana
+     * ability needs no mana to activate (Lotus Petal). Cost, amount and
+     * producible colours are read from the card's own script through native
+     * accessors - {@link forge.game.cost.Cost#getTotalMana},
+     * {@link SpellAbility#amountOfManaGenerated} and
+     * {@link SpellAbility#canProduce} - never from a table of card names.
+     *
+     * <p>Lion's Eye Diamond is excluded by that general rule rather than by
+     * name: its activation cost is {@code Discard<0/Hand>}, which is neither a
+     * tap nor a self-sacrifice, and an honest model of it would have to account
+     * for discarding Doomsday itself out of the same hand.</p> */
+    private record Bridge(SpellAbility spell, ManaCost cost, int amount, java.util.List<Byte> colours) { }
+
+    /** The mana ability the permanent would offer once it has resolved: no mana
+     * in its activation cost, and nothing besides tap or sacrificing itself -
+     * the same cost shape {@link #floatBlue} already requires. A creature's tap
+     * ability is refused, because summoning sickness would hold it until our
+     * next turn and the forecast would be a lie. */
+    private SpellAbility permanentManaAbility(Card card) {
+        for (SpellAbility original : card.getManaAbilities()) {
+            SpellAbility ability = original.copy(player);
+            if (ability.getPayCosts().getTotalMana().getCMC() != 0) continue;
+            if (!ability.getPayCosts().getCostParts().stream().allMatch(p -> p instanceof forge.game.cost.CostTap
+                    || p instanceof forge.game.cost.CostPartMana
+                    || p instanceof forge.game.cost.CostSacrifice sacrifice && sacrifice.getType().equals("CARDNAME"))) continue;
+            if (card.isCreature() && ability.getPayCosts().hasTapCost()) continue;
+            return ability;
+        }
+        return null;
+    }
+
+    /** Read one hand card as a bridge, or decline it. Special, combo and
+     * persistent mana are refused: their produced mana is not a plain amount of
+     * one colour, and resolving what they would make can touch game state. */
+    private Bridge bridgeFrom(Card card) {
+        for (SpellAbility original : card.getSpellAbilities()) {
+            if (!original.isSpell()) continue;
+            SpellAbility spell = original.copy(player);
+            if (spell.usesTargeting() || !CubeComboAi.canPlayNative(spell, player)
+                    || !CubeComboAi.canPayCost(spell, player, false)) continue;
+            SpellAbility production = spell.getManaPart() != null ? spell : permanentManaAbility(card);
+            if (production == null || production.getManaPart() == null) continue;
+            var part = production.getManaPart();
+            if (part.isSpecialMana() || part.isComboMana() || part.isPersistentMana()) continue;
+            int amount = production.amountOfManaGenerated(true);
+            if (amount <= 0) continue;
+            java.util.List<Byte> colours = new java.util.ArrayList<>();
+            for (byte colour : MagicColor.WUBRG)
+                if (production.canProduce(MagicColor.toShortString(colour))) colours.add(colour);
+            if (colours.isEmpty()) continue;
+            return new Bridge(spell, spell.getPayCosts().getTotalMana(), amount, colours);
+        }
+        return null;
+    }
+
+    /** Forecast only: would {@code route} be payable if this bridge resolved
+     * first? The bridge makes {@code amount} mana of one colour, so for each
+     * colour it can make, that many matching pips are struck off the route and
+     * the remainder is asked of native payment <em>together with the bridge's
+     * own cost</em>. Paying both out of one native check is what stops a single
+     * source being counted twice. Nothing is cast or tapped and no state
+     * changes: {@link CubeComboAi#canPayManaCost} runs inside the payment
+     * probe. A forecast is never a commitment - the next priority pass
+     * re-derives everything from live state. */
+    private boolean payableAfterBridge(Bridge bridge, ManaCost route) {
+        for (byte colour : bridge.colours()) {
+            ManaCostBeingPaid combined = new ManaCostBeingPaid(bridge.cost());
+            int left = bridge.amount();
+            for (ManaCostShard shard : route) {
+                if (left > 0 && shard.isColor(colour)) { left--; continue; }
+                combined.increaseShard(shard, 1);
+            }
+            combined.increaseGenericMana(Math.max(0, route.getGenericCost() - left));
+            if (CubeComboAi.canPayManaCost(combined, bridge.spell(), player, false)) return true;
+        }
+        return false;
+    }
+
+    /** Which already-registered route the bridge would make payable, evaluated
+     * in the order {@link #nextAction} evaluates them so the bridge can never
+     * prefer a route the plan itself would not take. Every non-mana gate is
+     * read from live state, because a bridge changes only our mana.
+     *
+     * <p>The Chromatic Star sub-route is deliberately not forecast: its
+     * payability depends on the reservation {@link #withStarReserved} applies
+     * during real payment, which a forecast cannot model honestly. A Star board
+     * therefore simply gets no bridge.</p> */
+    private String routeAfterBridge(Bridge bridge, ManaCost doomCost) {
+        ManaCost recallRoute = new Cost("B B B U U U", false).getTotalMana();
+        ManaCost gushRouteCost = new Cost("B B B U U", false).getTotalMana();
+        if (player.canDrawAmount(3) && inHand("Ancestral Recall") != null
+                && payableAfterBridge(bridge, recallRoute)) return "recall";
+        long islands = player.getCardsIn(ZoneType.Battlefield).stream()
+                .filter(c -> c.getType().hasSubtype("Island")).count();
+        if (availableInOwnDeck("Gush") && islands >= 2 && gushReachesOracle(5) && alternateGush() != null
+                && payableAfterBridge(bridge, gushRouteCost)) return "gush";
+        if (inHand("Thassa's Oracle") != null)
+            return oracleThreshold(false) >= 5 && payableAfterBridge(bridge, gushRouteCost) ? "route1" : null;
+        return oracleThreshold(false) >= 4 && player.canDrawAmount(1) && payableAfterBridge(bridge, doomCost)
+                ? "route2" : null;
+    }
+
+    /** Design v43 section A route 3, the ritual bridge. Doomsday is in hand and
+     * unplayable for want of black: {@code ComputerUtilMana} will not chain a
+     * ritual <em>spell</em> into a cost payment, so {@link #playable} cannot see
+     * the Dark Ritual that would pay for it. That is the shortfall the
+     * fresh-seed v45 panel recorded 66 times as {@code mana:BBB/0..2}.
+     *
+     * <p>The bridge casts the ritual as the plan's own action and commits to
+     * nothing else. {@link Stage#RITUAL} exists only to keep the plan from
+     * acting while the ritual is on the stack; the next priority pass clears it
+     * and re-derives every gate, so a countered ritual leaves the plan
+     * declining rather than holding a remembered pile. At most one bridge per
+     * turn, so a countered bridge is not chased with a second card.</p>
+     *
+     * <p>Reached only where {@code mana:BBB/<black>} was already the decline, so
+     * a board with no bridge keeps that receipt byte for byte. Own-visible
+     * information only: our hand, our own deck composition, our own public
+     * battlefield and both public battlefields.</p> */
+    private SpellAbility ritualBridge() {
+        SpellAbility doomSpell = handSpell("Doomsday");
+        if (doomSpell == null) return null;
+        if (ritualTurn == player.getGame().getPhaseHandler().getTurn()) {
+            decline = "other check=ritual-spent";
+            return null;
+        }
+        ManaCost doomCost = doomSpell.getPayCosts().getTotalMana();
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.getName().equals("Doomsday")) continue;
+            Bridge bridge = bridgeFrom(card);
+            if (bridge == null) continue;
+            String route = routeAfterBridge(bridge, doomCost);
+            if (route == null) continue;
+            // The v44 abstentions, applied to the bridge itself: a ritual is a
+            // card and half our life is the price of the route it buys.
+            if (oracleTriggerDisabled()) { decline = "oracle-etb-disabled"; return null; }
+            if (lethalOnBoard(!route.equals("route2"))) { decline = "better-attack"; return null; }
+            if (route.equals("route2") && !clockSurvivable()) { decline = "clock"; return null; }
+            turn = player.getGame().getPhaseHandler().getTurn();
+            ritualTurn = turn;
+            ritualId = bridge.spell().getHostCard().getId();
+            stage = Stage.RITUAL;
+            ritualBridges++;
+            System.err.println("CUBE_COMBO ritual-bridge card=" + card.getName() + " route=" + route
+                    + " produces=" + bridge.amount());
+            return bridge.spell();
+        }
+        return null;
+    }
+
     private SpellAbility commitDoomsday(SpellAbility doom) {
         turn = player.getGame().getPhaseHandler().getTurn();
         doomsdayId = doom.getHostCard().getId();
@@ -375,6 +553,10 @@ public final class CubeDoomsdayPlan {
         if (!player.getGame().getStack().isEmpty()) { decline = "stack-not-empty"; return null; }
         if (player.cantWin()) { stage = Stage.NONE; decline = "cant-win"; return null; }
         int librarySize = player.getCardsIn(ZoneType.Library).size(); // count, never identities/order
+        // A bridge commits to nothing. Its only job was to put mana in the pool
+        // (or a Lotus Petal on the battlefield), so the plan starts over here
+        // from live state and the ordinary entry gates decide again.
+        if (stage == Stage.RITUAL) stage = Stage.NONE;
         if (stage == Stage.DOOMSDAY) {
             if (librarySize > 5 || inHand("Doomsday") != null || inHand("Thassa's Oracle") == null && !oracleSelected) {
                 stage = Stage.NONE; decline = "other check=pile-not-resolved"; return null;
@@ -433,10 +615,13 @@ public final class CubeDoomsdayPlan {
             // Doomsday's own printed cost is ManaCost:B B B, so report black
             // sources rather than a total-mana count borrowed from the Recall
             // route's B B B U U U string.
-            decline = inHand("Doomsday") == null ? "no-doomsday-in-hand"
-                    : ownVisibleBlack() < 3 ? "mana:BBB/" + ownVisibleBlack()
-                    : "other check=playable:Doomsday";
-            return null;
+            if (inHand("Doomsday") == null) { decline = "no-doomsday-in-hand"; return null; }
+            if (ownVisibleBlack() >= 3) { decline = "other check=playable:Doomsday"; return null; }
+            // Black is the only thing missing, which is the one shortfall a
+            // mana-only card in hand can answer. The decline stays exactly what
+            // v45 printed unless a bridge is actually found.
+            decline = "mana:BBB/" + ownVisibleBlack();
+            return ritualBridge();
         }
         if (!player.canDrawAmount(3) || inHand("Ancestral Recall") == null
                 || !CubeComboAi.canPayCost(new Cost("B B B U U U", false), doom, player, false)) {

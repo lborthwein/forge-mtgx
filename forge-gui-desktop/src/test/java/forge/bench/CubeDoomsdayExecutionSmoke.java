@@ -749,6 +749,199 @@ public final class CubeDoomsdayExecutionSmoke {
             throw new AssertionError("Default arm unexpectedly won with Oracle: " + kase);
     }
 
+    private static final boolean RITUAL_STRICT = Boolean.getBoolean("forge.test.requireDoomsdayRitual");
+
+    private static final List<String> RITUAL_CASES = List.of("dark-ritual", "cabal-ritual", "lotus-petal",
+            "passturn-exact", "lethal-board", "pips-short", "oracle-battlefield", "torpor", "no-doomsday",
+            "rule-of-law", "counterspell");
+
+    /** The mana-only card in hand each case offers the bridge. */
+    private static String ritualBridgeCard(String kase) {
+        return switch (kase) {
+            case "cabal-ritual" -> "Cabal Ritual";
+            case "lotus-petal" -> "Lotus Petal";
+            default -> "Dark Ritual";
+        };
+    }
+
+    /** Whether the plan's first decision must be that bridge card.
+     * `lethal-board` is main-dependent for the same reason it is in the
+     * `nodraw` suite: the better-attack abstention only dominates a same-turn
+     * route while an attack step is still ahead of us, so in MAIN2 the bridge
+     * must still commit. */
+    private static boolean ritualProposes(String kase) {
+        if (kase.equals("lethal-board")) return main2;
+        return switch (kase) {
+            case "dark-ritual", "cabal-ritual", "lotus-petal", "passturn-exact", "counterspell" -> true;
+            default -> false;
+        };
+    }
+
+    /** The plan's own bridge count, read reflectively so this same source can
+     * run against the frozen v45 classes, where the field does not exist, and
+     * record -1 instead of failing. */
+    private static int planBridges(boolean reset) {
+        try {
+            var field = forge.ai.CubeDoomsdayPlan.class.getDeclaredField("ritualBridges");
+            field.setAccessible(true);
+            int value = field.getInt(null);
+            if (reset) field.setInt(null, 0);
+            return value;
+        } catch (final ReflectiveOperationException absent) {
+            return -1;
+        }
+    }
+
+    /** Route 3, the ritual bridge, both seats and both mains. Doomsday is in
+     * hand and unplayable for want of black; a mana-only card in hand would fix
+     * exactly that. The fixture specifies zones, tapped states and life totals
+     * only - never a plan action. The one deliberately specified game action is
+     * `rule-of-law`'s Mishra's Bauble, which establishes the native
+     * spells-cast-this-turn count the control is about; it is asserted before
+     * the plan is consulted. */
+    private static void ritualRun(int seat, String kase) {
+        List<Placement> own = new ArrayList<>(), other = new ArrayList<>();
+        boolean passTurn = kase.equals("passturn-exact");
+        String bridgeCard = ritualBridgeCard(kase);
+        if (!kase.equals("no-doomsday")) own.add(new Placement("Doomsday", ZoneType.Hand, false));
+        own.add(new Placement(bridgeCard, ZoneType.Hand, false));
+        if (kase.equals("rule-of-law")) own.add(new Placement("Mishra's Bauble", ZoneType.Hand, false));
+        // One black source short of Doomsday's own BBB in every case, which is
+        // the only shortfall a mana-only card can answer. Lotus Petal makes one
+        // mana of any colour, so its board is two black short of nothing else.
+        for (int i = 0; i < (kase.equals("lotus-petal") ? 2 : 1); i++)
+            own.add(new Placement("Swamp", ZoneType.Battlefield, false));
+        // passturn-exact taps its Islands: the bridged pool is then exactly
+        // Doomsday's BBB and nothing more, so only the pass-turn route is
+        // reachable this turn. They untap before the Oracle cast two turns on.
+        for (int i = 0; i < (kase.equals("cabal-ritual") ? 3 : 2); i++)
+            own.add(new Placement("Island", ZoneType.Battlefield, passTurn));
+        List<String> pips = passTurn ? List.of("Emry, Lurker of the Loch", "Faerie Mastermind")
+                : kase.equals("pips-short") ? List.of("Faerie Mastermind")
+                : List.of("Spellseeker", "Emry, Lurker of the Loch", "Faerie Mastermind");
+        for (String name : pips) own.add(new Placement(name, ZoneType.Battlefield, false));
+        if (kase.equals("lethal-board")) own.add(new Placement("Old One Eye", ZoneType.Battlefield, false));
+        ZoneType oracleZone = kase.equals("oracle-battlefield") ? ZoneType.Battlefield
+                : passTurn || kase.equals("pips-short") ? ZoneType.Library : ZoneType.Hand;
+        own.add(new Placement("Thassa's Oracle", oracleZone, false));
+        for (int i = 0; i < (oracleZone == ZoneType.Library ? 24 : 25); i++)
+            own.add(new Placement("Forest", ZoneType.Library, false));
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        switch (kase) {
+            case "torpor" -> other.add(new Placement("Torpor Orb", ZoneType.Battlefield, false));
+            case "rule-of-law" -> other.add(new Placement("Rule of Law", ZoneType.Battlefield, false));
+            case "counterspell" -> {
+                other.add(new Placement("Counterspell", ZoneType.Hand, false));
+                other.add(new Placement("Island", ZoneType.Battlefield, false));
+                other.add(new Placement("Island", ZoneType.Battlefield, false));
+            }
+            default -> { }
+        }
+        while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player p = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
+        if (kase.equals("lethal-board")) opponent.setLife(6, null);
+        game.getAction().checkStateEffects(true);
+        game.getTriggerHandler().resetActiveTriggers();
+        BenchRandomAudit.install(0); // Fixed constructed fixture, not a sampled opening.
+        if (kase.equals("rule-of-law")) {
+            // The only deliberately specified game action in this suite, and it
+            // is the control's premise rather than its decision: one spell must
+            // already have been cast this turn for Rule of Law to bite.
+            final Card bauble = p.getCardsIn(ZoneType.Hand).stream()
+                    .filter(c -> c.getName().equals("Mishra's Bauble")).findFirst().orElseThrow();
+            final var baubleSpell = bauble.getSpellAbilities().stream().filter(forge.game.spellability.SpellAbility::isSpell)
+                    .findFirst().orElseThrow(() -> new AssertionError("Mishra's Bauble has no permanent spell"));
+            baubleSpell.setActivatingPlayer(p);
+            if (!p.getController().playChosenSpellAbility(baubleSpell))
+                throw new AssertionError("native controller rejected the Rule of Law premise cast");
+            settle(game);
+            if (p.getSpellsCastThisTurn() != 1)
+                throw new AssertionError("Rule of Law fixture must actually have cast one spell this turn");
+        }
+        // Premises, asserted before the plan is consulted.
+        if (!kase.equals("no-doomsday")) {
+            var doom = p.getCardsIn(ZoneType.Hand).stream().filter(c -> c.getName().equals("Doomsday"))
+                    .findFirst().orElseThrow().getSpellAbilities().get(0).copy(p);
+            if (forge.ai.CubeComboAi.canPayCost(doom, p, false))
+                throw new AssertionError("Ritual fixture must actually start with Doomsday unpayable: " + kase);
+        }
+        var bridgeSpell = p.getCardsIn(ZoneType.Hand).stream().filter(c -> c.getName().equals(bridgeCard))
+                .findFirst().orElseThrow().getSpellAbilities().get(0).copy(p);
+        boolean bridgeCastable = forge.ai.CubeComboAi.canPlayNative(bridgeSpell, p)
+                && forge.ai.CubeComboAi.canPayCost(bridgeSpell, p, false);
+        if (kase.equals("rule-of-law") == bridgeCastable)
+            throw new AssertionError("Bridge castability premise wrong for " + kase + ": " + bridgeCastable);
+        // Public-board premise, computed exactly as `naturalRun` does: untapped
+        // creature power, with no phase-dependent CombatUtil call, so MAIN1 and
+        // MAIN2 assert the same position.
+        int ourPower = 0;
+        int opposingCreatures = 0;
+        for (Card card : p.getCardsIn(ZoneType.Battlefield))
+            if (card.isCreature() && card.isUntapped()) ourPower += Math.max(0, card.getNetPower());
+        for (Card card : opponent.getCardsIn(ZoneType.Battlefield)) if (card.isCreature()) opposingCreatures++;
+        if (kase.equals("lethal-board") && (ourPower < opponent.getLife() || opposingCreatures > 0))
+            throw new AssertionError("Lethal-board fixture must actually present unblocked lethal");
+        if (kase.equals("counterspell") && !has(opponent, ZoneType.Hand, "Counterspell"))
+            throw new AssertionError("Counterspell fixture must actually hold a Counterspell");
+        boolean proposes = ritualProposes(kase), expectWin = proposes && !kase.equals("counterspell");
+        planBridges(true);
+        var proposed = new forge.ai.CubeDoomsdayPlan(p).nextAction();
+        String action = proposed == null ? "none" : proposed.getHostCard().getName();
+        planBridges(true);
+        System.out.println("RITUAL_PROPOSAL suite=ritual improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " main2=" + main2 + " case=" + kase + " bridge=" + bridgeCard.replace(' ', '_')
+                + " bridgeCastable=" + bridgeCastable + " pips=" + String.join("+", pips).replace(' ', '_')
+                + " oracleZone=" + oracleZone + " life=" + p.getLife() + " oppLife=" + opponent.getLife()
+                + " ourUntappedPower=" + ourPower + " opposingCreatures=" + opposingCreatures
+                + " spellsCastThisTurn=" + p.getSpellsCastThisTurn()
+                + " mustMove=" + proposes + " action=" + action);
+        if (improved && RITUAL_STRICT && proposes != action.equals(bridgeCard))
+            throw new AssertionError("Ritual bridge proposal mismatch: " + kase + " main2=" + main2 + " -> " + action);
+        int steps = 0, limit = passTurn ? 1500 : STEP_LIMIT, lastTurn = passTurn ? 3 : 1;
+        boolean doom = false, pile = false;
+        int beforeOracle = -1, doomTurn = -1, oracleTurn = -1;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= lastTurn && steps++ < limit) {
+            game.getPhaseHandler().mainLoopStep();
+            if (!doom && has(p, ZoneType.Graveyard, "Doomsday")) { doom = true; doomTurn = game.getPhaseHandler().getTurn(); }
+            pile |= doom && p.getCardsIn(ZoneType.Library).size() == 5;
+            if (!game.getStack().isEmpty()) {
+                var sa = game.getStack().peekAbility();
+                if (sa.isSpell() && sa.getHostCard().getName().equals("Thassa's Oracle")) {
+                    beforeOracle = p.getCardsIn(ZoneType.Library).size();
+                    oracleTurn = game.getPhaseHandler().getTurn();
+                }
+            }
+        }
+        int bridges = planBridges(true);
+        boolean bridgeLeftHand = !has(p, ZoneType.Hand, bridgeCard);
+        boolean oracleWin = p.getOutcome() != null && "Thassa's Oracle".equals(p.getOutcome().altWinSourceName);
+        System.out.println("RITUAL_RESULT suite=ritual improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " main2=" + main2 + " case=" + kase + " bridge=" + bridgeCard.replace(' ', '_')
+                + " mustMove=" + proposes + " expectWin=" + expectWin + " proposed=" + action
+                + " planBridges=" + bridges + " bridgeLeftHand=" + bridgeLeftHand
+                + " doomsdayCast=" + doom + " doomsdayTurn=" + doomTurn + " fiveCardPile=" + pile
+                + " libraryBeforeOracle=" + beforeOracle + " oracleTurn=" + oracleTurn
+                + " oracleEnteredBattlefield=" + has(p, ZoneType.Battlefield, "Thassa's Oracle")
+                + " won=" + p.hasWon() + " oracleWin=" + oracleWin + " gameOver=" + game.isGameOver()
+                + " life=" + p.getLife() + " oppLife=" + opponent.getLife() + " steps=" + steps
+                + " opponentCounterspell=" + has(opponent, ZoneType.Graveyard, "Counterspell"));
+        if (steps >= limit) throw new AssertionError("Ritual bridge step budget: " + kase);
+        if (improved && RITUAL_STRICT) {
+            if (expectWin && !(bridges >= 1 && bridgeLeftHand && doom && pile && oracleWin
+                    && beforeOracle == (passTurn ? 4 : 5) && doomTurn == 1 && oracleTurn == (passTurn ? 3 : 1)))
+                throw new AssertionError("Ritual bridge did not execute: " + kase + " main2=" + main2);
+            if (!proposes && (bridges != 0 || doom))
+                throw new AssertionError("Plan spent a bridge or cast Doomsday despite " + kase);
+            if (!expectWin && oracleWin) throw new AssertionError("Unexpected control Oracle win: " + kase);
+            if (kase.equals("counterspell") && !has(opponent, ZoneType.Graveyard, "Counterspell"))
+                throw new AssertionError("Counterspell control did not interact: " + kase);
+        }
+        // Default arm is the improvement witness: it must not reach the Oracle win.
+        if (!improved && RITUAL_STRICT && oracleWin)
+            throw new AssertionError("Default arm unexpectedly won with Oracle: " + kase);
+    }
+
     public static void main(final String[] args) {
         try {
             improved = args.length > 1 && args[1].equals("improved");
@@ -765,6 +958,15 @@ public final class CubeDoomsdayExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
+            if (suite.equals("ritual")) {
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++) for (String kase : RITUAL_CASES) ritualRun(seat, kase);
+                }
+                System.out.println("RITUAL_SUITE_COMPLETE suite=ritual improved=" + improved
+                        + " policy=" + policy() + " cases=" + 4 * RITUAL_CASES.size());
+                return;
+            }
             if (suite.equals("nodraw") || suite.equals("passturn")) {
                 boolean passTurn = suite.equals("passturn");
                 for (boolean second : new boolean[] {false, true}) {
