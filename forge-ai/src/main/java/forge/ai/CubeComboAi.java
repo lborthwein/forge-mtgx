@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v46";
+    public static final String VERSION = "cube-combo-execution-v47";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -249,7 +249,59 @@ public final class CubeComboAi {
         // Kiki's haste route can finish this combat; the new Thopter bodies
         // normally need the next turn. Preserve the available faster route.
         Card immediate = chooseKikiTutorPartner(player, tutor, legalChoices);
-        return immediate != null ? immediate : CubeThopterPlan.chooseAssemblyCard(player, legalChoices);
+        if (immediate != null) return immediate;
+        // Then the two families with a native plan that acts in either of our
+        // own main phases, in the order this controller already runs their
+        // actions (breach before storm). Thopter stays last, unchanged.
+        Card piece = choosePlanTutorPiece(player, legalChoices);
+        return piece != null ? piece : CubeThopterPlan.chooseAssemblyCard(player, legalChoices);
+    }
+
+    /** The single card that would complete the entry gate of a family with a
+     * native plan, when that gate is otherwise exactly one card short. Each
+     * family's own gate logic reports its own completing names - no threshold
+     * is restated here - and only the native offered list is read, so a piece
+     * an opponent's search restriction kept out of that list is simply not
+     * chosen. Never a library enumeration, never an opponent zone.
+     *
+     * Family order: the Doomsday pile decision owns the controller API outright
+     * and never reaches this method; the Kiki pair is tried first by
+     * {@link #chooseTutorPartner} because its haste copies can finish this very
+     * combat; then Breach, then Storm, matching the action order
+     * CubeComboPlayerController.chooseSpellAbilityToPlay already uses; then the
+     * Thopter assembly last, because its bodies need the next turn. */
+    private static Card choosePlanTutorPiece(Player player, CardCollection legalChoices) {
+        if (!ownPlanSelectionWindow(player) || lethalOrdinaryAttackNow(player)) return null;
+        for (java.util.List<String> family : java.util.List.of(
+                CubeBreachPlan.completingPieceNames(player), CubeStormPlan.completingPieceNames(player))) {
+            if (family.isEmpty()) continue;
+            Card best = null;
+            for (Card card : legalChoices) {
+                if (card.getOwner() != player || card.isFaceDown() || !card.isInZone(ZoneType.Library)) continue;
+                if (!family.contains(card.getName())) continue;
+                // The same payability forecast the Kiki halves use: a piece we
+                // could not cast after this selection resolves - an
+                // unreachable colour above all - must not consume the choice.
+                if (!feasibleHalfAfterSelection(player, card)) continue;
+                if (best == null || card.getCMC() < best.getCMC()) best = card;
+            }
+            // Deliberately silent. chooseTutorPartner is also the forecast
+            // planTutor runs before it casts anything, so a line printed here
+            // would announce selections that never happen. The controller
+            // already logs the one real site it owns (a search-to-top), and a
+            // search of our own library emits no public event either way.
+            if (best != null) return best;
+        }
+        return null;
+    }
+
+    /** Every name a family with a native plan currently reports as its one
+     * missing piece, Breach before Storm. Used by {@link #planTutor} to decide
+     * whether casting a tutor for a piece is worth forecasting at all. */
+    static java.util.List<String> planCompletingNames(Player player) {
+        java.util.List<String> names = new java.util.ArrayList<>(CubeBreachPlan.completingPieceNames(player));
+        names.addAll(CubeStormPlan.completingPieceNames(player));
+        return names;
     }
 
     /** A Kiki pair that can finish this combat: the copy engine is on our
@@ -306,10 +358,38 @@ public final class CubeComboAi {
         var phases = player.getGame().getPhaseHandler();
         if (!phases.is(PhaseType.MAIN1, player)
                 && !(searchToTop(source) && phases.is(PhaseType.MAIN2, player))) return false;
+        return ownStackWindow(player);
+    }
+
+    /** v45's stack condition, factored out so both windows share one
+     * definition: nothing pending but our own single item (the resolving
+     * search itself). A selection made while another item waits can be
+     * answered before we ever use the card. */
+    private static boolean ownStackWindow(Player player) {
         var stack = player.getGame().getStack();
         if (stack.size() > 1) return false;
         for (var item : stack) if (item.getSpellAbility().getActivatingPlayer() != player) return false;
         return true;
+    }
+
+    /** The window for a Breach or Storm completing piece: our own MAIN1 or our
+     * own MAIN2, for every destination, with v45's stack condition unchanged.
+     *
+     * This is the stated exception to v45's destination-aware gate, and the
+     * reason is the same reason that gate exists. v45 restricted MAIN2 to a
+     * search-to-top because the Kiki route's priority rests on haste copies
+     * finishing *this* combat, which is a MAIN1 fact (needsMoreCopies is
+     * MAIN1-only). CubeBreachPlan.nextAction and CubeStormPlan.nextAction both
+     * admit our own MAIN1 and our own MAIN2, so a piece that opens one of
+     * their gates is worth the same selection in either phase whatever the
+     * tutor's destination: a piece fetched to hand in MAIN2 is usable by that
+     * plan in the very same MAIN2, and a piece put on top in MAIN2 is drawn
+     * next turn exactly as it would have been from MAIN1. No other consumer's
+     * gate moves; chooseKikiTutorPartner keeps {@link #ownSelectionWindow}. */
+    private static boolean ownPlanSelectionWindow(Player player) {
+        var phases = player.getGame().getPhaseHandler();
+        if (!phases.is(PhaseType.MAIN1, player) && !phases.is(PhaseType.MAIN2, player)) return false;
+        return ownStackWindow(player);
     }
 
     /** An unambiguous ordinary win already available this combat: our own
@@ -403,10 +483,35 @@ public final class CubeComboAi {
      * will enchant is exactly the body the selection is about to fetch - and
      * the real later cast still passes the full native legality path. */
     private static boolean feasibleHalfAfterSelection(Player player, Card card) {
+        return feasibleCastAfterSelection(player, card, ownSpellOf(card));
+    }
+
+    /** A card's own cast: the permanent spell where there is one, otherwise the
+     * card's first spell ability. An Aura casts through CardState.getAuraSpell
+     * and an instant or sorcery has no SpellPermanent at all, so the
+     * permanent-only resolution finds nothing for either. One definition,
+     * shared by the half forecast and by planTutor's second-cast forecast. */
+    private static SpellAbility ownSpellOf(Card card) {
         SpellAbility original = card.getSpellPermanent();
         if (original == null)
             for (SpellAbility candidate : card.getSpellAbilities()) if (candidate.isSpell()) { original = candidate; break; }
-        return feasibleCastAfterSelection(player, card, original);
+        return original;
+    }
+
+    /** A negative-ID CardFactory preview carries no printed script at all, so a
+     * plan piece that is an instant or a sorcery has no spell for the forecast
+     * to price. Restore just the printed variables and abilities, through the
+     * native parsers, for a detached preview of a name one of the plans named.
+     * Deliberately not restored: replacement effects, static abilities,
+     * triggers and intrinsic keywords - no check in this forecast reads them,
+     * and Brain Freeze's storm copies are not part of a cost. The preview
+     * stays detached: it is never inserted into a zone and never activated. */
+    private static boolean addPlanPiecePreviewRules(Card card, forge.item.PaperCard paper, java.util.List<String> names) {
+        if (card.getId() != -1 || !names.contains(card.getName())) return false;
+        var face = paper.getRules().getMainPart();
+        for (var variable : face.getVariables()) card.setSVar(variable.getKey(), variable.getValue());
+        forge.game.card.CardFactoryUtil.addAbilityFactoryAbilities(card, face.getAbilities());
+        return true;
     }
 
     private static boolean feasibleCastAfterSelection(Player player, Card card, SpellAbility original) {
@@ -431,7 +536,14 @@ public final class CubeComboAi {
     public static TutorPlan planTutor(Player player) {
         boolean main1 = player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player);
         String thopterMissing = CubeThopterPlan.missingPiece(player);
-        if (!enabled(player) || !(main1 || thopterMissing != null && player.getGame().getPhaseHandler().is(PhaseType.MAIN2, player))
+        // A Breach or Storm piece is worth casting a tutor for in either of our
+        // own main phases, for the reason ownPlanSelectionWindow states: both
+        // plans act in MAIN2 as well. The mana-only and disjoint-source
+        // discipline below is unchanged, floating mana still declines, and the
+        // v45 candidate set is still MAIN1-only.
+        java.util.List<String> planPieces = planCompletingNames(player);
+        boolean main2Route = thopterMissing != null || !planPieces.isEmpty();
+        if (!enabled(player) || !(main1 || main2Route && player.getGame().getPhaseHandler().is(PhaseType.MAIN2, player))
                 || !player.getGame().getStack().isEmpty() || !player.getManaPool().isEmpty()
                 || player.cantWin() || player.hasKeyword("LimitSearchLibrary")) {
             // Observability only: name the guard that already rejected the plan.
@@ -456,20 +568,30 @@ public final class CubeComboAi {
                         || tutor.getSubAbility() != null || !manaOnly(tutor)
                         || !canPlayNative(tutor, player) || !player.canSearchLibraryWith(tutor, player)) continue;
                 tutorDecline("other check=no-partner-route");
+                // Pass 0 is the v42/v45 candidate set, enumerated in registered
+                // deck order exactly as before, so no existing forecast can
+                // move. The plan pieces are a strictly later pass: where both a
+                // Kiki pair and a plan gate are one short, the faster route is
+                // still the one that gets the tutor.
+                for (int pass = 0; pass < 2; pass++)
                 for (var entry : player.getRegisteredPlayer().getDeck().getMain()) {
                     String name = entry.getKey().getName();
-                    if (!(name.equals(thopterMissing) || main1 && java.util.Set.of("Kiki-Jiki, Mirror Breaker", "Pestermite", "Deceiver Exarch",
-                            "Restoration Angel", "Zealous Conscripts").contains(name))
+                    boolean legacy = name.equals(thopterMissing) || main1 && java.util.Set.of("Kiki-Jiki, Mirror Breaker", "Pestermite", "Deceiver Exarch",
+                            "Restoration Angel", "Zealous Conscripts").contains(name);
+                    if ((pass == 0 ? !legacy : legacy || !planPieces.contains(name))
                             || !ownCopyOutside(player, name, ZoneType.Hand, ZoneType.Battlefield,
                                 ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command, ZoneType.Stack)) continue;
                     // A detached prototype: no game ID allocation or zone insertion.
                     Card forecast = forge.game.card.CardFactory.getCard(entry.getKey(), player, -1, player.getGame());
                     if(name.equals(thopterMissing) && !CubeThopterPlan.addAssemblyPreviewRules(forecast,entry.getKey()))continue;
+                    if(pass == 1 && !addPlanPiecePreviewRules(forecast, entry.getKey(), planPieces))continue;
                     forecast.setZone(player.getZone(ZoneType.Library));
                     if (!forecast.isValid(tutor.getParamOrDefault("ChangeType", "Card").split(","), player, hand, tutor)
                             || chooseTutorPartner(player, tutor, new CardCollection(forecast)) == null) continue;
                     forecast.setZone(player.getZone(ZoneType.Hand));
-                    SpellAbility creature = forecast.getSpellPermanent().copy(player);
+                    SpellAbility piece = ownSpellOf(forecast);
+                    if (piece == null) continue;
+                    SpellAbility creature = piece.copy(player);
                     if (!manaOnly(creature) || !castFitsAfter(player, tutor, creature)) continue;
                     var cost = ComputerUtilMana.calculateManaCost(creature.getPayCosts(), creature, player, true, 0, false);
                     CardCollection reserve = CubeComboAi.getManaSourcesToPayCost(cost, creature, player, false);

@@ -70,6 +70,44 @@ public final class CubeBreachPlan {
         return count;
     }
 
+    /** Brain Freeze where this plan can use it: our own hand, else our own
+     * graveyard (it escapes from there under Breach). */
+    private Card freeze() {
+        Card freeze = find(FREEZE, ZoneType.Hand);
+        return freeze != null ? freeze : find(FREEZE, ZoneType.Graveyard);
+    }
+
+    /** Underworld Breach as a usable half: already on our own battlefield, or
+     * in our own hand together with the graveyard fuel and own library size
+     * the hand route needs. This is the single definition of that half - both
+     * {@link #nextAction} and {@link #completingPieceNames} read it, so the
+     * missing-piece predicate cannot drift from the plan's own thresholds. */
+    private boolean breachReady(int fuel) {
+        if (find(BREACH, ZoneType.Battlefield) != null) return true;
+        return find(BREACH, ZoneType.Hand) != null && fuel >= 6
+                && player.getCardsIn(ZoneType.Library).size() >= 4;
+    }
+
+    /** Which single card, fetched from our own library, would complete this
+     * plan's entry gate - the gate being Brain Freeze plus a Lotus-type engine
+     * plus a usable Underworld Breach. Empty unless exactly one of those three
+     * halves is missing from our own visible zones, and empty for a missing
+     * Breach whose hand route could not be paid for anyway. Reads our own
+     * hand, battlefield and graveyard and our own library SIZE only; never
+     * library contents or order, never an opponent zone. */
+    static java.util.List<String> completingPieceNames(Player player) {
+        CubeBreachPlan plan = new CubeBreachPlan(player);
+        int fuel = plan.fuel();
+        boolean engine = plan.engine() != null, freeze = plan.freeze() != null, breach = plan.breachReady(fuel);
+        if ((engine ? 1 : 0) + (freeze ? 1 : 0) + (breach ? 1 : 0) != 2) return java.util.List.of();
+        if (!freeze) return java.util.List.of(FREEZE);
+        if (!engine) return ENGINES;
+        // The Breach half is the missing one. Fetching it is only worth a
+        // selection where the hand route's own gate would then be satisfied.
+        return fuel >= 6 && player.getCardsIn(ZoneType.Library).size() >= 4
+                ? java.util.List.of(BREACH) : java.util.List.of();
+    }
+
     private CardCollection escapeChoices(CostExile cost, SpellAbility ability) {
         CardCollection valid = CardLists.getValidCards(player.getCardsIn(cost.getFrom()),
                 cost.getType().split(";"), player, ability.getHostCard(), ability);
@@ -178,9 +216,8 @@ public final class CubeBreachPlan {
         int remaining = opponent.getCardsIn(ZoneType.Library).size();
         if (remaining == 0 || opponent.cantLoseCheck(GameLossReason.Milled)) return null;
         Card engine = engine();
-        Card freeze = find(FREEZE, ZoneType.Hand);
-        boolean fromHand = freeze != null;
-        if (freeze == null) freeze = find(FREEZE, ZoneType.Graveyard);
+        boolean fromHand = find(FREEZE, ZoneType.Hand) != null;
+        Card freeze = freeze();
         if (freeze == null || engine == null) return null;
         // A mill-out isn't a plan if its eventual target is currently illegal.
         boolean targetable = false;
@@ -193,7 +230,7 @@ public final class CubeBreachPlan {
         int fuel = fuel(), storm = game.getStack().getSpellsCastThisTurn().size();
         if (find(BREACH, ZoneType.Battlefield) == null) {
             Card breach = find(BREACH, ZoneType.Hand);
-            if (breach == null || fuel < 6 || player.getCardsIn(ZoneType.Library).size() < 4) return null;
+            if (!breachReady(fuel)) return null;
             // An on-board disabled engine is not a reason to spend Breach.
             if (engine.isInPlay() && crack(engine) == null) return null;
             reservedEngine = engine.isInPlay() ? engine : null;
