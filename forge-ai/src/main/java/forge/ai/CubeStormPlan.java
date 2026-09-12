@@ -65,6 +65,30 @@ public final class CubeStormPlan {
         return ability;
     }
 
+    /** Yawgmoth's Will where this plan can cast it: our own hand only. It is
+     * not castable from the graveyard without another Will effect. */
+    private Card will() { return find(WILL, ZoneType.Hand); }
+
+    /** Tendrils where this plan can reach it: our own hand, else our own
+     * graveyard (the Will replays it from there). The asymmetry between these
+     * two halves is the gate, and it is defined once, here. */
+    private Card finisher() {
+        Card finisher = find(TENDRILS, ZoneType.Hand);
+        return finisher != null ? finisher : find(TENDRILS, ZoneType.Graveyard);
+    }
+
+    /** Which single card, fetched from our own library, would complete this
+     * plan's entry gate. Empty when the gate is already open or more than one
+     * half is missing. Own hand and own graveyard only; the downstream
+     * Will-cast gate (a replayable rock and a spell in our graveyard) is this
+     * plan's business on the turn it acts, not the selection's. */
+    static java.util.List<String> completingPieceNames(Player player) {
+        CubeStormPlan plan = new CubeStormPlan(player);
+        boolean will = plan.will() != null, finisher = plan.finisher() != null;
+        if (will == finisher) return java.util.List.of();
+        return java.util.List.of(will ? TENDRILS : WILL);
+    }
+
     private boolean knownDraw() {
         for (String name : DRAWS) for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Graveyard))
             if (find(name, zone) != null) return true;
@@ -103,9 +127,8 @@ public final class CubeStormPlan {
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))
                 || player.getOpponents().size() != 1) return null;
         Player opponent = player.getOpponents().get(0);
-        Card will = find(WILL, ZoneType.Hand);
-        Card finisher = find(TENDRILS, ZoneType.Hand);
-        if (finisher == null) finisher = find(TENDRILS, ZoneType.Graveyard);
+        Card will = will();
+        Card finisher = finisher();
         if (attemptedWill && Boolean.getBoolean("forge.bench.comboTrace"))
             System.err.println("CUBE_STORM_STATE turn=" + turn + " phase=" + phase.getPhase() + " storm="
                     + game.getStack().getSpellsCastThisTurn().size() + " hand=" + player.getCardsIn(ZoneType.Hand)
