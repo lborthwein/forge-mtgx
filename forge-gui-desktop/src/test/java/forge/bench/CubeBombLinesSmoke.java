@@ -139,6 +139,22 @@ public final class CubeBombLinesSmoke {
             "depths-sequence",             // B9 R6 land-drop sequencing
             "depths-sequence:half");       // B10 half the pair: R6 must not fire
 
+    /** v56 payload cases (registration.md, suite `payload`). P1-P7 of
+     * design-v56-bomb-payload.md. P1, P3, P4 and P5 are positions the v55
+     * conversion suite already registered and are re-used verbatim - P1 is the
+     * design's `breach-pick-flier` board exactly (opponent at 7 behind one
+     * untapped 4/4 with neither flying nor reach; Through the Breach,
+     * Blightsteel Colossus and Griselbrand in hand; five lands) - so the only
+     * new positions are the three the design adds. */
+    private static final List<String> PAYLOAD = List.of(
+            "breach-choice:low-life",      // P1 pick the flier the board cannot block
+            "breach-pick-infect",          // P2 keep the infect payload when it is the lethal one
+            "sat-archon",                  // P3 an ETB that changes the board beats a bigger beater
+            "sat-atraxa-low-life",         // P4 a flying lifelink/deathtouch body while we are behind
+            "sat-beater-parity",           // P5 nothing to prefer: the ordinary chooser keeps the pick
+            "sneak-choice",                // P6 an ordinary cheat-in the plan does not own
+            "sat-opp-hand");               // P7 the opponent's own Show and Tell choice
+
     /** Registered starting life. 20 everywhere else, and no preserved row ever
      * calls setLife. */
     private static int ownLife(String control) {
@@ -161,7 +177,10 @@ public final class CubeBombLinesSmoke {
      * decides the opponent's board for these positions. */
     private static final Set<String> CONVERSION_BASES = new HashSet<>(List.of(
             "breach-blightsteel", "breach-choice", "breach-reach", "breach-foundry",
-            "sat-archon", "sat-atraxa-low-life", "sat-beater-parity", "depths-sequence"));
+            "sat-archon", "sat-atraxa-low-life", "sat-beater-parity", "depths-sequence",
+            // v56 adds its three new bases to the same by-base opponent switch,
+            // so no preserved control's placements are touched here either.
+            "breach-pick-infect", "sneak-choice", "sat-opp-hand"));
 
     private static String base(String control) { return control.split(":")[0]; }
     private static String variant(String control) { return control.contains(":") ? control.split(":", 2)[1] : ""; }
@@ -172,9 +191,9 @@ public final class CubeBombLinesSmoke {
             case "depths-stage", "depths-hexmage", "depths-hexmage-bf", "depths-sequence" -> MARIT;
             case "reanimate-griselbrand" -> GRISELBRAND;
             case "natural-order-hoof" -> HOOF;
-            case "breach-blightsteel", "breach-choice" -> BLIGHTSTEEL;
+            case "breach-blightsteel", "breach-choice", "breach-pick-infect" -> BLIGHTSTEEL;
             case "breach-reach", "breach-foundry" -> GRISELBRAND;
-            case "sat-archon" -> ARCHON;
+            case "sat-archon", "sat-opp-hand" -> ARCHON;
             case "sat-atraxa-low-life" -> ATRAXA;
             case "sat-beater-parity" -> WURM;
             default -> EMRAKUL;
@@ -279,6 +298,33 @@ public final class CubeBombLinesSmoke {
                     result.add(new Placement(WURM, ZoneType.Hand));
                     for (int i = 0; i < 4; i++) result.add(new Placement("Island", ZoneType.Battlefield));
                 }
+                // ------------------------------------- v56 payload positions
+                case "breach-pick-infect" -> {
+                    // P2. The converse of P1: no public blocker at all, so the
+                    // infect payload IS the lethal one and R3 must keep it.
+                    result.add(new Placement(BREACH, ZoneType.Hand));
+                    result.add(new Placement(GRISELBRAND, ZoneType.Hand));
+                    result.add(new Placement(BLIGHTSTEEL, ZoneType.Hand));
+                    for (int i = 0; i < 5; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                }
+                case "sneak-choice" -> {
+                    // P6. An ORDINARY cheat-in with two payloads in hand. The
+                    // bomb plan proposes no Sneak Attack activation (D4 is a
+                    // veto arm and breachAction takes spells only), so this
+                    // resolution-time choice is not one the hook may answer.
+                    result.add(new Placement(SNEAK, ZoneType.Battlefield));
+                    result.add(new Placement(EMRAKUL, ZoneType.Hand));
+                    result.add(new Placement(GRISELBRAND, ZoneType.Hand));
+                    for (int i = 0; i < 4; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
+                }
+                case "sat-opp-hand" -> {
+                    // P7. sat-archon's hand against an opponent who also has
+                    // permanents to put in, so the log carries BOTH choices.
+                    result.add(new Placement(SHOWTELL, ZoneType.Hand));
+                    result.add(new Placement(ULAMOG, ZoneType.Hand));
+                    result.add(new Placement(ARCHON, ZoneType.Hand));
+                    for (int i = 0; i < 3; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+                }
                 case "depths-sequence" -> {
                     // Both halves in hand, three ordinary lands already down and
                     // two ordinary lands in hand competing for the drops. This
@@ -311,6 +357,15 @@ public final class CubeBombLinesSmoke {
                 case "sat-atraxa-low-life" -> {
                     for (int i = 0; i < 2; i++) result.add(new Placement(BEARS, ZoneType.Battlefield));
                 }
+                case "sat-opp-hand" -> {
+                    // P7: two permanents in the OPPONENT'S hand, so their own
+                    // Show and Tell choice is a real choice and is visible in
+                    // the receipt as whichever one reaches their battlefield.
+                    result.add(new Placement(SPIDER, ZoneType.Hand));
+                    result.add(new Placement(BEARS, ZoneType.Hand));
+                }
+                // breach-pick-infect and sneak-choice give the opponent no
+                // board at all: an empty public battlefield is the position.
                 default -> { }
             }
         } else {
@@ -399,7 +454,20 @@ public final class CubeBombLinesSmoke {
         System.out.println("BOMB_HINT " + key + line);
     }
 
-    private static void run(boolean improved, int seat, PhaseType phase, String control, boolean conversion) {
+    /** The opponent's PUBLIC non-land battlefield, sorted - which is where P7
+     * reads the opponent's own Show and Tell choice from. A fixture read of a
+     * public zone after the game; no policy code sees it. */
+    private static String publicPermanents(Player opponent) {
+        List<String> names = new ArrayList<>();
+        for (Card c : opponent.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isLand()) continue;
+            names.add(c.isFaceDown() ? "face-down" : c.getName().replace(' ', '_'));
+        }
+        java.util.Collections.sort(names);
+        return String.join(";", names);
+    }
+
+    private static void run(boolean improved, int seat, PhaseType phase, String control, boolean conversion, boolean payload) {
         List<RegisteredPlayer> players = new ArrayList<>();
         for (int s = 0; s < 2; s++) players.add(new RegisteredPlayer(deck(s == seat, control)).setPlayer(
                 improved && s == seat ? new forge.ai.LobbyPlayerCubeComboAi("Combo-" + s) : defaultAi(s)));
@@ -443,6 +511,13 @@ public final class CubeBombLinesSmoke {
         // it had tapped to attack" is a different receipt from "never cast",
         // and only a turn can tell them apart.
         int breachTurn = -1, showtellTurn = -1, maritTurn = -1;
+        // v56 P7, Amendment 3: the FIRST non-land permanent to reach the
+        // opponent's public battlefield, and the turn it did. That is their own
+        // Show and Tell put-in, read where the choice is made rather than at the
+        // end of the game - Archon of Cruelty's trigger makes them sacrifice it,
+        // so the end-state board is a read of OUR payload, not of their choice.
+        String oppFirstPermanent = "none";
+        int oppFirstTurn = -1;
         String previous = "";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps < 600) {
             game.getPhaseHandler().mainLoopStep();
@@ -455,6 +530,10 @@ public final class CubeBombLinesSmoke {
                 stageLandTurn = game.getPhaseHandler().getTurn();
             if (maritTurn < 0 && countOnBattlefield(player, MARIT) > 0)
                 maritTurn = game.getPhaseHandler().getTurn();
+            if (oppFirstTurn < 0) {
+                String seen = publicPermanents(opponent);
+                if (!seen.isEmpty()) { oppFirstPermanent = seen; oppFirstTurn = game.getPhaseHandler().getTurn(); }
+            }
             maxMarit = Math.max(maxMarit, countOnBattlefield(player, MARIT));
             for (var item : game.getStack()) if (stackIds.add(item.getId())) {
                 var sa = item.getSpellAbility();
@@ -526,6 +605,17 @@ public final class CubeBombLinesSmoke {
                     + " wurmZone=" + zoneOf(player, WURM)
                     + " breachZone=" + zoneOf(player, BREACH)
                     + " showtellZone=" + zoneOf(player, SHOWTELL));
+        // v56: one more line, emitted for the payload cases ONLY, so that both
+        // BOMB_RESULT and the v55 BOMB_CONV line keep exactly the fields their
+        // own increment registered and every preserved row stays byte-
+        // comparable. `oppPermanents` is what makes P7 checkable: it is the
+        // opponent's own Show and Tell choice, read from their PUBLIC board.
+        if (payload)
+            System.out.println("BOMB_PICK " + key
+                    + " oppFirstPermanent=[" + oppFirstPermanent + "] oppFirstTurn=" + oppFirstTurn
+                    + " oppPermanents=[" + publicPermanents(opponent) + "]"
+                    + " oppHandSize=" + opponent.getCardsIn(ZoneType.Hand).size()
+                    + " ownPermanents=[" + publicPermanents(player) + "]");
     }
 
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
@@ -564,11 +654,16 @@ public final class CubeBombLinesSmoke {
                 case "bombs" -> BOMBS;
                 case "guards" -> GUARDS;
                 case "conversion" -> CONVERSION;
+                case "payload" -> PAYLOAD;
                 default -> { var all = new ArrayList<>(LINES); all.addAll(CONTROLS); yield all; }
             } : LINES;
-            boolean conversion = args.length > 2 && args[2].equals("conversion");
+            boolean payload = args.length > 2 && args[2].equals("payload");
+            // BOMB_CONV carries the turn of each gated action, which every
+            // payload case needs too, so the v55 line is emitted for both
+            // suites; BOMB_PICK is the payload suite's own.
+            boolean conversion = payload || args.length > 2 && args[2].equals("conversion");
             for (int seat = 0; seat < 2; seat++) for (PhaseType phase : List.of(PhaseType.MAIN1, PhaseType.MAIN2))
-                for (String control : cases) run(args[1].equals("improved"), seat, phase, control, conversion);
+                for (String control : cases) run(args[1].equals("improved"), seat, phase, control, conversion, payload);
             System.out.println("BOMB_SUITE_COMPLETE cases=" + (4 * cases.size()));
         } catch (Throwable failure) {
             failure.printStackTrace();
