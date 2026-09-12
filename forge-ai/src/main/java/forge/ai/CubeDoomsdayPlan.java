@@ -841,6 +841,44 @@ public final class CubeDoomsdayPlan {
         return doom;
     }
 
+
+    /** v60 - the one card, fetched from our own library, that would complete
+     * this plan's entry gate. That gate is Doomsday itself in our own HAND
+     * ({@link #playable} reads no other zone for it) with an Oracle this plan
+     * can still reach, a library big enough for a pile, a life total the pile's
+     * own cost leaves us alive at, and Doomsday's printed BBB payable from our
+     * own visible black sources.
+     *
+     * <p>Thassa's Oracle is never the completing piece: {@link
+     * #availableInOwnDeck} already counts the library and the graveyard, which
+     * are exactly the zones Doomsday searches, so an Oracle a tutor could find
+     * is one this plan already calls available, and an Oracle that is not in
+     * our own deck at all is one no search can find either.</p>
+     *
+     * <p>Doomsday's printed BBB is deliberately NOT tested here. It is a
+     * RESOURCE gate, and this predicate tests the entry gate only, exactly as
+     * {@code CubeStormPlan.completingPieceNames} states for its own downstream
+     * gate; the mana is priced twice downstream anyway - by
+     * {@code CubeComboAi.planFor}'s second-cast forecast and disjoint-source
+     * reserve before the tutor is ever cast, and by {@link #playable} on the
+     * turn this plan acts. There is a second, concrete reason: {@link
+     * #ownVisibleBlack} asks a LIVE mana ability {@code canProduce}, and a live
+     * ability whose activating player is null makes native Forge print a
+     * "Did not have activator set" line. That is acceptable once inside
+     * {@code pileAction}; it is not acceptable in a predicate consulted for
+     * every tutor candidate of every priority pass.</p>
+     *
+     * <p>Own hand, own graveyard, our own registered deck composition, our own
+     * library SIZE and our own life only. Entry gate only: which pile, and the
+     * Gush/Star/Recall routes, are this plan's business on the turn it acts.</p> */
+    static java.util.List<String> completingPieceNames(Player player) {
+        CubeDoomsdayPlan plan = new CubeDoomsdayPlan(player);
+        if (plan.inHand("Doomsday") != null || !plan.availableInOwnDeck("Thassa's Oracle")
+                || player.getCardsIn(ZoneType.Library).size() <= 5 || player.getLife() <= 1)
+            return java.util.List.of();
+        return java.util.List.of("Doomsday");
+    }
+
     public SpellAbility nextAction() {
         decline = "other check=doomsday-plan";
         if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)

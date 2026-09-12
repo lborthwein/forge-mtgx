@@ -196,6 +196,32 @@ public final class CubeKittenPlan {
         }
     }
 
+
+    /** v60 - which single card, fetched from our own library, would complete
+     * this plan's entry gate: Displacer Kitten and Teferi on our own
+     * battlefield, an Oracle this plan can still reach, and a replay rock we
+     * can already see. Empty unless exactly one of the two named engine halves
+     * is missing.
+     *
+     * <p>The rock is a PRINTED PROPERTY of a live card ({@link #rock}), so it
+     * can only be recognised on one we can already see - our own battlefield or
+     * our own hand - and is therefore required to be present rather than ever
+     * being named as the missing piece. {@link #knownOracle} is the plan's own
+     * availability test (our own hand, else our own registered deck
+     * composition minus our own visible zones); no library content or order is
+     * read, and no opponent zone is touched. Entry gate only: the UU the plan
+     * checks before it draws is its own business on the turn it acts.</p> */
+    static java.util.List<String> completingPieceNames(Player player) {
+        CubeKittenPlan plan=new CubeKittenPlan(player);
+        boolean kitten=plan.find(KITTEN,ZoneType.Battlefield)!=null;
+        boolean teferi=plan.find(TEFERI,ZoneType.Battlefield)!=null;
+        if(kitten==teferi||!plan.knownOracle()) return java.util.List.of();
+        for(ZoneType zone:List.of(ZoneType.Battlefield,ZoneType.Hand))
+            for(Card card:player.getCardsIn(zone))
+                if(!card.isFaceDown()&&plan.rock(card)) return java.util.List.of(kitten?TEFERI:KITTEN);
+        return java.util.List.of();
+    }
+
     public SpellAbility nextAction() {
         var game=player.getGame();var phase=game.getPhaseHandler();
         if(turn!=phase.getTurn()) {turn=phase.getTurn();actions=0;active=false;selected=null;pending=null;rockName=null;}

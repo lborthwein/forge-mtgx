@@ -1183,4 +1183,70 @@ public final class CubeBombPlan {
         }
         return played;
     }
+
+    // --------------------------------------------------- v60 completing pieces
+
+    /** The cube's two Depths halves and its three cheat-in spells, as FETCH
+     * CANDIDATES only. Both roles are still recognised on a live card by shape
+     * ({@link #zeroCounterPayoffType}, {@link #hasLandCloneAbility},
+     * {@link #cheatInShape}, {@link #showAndTellShape}); a name list is what a
+     * card we do not have leaves us, and it is confined to naming a candidate. */
+    private static final List<String> DEPTHS_PAYOFF_NAMES = List.of("Dark Depths");
+    private static final List<String> DEPTHS_CLONE_NAMES = List.of("Thespian's Stage");
+    private static final List<String> CHEAT_IN_NAMES =
+            List.of("Show and Tell", "Through the Breach", "Sneak Attack");
+
+    /** v60 - which single card, fetched from our own library, would complete
+     * one of this class's lines. Two lines are checked, in {@link #nextAction}'s
+     * own order.
+     *
+     * <p><b>A, the Depths route (D3/R6).</b> Its two halves are a zero-counter
+     * payoff permanent and a land-clone permanent, each own-visible in our own
+     * hand or on our own battlefield - exactly the zones and exactly the shape
+     * tests {@link #depthsLandAction} already uses. Exactly one missing names
+     * the other. Both halves are LANDS, so the fetched piece is played as a
+     * land drop, which is the drop {@link #depthsLandAction} itself proposes.</p>
+     *
+     * <p><b>B, the cheat-in routes (D1/D2).</b> A bomb we can already see in
+     * our own hand, and no own-visible ability that puts a creature from hand
+     * onto the battlefield. The bomb test is {@link #bombCandidates}' own
+     * threshold and its own legend-rule refusal, minus the printed
+     * {@code ChangeType} filter - which cannot be applied, because the spell
+     * that would carry it is the card we do not have yet. Deliberately wider
+     * there and nowhere else; the real cast still applies that filter.</p>
+     *
+     * <p>Our own hand, our own battlefield and the PUBLIC battlefield only. No
+     * library contents or order, no opponent hand, and a face-down card is
+     * never identified. Entry gate only: the hazard gates
+     * ({@link #exiledOnUncastEntry}, {@link #legendaryBounceVisible},
+     * {@link #landDestructionVisible}) and {@code canAttackForValue} are this
+     * plan's business on the turn it acts.</p> */
+    static List<String> completingPieceNames(Player player) {
+        boolean payoff = false, clone = false;
+        for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Battlefield))
+            for (Card card : player.getCardsIn(zone)) {
+                if (card.isFaceDown()) continue;
+                boolean isPayoff = zeroCounterPayoffType(card) != null;
+                if (isPayoff) payoff = true;
+                else if (hasLandCloneAbility(card)) clone = true;
+            }
+        if (payoff != clone) return payoff ? DEPTHS_CLONE_NAMES : DEPTHS_PAYOFF_NAMES;
+        boolean bomb = false;
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.isFaceDown() || !card.isPermanent()) continue;
+            if (!(card.isCreature() && ComputerUtilCard.evaluateCreature(card) >= BOMB_EVALUATION
+                    || card.getCMC() >= BOMB_CMC)) continue;
+            if (card.getType().isLegendary() && player.isCardInPlay(card.getName())) continue;
+            bomb = true;
+            break;
+        }
+        if (!bomb) return List.of();
+        for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Battlefield))
+            for (Card card : player.getCardsIn(zone)) {
+                if (card.isFaceDown()) continue;
+                for (SpellAbility ability : card.getSpellAbilities())
+                    if (cheatInShape(ability) || showAndTellShape(ability)) return List.of();
+            }
+        return CHEAT_IN_NAMES;
+    }
 }
