@@ -748,6 +748,19 @@ public class ChangeZoneAi extends SpellAbilityAi {
     protected boolean checkPhaseRestrictions(Player ai, SpellAbility sa, PhaseHandler ph) {
         String aiLogic = sa.getParamOrDefault("AILogic", "");
 
+        // v73. The phase rule this method is MISSING, named in the reanimation
+        // census section 6: it has rules only for Hand <- Graveyard and
+        // Library <- Graveyard, so a Library -> Graveyard graveyard tutor - an
+        // INSTANT, in this cube - has no end-of-turn preference and is cast
+        // whenever AiController first offers it. CubeReanimatorPlan supplies the
+        // window; it answers false for every seat that is not the cube combo
+        // policy, for every ability that is not a graveyard tutor, and for every
+        // board on which it is not actively sequencing one, so an ordinary
+        // decision reaches the rest of this method unchanged.
+        if (forge.ai.CubeReanimatorPlan.holdSearch(ai, sa)) {
+            return false;
+        }
+
         if (aiLogic.equals("SurvivalOfTheFittest")) {
             return ph.getNextTurn().equals(ai) && ph.is(PhaseType.END_OF_TURN);
         } else if (aiLogic.equals("Main1") && ph.is(PhaseType.MAIN1, ai)) {
@@ -1154,6 +1167,22 @@ public class ChangeZoneAi extends SpellAbilityAi {
                     choice = origin.contains(ZoneType.Battlefield)
                             ? ComputerUtilCard.getBestRemovalTargetAI(ai, list)
                             : ComputerUtilCard.getMostExpensivePermanentAI(list);
+                    // v73. The SPELL form of a reanimation (Reanimate, Death,
+                    // Persist, From the Catacombs, Necromancy's RaiseDead,
+                    // Recurring Nightmare) chooses its target HERE, by plain
+                    // max(mana value), and there is no PlayerController hook for
+                    // it. CubeReanimatorPlan ranks the same native candidate list
+                    // by the v62 value terms instead; it answers null for every
+                    // seat that is not the cube combo policy, for every ability
+                    // that is not ours, for a list of fewer than two legal
+                    // candidates, and whenever it agrees with `choice` - so an
+                    // ordinary decision reaches this line and leaves it
+                    // unchanged. Same guard shape as the Kitten blink hook above
+                    // and CubeBombPlan.declineCheatIn below.
+                    Card preferred = forge.ai.CubeReanimatorPlan.preferReanimationTarget(ai, sa, list, choice);
+                    if (preferred != null) {
+                        choice = preferred;
+                    }
                     if (choice.isCreature() && origin.contains(ZoneType.Graveyard)) {
                         // Karmic Guide can chain another creature
                         for (Card c : list) {
