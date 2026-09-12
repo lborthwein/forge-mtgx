@@ -9,16 +9,33 @@ import forge.game.spellability.SpellAbility;
 import forge.game.staticability.StaticAbilityMustTarget;
 import forge.game.zone.ZoneType;
 
-/** Finite Top/Citadel-or-Mystic/Reservoir turn plan. Every draw, cast, payment,
- * trigger and shot is a native action with ordinary opposing priority.
- * Only a natively viewable top card may be inspected, never the hidden tail. */
+/** Finite Top recursion turn plan. Every draw, cast, payment, trigger and shot
+ * is a native action with ordinary opposing priority.
+ * Only a natively viewable top card may be inspected, never the hidden tail.
+ *
+ * Two things are recognized by property rather than by card name: permission to
+ * cast the recursion object from the top of our own library ({@link #permissions})
+ * and the win outlet. The outlet is either the life-shot line (Aetherflux
+ * Reservoir, still by name) or a draw-drain permanent ({@link #drainPerOwnDraw}),
+ * whose trigger shape decides membership. */
 public final class CubeTopPlan {
-    private static final String TOP = "Sensei's Divining Top", CITADEL = "Bolas's Citadel",
-            MYSTIC = "Mystic Forge", BIRGI = "Birgi, God of Storytelling", RESERVOIR = "Aetherflux Reservoir";
+    private static final String TOP = "Sensei's Divining Top",
+            BIRGI = "Birgi, God of Storytelling", RESERVOIR = "Aetherflux Reservoir";
     private final Player player;
     private int turn = -1, actions, failedTurn = -1;
     private SpellAbility selected, pending;
     private int libraryBefore, lifeBefore, opposingLifeBefore;
+    /** Set when the selected action belongs to the drain route, so the
+     * no-progress check measures the right public quantity. */
+    private boolean drain;
+    /** The drain permanent the last drain-route pass recognized, if any. */
+    private Card drainOutlet;
+
+    /** A native permission to play the top card of our own library, found by
+     * the shape of a continuous static ability we control. {@code lifeCost} is
+     * true when that permission substitutes a life payment for the mana cost
+     * (Bolas's Citadel's {@code MayPlayAltManaCost$ PayLife<ConvertedManaCost>}). */
+    private record Permission(Card card, boolean lifeCost) {}
 
     public CubeTopPlan(Player player) { this.player = player; }
 
@@ -40,29 +57,90 @@ public final class CubeTopPlan {
                 && CubeComboAi.canPayCost(sa, player, false);
     }
 
-    private SpellAbility cast(Card card, boolean fromLibrary, String permission) {
+    private SpellAbility cast(Card card, boolean fromLibrary, Permission permission) {
         if (card == null) return null;
         for (SpellAbility original : card.getAllPossibleAbilities(player, false, null, true)) {
             SpellAbility sa = original.copy(player);
             if (!sa.isSpell()) continue;
             // Select an actual native permission/alternative, not a base
             // spell copied into an unauthorized zone or stripped of costs.
+            // The permission is identified by the permanent that granted it,
+            // and its life payment by that permission's own alternative cost.
             if (fromLibrary && (sa.getMayPlay() == null
-                    || !permission.equals(sa.getMayPlay().getHostCard().getName())
-                    || CITADEL.equals(permission) != sa.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostPayLife))) continue;
+                    || sa.getMayPlay().getHostCard() != permission.card()
+                    || permission.lifeCost() != sa.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostPayLife))) continue;
             if (payable(sa)) return sa;
         }
         return null;
     }
 
-    private SpellAbility select(SpellAbility sa) {
-        selected = sa; actions++; return sa;
+    /** Every permanent we control that natively grants play permission for the
+     * top card of our own library, cheapest-payment first: a permission that
+     * substitutes a life payment is tried only after the ones that do not.
+     * Membership is the static's shape (MayPlay for our own top card, in the
+     * library zone, live and unsuppressed), never the permanent's name. */
+    private java.util.List<Permission> permissions() {
+        java.util.List<Permission> free = new java.util.ArrayList<>(), paid = new java.util.ArrayList<>();
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown()) continue;
+            for (var st : card.getStaticAbilities()) {
+                if (st.isSuppressed() || !"True".equals(st.getParamOrDefault("MayPlay", ""))
+                        || !st.checkConditions(forge.game.staticability.StaticAbilityMode.Continuous)
+                        || !java.util.List.of(st.getParamOrDefault("AffectedZone", "").split(",")).contains("Library")) continue;
+                String affected = st.getParamOrDefault("Affected", "");
+                if (affected.isEmpty() || java.util.Arrays.stream(affected.split(","))
+                        .anyMatch(alt -> !alt.contains("TopLibrary") || !alt.contains("YouCtrl"))) continue;
+                // A permission with an alternative cost this plan cannot
+                // forecast is not a permission it may use.
+                boolean lifeCost = st.getParamOrDefault("MayPlayAltManaCost", "").startsWith("PayLife");
+                if (st.hasParam("MayPlayAltManaCost") && !lifeCost) continue;
+                (lifeCost ? paid : free).add(new Permission(card, lifeCost));
+                break;
+            }
+        }
+        free.addAll(paid);
+        return free;
+    }
+
+    /** How much life each opponent loses every time we draw a card, from a
+     * permanent we control, or 0 when this permanent is not such an outlet.
+     * Only an unconditional trigger on our own draws with an untargeted fixed
+     * life loss for opponents qualifies: the parameter set is allow-listed, so
+     * a per-turn count, a condition, a target or an opponent-draw trigger
+     * (Sheoldred, the Apocalypse's drain half) is not mistaken for this shape. */
+    private int drainPerOwnDraw(Card card) {
+        if (card.isFaceDown()) return 0;
+        for (var trigger : card.getTriggers()) {
+            if (trigger.isSuppressed()
+                    || !java.util.Set.of("Mode", "ValidCard", "TriggerZones", "Execute", "TriggerDescription")
+                        .containsAll(trigger.getMapParams().keySet())
+                    || !"Drawn".equals(trigger.getParam("Mode"))
+                    || !java.util.List.of("Card.YouCtrl", "Card.YouOwn").contains(trigger.getParamOrDefault("ValidCard", ""))
+                    || !java.util.List.of(trigger.getParamOrDefault("TriggerZones", "").split(",")).contains("Battlefield")) continue;
+            java.util.Map<String, String> effect = new java.util.HashMap<>();
+            for (String piece : card.getSVar(trigger.getParamOrDefault("Execute", "")).split("\\|")) {
+                String[] pair = piece.trim().split("\\$", 2);
+                if (pair.length == 2) effect.put(pair[0].trim(), pair[1].trim());
+            }
+            if (!"LoseLife".equals(effect.get("DB")) || effect.containsKey("ValidTgts")
+                    || effect.containsKey("UnlessCost")
+                    || !java.util.List.of("Player.Opponent", "Opponent").contains(effect.getOrDefault("Defined", ""))) continue;
+            try {
+                int amount = Integer.parseInt(effect.getOrDefault("LifeAmount", ""));
+                if (amount > 0) return amount;
+            } catch (NumberFormatException ignored) { }
+        }
+        return 0;
+    }
+
+    private SpellAbility select(SpellAbility sa, boolean drainRoute) {
+        selected = sa; drain = drainRoute; actions++; return sa;
     }
 
     /** Count-only reach estimate, not a claim of a forced win. Real triggers,
      * replacements and responses must still resolve; failures stop the plan. */
-    private boolean enoughDraws(Card top, int draws, boolean immediateRecast, String permission) {
-        int lifeCost = CITADEL.equals(permission) ? 1 : 0;
+    private boolean enoughDraws(Card top, int draws, boolean immediateRecast, Permission permission) {
+        int lifeCost = permission.lifeCost() ? 1 : 0;
         if (lifeCost == 0 && !sustainableManaRecast(top)) return false;
         long life = player.getLife();
         // Reservoir counts spells we cast, unlike storm's all-player count.
@@ -144,18 +222,22 @@ public final class CubeTopPlan {
         var game = player.getGame();
         var phase = game.getPhaseHandler();
         if (turn != phase.getTurn()) {
-            turn = phase.getTurn(); actions = 0; selected = null; pending = null;
+            turn = phase.getTurn(); actions = 0; selected = null; pending = null; drain = false;
         }
         if (failedTurn == turn || actions >= 200 || player.cantWin() || !game.getStack().isEmpty()
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))
                 || player.getOpponents().size() != 1) return null;
         Player opponent = player.getOpponents().get(0);
         if (pending != null) {
+            // Every iteration must make public progress. On the drain route the
+            // draw itself is the damage, so the opponent's life is what must
+            // move, and our own life is spent by design rather than refunded.
             boolean stalled = pending.getApi() == ApiType.Draw
                     && (find(TOP, ZoneType.Battlefield) != null
-                        || player.getCardsIn(ZoneType.Library).size() != libraryBefore)
+                        || player.getCardsIn(ZoneType.Library).size() != libraryBefore
+                        || drain && opponent.getLife() >= opposingLifeBefore)
                     || pending.isSpell() && (find(TOP, ZoneType.Battlefield) == null
-                        || player.getLife() < lifeBefore)
+                        || !drain && player.getLife() < lifeBefore)
                     || pending.getApi() == ApiType.DealDamage && opponent.getLife() >= opposingLifeBefore;
             pending = null;
             if (stalled) {
@@ -164,6 +246,14 @@ public final class CubeTopPlan {
                 return null;
             }
         }
+        SpellAbility shot = shotRoute(opponent);
+        if (shot != null) return shot;
+        return drainRoute(opponent);
+    }
+
+    /** The life-shot outlet, unchanged: accumulate life with the Reservoir's
+     * own cast trigger and fire the fifty-life shot. */
+    private SpellAbility shotRoute(Player opponent) {
         Card reservoir = find(RESERVOIR, ZoneType.Battlefield);
         SpellAbility shot = ability(reservoir, ApiType.DealDamage);
         if (shot == null || opponent.getLife() <= 0 || opponent.getLife() > 50
@@ -176,32 +266,71 @@ public final class CubeTopPlan {
                 || shot.isSuppressed() || reservoir.isDetained()
                 || !shot.getRestrictions().canPlay(reservoir, shot)
                 || !shot.isLegalAfterStack() || !shot.checkRestrictions(reservoir, player)) return null;
-        if (player.getLife() > 50 && payable(shot)) return select(shot);
+        if (player.getLife() > 50 && payable(shot)) return select(shot, false);
         if (!knownLifeGainWorks(reservoir)) return null;
         // A native zero-cost/refunded recast preserves life for the finish.
         // This is a preference among feasible complete-loop plans, not a
         // blanket Mystic gate: an absent/suppressed reducer or unpaid seed
         // still falls through to the life-paid Citadel route.
-        for (String permission : java.util.List.of(MYSTIC, CITADEL)) {
-            Card engine = find(permission, ZoneType.Battlefield);
-            if (engine == null || engine.getStaticAbilities().stream().noneMatch(st -> st.hasParam("MayPlay")
-                    && !st.isSuppressed() && st.checkConditions(forge.game.staticability.StaticAbilityMode.Continuous))) continue;
-            SpellAbility next = nextLoopAction(permission);
-            if (next != null) return select(next);
+        for (Permission permission : permissions()) {
+            SpellAbility next = nextLoopAction(permission, 0);
+            if (next != null) return select(next, false);
         }
         return null;
     }
 
-    private SpellAbility nextLoopAction(String permission) {
+    /** The draw-drain outlet, reached only when no life-shot line is available.
+     * The win condition is entirely public: the opponent's life total against
+     * the draws this loop can still make, times the drain each draw deals. The
+     * budget discipline is the shot route's — a finite forecast re-taken every
+     * iteration, no progress means stop — and our own life gains are not
+     * counted, so the forecast declines lines it may in fact be able to finish
+     * rather than starting one it cannot. */
+    private SpellAbility drainRoute(Player opponent) {
+        drainOutlet = null;
+        int amount = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            amount = drainPerOwnDraw(card);
+            if (amount > 0) { drainOutlet = card; break; }
+        }
+        if (drainOutlet == null || opponent.getLife() <= 0
+                || opponent.cantLoseForZeroOrLessLife() || !opponent.canLoseLife()) return null;
+        int need = (opponent.getLife() + amount - 1) / amount;
+        for (Permission permission : permissions()) {
+            SpellAbility next = nextLoopAction(permission, need);
+            if (next != null) return select(next, true);
+        }
+        return null;
+    }
+
+    /** Count-only reach estimate for the drain outlet, not a claim of a forced
+     * win: the draws must exist, be legal to take, and the repeat payment must
+     * leave us alive for all of them. */
+    private boolean enoughDrain(Card top, int draws, boolean immediateRecast, Permission permission, int need) {
+        int casts = need + (immediateRecast ? 1 : 0);
+        if (!permission.lifeCost() && !sustainableManaRecast(top)) return false;
+        if (need > draws || !player.canDrawAmount(need)) return false;
+        if (permission.lifeCost() && player.getLife() - (long) casts <= 0) return false;
+        return castBudgetFits(top, casts);
+    }
+
+    /** {@code need == 0} selects the shot route's reach test; any other value
+     * is the number of further draws the drain route still has to make. */
+    private boolean enough(Card top, int draws, boolean immediateRecast, Permission permission, int need) {
+        return need == 0 ? enoughDraws(top, draws, immediateRecast, permission)
+                : enoughDrain(top, draws, immediateRecast, permission, need);
+    }
+
+    private SpellAbility nextLoopAction(Permission permission, int need) {
         Card top = find(TOP, ZoneType.Battlefield);
         int librarySize = player.getCardsIn(ZoneType.Library).size();
         if (top != null) {
             SpellAbility draw = ability(top, ApiType.Draw);
-            if (librarySize > 0 && enoughDraws(top, librarySize, false, permission) && payable(draw)) return draw;
+            if (librarySize > 0 && enough(top, librarySize, false, permission, need) && payable(draw)) return draw;
             return null;
         }
         top = find(TOP, ZoneType.Hand);
-        if (top != null && enoughDraws(top, librarySize, true, permission)) {
+        if (top != null && enough(top, librarySize, true, permission, need)) {
             SpellAbility spell = cast(top, false, permission);
             if (spell != null) return spell;
         }
@@ -209,7 +338,7 @@ public final class CubeTopPlan {
         // Taking the top object is not permission to inspect its identity.
         Card visibleTop = player.getCardsIn(ZoneType.Library).get(0);
         if (!visibleTop.mayPlayerLook(player) || visibleTop.isFaceDown()
-                || !TOP.equals(visibleTop.getName()) || !enoughDraws(visibleTop, librarySize - 1, true, permission)) return null;
+                || !TOP.equals(visibleTop.getName()) || !enough(visibleTop, librarySize - 1, true, permission, need)) return null;
         return cast(visibleTop, true, permission);
     }
 
@@ -235,7 +364,9 @@ public final class CubeTopPlan {
         if (selected == null || turn != player.getGame().getPhaseHandler().getTurn() || stack.isEmpty()) return false;
         var top = stack.peekAbility();
         return top != null && top.getActivatingPlayer() == player
-                && (top.getHostCard() == selected.getHostCard() || RESERVOIR.equals(top.getHostCard().getName())
+                && (top.getHostCard() == selected.getHostCard() || top.getHostCard() == drainOutlet
+                    || drain && top.isTrigger()
+                    || RESERVOIR.equals(top.getHostCard().getName())
                     || BIRGI.equals(top.getHostCard().getName()));
     }
 }
