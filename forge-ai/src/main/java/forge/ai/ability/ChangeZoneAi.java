@@ -753,6 +753,15 @@ public class ChangeZoneAi extends SpellAbilityAi {
         } else if (aiLogic.equals("Main1") && ph.is(PhaseType.MAIN1, ai)) {
             return true;
         } else if (aiLogic.equals("BeforeCombat")) {
+            // v52 D4, gated on the cube-combo seat so the Default arm is
+            // byte-identical: this native gate reads the PHASE only and never
+            // whose TURN it is, so Default puts a bomb onto the battlefield
+            // during the opponent's upkeep, where it can never attack, and the
+            // end-step trigger sacrifices it for nothing. CubeBombPlan adds the
+            // own-turn / empty-stack / can-actually-attack veto.
+            if (CubeBombPlan.declineCheatIn(ai, sa)) {
+                return false;
+            }
             return !ai.getGame().getPhaseHandler().getPhase().isAfter(PhaseType.COMBAT_BEGIN);
         }
 

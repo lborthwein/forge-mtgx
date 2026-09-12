@@ -84,6 +84,32 @@ public final class CubeBombLinesSmoke {
             "animate-emrakul:priest",
             "natural-order-hoof:torpor-orb"); // Craterhoof's ETB pump is blanked
 
+    /** v52 MUST-MOVE: the four lines the design's D1-D4 are expected to move,
+     * plus the two rows that must NOT regress (the `opp-hand` Show and Tell
+     * Default already casts, and the own-turn Sneak Attack Default already
+     * takes). Every name here is one of the positions above, so each row keeps
+     * its diagnosis seed and its Default receipt. */
+    private static final List<String> BOMBS = List.of(
+            "depths-stage",
+            "showtell-emrakul",
+            "showtell-emrakul:opp-hand",
+            "breach-emrakul",
+            "sneak-emrakul");
+
+    /** v52 MUST-NOT-MOVE: the design's controls plus the four the brief adds.
+     * `wasteland-tapout` and `bridge` and `rip-empty` are new positions. */
+    private static final List<String> GUARDS = List.of(
+            "depths-stage:no-mana",
+            "depths-stage:karakas",
+            "depths-stage:wasteland",
+            "depths-stage:wasteland-tapout",
+            "sneak-emrakul:priest",
+            "sneak-emrakul:karakas",
+            "breach-emrakul:priest",
+            "breach-emrakul:bridge",
+            "showtell-emrakul:priest",
+            "reanimate-griselbrand:rip-empty");
+
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone) {}
@@ -110,7 +136,11 @@ public final class CubeBombLinesSmoke {
                 case "depths-stage" -> {
                     result.add(new Placement(DEPTHS, ZoneType.Battlefield));
                     result.add(new Placement(STAGE, ZoneType.Battlefield));
-                    if (!noMana) for (int i = 0; i < 4; i++) result.add(new Placement("Forest", ZoneType.Battlefield));
+                    // `wasteland-tapout` is the design's SOFT Wasteland decline:
+                    // the same opponent answer, but only two Forests, so paying
+                    // the Stage's {2} leaves us with no mana at all.
+                    int forests = noMana ? 0 : variant.equals("wasteland-tapout") ? 2 : 4;
+                    for (int i = 0; i < forests; i++) result.add(new Placement("Forest", ZoneType.Battlefield));
                 }
                 case "depths-hexmage" -> {
                     result.add(new Placement(DEPTHS, ZoneType.Battlefield));
@@ -139,7 +169,15 @@ public final class CubeBombLinesSmoke {
                 }
                 case "reanimate-griselbrand" -> {
                     result.add(new Placement(REANIMATE, ZoneType.Hand));
-                    result.add(new Placement(GRISELBRAND, ZoneType.Graveyard));
+                    // `rip-empty` is the corrected graveyard-hate control. The
+                    // original `:rip` placed Rest in Peace straight onto the
+                    // battlefield, so its "exile all graveyards" ETB trigger
+                    // never ran and the graveyard was never emptied - the
+                    // invalid control the diagnosis recorded. This models the
+                    // state AFTER that trigger resolves: the hoser in play and
+                    // the reanimation target already exiled.
+                    result.add(new Placement(GRISELBRAND,
+                            variant.equals("rip-empty") ? ZoneType.Exile : ZoneType.Graveyard));
                     if (!noMana) for (int i = 0; i < 4; i++) result.add(new Placement("Swamp", ZoneType.Battlefield));
                 }
                 case "animate-emrakul" -> {
@@ -160,8 +198,10 @@ public final class CubeBombLinesSmoke {
                 case "priest" -> "Containment Priest";
                 case "karakas" -> "Karakas";
                 case "wasteland" -> "Wasteland";
-                case "rip" -> "Rest in Peace";
+                case "rip", "rip-empty" -> "Rest in Peace";
                 case "torpor-orb" -> "Torpor Orb";
+                case "wasteland-tapout" -> "Wasteland";
+                case "bridge" -> "Ensnaring Bridge";
                 default -> null;
             };
             if (permanent != null) {
@@ -263,6 +303,11 @@ public final class CubeBombLinesSmoke {
         Set<Integer> stackIds = new HashSet<>();
         int steps = 0, stageClones = 0, depthsRemovals = 0, hexmageRemovals = 0, sneakActivations = 0;
         int breachCasts = 0, showTellCasts = 0, reanimations = 0, naturalOrders = 0, karakasBounces = 0, wastelands = 0;
+        // v52 D4's registered receipt: our own AILogic$ BeforeCombat cheat-in
+        // resolved while it was NOT our turn, so the body can never attack and
+        // the end-step trigger throws it away. Default shows 1 on every MAIN2
+        // sneak row; the guarded arm must show 0.
+        int offTurnCheatIns = 0;
         int lowestIce = minIce(player), maxMarit = 0;
         String previous = "";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps < 600) {
@@ -275,8 +320,16 @@ public final class CubeBombLinesSmoke {
                 var sa = item.getSpellAbility();
                 String host = sa.getHostCard().getName();
                 boolean ours = sa.getActivatingPlayer() == player;
-                if (ours && host.equals(STAGE) && sa.isActivatedAbility()) stageClones++;
-                if (ours && host.equals(DEPTHS) && sa.isActivatedAbility()) depthsRemovals++;
+                // API-precise from v52: once the Stage copies Dark Depths both
+                // permanents answer to the same NAME, so the counters read the
+                // ability instead. Both were already exact for the diagnosis
+                // receipts (every Default row recorded stageClones=0 and the
+                // only activated ability Dark Depths has is the counter removal).
+                if (ours && host.equals(STAGE) && sa.getApi() == forge.game.ability.ApiType.Clone) stageClones++;
+                if (ours && sa.getApi() == forge.game.ability.ApiType.RemoveCounter && sa.isActivatedAbility()
+                        && sa.getHostCard().getName().equals(DEPTHS)) depthsRemovals++;
+                if (ours && "BeforeCombat".equals(sa.getParam("AILogic"))
+                        && !game.getPhaseHandler().isPlayerTurn(player)) offTurnCheatIns++;
                 if (ours && host.equals(HEXMAGE) && sa.isActivatedAbility()) hexmageRemovals++;
                 if (ours && host.equals(SNEAK) && sa.isActivatedAbility()) sneakActivations++;
                 if (ours && host.equals(BREACH) && sa.isSpell()) breachCasts++;
@@ -306,6 +359,7 @@ public final class CubeBombLinesSmoke {
                 + " breachCasts=" + breachCasts + " showTellCasts=" + showTellCasts
                 + " reanimations=" + reanimations + " naturalOrders=" + naturalOrders
                 + " karakasBounces=" + karakasBounces + " wastelands=" + wastelands
+                + " offTurnCheatIns=" + offTurnCheatIns
                 + " lowestIce=" + lowestIce + " maxMarit=" + maxMarit
                 + " payoffZone=" + zoneOf(player, payoff(control))
                 + " emrakulZone=" + zoneOf(player, EMRAKUL)
@@ -334,7 +388,8 @@ public final class CubeBombLinesSmoke {
             });
             for (String name : List.of(DEPTHS, STAGE, HEXMAGE, SNEAK, BREACH, SHOWTELL, EMRAKUL, GRISELBRAND,
                     HOOF, ORDER, REANIMATE, ANIMATE, ELVES, "Containment Priest", "Karakas", "Wasteland",
-                    "Rest in Peace", "Torpor Orb", "Grizzly Bears", "Forest", "Island", "Mountain", "Swamp", "Plains"))
+                    "Rest in Peace", "Torpor Orb", "Ensnaring Bridge", "Grizzly Bears",
+                    "Forest", "Island", "Mountain", "Swamp", "Plains"))
                 StaticData.instance().attemptToLoadCard(name);
             List<String> cases = args.length > 2 ? switch (args[2]) {
                 case "lines" -> LINES;
@@ -343,6 +398,8 @@ public final class CubeBombLinesSmoke {
                 case "cheat-in" -> List.of("sneak-emrakul", "breach-emrakul", "showtell-emrakul");
                 case "reanimator" -> List.of("reanimate-griselbrand", "animate-emrakul");
                 case "order" -> List.of("natural-order-hoof");
+                case "bombs" -> BOMBS;
+                case "guards" -> GUARDS;
                 default -> { var all = new ArrayList<>(LINES); all.addAll(CONTROLS); yield all; }
             } : LINES;
             for (int seat = 0; seat < 2; seat++) for (PhaseType phase : List.of(PhaseType.MAIN1, PhaseType.MAIN2))

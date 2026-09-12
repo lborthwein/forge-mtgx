@@ -24,6 +24,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     private final CubeKittenPlan kittenPlan;
     private final CubeTopPlan topPlan;
     private final CubeThopterPlan thopterPlan;
+    private final CubeBombPlan bombPlan;
     private int comboSelectionChanges;
     private CubeComboAi.TutorPlan tutorPlan;
     private int comboTutorPlanCasts;
@@ -58,12 +59,13 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         kittenPlan = new CubeKittenPlan(player);
         topPlan = new CubeTopPlan(player);
         thopterPlan = new CubeThopterPlan(player);
+        bombPlan = new CubeBombPlan(player);
     }
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         planAction = null;
-        if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell()) return null;
+        if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell()) return null;
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
@@ -76,6 +78,10 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (action == null && (action = kittenPlan.nextAction()) != null) plan = "kitten";
         if (action == null && (action = topPlan.nextAction()) != null) plan = "top";
         if (action == null && (action = thopterPlan.nextAction()) != null) plan = "thopter";
+        // v52 bomb family last of the plans, before the tutor forecast: it
+        // owns no piece any earlier plan can want, and placing it here keeps
+        // every existing family's selection order byte-identical.
+        if (action == null && (action = bombPlan.nextAction()) != null) plan = "bomb";
         if (action == null) {
             tutorConsulted = true;
             tutorPlan = CubeComboAi.planTutor(getPlayer());
@@ -200,6 +206,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (kittenPlan.owns(ability)) return kittenPlan.play(ability);
         if (topPlan.owns(ability)) return topPlan.play(ability);
         if (thopterPlan.owns(ability)) return thopterPlan.play(ability);
+        if (bombPlan.owns(ability)) return bombPlan.play(ability);
         return doomsdayPlan.withReservedDrawSource(ability, () -> super.playChosenSpellAbility(ability));
     }
 
