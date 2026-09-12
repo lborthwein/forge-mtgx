@@ -48,6 +48,8 @@ public final class CubeTwinAssemblySmoke {
     private static final String CONSCRIPTS = "Zealous Conscripts";
     private static final String ANGEL = "Restoration Angel";
     private static final String PYRO = "Young Pyromancer";
+    private static final String RECRUITER = "Imperial Recruiter";
+    private static final String TRINKET = "Trinket Mage";
 
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
@@ -68,6 +70,23 @@ public final class CubeTwinAssemblySmoke {
      * after the opponent's turn 1. */
     private static final List<String> SEAT1 = List.of("t2-partner-beside-decoy", "t3-hold");
 
+    /** design-v61 section 6: the five prepared cases of the conditioned hold,
+     * in their own suite so the nine v53 cases keep their exact receipt shape
+     * and the `twin` regression group stays comparable line for line. */
+    private static final List<String> HOLD_CASES = List.of(
+            "h1a-hold-castable",
+            "h1b-release-uncastable",
+            "h2a-hold-tutor",
+            "h2b-tutor-cannot-fetch",
+            "h2c-hold-then-assemble");
+
+    /** A stable, collision-free audit seed index across both case lists: the
+     * v53 cases keep the exact index they had, so their seeds - and therefore
+     * their whole receipt - cannot move. */
+    private static int caseIndex(String name) {
+        return CASES.contains(name) ? CASES.indexOf(name) : 20 + HOLD_CASES.indexOf(name);
+    }
+
     /** The Twin partner each case is about, for the receipt. A Twin partner is
      * an untap body; Restoration Angel is a Kiki partner only and t7 therefore
      * reports none. t8's Pestermite belongs to the opponent, so our own-zone
@@ -77,6 +96,10 @@ public final class CubeTwinAssemblySmoke {
             case "t1-partner-ready", "t6-kiki-parity", "t8-enemy-partner", "t9-hold-then-assemble" -> PEST;
             case "t2-partner-beside-decoy", "t3-hold" -> CONSCRIPTS;
             case "t5-both-in-hand" -> EXARCH;
+            // v61: h2a and h2b register no Twin partner anywhere in the 40 -
+            // h2a is the row that proves the hold decision does not read the
+            // library, so "none" there is the point of the row.
+            case "h1a-hold-castable", "h1b-release-uncastable", "h2c-hold-then-assemble" -> PEST;
             default -> "none";
         };
     }
@@ -85,6 +108,10 @@ public final class CubeTwinAssemblySmoke {
      * The design's default is "this turn and the opponent's answer"; t5 and t9
      * are the two cases whose line cannot complete before our next turn. */
     private static int extraTurns(String name) {
+        // h2c needs the turn the tutor is cast on, the opponent's answer, and
+        // our own next turn - the first on which the Aura and the fetched body
+        // can both be paid for - with one spare pair of turns.
+        if (name.equals("h2c-hold-then-assemble")) return 4;
         return name.equals("t5-both-in-hand") || name.equals("t9-hold-then-assemble") ? 2 : 1;
     }
 
@@ -157,6 +184,57 @@ public final class CubeTwinAssemblySmoke {
                 // Added to the library first, so it is the top card and the
                 // next draw is a known land rather than an unknown filler.
                 result.add(new Placement("Island", ZoneType.Library));
+            }
+            // ---- design-v61, the conditioned hold. Splinter Twin is {2}{R}{R},
+            // so every board that can cast the Aura has red; a Twin partner is
+            // out of colour only when it is one of the two BLUE bodies on a
+            // board with no blue, which is exactly h1b.
+            case "h1a-hold-castable" -> {
+                result.add(new Placement(PYRO, ZoneType.Battlefield));
+                result.add(new Placement(TWIN, ZoneType.Hand));
+                result.add(new Placement(PEST, ZoneType.Hand));
+                // Pestermite is {2}{U} against two Islands: in colour, and
+                // CMC 3 <= 4 sources + 2. H1 keeps v60's hold.
+                lands(result, 2, 2, 0);
+            }
+            case "h1b-release-uncastable" -> {
+                result.add(new Placement(PYRO, ZoneType.Battlefield));
+                result.add(new Placement(TWIN, ZoneType.Hand));
+                // The same hand and the same partner as h1a, on a board with no
+                // blue source anywhere - not in play and not in hand. One
+                // printed fact differs between the two rows.
+                result.add(new Placement(PEST, ZoneType.Hand));
+                lands(result, 4, 0, 0);
+            }
+            case "h2a-hold-tutor" -> {
+                result.add(new Placement(PYRO, ZoneType.Battlefield));
+                result.add(new Placement(TWIN, ZoneType.Hand));
+                // Imperial Recruiter searches Creature.powerLE2, which admits
+                // Pestermite and Deceiver Exarch. NO Twin partner is registered
+                // anywhere in these 40 cards: the hold must still fire, because
+                // the decision reads the tutor's printed text and never the
+                // library.
+                result.add(new Placement(RECRUITER, ZoneType.Hand));
+                lands(result, 2, 2, 0);
+            }
+            case "h2b-tutor-cannot-fetch" -> {
+                result.add(new Placement(PYRO, ZoneType.Battlefield));
+                result.add(new Placement(TWIN, ZoneType.Hand));
+                // Trinket Mage is the same shape of tutor with a ChangeType
+                // that cannot name a creature at all (Artifact.cmcLE1).
+                result.add(new Placement(TRINKET, ZoneType.Hand));
+                lands(result, 2, 2, 0);
+            }
+            case "h2c-hold-then-assemble" -> {
+                result.add(new Placement(PYRO, ZoneType.Battlefield));
+                result.add(new Placement(TWIN, ZoneType.Hand));
+                result.add(new Placement(RECRUITER, ZoneType.Hand));
+                // Six lands: the tutor ({2}{R}) and the body it fetches ({2}{U})
+                // are both payable on the prepared turn, and the Aura is not.
+                lands(result, 3, 3, 0);
+                // Added first, so it is the top card; the search itself is a
+                // native library search and shuffles afterwards.
+                result.add(new Placement(PEST, ZoneType.Library));
             }
             default -> throw new AssertionError("unknown case " + name);
         }
@@ -234,12 +312,37 @@ public final class CubeTwinAssemblySmoke {
      * observability only and are never read by a decision; counting them here
      * is a test-side read of the log this JVM is already writing, and every
      * line still reaches the real stderr unchanged. */
-    private static int holdLines;
+    private static int holdLines, releaseLines;
+    private static String holdReason = "none", holdSubject = "none",
+            releaseReason = "none", releaseSubject = "none";
+
+    /** The first value of a {@code key=} token on a CUBE_TWIN_* line, or
+     * {@code unset} when the line does not carry that key - which is what the
+     * matched v60 control's own line shape produces, and is recorded rather
+     * than repaired. */
+    private static String tokenOf(String line, String... keys) {
+        for (String part : line.trim().split(" "))
+            for (String key : keys) if (part.startsWith(key + "=")) return part.substring(key.length() + 1);
+        return "unset";
+    }
 
     private static final class CountingErr extends PrintStream {
         CountingErr(PrintStream sink) { super(sink, true); }
         @Override public void println(String line) {
-            if (line != null && line.startsWith("CUBE_TWIN_HOLD")) holdLines++;
+            if (line != null && line.startsWith("CUBE_TWIN_HOLD")) {
+                holdLines++;
+                if (holdReason.equals("none")) {
+                    holdReason = tokenOf(line, "reason");
+                    holdSubject = tokenOf(line, "partner", "tutor", "partnerInHand");
+                }
+            }
+            if (line != null && line.startsWith("CUBE_TWIN_RELEASE")) {
+                releaseLines++;
+                if (releaseReason.equals("none")) {
+                    releaseReason = tokenOf(line, "reason");
+                    releaseSubject = tokenOf(line, "partner");
+                }
+            }
             super.println(line);
         }
     }
@@ -266,8 +369,9 @@ public final class CubeTwinAssemblySmoke {
                 () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player, startTurn));
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
-        BenchRandomAudit.install(53000L + seat * 100L + CASES.indexOf(name));
-        holdLines = 0;
+        BenchRandomAudit.install(53000L + seat * 100L + caseIndex(name));
+        holdLines = 0; releaseLines = 0;
+        holdReason = "none"; holdSubject = "none"; releaseReason = "none"; releaseSubject = "none";
         int bound = startTurn + extraTurns(name);
         String key = "arm=" + (improved ? "improved" : "baseline") + " seat=" + seat
                 + " phase=MAIN1 case=" + name;
@@ -334,6 +438,13 @@ public final class CubeTwinAssemblySmoke {
                 + " partner=" + partner.replace(' ', '_') + " partnerZone=" + zoneOf(body)
                 + " partnerTokens=" + tokensNamed(player, partner)
                 + " life=" + player.getLife() + " opponentLife=" + opponent.getLife());
+        // v61: the conditioned-hold receipt, printed ONLY for the new cases, so
+        // every TWIN_RESULT row of the v53 suite keeps its exact shape.
+        if (HOLD_CASES.contains(name))
+            System.out.println("TWIN_HOLD_RESULT " + key + " holdLines=" + holdLines
+                    + " releaseLines=" + releaseLines + " holdReason=" + holdReason
+                    + " holdSubject=" + holdSubject + " releaseReason=" + releaseReason
+                    + " releaseSubject=" + releaseSubject);
     }
 
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
@@ -350,6 +461,7 @@ public final class CubeTwinAssemblySmoke {
             case "assembly" -> List.of("t1-partner-ready", "t2-partner-beside-decoy", "t5-both-in-hand",
                     "t6-kiki-parity", "t9-hold-then-assemble");
             case "parity" -> List.of("t3-hold", "t4-no-partner-parity", "t7-resto-not-partner", "t8-enemy-partner");
+            case "hold" -> HOLD_CASES;
             default -> CASES;
         };
         for (String name : selected) rows.add(new Row(0, name));
@@ -373,7 +485,7 @@ public final class CubeTwinAssemblySmoke {
                 return null;
             });
             for (String card : List.of(TWIN, KIKI, PEST, EXARCH, CONSCRIPTS, ANGEL, PYRO,
-                    "Forest", "Island", "Mountain", "Plains"))
+                    RECRUITER, TRINKET, "Forest", "Island", "Mountain", "Plains"))
                 StaticData.instance().attemptToLoadCard(card);
             List<Row> rows = rows(args.length > 2 ? args[2] : "twin");
             for (Row row : rows) run(args[1].equals("improved"), row.seat(), row.name());
