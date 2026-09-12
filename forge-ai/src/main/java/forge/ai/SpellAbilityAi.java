@@ -79,6 +79,15 @@ public abstract class SpellAbilityAi {
     private AiAbilityDecision canPlayWithoutRestrict(final Player ai, final SpellAbility sa) {
         final Card source = sa.getHostCard();
 
+        // v52 D3, gated on the cube-combo seat so the Default arm is
+        // byte-identical: a non-targeted counter removal on one of our own
+        // permanents whose payoff is that counter reaching zero is worthless
+        // unless it can reach zero. Default falls through to the generic "80%
+        // chance to play the ability" fallback below and burns the mana.
+        if (CubeBombPlan.declineCounterRemoval(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         if (sa.hasParam("AILogic")) {
             final String logic = sa.getParam("AILogic");
             final boolean alwaysOnDiscard = "AlwaysOnDiscard".equals(logic) && ai.getGame().getPhaseHandler().is(PhaseType.END_OF_TURN, ai)
