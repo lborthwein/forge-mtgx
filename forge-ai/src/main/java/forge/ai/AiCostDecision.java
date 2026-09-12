@@ -626,12 +626,12 @@ public class AiCostDecision extends CostDecisionMakerBase {
      * the SAME method and refuses the cast when it returns null.</p>
      *
      * <p>Scope: {@link CubeBombPlan#ownsTinkerSacrifice} - a cube-combo seat,
-     * OUR OWN spell, v71's printed {@code tinkerShape}, this very spell's own
-     * artifact sacrifice by OBJECT IDENTITY, and the bomb plan's value floor
-     * passing, which is exactly the state in which that plan's veto path
-     * examined this cast and let it through. Gated on
-     * {@code CubeComboAi.enabled} first, so the Default arm is
-     * byte-identical.</p>
+     * OUR OWN spell, v71's printed {@code tinkerShape}, a cost part with the same
+     * printed type and amount as that spell's own artifact sacrifice (NOT object
+     * identity - the payment is handed a COPY; see that method's Amendment 1),
+     * and the bomb plan's value floor passing, which is exactly the state in
+     * which that plan's veto path examined this cast and let it through. Gated
+     * on {@code CubeComboAi.enabled} first, so the Default arm is byte-identical.</p>
      *
      * <p>Own battlefield only; no opponent zone is read, and the payload test
      * reads our own library exactly as {@code CubeBombPlan}'s v71 value floor
