@@ -39,9 +39,15 @@ public final class CubeBreachPlan {
 
     public CubeBreachPlan(Player player) { this.player = player; }
 
+    /** v49, predicate-only: one hand card this instance must pretend it does
+     * not have, so {@link #discardProtectedCards} can ask the plan's own gate
+     * what it would say without that card. Set only on the throwaway instances
+     * the two static predicates build; the live plan never sets it. */
+    private Card excluded;
+
     private Card find(String name, ZoneType zone) {
         for (Card card : player.getCardsIn(zone))
-            if (!card.isFaceDown() && name.equals(card.getName())) return card;
+            if (card != excluded && !card.isFaceDown() && name.equals(card.getName())) return card;
         return null;
     }
 
@@ -96,9 +102,12 @@ public final class CubeBreachPlan {
      * hand, battlefield and graveyard and our own library SIZE only; never
      * library contents or order, never an opponent zone. */
     static java.util.List<String> completingPieceNames(Player player) {
-        CubeBreachPlan plan = new CubeBreachPlan(player);
-        int fuel = plan.fuel();
-        boolean engine = plan.engine() != null, freeze = plan.freeze() != null, breach = plan.breachReady(fuel);
+        return new CubeBreachPlan(player).missingPieces();
+    }
+
+    private java.util.List<String> missingPieces() {
+        int fuel = fuel();
+        boolean engine = engine() != null, freeze = freeze() != null, breach = breachReady(fuel);
         if ((engine ? 1 : 0) + (freeze ? 1 : 0) + (breach ? 1 : 0) != 2) return java.util.List.of();
         if (!freeze) return java.util.List.of(FREEZE);
         if (!engine) return ENGINES;
@@ -106,6 +115,43 @@ public final class CubeBreachPlan {
         // selection where the hand route's own gate would then be satisfied.
         return fuel >= 6 && player.getCardsIn(ZoneType.Library).size() >= 4
                 ? java.util.List.of(BREACH) : java.util.List.of();
+    }
+
+    /** v49: is this plan's entry gate currently complete - Brain Freeze, a
+     * Lotus-type engine and a usable Underworld Breach, each where the plan can
+     * use it? The single definition, read by {@link #discardProtectedCards} so
+     * the protection cannot drift from {@link #breachReady}'s own thresholds. */
+    private boolean gateReady() {
+        int fuel = fuel();
+        return engine() != null && freeze() != null && breachReady(fuel);
+    }
+
+    /** v49, the Breach-diagnosis C2 shape: cards in our own hand that are the
+     * LAST copy this plan can reach of a half of an entry gate that is
+     * otherwise ready. Empty unless the gate is complete right now, and a card
+     * is named only when the same gate stops being complete once that card is
+     * taken away - which is exactly "last obtainable copy", computed from the
+     * plan's own zone definitions rather than a card-name rule.
+     *
+     * <p>Deliberately narrow, and deliberately NOT "never discard a combo
+     * piece": a copy still on the battlefield or in the graveyard, where
+     * {@link #engine} and {@link #freeze} already accept it, is not named; a
+     * gate that is already a card short is not defended; and the extra
+     * graveyard fuel the discard would itself supply is not modelled, so a half
+     * that would only become ready BECAUSE of the discard is never protected.
+     * Own hand, battlefield and graveyard and our own library SIZE only.</p> */
+    static CardCollection discardProtectedCards(Player player) {
+        CardCollection kept = new CardCollection();
+        CubeBreachPlan plan = new CubeBreachPlan(player);
+        if (!plan.gateReady()) return kept;
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            plan.excluded = card;
+            boolean stillReady = plan.gateReady();
+            boolean stillCompletable = !plan.missingPieces().isEmpty();
+            plan.excluded = null;
+            if (!stillReady && stillCompletable) kept.add(card);
+        }
+        return kept;
     }
 
     private CardCollection escapeChoices(CostExile cost, SpellAbility ability) {

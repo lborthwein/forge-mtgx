@@ -237,23 +237,78 @@ public final class CubeDoomsdayPlan {
      * already kills us across it. Public battlefield only, exact formula:
      * <pre>
      *   lifeAfter = life - ceil(life / 2)   // doomsday.txt Y = YourLifeTotal/HalfUp
-     *   clock     = sum of getNetPower() over every creature the opponent
-     *               controls, tapped included, because a tapped creature untaps
-     *               in its controller's untap step and can still attack
-     *   blockers  = our untapped creatures only, because ours do not untap
-     *               before the opponent's attack step
-     *   survivable iff blockers &gt; 0 || clock &lt; lifeAfter
+     *   attackers = every creature the opponent controls, tapped included,
+     *               because a tapped creature untaps in its controller's untap
+     *               step and can still attack
+     *   k         = our untapped creatures that native CombatUtil.canBlock
+     *               permits against at least one of those attackers; ours only,
+     *               because our creatures do not untap before their attack step
+     *   clock     = sum of the attacker powers left after the k LARGEST are
+     *               absorbed, one per blocker
+     *   survivable iff clock &lt; lifeAfter
      * </pre>
+     *
+     * <p>v49 R1 replaces v44's {@code blockers &gt; 0} short-circuit, which
+     * credited any single untapped creature with full immunity: two 1/1s were
+     * treated as an answer to four attackers, the position the v47 analysis
+     * recorded as the 16701484-s0 loss. An absorption count is the same public
+     * read, counted. It is still deliberately optimistic - trample, evasion,
+     * multiple blocks, removal and combat tricks are all ignored and every
+     * blocker is credited with eating a whole attacker - so it can only ever
+     * decline a position the old short-circuit already allowed, never commit
+     * one it refused: with {@code k = 0} the arithmetic is identical to v44's.
+     * </p>
+     *
      * Power and creature type are public even for a face-down permanent, so no
      * hidden identity is read. */
     private boolean clockSurvivable() {
-        for (Card card : player.getCardsIn(ZoneType.Battlefield))
-            if (card.isCreature() && card.isUntapped()) return true;
-        int clock = 0;
+        CardCollection attackers = new CardCollection();
         for (Player opponent : player.getOpponents())
             for (Card card : opponent.getCardsIn(ZoneType.Battlefield))
-                if (card.isCreature()) clock += Math.max(0, card.getNetPower());
+                if (card.isCreature()) attackers.add(card);
+        int blockers = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (card.isCreature() && card.isUntapped() && CombatUtil.canBlockAtLeastOne(card, attackers)) blockers++;
+        java.util.List<Integer> powers = new java.util.ArrayList<>();
+        for (Card card : attackers) powers.add(Math.max(0, card.getNetPower()));
+        powers.sort(java.util.Comparator.reverseOrder());
+        int clock = 0;
+        for (int i = blockers; i < powers.size(); i++) clock += powers.get(i);
         return clock < player.getLife() - (player.getLife() + 1) / 2;
+    }
+
+    /** v49 R2: own battlefield permanents that could pay one of Oracle's blue
+     * pips on our next turn. Exactly the two native reads the plan already
+     * makes elsewhere, combined - {@link #ownVisibleBlack}'s
+     * {@code getManaPart() != null && canProduce(...)} and
+     * {@link #oracleThreshold}'s exclusion of a mana ability whose cost
+     * contains a {@link forge.game.cost.CostSacrifice} part - and nothing else.
+     *
+     * <p>Tapped-ness is deliberately ignored: route 2 casts Oracle after our
+     * own untap step, so a tapped land is a source then. Sources are counted,
+     * never amounts, so one double-blue source under-promises rather than
+     * over-promising, and a sacrifice source (a Lotus Petal that Doomsday's own
+     * payment may consume this turn) is not counted at all. Pure reads of our
+     * own public battlefield: no payment probe, no RNG, no state change.</p> */
+    private int ownBlueSources() {
+        int sources = 0;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            for (SpellAbility original : card.getManaAbilities()) {
+                // Copy with us as the activator, exactly as floatBlue and
+                // permanentManaAbility already do. An intrinsic ability carries
+                // no activating player, and asking a non-producing one whether
+                // it could make U makes the engine fall back to the host's
+                // controller and log it; the copy is the same native read
+                // without that side effect.
+                SpellAbility ability = original.copy(player);
+                if (ability.getManaPart() == null || !ability.canProduce("U")) continue;
+                if (ability.getPayCosts().getCostParts().stream()
+                        .anyMatch(cost -> cost instanceof forge.game.cost.CostSacrifice)) continue;
+                sources++;
+                break;
+            }
+        }
+        return sources;
     }
 
     /** Unlike a Doomsday search, drawing cannot recover a graveyard copy. */
@@ -382,6 +437,12 @@ public final class CubeDoomsdayPlan {
         if (threshold < 4 || !player.canDrawAmount(1)) return null;
         if (lethalOnBoard(false)) { decline = "better-attack"; return null; }
         if (!clockSurvivable()) { decline = "clock"; return null; }
+        // v49 R2, evaluated LAST so that every pre-existing decline keeps its
+        // own token: route 2 buys an Oracle it must still be able to cast next
+        // turn, and v44 never checked the UU it is buying. Two own visible blue
+        // sources is the gate; the decline stays the caller's `fallback` token
+        // (`no-pile-route`), so the grammar is unchanged.
+        if (ownBlueSources() < 2) return null;
         return commitDoomsday(doom);
     }
 
@@ -484,8 +545,11 @@ public final class CubeDoomsdayPlan {
                 && payableAfterBridge(bridge, gushRouteCost)) return "gush";
         if (inHand("Thassa's Oracle") != null)
             return oracleThreshold(false) >= 5 && payableAfterBridge(bridge, gushRouteCost) ? "route1" : null;
-        return oracleThreshold(false) >= 4 && player.canDrawAmount(1) && payableAfterBridge(bridge, doomCost)
-                ? "route2" : null;
+        // v49 R2 applies to the forecast too: a bridge must not buy a route 2
+        // whose Oracle we could not pay for. Where it refuses, no bridge is
+        // found and the decline stays `mana:BBB/<black>` byte for byte.
+        return oracleThreshold(false) >= 4 && player.canDrawAmount(1) && ownBlueSources() >= 2
+                && payableAfterBridge(bridge, doomCost) ? "route2" : null;
     }
 
     /** Design v43 section A route 3, the ritual bridge. Doomsday is in hand and
@@ -648,6 +712,48 @@ public final class CubeDoomsdayPlan {
 
     public boolean ownsPileDecision(SpellAbility source) {
         return stage == Stage.DOOMSDAY && source.getHostCard().getId() == doomsdayId;
+    }
+
+    /** v49: is the plan still holding a pile it built, waiting for the Oracle
+     * that pile put on top? {@link #oracleSelected} is set only by
+     * {@link #choosePileCard}, i.e. only by our own resolving Doomsday, and is
+     * cleared only by {@link #commitDoomsday}, so it is the durable record of
+     * "the last Doomsday we cast searched Oracle into the pile". The rest is
+     * re-derived from live state each time, never remembered: the library is
+     * still the pile (or smaller), and Oracle is still somewhere a draw can
+     * reach it.
+     *
+     * <p>{@link #stage} deliberately is NOT the marker. The hold outlives it:
+     * the plan's own post-Doomsday pass ends with {@code stage = NONE} as soon
+     * as it cannot act this turn ({@code other check=post-doomsday-draw}), and
+     * the hazard this guards - the v47 analysis's 16701482-s0 - arrived on a
+     * later priority pass of that same turn and could equally arrive on a later
+     * turn. Reads our own hand, our own deck composition and our own library
+     * SIZE only.</p> */
+    private boolean holdingPile() {
+        return oracleSelected && player.getCardsIn(ZoneType.Library).size() <= 5
+                && reachableByDrawing("Thassa's Oracle");
+    }
+
+    /** v49: which cards in our own hand this plan is currently relying on, for
+     * the controller's discard-choice ownership. Empty unless
+     * {@link #holdingPile()} - so a plan that never cast Doomsday, or whose
+     * pile is spent or broken, owns no discard and the ordinary AI's choice
+     * stands untouched.
+     *
+     * <p>The route pieces are the pile's own: Thassa's Oracle always, and Gush
+     * additionally when {@link #choosePileCard} actually put a Gush in the pile
+     * ({@link #gushSelected}). This is not a preserve rule for a card name - it
+     * names only cards the plan put into a pile it is still holding, it expires
+     * with that pile, and it never blocks the discard itself when no legal
+     * alternative exists. Own-visible information only.</p> */
+    public CardCollection discardProtectedCards() {
+        CardCollection kept = new CardCollection();
+        if (!holdingPile()) return kept;
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.getName().equals("Thassa's Oracle") || gushSelected && card.getName().equals("Gush")) kept.add(card);
+        }
+        return kept;
     }
 
     public Card choosePileCard(CardCollection legalChoices) {

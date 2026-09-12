@@ -27,9 +27,15 @@ public final class CubeStormPlan {
 
     public CubeStormPlan(Player player) { this.player = player; }
 
+    /** v49, predicate-only: one hand card this instance must pretend it does
+     * not have, so {@link #discardProtectedCards} can ask the plan's own gate
+     * what it would say without that card. Set only on the throwaway instances
+     * the two static predicates build; the live plan never sets it. */
+    private Card excluded;
+
     private Card find(String name, ZoneType zone) {
         for (Card card : player.getCardsIn(zone))
-            if (!card.isFaceDown() && name.equals(card.getName())) return card;
+            if (card != excluded && !card.isFaceDown() && name.equals(card.getName())) return card;
         return null;
     }
 
@@ -83,10 +89,47 @@ public final class CubeStormPlan {
      * Will-cast gate (a replayable rock and a spell in our graveyard) is this
      * plan's business on the turn it acts, not the selection's. */
     static java.util.List<String> completingPieceNames(Player player) {
-        CubeStormPlan plan = new CubeStormPlan(player);
-        boolean will = plan.will() != null, finisher = plan.finisher() != null;
+        return new CubeStormPlan(player).missingPieces();
+    }
+
+    private java.util.List<String> missingPieces() {
+        boolean will = will() != null, finisher = finisher() != null;
         if (will == finisher) return java.util.List.of();
         return java.util.List.of(will ? TENDRILS : WILL);
+    }
+
+    /** v49: is this plan's entry gate currently complete - both halves where
+     * the plan can use them? The single definition, read by
+     * {@link #discardProtectedCards} so the protection cannot drift from
+     * {@link #missingPieces}'s own asymmetry (the Will from hand only; Tendrils
+     * from hand or graveyard). */
+    private boolean gateReady() { return will() != null && finisher() != null; }
+
+    /** v49, the Breach-diagnosis C2 shape: cards in our own hand that are the
+     * LAST copy this plan can reach of a half of an entry gate that is
+     * otherwise ready. Empty unless the gate is complete right now, and a card
+     * is named only when the same gate stops being complete once that card is
+     * taken away - which is exactly "last obtainable copy", computed from the
+     * plan's own zone definitions rather than a card-name rule.
+     *
+     * <p>Deliberately narrow, and deliberately NOT "never discard a combo
+     * piece": a redundant second copy in a zone the half already accepts is not
+     * named, a gate that is already a card short is not defended (breaking a
+     * complete gate is the registered shape; widening to a speculative one is
+     * not), and a gate that cannot be completed at all names nothing. Own hand
+     * and own graveyard only.</p> */
+    static forge.game.card.CardCollection discardProtectedCards(Player player) {
+        forge.game.card.CardCollection kept = new forge.game.card.CardCollection();
+        CubeStormPlan plan = new CubeStormPlan(player);
+        if (!plan.gateReady()) return kept;
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            plan.excluded = card;
+            boolean stillReady = plan.gateReady();
+            boolean stillCompletable = !plan.missingPieces().isEmpty();
+            plan.excluded = null;
+            if (!stillReady && stillCompletable) kept.add(card);
+        }
+        return kept;
     }
 
     private boolean knownDraw() {

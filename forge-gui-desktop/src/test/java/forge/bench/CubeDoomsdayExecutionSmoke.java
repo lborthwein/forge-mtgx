@@ -942,6 +942,330 @@ public final class CubeDoomsdayExecutionSmoke {
             throw new AssertionError("Default arm unexpectedly won with Oracle: " + kase);
     }
 
+    // ------------------------------------------------------------------ v49
+    private static final boolean TIGHTEN_STRICT = Boolean.getBoolean("forge.test.requireDoomsdayTighten");
+    private static final boolean DISCARD_STRICT = Boolean.getBoolean("forge.test.requireComboDiscard");
+
+    /** v49 R1/R2 controls. Route-2 boards only, both seats and both mains. The
+     * fixture specifies zones, tapped states and life totals - never a game
+     * action - exactly like {@link #naturalRun}. These live in their own suite
+     * rather than extending `passturn`, so every pre-existing suite log stays
+     * byte-identical. */
+    private static final List<String> TIGHTEN_CASES = List.of("clock-chump", "clock-absorbed",
+            "one-blue-source", "two-blue-sources", "petal-only-blue", "petal-consumed", "tapped-two-sources");
+
+    private static boolean tightenProposes(String kase) {
+        return switch (kase) {
+            case "clock-absorbed", "two-blue-sources", "tapped-two-sources" -> true;
+            default -> false;
+        };
+    }
+
+    /** The plan's own discard-swap count, read reflectively so this same source
+     * can run against the frozen v47 classes, where the field does not exist,
+     * and record -1 instead of failing. */
+    private static int discardSwaps(boolean reset) {
+        try {
+            var field = Class.forName("forge.ai.CubeComboPlayerController").getDeclaredField("comboDiscardSwaps");
+            field.setAccessible(true);
+            int value = field.getInt(null);
+            if (reset) field.setInt(null, 0);
+            return value;
+        } catch (final ReflectiveOperationException | LinkageError absent) {
+            return -1;
+        }
+    }
+
+    private static void tightenRun(int seat, String kase) {
+        List<Placement> own = new ArrayList<>(), other = new ArrayList<>();
+        own.add(new Placement("Doomsday", ZoneType.Hand, false));
+        // `petal-consumed` is one black source short of Doomsday's own BBB, so
+        // the payment must eat a Petal: that is the analysis's actual
+        // `passturn-petal-only` premise, which `petal-only-blue` (three Swamps,
+        // both Petals surviving) turns out NOT to be.
+        for (int i = 0; i < (kase.equals("petal-consumed") ? 2 : 3); i++)
+            own.add(new Placement("Swamp", ZoneType.Battlefield, false));
+        // The blue half of the board is the whole point of R2: count the own
+        // battlefield permanents that could pay one of Oracle's pips next turn.
+        switch (kase) {
+            case "one-blue-source" -> own.add(new Placement("Island", ZoneType.Battlefield, false));
+            case "two-blue-sources" -> {
+                own.add(new Placement("Island", ZoneType.Battlefield, false));
+                own.add(new Placement("Underground Sea", ZoneType.Battlefield, false));
+            }
+            case "petal-only-blue", "petal-consumed" -> {
+                own.add(new Placement("Lotus Petal", ZoneType.Battlefield, false));
+                own.add(new Placement("Lotus Petal", ZoneType.Battlefield, false));
+            }
+            default -> {
+                for (int i = 0; i < 2; i++)
+                    own.add(new Placement("Island", ZoneType.Battlefield, kase.equals("tapped-two-sources")));
+            }
+        }
+        // Two public blue pips, tapped in the clock cases so that the only
+        // untapped creatures we control are the blockers under test.
+        boolean tappedPips = kase.startsWith("clock");
+        for (String name : List.of("Emry, Lurker of the Loch", "Faerie Mastermind"))
+            own.add(new Placement(name, ZoneType.Battlefield, tappedPips));
+        // Vanilla 1/1s, deliberately with NO mana ability: probe-1 used Elvish
+        // Mystic, whose green mana funded Faerie Mastermind's {3}{U} draw on
+        // turn 1 and moved `libraryBeforeOracle` from 4 to 3. A control board
+        // must not contain the answer to its own premise.
+        if (kase.startsWith("clock"))
+            for (int i = 0; i < 2; i++) own.add(new Placement("Mons's Goblin Raiders", ZoneType.Battlefield, false));
+        own.add(new Placement("Thassa's Oracle", ZoneType.Library, false));
+        for (int i = 0; i < 24; i++) own.add(new Placement("Forest", ZoneType.Library, false));
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        // The opposing clock is read as public power only, so the 16701484-s0
+        // board (6 + 2 + 2 + 2 = 12) is reproduced by power, not by card
+        // identity; `clock-absorbed` is the same shape the k blockers do cover.
+        if (kase.equals("clock-chump")) {
+            other.add(new Placement("Old One Eye", ZoneType.Battlefield, false));
+            for (int i = 0; i < 3; i++) other.add(new Placement("Grizzly Bears", ZoneType.Battlefield, false));
+        }
+        if (kase.equals("clock-absorbed"))
+            for (int i = 0; i < 2; i++) other.add(new Placement("Grizzly Bears", ZoneType.Battlefield, false));
+        while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player p = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
+        if (kase.equals("clock-chump")) p.setLife(4, null);
+        if (kase.equals("clock-absorbed")) p.setLife(12, null);
+        game.getAction().checkStateEffects(true);
+        game.getTriggerHandler().resetActiveTriggers();
+        // Premises, computed from the same public reads the guard uses and
+        // asserted before the plan is consulted.
+        int blockers = 0, clockTotal = 0, blueSources = 0;
+        List<Integer> powers = new ArrayList<>();
+        for (Card card : opponent.getCardsIn(ZoneType.Battlefield))
+            if (card.isCreature()) { powers.add(Math.max(0, card.getNetPower())); clockTotal += Math.max(0, card.getNetPower()); }
+        for (Card card : p.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isCreature() && card.isUntapped()) blockers++;
+            for (var original : card.getManaAbilities()) {
+                var ability = original.copy(p);
+                if (ability.getManaPart() == null || !ability.canProduce("U")) continue;
+                if (ability.getPayCosts().getCostParts().stream()
+                        .anyMatch(cost -> cost instanceof forge.game.cost.CostSacrifice)) continue;
+                blueSources++;
+                break;
+            }
+        }
+        powers.sort(java.util.Comparator.reverseOrder());
+        int unabsorbed = 0;
+        for (int i = blockers; i < powers.size(); i++) unabsorbed += powers.get(i);
+        int lifeAfter = p.getLife() - (p.getLife() + 1) / 2;
+        if (kase.equals("clock-chump") && !(blockers == 2 && clockTotal == 12 && unabsorbed >= lifeAfter))
+            throw new AssertionError("clock-chump premise: blockers=" + blockers + " clock=" + clockTotal
+                    + " unabsorbed=" + unabsorbed + " lifeAfter=" + lifeAfter);
+        if (kase.equals("clock-absorbed") && !(blockers == 2 && clockTotal > 0 && unabsorbed < lifeAfter))
+            throw new AssertionError("clock-absorbed premise: blockers=" + blockers + " unabsorbed=" + unabsorbed);
+        int expectedBlue = switch (kase) {
+            case "one-blue-source" -> 1;
+            case "petal-only-blue", "petal-consumed" -> 0;
+            default -> 2;
+        };
+        if (blueSources != expectedBlue)
+            throw new AssertionError("Blue-source premise wrong for " + kase + ": " + blueSources);
+        boolean proposes = tightenProposes(kase);
+        BenchRandomAudit.install(0); // Fixed constructed fixture, not a sampled opening.
+        var proposed = new forge.ai.CubeDoomsdayPlan(p).nextAction();
+        String action = proposed == null ? "none" : proposed.getHostCard().getName();
+        System.out.println("TIGHTEN_PROPOSAL suite=tighten improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " main2=" + main2 + " case=" + kase
+                + " life=" + p.getLife() + " lifeAfterDoomsday=" + lifeAfter
+                + " visibleClock=" + clockTotal + " blockers=" + blockers + " unabsorbedClock=" + unabsorbed
+                + " ownBlueSources=" + blueSources + " mustMove=" + proposes + " action=" + action);
+        if (improved && TIGHTEN_STRICT && proposes != action.equals("Doomsday"))
+            throw new AssertionError("Tighten proposal mismatch: " + kase + " main2=" + main2 + " -> " + action);
+        int steps = 0, limit = 1500;
+        boolean doom = false, pile = false;
+        int beforeOracle = -1, doomTurn = -1, oracleTurn = -1;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps++ < limit) {
+            game.getPhaseHandler().mainLoopStep();
+            if (!doom && has(p, ZoneType.Graveyard, "Doomsday")) { doom = true; doomTurn = game.getPhaseHandler().getTurn(); }
+            pile |= doom && p.getCardsIn(ZoneType.Library).size() == 5;
+            if (!game.getStack().isEmpty()) {
+                var sa = game.getStack().peekAbility();
+                if (sa.isSpell() && sa.getHostCard().getName().equals("Thassa's Oracle")) {
+                    beforeOracle = p.getCardsIn(ZoneType.Library).size();
+                    oracleTurn = game.getPhaseHandler().getTurn();
+                }
+            }
+        }
+        boolean oracleWin = p.getOutcome() != null && "Thassa's Oracle".equals(p.getOutcome().altWinSourceName);
+        System.out.println("TIGHTEN_RESULT suite=tighten improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " main2=" + main2 + " case=" + kase + " mustMove=" + proposes
+                + " proposed=" + action + " doomsdayCast=" + doom + " doomsdayTurn=" + doomTurn
+                + " fiveCardPile=" + pile + " libraryBeforeOracle=" + beforeOracle + " oracleTurn=" + oracleTurn
+                + " won=" + p.hasWon() + " oracleWin=" + oracleWin + " gameOver=" + game.isGameOver()
+                + " life=" + p.getLife() + " oppLife=" + opponent.getLife() + " steps=" + steps);
+        if (steps >= limit) throw new AssertionError("Tighten step budget: " + kase);
+        if (improved && TIGHTEN_STRICT) {
+            if (proposes && !(doom && pile && oracleWin && beforeOracle == 4 && doomTurn == 1 && oracleTurn == 3))
+                throw new AssertionError("Tightened route 2 did not execute: " + kase + " main2=" + main2);
+            if (!proposes && doom) throw new AssertionError("Doomsday committed despite " + kase);
+            if (!proposes && oracleWin) throw new AssertionError("Unexpected control Oracle win: " + kase);
+        }
+        if (!improved && TIGHTEN_STRICT && oracleWin)
+            throw new AssertionError("Default arm unexpectedly won with Oracle: " + kase);
+    }
+
+    /** v49 discard ownership. Each case specifies exactly one premise action -
+     * our own loot or our own Frantic Search, the ordinary decision this change
+     * deliberately does NOT own - and the decision under test is only which
+     * card the native controller then discards. The `doom-*` cases first let
+     * the plan build its pile with no specified action at all, then loot at the
+     * moment the v47 analysis's 16701482-s0 looted. */
+    private static final List<String> DISCARD_CASES = List.of("doom-loot", "doom-loot-forced", "doom-no-hold",
+            "storm-will", "storm-redundant", "storm-gate-short", "breach-freeze");
+
+    private static boolean discardProtects(String kase) {
+        return switch (kase) {
+            case "doom-loot", "storm-will", "breach-freeze" -> true;
+            default -> false;
+        };
+    }
+
+    /** The card each case must still hold after its discard resolves. */
+    private static String discardPiece(String kase) {
+        return kase.startsWith("doom") ? "Thassa's Oracle"
+                : kase.equals("breach-freeze") ? "Brain Freeze" : "Yawgmoth's Will";
+    }
+
+    private static void activate(final Game game, final Player player, final String host) {
+        final Card card = player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals(host))
+                .findFirst().orElseThrow(() -> new AssertionError("missing battlefield card " + host));
+        final var ability = card.getSpellAbilities().stream().filter(a -> !a.isSpell() && a.getApi() != null)
+                .findFirst().orElseThrow(() -> new AssertionError("missing activated ability " + host));
+        ability.setActivatingPlayer(player);
+        if (!player.getController().playChosenSpellAbility(ability))
+            throw new AssertionError("native controller rejected the specified loot premise " + host);
+        settle(game);
+    }
+
+    private static void discardRun(int seat, String kase) {
+        boolean doomsday = kase.startsWith("doom");
+        List<Placement> own = new ArrayList<>(), other = new ArrayList<>();
+        if (doomsday) {
+            if (!kase.equals("doom-no-hold")) own.add(new Placement("Doomsday", ZoneType.Hand, false));
+            for (int i = 0; i < 3; i++) own.add(new Placement("Swamp", ZoneType.Battlefield, false));
+            for (int i = 0; i < 2; i++) own.add(new Placement("Island", ZoneType.Battlefield, false));
+            // Jace is both the second public blue pip and the loot outlet, the
+            // same double role it played in 16701482-s0.
+            own.add(new Placement("Jace, Vryn's Prodigy", ZoneType.Battlefield, false));
+            own.add(new Placement("Faerie Mastermind", ZoneType.Battlefield, false));
+            // Two uncastable spares: neither is a land, a creature, an artifact
+            // or an enchantment, so Forge's own discard ranking reaches
+            // getWorstCreatureAI and picks the Oracle - the 482 decision.
+            if (!kase.equals("doom-loot-forced")) {
+                own.add(new Placement("Liliana of the Veil", ZoneType.Hand, false));
+                own.add(new Placement("Wheel of Fortune", ZoneType.Hand, false));
+            }
+            own.add(new Placement("Thassa's Oracle", ZoneType.Library, false));
+            for (int i = 0; i < 24; i++) own.add(new Placement("Forest", ZoneType.Library, false));
+        } else {
+            // Five Islands: enough lands that Forge's discard ranking treats a
+            // four-drop as playable, and no black or white, so nothing in these
+            // hands is castable except the Frantic Search the fixture casts.
+            for (int i = 0; i < 5; i++) own.add(new Placement("Island", ZoneType.Battlefield, false));
+            own.add(new Placement("Frantic Search", ZoneType.Hand, false));
+            if (kase.equals("breach-freeze")) {
+                own.add(new Placement("Underworld Breach", ZoneType.Battlefield, false));
+                own.add(new Placement("Lotus Petal", ZoneType.Graveyard, false));
+                own.add(new Placement("Brain Freeze", ZoneType.Hand, false));
+            } else {
+                own.add(new Placement("Yawgmoth's Will", ZoneType.Hand, false));
+                if (kase.equals("storm-redundant")) own.add(new Placement("Yawgmoth's Will", ZoneType.Hand, false));
+                if (!kase.equals("storm-gate-short"))
+                    own.add(new Placement("Tendrils of Agony", ZoneType.Graveyard, false));
+            }
+            own.add(new Placement("Wrath of God", ZoneType.Hand, false));
+            // Library order is placement order, so these two are exactly what
+            // Frantic Search draws. Nothing that could change a gate is put
+            // where the draw can reach it before the discard is made.
+            for (int i = 0; i < 2; i++) own.add(new Placement("Damnation", ZoneType.Library, false));
+            if (kase.equals("storm-gate-short"))
+                own.add(new Placement("Tendrils of Agony", ZoneType.Library, false));
+            for (int i = 0; i < 12; i++) own.add(new Placement("Forest", ZoneType.Library, false));
+        }
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player p = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
+        game.getAction().checkStateEffects(true);
+        game.getTriggerHandler().resetActiveTriggers();
+        BenchRandomAudit.install(0); // Fixed constructed fixture, not a sampled opening.
+        discardSwaps(true);
+        String piece = discardPiece(kase);
+        boolean protect = discardProtects(kase);
+        int steps = 0, limit = 1500;
+        boolean doom = false, pile = false, looted = false;
+        String handAtDiscard = "not-reached";
+        boolean noHold = kase.equals("doom-no-hold");
+        if (doomsday && !noHold) {
+            // No specified action here: the plan casts Doomsday itself, and the
+            // loop stops the instant the pile exists - the exact position the
+            // v47 analysis recorded, with no intervening ordinary pass. Only
+            // the improved arm has a plan, so only it reaches a pile; the
+            // Default arm records that it did not, which is the witness.
+            while (!game.isGameOver() && game.getPhaseHandler().getTurn() == 1 && steps++ < limit) {
+                game.getPhaseHandler().mainLoopStep();
+                if (!doom && has(p, ZoneType.Graveyard, "Doomsday")) doom = true;
+                if (doom && game.getStack().isEmpty() && p.getCardsIn(ZoneType.Library).size() == 5) { pile = true; break; }
+            }
+            if (improved && !pile)
+                throw new AssertionError("Discard fixture never reached the pile: " + kase);
+        }
+        // `doom-no-hold` and the storm/breach cases loot at once, in BOTH arms,
+        // with no plan action ahead of them: their whole point is that the two
+        // arms must make the same discard.
+        if (doomsday ? pile || noHold : true) {
+            handAtDiscard = cards(p, ZoneType.Hand);
+            int libraryBefore = p.getCardsIn(ZoneType.Library).size();
+            if (doomsday) activate(game, p, "Jace, Vryn's Prodigy");
+            else cast(game, p, "Frantic Search");
+            looted = true;
+            // The premise must actually have drawn: the decision under test is
+            // the discard that follows it, so a silent no-op would make every
+            // assertion below vacuous.
+            int drew = libraryBefore - p.getCardsIn(ZoneType.Library).size();
+            if (drew != (doomsday ? 1 : 2))
+                throw new AssertionError("Loot premise did not draw for " + kase + ": " + drew);
+        }
+        int swaps = discardSwaps(true);
+        boolean pieceHeld = has(p, ZoneType.Hand, piece) || has(p, ZoneType.Battlefield, piece);
+        String afterDiscard = cards(p, ZoneType.Hand);
+        String graveyard = cards(p, ZoneType.Graveyard);
+        System.out.println("DISCARD_PROPOSAL suite=discard improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " main2=" + main2 + " case=" + kase + " piece=" + piece.replace(' ', '_')
+                + " mustProtect=" + protect + " looted=" + looted + " pileBuilt=" + pile
+                + " handBeforeLoot=[" + handAtDiscard.replace(' ', '_') + "]"
+                + " handAfterDiscard=[" + afterDiscard.replace(' ', '_') + "]"
+                + " graveyard=[" + graveyard.replace(' ', '_') + "] pieceHeld=" + pieceHeld
+                + " discardSwaps=" + swaps);
+        if (improved && DISCARD_STRICT && looted) {
+            if (protect && !(pieceHeld && swaps >= 1))
+                throw new AssertionError("Discard ownership did not keep " + piece + ": " + kase + " swaps=" + swaps);
+            if (!protect && swaps != 0)
+                throw new AssertionError("Discard ownership fired where no plan gate is active: " + kase);
+        }
+        if (!improved && DISCARD_STRICT && swaps > 0)
+            throw new AssertionError("Default arm must own no discard: " + kase);
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps++ < limit)
+            game.getPhaseHandler().mainLoopStep();
+        boolean oracleWin = p.getOutcome() != null && "Thassa's Oracle".equals(p.getOutcome().altWinSourceName);
+        System.out.println("DISCARD_RESULT suite=discard improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " main2=" + main2 + " case=" + kase + " piece=" + piece.replace(' ', '_')
+                + " mustProtect=" + protect + " discardSwaps=" + swaps + " pieceHeld=" + pieceHeld
+                + " doomsdayCast=" + doom + " fiveCardPile=" + pile
+                + " won=" + p.hasWon() + " oracleWin=" + oracleWin + " gameOver=" + game.isGameOver()
+                + " life=" + p.getLife() + " oppLife=" + opponent.getLife() + " steps=" + steps);
+        if (steps >= limit) throw new AssertionError("Discard step budget: " + kase);
+        if (improved && DISCARD_STRICT && kase.equals("doom-loot") && !oracleWin)
+            throw new AssertionError("Kept Oracle but the game did not finish: " + kase + " main2=" + main2);
+        if (improved && DISCARD_STRICT && kase.equals("doom-loot-forced") && oracleWin)
+            throw new AssertionError("Forced discard must not be overridden into a win: " + kase);
+    }
+
     public static void main(final String[] args) {
         try {
             improved = args.length > 1 && args[1].equals("improved");
@@ -958,6 +1282,24 @@ public final class CubeDoomsdayExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
+            if (suite.equals("tighten")) {
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++) for (String kase : TIGHTEN_CASES) tightenRun(seat, kase);
+                }
+                System.out.println("TIGHTEN_SUITE_COMPLETE suite=tighten improved=" + improved
+                        + " policy=" + policy() + " cases=" + 4 * TIGHTEN_CASES.size());
+                return;
+            }
+            if (suite.equals("discard")) {
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++) for (String kase : DISCARD_CASES) discardRun(seat, kase);
+                }
+                System.out.println("DISCARD_SUITE_COMPLETE suite=discard improved=" + improved
+                        + " policy=" + policy() + " cases=" + 4 * DISCARD_CASES.size());
+                return;
+            }
             if (suite.equals("ritual")) {
                 for (boolean second : new boolean[] {false, true}) {
                     main2 = second;
