@@ -217,7 +217,16 @@ public final class CubeBombLinesSmoke {
      * composition with the payload thirty cards deeper must produce the same
      * decision. T7 is the census's claim (c), recorded rather than asserted -
      * `CubeBombPlan` is said to admit and prefer Portal under Show and Tell
-     * already. */
+     * already.
+     *
+     * <p>v79 APPENDS T8 and T9, its two new bases. T5
+     * (`tinker-sac-choice`) is v79's MUST-MOVE row: v71 refuses that cast
+     * (`tinker:sac-piece`) because the native payment would eat Sensei's
+     * Divining Top; v79 spends the Lotus Petal and fetches. T8 is the negative
+     * witness - with the piece as the ONLY artifact the swap has nowhere to go
+     * and the refusal must survive - and T9 is the PARITY witness: two
+     * admissible spares and no piece, where the ordinary decision is already
+     * admissible and the hook must return it untouched.</p> */
     private static final List<String> TINKER_CASES = List.of(
             "tinker-portal",          // T1 the library holds Portal; the opponent has three creatures
             "tinker-portal:deep",     // T1b the same composition, the payload 30 cards deeper
@@ -226,7 +235,10 @@ public final class CubeBombLinesSmoke {
             "tinker-sac-safe",        // T4 an expendable artifact beside the piece
             "tinker-sac-choice",      // T5 only a spent Petal beside the piece
             "tinker-no-sac",          // T6 no artifact on our battlefield at all
-            "showtell-portal");       // T7 the census's claim (c), RECORDED
+            "showtell-portal",        // T7 the census's claim (c), RECORDED
+            // v79, APPENDED so no v71 row moves for a fixture reason.
+            "tinker-sac-only-piece",  // T8 the piece is the ONLY artifact: the refusal must survive
+            "tinker-sac-spares");     // T9 two admissible spares, no piece: PARITY with Default
 
     /** Registered starting life. 20 everywhere else, and no preserved row ever
      * calls setLife. */
@@ -266,7 +278,9 @@ public final class CubeBombLinesSmoke {
      * placements are touched. */
     private static final Set<String> TINKER_BASES = new HashSet<>(List.of(
             "tinker-portal", "tinker-blightsteel", "tinker-vanilla",
-            "tinker-sac-safe", "tinker-sac-choice", "tinker-no-sac", "showtell-portal"));
+            "tinker-sac-safe", "tinker-sac-choice", "tinker-no-sac", "showtell-portal",
+            // v79's two new bases, APPENDED.
+            "tinker-sac-only-piece", "tinker-sac-spares"));
 
     private static String base(String control) { return control.split(":")[0]; }
     private static String variant(String control) { return control.contains(":") ? control.split(":", 2)[1] : ""; }
@@ -292,7 +306,10 @@ public final class CubeBombLinesSmoke {
             case "tinker-blightsteel" -> BLIGHTSTEEL;
             case "tinker-vanilla" -> JUGGERNAUT;
             case "tinker-portal", "tinker-sac-safe", "tinker-sac-choice",
-                 "tinker-no-sac", "showtell-portal" -> PORTAL;
+                 "tinker-no-sac", "showtell-portal",
+                 // v79: both new bases are about the PAYMENT, so the payload is
+                 // the same single library artifact the v71 sac rows use.
+                 "tinker-sac-only-piece", "tinker-sac-spares" -> PORTAL;
             default -> EMRAKUL;
         };
     }
@@ -530,6 +547,32 @@ public final class CubeBombLinesSmoke {
                         for (int i = 0; i < 30; i++) result.add(new Placement("Forest", ZoneType.Library));
                     result.add(new Placement(PORTAL, ZoneType.Library));
                 }
+                // ------------------------------------ v79 Tinker positions
+                case "tinker-sac-only-piece", "tinker-sac-spares" -> {
+                    // T8/T9. The same One Tinker + three Islands + Portal as
+                    // the only library artifact that T1/T4/T5/T6 use, so the
+                    // only variable against them is what we control:
+                    //   tinker-sac-only-piece  the piece ALONE. Every legal
+                    //     payment takes it, so v79's preference has nowhere to
+                    //     go and v71's `tinker:sac-piece` refusal must survive.
+                    //   tinker-sac-spares  an Ornithopter AND a Lotus Petal and
+                    //     NO piece. Default's own choice (the Ornithopter, by
+                    //     tinker.txt's `Artifact.cmcEQ0` tier, which excludes
+                    //     the Petal by name) is already admissible, so the hook
+                    //     must return it untouched: TWO admissible candidates
+                    //     is what makes this a parity witness rather than a
+                    //     tautology, because a hook that re-ranked admissible
+                    //     cards would show up here.
+                    result.add(new Placement(TINKER, ZoneType.Hand));
+                    if (base.equals("tinker-sac-only-piece")) {
+                        result.add(new Placement(TOP, ZoneType.Battlefield));
+                    } else {
+                        result.add(new Placement(ORNITHOPTER, ZoneType.Battlefield));
+                        result.add(new Placement(PETAL, ZoneType.Battlefield));
+                    }
+                    for (int i = 0; i < 3; i++) result.add(new Placement("Island", ZoneType.Battlefield));
+                    result.add(new Placement(PORTAL, ZoneType.Library));
+                }
                 case "tinker-blightsteel" -> {
                     // T2. Both payloads in the library. Census claim (b) is that
                     // Forge's own hidden-origin chooser takes the most expensive
@@ -644,6 +687,11 @@ public final class CubeBombLinesSmoke {
                     result.add(new Placement(SPIDER, ZoneType.Hand));
                 }
                 case "tinker-vanilla" -> result.add(new Placement(BEARS, ZoneType.Battlefield));
+                // v79: the same three-creature opponent the other Portal rows
+                // use, so the payload's enters trigger is worth the same here.
+                case "tinker-sac-only-piece", "tinker-sac-spares" -> {
+                    for (int i = 0; i < 3; i++) result.add(new Placement(BEARS, ZoneType.Battlefield));
+                }
                 default -> { }
             }
         } else {
