@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v74";
+    public static final String VERSION = "cube-combo-execution-v75";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -963,6 +963,10 @@ public final class CubeComboAi {
     /** Index of the doomsday family in {@link #planCompletingFamilies}. */
     private static final int DOOMSDAY_FAMILY = 8;
 
+    /** Index of the breach family in {@link #planCompletingFamilies}, which
+     * v60 fixed as the first entry. */
+    private static final int BREACH_FAMILY = 0;
+
     /** v74 - would the family at {@code index} actually CONVERT this piece, or
      * is its entry gate the only thing that is true?
      *
@@ -983,23 +987,33 @@ public final class CubeComboAi {
      * measured defect is in, and the family whose act-time declines
      * ({@code no-pile-route}) are structural rather than mana.</p>
      *
-     * <p>The other eight families in {@link #planCompletingFamilies} - Breach,
-     * Storm, Kiki, Thopter, Bomb, Monolith, Kitten, Top - expose
+     * <p><b>v75 adds the SECOND such family, Breach</b>, through
+     * {@link CubeBreachPlan#wouldConvert} - v74's own named follow-up, taken
+     * for the family the breach2 opening panel measured next:
+     * {@code missing=Brain_Freeze} was 264 of 370 breach declines (71%) and the
+     * last breach token in 20 of 28 treated losses, on a deck holding Demonic
+     * Tutor, Mystical Tutor and Imperial Seal, and the singleton terminal was
+     * never fetched. That predicate re-runs the v41 route's STRUCTURAL clauses
+     * against the hypothetical hand and drops only its payment, keeping the
+     * graveyard fuel threshold, which is a resource and not mana.</p>
+     *
+     * <p>The other seven families in {@link #planCompletingFamilies} - Storm,
+     * Kiki, Thopter, Bomb, Monolith, Kitten, Top - expose
      * {@code completingPieceNames(Player)} and nothing else: their act-time
      * logic is an instance {@code nextAction()} evaluated against the LIVE hand,
      * which cannot be asked about a hypothetical one, and which prints markers
      * and advances plan stages besides. They therefore KEEP their v63 behaviour
      * here, unchanged and byte for byte, and this method returns true for them.
-     * Giving each of them its own {@code wouldConvert} is the obvious follow-up
-     * and is out of this increment's file scope.</p>
+     * Giving each of them its own {@code wouldConvert} remains the follow-up.</p>
      *
      * <p>The hypothetical hand is our own live hand plus the offered card. No
      * zone is written, nothing is printed, and no RNG is consumed.</p> */
     private static boolean familyConverts(Player player, int index, Card piece) {
-        if (index != DOOMSDAY_FAMILY) return true;
+        if (index != DOOMSDAY_FAMILY && index != BREACH_FAMILY) return true;
         java.util.List<Card> hand = new java.util.ArrayList<>(player.getCardsIn(ZoneType.Hand));
         hand.add(piece);
-        return CubeDoomsdayPlan.wouldConvert(player, hand);
+        return index == BREACH_FAMILY ? CubeBreachPlan.wouldConvert(player, hand)
+                : CubeDoomsdayPlan.wouldConvert(player, hand);
     }
 
     /** v60 - every family's completing names, in ONE fixed order, built once
