@@ -83,6 +83,19 @@ import java.util.*;
  *     Dead's printed {@code AttachAITgts:Creature.!namedWorldgorger Dragon} is
  *     applied by {@code ComputerUtil.filterAITgts} BEFORE the list the plan
  *     ranks, so BOTH arms must leave it alone. MUST-NOT-MOVE.</li>
+ * <li><b>portal-value</b> / <b>portal-reverse</b> - Portal to Phyrexia on our
+ *     battlefield and one candidate in EACH graveyard, then the two swapped.
+ *     Its upkeep trigger is a PHASE trigger whose {@code TrigChange} is a
+ *     targeted {@code Graveyard -> Battlefield} {@code ValidTgts$ Creature} with
+ *     {@code GainControl$ True} - a THIRD entry shape into v73's
+ *     {@code ChangeZoneAi.isPreferredTarget} hook, after a spell and after
+ *     Necromancy's ChangesZone trigger, and the first one no fixture covered.
+ *     The value ranking must take the tier-3 body from WHICHEVER graveyard holds
+ *     it, including the opponent's public one. Both arms, because the hook is
+ *     v73's.</li>
+ * <li><b>portal-single</b> - the same engine with ONE legal target anywhere.
+ *     PARITY: a single candidate is not a choice, so the ranking declines and
+ *     the ordinary answer stands.</li>
  * <li><b>aura-shuffler</b> - Emrakul and a Grizzly Bears in our graveyard. The
  *     aura form must NOT reuse v73's {@code staysInGraveyard} refusal: the card
  *     is already in a graveyard and the aura is taking it OUT. Both arms must
@@ -102,14 +115,18 @@ public final class CubeReanimatorSmoke {
         TITAN = "Grave Titan", ARCHON = "Archon of Cruelty", FATTY = "Bygone Colossus",
         BEARS = "Grizzly Bears", SWAMP = "Swamp", FOREST = "Forest",
         // v76 aura form.
-        NECROMANCY = "Necromancy", WORLDGORGER = "Worldgorger Dragon";
+        NECROMANCY = "Necromancy", WORLDGORGER = "Worldgorger Dragon",
+        // v76 addendum: the standing trigger engine.
+        PORTAL = "Portal to Phyrexia";
     private static final List<String> MUST_MOVE =
         List.of("entomb-stable", "loot-payload", "target-value", "persist-legendary",
                 "entomb-sequence", "entomb-endstep",
-                "aura-value", "aura-opponent-grave");
+                "aura-value", "aura-opponent-grave",
+                "portal-value", "portal-reverse");
     private static final List<String> MUST_NOT_MOVE =
         List.of("entomb-no-spell", "loot-no-spell", "ordinary-parity",
-                "aura-single", "aura-agree", "aura-worldgorger", "aura-shuffler");
+                "aura-single", "aura-agree", "aura-worldgorger", "aura-shuffler",
+                "portal-single");
 
     /** -1 means the classes under test have no such counter at all, which is
      * what the matched pre-v73 control arm reports. The plan class is resolved
@@ -249,6 +266,25 @@ public final class CubeReanimatorSmoke {
                 cards.add(new Entry(EMRAKUL, ZoneType.Graveyard));
                 cards.add(new Entry(BEARS, ZoneType.Graveyard));
             }
+            // ------------------------------------- v76 addendum: Portal rows
+            // The engine is placed directly on our battlefield, so its ETB
+            // ("each opponent sacrifices three creatures") never fires and the
+            // only thing under test is the UPKEEP trigger's target.
+            case "portal-value" -> {
+                cards.add(new Entry(PORTAL, ZoneType.Battlefield));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+            }
+            case "portal-reverse" -> {
+                cards.add(new Entry(PORTAL, ZoneType.Battlefield));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(FATTY, ZoneType.Graveyard));
+            }
+            case "portal-single" -> {
+                cards.add(new Entry(PORTAL, ZoneType.Battlefield));
+                for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
+                cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+            }
             default -> { // ordinary-parity
                 cards.add(new Entry(BEARS, ZoneType.Hand));
                 for (int i = 0; i < 4; i++) cards.add(new Entry(SWAMP, ZoneType.Battlefield));
@@ -267,6 +303,12 @@ public final class CubeReanimatorSmoke {
         if (control.equals("exhume-symmetry")) cards.add(new Entry(ARCHON, ZoneType.Graveyard));
         // v76: the one row whose payload is in the opponent's PUBLIC graveyard.
         if (control.equals("aura-opponent-grave")) cards.add(new Entry(ASHEN, ZoneType.Graveyard));
+        // v76 addendum. portal-value puts the value-free body in the PUBLIC
+        // graveyard and the payload in ours; portal-reverse swaps them, so the
+        // ranking has to reach across into the opponent's graveyard to be right.
+        // portal-single leaves this graveyard creature-free on purpose.
+        if (control.equals("portal-value")) cards.add(new Entry(FATTY, ZoneType.Graveyard));
+        if (control.equals("portal-reverse")) cards.add(new Entry(ASHEN, ZoneType.Graveyard));
         for (int i = 0; i < 20; i++) cards.add(new Entry(FOREST, ZoneType.Library));
         while (cards.size() < 40) cards.add(new Entry(FOREST, ZoneType.Graveyard));
         return cards;
@@ -469,6 +511,21 @@ public final class CubeReanimatorSmoke {
                     throw new AssertionError("Aura refused a body that is ALREADY in the graveyard: "
                         + key + " auraOn=" + auraOn(p));
             }
+            // ------------------------------------- v76 addendum: Portal rows
+            // v73's hook, reached from a PHASE trigger. The counter asserted is
+            // targetChanges (c[3]), NOT auraTargets: Portal to Phyrexia is not
+            // an Aura and never reaches AttachAi.
+            case "portal-value", "portal-reverse" -> {
+                if (c[3] < 1 || !returned.contains(ASHEN) || returned.contains(FATTY))
+                    throw new AssertionError("Portal took the expensive body: " + key + " returned=" + returned);
+                if (!zoneOf(p, ASHEN).equals("Battlefield"))
+                    throw new AssertionError("Portal returned nothing: " + key);
+            }
+            case "portal-single" -> {
+                if (!returned.contains(ASHEN) || !zoneOf(p, ASHEN).equals("Battlefield"))
+                    throw new AssertionError("Portal's single legal target was not taken: " + key
+                        + " returned=" + returned);
+            }
             default -> { }
         }
         if (MUST_MOVE.contains(control) && c[0] + c[1] + c[2] + c[3] + c[4] + c[5] + c[6] == 0)
@@ -481,7 +538,9 @@ public final class CubeReanimatorSmoke {
             "entomb-endstep", "ordinary-parity",
             // v76, APPENDED so every v73 row keeps its name and its seed.
             "aura-value", "aura-necromancy", "aura-opponent-grave", "aura-single",
-            "aura-agree", "aura-worldgorger", "aura-shuffler");
+            "aura-agree", "aura-worldgorger", "aura-shuffler",
+            // v76 addendum, APPENDED again for the same reason.
+            "portal-value", "portal-reverse", "portal-single");
     }
 
     public static void main(String[] args) {
