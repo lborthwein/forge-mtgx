@@ -73,6 +73,12 @@ public final class CubeReanimatorPlan {
      * the fixture, exactly like {@code CubeDrawOutPlan.drawOutActions}. */
     static int planActions, entombSelections, discardSwaps, targetChanges, symmetryDeclines, holds;
 
+    /** v76. Diagnostic only, never read by a decision: how often the AURA form's
+     * target ranking replaced the ordinary answer. Kept SEPARATE from
+     * {@link #targetChanges} so that v73's spell-form rows keep their registered
+     * values unchanged and the two paths stay distinguishable in a receipt. */
+    static int auraTargets;
+
     /** Observability only: the token for the check that already declined the
      * most recent {@link #nextAction}. Never read by a decision, exactly like
      * {@code CubeMonolithPlan.declineReason}.
@@ -462,6 +468,151 @@ public final class CubeReanimatorPlan {
         System.err.println("CUBE_REANIMATOR target=" + best.getName().replace(' ', '_')
                 + " instead=" + (ordinary == null ? "none" : ordinary.getName().replace(' ', '_'))
                 + " source=" + sa.getHostCard().getName().replace(' ', '_')
+                + " turn=" + player.getGame().getPhaseHandler().getTurn());
+        return best;
+    }
+
+    // ------------------------- v76 selection 4: the AURA form's target ranking
+
+    /** v76. A body whose OWN enters-the-battlefield chain moves permanents WE
+     * control off the battlefield - the lock piece.
+     *
+     * <p>v62's terms 3 and 4, which {@link #auraTier} inherits through
+     * {@link #entersWithValue}, score a {@code ChangeZone}/{@code ChangeZoneAll}
+     * off a battlefield as VALUE without reading WHOSE battlefield. Measured
+     * against the pinned cardsfolder, exactly two creatures carry that shape on a
+     * self enters-trigger: Worldgorger Dragon ({@code ChangeType$
+     * Permanent.YouCtrl+StrictlyOther | Origin$ Battlefield | Destination$
+     * Exile}, a 7/7) and Denizen of the Deep ({@code ChangeType$
+     * Creature.Other+YouCtrl | Origin$ Battlefield | Destination$ Hand}, an
+     * 11/11). Both would score tier 3 and both would outrank every honest
+     * payload on the second key, so this is a refusal the ranking cannot do
+     * without.</p>
+     *
+     * <p>For Animate Dead the guard is REDUNDANT with that card's printed
+     * {@code SVar:AttachAITgts:Creature.!namedWorldgorger Dragon}, which
+     * {@code ComputerUtil.filterAITgts} applies with {@code alwaysStrict} before
+     * the list this class ever sees; the {@code aura-worldgorger} fixture row
+     * measures that. It earns its place on Denizen of the Deep, which no
+     * {@code AttachAITgts} names, and on any aura script carrying none.</p>
+     *
+     * <p>Our own card's printed text only. Deliberately NOT applied to
+     * {@link #payloadTier}: widening that would change v73's shipped entomb,
+     * discard and spell-form behaviour, which is a different increment with
+     * different evidence (design.md section 3.2 registers the exposure).</p> */
+    private static boolean selfHarmingArrival(Card card) {
+        for (Trigger trigger : card.getTriggers()) {
+            if (trigger.getMode() != TriggerType.ChangesZone) continue;
+            if (!"Battlefield".equals(trigger.getParam("Destination"))) continue;
+            if (!"Card.Self".equals(trigger.getParamOrDefault("ValidCard", ""))) continue;
+            String svar = trigger.getParam("Execute");
+            for (int hop = 0; hop < CHAIN_DEPTH && svar != null && !svar.isEmpty(); hop++) {
+                String body = card.getSVar(svar);
+                if (body == null || body.isEmpty()) break;
+                String type = scriptParam(body, "ChangeType$");
+                if (VALUE_ZONE_APIS.contains(scriptParam(body, "DB$"))
+                        && "Battlefield".equals(scriptParam(body, "Origin$"))
+                        && type != null && type.contains("YouCtrl")) return true;
+                svar = scriptParam(body, "SubAbility$");
+            }
+        }
+        return false;
+    }
+
+    /** v76. {@link #payloadTier} for the AURA form, and the ONE term that
+     * differs is {@code staysInGraveyard}, which is DROPPED.
+     *
+     * <p>{@code payloadTier} answers {@code -1} for Emrakul, Ulamog the Infinite
+     * Gyre, Worldspine Wurm and Blightsteel Colossus because a body that leaves
+     * the graveyard on arrival is worth nothing to ENTOMB, to PITCH or to set up.
+     * The aura form runs in the opposite direction: the card is ALREADY in a
+     * graveyard and the aura is taking it OUT. Reusing the refusal here would
+     * make the plan pass over a 15/15 and reanimate a Grizzly Bears - a strict
+     * regression against Default. The {@code aura-shuffler} fixture row is that
+     * negative.</p>
+     *
+     * <p>Everything else is {@code payloadTier} verbatim: v62's terms 3 and 4 at
+     * tier 3, term 6 at tier 2, a plain body at tier 1, plus the lock-piece
+     * refusal of {@link #selfHarmingArrival}.</p> */
+    private int auraTier(Card card) {
+        if (card == null || !card.isCreature()) return -1;
+        if (selfHarmingArrival(card)) return -1;
+        if (entersWithValue(card) || diesWithValue(card)) return 3;
+        if (drawsForLife(card)) return 2;
+        return 1;
+    }
+
+    /** {@link #bestPayload}'s two-key ordering over {@link #auraTier}: tier
+     * first, then the native creature evaluation inside a tier, first wins ties.
+     * Deterministic over the list the native code produced. */
+    private Card bestAuraTarget(List<Card> pool) {
+        Card best = null;
+        int bestTier = 0, bestRank = -1;
+        for (Card candidate : pool) {
+            int tier = auraTier(candidate);
+            if (tier < 1) continue;
+            int value = ComputerUtilCard.evaluateCreature(candidate);
+            if (tier < bestTier || tier == bestTier && value <= bestRank) continue;
+            best = candidate; bestTier = tier; bestRank = value;
+        }
+        return best;
+    }
+
+    /** v76 - census section 6.4 and v73's registered limitation 1: the target of
+     * our own reanimation AURA.
+     *
+     * <p>The one place Forge chooses it is
+     * {@code AttachAi.attachAIReanimatePreference}, whose answer is
+     * {@code ComputerUtilCard.getBestCreatureAI} - a BODY SCORE that cannot see
+     * that Ashen Rider's enters-trigger exiles a permanent or that Archon of
+     * Cruelty's is a three-part Sacrifice + Discard + LoseLife. No controller
+     * hook exists for it, so this entry point is static and guarded on
+     * {@link CubeComboAi#enabled}, exactly as {@link #preferReanimationTarget}
+     * is for the spell form. A Default seat can never reach the ranking.</p>
+     *
+     * <p>{@code list} is the NATIVE candidate list -
+     * {@code AttachAi}'s {@code betterList}, already cut by the aura's printed
+     * {@code Enchant} restriction, by {@code canBeAttached} under the aura's own
+     * animated LKI, and by {@code ComputerUtil.filterAITgts} applying the printed
+     * {@code AttachAITgts}. Consuming that list rather than rebuilding one is how
+     * every printed restriction is honoured without this class knowing any of
+     * them exists.</p>
+     *
+     * <p>Answers null - so the ordinary answer stands byte-identically - for
+     * every seat that is not this policy, every ability that is not ours, every
+     * attach source that is not a reanimation aura by printed shape, every list
+     * of fewer than two legal candidates, and whenever the ranking agrees with
+     * {@code ordinary}.</p> */
+    public static Card preferAuraTarget(Player ai, SpellAbility sa, Card aura, Iterable<Card> list, Card ordinary) {
+        if (!CubeComboAi.enabled(ai) || sa == null || aura == null
+                || sa.getActivatingPlayer() != ai || !entersReanimates(aura)) return null;
+        CubeReanimatorPlan plan = ((CubeComboPlayerController) ai.getController()).reanimatorPlan();
+        return plan == null ? null : plan.preferAura(sa, aura, list, ordinary);
+    }
+
+    private Card preferAura(SpellAbility sa, Card aura, Iterable<Card> list, Card ordinary) {
+        List<Card> ours = new ArrayList<>(), theirs = new ArrayList<>();
+        for (Card card : list) {
+            if (card == null) continue;
+            (card.getOwner() == player ? ours : theirs).add(card);
+        }
+        if (ours.size() + theirs.size() < 2) return null;
+        // Our own graveyard first. A PUBLIC opponent graveyard is read only to
+        // ask whether it holds a STRICTLY better answer than ours, and a tie
+        // keeps ours - the same public-graveyard boundary the v73 Exhume
+        // symmetry refusal already works inside.
+        Card best = bestAuraTarget(ours), rival = bestAuraTarget(theirs);
+        boolean fromOpponent = rival != null && (best == null
+                || auraTier(rival) > auraTier(best)
+                || auraTier(rival) == auraTier(best)
+                        && ComputerUtilCard.evaluateCreature(rival) > ComputerUtilCard.evaluateCreature(best));
+        if (fromOpponent) best = rival;
+        if (best == null || best == ordinary) return null;
+        auraTargets++;
+        System.err.println("CUBE_REANIMATOR aura-target=" + best.getName().replace(' ', '_')
+                + " instead=" + (ordinary == null ? "none" : ordinary.getName().replace(' ', '_'))
+                + " source=" + aura.getName().replace(' ', '_')
+                + " from=" + (fromOpponent ? "opponent" : "own")
                 + " turn=" + player.getGame().getPhaseHandler().getTurn());
         return best;
     }

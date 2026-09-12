@@ -594,7 +594,30 @@ public class AttachAi extends SpellAbilityAi {
             return result;
         });
 
-        final Card c = ComputerUtilCard.getBestCreatureAI(betterList);
+        Card c = ComputerUtilCard.getBestCreatureAI(betterList);
+
+        // v76 D1: the versioned cube policy ranks its own reanimation Aura's
+        // target by the v62 value terms instead of by getBestCreatureAI, which
+        // is a BODY SCORE and cannot see that Ashen Rider's enters-trigger
+        // exiles a permanent. This is census section 6.4 and v73's registered
+        // limitation 1; no PlayerController hook reaches this choice.
+        //
+        // betterList is passed rather than rebuilt: it is the only list in the
+        // chain that has had the aura's printed Enchant restriction, the
+        // canBeAttached check under the aura's own animated LKI, and the printed
+        // AttachAITgts (strictly applied by ComputerUtil.filterAITgts above)
+        // ALL applied to it, so every printed restriction is honoured without
+        // the plan knowing any of them exists.
+        //
+        // Gated on CubeComboAi.enabled(ai) as this file's v53 and v41 hooks are;
+        // a null answer leaves the ordinary choice and everything below it
+        // untouched, and the Default arm never calls in.
+        if (CubeComboAi.enabled(ai)) {
+            final Card preferred = CubeReanimatorPlan.preferAuraTarget(ai, sa, attachSource, betterList, c);
+            if (preferred != null) {
+                c = preferred;
+            }
+        }
 
         // If Mandatory (brought directly into play without casting) gotta
         // choose something
