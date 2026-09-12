@@ -34,10 +34,16 @@ import java.util.function.Supplier;
  * five-card pile without shuffling the library back first. It is evaluated
  * after every route above it.</p> */
 public final class CubeDoomsdayPlan {
-    private enum Stage { NONE, RITUAL, DOOMSDAY, STAR, DRAW, ORACLE, JACE, FINISH }
+    private enum Stage { NONE, RITUAL, ENABLER, DOOMSDAY, STAR, DRAW, ORACLE, JACE, FINISH }
     private final Player player;
     private Stage stage = Stage.NONE;
     private int turn = -1, doomsdayId = -1, ritualId = -1, ritualTurn = -1, finisherId = -1;
+    /** v78: the enabler spell currently on the stack, and the turn one was last
+     * proposed on. Exactly {@link #ritualId}/{@link #ritualTurn}'s shape, for
+     * exactly their reason: the stage keeps the plan from acting while our own
+     * enabler is unresolved, and one enabler per turn means a countered one is
+     * not chased with a second card. */
+    private int enablerId = -1, enablerTurn = -1;
     private boolean oracleSelected, gushSelected, gushRoute;
     private Card reservedStar;
     /** Observability only: the token for the check that already declined the
@@ -66,7 +72,16 @@ public final class CubeDoomsdayPlan {
      * Stage#FINISH} passes. Route J is evaluated after every other route, so on
      * a board with no live empty-draw win replacement the token the routes above
      * set is what is printed, unchanged; the only other token route J can set is
-     * the pre-existing {@code better-attack}.</p> */
+     * the pre-existing {@code better-attack}.</p>
+     *
+     * <p>v78 adds exactly two tokens, {@code other check=enabler-spent} and
+     * {@code other check=enabler-uncastable}, and both are reachable only from
+     * {@link #enablerAction}, which is evaluated after every route above it
+     * INCLUDING route J and which returns without touching this field on every
+     * structural clause. So a board that offers no pile enabler in our own hand
+     * keeps whatever token the routes above set, byte for byte. The one
+     * pre-existing token v78 can newly set is {@code oracle-etb-disabled}, on an
+     * enabler board alone, for the reason {@link #naturalRoute} sets it.</p> */
     private String decline = "other check=doomsday-plan";
     public String declineReason() { return decline; }
     /** Diagnostic only, never read by a decision: how many times the ritual
@@ -79,6 +94,11 @@ public final class CubeDoomsdayPlan {
      * or the finisher itself). Test-visible static, read and reset reflectively
      * by the fixture, exactly like {@link #ritualBridges}. */
     static int jaceFinishes;
+    /** Diagnostic only, never read by a decision: how many times v78's enabler
+     * action actually proposed a pile enabler from our own hand. Test-visible
+     * static, read and reset reflectively by the fixture, exactly like
+     * {@link #ritualBridges} and {@link #jaceFinishes}. */
+    static int pileEnablers;
 
     public CubeDoomsdayPlan(Player player) { this.player = player; }
 
@@ -480,6 +500,10 @@ public final class CubeDoomsdayPlan {
         if (stage == Stage.NONE || player.getGame().getStack().isEmpty()) return false;
         SpellAbility top = player.getGame().getStack().peekAbility();
         return top.getActivatingPlayer() == player && ((stage == Stage.RITUAL && top.getHostCard().getId() == ritualId)
+                // v78: the enabler, by the spell's own object id, exactly as
+                // the ritual bridge above. Both stages are cleared by the next
+                // priority pass, which re-derives from live state.
+                || stage == Stage.ENABLER && top.getHostCard().getId() == enablerId
                 || (stage == Stage.DOOMSDAY && top.getHostCard().getId() == doomsdayId)
                 || stage == Stage.STAR && reservedStar != null && top.getHostCard().getId() == reservedStar.getId()
                 || stage == Stage.DRAW && top.getHostCard().getName().equals(gushRoute ? "Gush" : "Ancestral Recall")
@@ -1020,8 +1044,18 @@ public final class CubeDoomsdayPlan {
         // battlefield Chromatic Star the reservation needs.
         long islands = player.getCardsIn(ZoneType.Battlefield).stream()
                 .filter(card -> card.getType().hasSubtype("Island")).count();
+        // v78 adds the third disjunct, and ONLY the third: an enabler in the
+        // hypothetical hand that v78's own enablerAction would play onto our
+        // battlefield. v74 required the Star to be IN PLAY, which is exactly the
+        // shortfall the measured game had and exactly what this increment fixes;
+        // the two pre-existing disjuncts are untouched, so no board that
+        // converts today stops converting. canDrawAmount(3) matches
+        // pileAction's own gate on the Star branch. NO payment probe is run
+        // here - enablerShape is structural, for the reason this method's
+        // javadoc and completingPieceNames' already record.
         if (availableInOwnDeck("Gush") && islands >= 2
-                && (inHand("Gush") != null && gushReachesOracle(5) || ownStarInPlay() != null)) return true;
+                && (inHand("Gush") != null && gushReachesOracle(5) || ownStarInPlay() != null
+                    || player.canDrawAmount(3) && enablerInHand() != null)) return true;
         // naturalRoute's two routes, with its own thresholds and its own
         // trigger-disabled gate, without its B B B U U / B B B payment.
         if (oracleTriggerDisabled()) return false;
@@ -1039,6 +1073,216 @@ public final class CubeDoomsdayPlan {
         return null;
     }
 
+    /** Our own hand, or - inside {@link #wouldConvert} alone - the hypothetical
+     * one. The same rule {@link #inHand} applies, as an iteration rather than a
+     * name lookup. Every live decision path sees the real hand. */
+    private Iterable<Card> ownHand() {
+        return handOverride != null ? handOverride : player.getCardsIn(ZoneType.Hand);
+    }
+
+    /** v78 - the FIRST pile enabler in our own hand, or null. Structural only:
+     * no {@code getSpellPermanent}, no {@link CubeComboAi#canPlayNative}, no
+     * payment probe, nothing printed and no state changed, because
+     * {@link #wouldConvert} consults this per tutor candidate per priority pass
+     * and {@link #completingPieceNames}' javadoc records why a probe there is
+     * unacceptable. {@link #enablerAction} adds the legality and payment on top.
+     *
+     * <p>Hand order is the scan order, which is our own zone's order and is
+     * deterministic; the predicate below admits at most one shape of card, so a
+     * second candidate would be an equivalent one.</p> */
+    private Card enablerInHand() {
+        for (Card card : ownHand()) if (!card.isFaceDown() && enablerShape(card) != null) return card;
+        return null;
+    }
+
+    /** v78 - is this hand card the Gush route's own draw source, by PRINTED
+     * property rather than by card name? Returns the mana ability that makes it
+     * one, or null. Both halves are load-bearing:
+     *
+     * <ol>
+     * <li><b>The mana shape {@link #starAbility} activates.</b> A mana ability
+     *     able to produce BLUE (that method sets
+     *     {@code setManaExpressChoice(BLUE)}) whose payment SACRIFICES the
+     *     permanent itself and carries nothing besides a tap, mana and that
+     *     self-sacrifice - the same cost allow-list {@link #floatBlue} and
+     *     {@link #permanentManaAbility} already use, minus their zero-mana
+     *     clause, because the Star's {@code {1}, {T}, Sacrifice} deliberately
+     *     costs one.</li>
+     * <li><b>The sacrifice-draw the route counts on.</b> After Doomsday the
+     *     library is exactly five ({@code doomsday.txt ChangeNum$ 5}); the
+     *     sacrifice draw takes it to four, and {@link #gushReachesOracle}(4)
+     *     then asks {@code 4 - 2 <= oracleThreshold(true)}. Without the draw the
+     *     same board would need a threshold of three, i.e. a different route.
+     *     Recognised either as a printed
+     *     {@code ChangesZone / Battlefield -> Graveyard / Card.Self} trigger
+     *     drawing us one card, or as a {@code Draw} link in the mana ability's
+     *     own sub-ability chain.</li>
+     * </ol>
+     *
+     * <p>Chromatic Star matches on the trigger form and Chromatic Sphere on the
+     * sub-ability form. Lion's Eye Diamond does NOT, and is refused by the
+     * general rule rather than by name: its activation cost is
+     * {@code Sac<1/CARDNAME> Discard<0/Hand>}, and a discard is neither a tap
+     * nor a self-sacrifice - the same objection {@link #bridgeFrom}'s javadoc
+     * already records for it, for the same reason (an honest model would have to
+     * account for discarding Doomsday itself out of the same hand).</p>
+     *
+     * <p>Abilities are copied with us as the activator exactly as
+     * {@link #ownBlueSources} does, and for its reason: asking a non-producing
+     * intrinsic ability whether it could make U makes the engine fall back to
+     * the host's controller and log it.</p> */
+    private SpellAbility enablerShape(Card card) {
+        for (SpellAbility original : card.getManaAbilities()) {
+            SpellAbility ability = original.copy(player);
+            if (ability.getManaPart() == null || !ability.canProduce("U")) continue;
+            boolean sacrificesSelf = false, foreign = false;
+            for (var part : ability.getPayCosts().getCostParts()) {
+                if (part instanceof forge.game.cost.CostSacrifice sacrifice
+                        && sacrifice.getType().equals("CARDNAME")) sacrificesSelf = true;
+                else if (!(part instanceof forge.game.cost.CostTap
+                        || part instanceof forge.game.cost.CostPartMana)) foreign = true;
+            }
+            if (!sacrificesSelf || foreign) continue;
+            if (enablerDraw(ability) == 1 || sacrificeDrawsOne(card)) return ability;
+        }
+        return null;
+    }
+
+    /** How many cards the ability's own sub-ability chain draws for us, read the
+     * way native {@code DrawEffect} reads it: an absent {@code NumCards} is one
+     * and an absent {@code Defined} is {@code You}. Deliberately NOT
+     * {@link #drawsInChain}, which is route J's and refuses an absent amount
+     * outright; route J's receipts may not move for this. A computed amount, a
+     * {@code Defined} that is not ours, or any shuffle/library destination is
+     * refused rather than guessed. */
+    private int enablerDraw(SpellAbility ability) {
+        int draws = 0;
+        for (SpellAbility link = ability; link != null; link = link.getSubAbility()) {
+            if ("True".equals(link.getParam("Shuffle")) || "Library".equals(link.getParam("Destination"))) return 0;
+            if (link.getApi() != ApiType.Draw) continue;
+            String defined = link.getParamOrDefault("Defined", "You");
+            if (!defined.equals("You") && !defined.equals("TriggeredCardController")) return 0;
+            String amount = link.getParamOrDefault("NumCards", "1");
+            if (amount.isEmpty() || !amount.chars().allMatch(Character::isDigit)) return 0;
+            draws += Integer.parseInt(amount);
+        }
+        return draws;
+    }
+
+    /** The printed "when this is put into a graveyard from the battlefield,
+     * draw a card" trigger, as a property. The executed ability lives in an
+     * SVar, so it is parsed through the native ability factory with a cheap
+     * {@code contains} pre-filter - {@code CubeComboAi.etbLibrarySearch}'s
+     * idiom, and deliberately NOT {@code Trigger.ensureAbility()}, which caches
+     * the parsed ability onto the live trigger and is therefore a state change
+     * this forecast may not make. */
+    private boolean sacrificeDrawsOne(Card card) {
+        for (forge.game.trigger.Trigger trigger : card.getTriggers()) {
+            if (trigger.isSuppressed() || trigger.getMode() != forge.game.trigger.TriggerType.ChangesZone) continue;
+            if (!"Battlefield".equals(trigger.getParam("Origin"))
+                    || !"Graveyard".equals(trigger.getParam("Destination"))) continue;
+            String valid = trigger.getParam("ValidCard"), svar = trigger.getParam("Execute");
+            if (valid == null || !valid.contains("Card.Self") || svar == null) continue;
+            String printed = card.getSVar(svar);
+            if (printed == null || !printed.contains("Draw")) continue;
+            SpellAbility draw = forge.game.ability.AbilityFactory.getAbility(card, svar);
+            if (draw != null && enablerDraw(draw) == 1) return true;
+        }
+        return false;
+    }
+
+    /** v78 - the enabler's own cast, or null. {@code CubeThopterPlan}'s
+     * {@code assembleFromHand} pattern verbatim: the card's printed permanent
+     * spell, copied with us as the activator, then native legality and native
+     * payment. Never a name, never a forged cost. */
+    private SpellAbility enablerCast(Card card) {
+        var original = card.getSpellPermanent();
+        if (original == null) return null;
+        SpellAbility cast = original.copy(player);
+        return CubeComboAi.canPlayNative(cast, player) && CubeComboAi.canPayCost(cast, player, false) ? cast : null;
+    }
+
+    /** Design v78 section 2, the pile-enabler action: put the Gush route's own
+     * draw source onto our own battlefield, from our own hand.
+     *
+     * <p>The defect this closes is diagnosis section 6's second one -
+     * {@code runs/2026-09-12-doom-worsened-pair-v67/diagnosis.md}: "Chromatic
+     * Star was in hand from turn 2 to turn 15 and was never played, while the
+     * Gush route the plan wants requires it on the battlefield. The plan has no
+     * action that sets up its own enabler, and the ordinary AI had no reason to
+     * cast it." The ordinary AI's reason is a printed one and is checked, not
+     * assumed: {@code chromatic_star.txt} carries {@code AI:RemoveDeck:All} and
+     * {@code AiController.getSpellAbilityToPlay} removes every candidate whose
+     * host carries it, so there is no pass on which Default would have cast it.
+     * The action therefore reaches the stack through the registered plan-action
+     * bypass {@code CubeBombPlan.audit} documents, and still passes
+     * {@code CubeComboPlayerController.playChosenSpellAbility}'s native-legality
+     * guard and native payment. The receipt names the hint.</p>
+     *
+     * <p><b>Evaluated LAST</b>, after {@link #pileAction} and after v51's route
+     * J, for route J's own reason: every decline token the routes above set is
+     * preserved byte for byte on every board with no enabler in hand, and the
+     * action can only ever spend mana on a pass where NO route above it wanted
+     * any.</p>
+     *
+     * <p>The gates are the Gush route's own, read from {@link #pileAction}: the
+     * pre-pile library size, Doomsday in our own hand, a life total the pile
+     * leaves us alive at, an Oracle this plan can still reach, Gush in our own
+     * deck, two Island-subtype lands of ours, three draws available, no Star
+     * already in play, and no DIRECT Gush route (which needs no Star). Then the
+     * printed enabler shape, its own legality and payment, and
+     * {@link #oracleTriggerDisabled}, which is the one abstention that applies:
+     * with creature ETB triggers switched off no pile route can win, so the mana
+     * is wasted. {@link #lethalOnBoard} and {@link #clockSurvivable} are NOT
+     * applied - they price route 2's turn-pass and Doomsday's half-life, and
+     * this action passes no turn and pays no life.</p>
+     *
+     * <p>No whole-route mana forecast, on v74's registered reasoning: a mana
+     * shortfall is the one thing a later turn fixes on its own, and the measured
+     * declines were {@code no-pile-route}, not {@code mana:}. The only mana gate
+     * is the enabler's own cast.</p>
+     *
+     * <p>At most ONE enabler per turn, {@link #ritualBridge}'s own rule, so a
+     * countered enabler is not chased with a second card. Own-visible
+     * information only: our own hand, our own battlefield, our own graveyard,
+     * our own registered deck composition, our own library SIZE and our own
+     * life.</p> */
+    private SpellAbility enablerAction(int librarySize) {
+        // The PRE-pile position only. After Doomsday the pile is exactly five
+        // and the enabler is too late; recoverSmallLibrary's own battlefield
+        // scan is a different decision and is a registered follow-up.
+        if (librarySize <= 5) return null;
+        if (inHand("Doomsday") == null || player.getLife() <= 1
+                || !availableInOwnDeck("Thassa's Oracle")) return null;
+        if (!availableInOwnDeck("Gush") || !player.canDrawAmount(3)) return null;
+        if (player.getCardsIn(ZoneType.Battlefield).stream()
+                .filter(card -> card.getType().hasSubtype("Island")).count() < 2) return null;
+        // The route already HAS its enabler, or does not need one.
+        if (ownStarInPlay() != null) return null;
+        if (inHand("Gush") != null && gushReachesOracle(5)) return null;
+        Card enabler = enablerInHand();
+        if (enabler == null) return null;
+        // From here the board really does offer one, so a refusal is named.
+        if (enablerTurn == player.getGame().getPhaseHandler().getTurn()) {
+            decline = "other check=enabler-spent";
+            return null;
+        }
+        if (oracleTriggerDisabled()) { decline = "oracle-etb-disabled"; return null; }
+        SpellAbility cast = enablerCast(enabler);
+        if (cast == null) { decline = "other check=enabler-uncastable"; return null; }
+        gushRoute = false;
+        reservedStar = null;
+        turn = player.getGame().getPhaseHandler().getTurn();
+        enablerTurn = turn;
+        enablerId = cast.getHostCard().getId();
+        stage = Stage.ENABLER;
+        pileEnablers++;
+        System.err.println("CUBE_COMBO pile-enabler card=" + enabler.getName().replace(' ', '_')
+                + " route=gush remAIDeck=" + ComputerUtilCard.isCardRemAIDeck(enabler)
+                + " turn=" + turn + " phase=" + player.getGame().getPhaseHandler().getPhase());
+        return cast;
+    }
+
     public SpellAbility nextAction() {
         decline = "other check=doomsday-plan";
         if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)
@@ -1050,7 +1294,11 @@ public final class CubeDoomsdayPlan {
         // A bridge commits to nothing. Its only job was to put mana in the pool
         // (or a Lotus Petal on the battlefield), so the plan starts over here
         // from live state and the ordinary entry gates decide again.
-        if (stage == Stage.RITUAL) stage = Stage.NONE;
+        // v78's enabler commits to nothing either. Its only job was to put a
+        // pile enabler on our own battlefield, so the plan starts over here from
+        // live state and the ordinary entry gates decide again; a countered
+        // enabler leaves the plan declining rather than holding a memory.
+        if (stage == Stage.RITUAL || stage == Stage.ENABLER) stage = Stage.NONE;
         // v51 route J owns its own two stages. Both re-derive every gate from
         // live state, exactly as the ritual bridge does: a countered Doomsday
         // or a removed Jace leaves the plan declining rather than holding a
@@ -1066,7 +1314,12 @@ public final class CubeDoomsdayPlan {
         // v51 route J, evaluated LAST so that every decline token the routes
         // above set is preserved byte for byte on every board that has no live
         // empty-draw win replacement.
-        return jaceRoute(librarySize);
+        SpellAbility finish = jaceRoute(librarySize);
+        if (finish != null) return finish;
+        // v78's enabler, evaluated after route J for the same reason route J is
+        // evaluated after the piles: it may only spend mana on a pass where no
+        // route above it wanted any, and it must leave their tokens untouched.
+        return enablerAction(librarySize);
     }
 
     /** Every pre-v51 route, unchanged. Split out of {@link #nextAction} only so

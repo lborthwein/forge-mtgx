@@ -1638,6 +1638,135 @@ public final class CubeDoomsdayExecutionSmoke {
             throw new AssertionError("Forced discard must not be overridden into a win: " + kase);
     }
 
+    // ------------------------------------------------------------ v78 enabler
+
+    /** Design v78 section 5.1. Six boards differing from one base layout in one
+     * dimension each, so a difference between them is attributable.
+     *
+     * <p>The base battlefield is four {@code Island} plus six {@code Swamp}.
+     * Lands carry no blue pips, so
+     * {@code CubeDoomsdayPlan.oracleThreshold(false)} is 2 and BOTH natural
+     * routes are dead by construction (they need 4 and 5); Ancestral Recall is
+     * nowhere, so the Recall route is dead too; and Gush is in the library
+     * rather than the hand, so the DIRECT Gush route is dead. The Gush/Star
+     * route is the only live one, which is what makes these boards a test of
+     * this increment rather than of the plan at large.</p> */
+    private static final List<String> ENABLER_CASES = List.of(
+            "star-hand", "star-in-play", "no-doomsday", "no-gush", "one-island", "no-oracle");
+
+    /** The plan's own v78 enabler count, read reflectively so this same source
+     * runs against the frozen v77 classes - where the field does not exist - and
+     * records -1 instead of failing. That control run is this increment's
+     * differential evidence. */
+    private static int enablerCount(boolean reset) {
+        try {
+            var field = Class.forName("forge.ai.CubeDoomsdayPlan").getDeclaredField("pileEnablers");
+            field.setAccessible(true);
+            int value = field.getInt(null);
+            if (reset) field.setInt(null, 0);
+            return value;
+        } catch (final ReflectiveOperationException | LinkageError absent) {
+            return -1;
+        }
+    }
+
+    private static List<Placement> enablerLayout(String kase) {
+        List<Placement> own = new ArrayList<>();
+        // Two Island-subtype lands: the Gush route's own prerequisite. The
+        // `one-island` control takes exactly one of them away and changes
+        // nothing else.
+        // Ten lands, four of them Islands. Swamps, deliberately NOT dual lands:
+        // an Underground Sea carries the Island SUBTYPE, so a dual base would
+        // leave every land Island-subtype and the `one-island` control could not
+        // exist at all. The Islands are the Gush route's own return cost and the
+        // blue `floatBlue` needs beside the enabler itself; FOUR rather than two
+        // because native payment is free to spend one on the enabler's {1} and
+        // another on its {1} activation, and the route still needs two blue
+        // after that. `one-island` takes the count to one and changes nothing
+        // else.
+        int islands = kase.equals("one-island") ? 1 : 4;
+        for (int i = 0; i < 10; i++)
+            own.add(new Placement(i < islands ? "Island" : "Swamp", ZoneType.Battlefield, false));
+        if (!kase.equals("no-doomsday")) own.add(new Placement("Doomsday", ZoneType.Hand, false));
+        // THE dimension under test: the enabler's zone. `star-in-play` is the
+        // pre-v78 route and must produce no enabler receipt at all.
+        own.add(new Placement("Chromatic Star",
+                kase.equals("star-in-play") ? ZoneType.Battlefield : ZoneType.Hand, false));
+        if (!kase.equals("no-gush")) own.add(new Placement("Gush", ZoneType.Library, false));
+        if (!kase.equals("no-oracle")) own.add(new Placement("Thassa's Oracle", ZoneType.Library, false));
+        // A library of twelve: comfortably more than the five Doomsday leaves,
+        // which is what makes the pre-pile position the one under test.
+        while (own.stream().filter(p -> p.zone() == ZoneType.Library).count() < 12)
+            own.add(new Placement("Forest", ZoneType.Library, false));
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        return own;
+    }
+
+    private static void enablerRun(int seat, String kase) {
+        List<Placement> own = enablerLayout(kase);
+        List<Placement> other = new ArrayList<>();
+        while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player p = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
+        BenchRandomAudit.install(86900 + seat + (main2 ? 100 : 0));
+        enablerCount(true);
+        // The premise, asserted rather than assumed: the enabler really is in
+        // the zone this case says it is, and its own cast really is payable, so
+        // a refusal under test is the predicate's and not a mana shortfall.
+        boolean starInHand = has(p, ZoneType.Hand, "Chromatic Star");
+        boolean starPayable = handSpellPayable(p, "Chromatic Star");
+        if (starInHand == kase.equals("star-in-play"))
+            throw new AssertionError("enabler premise: wrong Chromatic Star zone for " + kase);
+        if (starInHand && !starPayable)
+            throw new AssertionError("enabler premise: Chromatic Star is not castable for " + kase);
+        String first = "default";
+        if (improved) {
+            var proposed = new forge.ai.CubeDoomsdayPlan(p).nextAction();
+            first = proposed == null ? "none" : proposed.getHostCard().getName().replace(' ', '_');
+            enablerCount(true); // the probe is a preview; only the game is scored
+        }
+        int steps = 0, limit = 900;
+        boolean doom = false;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() == 1 && steps++ < limit) {
+            game.getPhaseHandler().mainLoopStep();
+            doom |= has(p, ZoneType.Graveyard, "Doomsday");
+        }
+        if (steps >= limit) throw new AssertionError("enabler step budget: " + kase);
+        int enablers = enablerCount(true);
+        boolean starLeftHand = !has(p, ZoneType.Hand, "Chromatic Star");
+        boolean oracleWin = p.getOutcome() != null && "Thassa's Oracle".equals(p.getOutcome().altWinSourceName);
+        System.out.println("ENABLER_RESULT suite=enabler improved=" + improved + " policy=" + policy()
+                + " seat=" + seat + " main2=" + main2 + " case=" + kase
+                + " firstProposal=" + first + " enablerCasts=" + enablers
+                + " starInHandAtStart=" + starInHand + " starLeftHand=" + starLeftHand
+                + " starOnBattlefieldEnd=" + has(p, ZoneType.Battlefield, "Chromatic Star")
+                + " starInGraveyard=" + has(p, ZoneType.Graveyard, "Chromatic Star")
+                + " doomsdayCast=" + doom + " won=" + p.hasWon() + " oracleWin=" + oracleWin
+                + " gameOver=" + game.isGameOver() + " life=" + p.getLife()
+                + " oppLife=" + opponent.getLife() + " steps=" + steps);
+        if (!Boolean.getBoolean("forge.test.requireDoomsdayEnabler")) return;
+        // The Default arm owns no enabler anywhere: chromatic_star.txt carries
+        // AI:RemoveDeck:All and AiController.getSpellAbilityToPlay removes every
+        // candidate whose host carries it, so the ordinary AI cannot cast it on
+        // any pass. Same for doomsday.txt, which is why it casts no Doomsday.
+        if (!improved) {
+            if (enablers > 0) throw new AssertionError("Default arm owned an enabler: " + kase);
+            if (starInHand && starLeftHand)
+                throw new AssertionError("Default arm played Chromatic Star: " + kase);
+            if (doom) throw new AssertionError("Default arm cast Doomsday: " + kase);
+            return;
+        }
+        if (kase.equals("star-hand")) {
+            if (enablers < 1) throw new AssertionError("the plan did not play its own pile enabler: " + kase);
+            if (!first.equals("Chromatic_Star"))
+                throw new AssertionError("the first proposal was not the enabler: " + first);
+            if (!starLeftHand) throw new AssertionError("Chromatic Star stayed in hand: " + kase);
+            if (!oracleWin) throw new AssertionError("the enabled route did not finish: " + kase);
+        } else if (enablers != 0) {
+            throw new AssertionError("the enabler fired where no gate allows it: " + kase + " casts=" + enablers);
+        }
+    }
+
     public static void main(final String[] args) {
         try {
             improved = args.length > 1 && args[1].equals("improved");
@@ -1654,6 +1783,15 @@ public final class CubeDoomsdayExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
+            if (suite.equals("enabler")) {
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++) for (String kase : ENABLER_CASES) enablerRun(seat, kase);
+                }
+                System.out.println("ENABLER_SUITE_COMPLETE suite=enabler improved=" + improved
+                        + " policy=" + policy() + " cases=" + 4 * ENABLER_CASES.size());
+                return;
+            }
             if (suite.equals("jace")) {
                 for (boolean second : new boolean[] {false, true}) {
                     main2 = second;

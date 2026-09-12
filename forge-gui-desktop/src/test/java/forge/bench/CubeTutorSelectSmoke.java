@@ -132,7 +132,10 @@ public final class CubeTutorSelectSmoke {
      *     {@code no-pile-route}. Unlike {@code demonic:reach-doomsday}, whose
      *     board has no route kit at all, every route here is one card away and
      *     the one card is in the wrong place. v74 must let the ordinary fetch
-     *     stand.</li>
+     *     stand. <b>RE-REGISTERED MUST-MOVE at v78</b>, which gives the plan an
+     *     action that plays that one card from that wrong place: the route is no
+     *     longer one zone away, so the honest answer on this board is now the
+     *     fetch. The board is unchanged; only its registration is.</li>
      * <li>{@code demonic:reach-doomsday-route} MUST-MOVE - the same 40 cards
      *     with Baleful Strix swapped for True-Name Nemesis (three blue pips,
      *     threshold 5) and nothing else changed. The plan's own natural route 2
@@ -141,11 +144,28 @@ public final class CubeTutorSelectSmoke {
      *     stratum whose act-time route was already live.</li>
      * </ul> */
     private static final List<String> HAND_REACH_MOVE =
-            List.of("demonic:reach-tendrils", "demonic:reach-doomsday-route", "demonic:reach-twin");
+            List.of("demonic:reach-tendrils", "demonic:reach-doomsday-route", "demonic:reach-twin",
+                    // v78 RE-REGISTRATION, and the only change this increment
+                    // makes to this fixture. v74 registered this board as a
+                    // MUST-NOT-MOVE because "the no-route fixture's Gush
+                    // prerequisite passes on every count except the Star's zone,
+                    // and that is precisely where the plan declines"
+                    // (checkpoint-v74), a shortfall it recorded as noted, NOT
+                    // fixed. v78 is the increment that fixes the zone:
+                    // CubeDoomsdayPlan now plays the Star from its own hand, so
+                    // the plan's own act-time logic converts this board and the
+                    // steering may honestly fetch into it. The board, its
+                    // placements and every assertion body are untouched.
+                    "demonic:reach-doomsday-no-route");
     private static final List<String> HAND_REACH_HOLD = List.of("demonic:reach-two-short",
-            "demonic:reach-doomsday", "demonic:reach-doomsday-no-route");
-    private static final List<String> HAND_REACH =
-            java.util.stream.Stream.concat(HAND_REACH_MOVE.stream(), HAND_REACH_HOLD.stream()).toList();
+            "demonic:reach-doomsday");
+    /** Spelled out rather than derived from the two lists above so that the CASE
+     * ORDER is held fixed across v78's re-registration: every other row of this
+     * suite keeps its position, and the comparison against the previous frozen
+     * logs stays a row-for-row one. */
+    private static final List<String> HAND_REACH = List.of(
+            "demonic:reach-tendrils", "demonic:reach-doomsday-route", "demonic:reach-twin",
+            "demonic:reach-two-short", "demonic:reach-doomsday", "demonic:reach-doomsday-no-route");
 
     private static boolean handReach(String control) { return HAND_REACH.contains(control); }
     private static boolean mustMove(String control) {
