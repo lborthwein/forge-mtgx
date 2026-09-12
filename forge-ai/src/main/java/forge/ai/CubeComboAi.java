@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v56";
+    public static final String VERSION = "cube-combo-execution-v57";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -659,50 +659,245 @@ public final class CubeComboAi {
             return null;
         }
         tutorDecline("other check=no-tutor-in-hand");
+        // Phase 1 - the v42 plain-spell shape, over our own hand in zone order
+        // and each card's abilities in order, verbatim. A position that already
+        // had a qualifying tutor spell therefore takes exactly the v56 path,
+        // makes exactly the v56 calls and sets exactly the v56 decline token.
         for (Card hand : player.getCardsIn(ZoneType.Hand)) {
             if (hand.isFaceDown()) continue;
             for (SpellAbility original : hand.getSpellAbilities()) {
                 SpellAbility tutor = original.copy(player);
-                if (!tutor.isSpell() || tutor.getApi() != ApiType.ChangeZone || tutor.usesTargeting()
-                        || !"Library".equals(tutor.getParam("Origin"))
-                        || !"Hand".equals(tutor.getParam("Destination"))
-                        || !"1".equals(tutor.getParamOrDefault("ChangeNum", "1"))
-                        || !"You".equals(tutor.getParamOrDefault("Defined", "You"))
+                if (!tutor.isSpell() || !librarySearchToHand(tutor)
                         || tutor.getSubAbility() != null || !manaOnly(tutor)
                         || !canPlayNative(tutor, player) || !player.canSearchLibraryWith(tutor, player)) continue;
-                tutorDecline("other check=no-partner-route");
-                // Pass 0 is the v42/v45 candidate set, enumerated in registered
-                // deck order exactly as before, so no existing forecast can
-                // move. The plan pieces are a strictly later pass: where both a
-                // Kiki pair and a plan gate are one short, the faster route is
-                // still the one that gets the tutor.
-                for (int pass = 0; pass < 2; pass++)
-                for (var entry : player.getRegisteredPlayer().getDeck().getMain()) {
-                    String name = entry.getKey().getName();
-                    boolean legacy = name.equals(thopterMissing) || main1 && java.util.Set.of("Kiki-Jiki, Mirror Breaker", "Pestermite", "Deceiver Exarch",
-                            "Restoration Angel", "Zealous Conscripts").contains(name);
-                    if ((pass == 0 ? !legacy : legacy || !planPieces.contains(name))
-                            || !ownCopyOutside(player, name, ZoneType.Hand, ZoneType.Battlefield,
-                                ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command, ZoneType.Stack)) continue;
-                    // A detached prototype: no game ID allocation or zone insertion.
-                    Card forecast = forge.game.card.CardFactory.getCard(entry.getKey(), player, -1, player.getGame());
-                    if(name.equals(thopterMissing) && !CubeThopterPlan.addAssemblyPreviewRules(forecast,entry.getKey()))continue;
-                    if(pass == 1 && !addPlanPiecePreviewRules(forecast, entry.getKey(), planPieces))continue;
-                    forecast.setZone(player.getZone(ZoneType.Library));
-                    if (!forecast.isValid(tutor.getParamOrDefault("ChangeType", "Card").split(","), player, hand, tutor)
-                            || chooseTutorPartner(player, tutor, new CardCollection(forecast)) == null) continue;
-                    forecast.setZone(player.getZone(ZoneType.Hand));
-                    SpellAbility piece = ownSpellOf(forecast);
-                    if (piece == null) continue;
-                    SpellAbility creature = piece.copy(player);
-                    if (!manaOnly(creature) || !castFitsAfter(player, tutor, creature)) continue;
-                    var cost = ComputerUtilMana.calculateManaCost(creature.getPayCosts(), creature, player, true, 0, false);
-                    CardCollection reserve = CubeComboAi.getManaSourcesToPayCost(cost, creature, player, false);
-                    tutorDecline("mana:" + (tutor.getHostCard().getCMC() + forecast.getCMC()) + "/" + ownVisibleMana(player));
-                    if (reserve != null && withReservedSources(player, reserve,
-                            () -> CubeComboAi.canPayCost(tutor, player, false))) return new TutorPlan(tutor, reserve, name);
-                }
+                TutorPlan plan = planFor(player, tutor, tutor, false, main1, thopterMissing, planPieces);
+                if (plan != null) return plan;
             }
+        }
+        // Phase 2 - v57's widened shapes, consulted only after the plain-spell
+        // pass found nothing, so a v56-reachable position never even builds this
+        // list. Each shape's own gate is applied while the list is built.
+        for (TutorShape shape : widenedShapes(player)) {
+            TutorPlan plan = planFor(player, shape.action(), shape.search(), shape.controlTransfer(),
+                    main1, thopterMissing, planPieces);
+            if (plan != null) return plan;
+        }
+        return null;
+    }
+
+    /** One tutor candidate: the ability we would actually play, and the search
+     * that filters and forecasts. For the v42 plain-spell shape they are the
+     * same object. {@code controlTransfer} marks a search whose SubAbility hands
+     * the permanent to an opponent (Wishclaw Talisman). */
+    private record TutorShape(SpellAbility action, SpellAbility search, boolean controlTransfer) { }
+
+    /** The printed shape of a one-card search of our OWN library that puts the
+     * card in our OWN hand, shared by every tutor shape v57 admits. Printed
+     * parameters only - no zone, controller or game state is read here.
+     *
+     * <p>{@code EACH} is refused deliberately. ChangeZoneEffect skips its own
+     * ChangeType filter for an {@code EACH} list and fetches one card per
+     * clause, so such a search is not a one-card search at all even though it
+     * carries no {@code ChangeNum} and would otherwise take the default of 1.
+     * Yasharn, Implacable Earth is the cube's example; Vorinclex is refused one
+     * step earlier by its explicit {@code ChangeNum$ 2}.</p> */
+    private static boolean librarySearchToHand(SpellAbility search) {
+        return search != null && search.getApi() == ApiType.ChangeZone && !search.usesTargeting()
+                && "Library".equals(search.getParam("Origin"))
+                && "Hand".equals(search.getParam("Destination"))
+                && "1".equals(search.getParamOrDefault("ChangeNum", "1"))
+                && "You".equals(search.getParamOrDefault("Defined", "You"))
+                && !search.getParamOrDefault("ChangeType", "Card").startsWith("EACH");
+    }
+
+    /** v57 - the tutor shapes beyond the plain spell, in one fixed order: our
+     * own hand's creature ETB searches first, then the activated searches of
+     * permanents we control. Own hand and own battlefield only; a face-down
+     * card is never identified and a permanent we do not control is skipped. */
+    private static java.util.List<TutorShape> widenedShapes(Player player) {
+        java.util.List<TutorShape> shapes = new java.util.ArrayList<>();
+        for (Card hand : player.getCardsIn(ZoneType.Hand)) {
+            if (hand.isFaceDown()) continue;
+            SpellAbility search = etbLibrarySearch(player, hand);
+            if (search == null) continue;
+            SpellAbility own = ownSpellOf(hand);
+            if (own == null) continue;
+            SpellAbility action = own.copy(player);
+            if (!action.isSpell() || !manaOnly(action) || !canPlayNative(action, player)
+                    || !player.canSearchLibraryWith(search, player)) continue;
+            shapes.add(new TutorShape(action, search, false));
+        }
+        for (Card permanent : player.getCardsIn(ZoneType.Battlefield)) {
+            if (permanent.isFaceDown() || permanent.getController() != player) continue;
+            for (SpellAbility original : permanent.getSpellAbilities()) {
+                if (!original.isActivatedAbility() || !librarySearchToHand(original)) continue;
+                boolean transfer = controlTransferSub(original);
+                if (original.getSubAbility() != null && !transfer) continue;
+                SpellAbility action = original.copy(player);
+                if (!admittedActivationCost(player, action) || !canPlayNative(action, player)
+                        || !player.canSearchLibraryWith(action, player)) continue;
+                shapes.add(new TutorShape(action, action, transfer));
+            }
+        }
+        return shapes;
+    }
+
+    /** v57 - a card's own "when this enters, search your library" trigger, as a
+     * detached ability. Imperial Recruiter, Recruiter of the Guard, Spellseeker,
+     * Trinket Mage, Stoneforge Mystic and Ranger-Captain of Eos are the cube's
+     * members; the printed property, not the name, is the contract.
+     *
+     * The granted ability lives in an SVar, so it has to be parsed through the
+     * native ability factory to be tested at all. This deliberately does NOT use
+     * {@code Trigger.ensureAbility()}: that caches the parsed ability onto the
+     * live trigger, which is a state change, and this is a forecast. The cheap
+     * {@code contains} pre-filter keeps unrelated SVars away from the parser,
+     * exactly as {@link #engineAura} does for the engine Aura. */
+    private static SpellAbility etbLibrarySearch(Player player, Card card) {
+        for (forge.game.trigger.Trigger trigger : card.getTriggers()) {
+            if (trigger.getMode() != forge.game.trigger.TriggerType.ChangesZone
+                    || !"Battlefield".equals(trigger.getParam("Destination"))) continue;
+            String valid = trigger.getParam("ValidCard");
+            String svar = trigger.getParam("Execute");
+            if (valid == null || !valid.contains("Card.Self") || svar == null) continue;
+            String printed = card.getSVar(svar);
+            if (printed == null || !printed.contains("ChangeZone")) continue;
+            SpellAbility search = forge.game.ability.AbilityFactory.getAbility(card, svar);
+            if (search == null || !librarySearchToHand(search) || search.getSubAbility() != null) continue;
+            // The parsed ability is detached - it is not the trigger's own - so
+            // naming the actor here cannot disturb the live trigger, and
+            // chooseTutorPartner's actor gate needs it set.
+            search.setActivatingPlayer(player);
+            return search;
+        }
+        return null;
+    }
+
+    /** v57 - the Wishclaw shape, by printed property rather than by name: the
+     * search's SubAbility chain reaches a GainControl of the searching permanent
+     * itself. Any other SubAbility is refused by the caller. */
+    private static boolean controlTransferSub(SpellAbility search) {
+        for (SpellAbility sub = search.getSubAbility(); sub != null; sub = sub.getSubAbility())
+            if (sub.getApi() == ApiType.GainControl && "Self".equals(sub.getParam("Defined"))) return true;
+        return false;
+    }
+
+    /** v57 - the cost shapes an activated search may carry. Mana, a tap, a
+     * sacrifice OF THE SEARCHING PERMANENT ITSELF (Expedition Map), and a
+     * counter removal (Wishclaw's wish counter) are admitted outright. A discard
+     * cost (Survival of the Fittest) is admitted only when EVERY card in our own
+     * hand that could pay it is safe to lose: the native AI, not this policy,
+     * picks the card discarded, so "a safe discard exists" is not good enough.
+     * Every other cost part refuses. Actual payability stays the existing
+     * canPayCost / reserved-source discipline, which this does not replace. */
+    private static boolean admittedActivationCost(Player player, SpellAbility ability) {
+        if (ability.getPayCosts() == null) return false;
+        for (var part : ability.getPayCosts().getCostParts()) {
+            if (part instanceof forge.game.cost.CostPartMana || part instanceof forge.game.cost.CostTap
+                    || part instanceof forge.game.cost.CostRemoveCounter) continue;
+            if (part instanceof forge.game.cost.CostSacrifice && part.payCostFromSource()) continue;
+            if (part instanceof forge.game.cost.CostDiscard && safeDiscardCost(player, ability, part)) continue;
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean safeDiscardCost(Player player, SpellAbility ability, forge.game.cost.CostPart part) {
+        String[] types = part.getType().split(";");
+        java.util.Set<String> pieces = protectedPieceNames(player);
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.isFaceDown() || !card.isValid(types, player, ability.getHostCard(), ability)) continue;
+            if (pieces.contains(card.getName())) return false;
+        }
+        return true;
+    }
+
+    /** Every name a cost must not be allowed to eat: the Breach and Storm gates'
+     * current completing pieces, the Kiki halves and partners, and the thopter
+     * family's one missing piece. Own-visible reads only. */
+    private static java.util.Set<String> protectedPieceNames(Player player) {
+        java.util.Set<String> names = new java.util.HashSet<>(planCompletingNames(player));
+        names.addAll(java.util.Set.of("Kiki-Jiki, Mirror Breaker", "Pestermite", "Deceiver Exarch",
+                "Restoration Angel", "Zealous Conscripts", "Splinter Twin"));
+        String thopter = CubeThopterPlan.missingPiece(player);
+        if (thopter != null) names.add(thopter);
+        return names;
+    }
+
+    /** v57 - the gate on a control-transfer search. Wishclaw Talisman hands the
+     * permanent to an opponent, who gets the NEXT activation, so the fetch has
+     * to pay off before they ever use it.
+     *
+     * The one route this policy can honestly forecast as a same-turn win is the
+     * Kiki route: our own MAIN1, an engine already on our own battlefield whose
+     * copy ability passes its restrictions, and a PARTNER body fetched. Fetching
+     * the engine itself does not qualify - it enters summoning sick and cannot
+     * tap this turn. A fetch that merely opens a Breach or Storm gate does not
+     * qualify either; those plans act this turn but are not forecast here as a
+     * kill, and handing an opponent a repeatable tutor for a maybe is exactly
+     * the trade this gate exists to refuse.
+     *
+     * Own battlefield and the printed halves only. */
+    private static boolean fetchWinsThisTurn(Player player, Card forecast) {
+        if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player) || !partnerHalf(forecast)) return false;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || !card.getName().equals("Kiki-Jiki, Mirror Breaker")) continue;
+            if (card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
+                    && sa.copy(player).checkRestrictions(card, player))) return true;
+        }
+        return false;
+    }
+
+    /** The forecast body, one tutor shape at a time. This is v56's inner loop
+     * verbatim except for three things: the ChangeType and the offered-list
+     * forecast now read the SEARCH rather than the played ability (the same
+     * object for a plain spell, so the v42 path cannot move), the second cast is
+     * priced against the played ability, and a control-transfer search must also
+     * pass {@link #fetchWinsThisTurn}.
+     *
+     * The candidate names are unchanged and so is how the forecast decides a
+     * piece is "in library": our own registered deck composition minus our own
+     * visible zones, through {@link #ownCopyOutside}. The library is never
+     * enumerated, ordered or read. The preview card is detached (id -1) and is
+     * never inserted into a real zone. */
+    private static TutorPlan planFor(Player player, SpellAbility tutor, SpellAbility search, boolean controlTransfer,
+            boolean main1, String thopterMissing, java.util.List<String> planPieces) {
+        tutorDecline("other check=no-partner-route");
+        Card host = search.getHostCard();
+        // Pass 0 is the v42/v45 candidate set, enumerated in registered
+        // deck order exactly as before, so no existing forecast can
+        // move. The plan pieces are a strictly later pass: where both a
+        // Kiki pair and a plan gate are one short, the faster route is
+        // still the one that gets the tutor.
+        for (int pass = 0; pass < 2; pass++)
+        for (var entry : player.getRegisteredPlayer().getDeck().getMain()) {
+            String name = entry.getKey().getName();
+            boolean legacy = name.equals(thopterMissing) || main1 && java.util.Set.of("Kiki-Jiki, Mirror Breaker", "Pestermite", "Deceiver Exarch",
+                    "Restoration Angel", "Zealous Conscripts").contains(name);
+            if ((pass == 0 ? !legacy : legacy || !planPieces.contains(name))
+                    || !ownCopyOutside(player, name, ZoneType.Hand, ZoneType.Battlefield,
+                        ZoneType.Graveyard, ZoneType.Exile, ZoneType.Command, ZoneType.Stack)) continue;
+            // A detached prototype: no game ID allocation or zone insertion.
+            Card forecast = forge.game.card.CardFactory.getCard(entry.getKey(), player, -1, player.getGame());
+            if(name.equals(thopterMissing) && !CubeThopterPlan.addAssemblyPreviewRules(forecast,entry.getKey()))continue;
+            if(pass == 1 && !addPlanPiecePreviewRules(forecast, entry.getKey(), planPieces))continue;
+            forecast.setZone(player.getZone(ZoneType.Library));
+            if (!forecast.isValid(search.getParamOrDefault("ChangeType", "Card").split(","), player, host, search)
+                    || chooseTutorPartner(player, search, new CardCollection(forecast)) == null) continue;
+            if (controlTransfer && !fetchWinsThisTurn(player, forecast)) {
+                tutorDecline("subability:not-same-turn");
+                continue;
+            }
+            forecast.setZone(player.getZone(ZoneType.Hand));
+            SpellAbility piece = ownSpellOf(forecast);
+            if (piece == null) continue;
+            SpellAbility creature = piece.copy(player);
+            if (!manaOnly(creature) || !castFitsAfter(player, tutor, creature)) continue;
+            var cost = ComputerUtilMana.calculateManaCost(creature.getPayCosts(), creature, player, true, 0, false);
+            CardCollection reserve = CubeComboAi.getManaSourcesToPayCost(cost, creature, player, false);
+            tutorDecline("mana:" + (tutor.getHostCard().getCMC() + forecast.getCMC()) + "/" + ownVisibleMana(player));
+            if (reserve != null && withReservedSources(player, reserve,
+                    () -> CubeComboAi.canPayCost(tutor, player, false))) return new TutorPlan(tutor, reserve, name);
         }
         return null;
     }
