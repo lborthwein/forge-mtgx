@@ -46,6 +46,18 @@ public class PermanentAi extends SpellAbilityAi {
     protected AiAbilityDecision checkApiLogic(final Player ai, final SpellAbility sa) {
         final Card source = sa.getHostCard();
 
+        // v68 C5: the versioned cube policy holds an escape-granting enchantment
+        // - Underworld Breach, recognised by its PRINTED static and never by
+        // name - while its own plan can take no route and no escape cast is
+        // available this turn. Breach sacrifices itself at the beginning of the
+        // end step, so that cast is a gate piece thrown away. The predicate
+        // refuses nothing else: any other clause failing leaves the ordinary
+        // cast untouched and prints no line. Gated on CubeComboAi.enabled(ai):
+        // the Default arm never reaches it.
+        if (CubeComboAi.enabled(ai) && CubeBreachPlan.holdBreach(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         // check on legendary
         if (!source.ignoreLegendRule() && ai.isCardInPlay(source.getName())) {
             // TODO check the risk we'd lose the effect with bad timing

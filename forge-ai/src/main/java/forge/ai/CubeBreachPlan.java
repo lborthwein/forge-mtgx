@@ -15,6 +15,7 @@ import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.GameLossReason;
 import forge.game.spellability.SpellAbility;
+import forge.game.staticability.StaticAbility;
 import forge.game.staticability.StaticAbilityMustTarget;
 import forge.game.zone.ZoneType;
 import java.util.List;
@@ -844,6 +845,198 @@ public final class CubeBreachPlan {
         int extra = engineYield > 0 && fuel >= terminalEscape + engineEscape ? engineYield : 0;
         int available = sources + treasure + extra;
         return available >= colored && available >= generic + colored;
+    }
+
+    // ---------------------------------------------------------------- v68
+
+    /** v68 C5, the v41 hand route's own fuel gate: {@link #breachReady} admits
+     * a Breach in hand only at {@code fuel >= 6}. */
+    private static final int HAND_ROUTE_FUEL = 6;
+    /** The same two land drops v61's H1 forecast uses. */
+    private static final int LAND_DROP_HORIZON = 2;
+    /** The four finishers this plan can actually end on - the v41 terminal and
+     * v64's three - in the order {@link #holdBreach} scans them. */
+    private static final List<String> HOLD_TERMINALS = List.of(FREEZE, TENDRILS, WHEEL, ORACLE);
+    /** Where a terminal is own-visible to this seat. */
+    private static final List<ZoneType> HOLD_ZONES = List.of(ZoneType.Hand, ZoneType.Graveyard, ZoneType.Battlefield);
+    private static final ThreadLocal<String> HOLD_STAMP = new ThreadLocal<>();
+
+    /** The PRINTED static that grants escape to our own graveyard cards, or
+     * null. Underworld Breach is recognised by this ability and never by its
+     * name, so a renamed reprint is held on the same terms and a card that
+     * merely shares the name is not.
+     *
+     * <p>The shape asked for is exactly the one the card prints:
+     * {@code Mode$ Continuous}, {@code AffectedZone$ Graveyard},
+     * {@code Affected$ …YouOwn…} and an {@code AddKeyword$} that adds
+     * {@code Escape}. Nothing else about the card is read.</p> */
+    private static StaticAbility escapeGrant(Card card) {
+        if (card == null || card.isFaceDown()) return null;
+        for (StaticAbility stat : card.getStaticAbilities()) {
+            if (!"Continuous".equals(stat.getParam("Mode"))) continue;
+            String zone = stat.getParam("AffectedZone"), add = stat.getParam("AddKeyword"),
+                    affected = stat.getParam("Affected");
+            if (zone != null && zone.contains("Graveyard") && affected != null && affected.contains("YouOwn")
+                    && add != null && add.contains("Escape")) return stat;
+        }
+        return null;
+    }
+
+    /** How many OTHER graveyard cards an escape granted by this static exiles,
+     * parsed out of the printed {@code ExileFromGrave<n/…>} text rather than
+     * assumed - the same discipline {@link #escapeCost} already applies to a
+     * card's own escape ability. Zero when the text cannot be read, which
+     * refuses the hold outright. */
+    private static int grantExileAmount(StaticAbility grant) {
+        String add = grant.getParam("AddKeyword");
+        int open = add == null ? -1 : add.indexOf("ExileFromGrave<");
+        if (open < 0) return 0;
+        int start = open + "ExileFromGrave<".length(), end = start;
+        while (end < add.length() && Character.isDigit(add.charAt(end))) end++;
+        return end == start ? 0 : Integer.parseInt(add.substring(start, end));
+    }
+
+    /** Another card carrying the same printed grant, own-visible where it could
+     * still be deployed: our own battlefield or our own hand. A copy in the
+     * graveyard is deliberately NOT counted - an Underworld Breach there grants
+     * escape to nothing, as the diagnosis's {@code 69-s1} recorded. */
+    private static boolean otherEscapeGrant(Player player, Card host) {
+        for (ZoneType zone : List.of(ZoneType.Battlefield, ZoneType.Hand))
+            for (Card card : player.getCardsIn(zone))
+                if (card != host && escapeGrant(card) != null) return true;
+        return false;
+    }
+
+    /** Everything we could tap for mana right now without spending fuel:
+     * floating mana plus every untapped permanent we control that carries a
+     * mana ability. Deliberately more generous than
+     * {@link CubeComboAi#ownVisibleMana}, which counts lands only: this number
+     * feeds {@link #escapeAvailableThisTurn}, where over-counting finds an
+     * escape line and RELEASES the hold. */
+    private int ownVisibleSources() {
+        int sources = player.getManaPool().totalMana();
+        for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (!card.isFaceDown() && card.isUntapped() && !card.getManaAbilities().isEmpty()) sources++;
+        return sources;
+    }
+
+    /** v68's binding clause, and the one the v63 worker's constraint names:
+     * could ANY escape cast happen this turn once this Breach resolves? If one
+     * could, the ordinary cast is not a wasted card and the hold must not fire
+     * - this is what keeps the diagnosis's {@code 63-s1} and {@code 76-s1},
+     * where the ordinary Breach escaped Lotus Petals the same turn.
+     *
+     * <p>Own-visible counts only, and coarse in the direction of RELEASE:
+     * colour is never priced, a source that makes two mana counts once, and the
+     * mana left after paying for the Breach is the generous
+     * {@link #ownVisibleSources}. Each of those errors can only find an escape
+     * line a stricter forecast would miss, and finding one releases.</p> */
+    private boolean escapeAvailableThisTurn(Card breach, StaticAbility grant) {
+        int exile = grantExileAmount(grant);
+        if (exile <= 0) return true;
+        boolean nonLandOnly = grant.getParam("Affected").contains("nonLand");
+        var graveyard = player.getCardsIn(ZoneType.Graveyard);
+        if (graveyard.size() <= exile) return false;
+        int mana = Math.max(0, ownVisibleSources() - breach.getCMC());
+        for (Card card : graveyard) {
+            if (card.isFaceDown() || nonLandOnly && card.isLand()) continue;
+            if (card.getCMC() <= mana) return true;
+        }
+        return false;
+    }
+
+    /** A named card where this seat can see it: our own hand, then graveyard,
+     * then battlefield. Never a library, never an opponent zone. */
+    private Card ownVisible(String name) {
+        for (ZoneType zone : HOLD_ZONES) {
+            Card card = find(name, zone);
+            if (card != null) return card;
+        }
+        return null;
+    }
+
+    /** v68 C5 - refuse the ORDINARY AI's cast of an escape-granting enchantment
+     * (Underworld Breach, recognised by the printed static of
+     * {@link #escapeGrant}) when that cast throws the card away.
+     *
+     * <p>Underworld Breach sacrifices itself at the beginning of the end step,
+     * so casting it on a turn that can take no escape line spends the Breach
+     * half of this plan's entry gate for nothing. The diagnosis measured the
+     * ordinary AI doing exactly that in 5 of 32 storm games, once on turn 1.
+     * Its own sizing governs: this keeps the engine in 3 of those 5 and supplies
+     * none of the Brain Freezes the other 4 were missing.</p>
+     *
+     * <p>Every clause must hold, and a failed clause means DEFAULT BEHAVIOUR
+     * with no log line at all, so a released position is byte-identical:</p>
+     * <ol>
+     * <li>our own spell, our own card, in OUR OWN HAND;</li>
+     * <li>the printed escape grant is present and its exile amount parses;</li>
+     * <li>stack empty, our own MAIN1/MAIN2, one opponent, and we can still win;</li>
+     * <li>it is the LAST own copy we could deploy ({@link #otherEscapeGrant});</li>
+     * <li>no route of this plan can fire this turn - asked of a FRESH plan
+     *     instance, whose only asymmetry with the live one ({@code failedTurn}
+     *     unset) can make it propose where the live plan declined, which
+     *     releases;</li>
+     * <li>no escape cast is available this turn ({@link #escapeAvailableThisTurn});</li>
+     * <li>a terminal is own-visible AND its fuel or its mana is within a short
+     *     horizon - {@code fuel + 2 >= } the hand route's own gate, or v61 H1's
+     *     unchanged {@code castableWithinTwoDrops}.</li>
+     * </ol>
+     *
+     * <p>Own hand, own battlefield, own graveyard and both public life totals
+     * only. OUR OWN LIBRARY IS NEVER READ - not its contents, not its order,
+     * not its size - and neither is our registered decklist; the opponent's
+     * hidden zones are never touched and a face-down card is never identified.
+     * The plan probe of clause 5 reads exactly what {@code nextAction} already
+     * reads on every pass.</p>
+     *
+     * <p>Side-effect free: the probe's only {@code System.err} path is
+     * {@link #stalled}, which needs {@code wheelsCast > 0} and a fresh probe
+     * has none; {@link #reserveEngine} restores {@code AiCardMemory} in a
+     * {@code finally}; and every payment query runs inside
+     * {@link CubeComboAi#probePayment}, which snapshots and restores memory,
+     * mana-pool conversion state and ability actor/target state.</p> */
+    public static boolean holdBreach(Player player, SpellAbility spell) {
+        if (spell == null || !spell.isSpell()) return false;
+        Card host = spell.getHostCard();
+        if (host == null || host.isFaceDown() || host.getOwner() != player
+                || host.getController() != player || !host.isInZone(ZoneType.Hand)) return false;
+        StaticAbility grant = escapeGrant(host);
+        if (grant == null || grantExileAmount(grant) <= 0) return false;
+        var game = player.getGame();
+        var phase = game.getPhaseHandler();
+        if (!game.getStack().isEmpty() || player.cantWin() || player.getOpponents().size() != 1
+                || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))) return false;
+        if (otherEscapeGrant(player, host)) return false;
+        CubeBreachPlan probe = new CubeBreachPlan(player);
+        if (probe.nextAction() != null) return false;
+        if (probe.escapeAvailableThisTurn(host, grant)) return false;
+        boolean fuelClose = probe.fuel() + LAND_DROP_HORIZON >= HAND_ROUTE_FUEL;
+        for (String name : HOLD_TERMINALS) {
+            Card terminal = probe.ownVisible(name);
+            if (terminal == null) continue;
+            String reason = fuelClose ? "fuel-horizon"
+                    : CubeComboAi.castableWithinTwoDrops(player, terminal.getManaCost()) ? "mana-horizon" : null;
+            if (reason == null) continue;
+            holdLine(player, "CUBE_BREACH_HOLD reason=" + reason + " terminal=" + token(terminal.getName()));
+            return true;
+        }
+        return false;
+    }
+
+    /** One {@code CUBE_BREACH_HOLD} line per (seat, turn, phase), the v53/v61
+     * {@code twinLine} budget reproduced here because {@code CubeComboAi} is
+     * another worker's file this round. The budget suppresses the LINE, never
+     * the hold. Observability only: the identity stamp is compared, never
+     * printed, and no decision reads any of it. There is deliberately NO
+     * release line - a release is Default behaviour and must leave every
+     * preserved log byte-identical. */
+    private static void holdLine(Player player, String line) {
+        var phases = player.getGame().getPhaseHandler();
+        String stamp = System.identityHashCode(player) + ":" + phases.getTurn() + ":" + phases.getPhase();
+        if (stamp.equals(HOLD_STAMP.get())) return;
+        HOLD_STAMP.set(stamp);
+        System.err.println(line);
     }
 
     public boolean waitingForOwnSpell() {
