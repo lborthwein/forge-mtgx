@@ -31,15 +31,24 @@ import java.util.TreeMap;
  *
  * The host supplies the board and nothing else: every cast, copy choice,
  * target, trigger, block and attack is the native AI's. The treated arm is the
- * cube-combo controller under policy v67 (design-v67, section 5); the baseline
- * arm is Forge's Default AI on the identical board. A matched control arm runs
- * this same source against the frozen v61 classes (probe-379), so "v67 moved
- * the line" is separable from "the new fixture rows moved it".
+ * cube-combo controller under the tree's own policy label; the baseline arm is
+ * Forge's Default AI on the identical board. A matched control arm runs this
+ * same source against an older tree's frozen classes, so "the policy moved the
+ * line" is separable from "the new fixture rows moved it".
+ *
+ * Cases c1..c6 are design-v67 section 6 and are scored against the frozen v61
+ * classes (probe-379) in runs/2026-09-12-metamorph-v67. Cases c7..c12 are v69
+ * and are scored against the frozen merged-v67 classes (probe-380) in
+ * runs/2026-09-12-clone-fix-v69: the two Phantasmal Image hazard boards, the
+ * Twin-hold parity row for an Image in hand, and the three clone-fetch tutor
+ * rows. The v69 cases are APPENDED so every v67 case keeps its index and its
+ * seed, and the hazard receipt is a separate CLONE_HAZARD_RESULT line so no
+ * v67 row's fields move.
  *
  * These are prepared positions, not natural games: no seed sweep, no win rate
- * and no playing-strength claim. Registered in
- * runs/2026-09-12-metamorph-v67/registration.md before the scored run; the
- * CLONE_RESULT rows are scored there by readout-36.mjs, not by this JVM.
+ * and no playing-strength claim. Registered in each increment's own
+ * registration.md before its scored run; the rows are scored there by that
+ * increment's readout, not by this JVM.
  */
 public final class CubeCloneKikiSmoke {
     private static final String KIKI = "Kiki-Jiki, Mirror Breaker";
@@ -52,25 +61,52 @@ public final class CubeCloneKikiSmoke {
      * 2/1 Pestermite, so a row where the policy takes the Pestermite is a row
      * where the policy, not the absence of an alternative, made the choice. */
     private static final String DECOY = "Timeless Dragon";
+    /** v69 tutor rows. The library decoy is the card the ORDINARY AI fetches:
+     * Demonic Tutor's own script says the native AI takes the most expensive
+     * valid card, and Recruiter of the Guard's toughness-2 list has to hold a
+     * creature its evaluation prefers to a printed 0/0. */
+    private static final String DEMONIC = "Demonic Tutor";
+    private static final String RECRUITER = "Recruiter of the Guard";
+    private static final String GIFT = "Steelshaper's Gift";
+    private static final String SWORD = "Sword of the Meek";
+    private static final String LIBRARY_DECOY = "Grave Titan";
 
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
 
-    /** The six prepared cases of design-v67 section 6, in the design's order. */
+    /** design-v67 section 6, then v69's six, each in its own design's order. */
     private static final List<String> CASES = List.of(
             "c1-kiki-clone-beside-decoy",
             "c2-twin-clone-beside-decoy",
             "c3-twin-hold-clone",
             "c4-image-refused",
             "c5-no-body-parity",
-            "c6-no-engine-parity");
+            "c6-no-engine-parity",
+            // v69, appended so every v67 row keeps its case index and its seed.
+            "c7-kiki-image-hazard",
+            "c8-twin-image-hazard",
+            "c9-twin-hold-image-parity",
+            "c10-tutor-demonic-clone",
+            "c11-tutor-recruiter-clone",
+            "c12-tutor-shape-negative");
 
     private static int caseIndex(String name) { return CASES.indexOf(name); }
 
     /** The clone-class card this case is about, for the receipt and for the
      * zone lookup that follows it through its own copy choice. */
     private static String cloneOf(String name) {
-        return name.equals("c4-image-refused") ? IMAGE : METAMORPH;
+        return name.equals("c4-image-refused") || name.equals("c9-twin-hold-image-parity")
+                ? IMAGE : METAMORPH;
+    }
+
+    /** v69 - the SECOND clone-class card a hazard row carries, or "none". On
+     * those boards the ordinary AI enters a Phantasmal Image as a copy of the
+     * opponent's untap body; that permanent is then named Pestermite and still
+     * carries the sacrifice clause, and the row is about the policy NOT
+     * steering onto it. */
+    private static String hazardOf(String name) {
+        return name.equals("c7-kiki-image-hazard") || name.equals("c8-twin-image-hazard")
+                ? IMAGE : "none";
     }
 
     /** Turns this case is allowed to run for, counted from the prepared turn.
@@ -83,7 +119,20 @@ public final class CubeCloneKikiSmoke {
     private static int extraTurns(String name) {
         return switch (name) {
             case "c2-twin-clone-beside-decoy" -> 3;
-            case "c3-twin-hold-clone" -> 1;
+            case "c3-twin-hold-clone", "c9-twin-hold-image-parity" -> 1;
+            // The two hazard rows deploy across turns on purpose: the ordinary
+            // AI casts the most expensive affordable creature first, so on a
+            // one-turn board the cheap Image would always be the LAST body to
+            // enter and would never be the one a battlefield scan meets first.
+            // Their land schedule (three lands, then one draw per turn) makes
+            // the Image the only affordable spell on the prepared turn.
+            case "c7-kiki-image-hazard" -> 6;
+            case "c8-twin-image-hazard" -> 4;
+            // c11's carrier is a CREATURE, so native Forge casts it in MAIN2
+            // and the fetched clone is cast on our NEXT turn; the engine then
+            // needs the turn after that. Two extra turns, and nothing else
+            // about the row, differ from c10.
+            case "c11-tutor-recruiter-clone" -> 4;
             default -> 2;
         };
     }
@@ -98,7 +147,17 @@ public final class CubeCloneKikiSmoke {
             // policy declines when there is none.
             switch (name) {
                 case "c5-no-body-parity" -> result.add(new Placement(DECOY, ZoneType.Battlefield));
-                case "c3-twin-hold-clone" -> result.add(new Placement(PEST, ZoneType.Battlefield));
+                // The v69 rows keep the opponent's board to ONE body. That is
+                // what makes the Phantasmal Image's own copy choice forced -
+                // CloneAi filters the offered list to
+                // `Permanent.YouDontCtrl,Permanent.nonLegendary` first, and a
+                // legendary Kiki we control is not in it - so the hazard is
+                // created by the ordinary AI without the fixture steering it,
+                // and it is what gives the fetched clone a body to copy.
+                case "c3-twin-hold-clone", "c7-kiki-image-hazard", "c8-twin-image-hazard",
+                     "c9-twin-hold-image-parity", "c10-tutor-demonic-clone",
+                     "c11-tutor-recruiter-clone", "c12-tutor-shape-negative" ->
+                        result.add(new Placement(PEST, ZoneType.Battlefield));
                 default -> {
                     result.add(new Placement(PEST, ZoneType.Battlefield));
                     result.add(new Placement(DECOY, ZoneType.Battlefield));
@@ -151,6 +210,80 @@ public final class CubeCloneKikiSmoke {
                 result.add(new Placement(METAMORPH, ZoneType.Hand));
                 lands(result, 0, 5, 0);
             }
+            case "c7-kiki-image-hazard" -> {
+                // The Kiki hazard board. Three lands on the prepared turn buy
+                // the Image ({1}{U}) and nothing else, so the Image is the
+                // FIRST body on our battlefield; the fourth land buys the
+                // Metamorph a turn later and the fifth buys Kiki, which has
+                // haste and can act the turn it lands. Kiki's own battlefield
+                // scan therefore meets the Image first: v67 targets it, the
+                // Image sacrifices itself and the ability is countered; v69
+                // must skip it and take the Metamorph.
+                result.add(new Placement(KIKI, ZoneType.Hand));
+                result.add(new Placement(IMAGE, ZoneType.Hand));
+                result.add(new Placement(METAMORPH, ZoneType.Hand));
+                lands(result, 1, 2, 0);
+                // The land drops, on top of our own library in draw order. No
+                // land is in hand on the prepared turn, which is what caps that
+                // turn at three mana.
+                for (String land : List.of("Mountain", "Mountain", "Island", "Mountain"))
+                    result.add(new Placement(land, ZoneType.Library));
+            }
+            case "c8-twin-image-hazard" -> {
+                // The same hazard under the engine Aura, and the Twin decision
+                // is the harsher one: an Aura spent on the Image is destroyed
+                // with it the first time the token's untap trigger targets it.
+                // Three lands buy the Image alone on the prepared turn; the
+                // fourth, two turns later, is the first turn the Aura is
+                // payable at all, and that is the turn the hold decides.
+                result.add(new Placement(TWIN, ZoneType.Hand));
+                result.add(new Placement(IMAGE, ZoneType.Hand));
+                result.add(new Placement(METAMORPH, ZoneType.Hand));
+                lands(result, 1, 2, 0);
+                for (String land : List.of("Mountain", "Island", "Mountain"))
+                    result.add(new Placement(land, ZoneType.Library));
+            }
+            case "c9-twin-hold-image-parity" -> {
+                // c3 with the one printed fact changed: the clone in hand is an
+                // Image, so cloneAsPartner refuses it and no hold fires.
+                result.add(new Placement(PYRO, ZoneType.Battlefield));
+                result.add(new Placement(TWIN, ZoneType.Hand));
+                result.add(new Placement(IMAGE, ZoneType.Hand));
+                lands(result, 2, 2, 0);
+            }
+            case "c10-tutor-demonic-clone" -> {
+                // The fetch. Kiki is live, no untap body is own-visible, and
+                // the only body on any battlefield is the opponent's - which
+                // is exactly what cloneAsPartner tests.
+                result.add(new Placement(KIKI, ZoneType.Battlefield));
+                result.add(new Placement(DEMONIC, ZoneType.Hand));
+                result.add(new Placement(LIBRARY_DECOY, ZoneType.Library));
+                result.add(new Placement(METAMORPH, ZoneType.Library));
+                lands(result, 0, 5, 0, 3);
+            }
+            case "c11-tutor-recruiter-clone" -> {
+                // The same fetch through a printed ChangeType that DOES admit a
+                // clone: Recruiter of the Guard searches Creature.toughnessLE2
+                // and Phyrexian Metamorph is a printed 0/0.
+                result.add(new Placement(KIKI, ZoneType.Battlefield));
+                result.add(new Placement(RECRUITER, ZoneType.Hand));
+                result.add(new Placement(PYRO, ZoneType.Library));
+                result.add(new Placement(METAMORPH, ZoneType.Library));
+                lands(result, 0, 5, 4);
+            }
+            case "c12-tutor-shape-negative" -> {
+                // The ChangeType negative, same sorcery shape as c10:
+                // Steelshaper's Gift searches Equipment and can never name a
+                // clone, so the offered list holds no clone to steer toward and
+                // the Metamorph stays in the library. The Sword keeps the
+                // offered list non-empty, so this is a real decline rather than
+                // an empty search.
+                result.add(new Placement(KIKI, ZoneType.Battlefield));
+                result.add(new Placement(GIFT, ZoneType.Hand));
+                result.add(new Placement(SWORD, ZoneType.Library));
+                result.add(new Placement(METAMORPH, ZoneType.Library));
+                lands(result, 0, 5, 2);
+            }
             default -> throw new AssertionError("unknown case " + name);
         }
         while (result.size() < 40) result.add(new Placement("Forest", ZoneType.Library));
@@ -158,9 +291,17 @@ public final class CubeCloneKikiSmoke {
     }
 
     private static void lands(List<Placement> result, int mountains, int islands, int plains) {
+        lands(result, mountains, islands, plains, 0);
+    }
+
+    /** v69 adds the swamp column for the Demonic Tutor row. The four are
+     * appended in this fixed order, so every v67 board's placement list - and
+     * therefore its battlefield order and its registered 40 - is unchanged. */
+    private static void lands(List<Placement> result, int mountains, int islands, int plains, int swamps) {
         for (int i = 0; i < mountains; i++) result.add(new Placement("Mountain", ZoneType.Battlefield));
         for (int i = 0; i < islands; i++) result.add(new Placement("Island", ZoneType.Battlefield));
         for (int i = 0; i < plains; i++) result.add(new Placement("Plains", ZoneType.Battlefield));
+        for (int i = 0; i < swamps; i++) result.add(new Placement("Swamp", ZoneType.Battlefield));
     }
 
     private static Deck deck(boolean owner, String name) {
@@ -215,8 +356,20 @@ public final class CubeCloneKikiSmoke {
         Card byName = own(game, player, printed);
         if (byName != null) return byName;
         for (ZoneType z : LOOKUP) for (Card c : game.getCardsIn(z))
-            if (c.getOwner() == player && !c.isToken() && c.isCloned()) return c;
+            if (c.getOwner() == player && !c.isToken() && c.isCloned() && marks(c, printed)) return c;
         return null;
+    }
+
+    /** v69 - which of TWO clones on one board this is, by the type its own
+     * printed copy effect adds: Phantasmal Image's clone reads
+     * {@code AddTypes$ Illusion}, Phyrexian Metamorph's {@code AddTypes$
+     * Artifact}. Both then answer to the copied body's NAME, so the name is no
+     * longer enough to tell them apart. This is a fixture-side observation of
+     * printed card text; it reads nothing the policy reads. On the v67 boards
+     * only one clone exists and this marks the same card the name lookup did,
+     * which is why those six rows stay byte-identical. */
+    private static boolean marks(Card card, String printed) {
+        return printed.equals(IMAGE) ? card.getType().hasSubtype("Illusion") : card.isArtifact();
     }
 
     private static String zoneOf(Card card) {
@@ -365,6 +518,20 @@ public final class CubeCloneKikiSmoke {
                 + " releaseLines=" + releaseLines + " holdReason=" + holdReason
                 + " holdSubject=" + holdSubject + " releaseReason=" + releaseReason
                 + " releaseSubject=" + releaseSubject);
+        // v69: a SEPARATE receipt line, printed only by a hazard row, so every
+        // v67 row's CLONE_RESULT and CLONE_HOLD_RESULT keep their exact fields.
+        String hazardName = hazardOf(name);
+        if (!hazardName.equals("none")) {
+            Card hazard = clone(game, player, hazardName);
+            System.out.println("CLONE_HAZARD_RESULT " + key + " hazard=" + hazardName.replace(' ', '_')
+                    + " hazardZone=" + zoneOf(hazard)
+                    + " hazardName=" + (hazard == null ? "missing" : hazard.getName().replace(' ', '_'))
+                    + " hazardCloned=" + (hazard != null && hazard.isCloned())
+                    + " hazardAttached=" + (hazard != null && hazard.isInPlay()
+                        && hazard.isEnchanted())
+                    + " bodyZone=" + zoneOf(tracked)
+                    + " bodyName=" + (tracked == null ? "missing" : tracked.getName().replace(' ', '_')));
+        }
     }
 
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
@@ -380,6 +547,10 @@ public final class CubeCloneKikiSmoke {
         List<String> selected = switch (suite) {
             case "wins" -> List.of("c1-kiki-clone-beside-decoy", "c2-twin-clone-beside-decoy");
             case "parity" -> List.of("c4-image-refused", "c5-no-body-parity", "c6-no-engine-parity");
+            case "hazard" -> List.of("c7-kiki-image-hazard", "c8-twin-image-hazard",
+                    "c9-twin-hold-image-parity");
+            case "fetch" -> List.of("c10-tutor-demonic-clone", "c11-tutor-recruiter-clone",
+                    "c12-tutor-shape-negative");
             default -> CASES;
         };
         for (String name : selected) rows.add(new Row(0, name));
@@ -402,7 +573,8 @@ public final class CubeCloneKikiSmoke {
                 return null;
             });
             for (String card : List.of(KIKI, TWIN, PEST, METAMORPH, IMAGE, PYRO, DECOY,
-                    "Forest", "Island", "Mountain", "Plains"))
+                    DEMONIC, RECRUITER, GIFT, SWORD, LIBRARY_DECOY,
+                    "Forest", "Island", "Mountain", "Plains", "Swamp"))
                 StaticData.instance().attemptToLoadCard(card);
             List<Row> rows = rows(args.length > 2 ? args[2] : "clone");
             for (Row row : rows) run(args[1].equals("improved"), row.seat(), row.name());
