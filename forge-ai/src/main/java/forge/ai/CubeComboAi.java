@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v67";
+    public static final String VERSION = "cube-combo-execution-v69";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -269,6 +269,48 @@ public final class CubeComboAi {
         return false;
     }
 
+    /** v69 R1b - the BATTLEFIELD twin of {@link #sacsWhenTargeted(SpellAbility)}:
+     * whether this permanent, as it now stands, carries the "when this creature
+     * becomes the target of a spell or ability, sacrifice it" clause.
+     *
+     * <p>v67 refused a Phantasmal Image as OUR OWN copy choice, but the hazard
+     * it named and left open is a different object: an Image the ORDINARY AI
+     * already entered as a copy of an untap body. Forge's clone effect renames
+     * that card - {@code CardFactory} copies the body's characteristics and
+     * then adds the {@code AddTriggers$} trigger to the resulting state - so it
+     * answers {@link #untapBody} as a Pestermite while still carrying the
+     * sacrifice clause. Every Kiki/Twin route puts a target on the body: Kiki's
+     * ability targets it, and under the engine Aura the token's own untap
+     * trigger targets it. The clause therefore counters the ability and the
+     * loop never starts, which is exactly what v67's own c4 row measured
+     * ({@code cloneZone=Graveyard}, {@code copyActivations=1}).
+     *
+     * <p>Read off the card's LIVE triggers rather than any name: the clause is
+     * on the copy, not on the printed card, so a name test cannot see it and a
+     * printed-script test would be looking at the wrong object. The trigger's
+     * Execute is deliberately NOT inspected - a body we are about to target
+     * that has ANY {@code BecomesTarget} trigger on itself is not a body this
+     * policy should steer toward, and reading less can only withhold a steer,
+     * never invent one.</p>
+     *
+     * <p>Card state only - no zone, no controller, no hidden information.</p> */
+    static boolean sacsWhenTargeted(Card card) {
+        if (card == null) return false;
+        for (forge.game.trigger.Trigger trigger : card.getTriggers())
+            if (trigger.getMode() == forge.game.trigger.TriggerType.BecomesTarget
+                    && "Card.Self".equals(trigger.getParam("ValidTarget"))) return true;
+        return false;
+    }
+
+    /** v69 - an untap body a Kiki or Twin route can actually USE: the printed
+     * name test {@link #untapBody} and the v69 hazard guard. Every site that
+     * reads a body off a BATTLEFIELD asks this instead of {@link #untapBody};
+     * a card in a hand or a library has made no copy choice yet and cannot
+     * carry the clause, so those scans keep the printed test. */
+    private static boolean livePartnerBody(Card card) {
+        return untapBody(card) && !sacsWhenTargeted(card);
+    }
+
     /** v67 R4 - a Kiki/Twin engine a clone body could actually feed: a
      * Kiki-Jiki we control whose copy ability is live, or an engine half
      * ({@link #engineHalf} - Kiki-Jiki or Splinter Twin) in our own hand that
@@ -317,9 +359,14 @@ public final class CubeComboAi {
         if (host == null || host.isFaceDown() || host.getOwner() != player
                 || host.getController() != player) return null;
         if (sacsWhenTargeted(clone) || !cloneEngineRoute(player)) return null;
+        // v69: a body that is ITSELF a hazard - an Image the ordinary AI already
+        // put on a partner - is refused as a copy source too. Its copiable
+        // values carry the clause, so a clone of it would enter with the same
+        // sacrifice trigger and break the very loop this choice is for.
         for (String name : TWIN_PARTNERS)
             for (Card option : options)
-                if (option != null && !option.isFaceDown() && option.getName().equals(name)) return option;
+                if (option != null && !option.isFaceDown() && option.getName().equals(name)
+                        && !sacsWhenTargeted(option)) return option;
         return null;
     }
 
@@ -342,7 +389,7 @@ public final class CubeComboAi {
         if (clone == null || sacsWhenTargeted(clone)) return false;
         String[] choices = clone.getParam("Choices").split(",");
         for (Card body : player.getGame().getCardsIn(ZoneType.Battlefield))
-            if (!body.isFaceDown() && untapBody(body) && body.isValid(choices, player, card, clone)) return true;
+            if (!body.isFaceDown() && livePartnerBody(body) && body.isValid(choices, player, card, clone)) return true;
         return false;
     }
 
@@ -352,9 +399,11 @@ public final class CubeComboAi {
         if (source.getController() != player || !source.isInPlay()) return null;
         if (source.getName().equals("Kiki-Jiki, Mirror Breaker") && ability.usesTargeting()) {
             for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
-                if ((untapBody(card) || card.getName().equals("Restoration Angel")) && ability.canTarget(card)) return card;
+                // v69: partnerHalf now carries the hazard guard, so a body that
+                // sacrifices itself when targeted is never handed to Kiki.
+                if (partnerHalf(card) && ability.canTarget(card)) return card;
             }
-        } else if (untapBody(source) && "Self".equals(ability.getParam("Defined"))
+        } else if (livePartnerBody(source) && "Self".equals(ability.getParam("Defined"))
                 && "Haste".equals(ability.getParam("AddKeywords"))) {
             return source;
         }
@@ -454,7 +503,8 @@ public final class CubeComboAi {
         if (!ownEngineAuraCast(player, aura)) return null;
         Card ready = null, any = null;
         for (Card card : candidates) {
-            if (card == null || card.isFaceDown() || card.getController() != player || !untapBody(card)) continue;
+            if (card == null || card.isFaceDown() || card.getController() != player
+                    || !livePartnerBody(card)) continue;
             if (any == null) any = card;
             if (ready == null && card.isUntapped()
                     && (!card.isSick() || card.hasKeyword(forge.game.keyword.Keyword.HASTE))) ready = card;
@@ -497,8 +547,12 @@ public final class CubeComboAi {
      * we control, never a card in any hidden zone.</p> */
     public static boolean holdTwinAura(Player player, SpellAbility aura) {
         if (!ownEngineAuraCast(player, aura)) return false;
+        // v69: a hazard body on our battlefield is NOT a partner the Aura can
+        // be spent on, so it must not cancel the hold either. D1 would have to
+        // repair the target onto it, and the first untap trigger would then
+        // sacrifice it and take the Aura with it.
         for (Card card : player.getCardsIn(ZoneType.Battlefield))
-            if (!card.isFaceDown() && untapBody(card)) return false;
+            if (!card.isFaceDown() && livePartnerBody(card)) return false;
         Card uncastable = null;
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
             // v67: a clone-class card counts exactly as an untap body here -
@@ -929,7 +983,7 @@ public final class CubeComboAi {
         boolean body = false, engine = false;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown()) continue;
-            if (untapBody(card)) body = true;
+            if (livePartnerBody(card)) body = true;
             if (card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
                     && sa.copy(player).checkRestrictions(card, player))) engine = true;
         }
@@ -959,7 +1013,7 @@ public final class CubeComboAi {
             if (card.getName().equals("Kiki-Jiki, Mirror Breaker")
                     && card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
                         && sa.copy(player).checkRestrictions(card, player))) haveKiki = true;
-            if (untapBody(card) || card.getName().equals("Restoration Angel")) havePartner = true;
+            if (partnerHalf(card)) havePartner = true;
         }
         if (haveKiki && havePartner) return true;
         if (haveKiki == havePartner) return false;
@@ -1070,8 +1124,13 @@ public final class CubeComboAi {
         return card.getName().equals("Kiki-Jiki, Mirror Breaker") || card.getName().equals("Splinter Twin");
     }
 
+    /** v69 - the Kiki-route half, with the hazard guard. A body that
+     * sacrifices itself when targeted is no partner at all: Kiki's ability
+     * targets it and is countered. The guard is inert for a card in a hand or
+     * a library, which is where the tutor's fetch candidates come from. */
     private static boolean partnerHalf(Card card) {
-        return untapBody(card) || card.getName().equals("Restoration Angel");
+        return (untapBody(card) || card.getName().equals("Restoration Angel"))
+                && !sacsWhenTargeted(card);
     }
 
     /** Complete a Kiki pair that is one card short. Each half may be on our
@@ -1097,7 +1156,11 @@ public final class CubeComboAi {
         // the selection is declined rather than spent on a duplicate.
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
             if (card.isFaceDown()) continue;
-            boolean engine = engineHalf(card), partner = partnerHalf(card);
+            // v69: a clone-class card in our own hand with a body on some
+            // battlefield to copy is already the partner half - the same
+            // cloneAsPartner test v67 gave hasImmediateKikiRoute and
+            // kikiCompletingNames - so a search is not spent on a second one.
+            boolean engine = engineHalf(card), partner = partnerHalf(card) || cloneAsPartner(player, card);
             if (!engine && !partner || !feasibleHalfAfterSelection(player, card)) continue;
             haveKiki |= engine; havePartner |= partner;
         }
@@ -1105,7 +1168,17 @@ public final class CubeComboAi {
         Card best = null;
         for (Card card : legalChoices) {
             if (card.getOwner() != player || card.isFaceDown() || !card.isInZone(ZoneType.Library)) continue;
-            if (!(haveKiki && partnerHalf(card) || havePartner && card.getName().equals("Kiki-Jiki, Mirror Breaker"))) continue;
+            // v69 - v67's third limitation, closed: a tutor may fetch a
+            // clone-class creature as the partner half. cloneAsPartner is the
+            // same printed test the hand-side recognisers already use - a
+            // printed copy choice, no self-sacrifice clause, and an untap body
+            // already on SOME battlefield for it to copy - so a Metamorph is
+            // fetched only where it would actually become a body. The offered
+            // list is the native one, so the tutor's printed ChangeType is
+            // respected by construction: a search that cannot name a clone
+            // never offers one.
+            if (!(haveKiki && (partnerHalf(card) || cloneAsPartner(player, card))
+                    || havePartner && card.getName().equals("Kiki-Jiki, Mirror Breaker"))) continue;
             if (player.getCardsIn(ZoneType.Hand).stream().anyMatch(c -> c.getName().equals(card.getName()))) continue;
             if (!feasiblePartnerAfterSelection(player, card)) continue;
             if (best == null || card.getCMC() < best.getCMC()) best = card;
