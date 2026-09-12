@@ -54,6 +54,37 @@ public final class CubeBombPlan {
     private final Player player;
     private SpellAbility selected;
     private int turn = -1, actions, failedTurn = -1;
+    /** Observability only: the token for the check that already declined the
+     * most recent {@link #nextAction}. Never read by a decision, exactly like
+     * {@link CubeDoomsdayPlan#declineReason}.
+     *
+     * <p>Grammar, one token per (turn, phase): {@code phase},
+     * {@code stack-not-empty}, {@code cant-win}, {@code action-cap},
+     * {@code failed-this-turn}, {@code no-opponent}, {@code no-bomb-line}, or
+     * a hazard token {@code <line>:<hazard>} where {@code <line>} is
+     * {@code depths}, {@code show-and-tell} or {@code breach} and
+     * {@code <hazard>} is {@code legendary-bounce}, {@code land-destruction},
+     * {@code priest} or {@code no-attack-value}. The three routes are
+     * consulted in order and each overwrites the token, so the LAST hazard
+     * reached is the one reported; a pass that reaches no hazard at all
+     * reports {@code no-bomb-line}. Every hazard is read from a PUBLIC
+     * permanent, exactly as the gates that set it already do; no token reads
+     * an opponent's hand, library or decklist.</p> */
+    private String decline = "other check=bomb-plan";
+    public String declineReason() { return decline; }
+    private SpellAbility decline(String reason) { decline = reason; return null; }
+    /** Names the first true clause of the opening guard, re-reading only the
+     * same pure getters in the same order, after that guard has already
+     * decided to decline. */
+    private String gateReason() {
+        PhaseHandler phases = player.getGame().getPhaseHandler();
+        if (failedTurn == turn) return "failed-this-turn";
+        if (actions >= ACTION_CAP) return "action-cap";
+        if (player.cantWin()) return "cant-win";
+        if (!player.getGame().getStack().isEmpty()) return "stack-not-empty";
+        if (player.getOpponents().isEmpty()) return "no-opponent";
+        return "phase";
+    }
 
     public CubeBombPlan(Player player) { this.player = player; }
 
@@ -346,10 +377,10 @@ public final class CubeBombPlan {
             // bounce answers it for free and it ceases to exist. Containment
             // Priest is irrelevant here (it reads Creature.!token) and is
             // deliberately not consulted.
-            if (legendaryBounceVisible(player)) continue;
+            if (legendaryBounceVisible(player)) { decline = "depths:legendary-bounce"; continue; }
             // Do not spend into a public land-destruction answer at all: it can
             // destroy either half in response and the activation fizzles.
-            if (landDestructionVisible(player)) continue;
+            if (landDestructionVisible(player)) { decline = "depths:land-destruction"; continue; }
             return audit("depths-stage", clone);
         }
         return null;
@@ -371,8 +402,8 @@ public final class CubeBombPlan {
                 // design accepts that symmetry rather than modelling it: no gate
                 // here reads their hand, which is exactly the read that makes
                 // Default refuse the spell when it is best.
-                if (exiledOnUncastEntry(player)) continue;
-                if (bomb.getType().isLegendary() && legendaryBounceVisible(player)) continue;
+                if (exiledOnUncastEntry(player)) { decline = "show-and-tell:priest"; continue; }
+                if (bomb.getType().isLegendary() && legendaryBounceVisible(player)) { decline = "show-and-tell:legendary-bounce"; continue; }
                 return audit("show-and-tell", cast);
             }
         }
@@ -390,9 +421,9 @@ public final class CubeBombPlan {
                 if (!CubeComboAi.canPlayNative(cast, player) || !CubeComboAi.canPayCost(cast, player, false)) continue;
                 Card bomb = bestBomb(cast, true);
                 if (bomb == null) continue;
-                if (exiledOnUncastEntry(player)) continue;
-                if (!canAttackForValue(player, bomb, manaLeftAfter(player, cast))) continue;
-                if (bomb.getType().isLegendary() && legendaryBounceVisible(player)) continue;
+                if (exiledOnUncastEntry(player)) { decline = "breach:priest"; continue; }
+                if (!canAttackForValue(player, bomb, manaLeftAfter(player, cast))) { decline = "breach:no-attack-value"; continue; }
+                if (bomb.getType().isLegendary() && legendaryBounceVisible(player)) { decline = "breach:legendary-bounce"; continue; }
                 return audit("through-the-breach", cast);
             }
         }
@@ -429,7 +460,8 @@ public final class CubeBombPlan {
         if (turn != phases.getTurn()) { turn = phases.getTurn(); actions = 0; selected = null; }
         if (failedTurn == turn || actions >= ACTION_CAP || player.cantWin() || !game.getStack().isEmpty()
                 || player.getOpponents().isEmpty()
-                || !(phases.is(PhaseType.MAIN1, player) || phases.is(PhaseType.MAIN2, player))) return null;
+                || !(phases.is(PhaseType.MAIN1, player) || phases.is(PhaseType.MAIN2, player))) return decline(gateReason());
+        decline = "no-bomb-line";
         SpellAbility action = depthsAction();
         if (action == null) action = showAndTellAction();
         // Through the Breach's body has haste but must still reach the attack

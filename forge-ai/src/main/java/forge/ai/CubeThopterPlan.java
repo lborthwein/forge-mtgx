@@ -43,6 +43,40 @@ public final class CubeThopterPlan {
      * either this policy build or an older matched-control build. */
     static int assemblySelections, assemblySameTurnForecasts, assemblyPartialForecasts;
 
+    /** Observability only: the token for the check that already declined the
+     * most recent {@link #nextAction}. Never read by a decision, exactly like
+     * {@link CubeDoomsdayPlan#declineReason}.
+     *
+     * <p>Grammar, one token per (turn, phase): {@code phase},
+     * {@code stack-not-empty}, {@code cant-win}, {@code action-cap},
+     * {@code failed-this-turn}, {@code stopped-no-progress},
+     * {@code missing=<our own missing piece(s)>},
+     * {@code no-castable:<our own missing piece>}, {@code pool-not-empty},
+     * {@code kiki-route-preferred}, {@code assembly-unsupported},
+     * {@code assembly-unaffordable}, {@code sword-not-artifact},
+     * {@code token-budget}, {@code engine-unusable}, {@code cost-mismatch},
+     * {@code no-tap-payment} or {@code unpayable:engine}. Every piece name is
+     * a card absent from OUR OWN battlefield or present in OUR OWN hand; no
+     * token names an opponent zone.</p> */
+    private String decline="other check=thopter-plan";
+    public String declineReason() { return decline; }
+    private SpellAbility decline(String reason) { decline=reason; return null; }
+    /** Names the first true clause of the opening guard, re-reading only the
+     * same pure getters in the same order, after that guard has already
+     * decided to decline. */
+    private String gateReason() {
+        if(failedTurn==turn) return "failed-this-turn";
+        if(actions>=160) return "action-cap";
+        if(!player.getGame().getStack().isEmpty()) return "stack-not-empty";
+        return "cant-win";
+    }
+    /** Our own missing pieces as one log token, from our own battlefield. */
+    private static String missingToken(java.util.List<String> missing) {
+        StringBuilder names=new StringBuilder();
+        for(String name:missing) { if(names.length()>0) names.append(';'); names.append(name.replace(' ','_')); }
+        return names.toString();
+    }
+
     public CubeThopterPlan(Player player) { this.player=player; }
 
     /** Record a new selection. Any reserve forecast for a previous selection
@@ -214,10 +248,10 @@ public final class CubeThopterPlan {
 
     private SpellAbility assembleFromHand() {
         var phase=player.getGame().getPhaseHandler();
-        if(!(phase.is(PhaseType.MAIN1,player)||phase.is(PhaseType.MAIN2,player)))return null;
+        if(!(phase.is(PhaseType.MAIN1,player)||phase.is(PhaseType.MAIN2,player)))return decline("phase");
         java.util.List<String> missingAll=missingPieces(player);
         if(missingAll.size()==2)return assembleTwoFromHand(missingAll);
-        if(missingAll.size()!=1)return null;
+        if(missingAll.size()!=1)return decline("missing="+missingToken(missingAll));
         String missing=missingAll.get(0);
         for(Card card:player.getCardsIn(ZoneType.Hand)) {
             if(card.isFaceDown() || !card.getName().equals(missing) || !supportsAssembly(card))continue;
@@ -230,7 +264,7 @@ public final class CubeThopterPlan {
                 return cast;
             }
         }
-        return null;
+        return decline("no-castable:"+missing.replace(' ','_'));
     }
 
     /** Whether a card carries the artifact-tap mana ability the engine relies
@@ -272,8 +306,9 @@ public final class CubeThopterPlan {
      * it does for planTutor's two casts. Otherwise cast one castable piece and
      * re-evaluate on the next decision. No sequence is pre-committed. */
     private SpellAbility assembleTwoFromHand(java.util.List<String> missing) {
-        if(missing.size()!=2)return null;
-        if(!player.getManaPool().isEmpty() || CubeComboAi.hasImmediateKikiRoute(player))return null;
+        if(missing.size()!=2)return decline("missing="+missingToken(missing));
+        if(!player.getManaPool().isEmpty() || CubeComboAi.hasImmediateKikiRoute(player))
+            return decline(player.getManaPool().isEmpty()?"kiki-route-preferred":"pool-not-empty");
         java.util.List<Card> pieces=new java.util.ArrayList<>();
         java.util.List<SpellAbility> casts=new java.util.ArrayList<>();
         boolean[] payable=new boolean[2];
@@ -281,15 +316,15 @@ public final class CubeThopterPlan {
             Card found=null;
             for(Card card:player.getCardsIn(ZoneType.Hand))
                 if(!card.isFaceDown() && card.getName().equals(name)) { found=card; break; }
-            if(found==null || found.getSpellPermanent()==null)return null;
+            if(found==null || found.getSpellPermanent()==null)return decline("missing="+missingToken(missing));
             SpellAbility cast=found.getSpellPermanent().copy(player);
-            if(!CubeComboAi.manaOnly(cast) || !CubeComboAi.canPlayNative(cast,player))return null;
+            if(!CubeComboAi.manaOnly(cast) || !CubeComboAi.canPlayNative(cast,player))return decline("assembly-unaffordable");
             payable[pieces.size()]=CubeComboAi.canPayCost(cast,player,false);
-            if(!payable[pieces.size()] && !colorCompletable(cast))return null;
+            if(!payable[pieces.size()] && !colorCompletable(cast))return decline("assembly-unaffordable");
             pieces.add(found); casts.add(cast);
         }
-        if(!payable[0] && !payable[1])return null;
-        if(!supportsAssembly(pieces))return null;
+        if(!payable[0] && !payable[1])return decline("assembly-unaffordable");
+        if(!supportsAssembly(pieces))return decline("assembly-unsupported");
         int preferred=carriesArtifactTapMana(pieces.get(1)) && !carriesArtifactTapMana(pieces.get(0))?1:0;
         if(!payable[preferred])preferred=1-preferred;
         if(payable[0] && payable[1])for(int first:new int[]{preferred,1-preferred}) {
@@ -315,40 +350,41 @@ public final class CubeThopterPlan {
         var game=player.getGame();
         int currentTurn=game.getPhaseHandler().getTurn();
         if(currentTurn!=turn) { turn=currentTurn; actions=0; selected=null; pending=null; assemblyReserve=null; assemblyReserveFor=null; }
-        if(failedTurn==turn || actions>=160 || !game.getStack().isEmpty() || player.cantWin())return null;
+        if(failedTurn==turn || actions>=160 || !game.getStack().isEmpty() || player.cantWin())return decline(gateReason());
+        decline="other check=thopter-plan";
         if(pending!=null) {
             boolean failed=tokens()<=beforeTokens || find(SWORD)==null || player.getLife()<beforeLife;
             pending=null;
             if(failed) {
                 failedTurn=turn;
                 System.err.println("CUBE_THOPTER_PLAN stopped-no-progress turn="+turn);
-                return null;
+                return decline("stopped-no-progress");
             }
         }
         Card urza=find(URZA),foundry=find(FOUNDRY),sword=find(SWORD);
         if(urza==null || foundry==null || sword==null)return assembleFromHand();
-        if(!sword.isArtifact() || sword.isToken())return null;
+        if(!sword.isArtifact() || sword.isToken())return decline("sword-not-artifact");
         long budget=0;
         for(Player opponent:player.getOpponents())
             budget+=2L+Math.max(0,opponent.getLife())+opponent.getCreaturesInPlay().size();
-        if(tokens()>=Math.min(64,budget))return null;
+        if(tokens()>=Math.min(64,budget))return decline("token-budget");
         SpellAbility make=ability(foundry,ApiType.Token),mana=ability(urza,ApiType.Mana);
         if(make==null || mana==null || !TOKEN.equals(make.getParam("TokenScript"))
                 || !CubeComboAi.canPlayNative(make,player) || mana.isSuppressed() || !mana.isLegalAfterStack()
-                || !sword.canBeSacrificedBy(make,false) || !recursionAvailable(sword))return null;
+                || !sword.canBeSacrificedBy(make,false) || !recursionAvailable(sword))return decline("engine-unusable");
         var cost=ComputerUtilMana.calculateManaCost(make.getPayCosts(),make,player,true,0,false);
-        if(cost.getConvertedManaCost()!=1 || cost.getGenericManaAmount()!=1)return null;
+        if(cost.getConvertedManaCost()!=1 || cost.getGenericManaAmount()!=1)return decline("cost-mismatch");
         if(mana.getPayCosts().getCostParts().size()!=1
                 || !(mana.getPayCosts().getCostParts().get(0) instanceof CostTapType tap)
-                || tap.getAbilityAmount(mana)!=1 || !"Artifact".equals(tap.getType()))return null;
+                || tap.getAbilityAmount(mana)!=1 || !"Artifact".equals(tap.getType()))return decline("cost-mismatch");
         paymentSword=sword;
         paymentTap=sword.canTap()?sword:foundry.isArtifact() && foundry.canTap()?foundry:null;
         SpellAbility next;
         if(player.getManaPool().totalMana()<1) {
-            if(paymentTap==null)return null;
+            if(paymentTap==null)return decline("no-tap-payment");
             next=mana;
         } else next=make;
-        if(!CubeComboAi.canPlayNative(next,player) || !CubeComboAi.canPayCost(next,player,false))return null;
+        if(!CubeComboAi.canPlayNative(next,player) || !CubeComboAi.canPayCost(next,player,false))return decline("unpayable:engine");
         return select(next);
     }
 

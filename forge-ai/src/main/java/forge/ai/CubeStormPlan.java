@@ -24,6 +24,32 @@ public final class CubeStormPlan {
     private int turn = -1, actions, failedTurn = -1;
     private boolean attemptedWill;
     private SpellAbility selected;
+    /** Observability only: the token for the check that already declined the
+     * most recent {@link #nextAction}. Never read by a decision, exactly like
+     * {@link CubeDoomsdayPlan#declineReason}.
+     *
+     * <p>Grammar, one token per (turn, phase): {@code phase},
+     * {@code stack-not-empty}, {@code cant-win}, {@code action-cap},
+     * {@code failed-this-turn}, {@code multiplayer},
+     * {@code missing=<our own missing half>}, {@code cant-drain},
+     * {@code finisher-untargetable} or {@code no-resource-action}. The
+     * missing-half token names a card this plan cannot find in OUR OWN hand or
+     * graveyard; no token names an opponent zone.</p> */
+    private String decline = "other check=storm-plan";
+    public String declineReason() { return decline; }
+    private SpellAbility decline(String reason) { decline = reason; return null; }
+    /** Names the first true clause of the opening guard, re-reading only the
+     * same pure getters in the same order, after that guard has already
+     * decided to decline. */
+    private String gateReason() {
+        var phase = player.getGame().getPhaseHandler();
+        if (actions >= 40) return "action-cap";
+        if (failedTurn == turn) return "failed-this-turn";
+        if (player.cantWin()) return "cant-win";
+        if (!player.getGame().getStack().isEmpty()) return "stack-not-empty";
+        if (!(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))) return "phase";
+        return "multiplayer";
+    }
 
     public CubeStormPlan(Player player) { this.player = player; }
 
@@ -168,7 +194,8 @@ public final class CubeStormPlan {
         }
         if (actions >= 40 || failedTurn == turn || player.cantWin() || !game.getStack().isEmpty()
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))
-                || player.getOpponents().size() != 1) return null;
+                || player.getOpponents().size() != 1) return decline(gateReason());
+        decline = "other check=storm-plan";
         Player opponent = player.getOpponents().get(0);
         Card will = will();
         Card finisher = finisher();
@@ -179,9 +206,11 @@ public final class CubeStormPlan {
                     + " blue=" + player.getManaPool().getAmountOfColor(MagicColor.BLUE)
                     + " black=" + player.getManaPool().getAmountOfColor(MagicColor.BLACK)
                     + " finisher=" + (finisher == null ? "absent" : finisher.getZone()));
-        if (finisher == null || will == null && !attemptedWill || !opponent.canLoseLife()) return null;
+        if (finisher == null || will == null && !attemptedWill || !opponent.canLoseLife())
+            return decline(finisher == null ? "missing=" + token(TENDRILS)
+                    : will == null && !attemptedWill ? "missing=" + token(WILL) : "cant-drain");
         // Do not commit a storm resource plan toward an untargetable finish.
-        if (finisher.getSpellAbilities().stream().noneMatch(a -> a.copy(player).canTarget(opponent))) return null;
+        if (finisher.getSpellAbilities().stream().noneMatch(a -> a.copy(player).canTarget(opponent))) return decline("finisher-untargetable");
         int storm = game.getStack().getSpellsCastThisTurn().size();
         SpellAbility lethal = spell(finisher);
         if (lethal != null && 2L * (storm + 1) >= opponent.getLife() && target(lethal, opponent)) return select(lethal);
@@ -232,8 +261,12 @@ public final class CubeStormPlan {
             SpellAbility cast = engine && spells >= 1 ? spell(will) : null;
             if (cast != null) return select(cast);
         }
-        return null;
+        return decline("no-resource-action");
     }
+
+    /** A card name as one log token: our own missing half, never an opponent
+     * card and never a library read. */
+    private static String token(String name) { return name.replace(' ', '_'); }
 
     public boolean owns(SpellAbility ability) { return ability == selected; }
 
