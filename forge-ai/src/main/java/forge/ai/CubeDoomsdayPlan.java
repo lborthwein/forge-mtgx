@@ -456,6 +456,46 @@ public final class CubeDoomsdayPlan {
         return gush;
     }
 
+    /** Float a survivable painful blue only to finish Oracle from the current
+     * public board. Default's mana willingness rejects even one damage at low
+     * life; the residual native payment check must not count this source twice.
+     * Execution still pays the real activation and damage before reconsidering
+     * Oracle. Unsupported costs and subability chains remain with Default. */
+    private SpellAbility oraclePainMana(int librarySize) {
+        if (librarySize > 5 || librarySize > oracleThreshold(false) || oracleTriggerDisabled()) return null;
+        SpellAbility oracle = handSpell("Thassa's Oracle");
+        if (oracle == null || !CubeComboAi.canPlayNative(oracle, player)
+                || !oracle.getPayCosts().isOnlyManaCost()
+                || !oracle.getPayCosts().getTotalMana().equals(new Cost("U U", false).getTotalMana())) return null;
+        var memory = AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || !card.isUntapped() || AiCardMemory.isRememberedCard(player, card, memory)) continue;
+            for (SpellAbility original : card.getManaAbilities()) {
+                SpellAbility mana = original.copy(player);
+                SpellAbility pain = mana.getSubAbility();
+                if (mana.getManaPart() == null || !mana.canProduce("U")
+                        || mana.getPayCosts().getTotalMana().getCMC() != 0
+                        || !mana.getPayCosts().getCostParts().stream().allMatch(p -> p instanceof forge.game.cost.CostTap
+                            || p instanceof forge.game.cost.CostPartMana)
+                        || pain == null || pain.getApi() != ApiType.DealDamage || pain.getSubAbility() != null
+                        || !"You".equals(pain.getParam("Defined")) || !"1".equals(pain.getParam("NumDmg"))
+                        || pain.usesTargeting() || !CubeComboAi.canPlayNative(mana, player)
+                        || !CubeComboAi.canPayCost(mana, player, false)) continue;
+                int damage = ComputerUtilCombat.predictDamageTo(player, 1, card, false);
+                if (player.getLife() <= damage) continue;
+                boolean residualPayable;
+                AiCardMemory.rememberCard(player, card, memory);
+                try { residualPayable = CubeComboAi.canPayCost(new Cost("U", false), oracle, player, false); }
+                finally { AiCardMemory.forgetCard(player, card, memory); }
+                if (!residualPayable) continue;
+                mana.setManaExpressChoice(ColorSet.fromMask(MagicColor.BLUE));
+                stage = Stage.NONE;
+                return mana;
+            }
+        }
+        return null;
+    }
+
     /** Recover from public resources without pretending to remember a pile.
      * A draw is speculative until it reveals the next piece in our hand. Never
      * assume Gush/Oracle is on top merely because the library has five cards. */
@@ -465,6 +505,8 @@ public final class CubeDoomsdayPlan {
         reservedStar = null;
         SpellAbility oracle = librarySize <= oracleThreshold(false) ? playable("Thassa's Oracle") : null;
         if (oracle != null) { stage = Stage.ORACLE; return oracle; }
+        SpellAbility painMana = oraclePainMana(librarySize);
+        if (painMana != null) return painMana;
         SpellAbility recall = librarySize >= 3 && player.canDrawAmount(3) ? playable("Ancestral Recall") : null;
         if (recall != null && CubeComboAi.canPayCost(new Cost("U U U", false), recall, player, false)) {
             stage = Stage.DRAW;
@@ -1360,7 +1402,11 @@ public final class CubeDoomsdayPlan {
         if (stage == Stage.DRAW) {
             SpellAbility oracle = librarySize <= oracleThreshold(false) ? playable("Thassa's Oracle") : null;
             stage = oracle == null ? Stage.NONE : Stage.ORACLE;
-            if (oracle == null) decline = "other check=oracleThreshold";
+            if (oracle == null) {
+                SpellAbility painMana = oraclePainMana(librarySize);
+                if (painMana != null) return painMana;
+                decline = "other check=oracleThreshold";
+            }
             return oracle;
         }
         if (stage == Stage.ORACLE) { stage = Stage.NONE; decline = "other check=oracle-resolved"; return null; }

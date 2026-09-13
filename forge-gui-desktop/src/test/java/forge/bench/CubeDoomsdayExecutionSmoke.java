@@ -1775,8 +1775,12 @@ public final class CubeDoomsdayExecutionSmoke {
         int life = noDevotion ? 5 : Integer.parseInt(variant.substring(variant.lastIndexOf('-') + 1));
         List<Placement> own = new ArrayList<>();
         own.add(new Placement("Thassa's Oracle", ZoneType.Hand, false));
-        own.add(new Placement("Island", ZoneType.Battlefield, false));
-        own.add(new Placement(painless ? "Island" : "Talisman of Dominance", ZoneType.Battlefield, false));
+        own.add(new Placement(variant.equals("missing-blue-2") ? "Forest" : "Island", ZoneType.Battlefield, false));
+        own.add(new Placement(painless ? "Island" : "Talisman of Dominance", ZoneType.Battlefield, variant.equals("tapped-2")));
+        if (variant.equals("orb-2")) own.add(new Placement("Torpor Orb", ZoneType.Battlefield, false));
+        if (variant.equals("null-2")) own.add(new Placement("Null Rod", ZoneType.Battlefield, false));
+        if (variant.startsWith("tax-")) own.add(new Placement("Sphere of Resistance", ZoneType.Battlefield, false));
+        if (variant.equals("tax-funded-2")) own.add(new Placement("Forest", ZoneType.Battlefield, false));
         if (!noDevotion) own.add(new Placement("Vendilion Clique", ZoneType.Battlefield, false));
         for (int i = 0; i < 4; i++) own.add(new Placement("Forest", ZoneType.Library, false));
         while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
@@ -1788,8 +1792,17 @@ public final class CubeDoomsdayExecutionSmoke {
         BenchRandomAudit.install(98100 + seat * 100 + life);
         Card oracle = player.getCardsIn(ZoneType.Hand).get(0);
         var spell = oracle.getSpellPermanent().copy(player);
+        Card held = null;
+        var memory = forge.ai.AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL;
+        if (variant.equals("held-2")) {
+            held = player.getCardsIn(ZoneType.Battlefield).stream()
+                    .filter(c -> c.getName().equals("Talisman of Dominance")).findFirst().orElseThrow();
+            forge.ai.AiCardMemory.rememberCard(player, held, memory);
+        }
         boolean payableBefore = forge.ai.CubeComboAi.canPayCost(spell, player, false);
         var proposal = new forge.ai.CubeDoomsdayPlan(player).nextAction();
+        if (held != null && !forge.ai.AiCardMemory.isRememberedCard(player, held, memory))
+            throw new AssertionError("Terminal probe erased a pre-existing mana reservation");
         String first = proposal == null ? "none" : proposal.getHostCard().getName().replace(' ', '_');
         if (forced) {
             Card talisman = player.getCardsIn(ZoneType.Battlefield).stream()
@@ -1837,8 +1850,9 @@ public final class CubeDoomsdayExecutionSmoke {
             if (suite.equals("pain-diagnosis")) {
                 for (int seat = 0; seat < 2; seat++)
                     for (String variant : List.of("pain-1", "pain-2", "pain-4", "pain-5",
-                            "forced-2", "painless-2", "no-devotion")) painDiagnosis(seat, variant);
-                System.out.println("PAIN_SUITE_COMPLETE cases=14 improved=" + improved + " policy=" + policy());
+                            "forced-2", "painless-2", "no-devotion", "orb-2", "null-2", "tapped-2",
+                            "missing-blue-2", "tax-2", "tax-funded-2", "held-2")) painDiagnosis(seat, variant);
+                System.out.println("PAIN_SUITE_COMPLETE cases=28 improved=" + improved + " policy=" + policy());
                 return;
             }
             if (suite.equals("enabler")) {
