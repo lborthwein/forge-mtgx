@@ -304,6 +304,46 @@ public final class CubeStormPlan {
         return storm + countable;
     }
 
+    /** A first drain can be replayed by Will. Reserve the first two spells
+     * and the graveyard Dark Ritual's startup mana together, without spending
+     * one source twice. The native engine still executes every later cast.
+     * This is a bounded resource route, not a certificate against interaction. */
+    private boolean drainBeforeWill(SpellAbility drain, SpellAbility replay) {
+        if (attemptedWill || drain == null || replay == null
+                || !drain.getHostCard().isInZone(ZoneType.Hand)
+                || find("Dark Ritual", ZoneType.Graveyard) == null
+                || find("Cabal Ritual", ZoneType.Graveyard) == null
+                || player.getCardsIn(ZoneType.Graveyard).size() < 7
+                || !CubeComboAi.manaOnly(drain) || !CubeComboAi.manaOnly(replay)
+                || !CubeComboAi.castFitsAfter(player, drain, replay)) return false;
+        // A conservative public-only refusal: do not plan a graveyard replay
+        // through a movement replacement or an active per-turn cast limit.
+        for (ZoneType zone : List.of(ZoneType.Battlefield, ZoneType.Command)) {
+            for (Card source : player.getGame().getCardsIn(zone)) {
+                if (source.isFaceDown() || source.isPhasedOut()) continue;
+                for (var replacement : source.getReplacementEffects()) {
+                    if (replacement.getMode() == forge.game.replacement.ReplacementType.Moved
+                            && (replacement.getParamOrDefault("Destination", "Any").contains("Graveyard")
+                            || replacement.getParamOrDefault("Destination", "Any").equals("Any"))) return false;
+                }
+                for (var restriction : source.getStaticAbilities()) {
+                    if (restriction.hasParam("NumLimitEachTurn")
+                            && restriction.checkConditions(forge.game.staticability.StaticAbilityMode.CantBeCast)) return false;
+                }
+            }
+        }
+        Card ritual = find("Dark Ritual", ZoneType.Graveyard);
+        SpellAbility startup = ritual.getSpellAbilities().get(0).copy(player);
+        if (!CubeComboAi.manaOnly(startup)) return false;
+        var joint = ComputerUtilMana.calculateManaCost(drain.getPayCosts(), drain, player, true, 0, false);
+        var later = ComputerUtilMana.calculateManaCost(replay.getPayCosts(), replay, player, true, 0, false);
+        var start = ComputerUtilMana.calculateManaCost(startup.getPayCosts(), startup, player, true, 0, false);
+        joint.addManaCost(later.toManaCost()); joint.addManaCost(start.toManaCost());
+        return CubeComboAi.canPayManaCost(joint, drain, player, false)
+                && CubeComboAi.canPayManaCost(joint, replay, player, false)
+                && CubeComboAi.canPayManaCost(joint, startup, player, false);
+    }
+
     public SpellAbility nextAction() {
         var game = player.getGame();
         var phase = game.getPhaseHandler();
@@ -385,6 +425,7 @@ public final class CubeStormPlan {
                 if (DRAWS.contains(card.getName()) || card.getName().equals(TENDRILS)
                         || card.getName().equals("Dark Ritual") || card.getName().equals("Cabal Ritual")) spells++;
             SpellAbility cast = engine && spells >= 1 ? spell(will) : null;
+            if (drainBeforeWill(lethal, cast) && target(lethal, opponent)) return select(lethal);
             if (cast != null) return select(cast);
         }
         return decline("no-resource-action");
