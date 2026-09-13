@@ -116,6 +116,28 @@ public final class CubeHarnfelTopObservationSmoke {
         for (var entry : original.entrySet()) copy.put(entry.getKey(), Set.copyOf((java.util.Collection<?>)entry.getValue()));
         return copy;
     }
+    private static void permissionProbe(Object parent, Player player, forge.game.spellability.SpellAbility action, String key, int step) throws ReflectiveOperationException {
+        if (action == null || !action.isSpell() || action.getMayPlay() == null || !action.getHostCard().isInZone(ZoneType.Exile)) return;
+        var childField = parent.getClass().getDeclaredField("harnfelLoop"); childField.setAccessible(true);
+        Object child = childField.get(parent);
+        var method = child.getClass().getDeclaredMethod("permission", forge.game.spellability.SpellAbility.class, Card.class); method.setAccessible(true);
+        Card card = action.getHostCard(); Object before = snapshot(player);
+        boolean positive = (boolean)method.invoke(child, action, card);
+        var foreign = action.copy(player.getOpponents().get(0));
+        boolean foreignPlayer = (boolean)method.invoke(child, foreign, card);
+        Card detached = forge.game.card.CardCopyService.getLKICopy(card);
+        var alias = action.copy(player); alias.setHostCard(detached);
+        boolean detachedSource = (boolean)method.invoke(child, alias, card);
+        boolean detachedCard = (boolean)method.invoke(child, action, detached);
+        var noGrant = card.getSpellPermanent().copy(player);
+        boolean missingGrant = (boolean)method.invoke(child, noGrant, card);
+        if (!before.equals(snapshot(player))) throw new AssertionError("permission queries changed native state/RNG");
+        System.out.println("HARNFEL_PERMISSION_QUERY " + key + " step=" + step + " positive=" + positive
+                + " foreignPlayer=" + foreignPlayer + " detachedSource=" + detachedSource
+                + " detachedCard=" + detachedCard + " missingGrant=" + missingGrant + " unchanged=true");
+        if (!positive || foreignPlayer || detachedSource || detachedCard || missingGrant)
+            throw new AssertionError("permission ownership gate " + key);
+    }
     private static void actualPlan(Player player, String key, int step) {
         if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return;
         try {
@@ -126,6 +148,7 @@ public final class CubeHarnfelTopObservationSmoke {
                 String receipt;
                 try {
                     var action = (forge.game.spellability.SpellAbility)plan.getClass().getMethod("nextAction").invoke(plan);
+                    permissionProbe(plan, player, action, key, step);
                     receipt = action == null ? "none" : action.getHostCard().getId() + ":" + action.getApi() + ":" + action.getTargets();
                 } finally {
                     for (var value : saved) value.field().set(value.owner(), value.value());
