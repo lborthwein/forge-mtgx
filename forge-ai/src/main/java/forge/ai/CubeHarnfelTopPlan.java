@@ -190,5 +190,22 @@ public final class CubeHarnfelTopPlan {
         pending = action; tracking = true; sawLibrary = sawExile = false;
         libraryBefore = player.getCardsIn(ZoneType.Library).size(); lifeBefore = player.getLife();
     }
-    void played(boolean success) { if (!success) stop(); }
+    void played(boolean success) {
+        if (!success) { stop(); return; }
+        // MagicStack creates a fresh instance for an activated ability and
+        // records the exact selected original. Bind that actual stack object,
+        // never an arbitrary ability with a matching host/name/id.
+        if (selected.isActivatedAbility()) {
+            SpellAbility actual = null;
+            for (var entry : player.getGame().getStack()) {
+                SpellAbility ability = entry.getSpellAbility();
+                if (ability.getOriginalAbility() != selected || ability.isCopied()
+                        || ability.getActivatingPlayer() != player) continue;
+                if (actual != null) { stop(); return; }
+                actual = ability;
+            }
+            if (actual == null) { stop(); return; }
+            pending = actual;
+        }
+    }
 }
