@@ -51,6 +51,28 @@ final class CubeEmryPlan {
         selected = sa; blinkPartner = null; actions++;
         return sa;
     }
+    private boolean canRecoverAfterSacrifice(Card artifact, Card emry, Card greaves) {
+        SpellAbility grant = ability(emry, ApiType.Effect);
+        if (grant == null || grant.isSuppressed() || emry.isDetained()
+                || !grant.getRestrictions().canPlay(emry, grant) || !grant.isLegalAfterStack()
+                || !grant.checkRestrictions(emry, player)) return false;
+        // Native activation restrictions apply even if Greaves can supply the
+        // haste needed to pay the tap cost after the artifact reaches our GY.
+        if (!payable(grant) && !(emry.isSick() && !emry.isTapped() && greaves != null
+                && payable(target(ability(greaves, ApiType.Attach), emry)))) return false;
+        for (ZoneType zone : new ZoneType[]{ZoneType.Battlefield, ZoneType.Command})
+            for (Card source : player.getGame().getCardsIn(zone)) {
+                if (source.isFaceDown() || source.isPhasedOut()) continue;
+                for (var replacement : source.getReplacementEffects()) {
+                    String destination = replacement.getParamOrDefault("Destination", "Any");
+                    if (replacement.getMode() == forge.game.replacement.ReplacementType.Moved
+                            && (destination.contains("Graveyard") || destination.equals("Any"))
+                            && replacement.zonesCheck(source.getZone()) && replacement.requirementsCheck(player.getGame())
+                            && replacement.matchesValidParam("ValidCard", artifact)) return false;
+                }
+            }
+        return true;
+    }
     SpellAbility nextAction() {
         var game = player.getGame(); var phase = game.getPhaseHandler();
         if (turn != phase.getTurn()) { turn = phase.getTurn(); actions = 0; selected = null; pendingCast = false; }
@@ -103,7 +125,8 @@ final class CubeEmryPlan {
             if (artifact == null) continue;
             // A prior ordinary blink may have targeted something other than
             // Emry. Do not sacrifice the resource without a ready next grant.
-            if (emry.isTapped() || emry.isSick() && greaves == null) continue;
+            if (emry.isTapped() || emry.isSick() && greaves == null
+                    || !canRecoverAfterSacrifice(artifact, emry, greaves)) continue;
             // Do not discard a held spell for an unproved resource loop. The
             // initial supported LED route has its engine and terminal in play.
             if ("Lion's Eye Diamond".equals(name) && player.getCardsIn(ZoneType.Hand).stream().anyMatch(c -> !c.isLand())) continue;
