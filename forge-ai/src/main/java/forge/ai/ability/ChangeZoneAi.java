@@ -1242,6 +1242,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
                         CardLists.shuffle(list);
                         choice = list.get(0);
                     }
+                    if (destination.equals(ZoneType.Hand) && origin.size() == 1 && origin.contains(ZoneType.Graveyard)) {
+                        Card recurrence = forge.ai.CubeExtraTurnPlan.preferRecurrence(ai, sa, list, choice);
+                        if (recurrence != null) choice = recurrence;
+                    }
                 } else {
                     choice = ComputerUtilCard.getBestAI(list);
                 }
