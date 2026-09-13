@@ -1772,8 +1772,16 @@ public final class CubeDoomsdayExecutionSmoke {
     /** Entry guards and explicit public-board interventions after a real pile. */
     private static void handPassControl(int seat, String control) {
         List<Placement> own = new ArrayList<>();
-        for (String name : List.of("Swamp", "Creeping Tar Pit", "Watery Grave", "Underground Sea", "Island"))
+        boolean disruption = control.startsWith("disruption-");
+        for (String name : List.of("Swamp", "Creeping Tar Pit", "Watery Grave", "Underground Sea", "Island")) {
+            if (disruption && name.equals("Island")) continue;
             own.add(new Placement(control.equals("no-blue") ? "Swamp" : name, ZoneType.Battlefield, false));
+        }
+        if (control.equals("disruption-safe") || control.equals("disruption-no-spare"))
+            own.add(new Placement("True-Name Nemesis", ZoneType.Battlefield, false));
+        if (control.equals("disruption-safe") || control.equals("disruption-low-devotion"))
+            own.add(new Placement("Forest", ZoneType.Hand, false));
+        if (control.equals("disruption-disabled")) own.add(new Placement("The Immortal Sun", ZoneType.Battlefield, false));
         own.add(new Placement(control.equals("no-devotion") ? "Llanowar Elves" : "True-Name Nemesis", ZoneType.Battlefield, false));
         own.add(new Placement("Doomsday", ZoneType.Hand, false));
         own.add(new Placement("Thassa's Oracle", ZoneType.Hand, false));
@@ -1783,6 +1791,7 @@ public final class CubeDoomsdayExecutionSmoke {
         for (int i = 0; i < 20; i++) own.add(new Placement("Forest", ZoneType.Library, false));
         while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
         List<Placement> other = new ArrayList<>();
+        if (disruption) other.add(new Placement("Liliana of the Veil", ZoneType.Battlefield, false));
         switch (control) {
             case "clock" -> other.add(new Placement("Griselbrand", ZoneType.Battlefield, false));
             case "orb" -> other.add(new Placement("Torpor Orb", ZoneType.Battlefield, false));
@@ -1804,7 +1813,7 @@ public final class CubeDoomsdayExecutionSmoke {
         var plan = improved ? ((forge.ai.CubeComboPlayerController) player.getController()).doomsdayPlan()
                 : new forge.ai.CubeDoomsdayPlan(player);
         var proposal = new forge.ai.CubeDoomsdayPlan(player).nextAction();
-        boolean shouldPropose = List.of("hold-live", "break-devotion", "orb-after", "draw-after", "counterspell").contains(control);
+        boolean shouldPropose = List.of("hold-live", "break-devotion", "orb-after", "draw-after", "counterspell", "disruption-safe", "disruption-disabled").contains(control);
         if ((proposal != null) != shouldPropose) throw new AssertionError("Hand-pass entry " + control + " main2=" + main2);
         Card oracle = player.getCardsIn(ZoneType.Hand).stream().filter(c -> c.getName().equals("Thassa's Oracle")).findFirst().orElseThrow();
         Card otherOracle = player.getCardsIn(ZoneType.Exile).stream().filter(c -> c.getName().equals("Thassa's Oracle")).findFirst().orElseThrow();
@@ -1817,7 +1826,7 @@ public final class CubeDoomsdayExecutionSmoke {
             int library = player.getCardsIn(ZoneType.Library).size();
             if (improved && !sawPile && doomGone && library == 5 && shouldPropose) {
                 sawPile = true;
-                sawHold = plan.holdDelayedOracle(oracleSpell);
+                sawHold = plan.holdDelayedOracle(oracleSpell) || plan.discardProtectedCards().contains(oracle);
                 if (!sawHold) throw new AssertionError("Missing owned Oracle hold " + control);
                 if (plan.holdDelayedOracle(otherOracle.getFirstSpellAbility().copy(player)))
                     throw new AssertionError("Hold leaked to a different Oracle object");
@@ -1830,7 +1839,7 @@ public final class CubeDoomsdayExecutionSmoke {
                     game.getAction().moveToPlay(card, null, null);
                 }
                 game.getAction().checkStateEffects(true);
-                if (!control.equals("hold-live")) {
+                if (List.of("break-devotion", "orb-after", "draw-after").contains(control)) {
                     released = !plan.holdDelayedOracle(oracleSpell);
                     if (!released) throw new AssertionError("Hold survived broken route " + control);
                 }
@@ -1846,7 +1855,7 @@ public final class CubeDoomsdayExecutionSmoke {
             throw new AssertionError("Incomplete hold/release control " + control);
         if (improved && control.equals("counterspell") && (!sawCounter || !has(opponent, ZoneType.Graveyard, "Counterspell")))
             throw new AssertionError("Counterspell control did not counter Doomsday");
-        if (improved && control.equals("hold-live") && !(player.hasWon() && "Thassa's Oracle".equals(player.getOutcome().altWinSourceName)))
+        if (improved && List.of("hold-live", "disruption-safe", "disruption-disabled").contains(control) && !(player.hasWon() && "Thassa's Oracle".equals(player.getOutcome().altWinSourceName)))
             throw new AssertionError("Live hold did not finish Oracle");
         System.out.println("HAND_PASS_CONTROL improved=" + improved + " policy=" + policy() + " seat=" + seat
                 + " main2=" + main2 + " control=" + control + " proposed=" + (proposal != null)
@@ -2009,9 +2018,10 @@ public final class CubeDoomsdayExecutionSmoke {
                     main2 = second;
                     for (int seat = 0; seat < 2; seat++)
                         for (String control : List.of("no-blue", "no-devotion", "clock", "orb", "no-draw", "cannot-win", "lethal-board",
-                                "hold-live", "break-devotion", "orb-after", "draw-after", "counterspell")) handPassControl(seat, control);
+                                "hold-live", "break-devotion", "orb-after", "draw-after", "counterspell", "disruption-unsafe",
+                                "disruption-safe", "disruption-no-spare", "disruption-low-devotion", "disruption-disabled")) handPassControl(seat, control);
                 }
-                System.out.println("HAND_PASS_CONTROL_COMPLETE cases=48 improved=" + improved + " policy=" + policy());
+                System.out.println("HAND_PASS_CONTROL_COMPLETE cases=68 improved=" + improved + " policy=" + policy());
                 return;
             }
             if (suite.equals("hand-pass-diagnosis")) {

@@ -1531,12 +1531,16 @@ public final class CubeDoomsdayPlan {
      * devotion establish the hold; a countered spell cannot establish it.
      * No next-turn draw means expiration, not an indefinite card-name hold. */
     public boolean holdDelayedOracle(SpellAbility spell) {
-        if (delayedHandOracle == null || spell.getHostCard() != delayedHandOracle || !spell.isSpell()
-                || !delayedHandOracle.isInZone(ZoneType.Hand)
+        return spell.isSpell() && spell.getHostCard() == delayedHandOracle
+                && delayedOracleActive() && player.getCardsIn(ZoneType.Library).size() > oracleThreshold(false);
+    }
+
+    private boolean delayedOracleActive() {
+        if (delayedHandOracle == null || !delayedHandOracle.isInZone(ZoneType.Hand)
                 || delayedHandOracle.getController() != player) return false;
         int library = player.getCardsIn(ZoneType.Library).size();
         int now = player.getGame().getPhaseHandler().getTurn();
-        if (now > delayedHandTurn + 1 || library > 5 || library <= oracleThreshold(false)
+        if (now > delayedHandTurn + 1 || library > 5
                 || oracleThreshold(false) < 4 || oracleTriggerDisabled() || !player.canDrawAmount(1)
                 || player.cantWin() || player.getOpponents().stream().anyMatch(p -> p.cantLose())) return false;
         return player.getCardsIn(ZoneType.Graveyard).stream().anyMatch(c -> c.getId() == delayedDoomId);
@@ -1577,7 +1581,7 @@ public final class CubeDoomsdayPlan {
      * alternative exists. Own-visible information only.</p> */
     public CardCollection discardProtectedCards() {
         CardCollection kept = new CardCollection();
-        if (delayedHandOracle != null && holdDelayedOracle(delayedHandOracle.getFirstSpellAbility().copy(player)))
+        if (delayedOracleActive())
             kept.add(delayedHandOracle);
         if (!holdingPile()) return kept;
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
