@@ -716,6 +716,7 @@ public final class CubeDoomsdayExecutionSmoke {
                 && !passTurn && (kase.equals("pips2-oracle-hand") || kase.equals("liliana"));
         boolean observeNextTurn = passTurn || improved && delayedHandRoute || delayedReview;
         int steps = 0, limit = observeNextTurn ? 1500 : STEP_LIMIT, lastTurn = observeNextTurn ? 3 : 1;
+        if (Boolean.getBoolean("forge.test.observeTrampleClock") && passTurn && kase.equals("clock")) lastTurn = 5;
         boolean doom = false, pile = false;
         int beforeOracle = -1, doomTurn = -1, oracleTurn = -1;
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= lastTurn && steps++ < limit) {
@@ -2000,6 +2001,72 @@ public final class CubeDoomsdayExecutionSmoke {
                 + " steps=" + steps);
     }
 
+    private static long exhaustiveAbsorption(long[][] weights, int row, int used) {
+        if (row == weights.length) return 0;
+        long best = exhaustiveAbsorption(weights, row + 1, used);
+        for (int column = 0; column < weights[row].length; column++)
+            if ((used & (1 << column)) == 0)
+                best = Math.max(best, weights[row][column]
+                        + exhaustiveAbsorption(weights, row + 1, used | (1 << column)));
+        return best;
+    }
+
+    /** Independent exhaustive oracle for the polynomial assignment solver, then
+     * native public-card clock boundaries. Synthetic keywords are explicit test
+     * controls, never claims about the printed card or sampled deck strength. */
+    private static void trampleClockChecks() throws Exception {
+        var matching = forge.ai.CubeDoomsdayPlan.class.getDeclaredMethod("maximumAbsorption", long[][].class);
+        matching.setAccessible(true);
+        java.util.Random random = new java.util.Random(830912L);
+        int matrices = 0;
+        for (int rows = 0; rows <= 5; rows++) for (int columns = 0; columns <= 5; columns++)
+            for (int trial = 0; trial < 40; trial++) {
+                long[][] weights = new long[rows][columns];
+                for (int row = 0; row < rows; row++) for (int col = 0; col < columns; col++)
+                    weights[row][col] = random.nextInt(9) * (trial == 39 ? 1000000000L : 1L);
+                long actual = (Long) matching.invoke(null, (Object) weights);
+                long expected = exhaustiveAbsorption(weights, 0, 0);
+                if (actual != expected) throw new AssertionError("Matching differs from exhaustive oracle: "
+                        + rows + "x" + columns + " trial=" + trial + " actual=" + actual + " expected=" + expected);
+                matrices++;
+            }
+        var clock = forge.ai.CubeDoomsdayPlan.class.getDeclaredMethod("clockSurvivable");
+        clock.setAccessible(true);
+        int cases = 0;
+        for (int seat = 0; seat < 2; seat++) for (String variant : List.of(
+                "partial", "deathtouch", "double", "double-deathtouch", "nontrample", "tapped")) {
+            List<Placement> own = new ArrayList<>(), other = new ArrayList<>();
+            own.add(new Placement("Emry, Lurker of the Loch", ZoneType.Battlefield, variant.equals("tapped")));
+            other.add(new Placement(variant.equals("nontrample") ? "Grave Titan" : "Old One Eye", ZoneType.Battlefield, false));
+            while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Library, false));
+            while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
+            Game game = fixtureGame(own, other, seat);
+            Player player = game.getPlayers().get(seat);
+            Card attacker = game.getPlayers().get(1 - seat).getCardsIn(ZoneType.Battlefield).get(0);
+            if (variant.contains("deathtouch")) attacker.addIntrinsicKeyword("Deathtouch");
+            if (variant.startsWith("double")) attacker.addIntrinsicKeyword("Double strike");
+            int spill = switch (variant) {
+                case "partial" -> 4;
+                case "deathtouch" -> 5;
+                case "double" -> 10;
+                case "double-deathtouch" -> 11;
+                case "tapped" -> 6;
+                default -> 0;
+            };
+            for (int remaining : new int[] {Math.max(1, spill), spill + 1}) {
+                player.setLife(2 * remaining, null);
+                boolean expected = spill < remaining;
+                boolean actual = (Boolean) clock.invoke(new forge.ai.CubeDoomsdayPlan(player));
+                if (actual != expected) throw new AssertionError("Native clock boundary: " + variant
+                        + " seat=" + seat + " life=" + player.getLife() + " spill=" + spill + " actual=" + actual);
+                System.out.println("TRAMPLE_CLOCK_RESULT case=" + variant + " seat=" + seat
+                        + " life=" + player.getLife() + " spill=" + spill + " survivable=" + actual);
+                cases++;
+            }
+        }
+        System.out.println("TRAMPLE_CLOCK_COMPLETE matrices=" + matrices + " nativeCases=" + cases);
+    }
+
     public static void main(final String[] args) {
         try {
             improved = args.length > 1 && args[1].equals("improved");
@@ -2016,6 +2083,10 @@ public final class CubeDoomsdayExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
+            if (suite.equals("trample-clock")) {
+                trampleClockChecks();
+                return;
+            }
             if (suite.equals("hand-pass-controls")) {
                 for (boolean second : new boolean[] {false, true}) {
                     main2 = second;

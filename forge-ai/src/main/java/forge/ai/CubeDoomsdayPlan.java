@@ -286,100 +286,85 @@ public final class CubeDoomsdayPlan {
         return false;
     }
 
-    /** Route 2 hands the opponent a turn, so decline when their public board
-     * already kills us across it. Public battlefield only, exact formula:
-     * <pre>
-     *   lifeAfter = life - ceil(life / 2)   // doomsday.txt Y = YourLifeTotal/HalfUp
-     *   attackers = every creature the opponent controls, tapped included,
-     *               because a tapped creature untaps in its controller's untap
-     *               step and can still attack
-     *   k         = our untapped creatures that native CombatUtil.canBlock
-     *               permits against at least one of those attackers; ours only,
-     *               because our creatures do not untap before their attack step
-     *   clock     = sum of the attacker powers left after the k LARGEST are
-     *               absorbed, one per blocker
-     *   survivable iff clock &lt; lifeAfter
-     * </pre>
-     *
-     * <p>v49 R1 replaces v44's {@code blockers &gt; 0} short-circuit, which
-     * credited any single untapped creature with full immunity: two 1/1s were
-     * treated as an answer to four attackers, the position the v47 analysis
-     * recorded as the 16701484-s0 loss. An absorption count is the same public
-     * read, counted. It is still deliberately optimistic - trample, evasion,
-     * multiple blocks, removal and combat tricks are all ignored and every
-     * blocker is credited with eating a whole attacker - so it can only ever
-     * decline a position the old short-circuit already allowed, never commit
-     * one it refused: with {@code k = 0} the arithmetic is identical to v44's.
-     * </p>
-     *
-     * Power and creature type are public even for a face-down permanent, so no
-     * hidden identity is read. */
+    /** Forecast the public attack after Doomsday halves our life. Match legal
+     * single blocks for maximum absorption, including trample spill and a
+     * double-strike second damage step. Current damage on blockers is counted
+     * conservatively; multi-blocks, future pumps/removal and blockers killing
+     * attackers before their damage are outside this bound. Own/public zones
+     * only, with no opponent-hand or library inspection. */
     private boolean clockSurvivable() {
-        CardCollection attackers = new CardCollection();
+        CardCollection attackers = new CardCollection(), blockers = new CardCollection();
         for (Player opponent : player.getOpponents())
-            for (Card card : opponent.getCardsIn(ZoneType.Battlefield))
-                if (card.isCreature()) attackers.add(card);
-        CardCollection blockers = new CardCollection();
+            for (Card card : opponent.getCardsIn(ZoneType.Battlefield)) if (card.isCreature()) attackers.add(card);
         for (Card card : player.getCardsIn(ZoneType.Battlefield))
             if (card.isCreature() && card.isUntapped()) blockers.add(card);
-        // Attackers by descending power, so the greedy pass below takes the
-        // largest absorbable one first.
-        java.util.List<Card> ordered = new java.util.ArrayList<>(attackers);
-        ordered.sort(java.util.Comparator.comparingInt((Card card) -> Math.max(0, card.getNetPower())).reversed());
-        // assignment[b] = index in `ordered` of the attacker blocker b is
-        // currently assigned to, or -1.
-        int[] assignment = new int[blockers.size()];
-        java.util.Arrays.fill(assignment, -1);
-        int clock = 0;
-        for (int index = 0; index < ordered.size(); index++) {
-            Card attacker = ordered.get(index);
-            int power = Math.max(0, attacker.getNetPower());
-            if (!absorb(index, ordered, blockers, assignment, new boolean[blockers.size()])) clock += power;
-        }
-        return clock < player.getLife() - (player.getLife() + 1) / 2;
-    }
-
-    /** v63 C4 (the v47 analysis section 4 R1). One augmenting-path step of
-     * Kuhn's algorithm: can this attacker be given a blocker, moving already
-     * assigned blockers along legal edges only? An edge exists iff native
-     * {@link CombatUtil#canBlock} permits that blocker against that attacker -
-     * the same native predicate v55's forecast uses, so "can't be blocked by
-     * creatures with power 2 or less", flying/reach and every other CantBlockBy
-     * static is honoured by the engine rather than restated here - and iff the
-     * attacker does not demand more than one blocker (menace), because this
-     * model assigns exactly one.
-     *
-     * <p>{@link #clockSurvivable} calls this with the attackers in descending
-     * power. The attacker sets that can be matched simultaneously form a
-     * transversal matroid, so greedy by weight with an independence test is the
-     * MAXIMUM absorbable power: the guard stays as optimistic as it can
-     * honestly be rather than over-declining.</p>
-     *
-     * <p>This is a strict tightening of v49 R1, which credited the {@code k}
-     * largest attackers to any {@code k} blockers that could block SOMETHING.
-     * The absorbed set has size {@code m <= k} (a matched blocker could block
-     * at least one attacker, so v49 R1 already counted it), and the sum of its
-     * powers is at most the sum of the {@code m} largest overall, hence at most
-     * the sum of the {@code k} largest. So the new clock is never smaller than
-     * the old one: no board v49 R1 refused can be newly committed, and with
-     * {@code k = 0} the two are identical. Everything v49 R1 ignores - trample,
-     * multiple blocks, removal, combat tricks - stays ignored.</p>
-     *
-     * <p>Public battlefields only; power and creature type are public even for
-     * a face-down permanent, so no hidden identity is read.</p> */
-    private boolean absorb(int attackerIndex, java.util.List<Card> ordered, CardCollection blockers,
-            int[] assignment, boolean[] visited) {
-        Card attacker = ordered.get(attackerIndex);
-        if (CombatUtil.getMinNumBlockersForAttacker(attacker, player) > 1) return false;
-        for (int b = 0; b < blockers.size(); b++) {
-            if (visited[b] || !CombatUtil.canBlock(attacker, blockers.get(b))) continue;
-            visited[b] = true;
-            if (assignment[b] < 0 || absorb(assignment[b], ordered, blockers, assignment, visited)) {
-                assignment[b] = attackerIndex;
-                return true;
+        long damage = 0;
+        long[][] absorption = new long[attackers.size()][blockers.size()];
+        for (int a = 0; a < attackers.size(); a++) {
+            Card attacker = attackers.get(a);
+            long attackDamage = Math.max(0, attacker.getNetCombatDamage());
+            if (attacker.hasKeyword(forge.game.keyword.Keyword.DOUBLE_STRIKE)) attackDamage *= 2;
+            damage += attackDamage;
+            if (CombatUtil.getMinNumBlockersForAttacker(attacker, player) > 1) continue;
+            for (int b = 0; b < blockers.size(); b++) {
+                Card blocker = blockers.get(b);
+                if (!CombatUtil.canBlock(attacker, blocker)) continue;
+                if (!attacker.hasKeyword(forge.game.keyword.Keyword.TRAMPLE)) absorption[a][b] = attackDamage;
+                else {
+                    // Trample assignment uses lethal damage, regardless of
+                    // indestructibility/prevention. Deathtouch needs only one.
+                    long lethal = attacker.hasKeyword(forge.game.keyword.Keyword.DEATHTOUCH)
+                            ? 1 : Math.max(0, blocker.getLethalDamage());
+                    absorption[a][b] = Math.min(attackDamage, lethal);
+                }
             }
         }
-        return false;
+        return damage - maximumAbsorption(absorption) < player.getLife() - (player.getLife() + 1) / 2;
+    }
+
+    /** Maximum total absorbed damage with one blocker per attacker and vice
+     * versa. Hungarian assignment on the smaller dimension keeps a large token
+     * army opposite a few blockers inexpensive. Zero-weight dummy columns let
+     * any row remain unmatched. No game objects, RNG or hidden information. */
+    private static long maximumAbsorption(long[][] weights) {
+        if (weights.length == 0 || weights[0].length == 0) return 0;
+        boolean transpose = weights.length > weights[0].length;
+        int rows = Math.min(weights.length, weights[0].length);
+        int realColumns = Math.max(weights.length, weights[0].length), columns = realColumns + rows;
+        long[] u = new long[rows + 1], v = new long[columns + 1];
+        int[] owner = new int[columns + 1], previous = new int[columns + 1];
+        for (int row = 1; row <= rows; row++) {
+            owner[0] = row;
+            int column = 0;
+            long[] slack = new long[columns + 1];
+            java.util.Arrays.fill(slack, Long.MAX_VALUE / 4);
+            boolean[] used = new boolean[columns + 1];
+            do {
+                used[column] = true;
+                int activeRow = owner[column], next = 0;
+                long delta = Long.MAX_VALUE / 4;
+                for (int c = 1; c <= columns; c++) if (!used[c]) {
+                    long weight = c > realColumns ? 0 : transpose ? weights[c - 1][activeRow - 1] : weights[activeRow - 1][c - 1];
+                    long reduced = -weight - u[activeRow] - v[c];
+                    if (reduced < slack[c]) { slack[c] = reduced; previous[c] = column; }
+                    if (slack[c] < delta) { delta = slack[c]; next = c; }
+                }
+                for (int c = 0; c <= columns; c++) {
+                    if (used[c]) { u[owner[c]] += delta; v[c] -= delta; }
+                    else slack[c] -= delta;
+                }
+                column = next;
+            } while (owner[column] != 0);
+            do {
+                int next = previous[column];
+                owner[column] = owner[next];
+                column = next;
+            } while (column != 0);
+        }
+        long result = 0;
+        for (int c = 1; c <= realColumns; c++) if (owner[c] != 0)
+            result += transpose ? weights[c - 1][owner[c] - 1] : weights[owner[c] - 1][c - 1];
+        return result;
     }
 
     /** v49 R2: own battlefield permanents that could pay one of Oracle's blue
