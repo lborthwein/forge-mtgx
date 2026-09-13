@@ -710,7 +710,9 @@ public final class CubeDoomsdayExecutionSmoke {
                 + " mustMove=" + proposes + " action=" + action);
         if (improved && NATURAL_STRICT && proposes != action.equals("Doomsday"))
             throw new AssertionError("Natural route proposal mismatch: " + kase + " main2=" + main2 + " -> " + action);
-        int steps = 0, limit = passTurn ? 1500 : STEP_LIMIT, lastTurn = passTurn ? 3 : 1;
+        boolean delayedReview = Boolean.getBoolean("forge.test.observeDoomsdayDelayed")
+                && !passTurn && (kase.equals("pips2-oracle-hand") || kase.equals("liliana"));
+        int steps = 0, limit = passTurn || delayedReview ? 1500 : STEP_LIMIT, lastTurn = passTurn || delayedReview ? 3 : 1;
         boolean doom = false, pile = false;
         int beforeOracle = -1, doomTurn = -1, oracleTurn = -1;
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= lastTurn && steps++ < limit) {
