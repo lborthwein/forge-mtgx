@@ -45,6 +45,11 @@ public final class CubeExtraTurnExecutionSmoke {
         state.put("timestamp", game.getTimestamp());
         state.put("rng", ((BenchRandomAudit.AuditedRandom) forge.util.MyRandom.getRandom()).snapshot().toString());
         state.put("mana", player.getManaPool().totalMana());
+        state.put("phase", game.getPhaseHandler().getPhase());
+        state.put("active", game.getPhaseHandler().getPlayerTurn().getId());
+        state.put("conversion", java.util.stream.IntStream.range(0, 6)
+                .map(i -> player.getManaPool().getPossibleColorUses((byte)(1 << i))).boxed().toList());
+        state.put("snowConversion", player.getManaPool().isSnowForColor());
         state.put("manaObjects", java.util.stream.StreamSupport.stream(player.getManaPool().spliterator(), false).toList());
         for (var memory : forge.ai.AiCardMemory.MemorySet.values())
             state.put(memory.name(), forge.ai.AiCardMemory.getMemorySet(player, memory).stream().map(Card::getId).sorted().toList());
@@ -76,6 +81,40 @@ public final class CubeExtraTurnExecutionSmoke {
             if (!before.equals(visibleSnapshot(player))) throw new AssertionError("recurrence query changed native state");
         }
         System.out.println("EXTRA_TURN_PURITY queries=3 unchanged=true candidate=" + candidate);
+        // Explicit counterfactual guard tests, isolated from native execution.
+        // Each query must be pure relative to its counterfactual entry state;
+        // finally restores the exact real history before native play continues.
+        Card blink = choices.stream().filter(c -> c.getName().equals("Ephemerate")).findFirst().orElseThrow();
+        var history = player.getGame().getStack().getSpellsCastThisTurn();
+        var savedHistory = new ArrayList<>(history);
+        var savedLiveOrigin = blink.getCastFrom();
+        try {
+            history.clear();
+            blink.setCastFrom(player.getZone(ZoneType.Exile));
+            var entry = visibleSnapshot(player);
+            if (forge.ai.CubeExtraTurnPlan.preferRecurrence(player, query, choices, ordinary) != null)
+                throw new AssertionError("live exile origin without current cast history accepted");
+            if (!entry.equals(visibleSnapshot(player))) throw new AssertionError("no-history query mutated state");
+        } finally {
+            history.clear(); history.addAll(savedHistory); blink.setCastFrom(savedLiveOrigin);
+        }
+        if (!before.equals(visibleSnapshot(player))) throw new AssertionError("history fixture restoration failed");
+        Card cast = player.getGame().getStack().getSpellCardsCastThisTurn().stream()
+                .filter(c -> c.getId() == blink.getId()).findFirst().orElseThrow();
+        var savedOrigin = cast.getCastFrom();
+        try {
+            cast.setCastFrom(player.getZone(ZoneType.Hand));
+            var entry = visibleSnapshot(player);
+            if (forge.ai.CubeExtraTurnPlan.preferRecurrence(player, query, choices, ordinary) != null)
+                throw new AssertionError("hand cast accepted as rebound");
+            if (!entry.equals(visibleSnapshot(player))) throw new AssertionError("hand-history query mutated state");
+        } finally { cast.setCastFrom(savedOrigin); }
+        var ordinaryQuery = query.copy(player);
+        ordinaryQuery.setTrigger(null);
+        if (forge.ai.CubeExtraTurnPlan.preferRecurrence(player, ordinaryQuery, choices, ordinary) != null)
+            throw new AssertionError("ordinary non-trigger accepted as recurrence");
+        if (!before.equals(visibleSnapshot(player))) throw new AssertionError("guard fixture restoration failed");
+        System.out.println("EXTRA_TURN_HISTORY_GUARDS cases=3 unchanged=true candidate=" + candidate);
     }
     private static void run(int seat, String engine, String turnSpell, String control, boolean candidate) {
         List<Entry> own = new ArrayList<>(), other = new ArrayList<>();
