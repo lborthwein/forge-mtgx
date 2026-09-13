@@ -101,6 +101,9 @@ final class CubeEmryPlan {
             }
             artifact = find(name, ZoneType.Battlefield);
             if (artifact == null) continue;
+            // A prior ordinary blink may have targeted something other than
+            // Emry. Do not sacrifice the resource without a ready next grant.
+            if (emry.isTapped() || emry.isSick() && greaves == null) continue;
             // Do not discard a held spell for an unproved resource loop. The
             // initial supported LED route has its engine and terminal in play.
             if ("Lion's Eye Diamond".equals(name) && player.getCardsIn(ZoneType.Hand).stream().anyMatch(c -> !c.isLand())) continue;
