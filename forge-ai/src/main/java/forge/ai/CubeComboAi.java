@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v93";
+    public static final String VERSION = "cube-combo-execution-v94";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -1646,6 +1646,36 @@ public final class CubeComboAi {
                     () -> CubeComboAi.canPayCost(tutor, player, false))) return new TutorPlan(tutor, reserve, name);
         }
         return null;
+    }
+
+    record TopTutorForecast(CardCollection allReserved, CardCollection pieceReserved, String partner) { }
+
+    /** Native top-search plus optional immediate draw; reserve disjoint sources
+     * for the draw and the missing piece before checking the tutor payment.
+     * planFor uses registered composition and detached previews, not a library. */
+    static TopTutorForecast topTutorForecast(Player player, SpellAbility tutor, SpellAbility draw) {
+        java.util.List<String> pieces = new java.util.ArrayList<>(CubeBreachPlan.completingPieceNames(player));
+        pieces.addAll(CubeStormPlan.completingPieceNames(player));
+        if (pieces.isEmpty()) return null;
+        CardCollection drawReserve = new CardCollection();
+        if (draw != null) {
+            if (!manaOnly(draw) || !castFitsAfter(player, tutor, draw)) return null;
+            // Decline public cast caps for the three-spell forecast. Pairwise
+            // checks alone cannot prove that all three fit the same limit.
+            for (Card card : player.getGame().getCardsIn(ZoneType.Battlefield))
+                if (!card.isFaceDown()) for (var st : card.getStaticAbilities())
+                    if (st.hasParam("NumLimitEachTurn") && !st.isSuppressed()
+                            && st.checkConditions(forge.game.staticability.StaticAbilityMode.CantBeCast)) return null;
+            var cost = ComputerUtilMana.calculateManaCost(draw.getPayCosts(), draw, player, true, 0, false);
+            drawReserve = getManaSourcesToPayCost(cost, draw, player, false);
+            if (drawReserve == null) return null;
+        }
+        final CardCollection reserve = drawReserve;
+        TutorPlan planned = withReservedSources(player, reserve,
+                () -> planFor(player, tutor, tutor, false, false, null, pieces));
+        if (planned == null) return null;
+        CardCollection all = new CardCollection(reserve); all.addAll(planned.reservedSources());
+        return new TopTutorForecast(all, new CardCollection(planned.reservedSources()), planned.plannedPartner());
     }
 
     /** v60 - the land-drop half of the second-piece forecast: what has to fit

@@ -30,6 +30,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     private final CubeReanimatorPlan reanimatorPlan; // v73 reanimator
     private int comboSelectionChanges;
     private CubeComboAi.TutorPlan tutorPlan;
+    private final CubeTopTutorPlan topTutorPlan;
     private int comboTutorPlanCasts;
     /** The action this policy proposed on the current priority pass, or null when
      * the ordinary AI's own choice was taken. The native-legality guard applies to
@@ -80,6 +81,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         breachPlan = new CubeBreachPlan(player);
         stormPlan = new CubeStormPlan(player);
         emryPlan = new CubeEmryPlan(player);
+        topTutorPlan = new CubeTopTutorPlan(player);
         monolithPlan = new CubeMonolithPlan(player);
         kittenPlan = new CubeKittenPlan(player);
         topPlan = new CubeTopPlan(player);
@@ -92,7 +94,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         planAction = null;
-        if (emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
+        if (topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
@@ -130,6 +132,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
                 if (action != null) plan = "tutor";
             }
         }
+        if (action == null && (action = topTutorPlan.nextAction()) != null) plan = "top-tutor";
         List<SpellAbility> chosen = action == null ? super.chooseSpellAbilityToPlay() : List.of(action);
         planAction = action;
         logDecision(plan, action, chosen, tutorConsulted);
@@ -281,6 +284,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             tutorPlan = null;
             return played;
         }
+        if (topTutorPlan.owns(ability)) return topTutorPlan.play(ability);
         if (emryPlan.owns(ability)) return emryPlan.play(ability);
         if (breachPlan.owns(ability)) return breachPlan.play(ability);
         if (stormPlan.owns(ability)) return stormPlan.play(ability);
@@ -332,6 +336,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
                 if (delayedReveal != null) reveal(delayedReveal);
                 Card partner = CubeComboAi.chooseTutorPartner(getPlayer(), source, new CardCollection(choices));
                 if (partner != null) {
+                    topTutorPlan.selectedFromSearch(source, partner);
                     comboSelectionChanges++;
                     System.err.println("CUBE_COMBO_SELECTION changed-search-selection source=" + source.getHostCard().getName()
                             + " phase=" + getGame().getPhaseHandler().getPhase() + " partner=" + partner.getName());
