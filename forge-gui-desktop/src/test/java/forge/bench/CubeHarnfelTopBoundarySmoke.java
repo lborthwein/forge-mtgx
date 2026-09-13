@@ -21,7 +21,7 @@ import java.util.*;
 public final class CubeHarnfelTopBoundarySmoke {
     private static final String BIRGI = "Birgi, God of Storytelling", HARNFEL = "Harnfel, Horn of Bounty";
     private static final String TOP = "Sensei's Divining Top", HELM = "Helm of Awakening", OUTLET = "Aetherflux Reservoir";
-    private static final List<String> CASES = List.of("bf-15", "bf-14", "hand-13", "hand-12", "paid-8", "paid-6", "root-maze", "draw-limit", "activation-tax");
+    private static final List<String> CASES = List.of("bf-15", "bf-14", "hand-13", "hand-12", "paid-8", "paid-6", "root-maze", "draw-limit", "activation-tax", "root-maze-last");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone) { }
     private static void add(List<Placement> out, int n, String name, ZoneType zone) {
@@ -38,7 +38,7 @@ public final class CubeHarnfelTopBoundarySmoke {
             if (!control.equals("empty-hand")) add(out, 1, "Forest", ZoneType.Hand);
         } else {
             String blocker = switch (control) {
-                case "root-maze" -> "Root Maze";
+                case "root-maze", "root-maze-last" -> "Root Maze";
                 case "draw-limit" -> "Spirit of the Labyrinth";
                 case "activation-tax" -> "Suppression Field";
                 case "draw-blocked" -> "Omen Machine";
@@ -94,7 +94,7 @@ public final class CubeHarnfelTopBoundarySmoke {
         rules.setAllowCheatShuffle(false);
         Game game = new Match(rules, entries, "Harnfel observation").createGame();
         Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1-seat);
-        player.setLife(20, null); opponent.setLife(20, null); populate(player, true, control); populate(opponent, false, control);
+        player.setLife(control.equals("root-maze-last") ? 50 : 20, null); opponent.setLife(20, null); populate(player, true, control); populate(opponent, false, control);
         game.setAge(GameStage.Play); int start = seat == 0 ? 1 : 2;
         game.getPhaseHandler().setupFirstTurn(seat == 0 ? player : opponent,
                 () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player, start));
@@ -124,8 +124,13 @@ public final class CubeHarnfelTopBoundarySmoke {
                         + " ownPermission=" + (grant != null && grant.getHostCard().getController() == player));
             }
         }
-        boolean expectedWin = Set.of("bf-15", "hand-13", "paid-8").contains(control);
+        boolean expectedWin = Set.of("bf-15", "hand-13", "paid-8", "root-maze-last").contains(control);
         if (player.hasWon() != expectedWin) throw new AssertionError("native resource boundary " + key);
+        if (control.equals("root-maze-last")) {
+            Card top = player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals(TOP)).findFirst().orElseThrow();
+            if (!top.isTapped()) throw new AssertionError("Root Maze did not apply to final recast");
+            System.out.println("HARNFEL_LAST_CAST " + key + " initialLife=50 topTapped=true nativeFinish=" + player.hasWon());
+        }
         if (steps >= 1000) throw new AssertionError("native step budget exhausted " + key);
         System.out.println("HARNFEL_RESULT " + key + " won=" + player.hasWon() + " gameOver=" + game.isGameOver()
                 + " steps=" + steps + " turn=" + game.getPhaseHandler().getTurn() + " topCasts=" + topCasts
@@ -148,7 +153,7 @@ public final class CubeHarnfelTopBoundarySmoke {
             for (String control : CASES) for (boolean own : List.of(false,true)) for (Placement p : placements(own,control)) names.add(p.name());
             for (String name : names) StaticData.instance().attemptToLoadCard(name);
             for (String control : CASES) for (int seat = 0; seat < 2; seat++) run(args[1].equals("improved"),args[2].equals("observed"),seat,control);
-            System.out.println("HARNFEL_SUITE_COMPLETE cases=18");
+            System.out.println("HARNFEL_SUITE_COMPLETE cases=20");
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }
 }
