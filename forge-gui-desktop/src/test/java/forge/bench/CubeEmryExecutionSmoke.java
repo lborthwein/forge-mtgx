@@ -59,6 +59,7 @@ public final class CubeEmryExecutionSmoke {
         if (control.equals("rule-of-law")) add(result,1,"Rule of Law",ZoneType.Battlefield);
         if (control.equals("jailer")) add(result,1,"Soulless Jailer",ZoneType.Battlefield);
         if (control.equals("tainted-remedy")) add(result,1,"Tainted Remedy",ZoneType.Battlefield);
+        if (control.equals("late-remedy")) add(result,1,"Tainted Remedy",ZoneType.Exile);
         if (control.equals("prevent-damage")) add(result,1,"Glacial Chasm",ZoneType.Battlefield);
         add(result,40-result.size(),"Forest",ZoneType.Library); return result;
     }
@@ -238,6 +239,7 @@ public final class CubeEmryExecutionSmoke {
         game.getAction().checkStateEffects(true);game.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(990300L+100L*seat+index);
         String key="arm="+(improved?"improved":"baseline")+" seat="+seat+" case="+name;
         System.out.println("EMRY_FIXTURE "+key+" policy="+forge.ai.CubeComboAi.VERSION+" registered=40 initialMana=0 ownLife="+player.getLife()+" opponentLife=20");
+        boolean interrupted=false; int observedFailedTurn=-1;
         Set<Integer> seen=new HashSet<>();int steps=0,artifactCasts=0,emryActions=0,kittenActions=0,shots=0;String previous="",previousAvailable="";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn()<=startTurn+2 && steps<1500) {
             previousAvailable=observe(player,key,steps,previousAvailable);
@@ -251,6 +253,26 @@ public final class CubeEmryExecutionSmoke {
                 if(host.equals("Aetherflux Reservoir")&&sa.getApi()==forge.game.ability.ApiType.DealDamage)shots++;
                 System.out.println("EMRY_STACK "+key+" step="+steps+" source="+host.replace(' ','_')+" api="+sa.getApi()+" spell="+sa.isSpell()+" copied="+sa.isCopied()+" sourceId="+sa.getHostCard().getId()+" castFrom="+sa.getHostCard().getCastFrom()+" targets="+sa.getTargets());
             }
+            if (name.endsWith(":late-remedy") && !interrupted && artifactCasts>0) {
+                Card remedy=null;
+                for(Card card:opponent.getCardsIn(ZoneType.Exile)) if(!card.isFaceDown() && card.getName().equals("Tainted Remedy"))remedy=card;
+                if(remedy==null)throw new AssertionError("missing public interruption card");
+                int life=player.getLife();
+                game.getAction().moveToPlay(remedy,null,forge.game.ability.AbilityKey.newMap());
+                game.getAction().checkStateEffects(true);
+                if(player.getLife()!=life)throw new AssertionError("interruption changed life before gain");
+                interrupted=true;
+                System.out.println("EMRY_INTERRUPTION "+key+" step="+steps+" publicExileToBattlefield=true life="+life+" casts="+artifactCasts);
+            }
+            if (improved) try {
+                var owner=forge.ai.CubeComboPlayerController.class.getDeclaredField("emryPlan");owner.setAccessible(true);
+                Object plan=owner.get(player.getController());var failed=plan.getClass().getDeclaredField("failedTurn");failed.setAccessible(true);
+                int value=failed.getInt(plan);
+                if(value>=0 && value!=observedFailedTurn) {
+                    observedFailedTurn=value;
+                    System.out.println("EMRY_NATIVE_STOP "+key+" step="+steps+" failedTurn="+value+" observedAfterNativeStep=true");
+                }
+            } catch(ReflectiveOperationException e) {throw new AssertionError(e);}
             String state="turn="+game.getPhaseHandler().getTurn()+" phase="+game.getPhaseHandler().getPhase()+" library="+player.getCardsIn(ZoneType.Library).size()+" hand="+player.getCardsIn(ZoneType.Hand).size()+" graveyard="+player.getCardsIn(ZoneType.Graveyard).size()+" mana="+player.getManaPool().totalMana()+" ownLife="+player.getLife()+" opponentLife="+opponent.getLife();
             if(!state.equals(previous))System.out.println("EMRY_STATE "+key+" step="+steps+" "+state);previous=state;
         }
@@ -274,7 +296,8 @@ public final class CubeEmryExecutionSmoke {
             for(int p=1;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:CONTROLS)cases.add(p+":"+a+":"+control);
             for(int p=0;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:BOUNDARIES)cases.add(p+":"+a+":"+control);
             for(int p=0;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:BATTLEFIELD_CASES)cases.add(p+":"+a+":bf-"+control);
-            if(cases.size()!=336)throw new AssertionError("case count");
+            for(int p=0;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)cases.add(p+":"+a+":late-remedy");
+            if(cases.size()!=348)throw new AssertionError("case count");
             int executed=0;
             for(int i=0;i<cases.size();i++) {
                 if(args.length>2 && !cases.get(i).endsWith(":"+args[2]))continue;
