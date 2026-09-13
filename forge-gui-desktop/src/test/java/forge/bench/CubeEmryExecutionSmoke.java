@@ -33,25 +33,26 @@ public final class CubeEmryExecutionSmoke {
     private static final List<String> ARTIFACTS = List.of("Lotus Petal", "Mishra's Bauble", "Lion's Eye Diamond");
     private static final List<String> CONTROLS = List.of("no-emry", "no-kitten", "no-partner", "no-outlet", "null-rod", "rest-in-peace", "cursed-totem");
     private static final List<String> BOUNDARIES = List.of("life50", "life51", "short-library", "empty-library", "held-counterspell", "held-oracle", "rule-of-law", "jailer", "tainted-remedy", "emry-sick", "emry-tapped", "prevent-damage");
+    private static final List<String> BATTLEFIELD_CASES = List.of("complete", "emry-tapped", "emry-sick", "cursed-totem", "null-rod", "rest-in-peace", "rule-of-law", "no-partner");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone, boolean tapped) { }
     private static void add(List<Placement> into, int count, String name, ZoneType zone) {
         for (int i=0;i<count;i++) into.add(new Placement(name,zone,false));
     }
     private static List<Placement> own(String name) {
-        String[] key=name.split(":"); int partner=Integer.parseInt(key[0]), artifact=Integer.parseInt(key[1]); String control=key[2];
+        String[] key=name.split(":"); int partner=Integer.parseInt(key[0]), artifact=Integer.parseInt(key[1]); String control=key[2].replaceFirst("^bf-", "");
         List<Placement> result=new ArrayList<>();
         if (!control.equals("no-emry")) add(result,1,EMRY,ZoneType.Battlefield);
         if (!control.equals("no-kitten")) add(result,1,KITTEN,ZoneType.Battlefield);
         if (!control.equals("no-partner")) add(result,1,PARTNERS.get(partner),ZoneType.Battlefield);
         if (!control.equals("no-outlet")) add(result,1,"Aetherflux Reservoir",ZoneType.Battlefield);
-        add(result,3,"Island",ZoneType.Battlefield); add(result,1,ARTIFACTS.get(artifact),ZoneType.Graveyard);
+        add(result,3,"Island",ZoneType.Battlefield); add(result,1,ARTIFACTS.get(artifact),key[2].startsWith("bf-")?ZoneType.Battlefield:ZoneType.Graveyard);
         add(result,1,control.equals("held-counterspell")?"Counterspell":control.equals("held-oracle")?"Thassa's Oracle":"Forest",ZoneType.Hand);
         add(result,control.equals("empty-library")?0:control.equals("short-library")?1:20,"Forest",ZoneType.Library);
         add(result,40-result.size(),"Forest",ZoneType.Exile); return result;
     }
     private static List<Placement> other(String name) {
-        String control=name.split(":")[2]; List<Placement> result=new ArrayList<>();
+        String control=name.split(":")[2].replaceFirst("^bf-", ""); List<Placement> result=new ArrayList<>();
         if (control.equals("null-rod")) add(result,1,"Null Rod",ZoneType.Battlefield);
         if (control.equals("rest-in-peace")) add(result,1,"Rest in Peace",ZoneType.Battlefield);
         if (control.equals("cursed-totem")) add(result,1,"Cursed Totem",ZoneType.Battlefield);
@@ -75,8 +76,8 @@ public final class CubeEmryExecutionSmoke {
                     FModel.getMagicDb().getCommonCards().getCard(p.name()), p.name()), player);
             card.setGameTimestamp(player.getGame().getNextTimestamp());
             player.getZone(p.zone()).add(card);
-            card.setSickness(owner && name.endsWith(":emry-sick") && p.name().equals(EMRY));
-            if (owner && name.endsWith(":emry-tapped") && p.name().equals(EMRY)) card.setTapped(true);
+            card.setSickness(owner && name.endsWith("emry-sick") && p.name().equals(EMRY));
+            if (owner && name.endsWith("emry-tapped") && p.name().equals(EMRY)) card.setTapped(true);
             if (p.tapped()) card.setTapped(true);
         }
         TreeMap<String, Integer> actual = new TreeMap<>(), registered = new TreeMap<>();
@@ -229,7 +230,8 @@ public final class CubeEmryExecutionSmoke {
             for(int a=0;a<ARTIFACTS.size();a++)for(String control:CONTROLS)cases.add("0:"+a+":"+control);
             for(int p=1;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:CONTROLS)cases.add(p+":"+a+":"+control);
             for(int p=0;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:BOUNDARIES)cases.add(p+":"+a+":"+control);
-            if(cases.size()!=240)throw new AssertionError("case count");
+            for(int p=0;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:BATTLEFIELD_CASES)cases.add(p+":"+a+":bf-"+control);
+            if(cases.size()!=336)throw new AssertionError("case count");
             int executed=0;
             for(int i=0;i<cases.size();i++) {
                 if(args.length>2 && !cases.get(i).endsWith(":"+args[2]))continue;
