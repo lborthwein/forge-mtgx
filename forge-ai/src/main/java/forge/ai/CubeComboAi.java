@@ -1139,7 +1139,8 @@ public final class CubeComboAi {
                 || !player.getGame().getStack().isEmpty()) return false;
         for (Card body : player.getCardsIn(ZoneType.Battlefield)) {
             if (body.isFaceDown() || body.getController() != player || !livePartnerBody(body)
-                    || player.getOpponents().stream().noneMatch(o -> forge.game.combat.CombatUtil.canAttack(body, o))) continue;
+                    || player.getOpponents().stream().noneMatch(o -> forge.game.combat.CombatUtil.canAttack(body, o)
+                            && o.staticDamagePrevention(body.getNetPower(), 0, body, true) > 0)) continue;
             for (SpellAbility original : body.getSpellAbilities()) {
                 if (!copyEngine(original) || copyPartner(player, original) == null) continue;
                 SpellAbility active = original.copy(player);
@@ -1155,7 +1156,8 @@ public final class CubeComboAi {
                 for (Card body : player.getCardsIn(ZoneType.Battlefield)) {
                     if (body.isFaceDown() || body.getController() != player || !livePartnerBody(body)
                             || body.isTapped() || body.isSick() || body.getNetPower() <= 0
-                            || player.getOpponents().stream().noneMatch(o -> forge.game.combat.CombatUtil.canAttack(body, o))) continue;
+                            || player.getOpponents().stream().noneMatch(o -> forge.game.combat.CombatUtil.canAttack(body, o)
+                            && o.staticDamagePrevention(body.getNetPower(), 0, body, true) > 0)) continue;
                     SpellAbility cast = original.copy(player);
                     if (!selectSingleTarget(cast, body) || !canPlayNative(cast, player)
                             || !canPayCost(cast, player, false)) continue;

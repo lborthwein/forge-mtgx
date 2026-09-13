@@ -42,6 +42,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static final List<String> PRIORITIES = List.of("kiki-ready", "twin-ready", "doom-ready");
     private static final List<String> TWIN_BOUNDS = List.of("twin-blocked", "twin-no-red", "twin-sick", "twin-shroud");
     private static final List<String> TWIN_COMBAT = List.of("twin-moat", "twin-bridge");
+    private static final List<String> FINAL_BOUNDS = List.of("twin-chasm", "life-emperion", "life-angel");
     private static final List<String> CASES = cases();
     private static List<String> cases() {
         List<String> result = new ArrayList<>();
@@ -62,6 +63,8 @@ public final class CubeTopTutorAvailabilitySmoke {
             for (String control : TWIN_BOUNDS) result.add(tutor + ":" + half + ":" + control);
         for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
             for (String control : TWIN_COMBAT) result.add(tutor + ":" + half + ":" + control);
+        for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
+            for (String control : FINAL_BOUNDS) result.add(tutor + ":" + half + ":" + control);
         return result;
     }
     private static String tutor(String name) { return TUTORS.get(Integer.parseInt(name.split(":")[0])); }
@@ -84,7 +87,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static List<Placement> placements(boolean owner, String name) {
         List<Placement> result = new ArrayList<>();
         boolean breach = List.of("breach", "freeze").contains(name.split(":")[1]);
-        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name)) || DRAW_BOUNDS.contains(control(name)) || PRIORITIES.contains(control(name)) || TWIN_BOUNDS.contains(control(name)) || TWIN_COMBAT.contains(control(name))) return expandedPlacements(owner, name, breach);
+        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name)) || DRAW_BOUNDS.contains(control(name)) || PRIORITIES.contains(control(name)) || TWIN_BOUNDS.contains(control(name)) || TWIN_COMBAT.contains(control(name)) || FINAL_BOUNDS.contains(control(name))) return expandedPlacements(owner, name, breach);
         if (owner) {
             add(result, 1, tutor(name), ZoneType.Hand);
             add(result, 1, missing(name).equals(WILL) ? TENDRILS : WILL, ZoneType.Hand);
@@ -127,6 +130,8 @@ public final class CubeTopTutorAvailabilitySmoke {
             if (!control.equals("no-draw")) add(result, 1,
                     control.startsWith("recall-") ? "Ancestral Recall" : control.startsWith("brainstorm-") ? "Brainstorm"
                             : control.equals("preordain") ? "Preordain" : control.equals("ponder") ? "Ponder" : "Gitaxian Probe", ZoneType.Hand);
+            if (control.equals("life-emperion")) add(result, 1, "Platinum Emperion", ZoneType.Battlefield);
+            if (control.equals("life-angel")) add(result, 1, "Enduring Angel", ZoneType.Battlefield);
             if (control.equals("kiki-ready")) {
                 add(result, 1, "Kiki-Jiki, Mirror Breaker", ZoneType.Battlefield);
                 add(result, 1, "Deceiver Exarch", ZoneType.Battlefield);
@@ -152,6 +157,7 @@ public final class CubeTopTutorAvailabilitySmoke {
                 case "twin-shroud" -> "Dense Foliage";
                 case "twin-moat" -> "Moat";
                 case "twin-bridge" -> "Ensnaring Bridge";
+                case "twin-chasm" -> "Glacial Chasm";
                 default -> null;
             };
             if (blocker != null) add(result, 1, blocker, ZoneType.Battlefield);
@@ -306,12 +312,17 @@ public final class CubeTopTutorAvailabilitySmoke {
             for (Card card : player.getCardsIn(zone)) if (!card.isFaceDown()) own.add(card.getName());
         Set<String> publicCards = new HashSet<>();
         for (Card card : game.getCardsIn(ZoneType.Battlefield)) if (!card.isFaceDown()) publicCards.add(card.getName());
+        boolean lifeReplacement = game.getCardsIn(ZoneType.Battlefield).stream().filter(c -> !c.isFaceDown())
+                .flatMap(c -> c.getReplacementEffects().stream()).anyMatch(e -> !e.isSuppressed()
+                        && "LifeReduced".equals(e.getParam("Event")));
         System.out.println("TOP_TUTOR_LIVE_GATE " + key + " step=" + step + " turn=" + game.getPhaseHandler().getTurn() + " canDraw=" + player.canDraw()
                 + " stormHalves=" + ((own.contains(WILL) ? 1 : 0) + (own.contains(TENDRILS) ? 1 : 0))
                 + " breachHalves=" + ((own.contains("Underworld Breach") ? 1 : 0) + (own.contains("Brain Freeze") ? 1 : 0))
                 + " portalPresent=" + publicCards.contains("Possessed Portal")
                 + " rulePresent=" + publicCards.contains("Rule of Law")
-                + " ownLibrary=" + player.getCardsIn(ZoneType.Library).size() + " ownLife=" + player.getLife());
+                + " ownLibrary=" + player.getCardsIn(ZoneType.Library).size() + " ownLife=" + player.getLife()
+                + " canLoseLife=" + player.canLoseLife() + " cantLoseForLife=" + player.cantLoseForZeroOrLessLife()
+                + " lifeReplacement=" + lifeReplacement);
     }
     private static Object planValue(Player player, String fieldName) {
         if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return null;
@@ -454,7 +465,7 @@ public final class CubeTopTutorAvailabilitySmoke {
         rules.setAllowCheatShuffle(false);
         Game game = new Match(rules, players, "native top-tutor availability diagnosis").createGame();
         Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1-seat);
-        player.setLife(control(name).equals("life-two") ? 2 : control(name).equals("life-three") ? 3 : 20, null);
+        player.setLife(List.of("life-two", "life-emperion", "life-angel").contains(control(name)) ? 2 : control(name).equals("life-three") ? 3 : 20, null);
         opponent.setLife(10, null);
         populate(player, true, name); populate(opponent, false, name);
         for (Card c : opponent.getCardsIn(ZoneType.Battlefield))

@@ -117,7 +117,7 @@ public final class CubeTopTutorPlan {
         for (Card card : player.getGame().getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown()) continue;
             for (var replacement : card.getReplacementEffects())
-                if (!replacement.isSuppressed() && ("LoseLife".equals(replacement.getParam("Event"))
+                if (!replacement.isSuppressed() && ("LifeReduced".equals(replacement.getParam("Event"))
                         || "Draw".equals(replacement.getParam("Event")) || "DrawCards".equals(replacement.getParam("Event")))) return false;
         }
         return CubeComboAi.canPlayNative(sa, player) && CubeComboAi.canPayCost(sa, player, false);
