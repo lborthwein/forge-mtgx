@@ -32,6 +32,10 @@ public final class CubeBreachChannelerSmoke {
     private static final String DRC = "Dragon's Rage Channeler", OUTLET = "Aetherflux Reservoir";
     private static final List<String> CASES = List.of("complete", "exact-library", "short-library",
             "no-breach", "no-channeler", "no-outlet", "short-fuel", "no-blue", "two-lands", "low-library");
+    private static final List<String> BOUNDARIES = List.of("stun-one", "stun-all", "tapped",
+            "draw-cap", "no-life", "protected", "cast-cap", "nonartifact-cap", "activation-off",
+            "spell-tax", "activation-tax", "graveyard-replacement", "draw-replacement", "second-channeler",
+            "helm", "life20-exact", "life20-short", "hidden-mountain", "prevent-damage");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone, boolean tapped) { }
@@ -52,16 +56,35 @@ public final class CubeBreachChannelerSmoke {
             case "exact-library" -> 15;
             case "short-library" -> 14;
             case "low-library" -> 3;
+            case "life20-exact" -> 24;
+            case "life20-short" -> 23;
             default -> 18;
         };
-        add(result, library, "Forest", ZoneType.Library);
+        if (name.equals("second-channeler")) add(result, 1, DRC, ZoneType.Battlefield);
+        if (name.equals("draw-replacement")) add(result, 1, "Alhammarret's Archive", ZoneType.Battlefield);
+        if (name.equals("helm")) add(result, 1, "Helm of Awakening", ZoneType.Battlefield);
+        add(result, library, name.equals("hidden-mountain") ? "Mountain" : "Forest", ZoneType.Library);
         add(result, 40 - result.size(), "Forest", ZoneType.Exile);
         if (result.size() != 40) throw new AssertionError("own deck size");
         return result;
     }
     private static List<Placement> other(String name) {
         List<Placement> result = new ArrayList<>();
-        add(result, 40, "Forest", ZoneType.Library);
+        String restriction = switch (name) {
+            case "draw-cap" -> "Narset, Parter of Veils";
+            case "no-life" -> "Sulfuric Vortex";
+            case "protected" -> "Leyline of Sanctity";
+            case "cast-cap" -> "Rule of Law";
+            case "nonartifact-cap" -> "Ethersworn Canonist";
+            case "activation-off" -> "Damping Matrix";
+            case "spell-tax" -> "Thalia, Guardian of Thraben";
+            case "activation-tax" -> "Suppression Field";
+            case "graveyard-replacement" -> "Rest in Peace";
+            case "prevent-damage" -> "Glacial Chasm";
+            default -> null;
+        };
+        if (restriction != null) add(result, 1, restriction, ZoneType.Battlefield);
+        add(result, 40 - result.size(), "Forest", ZoneType.Library);
         return result;
     }
     private static List<Placement> placements(boolean owner, String name) {
@@ -76,13 +99,19 @@ public final class CubeBreachChannelerSmoke {
 
     private static void populate(Player player, boolean owner, String name) {
         for (ZoneType z : ZoneType.values()) if (player.getZone(z) != null) player.getZone(z).removeAllCards(true);
+        boolean stunned = false;
         for (Placement p : placements(owner, name)) {
             Card card = Card.fromPaperCard(Objects.requireNonNull(
                     FModel.getMagicDb().getCommonCards().getCard(p.name()), p.name()), player);
             card.setGameTimestamp(player.getGame().getNextTimestamp());
             player.getZone(p.zone()).add(card);
             card.setSickness(false);
-            if (p.tapped()) card.setTapped(true);
+            if (p.tapped() || owner && name.equals("tapped") && card.isLand() && p.zone() == ZoneType.Battlefield) card.setTapped(true);
+            if (p.name().equals("Narset, Parter of Veils")) card.setCounters(forge.game.card.CounterEnumType.LOYALTY, 5);
+            if (owner && card.isLand() && p.zone() == ZoneType.Battlefield
+                    && (name.equals("stun-all") || name.equals("stun-one") && !stunned)) {
+                card.setCounters(forge.game.card.CounterEnumType.STUN, 1); stunned = true;
+            }
         }
         TreeMap<String, Integer> actual = new TreeMap<>(), registered = new TreeMap<>();
         for (ZoneType z : ZONES) for (Card c : player.getCardsIn(z)) actual.merge(c.getName(), 1, Integer::sum);
@@ -113,6 +142,20 @@ public final class CubeBreachChannelerSmoke {
         state.put("librarySize", player.getCardsIn(ZoneType.Library).size());
         state.put("history", game.getStack().getSpellCardsCastThisTurn().stream().map(c -> c.getId() + ":" + c.getCastFrom()).toList());
         return state;
+    }
+    private static void probeInitial(Player player, String key) {
+        Map<String, Object> before = snapshot(player);
+        String first = null;
+        var persistent = new forge.ai.CubeBreachPlan(player);
+        for (int i = 0; i < 6; i++) {
+            var plan = i < 3 ? new forge.ai.CubeBreachPlan(player) : persistent;
+            var action = plan.nextAction();
+            String choice = action == null ? "none" : action.getHostCard().getName().replace(' ', '_');
+            if (i == 0) first = choice;
+            else if (!first.equals(choice)) throw new AssertionError("query drift " + key);
+            if (!before.equals(snapshot(player))) throw new AssertionError("initial query mutated native state/RNG " + key);
+        }
+        System.out.println("CHANNELER_QUERY " + key + " repeats=6 unchanged=true choice=" + first);
     }
     /** Observe the actual partition after native surveil, without reading library identities. */
     public static final class SurveilObserver {
@@ -228,18 +271,19 @@ public final class CubeBreachChannelerSmoke {
         Game game = new Match(rules, players, "native breach-channeler diagnosis").createGame();
         Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
         populate(player, true, name); populate(opponent, false, name);
-        player.setLife(40, null);
+        player.setLife(name.startsWith("life20-") ? 20 : 40, null);
         game.setAge(GameStage.Play);
         int startTurn = seat == 0 ? 1 : 2;
         game.getPhaseHandler().setupFirstTurn(seat == 0 ? player : opponent,
                 () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player, startTurn));
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
-        BenchRandomAudit.install(987100L + 100L * seat + CASES.indexOf(name));
+        BenchRandomAudit.install(987100L + 100L * seat + (CASES.contains(name) ? CASES.indexOf(name) : 1000 + BOUNDARIES.indexOf(name)));
         String key = "arm=" + (improved ? "improved" : "baseline") + " seat=" + seat + " case=" + name;
         System.out.println("CHANNELER_FIXTURE " + key + " policy=" + forge.ai.CubeComboAi.VERSION
-                + " ownLife=40 registered=40 initialMana=0 startTurn=" + startTurn
+                + " ownLife=" + player.getLife() + " registered=40 initialMana=0 startTurn=" + startTurn
                 + " ownLibrary=" + player.getCardsIn(ZoneType.Library).size());
+        if (improved && BOUNDARIES.contains(name)) probeInitial(player, key);
         SurveilObserver observer = new SurveilObserver(player, key);
         game.subscribeToEvents(observer);
         Set<Integer> ids = new HashSet<>();
@@ -293,10 +337,13 @@ public final class CubeBreachChannelerSmoke {
                 preferences.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US"); return null;
             });
-            for (String card : List.of(BREACH, FRANTIC, DRC, OUTLET, "Forest", "Plains", "Island"))
+            for (String card : List.of(BREACH, FRANTIC, DRC, OUTLET, "Forest", "Plains", "Island", "Mountain", "Narset, Parter of Veils", "Sulfuric Vortex",
+                    "Leyline of Sanctity", "Rule of Law", "Ethersworn Canonist", "Damping Matrix", "Thalia, Guardian of Thraben",
+                    "Suppression Field", "Rest in Peace", "Glacial Chasm", "Alhammarret's Archive", "Helm of Awakening"))
                 StaticData.instance().attemptToLoadCard(card);
-            for (String name : CASES) for (int seat = 0; seat < 2; seat++) run(args[1].equals("improved"), seat, name);
-            System.out.println("CHANNELER_SUITE_COMPLETE cases=" + (CASES.size() * 2));
+            List<String> selected = args.length > 2 && args[2].equals("boundaries") ? BOUNDARIES : CASES;
+            for (String name : selected) for (int seat = 0; seat < 2; seat++) run(args[1].equals("improved"), seat, name);
+            System.out.println("CHANNELER_SUITE_COMPLETE cases=" + (selected.size() * 2));
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }
 }
