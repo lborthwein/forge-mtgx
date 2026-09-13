@@ -118,7 +118,9 @@ public final class CombatDamageExecutionSmoke {
     }
     static void blocker(int seat, String kind) {
         C c = context(seat); Card a=card(c,c.other(),"Grizzly Bears"), b=card(c,c.actor(),"Grizzly Bears");
-        b.setBasePower(kind.equals("zero") ? 0 : 4); b.addIntrinsicKeyword("Trample");
+        final boolean nonPositive = kind.equals("zero") || kind.equals("negative");
+        b.setBasePower(kind.equals("zero") ? 0 : kind.equals("negative") ? -1 : 4);
+        b.addIntrinsicKeyword("Trample");
         Combat combat=ready(c,false);combat.addAttacker(a,c.actor());combat.addBlocker(a,b);combat.setBlocked(a,true);
         combat.orderBlockersForDamageAssignment();combat.orderAttackersForDamageAssignment();
         c.game().getPhaseHandler().devModeSet(PhaseType.COMBAT_DAMAGE,c.other(),false);
@@ -127,8 +129,14 @@ public final class CombatDamageExecutionSmoke {
             c.host().payload.add("assign",kind.equals("bad")?map(a.getId(),2,-1,2):kind.equals("zero")?map():map(a.getId(),4));
         };
         try { combat.assignCombatDamage(false);verify(!kind.equals("bad"),"blocker sentinel accepted");
-            verify(coverage(c).get("host").getAsInt()==1,"blocking allocation completed");
-            verify(a.getTotalAssignedDamage()==(kind.equals("zero")?0:4),"native exact blocker assignment");
+            if (nonPositive) {
+                verify(c.host().asks == 0,"CR 510.1a: non-positive blocker makes no allocation ask");
+                verify(coverage(c) == null,"no damage invocation exists to classify");
+                verify(c.session().integrityFailure(c.game()) == null,"non-positive blocker is rules-valid");
+            } else {
+                verify(coverage(c).get("host").getAsInt()==1,"blocking allocation completed");
+            }
+            verify(a.getTotalAssignedDamage()==(nonPositive?0:4),"native exact blocker assignment");
         } catch(RuntimeException failure) {
             verify(kind.equals("bad"),"unexpected blocker failure "+failure);
             verify(c.session().integrityFailure(c.game())!=null,"blocker failure latched");
@@ -221,7 +229,7 @@ public final class CombatDamageExecutionSmoke {
                 for(String kind:List.of("normal","nontrample","insufficient","shared","shared-bad","shared-defer","shared-repeat-defer","modern","deathtouch",
                         "walker","walker-bad","zero","string","fraction","overflow","negative-key","unknown","stale","changed","delegate","eof")) scenario(seat,kind);
                 staleScope(seat);
-                for(String kind:List.of("normal","bad","zero")) blocker(seat,kind);
+                for(String kind:List.of("normal","bad","zero","negative")) blocker(seat,kind);
                 previousWalkerDamage(seat);
                 String baseline=stock(seat,"native",false);
                 for(String mode:List.of("native","NULL")) for(boolean audit:List.of(false,true))
