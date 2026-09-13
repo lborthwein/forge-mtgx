@@ -222,8 +222,10 @@ public final class CubeTopTutorAvailabilitySmoke {
                 preferences.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US"); return null;
             });
+            Set<String> cardNames = new java.util.LinkedHashSet<>();
             for (String name : CASES) for (boolean owner : List.of(false, true))
-                for (Placement p : placements(owner, name)) StaticData.instance().attemptToLoadCard(p.name());
+                for (Placement p : placements(owner, name)) cardNames.add(p.name());
+            for (String cardName : cardNames) StaticData.instance().attemptToLoadCard(cardName);
             for (String name : CASES) for (int seat = 0; seat < 2; seat++)
                 run(args[1].equals("improved"), args[2].equals("observed"), seat, name);
             System.out.println("TOP_TUTOR_SUITE_COMPLETE cases=" + (CASES.size()*2));
