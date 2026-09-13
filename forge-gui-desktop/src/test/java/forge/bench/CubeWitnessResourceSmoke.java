@@ -60,18 +60,26 @@ public final class CubeWitnessResourceSmoke {
                     + " tapped=" + event.tapped());
         }
     }
+    private static String auxiliaryName(String control) {
+        return control.equals("white-auxiliary") ? "Mother of Runes" : control.equals("aux-shroud") ? "Nimble Mongoose" : "Elvish Mystic";
+    }
     private static List<Entry> layout(String engine, String control) {
         List<Entry> cards = new ArrayList<>();
         cards.add(new Entry(control.equals("no-kitten") ? "Forest" : KITTEN, ZoneType.Battlefield));
         cards.add(new Entry(control.equals("no-witness") ? "Forest" : PARTNER, ZoneType.Battlefield));
         cards.add(new Entry(control.equals("no-outlet") ? "Forest" : OUTLET, ZoneType.Battlefield));
         if (engine.equals("snap")) {
-            cards.add(new Entry("Snap", ZoneType.Hand));
-            cards.add(new Entry(control.equals("no-petal") ? "Forest" : "Lotus Petal", ZoneType.Graveyard));
+            cards.add(new Entry("Snap", control.equals("partial-after-snap") ? ZoneType.Graveyard : ZoneType.Hand));
+            cards.add(new Entry(control.equals("no-petal") ? "Forest" : "Lotus Petal",
+                    control.equals("partial-after-snap") ? ZoneType.Hand : control.equals("partial-before-sac") ? ZoneType.Battlefield : ZoneType.Graveyard));
             cards.add(new Entry(control.equals("no-auxiliary") || control.equals("opposing-creatures")
-                    ? "Forest" : "Elvish Mystic", ZoneType.Battlefield));
-            cards.add(new Entry("Island", ZoneType.Battlefield));
-            if (!control.equals("one-land")) cards.add(new Entry("Island", ZoneType.Battlefield));
+                    ? "Forest" : auxiliaryName(control), control.startsWith("partial-") ? ZoneType.Hand : ZoneType.Battlefield));
+            cards.add(new Entry(control.equals("missing-blue") ? "Forest" : "Island", ZoneType.Battlefield));
+            if (!List.of("one-land", "helm-one-land").contains(control)) cards.add(new Entry(
+                    List.of("missing-blue", "partial-before-aux-short").contains(control) ? "Forest" : "Island", ZoneType.Battlefield));
+            if (control.equals("partial-before-aux-funded")) cards.add(new Entry("Forest", ZoneType.Battlefield));
+            if (control.equals("helm-one-land")) cards.add(new Entry("Helm of Awakening", ZoneType.Battlefield));
+            if (control.equals("witness-shroud")) cards.add(new Entry("Lightning Greaves", ZoneType.Battlefield));
         } else {
             cards.add(new Entry(control.equals("no-ritual") ? "Forest" : DARK, ZoneType.Hand));
             cards.add(new Entry("Frantic Search", ZoneType.Graveyard));
@@ -83,7 +91,7 @@ public final class CubeWitnessResourceSmoke {
                 cards.add(new Entry("Ancestral Recall", ZoneType.Hand));
             }
         }
-        for (int i = 0; i < (control.equals("short-library") ? 2 : 20); i++) cards.add(new Entry("Forest", ZoneType.Library));
+        for (int i = 0; i < (control.equals("short-library") ? 2 : 20); i++) cards.add(new Entry(control.equals("hidden-swamp") ? "Swamp" : control.equals("hidden-mountain") ? "Mountain" : "Forest", ZoneType.Library));
         while (cards.size() < 40) cards.add(new Entry("Forest", ZoneType.Exile));
         if (cards.size() != 40) throw new AssertionError("forty-card layout");
         return cards;
@@ -93,6 +101,22 @@ public final class CubeWitnessResourceSmoke {
         if (control.equals("opposing-creatures"))
             for (int i = 0; i < 4; i++) cards.add(new Entry("Grizzly Bears", ZoneType.Battlefield));
         if (control.equals("draw-cap")) cards.add(new Entry("Narset, Parter of Veils", ZoneType.Battlefield));
+        String restriction = switch (control) {
+            case "graveyard-shroud" -> "Ground Seal";
+            case "no-etb" -> "Torpor Orb";
+            case "no-life" -> "Sulfuric Vortex";
+            case "protected-opponent" -> "Leyline of Sanctity";
+            case "cast-cap" -> "Rule of Law";
+            case "nonartifact-cap" -> "Ethersworn Canonist";
+            case "activation-off" -> "Stony Silence";
+            case "root-maze" -> "Root Maze";
+            case "spell-tax" -> "Sphere of Resistance";
+            case "activation-tax", "expensive-outlet" -> "Suppression Field";
+            case "stasis" -> "Stasis";
+            default -> null;
+        };
+        if (restriction != null) cards.add(new Entry(restriction, ZoneType.Battlefield));
+        if (control.equals("expensive-outlet")) cards.add(new Entry(restriction, ZoneType.Battlefield));
         for (int i = 0; i < 30; i++) cards.add(new Entry("Forest", ZoneType.Library));
         while (cards.size() < 40) cards.add(new Entry("Forest", ZoneType.Exile));
         return cards;
@@ -152,8 +176,17 @@ public final class CubeWitnessResourceSmoke {
         Player p = game.getPlayers().get(seat), opp = game.getPlayers().get(1 - seat);
         game.getPhaseHandler().setupFirstTurn(p, () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, p));
         populate(p, own); populate(opp, other); p.setLife(20, null); opp.setLife(40, null);
+        if (control.equals("witness-shroud")) {
+            Card greaves = p.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals("Lightning Greaves")).findFirst().orElseThrow();
+            Card body = p.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals(PARTNER)).findFirst().orElseThrow();
+            greaves.attachToEntity(body, null, true);
+        }
+        for (Card card : p.getCardsIn(ZoneType.Battlefield)) {
+            if (control.equals("no-ready-mana") && (card.isLand() || card.getName().equals(auxiliaryName(control)))) card.setTapped(true);
+            if (control.equals("purity-tapped-land") && card.isLand()) { card.setTapped(true); break; }
+        }
         game.getAction().checkStateEffects(true); game.getTriggerHandler().resetActiveTriggers();
-        BenchRandomAudit.install(98800 + seat * 100 + (engine.equals("snap") ? 0 : 40) + controls(engine).indexOf(control));
+        BenchRandomAudit.install(98800 + seat * 100 + (engine.equals("snap") ? 0 : 40) + (controls(engine).contains(control) ? controls(engine).indexOf(control) : 200 + boundaries().indexOf(control)));
         String key = "seat=" + seat + " engine=" + engine + " control=" + control;
         System.out.println("WITNESS_RESOURCE_FIXTURE " + key + " candidate=" + candidate + " policy=" + forge.ai.CubeComboAi.VERSION);
         if (candidate) probeInitial(p);
@@ -206,7 +239,7 @@ public final class CubeWitnessResourceSmoke {
                 String name = sa.getHostCard().getName();
                 if (sa.isSpell() && !sa.isCopied()) {
                     casts++;
-                    if (name.equals("Elvish Mystic")) auxiliaryCasts++;
+                    if (name.equals(auxiliaryName(control))) auxiliaryCasts++;
                     if (name.equals("Snap")) snapCasts++;
                     if (name.equals("Frantic Search")) franticCasts++;
                 }
@@ -234,6 +267,12 @@ public final class CubeWitnessResourceSmoke {
             ? List.of("none", "no-auxiliary", "no-petal", "no-kitten", "no-witness", "no-outlet", "one-land", "opposing-creatures")
             : List.of("none", "short-library", "no-blue", "no-kitten", "no-witness", "no-outlet", "draw-cap", "discard-pressure", "no-ritual");
     }
+    private static List<String> boundaries() {
+        return List.of("missing-blue", "no-ready-mana", "aux-shroud", "witness-shroud", "graveyard-shroud", "no-etb",
+                "no-life", "protected-opponent", "cast-cap", "nonartifact-cap", "activation-off", "root-maze", "spell-tax",
+                "activation-tax", "expensive-outlet", "stasis", "helm-one-land", "white-auxiliary", "partial-after-snap",
+                "partial-before-sac", "partial-before-aux-funded", "partial-before-aux-short", "hidden-swamp", "hidden-mountain", "purity-tapped-land");
+    }
     public static void main(String[] args) {
         try {
             GuiBase.setInterface((IGuiBase) Proxy.newProxyInstance(IGuiBase.class.getClassLoader(), new Class<?>[]{IGuiBase.class}, (p, m, v) -> switch (m.getName()) {
@@ -242,8 +281,10 @@ public final class CubeWitnessResourceSmoke {
             FModel.initialize(null, p -> {p.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); p.setPref(FPref.UI_LANGUAGE, "en-US"); return null;});
             boolean candidate = args.length < 2 || !args[1].equals("baseline");
             int cases = 0;
+            boolean boundary = args.length > 2 && args[2].equals("boundaries");
             for (int seat = 0; seat < 2; seat++)
-                for (String engine : List.of("snap", "frantic"))
+                if (boundary) for (String control : boundaries()) {run(seat, "snap", control, candidate); cases++;}
+                else for (String engine : List.of("snap", "frantic"))
                     for (String control : controls(engine)) {run(seat, engine, control, candidate); cases++;}
             System.out.println("WITNESS_RESOURCE_SUITE_COMPLETE cases=" + cases);
         } catch (Throwable t) {t.printStackTrace(); System.exit(1);}

@@ -112,6 +112,37 @@ final class CubeWitnessResourcePlan {
             }
         return true;
     }
+    private SpellAbility triggerAbility(Card card, String mode, java.util.Map<AbilityKey, Object> params) {
+        for (var trigger : card.getTriggers()) {
+            if (trigger.isSuppressed() || !mode.equals(trigger.getParam("Mode"))) continue;
+            boolean disabled = false;
+            for (ZoneType zone : new ZoneType[]{ZoneType.Battlefield, ZoneType.Command})
+                for (Card source : player.getGame().getCardsIn(zone)) {
+                    if (source.isFaceDown()) continue;
+                    for (var st : source.getStaticAbilities())
+                        if (st.checkConditions(StaticAbilityMode.DisableTriggers)
+                                && forge.game.staticability.StaticAbilityDisableTriggers.isDisabled(st, trigger, params)) disabled = true;
+                }
+            if (disabled) continue;
+            String script = card.getSVar(trigger.getParamOrDefault("Execute", ""));
+            if (script.isEmpty()) continue;
+            SpellAbility sa = forge.game.ability.AbilityFactory.getAbility(script, card);
+            sa.setActivatingPlayer(player); return sa;
+        }
+        return null;
+    }
+    private boolean restorationAvailable(Card kitten) {
+        var castParams = AbilityKey.newMap(); castParams.put(AbilityKey.Card, snap); castParams.put(AbilityKey.SpellAbility, spell(snap));
+        SpellAbility blink = triggerAbility(kitten, "SpellCast", castParams);
+        if (!target(blink, witness)) return false;
+        var entry = AbilityKey.mapFromCard(witness); entry.put(AbilityKey.CardLKI, witness);
+        entry.put(AbilityKey.Origin, "Exile"); entry.put(AbilityKey.Destination, "Battlefield");
+        SpellAbility restore = triggerAbility(witness, "ChangesZone", entry);
+        if (restore == null) return false;
+        Card futureReturn = CardCopyService.getLKICopy(petal);
+        futureReturn.setLastKnownZone(player.getZone(ZoneType.Graveyard));
+        return target(restore, futureReturn);
+    }
     private boolean finishAvailable() {
         Card reservoir = find("Aetherflux Reservoir", ZoneType.Battlefield);
         if (reservoir == null || !player.canGainLife() || player.getOpponents().size() != 1) return false;
@@ -133,6 +164,11 @@ final class CubeWitnessResourcePlan {
             SpellAbility shot = original.copy(player);
             if (!shot.canTarget(opponent)) continue;
             shot.resetTargets(); shot.getTargets().add(opponent);
+            var adjusted = forge.game.cost.CostAdjustment.adjust(shot.getPayCosts(), shot, false);
+            if (adjusted == null || adjusted.getCostParts().stream().anyMatch(p -> !(p instanceof CostPartMana)
+                    && !(p instanceof forge.game.cost.CostPayLife))) continue;
+            var mana = ComputerUtilMana.calculateManaCost(shot.getPayCosts(), shot, player, true, 0, false);
+            if (mana.getXcounter() != 0 || !CubeComboAi.canPayManaCost(mana, shot, player, false)) continue;
             if (shot.isTargetNumberValid() && StaticAbilityMustTarget.meetsMustTargetRestriction(shot)
                     && !shot.isSuppressed() && !reservoir.isDetained() && shot.getRestrictions().canPlay(reservoir, shot)
                     && shot.isLegalAfterStack() && shot.checkRestrictions(reservoir, player)) return true;
@@ -174,7 +210,7 @@ final class CubeWitnessResourcePlan {
         snap = find("Snap", ZoneType.Hand, ZoneType.Graveyard);
         petal = find("Lotus Petal", ZoneType.Hand, ZoneType.Graveyard, ZoneType.Battlefield);
         auxiliary = auxiliary();
-        if (snap == null || petal == null || auxiliary == null) return null;
+        if (snap == null || petal == null || auxiliary == null || !restorationAvailable(kitten)) return null;
         var snapCost = cost(snap); var petalCost = cost(petal); var creatureCost = cost(auxiliary);
         if (snapCost == null || petalCost == null || creatureCost == null || petalCost.getConvertedManaCost() != 0
                 || snapCost.getUnpaidColors() != MagicColor.BLUE || snapCost.getConvertedManaCost() - snapCost.getGenericManaAmount() != 1
@@ -197,7 +233,12 @@ final class CubeWitnessResourcePlan {
                     mana.setManaExpressChoice(ColorSet.fromMask(color)); action = mana; break;
                 }
             }
-        } else if (snap.isInZone(ZoneType.Hand) && petal.isInZone(ZoneType.Graveyard) && auxiliary.isInZone(ZoneType.Hand)) action = spell(auxiliary);
+        } else if (snap.isInZone(ZoneType.Hand) && petal.isInZone(ZoneType.Graveyard) && auxiliary.isInZone(ZoneType.Hand)) {
+            action = spell(auxiliary);
+            ManaCostBeingPaid joint = new ManaCostBeingPaid(creatureCost); joint.addManaCost(snapCost.toManaCost());
+            if (!CubeComboAi.canPayManaCost(joint, action, player, false)
+                    || !CubeComboAi.canPayManaCost(joint, spell(snap), player, false)) return null;
+        }
         if (!payable(action)) return null;
         active = true; selected = action; witnessBefore = witness.getGameTimestamp();
         System.err.println("CUBE_WITNESS_RESOURCE select card=" + action.getHostCard().getName().replace(' ', '_') + " api=" + action.getApi() + " turn=" + turn);
