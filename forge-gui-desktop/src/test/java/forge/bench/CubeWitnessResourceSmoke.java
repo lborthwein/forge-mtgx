@@ -383,7 +383,7 @@ public final class CubeWitnessResourceSmoke {
         return List.of("missing-blue", "no-ready-mana", "aux-shroud", "witness-shroud", "graveyard-shroud", "no-etb",
                 "no-life", "protected-opponent", "cast-cap", "nonartifact-cap", "activation-off", "root-maze", "spell-tax",
                 "activation-tax", "expensive-outlet", "stasis", "helm-one-land", "white-auxiliary", "partial-after-snap",
-                "partial-before-sac", "partial-before-aux-funded", "partial-before-aux-short", "hidden-swamp", "hidden-mountain", "purity-tapped-land", "partial-before-sac-shroud");
+                "partial-before-sac", "partial-before-aux-funded", "partial-before-aux-short", "hidden-swamp", "hidden-mountain", "purity-tapped-land", "partial-before-sac-shroud", "stun-blue");
     }
     private static List<String> franticBoundaries() {
         return List.of("exact-library", "one-short-library", "partial-search", "partial-search-short", "missing-black",
