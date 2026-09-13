@@ -28,6 +28,8 @@ public final class CubeTopPlan {
             java.util.List.of("Bolas's Citadel", "Mystic Forge");
     private final Player player;
     private final CubeTopKittenPlan kittenLoop;
+    private final CubeHarnfelTopPlan harnfelLoop;
+    private boolean harnfelAction;
     private boolean kittenAction;
     private int turn = -1, actions, failedTurn = -1;
     private SpellAbility selected, pending;
@@ -76,7 +78,7 @@ public final class CubeTopPlan {
      * (Bolas's Citadel's {@code MayPlayAltManaCost$ PayLife<ConvertedManaCost>}). */
     private record Permission(Card card, boolean lifeCost) {}
 
-    public CubeTopPlan(Player player) { this.player = player; kittenLoop = new CubeTopKittenPlan(player); }
+    public CubeTopPlan(Player player) { this.player = player; kittenLoop = new CubeTopKittenPlan(player); harnfelLoop = new CubeHarnfelTopPlan(player); }
 
     private Card find(String name, ZoneType zone) {
         for (Card card : player.getCardsIn(zone))
@@ -294,12 +296,12 @@ public final class CubeTopPlan {
         var game = player.getGame();
         var phase = game.getPhaseHandler();
         if (turn != phase.getTurn()) {
-            turn = phase.getTurn(); actions = 0; selected = null; pending = null; drain = false; kittenLoop.reset();
+            turn = phase.getTurn(); actions = 0; selected = null; pending = null; drain = false; kittenLoop.reset(); harnfelLoop.reset();
         }
         if (failedTurn == turn || actions >= 200 || player.cantWin() || !game.getStack().isEmpty()
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))
                 || player.getOpponents().size() != 1) return decline(gateReason());
-        kittenAction = false;
+        kittenAction = false; harnfelAction = false;
         shotDecline = "other check=shot-route"; drainDecline = "other check=drain-route";
         Player opponent = player.getOpponents().get(0);
         if (pending != null) {
@@ -360,6 +362,8 @@ public final class CubeTopPlan {
         }
         SpellAbility recurrence = kittenLoop.nextAction(0, n -> castBudgetFits(recurrenceTop(), n));
         if (recurrence != null) { kittenAction = true; return select(recurrence, false); }
+        SpellAbility harnfel = harnfelLoop.nextAction(n -> castBudgetFits(harnfelLoop.forecastTop(), n));
+        if (harnfel != null) { harnfelAction = true; return select(harnfel, false); }
         return declineShot("no-loop-action");
     }
 
@@ -439,9 +443,11 @@ public final class CubeTopPlan {
         libraryBefore = player.getCardsIn(ZoneType.Library).size();
         lifeBefore = player.getLife();
         opposingLifeBefore = player.getOpponents().get(0).getLife();
+        if (harnfelAction) harnfelLoop.beforePlay(sa);
         boolean played = ComputerUtil.handlePlayingSpellAbility(player, sa, null,
                 current -> new AiCostDecision(player, current, false));
         if (kittenAction) kittenLoop.played(sa, played);
+        if (harnfelAction) harnfelLoop.played(played);
         if (played) pending = sa;
         else failedTurn = turn;
         System.err.println("CUBE_TOP_PLAN " + (played ? "played" : "native-payment-failed")
