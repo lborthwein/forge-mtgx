@@ -335,6 +335,11 @@ public final class CubeTopPlan {
         if (shot == null || opponent.getLife() <= 0 || opponent.getLife() > 50
                 || opponent.cantLoseForZeroOrLessLife() || !opponent.canLoseLife() || !shot.canTarget(opponent))
             return declineShot(shot == null ? "no-outlet" : "outlet-unusable");
+        // The native shot can be targetable but completely prevented. Forecast
+        // its public damage before spending cards or fifty life on the finish.
+        if (!"50".equals(shot.getParam("NumDmg"))
+                || ComputerUtilCombat.predictDamageTo(opponent, 50,
+                    reservoir, false) < opponent.getLife()) return declineShot("damage-prevented");
         shot.resetTargets(); shot.getTargets().add(opponent);
         // Forecast only activation restrictions here: canPlay() also checks
         // the fifty-life payment that this plan has not accumulated yet.

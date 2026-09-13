@@ -163,7 +163,9 @@ final class CubeWitnessResourcePlan {
                             && re.zonesCheck(source.getZone()) && re.requirementsCheck(player.getGame()) && re.canReplace(params)) return false;
             }
         for (SpellAbility original : reservoir.getSpellAbilities()) {
-            if (original.getApi() != ApiType.DealDamage) continue;
+            if (original.getApi() != ApiType.DealDamage || !"50".equals(original.getParam("NumDmg"))) continue;
+            if (ComputerUtilCombat.predictDamageTo(opponent, 50,
+                    reservoir, false) < opponent.getLife()) continue;
             SpellAbility shot = original.copy(player);
             if (!shot.canTarget(opponent)) continue;
             shot.resetTargets(); shot.getTargets().add(opponent);
