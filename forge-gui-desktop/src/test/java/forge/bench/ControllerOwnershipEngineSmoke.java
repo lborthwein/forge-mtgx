@@ -153,7 +153,11 @@ public final class ControllerOwnershipEngineSmoke {
                 && bucket(c.controller, "cheatShuffle", "forced") == 0,
                 "verified native shuffle completion is rules-owned, never an AI decision");
         for (String method : List.of("chooseBinary", "chooseNumber", "acceptsDrawOffer"))
-            check(bucket(c.controller, method, "unclassified") >= 1 && bucket(c.controller, method, "forced") == 0, "actual inherited callback now counted as unknown: " + method);
+            check(bucket(c.controller, method, "stock") >= 1
+                    && bucket(c.controller, method, "unclassified") == 0
+                    && bucket(c.controller, method, "forced") == 0
+                    && bucket(c.controller, method, "host") == 0,
+                    "inherited callback is stock-owned, never host or forced: " + method);
         for (String method : List.of("setupAutoProfile", "complainCardsCantPlayWell", "resetAtEndOfTurn")) {
             check(bucket(c.controller,method,"rules")==1,"verified lifecycle operation is rules-owned: "+method);
             for(String owner:List.of("host","forced","stock","unclassified"))

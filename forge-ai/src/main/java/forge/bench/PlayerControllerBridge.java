@@ -148,6 +148,21 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         counters.count(method);
     }
 
+    /** Classify only after the selected path returned successfully. The argument
+     * is evaluated before classification; exceptions retain the open invocation. */
+    private <T> T classifiedResult(final CallCounter.Invocation invocation,
+            final CallCounter.Ownership owner, final T result) {
+        if (invocation != null) invocation.classify(owner);
+        return result;
+    }
+
+    /** A real inherited AI answer, including on a bridged seat. STOCK is never
+     * upgraded to HOST merely because a bridge controller is installed. */
+    private <T> T stockCall(final String method, final java.util.function.Supplier<T> action) {
+        final var invocation = isLiveGame() ? counters.beginCall(method) : null;
+        return classifiedResult(invocation, CallCounter.Ownership.STOCK, action.get());
+    }
+
     /**
      * False inside a copied game built by {@code GameCopier} for the simulation search.
      * Such a controller must behave as plain {@link PlayerControllerAi}: it is deciding
@@ -1069,9 +1084,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     @Override
     public int chooseNumberForKeywordCost(final SpellAbility sa, final Cost cost,
             final KeywordInterface keyword, final String prompt, final int max) {
-        count("chooseNumberForKeywordCost");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseNumberForKeywordCost") : null;
         if (!bridged()) {
-            return super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max));
         }
         final int ceiling = affordableRepeats(sa, cost, max);
         final JsonObject body = envelope(true);
@@ -1092,7 +1107,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("chooseNumberForKeywordCost", "keywordCost", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final int out = super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
+            final int out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max));
             echo(e, echoInt("value", out));
             return out;
         }
@@ -1100,27 +1115,27 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         if (v == null || v < 0 || v > ceiling) {
             refuse("chooseNumberForKeywordCost",
                     "value " + v + " outside [0," + ceiling + "] for " + prompt);
-            return super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max));
         }
         counters.instrument("keywordCost.answered");
         if (v > 0) {
             counters.instrument("keywordCost.paid");
         }
-        return v;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, v);
     }
 
     @Override
     public List<OptionalCostValue> chooseOptionalCosts(final SpellAbility chosen,
             final List<OptionalCostValue> optionalCostValues) {
-        count("chooseOptionalCosts");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseOptionalCosts") : null;
         if (buildingMenu) {
             // Decline while enumerating: taking them here would silently drop the unkicked
             // ability from the menu. Both variants are offered instead (see
             // legalSpellAbilities), so the host votes on the cost rather than inheriting it.
-            return Collections.emptyList();
+            return classifiedResult(invocation, CallCounter.Ownership.RULES, Collections.emptyList());
         }
         if (!bridged() || optionalCostValues == null || optionalCostValues.isEmpty()) {
-            return super.chooseOptionalCosts(chosen, optionalCostValues);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseOptionalCosts(chosen, optionalCostValues));
         }
         final JsonObject body = envelope(true);
         body.add("ability", StateEncoder.encodeSpellAbility(chosen));
@@ -1139,24 +1154,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("chooseOptionalCosts", "optionalCosts", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final List<OptionalCostValue> out = super.chooseOptionalCosts(chosen, optionalCostValues);
+            final List<OptionalCostValue> out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseOptionalCosts(chosen, optionalCostValues));
             echo(e, echoIndices(optionalCostValues, out));
             return out;
         }
         final List<Integer> idx = optIntList(ans, "choices");
         if (idx == null) {
             refuse("chooseOptionalCosts", "missing/!array 'choices'");
-            return super.chooseOptionalCosts(chosen, optionalCostValues);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseOptionalCosts(chosen, optionalCostValues));
         }
         final List<OptionalCostValue> picked = new ArrayList<>();
         for (int i : idx) {
             if (i < 0 || i >= optionalCostValues.size() || picked.contains(optionalCostValues.get(i))) {
                 refuse("chooseOptionalCosts", "optional-cost index out of range/duplicate: " + i);
-                return super.chooseOptionalCosts(chosen, optionalCostValues);
+                return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseOptionalCosts(chosen, optionalCostValues));
             }
             picked.add(optionalCostValues.get(i));
         }
-        return picked;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, picked);
     }
 
     /**
@@ -1414,9 +1429,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
      */
     @Override
     public Player chooseStartingPlayer(final boolean isFirstGame) {
-        count("chooseStartingPlayer");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseStartingPlayer") : null;
         if (!bridged()) {
-            return super.chooseStartingPlayer(isFirstGame);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseStartingPlayer(isFirstGame));
         }
         final JsonObject body = envelope(true);
         // The seat being asked IS the seat that won the roll; Forge never asks the other.
@@ -1426,7 +1441,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("chooseStartingPlayer", "startingPlayer", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final Player out = super.chooseStartingPlayer(isFirstGame);
+            final Player out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseStartingPlayer(isFirstGame));
             // `play` is the answer field; Forge returns the player who goes first.
             echo(e, echoBool("play", out == getPlayer()));
             return out;
@@ -1434,11 +1449,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final Boolean play = optBool(ans, "play");
         if (play == null) {
             refuse("chooseStartingPlayer", "expected boolean 'play'");
-            return super.chooseStartingPlayer(isFirstGame);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseStartingPlayer(isFirstGame));
         }
         counters.instrument(play ? "start.tookPlay" : "start.tookDraw");
         if (play) {
-            return getPlayer();
+            return classifiedResult(invocation, CallCounter.Ownership.HOST, getPlayer());
         }
         // Decline: the opponent goes first. With more than two seats Forge's own rule is
         // "the chooser or nobody", so fall back rather than invent a seating order.
@@ -1447,12 +1462,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             if (p != getPlayer()) {
                 if (other != null) {
                     refuse("chooseStartingPlayer", "cannot decline the play in a >2 player game");
-                    return super.chooseStartingPlayer(isFirstGame);
+                    return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseStartingPlayer(isFirstGame));
                 }
                 other = p;
             }
         }
-        return other == null ? getPlayer() : other;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, other == null ? getPlayer() : other);
     }
 
     /**
@@ -1464,7 +1479,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     public CardCollectionView tuckCardsViaMulligan(final CardCollectionView hand, final int cardsToReturn) {
         final var invocation = isLiveGame() ? counters.beginCall("tuckCardsViaMulligan") : null;
         if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
-            return super.tuckCardsViaMulligan(hand, cardsToReturn);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.tuckCardsViaMulligan(hand, cardsToReturn));
         }
         try {
         requireHostChannel("London bottom selection");
@@ -1509,7 +1524,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     public boolean mulliganKeepHand(final Player firstPlayer, final int cardsToReturn) {
         final var invocation = isLiveGame() ? counters.beginCall("mulliganKeepHand") : null;
         if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
-            return super.mulliganKeepHand(firstPlayer, cardsToReturn);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.mulliganKeepHand(firstPlayer, cardsToReturn));
         }
         try {
         requireHostChannel("mulligan");
@@ -1546,38 +1561,38 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
 
     @Override
     public CardCollectionView chooseCardsToDiscardToMaximumHandSize(final int numDiscard) {
-        count("chooseCardsToDiscardToMaximumHandSize");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseCardsToDiscardToMaximumHandSize") : null;
         if (!bridged()) {
-            return super.chooseCardsToDiscardToMaximumHandSize(numDiscard);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseCardsToDiscardToMaximumHandSize(numDiscard));
         }
         final CardCollectionView hand = getPlayer().getCardsIn(ZoneType.Hand);
         final CardCollection picked = askForCards("chooseCardsToDiscardToMaximumHandSize", hand,
                 numDiscard, numDiscard, "discard to maximum hand size", null);
         if (picked == null) {
             final Echo e = takeEcho();
-            final CardCollectionView out = super.chooseCardsToDiscardToMaximumHandSize(numDiscard);
+            final CardCollectionView out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseCardsToDiscardToMaximumHandSize(numDiscard));
             echo(e, echoCards(out));
             return out;
         }
-        return picked;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, picked);
     }
 
     @Override
     public CardCollectionView choosePermanentsToSacrifice(final SpellAbility sa, final int min, final int max,
             final CardCollectionView validTargets, final String message) {
-        count("choosePermanentsToSacrifice");
+        final var invocation = isLiveGame() ? counters.beginCall("choosePermanentsToSacrifice") : null;
         if (!bridged()) {
-            return super.choosePermanentsToSacrifice(sa, min, max, validTargets, message);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.choosePermanentsToSacrifice(sa, min, max, validTargets, message));
         }
         final CardCollection picked = askForCards("choosePermanentsToSacrifice", validTargets, min, max, message, sa);
         if (picked == null) {
             final Echo e = takeEcho();
             final CardCollectionView out =
-                    super.choosePermanentsToSacrifice(sa, min, max, validTargets, message);
+                    classifiedResult(invocation, CallCounter.Ownership.STOCK, super.choosePermanentsToSacrifice(sa, min, max, validTargets, message));
             echo(e, echoCards(out));
             return out;
         }
-        return picked;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, picked);
     }
 
     @Override
@@ -1996,8 +2011,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             }
         }
         if (!bridged() || optionList == null || optionList.isEmpty()) {
-            return super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional,
-                    relatedPlayer, params);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional,
+                    relatedPlayer, params));
         }
         final List<T> options = Lists.newArrayList(optionList);
         final JsonObject body = envelope(true);
@@ -2010,8 +2025,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("chooseSingleEntityForEffect", "entityChoice", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final T out = super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title,
-                    isOptional, relatedPlayer, params);
+            final T out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title,
+                    isOptional, relatedPlayer, params));
             final int at = out == null ? -1 : indexOfIdentity(options, out);
             // `none` is a legal answer only when the ask said `optional`; a non-null
             // pick that is somehow not in the menu we published is reported as an
@@ -2021,25 +2036,25 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             return out;
         }
         if (isOptional && Boolean.TRUE.equals(optBool(ans, "none"))) {
-            return null;
+            return classifiedResult(invocation, CallCounter.Ownership.HOST, (T) null);
         }
         final Integer choice = optInt(ans, "choice");
         if (choice == null || choice < 0 || choice >= options.size()) {
             refuse("chooseSingleEntityForEffect", "choice out of range: " + choice);
-            return super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional,
-                    relatedPlayer, params);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional,
+                    relatedPlayer, params));
         }
-        return options.get(choice);
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, options.get(choice));
     }
 
     @Override
     public <T extends GameEntity> List<T> chooseEntitiesForEffect(final FCollectionView<T> optionList,
             final int min, final int max, final DelayedReveal delayedReveal, final SpellAbility sa,
             final String title, final Player relatedPlayer, final Map<String, Object> params) {
-        count("chooseEntitiesForEffect");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseEntitiesForEffect") : null;
         if (!bridged() || optionList == null || optionList.isEmpty()) {
-            return super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
-                    relatedPlayer, params);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
+                    relatedPlayer, params));
         }
         final List<T> options = Lists.newArrayList(optionList);
         final JsonObject body = envelope(true);
@@ -2053,34 +2068,34 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("chooseEntitiesForEffect", "entityChoice", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final List<T> out = super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa,
-                    title, relatedPlayer, params);
+            final List<T> out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa,
+                    title, relatedPlayer, params));
             echo(e, echoIndices(options, out));
             return out;
         }
         final List<Integer> idx = optIntList(ans, "choices");
         if (idx == null || idx.size() < min || idx.size() > max) {
             refuse("chooseEntitiesForEffect", "bad 'choices' for [" + min + "," + max + "]");
-            return super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
-                    relatedPlayer, params);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
+                    relatedPlayer, params));
         }
         final List<T> picked = new ArrayList<>();
         for (int i : idx) {
             if (i < 0 || i >= options.size() || picked.contains(options.get(i))) {
                 refuse("chooseEntitiesForEffect", "index out of range/duplicate: " + i);
-                return super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
-                        relatedPlayer, params);
+                return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
+                        relatedPlayer, params));
             }
             picked.add(options.get(i));
         }
-        return picked;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, picked);
     }
 
     @Override
     public int chooseNumber(final SpellAbility sa, final String title, final int min, final int max) {
-        count("chooseNumber");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseNumber") : null;
         if (!bridged()) {
-            return super.chooseNumber(sa, title, min, max);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumber(sa, title, min, max));
         }
         final JsonObject body = envelope(true);
         body.addProperty("title", String.valueOf(title));
@@ -2092,24 +2107,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("chooseNumber", "number", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final int out = super.chooseNumber(sa, title, min, max);
+            final int out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumber(sa, title, min, max));
             echo(e, echoInt("value", out));
             return out;
         }
         final Integer v = optInt(ans, "value");
         if (v == null || v < min || v > max) {
             refuse("chooseNumber", "value " + v + " outside [" + min + "," + max + "]");
-            return super.chooseNumber(sa, title, min, max);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumber(sa, title, min, max));
         }
-        return v;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, v);
     }
 
     @Override
     public int chooseNumber(final SpellAbility sa, final String title, final List<Integer> values,
             final Player relatedPlayer) {
-        count("chooseNumber");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseNumber") : null;
         if (!bridged() || values == null || values.isEmpty()) {
-            return super.chooseNumber(sa, title, values, relatedPlayer);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumber(sa, title, values, relatedPlayer));
         }
         final JsonObject body = envelope(true);
         body.addProperty("title", String.valueOf(title));
@@ -2124,16 +2139,16 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("chooseNumber", "number", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final int out = super.chooseNumber(sa, title, values, relatedPlayer);
+            final int out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumber(sa, title, values, relatedPlayer));
             echo(e, echoInt("value", out));
             return out;
         }
         final Integer v = optInt(ans, "value");
         if (v == null || !values.contains(v)) {
             refuse("chooseNumber", "value " + v + " not offered");
-            return super.chooseNumber(sa, title, values, relatedPlayer);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumber(sa, title, values, relatedPlayer));
         }
-        return v;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, v);
     }
 
     @Override
@@ -2194,17 +2209,17 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final List<Integer> idx = optIntList(ans, "choices");
         if (idx == null || idx.size() < min || idx.size() > num) {
             refuse("chooseModeForAbility", "bad 'choices' for [" + min + "," + num + "]");
-            return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseModeForAbility(sa, possible, min, num, allowRepeat));
         }
         final List<AbilitySub> picked = new ArrayList<>();
         for (int i : idx) {
             if (i < 0 || i >= possible.size() || (!allowRepeat && picked.contains(possible.get(i)))) {
                 refuse("chooseModeForAbility", "mode index out of range/repeat: " + i);
-                return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+                return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseModeForAbility(sa, possible, min, num, allowRepeat));
             }
             picked.add(possible.get(i));
         }
-        if (invocation != null && announcingExternalAction)
+        if (invocation != null)
             invocation.classify(CallCounter.Ownership.HOST);
         return picked;
     }
@@ -2212,9 +2227,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     @Override
     public boolean confirmAction(final SpellAbility sa, final PlayerActionConfirmMode mode0, final String message,
             final List<String> options, final Card cardToShow, final Map<String, Object> params) {
-        count("confirmAction");
+        final var invocation = isLiveGame() ? counters.beginCall("confirmAction") : null;
         if (!bridged()) {
-            return super.confirmAction(sa, mode0, message, options, cardToShow, params);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.confirmAction(sa, mode0, message, options, cardToShow, params));
         }
         final JsonObject body = envelope(true);
         body.addProperty("mode", String.valueOf(mode0));
@@ -2228,24 +2243,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("confirmAction", "confirm", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final boolean out = super.confirmAction(sa, mode0, message, options, cardToShow, params);
+            final boolean out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.confirmAction(sa, mode0, message, options, cardToShow, params));
             echo(e, echoBool("yes", out));
             return out;
         }
         final Boolean yes = optBool(ans, "yes");
         if (yes == null) {
             refuse("confirmAction", "expected boolean 'yes'");
-            return super.confirmAction(sa, mode0, message, options, cardToShow, params);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.confirmAction(sa, mode0, message, options, cardToShow, params));
         }
-        return yes;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, yes);
     }
 
     @Override
     public boolean chooseBinary(final SpellAbility sa, final String question, final BinaryChoiceType kindOfChoice,
             final Boolean defaultChoice) {
-        count("chooseBinary");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseBinary") : null;
         if (!bridged()) {
-            return super.chooseBinary(sa, question, kindOfChoice, defaultChoice);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseBinary(sa, question, kindOfChoice, defaultChoice));
         }
         final JsonObject body = envelope(true);
         body.addProperty("message", String.valueOf(question));
@@ -2256,23 +2271,23 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("chooseBinary", "confirm", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final boolean out = super.chooseBinary(sa, question, kindOfChoice, defaultChoice);
+            final boolean out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseBinary(sa, question, kindOfChoice, defaultChoice));
             echo(e, echoBool("yes", out));
             return out;
         }
         final Boolean yes = optBool(ans, "yes");
         if (yes == null) {
             refuse("chooseBinary", "expected boolean 'yes'");
-            return super.chooseBinary(sa, question, kindOfChoice, defaultChoice);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseBinary(sa, question, kindOfChoice, defaultChoice));
         }
-        return yes;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, yes);
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(final CardCollection topN) {
         final var invocation = isLiveGame() ? counters.beginCall("arrangeForScry") : null;
         if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
-            return super.arrangeForScry(topN);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.arrangeForScry(topN));
         }
         try {
         requireHostChannel("scry");
@@ -2323,9 +2338,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
 
     @Override
     public CardCollection orderBlockers(final Card attacker, final CardCollection blockers) {
-        count("orderBlockers");
+        final var invocation = isLiveGame() ? counters.beginCall("orderBlockers") : null;
         if (!bridged() || blockers == null || blockers.size() < 2) {
-            return super.orderBlockers(attacker, blockers);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.orderBlockers(attacker, blockers));
         }
         final JsonObject body = envelope(true);
         body.add("attacker", StateEncoder.encodeCardUnchecked(attacker));
@@ -2333,7 +2348,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final JsonObject ans = ask("orderBlockers", "orderBlockers", body);
         if (ans == null) {
             final Echo e = takeEcho();
-            final CardCollection out = super.orderBlockers(attacker, blockers);
+            final CardCollection out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.orderBlockers(attacker, blockers));
             // `orderBlockers` answers on `order`; `orderZone` answers on `choices`. The
             // two ordering kinds are NOT uniform and the host's own signature reader
             // says so — echoing the wrong key would publish an empty order for every
@@ -2346,18 +2361,18 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final List<Integer> order = optIntList(ans, "order");
         if (order == null || order.size() != blockers.size()) {
             refuse("orderBlockers", "'order' must be a permutation of all " + blockers.size() + " blockers");
-            return super.orderBlockers(attacker, blockers);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.orderBlockers(attacker, blockers));
         }
         final CardCollection out = new CardCollection();
         for (int fid : order) {
             final Card c = findCard(blockers, fid);
             if (c == null || out.contains(c)) {
                 refuse("orderBlockers", "unknown/duplicate blocker " + fid);
-                return super.orderBlockers(attacker, blockers);
+                return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.orderBlockers(attacker, blockers));
             }
             out.add(c);
         }
-        return out;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, out);
     }
 
     @Override public boolean requiresCombatDamageAssignmentScope() {
@@ -2523,7 +2538,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     // Count the actual invocation, but do not claim forced/host ownership merely
     // because a particular input happens to yield a constant answer.
     @Override
-    public boolean acceptsDrawOffer() { count("acceptsDrawOffer"); return super.acceptsDrawOffer(); }
+    public boolean acceptsDrawOffer() { return stockCall("acceptsDrawOffer", () -> super.acceptsDrawOffer()); }
     @Override
     public CardCollectionView cheatShuffle(CardCollectionView cards) {
         final var invocation = isLiveGame() ? counters.beginCall("cheatShuffle") : null;
@@ -2547,16 +2562,18 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     }
     @Override
     public boolean chooseBinary(SpellAbility sa, String question, BinaryChoiceType kind, Map<String, Object> params) {
-        count("chooseBinary"); return super.chooseBinary(sa, question, kind, params);
+        return stockCall("chooseBinary", () -> super.chooseBinary(sa, question, kind, params));
     }
     @Override
     public int chooseNumber(SpellAbility sa, String title, int min, int max, Map<String, Object> params) {
-        count("chooseNumber"); return super.chooseNumber(sa, title, min, max, params);
+        return stockCall("chooseNumber", () -> super.chooseNumber(sa, title, min, max, params));
     }
     @Override
     public void setupAutoProfile(Deck deck) {
         final var invocation = isLiveGame() ? counters.beginCall("setupAutoProfile") : null;
-        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) { super.setupAutoProfile(deck); return; }
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) { super.setupAutoProfile(deck);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return; }
         try {
             requireHostChannel("profile notification");
             // A full-control host is not a Default combat policy. Do not infer
@@ -2569,7 +2586,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     @Override
     public Map<DeckSection, List<? extends PaperCard>> complainCardsCantPlayWell(Deck deck) {
         final var invocation = isLiveGame() ? counters.beginCall("complainCardsCantPlayWell") : null;
-        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) return super.complainCardsCantPlayWell(deck);
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.complainCardsCantPlayWell(deck));
         try {
             requireHostChannel("deck diagnostic notification");
             // Match uses this only for warning broadcasts. Calling super also
@@ -2583,7 +2600,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     @Override
     public void resetAtEndOfTurn() {
         final var invocation = isLiveGame() ? counters.beginCall("resetAtEndOfTurn") : null;
-        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) { super.resetAtEndOfTurn(); return; }
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) { super.resetAtEndOfTurn();
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return; }
         try {
             requireHostChannel("end-turn scratch cleanup");
             // Clear transient reservations, not the separate revealed-hand ledger.
@@ -2595,12 +2614,14 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     }
 
     @Override
-    public SpellAbility getAbilityToPlay(Card hostCard, List<SpellAbility> abilities, ITriggerEvent triggerEvent) { count("getAbilityToPlay"); return super.getAbilityToPlay(hostCard, abilities, triggerEvent); }
+    public SpellAbility getAbilityToPlay(Card hostCard, List<SpellAbility> abilities, ITriggerEvent triggerEvent) { return stockCall("getAbilityToPlay", () -> super.getAbilityToPlay(hostCard, abilities, triggerEvent)); }
     @Override
     public void playSpellAbilityNoStack(SpellAbility effectSA, boolean mayChoseNewTargets) {
         final var invocation = isLiveGame() ? counters.beginCall("playSpellAbilityNoStack") : null;
         if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
-            super.playSpellAbilityNoStack(effectSA, mayChoseNewTargets); return;
+            super.playSpellAbilityNoStack(effectSA, mayChoseNewTargets);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return;
         }
         try {
         requireHostChannel("trigger no-stack execution");
@@ -2653,7 +2674,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     @Override
     public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) {
         final var invocation = isLiveGame() ? counters.beginCall("orderSimultaneousSa") : null;
-        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) return super.orderSimultaneousSa(activePlayerSAs);
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.orderSimultaneousSa(activePlayerSAs));
         try {
             if (activePlayerSAs == null) throw new RulesCostFeasibility.Unsupported("null pending trigger list");
             if (activePlayerSAs.size()<2) {
@@ -2678,7 +2699,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
         final var invocation = isLiveGame() ? counters.beginCall("orderAndPlaySimultaneousSa") : null;
         if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
-            super.orderAndPlaySimultaneousSa(activePlayerSAs); return;
+            super.orderAndPlaySimultaneousSa(activePlayerSAs);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return;
         }
         try {
         requireHostChannel("simultaneous trigger execution");
@@ -2843,42 +2866,42 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         }
         if (activeRulesPayment != null) return activeRulesPayment.duringMandatoryTrigger(host, wrapperAbility, isMandatory,
                 () -> super.playTrigger(host, wrapperAbility, isMandatory));
-        return super.playTrigger(host, wrapperAbility, isMandatory);
+        return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.playTrigger(host, wrapperAbility, isMandatory));
     }
     @Override
-    public boolean playSaFromPlayEffect(SpellAbility tgtSA) { count("playSaFromPlayEffect"); return super.playSaFromPlayEffect(tgtSA); }
+    public boolean playSaFromPlayEffect(SpellAbility tgtSA) { return stockCall("playSaFromPlayEffect", () -> super.playSaFromPlayEffect(tgtSA)); }
     @Override
-    public List<PaperCard> sideboard(final Deck deck, GameType gameType, String message) { count("sideboard"); return super.sideboard(deck, gameType, message); }
+    public List<PaperCard> sideboard(final Deck deck, GameType gameType, String message) { return stockCall("sideboard", () -> super.sideboard(deck, gameType, message)); }
     @Override
-    public List<PaperCard> chooseCardsYouWonToAddToDeck(List<PaperCard> losses) { count("chooseCardsYouWonToAddToDeck"); return super.chooseCardsYouWonToAddToDeck(losses); }
+    public List<PaperCard> chooseCardsYouWonToAddToDeck(List<PaperCard> losses) { return stockCall("chooseCardsYouWonToAddToDeck", () -> super.chooseCardsYouWonToAddToDeck(losses)); }
     @Override
-    public Map<GameEntity, Integer> divideShield(Card effectSource, Map<GameEntity, Integer> affected, int shieldAmount) { count("divideShield"); return super.divideShield(effectSource, affected, shieldAmount); }
+    public Map<GameEntity, Integer> divideShield(Card effectSource, Map<GameEntity, Integer> affected, int shieldAmount) { return stockCall("divideShield", () -> super.divideShield(effectSource, affected, shieldAmount)); }
     @Override
-    public Map<Byte, Integer> specifyManaCombo(SpellAbility sa, ColorSet colorSet, int manaAmount, boolean different) { count("specifyManaCombo"); return super.specifyManaCombo(sa, colorSet, manaAmount, different); }
+    public Map<Byte, Integer> specifyManaCombo(SpellAbility sa, ColorSet colorSet, int manaAmount, boolean different) { return stockCall("specifyManaCombo", () -> super.specifyManaCombo(sa, colorSet, manaAmount, different)); }
     @Override
-    public CardCollectionView choosePermanentsToDestroy(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) { count("choosePermanentsToDestroy"); return super.choosePermanentsToDestroy(sa, min, max, validTargets, message); }
+    public CardCollectionView choosePermanentsToDestroy(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) { return stockCall("choosePermanentsToDestroy", () -> super.choosePermanentsToDestroy(sa, min, max, validTargets, message)); }
     @Override
-    public Integer announceRequirements(SpellAbility ability, int min, int max, String announce) { count("announceRequirements"); return super.announceRequirements(ability, min, max, announce); }
+    public Integer announceRequirements(SpellAbility ability, int min, int max, String announce) { return stockCall("announceRequirements", () -> super.announceRequirements(ability, min, max, announce)); }
     @Override
-    public TargetChoices chooseNewTargetsFor(SpellAbility ability, Predicate<GameObject> filter, boolean optional) { count("chooseNewTargetsFor"); return super.chooseNewTargetsFor(ability, filter, optional); }
+    public TargetChoices chooseNewTargetsFor(SpellAbility ability, Predicate<GameObject> filter, boolean optional) { return stockCall("chooseNewTargetsFor", () -> super.chooseNewTargetsFor(ability, filter, optional)); }
     @Override
-    public Pair<SpellAbilityStackInstance, GameObject> chooseTarget(SpellAbility sa, List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) { count("chooseTarget"); return super.chooseTarget(sa, allTargets); }
+    public Pair<SpellAbilityStackInstance, GameObject> chooseTarget(SpellAbility sa, List<Pair<SpellAbilityStackInstance, GameObject>> allTargets) { return stockCall("chooseTarget", () -> super.chooseTarget(sa, allTargets)); }
     @Override
-    public boolean helpPayForAssistSpell(ManaCostBeingPaid cost, SpellAbility sa, int max, int requested) { count("helpPayForAssistSpell"); return super.helpPayForAssistSpell(cost, sa, max, requested); }
+    public boolean helpPayForAssistSpell(ManaCostBeingPaid cost, SpellAbility sa, int max, int requested) { return stockCall("helpPayForAssistSpell", () -> super.helpPayForAssistSpell(cost, sa, max, requested)); }
     @Override
-    public Player choosePlayerToAssistPayment(FCollectionView<Player> optionList, SpellAbility sa, String title, int max) { count("choosePlayerToAssistPayment"); return super.choosePlayerToAssistPayment(optionList, sa, title, max); }
+    public Player choosePlayerToAssistPayment(FCollectionView<Player> optionList, SpellAbility sa, String title, int max) { return stockCall("choosePlayerToAssistPayment", () -> super.choosePlayerToAssistPayment(optionList, sa, title, max)); }
     @Override
-    public CardCollection chooseCardsForEffectMultiple(Map<String, CardCollection> validMap, SpellAbility sa, String title, boolean isOptional) { count("chooseCardsForEffectMultiple"); return super.chooseCardsForEffectMultiple(validMap, sa, title, isOptional); }
+    public CardCollection chooseCardsForEffectMultiple(Map<String, CardCollection> validMap, SpellAbility sa, String title, boolean isOptional) { return stockCall("chooseCardsForEffectMultiple", () -> super.chooseCardsForEffectMultiple(validMap, sa, title, isOptional)); }
     @Override
-    public List<SpellAbility> chooseSpellAbilitiesForEffect(List<SpellAbility> spells, SpellAbility sa, String title, int num, Map<String, Object> params) { count("chooseSpellAbilitiesForEffect"); return super.chooseSpellAbilitiesForEffect(spells, sa, title, num, params); }
+    public List<SpellAbility> chooseSpellAbilitiesForEffect(List<SpellAbility> spells, SpellAbility sa, String title, int num, Map<String, Object> params) { return stockCall("chooseSpellAbilitiesForEffect", () -> super.chooseSpellAbilitiesForEffect(spells, sa, title, num, params)); }
     @Override
-    public SpellAbility chooseSingleSpellForEffect(List<SpellAbility> spells, SpellAbility sa, String title, Map<String, Object> params) { count("chooseSingleSpellForEffect"); return super.chooseSingleSpellForEffect(spells, sa, title, params); }
+    public SpellAbility chooseSingleSpellForEffect(List<SpellAbility> spells, SpellAbility sa, String title, Map<String, Object> params) { return stockCall("chooseSingleSpellForEffect", () -> super.chooseSingleSpellForEffect(spells, sa, title, params)); }
     @Override
-    public boolean confirmBidAction(SpellAbility sa, PlayerActionConfirmMode bidlife, String string, int bid, Player winner) { count("confirmBidAction"); return super.confirmBidAction(sa, bidlife, string, bid, winner); }
+    public boolean confirmBidAction(SpellAbility sa, PlayerActionConfirmMode bidlife, String string, int bid, Player winner) { return stockCall("confirmBidAction", () -> super.confirmBidAction(sa, bidlife, string, bid, winner)); }
     @Override
-    public boolean confirmReplacementEffect(ReplacementEffect replacementEffect, SpellAbility effectSA, GameEntity affected, String question) { count("confirmReplacementEffect"); return super.confirmReplacementEffect(replacementEffect, effectSA, affected, question); }
+    public boolean confirmReplacementEffect(ReplacementEffect replacementEffect, SpellAbility effectSA, GameEntity affected, String question) { return stockCall("confirmReplacementEffect", () -> super.confirmReplacementEffect(replacementEffect, effectSA, affected, question)); }
     @Override
-    public boolean confirmStaticApplication(Card hostCard, PlayerActionConfirmMode mode, String message, String logic) { count("confirmStaticApplication"); return super.confirmStaticApplication(hostCard, mode, message, logic); }
+    public boolean confirmStaticApplication(Card hostCard, PlayerActionConfirmMode mode, String message, String logic) { return stockCall("confirmStaticApplication", () -> super.confirmStaticApplication(hostCard, mode, message, logic)); }
     @Override
     public boolean confirmTrigger(WrappedAbility sa) {
         final var invocation=isLiveGame()?counters.beginCall("confirmTrigger"):null;
@@ -2920,18 +2943,20 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         return yes.getAsBoolean();
     }
     @Override
-    public List<Card> exertAttackers(List<Card> attackers) { count("exertAttackers"); return super.exertAttackers(attackers); }
+    public List<Card> exertAttackers(List<Card> attackers) { return stockCall("exertAttackers", () -> super.exertAttackers(attackers)); }
     @Override
-    public List<Card> enlistAttackers(List<Card> attackers) { count("enlistAttackers"); return super.enlistAttackers(attackers); }
+    public List<Card> enlistAttackers(List<Card> attackers) { return stockCall("enlistAttackers", () -> super.enlistAttackers(attackers)); }
     @Override
-    public CardCollection orderBlocker(final Card attacker, final Card blocker, final CardCollection oldBlockers) { count("orderBlocker"); return super.orderBlocker(attacker, blocker, oldBlockers); }
+    public CardCollection orderBlocker(final Card attacker, final Card blocker, final CardCollection oldBlockers) { return stockCall("orderBlocker", () -> super.orderBlocker(attacker, blocker, oldBlockers)); }
     @Override
-    public CardCollection orderAttackers(Card blocker, CardCollection attackers) { count("orderAttackers"); return super.orderAttackers(blocker, attackers); }
+    public CardCollection orderAttackers(Card blocker, CardCollection attackers) { return stockCall("orderAttackers", () -> super.orderAttackers(blocker, attackers)); }
     @Override
     public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addMsgSuffix) {
         final var invocation = isLiveGame() ? counters.beginCall("reveal") : null;
         if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
-            super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); return;
+            super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return;
         }
         try {
             requireHostChannel("reveal");
@@ -2951,7 +2976,10 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     @Override
     public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addMsgSuffix) {
         if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) {
-            count("reveal"); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); return;
+            final var invocation = isLiveGame() ? counters.beginCall("reveal") : null;
+            super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix);
+            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
+            return;
         }
         if (zone != ZoneType.Hand) {
             final var invocation = counters.beginCall("reveal");
@@ -2983,13 +3011,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     @Override
     public void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value) { final var invocation = isLiveGame() ? counters.beginCall("notifyOfValue") : null; super.notifyOfValue(saSource, realtedTarget, value); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
     @Override
-    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { count("arrangeForSurveil"); return super.arrangeForSurveil(topN); }
+    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { return stockCall("arrangeForSurveil", () -> super.arrangeForSurveil(topN)); }
     @Override
-    public boolean willPutCardOnTop(Card c) { count("willPutCardOnTop"); return super.willPutCardOnTop(c); }
+    public boolean willPutCardOnTop(Card c) { return stockCall("willPutCardOnTop", () -> super.willPutCardOnTop(c)); }
     @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
         final var invocation = isLiveGame() ? counters.beginCall("orderMoveToZoneList") : null;
-        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) return super.orderMoveToZoneList(cards, destinationZone, source);
+        if (mode != BenchSession.Mode.BRIDGE || !isLiveGame()) return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.orderMoveToZoneList(cards, destinationZone, source));
         try {
             if (cards == null) throw new RulesCostFeasibility.Unsupported("null zone-order list");
             if (cards.size() < 2) {
@@ -3084,48 +3112,48 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         }
     }
     @Override
-    public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String[] unlessTypes, SpellAbility sa) { count("chooseCardsToDiscardUnlessType"); return super.chooseCardsToDiscardUnlessType(min, hand, unlessTypes, sa); }
+    public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String[] unlessTypes, SpellAbility sa) { return stockCall("chooseCardsToDiscardUnlessType", () -> super.chooseCardsToDiscardUnlessType(min, hand, unlessTypes, sa)); }
     @Override
-    public CardCollectionView chooseCardsToDelve(int genericAmount, CardCollection grave) { count("chooseCardsToDelve"); return super.chooseCardsToDelve(genericAmount, grave); }
+    public CardCollectionView chooseCardsToDelve(int genericAmount, CardCollection grave) { return stockCall("chooseCardsToDelve", () -> super.chooseCardsToDelve(genericAmount, grave)); }
     @Override
-    public Map<Card, ManaCostShard> chooseCardsForConvokeOrImprovise(SpellAbility sa, ManaCost manaCost, CardCollectionView untappedCards, boolean artifacts, boolean creatures, Integer maxReduction) { count("chooseCardsForConvokeOrImprovise"); return super.chooseCardsForConvokeOrImprovise(sa, manaCost, untappedCards, artifacts, creatures, maxReduction); }
+    public Map<Card, ManaCostShard> chooseCardsForConvokeOrImprovise(SpellAbility sa, ManaCost manaCost, CardCollectionView untappedCards, boolean artifacts, boolean creatures, Integer maxReduction) { return stockCall("chooseCardsForConvokeOrImprovise", () -> super.chooseCardsForConvokeOrImprovise(sa, manaCost, untappedCards, artifacts, creatures, maxReduction)); }
     @Override
-    public List<Card> chooseCardsForSplice(SpellAbility sa, List<Card> cards) { count("chooseCardsForSplice"); return super.chooseCardsForSplice(sa, cards); }
+    public List<Card> chooseCardsForSplice(SpellAbility sa, List<Card> cards) { return stockCall("chooseCardsForSplice", () -> super.chooseCardsForSplice(sa, cards)); }
     @Override
-    public CardCollectionView chooseCardsToRevealFromHand(int min, int max, CardCollectionView valid) { count("chooseCardsToRevealFromHand"); return super.chooseCardsToRevealFromHand(min, max, valid); }
+    public CardCollectionView chooseCardsToRevealFromHand(int min, int max, CardCollectionView valid) { return stockCall("chooseCardsToRevealFromHand", () -> super.chooseCardsToRevealFromHand(min, max, valid)); }
     @Override
-    public List<SpellAbility> chooseSaToActivateFromOpeningHand(List<SpellAbility> usableFromOpeningHand) { count("chooseSaToActivateFromOpeningHand"); return super.chooseSaToActivateFromOpeningHand(usableFromOpeningHand); }
+    public List<SpellAbility> chooseSaToActivateFromOpeningHand(List<SpellAbility> usableFromOpeningHand) { return stockCall("chooseSaToActivateFromOpeningHand", () -> super.chooseSaToActivateFromOpeningHand(usableFromOpeningHand)); }
     @Override
-    public PlayerZone chooseStartingHand(List<PlayerZone> zones) { count("chooseStartingHand"); return super.chooseStartingHand(zones); }
+    public PlayerZone chooseStartingHand(List<PlayerZone> zones) { return stockCall("chooseStartingHand", () -> super.chooseStartingHand(zones)); }
     @Override
-    public Mana chooseManaFromPool(List<Mana> manaChoices) { count("chooseManaFromPool"); return super.chooseManaFromPool(manaChoices); }
+    public Mana chooseManaFromPool(List<Mana> manaChoices) { return stockCall("chooseManaFromPool", () -> super.chooseManaFromPool(manaChoices)); }
     @Override
-    public String chooseSomeType(String kindOfType, SpellAbility sa, Collection<String> validTypes, boolean isOptional) { count("chooseSomeType"); return super.chooseSomeType(kindOfType, sa, validTypes, isOptional); }
+    public String chooseSomeType(String kindOfType, SpellAbility sa, Collection<String> validTypes, boolean isOptional) { return stockCall("chooseSomeType", () -> super.chooseSomeType(kindOfType, sa, validTypes, isOptional)); }
     @Override
-    public String chooseSector(Card assignee, String ai, List<String> sectors) { count("chooseSector"); return super.chooseSector(assignee, ai, sectors); }
+    public String chooseSector(Card assignee, String ai, List<String> sectors) { return stockCall("chooseSector", () -> super.chooseSector(assignee, ai, sectors)); }
     @Override
-    public List<Card> chooseContraptionsToCrank(List<Card> contraptions) { count("chooseContraptionsToCrank"); return super.chooseContraptionsToCrank(contraptions); }
+    public List<Card> chooseContraptionsToCrank(List<Card> contraptions) { return stockCall("chooseContraptionsToCrank", () -> super.chooseContraptionsToCrank(contraptions)); }
     @Override
-    public int chooseSprocket(Card assignee, List<Integer> sprockets) { count("chooseSprocket"); return super.chooseSprocket(assignee, sprockets); }
+    public int chooseSprocket(Card assignee, List<Integer> sprockets) { return stockCall("chooseSprocket", () -> super.chooseSprocket(assignee, sprockets)); }
     @Override
-    public PlanarDice choosePDRollToIgnore(List<PlanarDice> rolls) { count("choosePDRollToIgnore"); return super.choosePDRollToIgnore(rolls); }
+    public PlanarDice choosePDRollToIgnore(List<PlanarDice> rolls) { return stockCall("choosePDRollToIgnore", () -> super.choosePDRollToIgnore(rolls)); }
     @Override
-    public Integer chooseRollToIgnore(List<Integer> rolls) { count("chooseRollToIgnore"); return super.chooseRollToIgnore(rolls); }
+    public Integer chooseRollToIgnore(List<Integer> rolls) { return stockCall("chooseRollToIgnore", () -> super.chooseRollToIgnore(rolls)); }
     @Override
-    public List<Integer> chooseDiceToReroll(List<Integer> rolls) { count("chooseDiceToReroll"); return super.chooseDiceToReroll(rolls); }
+    public List<Integer> chooseDiceToReroll(List<Integer> rolls) { return stockCall("chooseDiceToReroll", () -> super.chooseDiceToReroll(rolls)); }
     @Override
-    public Integer chooseRollToModify(List<Integer> rolls) { count("chooseRollToModify"); return super.chooseRollToModify(rolls); }
+    public Integer chooseRollToModify(List<Integer> rolls) { return stockCall("chooseRollToModify", () -> super.chooseRollToModify(rolls)); }
     @Override
-    public RollDiceEffect.DieRollResult chooseRollToSwap(List<RollDiceEffect.DieRollResult> rolls) { count("chooseRollToSwap"); return super.chooseRollToSwap(rolls); }
+    public RollDiceEffect.DieRollResult chooseRollToSwap(List<RollDiceEffect.DieRollResult> rolls) { return stockCall("chooseRollToSwap", () -> super.chooseRollToSwap(rolls)); }
     @Override
-    public String chooseRollSwapValue(List<String> swapChoices, Integer currentResult, int power, int toughness) { count("chooseRollSwapValue"); return super.chooseRollSwapValue(swapChoices, currentResult, power, toughness); }
+    public String chooseRollSwapValue(List<String> swapChoices, Integer currentResult, int power, int toughness) { return stockCall("chooseRollSwapValue", () -> super.chooseRollSwapValue(swapChoices, currentResult, power, toughness)); }
     @Override
-    public Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) { count("vote"); return super.vote(sa, prompt, options, votes, forPlayer, optional); }
+    public Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) { return stockCall("vote", () -> super.vote(sa, prompt, options, votes, forPlayer, optional)); }
     @Override
     public boolean playChosenSpellAbility(SpellAbility sa) {
         final var invocation = isLiveGame() ? counters.beginCall("playChosenSpellAbility") : null;
         if (failedExternalAction) throw new RulesCostFeasibility.Unsupported("prior controlled action failed; game cannot continue");
-        if (pendingExternalAbility == null) return super.playChosenSpellAbility(sa);
+        if (pendingExternalAbility == null) return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.playChosenSpellAbility(sa));
         final JsonObject selectedAnswer = pendingExternalAnswer;
         try {
             if (pendingExternalAbility != sa) throw new RulesCostFeasibility.Unsupported("selected/executed ability identity mismatch");
@@ -3189,7 +3217,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         } finally { activeRulesPayment = null; announcingExternalAction = false; announcingExternalAbility = null; selectingExternalTargets = false; }
     }
     @Override
-    public int chooseNumberForCostReduction(final SpellAbility sa, final int min, final int max) { count("chooseNumberForCostReduction"); return super.chooseNumberForCostReduction(sa, min, max); }
+    public int chooseNumberForCostReduction(final SpellAbility sa, final int min, final int max) { return stockCall("chooseNumberForCostReduction", () -> super.chooseNumberForCostReduction(sa, min, max)); }
 
     private List<Card> chooseReturnCost(RulesReturnCostDomain domain) {
         var invocation=counters.beginCall("chooseReturnForCost");
@@ -3228,7 +3256,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         }
     }
     @Override
-    public boolean chooseFlipResult(SpellAbility sa, Player flipper, boolean call) { count("chooseFlipResult"); return super.chooseFlipResult(sa, flipper, call); }
+    public boolean chooseFlipResult(SpellAbility sa, Player flipper, boolean call) { return stockCall("chooseFlipResult", () -> super.chooseFlipResult(sa, flipper, call)); }
     @Override
     public byte chooseColor(String message, SpellAbility sa, ColorSet colors) {
         if (isLiveGame() && activeRulesPayment != null) {
@@ -3256,20 +3284,20 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
                 session.noteIntegrityFailure(getGame(),seat,"chooseColor",failure);throw failure;
             }
         }
-        count("chooseColor"); return super.chooseColor(message, sa, colors);
+        return stockCall("chooseColor", () -> super.chooseColor(message, sa, colors));
     }
     @Override
-    public byte chooseColorAllowColorless(String message, Card c, ColorSet colors) { count("chooseColorAllowColorless"); return super.chooseColorAllowColorless(message, c, colors); }
+    public byte chooseColorAllowColorless(String message, Card c, ColorSet colors) { return stockCall("chooseColorAllowColorless", () -> super.chooseColorAllowColorless(message, c, colors)); }
     @Override
-    public ColorSet chooseColors(String message, SpellAbility sa, int min, int max, ColorSet options) { count("chooseColors"); return super.chooseColors(message, sa, min, max, options); }
+    public ColorSet chooseColors(String message, SpellAbility sa, int min, int max, ColorSet options) { return stockCall("chooseColors", () -> super.chooseColors(message, sa, min, max, options)); }
     @Override
-    public ICardFace chooseSingleCardFace(SpellAbility sa, String message, Predicate<ICardFace> cpp, String name) { count("chooseSingleCardFace"); return super.chooseSingleCardFace(sa, message, cpp, name); }
+    public ICardFace chooseSingleCardFace(SpellAbility sa, String message, Predicate<ICardFace> cpp, String name) { return stockCall("chooseSingleCardFace", () -> super.chooseSingleCardFace(sa, message, cpp, name)); }
     @Override
-    public ICardFace chooseSingleCardFace(SpellAbility sa, List<ICardFace> faces, String message) { count("chooseSingleCardFace"); return super.chooseSingleCardFace(sa, faces, message); }
+    public ICardFace chooseSingleCardFace(SpellAbility sa, List<ICardFace> faces, String message) { return stockCall("chooseSingleCardFace", () -> super.chooseSingleCardFace(sa, faces, message)); }
     @Override
-    public CardState chooseSingleCardState(SpellAbility sa, List<CardState> states, String message, Map<String, Object> params) { count("chooseSingleCardState"); return super.chooseSingleCardState(sa, states, message, params); }
+    public CardState chooseSingleCardState(SpellAbility sa, List<CardState> states, String message, Map<String, Object> params) { return stockCall("chooseSingleCardState", () -> super.chooseSingleCardState(sa, states, message, params)); }
     @Override
-    public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) { count("chooseCardsPile"); return super.chooseCardsPile(sa, pile1, pile2, faceUp); }
+    public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) { return stockCall("chooseCardsPile", () -> super.chooseCardsPile(sa, pile1, pile2, faceUp)); }
     @Override
     public CounterType chooseCounterType(List<CounterType> options, SpellAbility sa, String prompt, Map<String, Object> params) {
         final var invocation = isLiveGame() ? counters.beginCall("chooseCounterType") : null;
@@ -3291,15 +3319,15 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         }
     }
     @Override
-    public String chooseKeywordForPump(List<String> options, SpellAbility sa, String prompt, Card tgtCard) { count("chooseKeywordForPump"); return super.chooseKeywordForPump(options, sa, prompt, tgtCard); }
+    public String chooseKeywordForPump(List<String> options, SpellAbility sa, String prompt, Card tgtCard) { return stockCall("chooseKeywordForPump", () -> super.chooseKeywordForPump(options, sa, prompt, tgtCard)); }
     @Override
-    public boolean confirmPayment(CostPart costPart, String string, SpellAbility sa) { count("confirmPayment"); return super.confirmPayment(costPart, string, sa); }
+    public boolean confirmPayment(CostPart costPart, String string, SpellAbility sa) { return stockCall("confirmPayment", () -> super.confirmPayment(costPart, string, sa)); }
     @Override
-    public ReplacementEffect chooseSingleReplacementEffect(List<ReplacementEffect> possibleReplacers) { count("chooseSingleReplacementEffect"); return super.chooseSingleReplacementEffect(possibleReplacers); }
+    public ReplacementEffect chooseSingleReplacementEffect(List<ReplacementEffect> possibleReplacers) { return stockCall("chooseSingleReplacementEffect", () -> super.chooseSingleReplacementEffect(possibleReplacers)); }
     @Override
-    public StaticAbility chooseSingleStaticAbility(List<StaticAbility> possibleReplacers) { count("chooseSingleStaticAbility"); return super.chooseSingleStaticAbility(possibleReplacers); }
+    public StaticAbility chooseSingleStaticAbility(List<StaticAbility> possibleReplacers) { return stockCall("chooseSingleStaticAbility", () -> super.chooseSingleStaticAbility(possibleReplacers)); }
     @Override
-    public String chooseProtectionType(SpellAbility sa, List<String> choices) { count("chooseProtectionType"); return super.chooseProtectionType(sa, choices); }
+    public String chooseProtectionType(SpellAbility sa, List<String> choices) { return stockCall("chooseProtectionType", () -> super.chooseProtectionType(sa, choices)); }
     @Override
     public void revealAnte(String message, Multimap<Player, PaperCard> removedAnteCards) { final var invocation = isLiveGame() ? counters.beginCall("revealAnte") : null; super.revealAnte(message, removedAnteCards); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
     @Override
@@ -3307,7 +3335,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     @Override
     public void revealUnsupported(Map<Player, List<PaperCard>> unsupported) { final var invocation = isLiveGame() ? counters.beginCall("revealUnsupported") : null; super.revealUnsupported(unsupported); if (invocation != null) invocation.classify(CallCounter.Ownership.RULES); }
     @Override
-    public List<CostPart> orderCosts(List<CostPart> costs) { count("orderCosts"); return super.orderCosts(costs); }
+    public List<CostPart> orderCosts(List<CostPart> costs) { return stockCall("orderCosts", () -> super.orderCosts(costs)); }
     @Override
     public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) {
         final var invocation = isLiveGame() ? counters.beginCall("payCostToPreventEffect") : null;
@@ -3364,9 +3392,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         }
     }
     @Override
-    public boolean payCostDuringRoll(Cost cost, SpellAbility sa) { count("payCostDuringRoll"); return super.payCostDuringRoll(cost, sa); }
+    public boolean payCostDuringRoll(Cost cost, SpellAbility sa) { return stockCall("payCostDuringRoll", () -> super.payCostDuringRoll(cost, sa)); }
     @Override
-    public boolean payCombatCost(Card card, Cost cost, SpellAbility sa, String prompt) { count("payCombatCost"); return super.payCombatCost(card, cost, sa, prompt); }
+    public boolean payCombatCost(Card card, Cost cost, SpellAbility sa, String prompt) { return stockCall("payCombatCost", () -> super.payCombatCost(card, cost, sa, prompt)); }
     @Override
     public boolean payManaCost(ManaCost toPay, CostPartMana costPartMana, SpellAbility sa, String prompt, ManaConversionMatrix matrix, boolean effect) {
         final var invocation = isLiveGame() ? counters.beginCall("payManaCost") : null;
@@ -3391,18 +3419,18 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             if (paid && invocation != null) invocation.classify(CallCounter.Ownership.RULES);
             return paid;
         }
-        return super.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect);
+        return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect));
     }
     @Override
-    public boolean applyManaToCost(ManaCostBeingPaid toPay, SpellAbility ability, String prompt, ManaConversionMatrix matrix, boolean effect) { count("applyManaToCost"); return super.applyManaToCost(toPay, ability, prompt, matrix, effect); }
+    public boolean applyManaToCost(ManaCostBeingPaid toPay, SpellAbility ability, String prompt, ManaConversionMatrix matrix, boolean effect) { return stockCall("applyManaToCost", () -> super.applyManaToCost(toPay, ability, prompt, matrix, effect)); }
     @Override
-    public CardCollectionView chooseCardsForCost(CardCollectionView optionList, SpellAbility sa, CostPartWithList cpl, int amount, boolean isOptional, String prompt) { count("chooseCardsForCost"); return super.chooseCardsForCost(optionList, sa, cpl, amount, isOptional, prompt); }
+    public CardCollectionView chooseCardsForCost(CardCollectionView optionList, SpellAbility sa, CostPartWithList cpl, int amount, boolean isOptional, String prompt) { return stockCall("chooseCardsForCost", () -> super.chooseCardsForCost(optionList, sa, cpl, amount, isOptional, prompt)); }
     @Override
-    public CostDecisionMakerBase getCostDecisionMaker(Player player, SpellAbility ability, boolean effect, String prompt) { count("getCostDecisionMaker"); return super.getCostDecisionMaker(player, ability, effect, prompt); }
+    public CostDecisionMakerBase getCostDecisionMaker(Player player, SpellAbility ability, boolean effect, String prompt) { return stockCall("getCostDecisionMaker", () -> super.getCostDecisionMaker(player, ability, effect, prompt)); }
     @Override
-    public String chooseCardName(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) { count("chooseCardName"); return super.chooseCardName(sa, cpp, valid, message); }
+    public String chooseCardName(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) { return stockCall("chooseCardName", () -> super.chooseCardName(sa, cpp, valid, message)); }
     @Override
-    public String chooseCardName(SpellAbility sa, List<ICardFace> faces, String message) { count("chooseCardName"); return super.chooseCardName(sa, faces, message); }
+    public String chooseCardName(SpellAbility sa, List<ICardFace> faces, String message) { return stockCall("chooseCardName", () -> super.chooseCardName(sa, faces, message)); }
     /*
      * ---------------------------------------------------------------------
      * THE ZONE-CHANGE ASKS — v2.17, and until this they were COUNTED AND
@@ -3446,10 +3474,10 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
             CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
             Player decider) {
-        count("chooseSingleCardForZoneChange");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseSingleCardForZoneChange") : null;
         if (!bridged() || decider != getPlayer() || fetchList == null || fetchList.isEmpty()) {
-            return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
-                    selectPrompt, isOptional, decider);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
+                    selectPrompt, isOptional, decider));
         }
         final int changeNum = zoneChangeNum(sa);
         final int chosen = zoneChangeProgress(sa, changeNum);
@@ -3460,8 +3488,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
                 sa, fetchList, isOptional ? 0 : 1, 1, selectPrompt, changeNum, chosen, true);
         if (picked == null) {
             final Echo e = takeEcho();
-            final Card out = super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList,
-                    null, selectPrompt, isOptional, decider);
+            final Card out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList,
+                    null, selectPrompt, isOptional, decider));
             // Single-card ask, list-shaped answer: the host answers `choices` here even
             // when `max` is 1, and declining is the empty list rather than a `none`.
             echo(e, echoCards(out == null ? Collections.<Card>emptyList()
@@ -3469,17 +3497,17 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             return out;
         }
         if (picked.isEmpty()) {
-            return null; // a legal answer when `isOptional`; `min` refused it otherwise
+            return classifiedResult(invocation, CallCounter.Ownership.HOST, (Card) null); // a legal answer when `isOptional`; `min` refused it otherwise
         }
         zoneChangeChosen++;
-        return picked.get(0);
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, picked.get(0));
     }
 
     @Override
     public List<Card> chooseCardsForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
             CardCollection fetchList, int min, int max, DelayedReveal delayedReveal, String selectPrompt,
             Player decider) {
-        count("chooseCardsForZoneChange");
+        final var invocation = isLiveGame() ? counters.beginCall("chooseCardsForZoneChange") : null;
         /*
          * UNORDERED, and unlike its sibling it has NEVER been called on this
          * bench: `ChangeZoneEffect.allowMultiSelect` requires
@@ -3492,8 +3520,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
          * the ceiling before it can happen.
          */
         if (!bridged() || decider != getPlayer() || fetchList == null || fetchList.isEmpty()) {
-            return super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max,
-                    delayedReveal, selectPrompt, decider);
+            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max,
+                    delayedReveal, selectPrompt, decider));
         }
         if (delayedReveal != null) {
             reveal(delayedReveal);
@@ -3504,15 +3532,15 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
                 fetchList, lo, hi, selectPrompt, hi, 0, false);
         if (picked == null) {
             final Echo e = takeEcho();
-            final List<Card> out = super.chooseCardsForZoneChange(destination, origin, sa, fetchList,
-                    min, max, null, selectPrompt, decider);
+            final List<Card> out = classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseCardsForZoneChange(destination, origin, sa, fetchList,
+                    min, max, null, selectPrompt, decider));
             // `PlayerControllerAi`'s own body is `return null` under the comment "this
             // isn't used", so an empty `choices` here is the honest echo of a method
             // that decides nothing rather than a lost row.
             echo(e, echoCards(out));
             return out;
         }
-        return picked;
+        return classifiedResult(invocation, CallCounter.Ownership.HOST, picked);
     }
 
     /**
