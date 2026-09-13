@@ -32,6 +32,7 @@ public final class CubeEmryExecutionSmoke {
     private static final List<String> PARTNERS = List.of("Lightning Greaves", "Pestermite", "Deceiver Exarch", "Zealous Conscripts");
     private static final List<String> ARTIFACTS = List.of("Lotus Petal", "Mishra's Bauble", "Lion's Eye Diamond");
     private static final List<String> CONTROLS = List.of("no-emry", "no-kitten", "no-partner", "no-outlet", "null-rod", "rest-in-peace", "cursed-totem");
+    private static final List<String> BOUNDARIES = List.of("life50", "life51", "short-library", "empty-library", "held-counterspell", "held-oracle", "rule-of-law", "jailer", "tainted-remedy", "emry-sick", "emry-tapped", "prevent-damage");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone, boolean tapped) { }
     private static void add(List<Placement> into, int count, String name, ZoneType zone) {
@@ -45,7 +46,8 @@ public final class CubeEmryExecutionSmoke {
         if (!control.equals("no-partner")) add(result,1,PARTNERS.get(partner),ZoneType.Battlefield);
         if (!control.equals("no-outlet")) add(result,1,"Aetherflux Reservoir",ZoneType.Battlefield);
         add(result,3,"Island",ZoneType.Battlefield); add(result,1,ARTIFACTS.get(artifact),ZoneType.Graveyard);
-        add(result,1,"Forest",ZoneType.Hand); add(result,20,"Forest",ZoneType.Library);
+        add(result,1,control.equals("held-counterspell")?"Counterspell":control.equals("held-oracle")?"Thassa's Oracle":"Forest",ZoneType.Hand);
+        add(result,control.equals("empty-library")?0:control.equals("short-library")?1:20,"Forest",ZoneType.Library);
         add(result,40-result.size(),"Forest",ZoneType.Exile); return result;
     }
     private static List<Placement> other(String name) {
@@ -53,6 +55,10 @@ public final class CubeEmryExecutionSmoke {
         if (control.equals("null-rod")) add(result,1,"Null Rod",ZoneType.Battlefield);
         if (control.equals("rest-in-peace")) add(result,1,"Rest in Peace",ZoneType.Battlefield);
         if (control.equals("cursed-totem")) add(result,1,"Cursed Totem",ZoneType.Battlefield);
+        if (control.equals("rule-of-law")) add(result,1,"Rule of Law",ZoneType.Battlefield);
+        if (control.equals("jailer")) add(result,1,"Soulless Jailer",ZoneType.Battlefield);
+        if (control.equals("tainted-remedy")) add(result,1,"Tainted Remedy",ZoneType.Battlefield);
+        if (control.equals("prevent-damage")) add(result,1,"Glacial Chasm",ZoneType.Battlefield);
         add(result,40-result.size(),"Forest",ZoneType.Library); return result;
     }
     private static List<Placement> placements(boolean owner,String name) {return owner?own(name):other(name);}
@@ -69,7 +75,8 @@ public final class CubeEmryExecutionSmoke {
                     FModel.getMagicDb().getCommonCards().getCard(p.name()), p.name()), player);
             card.setGameTimestamp(player.getGame().getNextTimestamp());
             player.getZone(p.zone()).add(card);
-            card.setSickness(false);
+            card.setSickness(owner && name.endsWith(":emry-sick") && p.name().equals(EMRY));
+            if (owner && name.endsWith(":emry-tapped") && p.name().equals(EMRY)) card.setTapped(true);
             if (p.tapped()) card.setTapped(true);
         }
         TreeMap<String, Integer> actual = new TreeMap<>(), registered = new TreeMap<>();
@@ -181,12 +188,12 @@ public final class CubeEmryExecutionSmoke {
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);
         Game game=new Match(rules,players,"native Emry recurrence diagnosis").createGame();
         Player player=game.getPlayers().get(seat),opponent=game.getPlayers().get(1-seat);
-        populate(player,true,name);populate(opponent,false,name);player.setLife(40,null);opponent.setLife(20,null);game.setAge(GameStage.Play);
+        populate(player,true,name);populate(opponent,false,name);player.setLife(name.endsWith(":life50")?50:name.endsWith(":life51")?51:40,null);opponent.setLife(20,null);game.setAge(GameStage.Play);
         int startTurn=seat==0?1:2;
         game.getPhaseHandler().setupFirstTurn(seat==0?player:opponent,()->game.getPhaseHandler().devModeSet(PhaseType.MAIN1,player,startTurn));
         game.getAction().checkStateEffects(true);game.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(990300L+100L*seat+index);
         String key="arm="+(improved?"improved":"baseline")+" seat="+seat+" case="+name;
-        System.out.println("EMRY_FIXTURE "+key+" policy="+forge.ai.CubeComboAi.VERSION+" registered=40 initialMana=0 ownLife=40 opponentLife=20");
+        System.out.println("EMRY_FIXTURE "+key+" policy="+forge.ai.CubeComboAi.VERSION+" registered=40 initialMana=0 ownLife="+player.getLife()+" opponentLife=20");
         Set<Integer> seen=new HashSet<>();int steps=0,artifactCasts=0,emryActions=0,kittenActions=0,shots=0;String previous="",previousAvailable="";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn()<=startTurn+2 && steps<1500) {
             previousAvailable=observe(player,key,steps,previousAvailable);
@@ -214,14 +221,16 @@ public final class CubeEmryExecutionSmoke {
                 default -> throw new AssertionError(method.getName());
             }));
             FModel.initialize(null,p->{p.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);p.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
-            List<String> names=new ArrayList<>(PARTNERS);names.addAll(ARTIFACTS);names.addAll(List.of(EMRY,KITTEN,"Aetherflux Reservoir","Island","Forest","Null Rod","Rest in Peace","Cursed Totem"));
+            List<String> names=new ArrayList<>(PARTNERS);names.addAll(ARTIFACTS);names.addAll(List.of(EMRY,KITTEN,"Aetherflux Reservoir","Island","Forest","Null Rod","Rest in Peace","Cursed Totem","Counterspell","Thassa's Oracle","Rule of Law","Soulless Jailer","Tainted Remedy","Glacial Chasm"));
             for(String name:names)StaticData.instance().attemptToLoadCard(name);
             List<String> cases=new ArrayList<>();
             for(int p=0;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)cases.add(p+":"+a+":complete");
             for(int a=0;a<ARTIFACTS.size();a++)for(String control:CONTROLS)cases.add("0:"+a+":"+control);
-            if(cases.size()!=33)throw new AssertionError("case count");
+            for(int p=1;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:CONTROLS)cases.add(p+":"+a+":"+control);
+            for(int p=0;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:BOUNDARIES)cases.add(p+":"+a+":"+control);
+            if(cases.size()!=240)throw new AssertionError("case count");
             for(int i=0;i<cases.size();i++)for(int seat=0;seat<2;seat++)run(args[1].equals("improved"),seat,cases.get(i),i);
-            System.out.println("EMRY_SUITE_COMPLETE cases=66");
+            System.out.println("EMRY_SUITE_COMPLETE cases=480");
         } catch(Throwable failure){failure.printStackTrace();System.exit(1);}
     }
 }
