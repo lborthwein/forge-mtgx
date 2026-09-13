@@ -284,6 +284,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             tutorPlan = null;
             return played;
         }
+        if (doomsdayPlan.ownsStarAction(ability)) return doomsdayPlan.playStarAction(ability);
         if (topTutorPlan.owns(ability)) return topTutorPlan.play(ability);
         if (emryPlan.owns(ability)) return emryPlan.play(ability);
         if (breachPlan.owns(ability)) return breachPlan.play(ability);

@@ -31,6 +31,13 @@ public final class CubeDoomStarResources {
      * not establish disjoint resources; it does not mean native unpayability.
      * Multiple abilities on one permanent never create multiple resources. */
     public static List<Payment> assign(Player player, List<String> demands, Set<Card> excluded) {
+        return assign(player, demands, excluded, null);
+    }
+    /** Only the caller's independently checked native basic-land action may
+     * supply this prospective resource. No hypothetical zone move occurs. */
+    static List<Payment> assign(Player player, List<String> demands, Set<Card> excluded, Card futureLand) {
+        if (futureLand != null && (!futureLand.isBasicLand() || !futureLand.isInZone(ZoneType.Hand)
+                || futureLand.getOwner() != player || player.getGame().getCardState(futureLand, null) != futureLand)) return null;
         if (demands.size() > 12 || demands.stream().anyMatch(x -> !COLORS.contains(x) && !"1".equals(x)))
             return null;
         List<Option> options = new ArrayList<>();
@@ -40,7 +47,10 @@ public final class CubeDoomStarResources {
             String color = color(mana.getColor());
             if (color != null) options.add(new Option(mana, new Payment(null, null, mana, color)));
         }
-        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+        List<Card> sources = new ArrayList<>();
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) sources.add(card);
+        if (futureLand != null) sources.add(futureLand);
+        for (Card card : sources) {
             if (excluded.contains(card) || card.getController() != player || card.isFaceDown()
                     || card.isPhasedOut() || card.isTapped()
                     || player.getGame().getCardState(card, null) != card) continue;
@@ -53,7 +63,7 @@ public final class CubeDoomStarResources {
                 if (costs == null || costs.getCostParts().stream().anyMatch(p -> !(p instanceof CostTap) && !(p instanceof CostPartMana))
                         || costs.getCostParts().stream().filter(p -> p instanceof CostTap).count() != 1
                         || !ComputerUtilMana.calculateManaCost(ability.getPayCosts(), ability, player, true, 0, false).isPaid()
-                        || !CubeComboAi.canPlayNative(ability, player) || !CubeComboAi.canPayCost(ability, player, false)) continue;
+                        || card != futureLand && (!CubeComboAi.canPlayNative(ability, player) || !CubeComboAi.canPayCost(ability, player, false))) continue;
                 for (String color : COLORS) if (ability.canProduce(color)) {
                     SpellAbility chosen = ability.copy(player);
                     if (!"C".equals(color)) chosen.setManaExpressChoice(ColorSet.fromMask(mask(color)));

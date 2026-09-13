@@ -36,6 +36,7 @@ import java.util.function.Supplier;
 public final class CubeDoomsdayPlan {
     private enum Stage { NONE, RITUAL, ENABLER, DOOMSDAY, STAR, DRAW, ORACLE, JACE, FINISH }
     private final Player player;
+    private final CubeDoomStarPlan starPlan;
     private Stage stage = Stage.NONE;
     private int turn = -1, doomsdayId = -1, ritualId = -1, ritualTurn = -1, finisherId = -1;
     /** v78: the enabler spell currently on the stack, and the turn one was last
@@ -102,7 +103,11 @@ public final class CubeDoomsdayPlan {
      * {@link #ritualBridges} and {@link #jaceFinishes}. */
     static int pileEnablers;
 
-    public CubeDoomsdayPlan(Player player) { this.player = player; }
+    public CubeDoomsdayPlan(Player player) { this.player = player; this.starPlan = new CubeDoomStarPlan(player); }
+    public boolean ownsStarAction(SpellAbility action) { return starPlan.owns(action); }
+    public boolean playStarAction(SpellAbility action) { return starPlan.play(action); }
+    private boolean starFinishLegal() { return !player.cantWin() && player.canDrawAmount(1)
+            && !oracleTriggerDisabled() && oracleThreshold(false) >= 4 && availableInOwnDeck("Thassa's Oracle"); }
 
     /** v74: when non-null, {@link #inHand} reads THIS collection instead of our
      * own live hand. Set by {@link #wouldConvert} alone, on a throwaway plan
@@ -529,6 +534,7 @@ public final class CubeDoomsdayPlan {
     /** Don't spend the plan's draw in response to our own unresolved combo spell.
      * An opposing spell/trigger still goes to Default's response policy. */
     public boolean waitingForOwnSpell() {
+        if (starPlan.waiting()) return true;
         if (stage == Stage.NONE || player.getGame().getStack().isEmpty()) return false;
         SpellAbility top = player.getGame().getStack().peekAbility();
         return top.getActivatingPlayer() == player && ((stage == Stage.RITUAL && top.getHostCard().getId() == ritualId)
@@ -613,6 +619,10 @@ public final class CubeDoomsdayPlan {
         reservedStar = null;
         if (oracleTriggerDisabled()) { decline = "oracle-etb-disabled"; return null; }
         int threshold = oracleThreshold(false);
+        if (handOverride == null && threshold >= 4 && player.canDrawAmount(1) && inHand("Thassa's Oracle") == null) {
+            SpellAbility star = starPlan.begin(doom);
+            if (star != null) return star;
+        }
         if (inHand("Thassa's Oracle") != null) {
             if (threshold >= 5 && CubeComboAi.canPayCost(new Cost("B B B U U", false), doom, player, false)) {
                 if (lethalOnBoard(true)) { decline = "better-attack"; return null; }
@@ -1379,6 +1389,11 @@ public final class CubeDoomsdayPlan {
         if (turn != player.getGame().getPhaseHandler().getTurn()) stage = Stage.NONE;
         if (!player.getGame().getStack().isEmpty()) { decline = "stack-not-empty"; return null; }
         if (player.cantWin()) { stage = Stage.NONE; decline = "cant-win"; return null; }
+        if (starPlan.active()) {
+            SpellAbility action = starPlan.nextAction(this::starFinishLegal);
+            if (action == null) decline = "other check=star-finish-stopped";
+            return action;
+        }
         int librarySize = player.getCardsIn(ZoneType.Library).size(); // count, never identities/order
         // A bridge commits to nothing. Its only job was to put mana in the pool
         // (or a Lotus Petal on the battlefield), so the plan starts over here
@@ -1508,6 +1523,7 @@ public final class CubeDoomsdayPlan {
     }
 
     public boolean ownsPileDecision(SpellAbility source) {
+        if (starPlan.active()) return starPlan.ownsSearch(source);
         return stage == Stage.DOOMSDAY && source.getHostCard().getId() == doomsdayId;
     }
 
@@ -1576,6 +1592,7 @@ public final class CubeDoomsdayPlan {
     }
 
     public Card choosePileCard(CardCollection legalChoices) {
+        if (starPlan.active()) return starPlan.choose(legalChoices);
         if (gushRoute && inHand("Gush") == null && !gushSelected) {
             for (Card card : legalChoices) if (card.getName().equals("Gush")) { gushSelected = true; return card; }
             stage = Stage.NONE; return null;
@@ -1594,6 +1611,7 @@ public final class CubeDoomsdayPlan {
     }
 
     public CardCollectionView orderPile(CardCollectionView revealedCards) {
+        if (starPlan.active()) return starPlan.order(revealedCards);
         CardCollection moveOrder = new CardCollection();
         for (Card card : revealedCards) {
             if (!card.getName().equals("Thassa's Oracle") && !(gushRoute && card.getName().equals("Gush"))) moveOrder.add(card);
