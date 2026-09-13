@@ -179,9 +179,10 @@ public final class CubeStormReplayBoundSmoke {
                 var sa = item.getSpellAbility();
                 if (sa.getActivatingPlayer() != player) continue;
                 String host = sa.getHostCard().getName();
-                if (sa.isSpell()) casts.merge(host, 1, Integer::sum);
+                if (sa.isSpell() && !sa.isCopied()) casts.merge(host, 1, Integer::sum);
                 System.out.println("STORM_REPLAY_STACK " + key + " step=" + steps + " source="
                         + host.replace(' ', '_') + " api=" + sa.getApi() + " spell=" + sa.isSpell()
+                        + " copied=" + sa.isCopied() + " castFrom=" + sa.getHostCard().getCastFrom()
                         + " escape=" + sa.isEscape() + " sourceId=" + sa.getHostCard().getId()
                         + " timestamp=" + sa.getHostCard().getGameTimestamp());
             }
