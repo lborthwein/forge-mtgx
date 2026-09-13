@@ -90,17 +90,20 @@ public final class CubeWitnessResourceSmoke {
             if (control.equals("helm-one-land")) cards.add(new Entry("Helm of Awakening", ZoneType.Battlefield));
             if (control.equals("witness-shroud")) cards.add(new Entry("Lightning Greaves", ZoneType.Battlefield));
         } else {
-            cards.add(new Entry(control.equals("no-ritual") ? "Forest" : DARK, ZoneType.Hand));
-            cards.add(new Entry("Frantic Search", ZoneType.Graveyard));
+            cards.add(new Entry(control.equals("no-ritual") ? "Forest" : DARK, control.startsWith("partial-search") ? ZoneType.Graveyard : ZoneType.Hand));
+            cards.add(new Entry("Frantic Search", control.startsWith("partial-search") ? ZoneType.Hand : ZoneType.Graveyard));
             cards.add(new Entry(control.equals("no-blue") ? "Swamp" : "Island", ZoneType.Battlefield));
-            cards.add(new Entry("Swamp", ZoneType.Battlefield));
-            cards.add(new Entry("Swamp", ZoneType.Battlefield));
+            cards.add(new Entry(control.equals("missing-black") ? "Island" : "Swamp", ZoneType.Battlefield));
+            if (!control.equals("partial-search-short")) cards.add(new Entry(control.equals("missing-black") ? "Island" : "Swamp", ZoneType.Battlefield));
+            if (control.equals("witness-shroud")) cards.add(new Entry("Lightning Greaves", ZoneType.Battlefield));
+            if (control.equals("helm-reducer")) cards.add(new Entry("Helm of Awakening", ZoneType.Battlefield));
+            if (control.equals("draw-replacement")) cards.add(new Entry("Alhammarret's Archive", ZoneType.Battlefield));
             if (control.equals("discard-pressure")) {
                 cards.add(new Entry("Black Lotus", ZoneType.Hand));
                 cards.add(new Entry("Ancestral Recall", ZoneType.Hand));
             }
         }
-        for (int i = 0; i < (control.equals("short-library") ? 2 : 20); i++) cards.add(new Entry(control.equals("hidden-swamp") ? "Swamp" : control.equals("hidden-mountain") ? "Mountain" : "Forest", ZoneType.Library));
+        for (int i = 0; i < (control.equals("short-library") ? 2 : control.equals("exact-library") ? 8 : control.equals("one-short-library") ? 7 : control.equals("zero-library") ? 0 : 20); i++) cards.add(new Entry(control.equals("hidden-swamp") ? "Swamp" : control.equals("hidden-mountain") ? "Mountain" : "Forest", ZoneType.Library));
         while (cards.size() < 40) cards.add(new Entry("Forest", ZoneType.Exile));
         if (cards.size() != 40) throw new AssertionError("forty-card layout");
         return cards;
@@ -218,10 +221,11 @@ public final class CubeWitnessResourceSmoke {
         }
         for (Card card : p.getCardsIn(ZoneType.Battlefield)) {
             if (control.equals("no-ready-mana") && (card.isLand() || card.getName().equals(auxiliaryName(control)))) card.setTapped(true);
+            if (control.equals("stun-blue") && card.getName().equals("Island")) card.setCounters(forge.game.card.CounterEnumType.STUN, 1);
             if (control.equals("purity-tapped-land") && card.isLand()) { card.setTapped(true); break; }
         }
         game.getAction().checkStateEffects(true); game.getTriggerHandler().resetActiveTriggers();
-        BenchRandomAudit.install(98800 + seat * 100 + (engine.equals("snap") ? 0 : 40) + (controls(engine).contains(control) ? controls(engine).indexOf(control) : 200 + boundaries().indexOf(control)));
+        BenchRandomAudit.install(98800 + seat * 100 + (engine.equals("snap") ? 0 : 40) + (controls(engine).contains(control) ? controls(engine).indexOf(control) : (engine.equals("frantic") ? 400 + franticBoundaries().indexOf(control) : 200 + boundaries().indexOf(control))));
         String key = "seat=" + seat + " engine=" + engine + " control=" + control;
         System.out.println("WITNESS_RESOURCE_FIXTURE " + key + " candidate=" + candidate + " policy=" + forge.ai.CubeComboAi.VERSION);
         if (candidate) probeInitial(p);
@@ -308,6 +312,12 @@ public final class CubeWitnessResourceSmoke {
                 "activation-tax", "expensive-outlet", "stasis", "helm-one-land", "white-auxiliary", "partial-after-snap",
                 "partial-before-sac", "partial-before-aux-funded", "partial-before-aux-short", "hidden-swamp", "hidden-mountain", "purity-tapped-land", "partial-before-sac-shroud");
     }
+    private static List<String> franticBoundaries() {
+        return List.of("exact-library", "one-short-library", "partial-search", "partial-search-short", "missing-black",
+                "no-ready-mana", "stun-blue", "stasis", "graveyard-shroud", "no-etb", "no-life", "protected-opponent",
+                "cast-cap", "nonartifact-cap", "activation-off", "spell-tax", "activation-tax", "expensive-outlet",
+                "witness-shroud", "hidden-swamp", "hidden-mountain", "draw-replacement", "helm-reducer", "zero-library");
+    }
     public static void main(String[] args) {
         try {
             GuiBase.setInterface((IGuiBase) Proxy.newProxyInstance(IGuiBase.class.getClassLoader(), new Class<?>[]{IGuiBase.class}, (p, m, v) -> switch (m.getName()) {
@@ -317,8 +327,10 @@ public final class CubeWitnessResourceSmoke {
             boolean candidate = args.length < 2 || !args[1].equals("baseline");
             int cases = 0;
             boolean boundary = args.length > 2 && args[2].equals("boundaries");
+            boolean franticBoundary = args.length > 2 && args[2].equals("frantic-boundaries");
             for (int seat = 0; seat < 2; seat++)
-                if (boundary) for (String control : boundaries()) {run(seat, "snap", control, candidate); cases++;}
+                if (franticBoundary) for (String control : franticBoundaries()) {run(seat, "frantic", control, candidate); cases++;}
+                else if (boundary) for (String control : boundaries()) {run(seat, "snap", control, candidate); cases++;}
                 else for (String engine : List.of("snap", "frantic"))
                     for (String control : controls(engine)) {run(seat, engine, control, candidate); cases++;}
             System.out.println("WITNESS_RESOURCE_SUITE_COMPLETE cases=" + cases);
