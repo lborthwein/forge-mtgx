@@ -68,6 +68,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
      * needs: the SPELL form's reanimation target is chosen inside that method
      * and no controller hook exists for it. */
     public CubeReanimatorPlan reanimatorPlan() { return reanimatorPlan; }
+    Card emryUntapSource(SpellAbility sa) { return emryPlan.untapSource(sa); }
     public CubeDoomsdayPlan doomsdayPlan() { return doomsdayPlan; }
     public int getComboSelectionChanges() { return comboSelectionChanges; }
     public int getComboTutorPlanCasts() { return comboTutorPlanCasts; }
@@ -295,10 +296,10 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
 
     @Override
     public boolean chooseTargetsFor(SpellAbility ability) {
-        return kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
+        return emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
     }
 
-    public boolean chooseKittenBlink(SpellAbility ability) { return kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability); }
+    public boolean chooseKittenBlink(SpellAbility ability) { return emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability); }
 
     @Override
     public <T extends forge.game.GameEntity> T chooseSingleEntityForEffect(forge.util.collect.FCollectionView<T> options,

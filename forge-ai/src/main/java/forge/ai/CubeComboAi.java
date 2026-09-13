@@ -726,6 +726,10 @@ public final class CubeComboAi {
     }
 
     public static Card untapSource(Player player, SpellAbility trigger) {
+        if (player.getController() instanceof CubeComboPlayerController combo) {
+            Card emry = combo.emryUntapSource(trigger);
+            if (emry != null) return emry;
+        }
         if (!enabled(player) || !untapBody(trigger.getHostCard()) || !trigger.usesTargeting()) return null;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             // This is an effect untap, not that player's untap step (exert and

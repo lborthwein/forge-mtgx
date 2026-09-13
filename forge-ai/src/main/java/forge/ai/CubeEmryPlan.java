@@ -15,6 +15,8 @@ final class CubeEmryPlan {
     private final Player player;
     private int turn = -1, actions, failedTurn = -1;
     private SpellAbility selected;
+    private Card blinkPartner;
+    private long blinkTimestamp;
     CubeEmryPlan(Player player) { this.player = player; }
     private Card find(String name, ZoneType zone) {
         for (Card card : player.getCardsIn(zone))
@@ -44,7 +46,7 @@ final class CubeEmryPlan {
     }
     private SpellAbility select(SpellAbility sa) {
         if (!payable(sa)) return null;
-        selected = sa; actions++;
+        selected = sa; blinkPartner = null; actions++;
         return sa;
     }
     SpellAbility nextAction() {
@@ -99,6 +101,31 @@ final class CubeEmryPlan {
             if (payable(sacrifice)) return select(sacrifice);
         }
         return null;
+    }
+    boolean chooseBlink(SpellAbility sa) {
+        if (selected == null || !selected.isSpell() || turn != player.getGame().getPhaseHandler().getTurn()
+                || sa.getActivatingPlayer() != player || !KITTEN.equals(sa.getHostCard().getName())
+                || sa.getApi() != ApiType.ChangeZone || !"Exile".equals(sa.getParam("Destination"))) return false;
+        Object cause = sa.getRootAbility().getTriggeringObject(forge.game.ability.AbilityKey.SpellAbility);
+        if (!(cause instanceof SpellAbility cast) || cast.getActivatingPlayer() != player
+                || cast.getHostCard() != selected.getHostCard()) return false;
+        Card partner = find("Lightning Greaves", ZoneType.Battlefield) == null ? null : find(EMRY, ZoneType.Battlefield);
+        if (partner == null) for (String name : new String[]{"Pestermite", "Deceiver Exarch", "Zealous Conscripts"}) {
+            partner = find(name, ZoneType.Battlefield); if (partner != null) break;
+        }
+        if (partner == null || target(sa, partner) == null) return false;
+        blinkPartner = partner; blinkTimestamp = partner.getGameTimestamp();
+        return true;
+    }
+    Card untapSource(SpellAbility sa) {
+        if (selected == null || !selected.isSpell() || blinkPartner == null
+                || turn != player.getGame().getPhaseHandler().getTurn() || sa.getActivatingPlayer() != player
+                || sa.getHostCard().getController() != player || sa.getHostCard().getId() != blinkPartner.getId()
+                || sa.getHostCard().getGameTimestamp() == blinkTimestamp
+                || !(sa.getApi() == ApiType.TapOrUntap || sa.getApi() == ApiType.Untap
+                    || sa.getApi() == ApiType.GainControl && sa.hasParam("Untap"))) return null;
+        Card emry = find(EMRY, ZoneType.Battlefield);
+        return emry != null && emry.isTapped() && emry.canUntap(null, true) && sa.canTarget(emry) ? emry : null;
     }
     boolean owns(SpellAbility sa) { return sa == selected; }
     boolean play(SpellAbility sa) {
