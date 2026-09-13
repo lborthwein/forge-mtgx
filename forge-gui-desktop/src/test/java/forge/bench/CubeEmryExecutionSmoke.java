@@ -130,9 +130,39 @@ public final class CubeEmryExecutionSmoke {
         }
         return String.join(";",rows);
     }
+    private static void observePlan(Player player, String key, int step) {
+        if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return;
+        try {
+            var field = forge.ai.CubeComboPlayerController.class.getDeclaredField("emryPlan"); field.setAccessible(true);
+            Object plan = field.get(player.getController());
+            var next = plan.getClass().getDeclaredMethod("nextAction"); next.setAccessible(true);
+            Map<java.lang.reflect.Field,Object> saved = new LinkedHashMap<>();
+            for (var f : plan.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers()) || java.lang.reflect.Modifier.isFinal(f.getModifiers())) continue;
+                f.setAccessible(true); saved.put(f,f.get(plan));
+            }
+            var before = snapshot(player); String first = null;
+            try {
+                for (int i=0;i<3;i++) {
+                    for (var entry:saved.entrySet()) entry.getKey().set(plan,entry.getValue());
+                    var action = (forge.game.spellability.SpellAbility)next.invoke(plan);
+                    String receipt = action == null ? "none" : action.getHostCard().getId()+":"+action.getApi()+":"+action.getTargets()
+                            +":"+(action.getManaPart()==null?"none":action.getManaPart().getExpressChoice());
+                    if (first==null) first=receipt; else if (!first.equals(receipt)) throw new AssertionError("plan query drift "+key);
+                    if (!before.equals(snapshot(player))) throw new AssertionError("plan query mutated native state/RNG "+key+" step="+step);
+                }
+            } finally {
+                // These are dry queries of the real controller-owned planner.
+                // Restore its own selection/ownership counters before gameplay.
+                for (var entry:saved.entrySet()) entry.getKey().set(plan,entry.getValue());
+            }
+            System.out.println("EMRY_PLAN_QUERY "+key+" step="+step+" repeats=3 unchanged=true action="+first);
+        } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
+    }
     private static String observe(Player player,String key,int step,String previous) {
         Game game=player.getGame();
         if(!game.getStack().isEmpty() || game.isGameOver() || !game.getPhaseHandler().is(PhaseType.MAIN1,player) && !game.getPhaseHandler().is(PhaseType.MAIN2,player))return previous;
+        observePlan(player,key,step);
         var before=snapshot(player);String first=null;
         for(int i=0;i<3;i++) {
             String receipt=available(player);
