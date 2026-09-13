@@ -102,13 +102,29 @@ public final class CubeHarnfelTopPlan {
             }
         return true;
     }
+    private boolean returnsUntapped(Card card) {
+        // Public ETB-tapped replacements invalidate both the mana restoration
+        // and Top's next draw activation. No prospective move is executed.
+        for (ZoneType zone : new ZoneType[]{ZoneType.Battlefield, ZoneType.Command})
+            for (Card source : player.getGame().getCardsIn(zone)) {
+                if (source.isFaceDown()) continue;
+                for (var re : source.getReplacementEffects()) {
+                    if (!re.zonesCheck(source.getZone()) || !re.requirementsCheck(player.getGame())
+                            || !"Moved".equals(re.getParam("Event")) || !"Battlefield".equals(re.getParam("Destination"))
+                            || !re.matchesValidParam("ValidCard", card)) continue;
+                    String script = source.getSVar(re.getParamOrDefault("ReplaceWith", ""));
+                    if (script.matches("(?s).*DB\\$\\s*Tap(?:\\s*\\|.*|\\s*)") && script.contains("ETB$ True")) return false;
+                }
+            }
+        return true;
+    }
     private boolean enough(Card top, IntPredicate castBudget) {
         long life = player.getLife();
         int count = (int)player.getGame().getStack().getSpellsCastThisTurn().stream()
                 .filter(sa -> sa.getActivatingPlayer() == player).count();
         int casts = 0;
         while (life <= 50 && casts < 100) { life += ++count; casts++; }
-        if (life <= 50 || casts == 0) return false;
+        if (life <= 50 || casts == 0 || casts > 1 && !returnsUntapped(visibleTop)) return false;
         boolean library = top.isInZone(ZoneType.Library);
         boolean immediate = library || top.isInZone(ZoneType.Hand) || top.isInZone(ZoneType.Exile);
         int size = player.getCardsIn(ZoneType.Library).size();
