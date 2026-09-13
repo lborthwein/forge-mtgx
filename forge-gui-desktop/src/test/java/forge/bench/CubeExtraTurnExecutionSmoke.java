@@ -17,7 +17,8 @@ import java.lang.reflect.Proxy;
 import java.util.*;
 
 /** Bounded diagnostic of catalogue family S using entirely native decisions.
- * No scripted action, host answer, or policy change. Repeated own turns are
+ * No scripted action or host answer. Explicit public fixture interventions are
+ * labelled separately. Repeated own turns are
  * recorded, not described as mathematical infinity or sampled strength. */
 public final class CubeExtraTurnExecutionSmoke {
     private record Entry(String name, ZoneType zone) {}
@@ -38,6 +39,44 @@ public final class CubeExtraTurnExecutionSmoke {
             player.getZone(entry.zone()).add(card); card.setSickness(false);
         }
     }
+    private static Map<String, Object> visibleSnapshot(Player player) {
+        Map<String, Object> state = new LinkedHashMap<>();
+        Game game = player.getGame();
+        state.put("timestamp", game.getTimestamp());
+        state.put("rng", ((BenchRandomAudit.AuditedRandom) forge.util.MyRandom.getRandom()).snapshot().toString());
+        state.put("mana", player.getManaPool().totalMana());
+        state.put("manaObjects", java.util.stream.StreamSupport.stream(player.getManaPool().spliterator(), false).toList());
+        for (var memory : forge.ai.AiCardMemory.MemorySet.values())
+            state.put(memory.name(), forge.ai.AiCardMemory.getMemorySet(player, memory).stream().map(Card::getId).sorted().toList());
+        for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Graveyard, ZoneType.Battlefield, ZoneType.Exile}) {
+            state.put(zone.name(), player.getCardsIn(zone).stream()
+                    .map(c -> c.getId() + ":" + c.getGameTimestamp() + ":" + c.isTapped() + ":" + c.getCastFrom()
+                            + ":" + c.getCastSA()).toList());
+            state.put(zone.name() + "Abilities", player.getCardsIn(zone).stream().flatMap(c -> c.getSpellAbilities().stream())
+                    .map(a -> a.getHostCard().getId() + ":" + a.getActivatingPlayer() + ":" + a.getTargets()
+                            + ":" + (a.getManaPart() == null ? "null" : a.getManaPart().getExpressChoice())).toList());
+        }
+        state.put("history", game.getStack().getSpellCardsCastThisTurn().stream()
+                .map(c -> c.getId() + ":" + c.getCastFrom() + ":" + c.getController()).toList());
+        state.put("stack", java.util.stream.StreamSupport.stream(game.getStack().spliterator(), false)
+                .map(a -> a.getId() + ":" + a.getSpellAbility().getTargets()).toList());
+        return state;
+    }
+    private static void checkPurity(Player player, forge.game.spellability.SpellAbility ability, boolean candidate) {
+        while (ability instanceof forge.game.trigger.WrappedAbility wrapper) ability = wrapper.getWrappedAbility();
+        var query = ability.copy(player);
+        query.resetTargets();
+        var choices = new forge.game.card.CardCollection(player.getCardsIn(ZoneType.Graveyard));
+        Card ordinary = choices.stream().filter(c -> c.getName().equals("Time Walk")).findFirst().orElseThrow();
+        Map<String, Object> before = visibleSnapshot(player);
+        for (int repeat = 0; repeat < 3; repeat++) {
+            Card preferred = forge.ai.CubeExtraTurnPlan.preferRecurrence(player, query, choices, ordinary);
+            if (candidate ? preferred == null || !preferred.getName().equals("Ephemerate") : preferred != null)
+                throw new AssertionError("unexpected preference in purity query");
+            if (!before.equals(visibleSnapshot(player))) throw new AssertionError("recurrence query changed native state");
+        }
+        System.out.println("EXTRA_TURN_PURITY queries=3 unchanged=true candidate=" + candidate);
+    }
     private static void run(int seat, String engine, String turnSpell, String control, boolean candidate) {
         List<Entry> own = new ArrayList<>(), other = new ArrayList<>();
         own.add(new Entry(control.equals("no-witness") ? "Forest" : "Eternal Witness", ZoneType.Battlefield));
@@ -46,7 +85,7 @@ public final class CubeExtraTurnExecutionSmoke {
         own.add(new Entry(control.equals("no-turn-spell") ? "Forest" : turnSpell, ZoneType.Hand));
         if (control.equals("conversion")) own.add(new Entry("Dauthi Voidwalker", ZoneType.Battlefield));
         own.add(new Entry("Plains", ZoneType.Battlefield));
-        for (int i = 0; i < 5; i++) own.add(new Entry("Island", ZoneType.Battlefield));
+        for (int i = 0; i < 5; i++) own.add(new Entry(i == 0 && control.endsWith("two-white") ? "Plains" : "Island", ZoneType.Battlefield));
         for (int i = 0; i < 20; i++) own.add(new Entry("Forest", ZoneType.Library));
         while (own.size() < 40) own.add(new Entry("Forest", ZoneType.Exile));
         if (control.equals("conversion")) other.add(new Entry("Old One Eye", ZoneType.Battlefield));
@@ -87,12 +126,13 @@ public final class CubeExtraTurnExecutionSmoke {
             // upkeep. Cast/trigger history is untouched; no target is scripted.
             if (!intervention && turn == 2 && game.getPhaseHandler().getPhase() == PhaseType.UPKEEP
                     && game.getPhaseHandler().getPlayerTurn() == player && !control.equals("none")
-                    && !control.startsWith("no-") && !control.equals("conversion")) {
+                    && !control.startsWith("no-") && !control.equals("conversion") && !control.equals("purity")) {
                 int islandsKept = switch (control) {
                     case "mana-two" -> 1;
                     case "mana-three" -> 2;
                     case "missing-blue" -> 0;
                     case "tax-short" -> 4;
+                    case "tax-short-two-white" -> 3;
                     default -> 5;
                 };
                 int islands = 0;
@@ -115,6 +155,9 @@ public final class CubeExtraTurnExecutionSmoke {
                 if (name.equals(engine)) engineActions++;
                 if (name.equals("Eternal Witness") && ability.getApi() == forge.game.ability.ApiType.ChangeZone) {
                     returns++;
+                    if (control.equals("purity") && game.getPhaseHandler().getTurn() == 2
+                            && game.getPhaseHandler().getPhase() == PhaseType.UPKEEP)
+                        checkPurity(player, ability, candidate);
                     if (control.startsWith("tax-") && game.getPhaseHandler().getPhase() == PhaseType.UPKEEP) {
                         System.out.println("EXTRA_TURN_RESOURCES turn=" + game.getPhaseHandler().getTurn()
                                 + " lands=" + player.getCardsIn(ZoneType.Battlefield).stream().filter(Card::isLand)
@@ -143,7 +186,14 @@ public final class CubeExtraTurnExecutionSmoke {
             FModel.initialize(null, p -> {p.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); p.setPref(FPref.UI_LANGUAGE, "en-US"); return null;});
             boolean candidate = args.length < 2 || !args[1].equals("baseline");
             int cases = 0;
-            if (args.length > 2 && args[2].equals("guards")) {
+            if (args.length > 2 && args[2].equals("extended")) {
+                for (int seat = 0; seat < 2; seat++) for (String control : List.of(
+                        "tax-funded-two-white", "tax-short-two-white", "purity")) {
+                    run(seat, "Ephemerate", "Time Walk", control, candidate); cases++;
+                }
+                System.out.println("EXTRA_TURN_EXTENDED_COMPLETE cases=" + cases + " candidate=" + candidate);
+                return;
+            } else if (args.length > 2 && args[2].equals("guards")) {
                 for (int seat = 0; seat < 2; seat++) for (String control : List.of("mana-two", "mana-three", "missing-white",
                         "missing-blue", "tax-funded", "tax-short", "cast-cap", "conversion")) {
                     run(seat, "Ephemerate", "Time Walk", control, candidate); cases++;
