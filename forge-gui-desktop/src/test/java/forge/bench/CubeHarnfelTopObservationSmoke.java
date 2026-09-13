@@ -95,8 +95,52 @@ public final class CubeHarnfelTopObservationSmoke {
         }
         return String.join(";", result);
     }
+    private record SavedField(Object owner, java.lang.reflect.Field field, Object value) {}
+    private static void savePlanner(Object plan, List<SavedField> saved) throws ReflectiveOperationException {
+        for (var field : plan.getClass().getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+            field.setAccessible(true); Object value = field.get(plan);
+            if (java.lang.reflect.Modifier.isFinal(field.getModifiers())) {
+                if (value != null && value.getClass().getName().matches("forge\\.ai\\.Cube(?:TopKitten|HarnfelTop)Plan")) savePlanner(value, saved);
+            } else saved.add(new SavedField(plan, field, value));
+        }
+    }
+    private static Object listeners(Game game) throws ReflectiveOperationException {
+        var events = Game.class.getDeclaredField("events"); events.setAccessible(true);
+        Object bus = events.get(game);
+        var registry = bus.getClass().getDeclaredField("subscribers"); registry.setAccessible(true);
+        Object holder = registry.get(bus);
+        var subscribers = holder.getClass().getDeclaredField("subscribers"); subscribers.setAccessible(true);
+        Map<?, ?> original = (Map<?, ?>)subscribers.get(holder);
+        Map<Object, Object> copy = new java.util.HashMap<>();
+        for (var entry : original.entrySet()) copy.put(entry.getKey(), Set.copyOf((java.util.Collection<?>)entry.getValue()));
+        return copy;
+    }
+    private static void actualPlan(Player player, String key, int step) {
+        if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return;
+        try {
+            var field = forge.ai.CubeComboPlayerController.class.getDeclaredField("topPlan"); field.setAccessible(true);
+            Object plan = field.get(player.getController()); List<SavedField> saved = new ArrayList<>(); savePlanner(plan, saved);
+            Object before = snapshot(player), beforeListeners = listeners(player.getGame()); String first = null;
+            for (int i = 0; i < 3; i++) {
+                String receipt;
+                try {
+                    var action = (forge.game.spellability.SpellAbility)plan.getClass().getMethod("nextAction").invoke(plan);
+                    receipt = action == null ? "none" : action.getHostCard().getId() + ":" + action.getApi() + ":" + action.getTargets();
+                } finally {
+                    for (var value : saved) value.field().set(value.owner(), value.value());
+                }
+                if (first == null) first = receipt;
+                else if (!first.equals(receipt)) throw new AssertionError("actual plan query drift " + key);
+                if (!before.equals(snapshot(player)) || !beforeListeners.equals(listeners(player.getGame())))
+                    throw new AssertionError("actual plan query changed native state/RNG/listeners " + key);
+            }
+            System.out.println("HARNFEL_PLAN_QUERY " + key + " step=" + step + " repeats=3 unchanged=true listenersUnchanged=true action=" + first);
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+    }
     private static void observe(Player player, String key, int step) {
         if (!player.getGame().getStack().isEmpty() || !player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)) return;
+        actualPlan(player, key, step);
         Object before = snapshot(player); String first = available(player);
         for (int i = 0; i < 2; i++) if (!first.equals(available(player))) throw new AssertionError("query not repeatable");
         if (!before.equals(snapshot(player))) throw new AssertionError("query changed native state/RNG");
