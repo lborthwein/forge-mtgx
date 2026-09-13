@@ -248,6 +248,21 @@ public final class CubeTopTutorAvailabilitySmoke {
         probeActualPlan(player, key, step);
         return stamp;
     }
+    private static void liveGate(Player player, String key, int step) {
+        var game = player.getGame();
+        if (!game.getStack().isEmpty() || !(game.getPhaseHandler().is(PhaseType.MAIN1, player)
+                || game.getPhaseHandler().is(PhaseType.MAIN2, player))) return;
+        Set<String> own = new HashSet<>();
+        for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile))
+            for (Card card : player.getCardsIn(zone)) if (!card.isFaceDown()) own.add(card.getName());
+        Set<String> publicCards = new HashSet<>();
+        for (Card card : game.getCardsIn(ZoneType.Battlefield)) if (!card.isFaceDown()) publicCards.add(card.getName());
+        System.out.println("TOP_TUTOR_LIVE_GATE " + key + " step=" + step + " canDraw=" + player.canDraw()
+                + " stormHalves=" + ((own.contains(WILL) ? 1 : 0) + (own.contains(TENDRILS) ? 1 : 0))
+                + " breachHalves=" + ((own.contains("Underworld Breach") ? 1 : 0) + (own.contains("Brain Freeze") ? 1 : 0))
+                + " portalPresent=" + publicCards.contains("Possessed Portal")
+                + " rulePresent=" + publicCards.contains("Rule of Law"));
+    }
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
         var lobby = new forge.ai.LobbyPlayerAi("Default-" + seat, null);
         lobby.setAiProfile("Default");
@@ -282,6 +297,7 @@ public final class CubeTopTutorAvailabilitySmoke {
         TreeMap<String, Integer> casts = new TreeMap<>();
         String previous = "";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= startTurn + 2 && steps < 1000) {
+            liveGate(player, key, steps);
             if (observed) previous = observe(player, key, steps, previous);
             game.getPhaseHandler().mainLoopStep(); steps++;
             for (var item : game.getStack()) if (ids.add(item.getId())) {
