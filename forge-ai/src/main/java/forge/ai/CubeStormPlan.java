@@ -275,8 +275,15 @@ public final class CubeStormPlan {
      *
      * <p>Own hand, own graveyard, own battlefield and the public storm count
      * only.</p> */
+    // v90 qualification of the historical v72 description above: the replay
+    // term also includes known hand rituals/cantrips, and every extra hand or
+    // battlefield replay term applies only before Will is attempted.
     private int reachableStormBound(int storm) {
         boolean willReachable = will() != null || attemptedWill;
+        // Only casts made before Will can enter the graveyard for its replay.
+        // After an attempted Will, hand spells and sacrificed rocks cannot
+        // supply that second cast through this plan's own build order.
+        boolean beforeWill = will() != null && !attemptedWill;
         int countable = will() != null && !attemptedWill ? 1 : 0;
         for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Graveyard)) {
             if (zone == ZoneType.Graveyard && !willReachable) continue;
@@ -286,12 +293,14 @@ public final class CubeStormPlan {
                 if (!(ROCKS.contains(name) || DRAWS.contains(name)
                         || name.equals("Dark Ritual") || name.equals("Cabal Ritual"))) continue;
                 countable++;
-                // v72 R1: cast from hand, cracked into the graveyard, replayed.
-                if (zone == ZoneType.Hand && willReachable && sacrificeRock(card)) countable++;
+                // Hand rituals/cantrips, like sacrifice rocks, can be cast
+                // before Will and replayed once. Count no unseen draw.
+                if (zone == ZoneType.Hand && beforeWill && (sacrificeRock(card)
+                        || DRAWS.contains(name) || name.equals("Dark Ritual") || name.equals("Cabal Ritual"))) countable++;
             }
         }
         // v72 R1: the crack step's own rock, replayed once the Will resolves.
-        Card onBoard = willReachable ? battlefieldSacrificeRock() : null;
+        Card onBoard = beforeWill ? battlefieldSacrificeRock() : null;
         if (onBoard != null && onBoard != excluded && sacrificeRock(onBoard)) countable++;
         return storm + countable;
     }
