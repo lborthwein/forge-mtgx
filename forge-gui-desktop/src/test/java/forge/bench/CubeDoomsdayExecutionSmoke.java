@@ -1801,7 +1801,7 @@ public final class CubeDoomsdayExecutionSmoke {
         BenchRandomAudit.install(98800 + seat * 100);
         var plan = improved ? ((forge.ai.CubeComboPlayerController) player.getController()).doomsdayPlan()
                 : new forge.ai.CubeDoomsdayPlan(player);
-        var proposal = plan.nextAction();
+        var proposal = new forge.ai.CubeDoomsdayPlan(player).nextAction();
         boolean shouldPropose = List.of("hold-live", "break-devotion", "orb-after", "draw-after", "counterspell").contains(control);
         if ((proposal != null) != shouldPropose) throw new AssertionError("Hand-pass entry " + control + " main2=" + main2);
         Card oracle = player.getCardsIn(ZoneType.Hand).stream().filter(c -> c.getName().equals("Thassa's Oracle")).findFirst().orElseThrow();
@@ -1842,7 +1842,7 @@ public final class CubeDoomsdayExecutionSmoke {
         if (steps >= 1500) throw new AssertionError("Hand-pass control step bound");
         if (improved && shouldPropose && !control.equals("counterspell") && !(sawPile && sawHold && released))
             throw new AssertionError("Incomplete hold/release control " + control);
-        if (improved && control.equals("counterspell") && !sawCounter)
+        if (improved && control.equals("counterspell") && (!sawCounter || !has(opponent, ZoneType.Graveyard, "Counterspell")))
             throw new AssertionError("Counterspell control did not counter Doomsday");
         if (improved && control.equals("hold-live") && !(player.hasWon() && "Thassa's Oracle".equals(player.getOutcome().altWinSourceName)))
             throw new AssertionError("Live hold did not finish Oracle");
