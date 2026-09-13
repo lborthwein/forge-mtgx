@@ -1797,7 +1797,7 @@ public final class CubeDoomsdayExecutionSmoke {
             for (Card card : player.getCardsIn(ZoneType.Battlefield))
                 if (card.getName().equals("Talisman of Dominance"))
                     for (var mana : card.getManaAbilities()) {
-                        mana.setParam("RestrictValid", "nonSpell");
+                        mana.getMapParams().put("RestrictValid", "nonSpell");
                         mana.setManaPart(new forge.game.spellability.AbilityManaPart(mana, mana.getMapParams()));
                     }
         }
