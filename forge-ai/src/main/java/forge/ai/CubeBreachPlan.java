@@ -68,6 +68,7 @@ public final class CubeBreachPlan {
      * empty library a loss, so the plan never proposes a wheel below this. */
     private static final int WHEEL_DRAW = 7;
     private final Player player;
+    private final CubeBreachChannelerPlan channelerPlan;
     // Diagnostic state is never consulted by a decision. Hypothetical probes
     // explicitly disable it, including when the process opts into tracing.
     private final boolean traceEnabled;
@@ -148,6 +149,7 @@ public final class CubeBreachPlan {
 
     private CubeBreachPlan(Player player, boolean traceEnabled) {
         this.player = player;
+        this.channelerPlan = new CubeBreachChannelerPlan(player);
         this.traceEnabled = traceEnabled;
     }
 
@@ -515,7 +517,7 @@ public final class CubeBreachPlan {
         if (turn != phase.getTurn()) {
             turn = phase.getTurn(); actions = 0; selected = null; freezeTarget = null; freezeOpponent = null;
             reservedEngine = null; selfCopiesRemaining = 0; copyTargets.clear();
-            tideCasts = 0; wheelsCast = 0;
+            tideCasts = 0; wheelsCast = 0; channelerPlan.reset();
         }
         if (failedTurn == turn || actions >= 64 || player.cantWin() || !game.getStack().isEmpty()
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))
@@ -559,6 +561,10 @@ public final class CubeBreachPlan {
         action = wheelRoute(opponent, fuel, storm);
         traceAction("wheel", action);
         if (action != null) return action;
+        if (find("Dragon's Rage Channeler", ZoneType.Battlefield) != null) {
+            action = channelerPlan.nextAction(spell(find(FRANTIC, ZoneType.Graveyard)), 64 - actions);
+            if (action != null) return select(action);
+        }
         if (routeDecline != null) decline = routeDecline;
         return null;
     }
@@ -1444,11 +1450,13 @@ public final class CubeBreachPlan {
     }
 
     public boolean owns(SpellAbility ability) { return ability == selected; }
+    public boolean ownsChannelerSurveil(CardCollection offered) { return channelerPlan.ownsSurveil(offered); }
 
     public boolean play(SpellAbility ability) {
         boolean played = BREACH.equals(ability.getHostCard().getName())
                 ? reserveEngine(() -> playNative(ability)) : playNative(ability);
         if (played) {
+            channelerPlan.played(ability);
             String name = ability.getHostCard().getName();
             if (TIDE.equals(name)) tideCasts++;
             else if (WHEEL.equals(name)) wheelsCast++;
