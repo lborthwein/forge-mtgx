@@ -131,11 +131,24 @@ public final class CubeHarnfelTopObservationSmoke {
         boolean detachedCard = (boolean)method.invoke(child, action, detached);
         var noGrant = card.getSpellPermanent().copy(player);
         boolean missingGrant = (boolean)method.invoke(child, noGrant, card);
-        if (!before.equals(snapshot(player))) throw new AssertionError("permission queries changed native state/RNG");
+        // Query-only adversarial substitutions, restored before any game step.
+        var grant = action.getMayPlay(); Card effect = grant.getHostCard();
+        boolean wasSuppressed = grant.isSuppressed(), suppressedGrant, copiedRoot, inactiveGrant;
+        var source = effect.getEffectSourceAbility(); var zone = effect.getZone();
+        try { grant.setSuppressed(true); suppressedGrant = (boolean)method.invoke(child, action, card); }
+        finally { grant.setSuppressed(wasSuppressed); }
+        try { effect.setEffectSource(source.copy(player)); copiedRoot = (boolean)method.invoke(child, action, card); }
+        finally { effect.setEffectSource(source); }
+        try { effect.setZone(player.getZone(ZoneType.Graveyard)); inactiveGrant = (boolean)method.invoke(child, action, card); }
+        finally { effect.setZone(zone); }
+        if (!before.equals(snapshot(player)) || grant.isSuppressed() != wasSuppressed
+                || effect.getEffectSourceAbility() != source || effect.getZone() != zone)
+            throw new AssertionError("permission queries changed native state/RNG");
         System.out.println("HARNFEL_PERMISSION_QUERY " + key + " step=" + step + " positive=" + positive
                 + " foreignPlayer=" + foreignPlayer + " detachedSource=" + detachedSource
-                + " detachedCard=" + detachedCard + " missingGrant=" + missingGrant + " unchanged=true");
-        if (!positive || foreignPlayer || detachedSource || detachedCard || missingGrant)
+                + " detachedCard=" + detachedCard + " missingGrant=" + missingGrant
+                + " suppressedGrant=" + suppressedGrant + " copiedRoot=" + copiedRoot + " inactiveGrant=" + inactiveGrant + " unchanged=true");
+        if (!positive || foreignPlayer || detachedSource || detachedCard || missingGrant || suppressedGrant || copiedRoot || inactiveGrant)
             throw new AssertionError("permission ownership gate " + key);
     }
     private static void actualPlan(Player player, String key, int step) {
