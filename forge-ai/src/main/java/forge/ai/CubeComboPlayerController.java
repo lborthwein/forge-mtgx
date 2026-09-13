@@ -556,6 +556,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (p != getPlayer() || sa == null || sa.getActivatingPlayer() != getPlayer()
                 || ordinary == null || ordinary.isEmpty() || validCards == null) return ordinary;
         CardCollection reserved = reservedDiscardCards();
+        reserved.addAll(kittenPlan.resourceDiscardProtectedCards(sa));
         if (reserved.isEmpty()) return reanimatorDiscardChoice(validCards, ordinary, sa.getHostCard().getName());
         return ownDiscardChoice(validCards, ordinary, reserved, sa.getHostCard().getName());
     }
