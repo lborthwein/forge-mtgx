@@ -1771,11 +1771,11 @@ public final class CubeDoomsdayExecutionSmoke {
      * Default's willingness to use a painful mana source for a terminal. */
     private static void painDiagnosis(int seat, String variant) {
         boolean forced = variant.equals("forced-2"), painless = variant.equals("painless-2");
-        boolean noDevotion = variant.equals("no-devotion");
-        int life = noDevotion ? 5 : Integer.parseInt(variant.substring(variant.lastIndexOf('-') + 1));
+        boolean noDevotion = variant.equals("no-devotion") || variant.equals("without-devotion-2");
+        int life = variant.equals("no-devotion") ? 5 : Integer.parseInt(variant.substring(variant.lastIndexOf('-') + 1));
         List<Placement> own = new ArrayList<>();
         own.add(new Placement("Thassa's Oracle", ZoneType.Hand, false));
-        own.add(new Placement(variant.equals("missing-blue-2") ? "Forest" : "Island", ZoneType.Battlefield, false));
+        own.add(new Placement(variant.equals("missing-blue-2") ? "Forest" : variant.equals("double-pain-2") ? "Talisman of Dominance" : "Island", ZoneType.Battlefield, false));
         own.add(new Placement(painless ? "Island" : "Talisman of Dominance", ZoneType.Battlefield, variant.equals("tapped-2")));
         if (variant.equals("orb-2")) own.add(new Placement("Torpor Orb", ZoneType.Battlefield, false));
         if (variant.equals("null-2")) own.add(new Placement("Null Rod", ZoneType.Battlefield, false));
@@ -1792,6 +1792,12 @@ public final class CubeDoomsdayExecutionSmoke {
         BenchRandomAudit.install(98100 + seat * 100 + life);
         Card oracle = player.getCardsIn(ZoneType.Hand).get(0);
         var spell = oracle.getSpellPermanent().copy(player);
+        if (variant.equals("restricted-2")) {
+            // Explicit synthetic restriction control, not a printed-card claim.
+            for (Card card : player.getCardsIn(ZoneType.Battlefield))
+                if (card.getName().equals("Talisman of Dominance"))
+                    for (var mana : card.getManaAbilities()) mana.getManaPart().setExtraManaRestriction("nonSpell");
+        }
         Card held = null;
         var memory = forge.ai.AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL;
         if (variant.equals("held-2")) {
@@ -1824,6 +1830,18 @@ public final class CubeDoomsdayExecutionSmoke {
             game.getPhaseHandler().mainLoopStep();
         if (steps >= STEP_LIMIT) throw new AssertionError("Pain diagnosis exceeded step bound");
         String altWin = player.getOutcome() == null ? null : player.getOutcome().altWinSourceName;
+        boolean recoveryCase = List.of("pain-2", "pain-4", "forced-2", "tax-funded-2").contains(variant);
+        String expectedFirst = recoveryCase ? "Talisman_of_Dominance"
+                : List.of("pain-5", "painless-2").contains(variant) ? "Thassa's_Oracle" : "none";
+        if (!first.equals(expectedFirst)) throw new AssertionError("Pain proposal " + variant + ": " + first);
+        boolean expectedWin = forced || variant.equals("pain-5") || painless
+                || improved && (recoveryCase || variant.equals("held-2"));
+        // The held-source control checks the immediate proposal and preserved
+        // memory above. Default later clears its transient reservation normally.
+        if (player.hasWon() != expectedWin || expectedWin && !"Thassa's Oracle".equals(altWin))
+            throw new AssertionError("Pain terminal outcome " + variant + " improved=" + improved);
+        int expectedLife = expectedWin && !painless || noDevotion && life == 5 ? life - 1 : life;
+        if (player.getLife() != expectedLife) throw new AssertionError("Pain damage " + variant);
         System.out.println("PAIN_RESULT improved=" + improved + " policy=" + policy() + " seat=" + seat
                 + " variant=" + variant + " scripted=" + forced + " initialLife=" + life
                 + " payableBefore=" + payableBefore + " payableAfter=" + payableAfter + " first=" + first
@@ -1851,8 +1869,9 @@ public final class CubeDoomsdayExecutionSmoke {
                 for (int seat = 0; seat < 2; seat++)
                     for (String variant : List.of("pain-1", "pain-2", "pain-4", "pain-5",
                             "forced-2", "painless-2", "no-devotion", "orb-2", "null-2", "tapped-2",
-                            "missing-blue-2", "tax-2", "tax-funded-2", "held-2")) painDiagnosis(seat, variant);
-                System.out.println("PAIN_SUITE_COMPLETE cases=28 improved=" + improved + " policy=" + policy());
+                            "missing-blue-2", "tax-2", "tax-funded-2", "held-2",
+                            "restricted-2", "double-pain-2", "without-devotion-2")) painDiagnosis(seat, variant);
+                System.out.println("PAIN_SUITE_COMPLETE cases=34 improved=" + improved + " policy=" + policy());
                 return;
             }
             if (suite.equals("enabler")) {

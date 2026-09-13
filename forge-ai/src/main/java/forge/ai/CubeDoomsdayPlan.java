@@ -474,6 +474,9 @@ public final class CubeDoomsdayPlan {
                 SpellAbility mana = original.copy(player);
                 SpellAbility pain = mana.getSubAbility();
                 if (mana.getManaPart() == null || !mana.canProduce("U")
+                        || !mana.getManaPart().meetsManaRestrictions(oracle)
+                        || !mana.getManaPart().meetsManaShardRestrictions(ManaCostShard.BLUE, MagicColor.BLUE)
+                        || mana.getPayCosts().getCostParts().stream().noneMatch(p -> p instanceof forge.game.cost.CostTap)
                         || mana.getPayCosts().getTotalMana().getCMC() != 0
                         || !mana.getPayCosts().getCostParts().stream().allMatch(p -> p instanceof forge.game.cost.CostTap
                             || p instanceof forge.game.cost.CostPartMana)
