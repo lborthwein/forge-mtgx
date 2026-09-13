@@ -29,6 +29,37 @@ public final class CubeWitnessResourceSmoke {
         if (loaded.add(name)) StaticData.instance().attemptToLoadCard(name);
         return Objects.requireNonNull(FModel.getMagicDb().getCommonCards().getCard(name),name);
     }
+    /** Synchronous native event receipts. Read names only in own visible zones;
+     * a known name can label a later move without revealing library contents. */
+    public static final class ResourceObserver {
+        private final Player owner;
+        private final Map<Integer, String> known = new TreeMap<>();
+        int step;
+        ResourceObserver(Player owner) {
+            this.owner = owner;
+            for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile})
+                for (Card card : owner.getCardsIn(zone)) if (!card.isFaceDown()) known.put(card.getId(), card.getName());
+        }
+        @com.google.common.eventbus.Subscribe
+        public void zone(forge.game.event.GameEventCardChangeZone event) {
+            var card = event.card();
+            if (card == null || !owner.getView().equals(card.getOwner())) return;
+            ZoneType to = event.to() == null ? null : event.to().zoneType();
+            if (to != null && List.of(ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile).contains(to)
+                    && !card.isFaceDown()) known.put(card.getId(), card.getCurrentState().getName());
+            String name = known.get(card.getId());
+            if (name == null) return;
+            System.out.println("WITNESS_EVENT_ZONE step=" + step + " id=" + card.getId() + " card=" + name.replace(' ', '_')
+                    + " from=" + (event.from() == null ? null : event.from().zoneType()) + " to=" + to);
+        }
+        @com.google.common.eventbus.Subscribe
+        public void tap(forge.game.event.GameEventCardTapped event) {
+            var card = event.card();
+            if (card == null || !owner.getView().equals(card.getOwner()) || !known.containsKey(card.getId())) return;
+            System.out.println("WITNESS_EVENT_TAP step=" + step + " id=" + card.getId() + " card=" + known.get(card.getId()).replace(' ', '_')
+                    + " tapped=" + event.tapped());
+        }
+    }
     private static List<Entry> layout(String engine, String control) {
         List<Entry> cards = new ArrayList<>();
         cards.add(new Entry(control.equals("no-kitten") ? "Forest" : KITTEN, ZoneType.Battlefield));
@@ -104,9 +135,10 @@ public final class CubeWitnessResourceSmoke {
                 if (zone == ZoneType.Battlefield && c.isLand()) priorLandTap.put(c.getId(), c.isTapped());
             }
         int witnessEntries = 0, graveyardReturns = 0, auxiliaryCasts = 0, snapCasts = 0, franticCasts = 0;
+        ResourceObserver observer = new ResourceObserver(p); game.subscribeToEvents(observer);
         int turn = -1;
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps < 2400) {
-            steps++; game.getPhaseHandler().mainLoopStep();
+            steps++; observer.step = steps; game.getPhaseHandler().mainLoopStep();
             highestLife = Math.max(highestLife, p.getLife());
             if (turn != game.getPhaseHandler().getTurn()) {
                 turn = game.getPhaseHandler().getTurn();
@@ -151,6 +183,10 @@ public final class CubeWitnessResourceSmoke {
                     + " api=" + sa.getApi() + " targets=" + sa.getTargets());
             }
         }
+        for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard})
+            for (Card card : p.getCardsIn(zone)) if (!card.isFaceDown())
+                System.out.println("WITNESS_FINAL_CARD zone=" + zone + " id=" + card.getId() + " card=" + card.getName().replace(' ', '_')
+                        + " tapped=" + card.isTapped() + " sick=" + card.isSick());
         System.out.println("WITNESS_RESOURCE_RESULT " + key + " candidate=" + candidate + " policy=" + forge.ai.CubeComboAi.VERSION
             + " won=" + p.hasWon() + " gameOver=" + game.isGameOver() + " steps=" + steps + " casts=" + casts
             + " snapCasts=" + snapCasts + " franticCasts=" + franticCasts + " auxiliaryCasts=" + auxiliaryCasts
