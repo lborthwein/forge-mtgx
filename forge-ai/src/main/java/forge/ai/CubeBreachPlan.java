@@ -68,6 +68,10 @@ public final class CubeBreachPlan {
      * empty library a loss, so the plan never proposes a wheel below this. */
     private static final int WHEEL_DRAW = 7;
     private final Player player;
+    // Diagnostic state is never consulted by a decision. Hypothetical probes
+    // explicitly disable it, including when the process opts into tracing.
+    private final boolean traceEnabled;
+    private long tracePass;
     private SpellAbility selected;
     private Player freezeTarget;
     private Player freezeOpponent;
@@ -138,7 +142,33 @@ public final class CubeBreachPlan {
      * card and never a library read. */
     private static String token(String name) { return name.replace(' ', '_'); }
 
-    public CubeBreachPlan(Player player) { this.player = player; }
+    public CubeBreachPlan(Player player) {
+        this(player, Boolean.getBoolean("forge.ai.cubeBreachTrace"));
+    }
+
+    private CubeBreachPlan(Player player, boolean traceEnabled) {
+        this.player = player;
+        this.traceEnabled = traceEnabled;
+    }
+
+    private void trace(String route, String detail) {
+        if (!traceEnabled) return;
+        var phase = player.getGame().getPhaseHandler();
+        System.err.println("CUBE_BREACH_TRACE seat=" + player.getId()
+                + " turn=" + phase.getTurn() + " phase=" + phase.getPhase()
+                + " pass=" + tracePass + " route=" + route + " " + detail);
+    }
+
+    private void traceAction(String route, SpellAbility action) {
+        if (!traceEnabled) return;
+        trace(route, "action=" + (action == null ? "none"
+                : token(action.getHostCard().getName()) + "/" + action.getApi()));
+    }
+
+    private SpellAbility traceSkip(String route, String reason) {
+        if (traceEnabled) trace(route, "skip=" + reason);
+        return null;
+    }
 
     /** v49, predicate-only: one hand card this instance must pretend it does
      * not have, so {@link #discardProtectedCards} can ask the plan's own gate
@@ -508,15 +538,26 @@ public final class CubeBreachPlan {
         // gate, and R1/R2 cannot evaluate at all until it has. It writes
         // nothing and does nothing on a board with no Breach in our own hand
         // and no High Tide own-visible.
+        if (traceEnabled) {
+            tracePass++;
+            trace("pass", "fuel=" + fuel + " storm=" + storm
+                    + " ownLibrary=" + player.getCardsIn(ZoneType.Library).size()
+                    + " opponentLibrary=" + opponent.getCardsIn(ZoneType.Library).size());
+        }
         SpellAbility action = breachSequence(opponent, fuel, storm);
+        traceAction("sequence", action);
         if (action != null) return action;
         action = tideRoute(opponent, fuel, storm);
+        traceAction("tide", action);
         if (action != null) return action;
         action = franticRoute(opponent, fuel, storm);
+        traceAction("frantic", action);
         if (action != null) return action;
         action = freezeRoute(opponent);
+        traceAction("freeze", action);
         if (action != null) return action;
         action = wheelRoute(opponent, fuel, storm);
+        traceAction("wheel", action);
         if (action != null) return action;
         if (routeDecline != null) decline = routeDecline;
         return null;
@@ -819,15 +860,18 @@ public final class CubeBreachPlan {
      * probe now proposes the Breach and the hold RELEASES, which is correct:
      * the cast is no longer a wasted card.</p> */
     private SpellAbility breachSequence(Player opponent, int fuel, int storm) {
-        if (find(BREACH, ZoneType.Battlefield) != null) return null;
+        if (find(BREACH, ZoneType.Battlefield) != null) return traceSkip("sequence", "breach-on-board");
         Card breach = find(BREACH, ZoneType.Hand);
-        if (breach == null) return null;
+        if (breach == null) return traceSkip("sequence", "breach-not-in-hand");
         Card tide = routeCard(TIDE);
-        if (tide == null) return null;
+        if (tide == null) return traceSkip("sequence", "tide-not-own-visible");
         int remaining = opponent.getCardsIn(ZoneType.Library).size();
         Card freeze = freeze();
         if (freeze == null || remaining == 0 || opponent.cantLoseCheck(GameLossReason.Milled)
-                || !freezeTargetable(freeze, opponent)) return routeDecline("sequence-no-gain");
+                || !freezeTargetable(freeze, opponent)) {
+            traceSkip("sequence", freeze == null ? "missing-freeze" : "terminal-unavailable");
+            return routeDecline("sequence-no-gain");
+        }
         int blue = player.getManaPool().getAmountOfColor(MagicColor.BLUE);
         int islands = islands(), other = Math.max(0, colorMana("U", MagicColor.BLUE) - blue - islands);
         // The Breach's own cost comes out of the mana this blue forecast does
@@ -836,22 +880,38 @@ public final class CubeBreachPlan {
         // resolved, so spending them first would both misprice the line and be
         // the payment the native engine is least likely to choose.
         int cost = breach.getCMC();
-        cost -= Math.min(nonBlueSources(), cost);
+        int nonBlue = nonBlueSources();
+        if (traceEnabled) trace("sequence", "stage=before-entry blue=" + blue
+                + " islands=" + islands + " otherBlue=" + other + " nonBlueSources=" + nonBlue
+                + " breachCost=" + cost + " tideZone=" + tide.getZone().getZoneType()
+                + " freezeZone=" + freeze.getZone().getZoneType());
+        cost -= Math.min(nonBlue, cost);
         int take = Math.min(other, cost); other -= take; cost -= take;
         take = Math.min(blue, cost); blue -= take; cost -= take;
         take = Math.min(islands, cost); islands -= take; cost -= take;
         // The Tide's own {U}, priced exactly as R1 prices it.
         int islandPays = blue == 0 && other == 0 ? 1 : 0;
-        if (islands < islandPays || blue + islands + other < 1) return routeDecline("sequence-no-gain");
+        if (islands < islandPays || blue + islands + other < 1) {
+            traceSkip("sequence", "no-blue-after-entry");
+            return routeDecline("sequence-no-gain");
+        }
         int routeFuel = fuel - graveyardRouteCards();
         int tideCost = tide.isInZone(ZoneType.Graveyard) ? escapeCost(tide) : 0;
         Card engine = engine();
         boolean fromHand = find(FREEZE, ZoneType.Hand) != null;
         // The Breach and the Tide are both spells cast this turn, so the storm
         // the terminal will see is two higher than the one on this pass.
-        if (!enoughToMill(routeFuel - tideCost,
+        boolean with = enoughToMill(routeFuel - tideCost,
                 blue + 2 * (islands - islandPays) + other - (1 - islandPays),
-                engine, fromHand, storm + 2, remaining)) return routeDecline("sequence-no-gain");
+                engine, fromHand, storm + 2, remaining);
+        if (traceEnabled) trace("sequence", "stage=forecast fuel=" + fuel + " routeFuel=" + routeFuel
+                + " tideEscape=" + tideCost + " blue=" + blue + " islands=" + islands
+                + " otherBlue=" + other + " islandPays=" + islandPays + " entryCostUncovered=" + cost
+                + " forecastBlue=" + (blue + 2 * (islands - islandPays) + other - (1 - islandPays))
+                + " freezeInHand=" + fromHand + " engine=" + (engine == null ? "none" : token(engine.getName()))
+                + " engineZone=" + (engine == null ? "none" : engine.getZone().getZoneType())
+                + " storm=" + storm + " remaining=" + remaining + " with=" + with);
+        if (!with) return routeDecline("sequence-no-gain");
         // An on-board disabled engine is not a reason to spend the Breach -
         // freezeRoute's own clause, in this route's token namespace.
         if (engine != null && engine.isInPlay() && crack(engine) == null)
@@ -874,21 +934,30 @@ public final class CubeBreachPlan {
      * it: the win is proved before the card is spent, and a position the v41
      * route already wins never spends one. */
     private SpellAbility tideRoute(Player opponent, int fuel, int storm) {
-        if (find(BREACH, ZoneType.Battlefield) == null) return null;
+        if (find(BREACH, ZoneType.Battlefield) == null) return traceSkip("tide", "breach-not-on-board");
         Card tide = routeCard(TIDE);
-        if (tide == null) return null;
-        if (tideCasts > 0) return routeDecline("tide-already-cast");
+        if (tide == null) return traceSkip("tide", "tide-not-own-visible");
+        if (tideCasts > 0) {
+            traceSkip("tide", "already-cast");
+            return routeDecline("tide-already-cast");
+        }
         int remaining = opponent.getCardsIn(ZoneType.Library).size();
         Card freeze = freeze();
         if (freeze == null || remaining == 0 || opponent.cantLoseCheck(GameLossReason.Milled)
-                || !freezeTargetable(freeze, opponent)) return routeDecline("tide-no-gain");
+                || !freezeTargetable(freeze, opponent)) {
+            traceSkip("tide", freeze == null ? "missing-freeze" : "terminal-unavailable");
+            return routeDecline("tide-no-gain");
+        }
         int blue = player.getManaPool().getAmountOfColor(MagicColor.BLUE);
         int islands = islands(), other = Math.max(0, colorMana("U", MagicColor.BLUE) - blue - islands);
         // The Tide's own {U} comes from floating blue or another blue source
         // when there is one; otherwise an Island pays for it BEFORE the effect
         // exists, so that Island yields one, not two.
         int islandPays = blue == 0 && other == 0 ? 1 : 0;
-        if (islands < islandPays || blue + islands + other < 1) return routeDecline("tide-unaffordable");
+        if (islands < islandPays || blue + islands + other < 1) {
+            traceSkip("tide", "no-blue");
+            return routeDecline("tide-unaffordable");
+        }
         int routeFuel = fuel - graveyardRouteCards();
         int cost = tide.isInZone(ZoneType.Graveyard) ? escapeCost(tide) : 0;
         Card engine = engine();
@@ -896,6 +965,15 @@ public final class CubeBreachPlan {
         boolean without = enoughToMill(routeFuel, blue + islands + other, engine, fromHand, storm, remaining);
         boolean with = enoughToMill(routeFuel - cost, blue + 2 * (islands - islandPays) + other - (1 - islandPays),
                 engine, fromHand, storm + 1, remaining);
+        if (traceEnabled) trace("tide", "stage=forecast fuel=" + fuel + " routeFuel=" + routeFuel
+                + " tideEscape=" + cost + " blue=" + blue + " islands=" + islands
+                + " otherBlue=" + other + " islandPays=" + islandPays
+                + " withoutBlue=" + (blue + islands + other)
+                + " withBlue=" + (blue + 2 * (islands - islandPays) + other - (1 - islandPays))
+                + " freezeInHand=" + fromHand + " engine=" + (engine == null ? "none" : token(engine.getName()))
+                + " engineZone=" + (engine == null ? "none" : engine.getZone().getZoneType())
+                + " tideZone=" + tide.getZone().getZoneType() + " freezeZone=" + freeze.getZone().getZoneType()
+                + " storm=" + storm + " remaining=" + remaining + " without=" + without + " with=" + with);
         if (without || !with) return routeDecline("tide-no-gain");
         routeKeys = Set.copyOf(ROUTE_CARDS);
         SpellAbility cast = select(spell(tide));
@@ -1306,7 +1384,7 @@ public final class CubeBreachPlan {
         if (!game.getStack().isEmpty() || player.cantWin() || player.getOpponents().size() != 1
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))) return false;
         if (otherEscapeGrant(player, host)) return false;
-        CubeBreachPlan probe = new CubeBreachPlan(player);
+        CubeBreachPlan probe = new CubeBreachPlan(player, false);
         if (probe.nextAction() != null) return false;
         if (probe.escapeAvailableThisTurn(host, grant)) return false;
         boolean fuelClose = probe.fuel() + LAND_DROP_HORIZON >= HAND_ROUTE_FUEL;
