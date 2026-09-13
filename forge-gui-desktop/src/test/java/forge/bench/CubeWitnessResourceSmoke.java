@@ -108,6 +108,39 @@ public final class CubeWitnessResourceSmoke {
             if (c.getName().equals("Narset, Parter of Veils")) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 5);
         }
     }
+    private static Map<String, Object> snapshot(Player player) {
+        Map<String, Object> state = new LinkedHashMap<>(); Game game = player.getGame();
+        state.put("timestamp", game.getTimestamp());
+        state.put("rng", ((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot().toString());
+        state.put("mana", java.util.stream.StreamSupport.stream(player.getManaPool().spliterator(), false).toList());
+        state.put("conversion", java.util.stream.IntStream.range(0, 6)
+                .map(i -> player.getManaPool().getPossibleColorUses((byte)(1 << i))).boxed().toList());
+        state.put("snow", player.getManaPool().isSnowForColor());
+        for (var memory : forge.ai.AiCardMemory.MemorySet.values())
+            state.put(memory.name(), forge.ai.AiCardMemory.getMemorySet(player, memory).stream().map(Card::getId).sorted().toList());
+        for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile}) {
+            state.put(zone.name(), player.getCardsIn(zone).stream().map(c -> c.getId() + ":" + c.getGameTimestamp()
+                    + ":" + c.isTapped() + ":" + c.getView().isTapped() + ":" + c.getPlaneswalkerAbilityActivated() + ":" + c.getCounters(forge.game.card.CounterEnumType.LOYALTY) + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
+            state.put(zone.name() + "Abilities", player.getCardsIn(zone).stream().flatMap(c -> c.getSpellAbilities().stream())
+                    .map(sa -> sa.getHostCard().getId() + ":" + sa.getActivatingPlayer() + ":" + sa.getTargets() + ":" + System.identityHashCode(sa.getTargets())
+                            + ":" + (sa.getManaPart() == null ? "null" : sa.getManaPart().getExpressChoice())).toList());
+        }
+        state.put("librarySize", player.getCardsIn(ZoneType.Library).size());
+        state.put("history", game.getStack().getSpellCardsCastThisTurn().stream().map(c -> c.getId() + ":" + c.getCastFrom()).toList());
+        return state;
+    }
+    private static void probeInitial(Player player) {
+        Map<String, Object> before = snapshot(player); String first = null;
+        System.out.println("WITNESS_QUERY_BEGIN");
+        for (int repeat = 0; repeat < 3; repeat++) {
+            var action = new forge.ai.CubeKittenPlan(player).nextAction();
+            String choice = action == null ? "none" : action.getHostCard().getName().replace(' ', '_') + "/" + action.getApi();
+            if (first == null) first = choice;
+            if (!first.equals(choice)) throw new AssertionError("initial recurrence query is unstable");
+            if (!before.equals(snapshot(player))) throw new AssertionError("initial recurrence query changed native state");
+        }
+        System.out.println("WITNESS_QUERY_END repeats=3 unchanged=true choice=" + first);
+    }
     private static void run(int seat, String engine, String control, boolean candidate) {
         List<Entry> own = layout(engine, control), other = opposing(control);
         List<RegisteredPlayer> players = new ArrayList<>();
@@ -123,6 +156,7 @@ public final class CubeWitnessResourceSmoke {
         BenchRandomAudit.install(98800 + seat * 100 + (engine.equals("snap") ? 0 : 40) + controls(engine).indexOf(control));
         String key = "seat=" + seat + " engine=" + engine + " control=" + control;
         System.out.println("WITNESS_RESOURCE_FIXTURE " + key + " candidate=" + candidate + " policy=" + forge.ai.CubeComboAi.VERSION);
+        if (candidate) probeInitial(p);
         Set<Integer> seen = new HashSet<>(); Set<Long> partnerObjects = new HashSet<>();
         int steps = 0, casts = 0, blinks = 0, witnessEtb = 0, shots = 0, highestLife = p.getLife();
         Map<Integer, ZoneType> priorZones = new TreeMap<>();
