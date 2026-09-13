@@ -1767,6 +1767,55 @@ public final class CubeDoomsdayExecutionSmoke {
         }
     }
 
+    /** Delayed hand-Oracle diagnosis; scripted casts are explicit interventions. */
+    private static void handPassDiagnosis(int seat, int lands, boolean scripted) {
+        List<Placement> own = new ArrayList<>();
+        for (String name : List.of("Swamp", "Creeping Tar Pit", "Watery Grave", "Underground Sea"))
+            own.add(new Placement(name, ZoneType.Battlefield, false));
+        if (lands == 5) own.add(new Placement("Island", ZoneType.Battlefield, false));
+        own.add(new Placement("True-Name Nemesis", ZoneType.Battlefield, false));
+        own.add(new Placement("Doomsday", ZoneType.Hand, false));
+        own.add(new Placement("Thassa's Oracle", ZoneType.Hand, false));
+        for (int i = 0; i < 20; i++) own.add(new Placement("Forest", ZoneType.Library, false));
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        List<Placement> other = new ArrayList<>();
+        for (int i = 0; i < 40; i++) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player player = game.getPlayers().get(seat);
+        BenchRandomAudit.install(98400 + seat * 100 + lands);
+        var proposal = new forge.ai.CubeDoomsdayPlan(player).nextAction();
+        String first = proposal == null ? "none" : proposal.getHostCard().getName().replace(' ', '_');
+        if (scripted) {
+            Card card = player.getCardsIn(ZoneType.Hand).stream()
+                    .filter(c -> c.getName().equals("Doomsday")).findFirst().orElseThrow();
+            var doom = card.getFirstSpellAbility().copy(player);
+            if (!forge.ai.CubeComboAi.canPlayNative(doom, player)
+                    || !forge.ai.CubeComboAi.canPayCost(doom, player, false)
+                    || !player.getController().playChosenSpellAbility(doom))
+                throw new AssertionError("Scripted native Doomsday failed");
+            settle(game);
+            if (player.getLife() != 10 || player.getCardsIn(ZoneType.Library).size() != 5)
+                throw new AssertionError("Scripted Doomsday did not resolve its real cost and pile");
+        }
+        int steps = 0, oracleTurn = -1, beforeOracle = -1;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps++ < 1500) {
+            game.getPhaseHandler().mainLoopStep();
+            if (!game.getStack().isEmpty()) {
+                var sa = game.getStack().peekAbility();
+                if (sa.isSpell() && sa.getHostCard().getName().equals("Thassa's Oracle")) {
+                    oracleTurn = game.getPhaseHandler().getTurn();
+                    beforeOracle = player.getCardsIn(ZoneType.Library).size();
+                }
+            }
+        }
+        if (steps >= 1500) throw new AssertionError("Hand-Oracle diagnosis step bound");
+        String altWin = player.getOutcome() == null ? null : player.getOutcome().altWinSourceName;
+        System.out.println("HAND_PASS_RESULT improved=" + improved + " policy=" + policy() + " seat=" + seat
+                + " main2=" + main2 + " lands=" + lands + " scripted=" + scripted + " first=" + first
+                + " doom=" + has(player, ZoneType.Graveyard, "Doomsday") + " oracleTurn=" + oracleTurn
+                + " libraryBeforeOracle=" + beforeOracle + " won=" + player.hasWon() + " altWin=" + altWin);
+    }
+
     /** Diagnostic intervention only: distinguish native payment legality from
      * Default's willingness to use a painful mana source for a terminal. */
     private static void painDiagnosis(int seat, String variant) {
@@ -1868,6 +1917,15 @@ public final class CubeDoomsdayExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
+            if (suite.equals("hand-pass-diagnosis")) {
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++) for (int lands : new int[] {4, 5})
+                        for (boolean scripted : new boolean[] {false, true}) handPassDiagnosis(seat, lands, scripted);
+                }
+                System.out.println("HAND_PASS_SUITE_COMPLETE cases=16 improved=" + improved + " policy=" + policy());
+                return;
+            }
             if (suite.equals("pain-diagnosis")) {
                 for (int seat = 0; seat < 2; seat++)
                     for (String variant : List.of("pain-1", "pain-2", "pain-4", "pain-5",
