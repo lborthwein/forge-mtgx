@@ -20,6 +20,8 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
@@ -91,15 +93,52 @@ public final class CubeBreachChannelerSmoke {
     }
 
 
+    private static Map<String, Object> snapshot(Player player) {
+        Map<String, Object> state = new LinkedHashMap<>(); Game game = player.getGame();
+        state.put("timestamp", game.getTimestamp());
+        state.put("rng", ((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot().toString());
+        state.put("mana", java.util.stream.StreamSupport.stream(player.getManaPool().spliterator(), false).toList());
+        state.put("conversion", java.util.stream.IntStream.range(0, 6)
+                .map(i -> player.getManaPool().getPossibleColorUses((byte)(1 << i))).boxed().toList());
+        state.put("snow", player.getManaPool().isSnowForColor());
+        for (var memory : forge.ai.AiCardMemory.MemorySet.values())
+            state.put(memory.name(), forge.ai.AiCardMemory.getMemorySet(player, memory).stream().map(Card::getId).sorted().toList());
+        for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile}) {
+            state.put(zone.name(), player.getCardsIn(zone).stream().map(c -> c.getId() + ":" + c.getGameTimestamp()
+                    + ":" + c.isTapped() + ":" + c.getView().isTapped() + ":" + c.getPlaneswalkerAbilityActivated() + ":" + c.getCounters() + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
+            state.put(zone.name() + "Abilities", player.getCardsIn(zone).stream().flatMap(c -> c.getSpellAbilities().stream())
+                    .map(sa -> sa.getHostCard().getId() + ":" + sa.getActivatingPlayer() + ":" + sa.getTargets() + ":" + System.identityHashCode(sa.getTargets())
+                            + ":" + (sa.getManaPart() == null ? "null" : sa.getManaPart().getExpressChoice())).toList());
+        }
+        state.put("librarySize", player.getCardsIn(ZoneType.Library).size());
+        state.put("history", game.getStack().getSpellCardsCastThisTurn().stream().map(c -> c.getId() + ":" + c.getCastFrom()).toList());
+        return state;
+    }
     /** Observe the actual partition after native surveil, without reading library identities. */
     public static final class SurveilObserver {
         private final Player owner;
         private final String key;
         int step;
+        Card lastMilled;
+        boolean probed;
+        Throwable probeFailure;
+        @com.google.common.eventbus.Subscribe
+        public void moved(forge.game.event.GameEventCardChangeZone event) {
+            if (event.card() == null || !owner.getView().equals(event.card().getOwner())
+                    || event.from() == null || event.to() == null
+                    || event.from().zoneType() != ZoneType.Library || event.to().zoneType() != ZoneType.Graveyard) return;
+            for (Card card : owner.getCardsIn(ZoneType.Graveyard))
+                if (card.getId() == event.card().getId()) lastMilled = card;
+        }
         SurveilObserver(Player owner, String key) { this.owner = owner; this.key = key; }
         @com.google.common.eventbus.Subscribe
         public void surveil(forge.game.event.GameEventSurveil event) {
             if (!owner.getView().equals(event.player())) return;
+            if (!probed && event.toGraveyard() == 1 && lastMilled != null
+                    && owner.getController() instanceof forge.ai.CubeComboPlayerController) {
+                try { probeOwnership(); probed = true; }
+                catch (Throwable failure) { probeFailure = failure; }
+            }
             var resolving = owner.getGame().getStack().peekAbility();
             Object triggering = resolving == null ? null
                     : resolving.getTriggeringObject(forge.game.ability.AbilityKey.SpellAbility);
@@ -120,6 +159,59 @@ public final class CubeBreachChannelerSmoke {
                     + " castTimestamp=" + (cast == null ? -1 : cast.getHostCard().getGameTimestamp())
                     + " castOnStack=" + castOnStack);
         }
+        private void probeOwnership() throws ReflectiveOperationException {
+            var controller = (forge.ai.CubeComboPlayerController) owner.getController();
+            var before = snapshot(owner);
+            // This card was just revealed by our real native surveil. Recreate
+            // only that permitted offered object, never look up a hidden top.
+            Card offeredCard = forge.game.card.CardCopyService.getLKICopy(lastMilled);
+            offeredCard.setLastKnownZone(owner.getZone(ZoneType.Library));
+            var offered = new forge.game.card.CardCollection(); offered.add(offeredCard);
+            int checks = 0;
+            for (int i = 0; i < 3; i++) {
+                if (!controller.ownsChannelerSurveil(offered)) throw new AssertionError("real cause rejected");
+                checks++;
+            }
+            if (controller.ownsChannelerSurveil(null)) throw new AssertionError("null offered"); checks++;
+            if (controller.ownsChannelerSurveil(new forge.game.card.CardCollection())) throw new AssertionError("empty offered"); checks++;
+            var wrongZone = new forge.game.card.CardCollection(); wrongZone.add(lastMilled);
+            if (controller.ownsChannelerSurveil(wrongZone)) throw new AssertionError("graveyard offered"); checks++;
+            Card foreign = forge.game.card.CardCopyService.getLKICopy(offeredCard);
+            foreign.setOwner(owner.getOpponents().get(0));
+            var wrongOwner = new forge.game.card.CardCollection(); wrongOwner.add(foreign);
+            if (controller.ownsChannelerSurveil(wrongOwner)) throw new AssertionError("foreign offered"); checks++;
+            var bf = controller.getClass().getDeclaredField("breachPlan"); bf.setAccessible(true);
+            Object breach = bf.get(controller);
+            var cf = breach.getClass().getDeclaredField("channelerPlan"); cf.setAccessible(true);
+            Object plan = cf.get(breach);
+            for (String name : List.of("castTimestamp", "sourceTimestamp", "turn", "sourceId", "castId")) {
+                var field = plan.getClass().getDeclaredField(name); field.setAccessible(true);
+                Object old = field.get(plan);
+                try {
+                    if (old instanceof Long value) field.setLong(plan, value + 1);
+                    else field.setInt(plan, ((Integer) old) + 1);
+                    if (controller.ownsChannelerSurveil(offered)) throw new AssertionError("stale " + name);
+                    checks++;
+                } finally { field.set(plan, old); }
+            }
+            var top = owner.getGame().getStack().peekAbility();
+            var key = forge.game.ability.AbilityKey.SpellAbility;
+            Object oldCause = top.getTriggeringObject(key);
+            var cast = (forge.game.spellability.SpellAbility) oldCause;
+            try {
+                var copy = cast.copy(owner);
+                top.setTriggeringObject(key, copy);
+                if (controller.ownsChannelerSurveil(offered)) throw new AssertionError("unstacked copy"); checks++;
+                copy.setActivatingPlayer(owner.getOpponents().get(0));
+                if (controller.ownsChannelerSurveil(offered)) throw new AssertionError("wrong actor"); checks++;
+                top.setTriggeringObject(key, null);
+                if (controller.ownsChannelerSurveil(offered)) throw new AssertionError("missing cause"); checks++;
+            } finally { top.setTriggeringObject(key, oldCause); }
+            if (!controller.ownsChannelerSurveil(offered)) throw new AssertionError("restored cause rejected"); checks++;
+            if (!before.equals(snapshot(owner))) throw new AssertionError("ownership probe changed native state/RNG");
+            System.out.println("CHANNELER_OWNERSHIP " + key() + " checks=" + checks + " queries=3 unchanged=true");
+        }
+        private String key() { return key; }
     }
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
         var lobby = new forge.ai.LobbyPlayerAi("Default-" + seat, null);
@@ -156,6 +248,7 @@ public final class CubeBreachChannelerSmoke {
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= startTurn + 1 && steps < 900) {
             observer.step = steps + 1;
             game.getPhaseHandler().mainLoopStep(); steps++;
+            if (observer.probeFailure != null) throw new AssertionError("synchronous ownership probe failed", observer.probeFailure);
             for (var item : game.getStack()) if (ids.add(item.getId())) {
                 var sa = item.getSpellAbility();
                 if (sa.getActivatingPlayer() != player) continue;
