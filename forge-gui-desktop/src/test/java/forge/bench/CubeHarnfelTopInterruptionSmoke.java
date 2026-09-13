@@ -21,7 +21,7 @@ import java.util.*;
 public final class CubeHarnfelTopInterruptionSmoke {
     private static final String BIRGI = "Birgi, God of Storytelling", HARNFEL = "Harnfel, Horn of Bounty";
     private static final String TOP = "Sensei's Divining Top", HELM = "Helm of Awakening", OUTLET = "Aetherflux Reservoir";
-    private static final List<String> CASES = List.of("complete", "counter-draw", "counter-dig", "counter-cast");
+    private static final List<String> CASES = List.of("complete", "counter-draw", "counter-dig", "counter-cast", "shuffle-after-draw", "remove-after-dig");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone) { }
     private static void add(List<Placement> out, int n, String name, ZoneType zone) {
@@ -170,8 +170,26 @@ public final class CubeHarnfelTopInterruptionSmoke {
                 + " observed=" + observed + " registered=40 initialMana=0 startTurn=" + start
                 + " face=" + (control.equals("front-face") ? "Birgi" : "Harnfel") + " librarySize=" + player.getCardsIn(ZoneType.Library).size());
         if (opponent.getController() instanceof CounterController counter) { counter.control = control; counter.key = key; }
+        boolean intervened = false;
         Set<Integer> seen = new HashSet<>(); int steps = 0, topCasts = 0, exileCasts = 0, harnfelActivations = 0, shots = 0;
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= start && steps < 1000) {
+            if (!intervened && game.getStack().isEmpty() && (control.equals("shuffle-after-draw") || control.equals("remove-after-dig"))) {
+                var pending = (forge.game.spellability.SpellAbility)childValue(player, "pending");
+                Card visible = (Card)childValue(player, "visibleTop");
+                Card actual = visible == null ? null : game.getCardState(visible, null);
+                if (pending != null && actual != null && (control.equals("shuffle-after-draw") && pending.getApi() == forge.game.ability.ApiType.Draw && actual.isInZone(ZoneType.Library)
+                        || control.equals("remove-after-dig") && pending.getApi() == forge.game.ability.ApiType.Dig && actual.isInZone(ZoneType.Exile))) {
+                    int library = player.getCardsIn(ZoneType.Library).size();
+                    if (control.equals("shuffle-after-draw")) player.shuffle(null);
+                    else game.getAction().moveToGraveyard(actual, null);
+                    if (!Boolean.TRUE.equals(childValue(player, "disrupted"))) throw new AssertionError("intervention did not invalidate owned memory");
+                    if (player.getCardsIn(ZoneType.Library).size() != library) throw new AssertionError("intervention changed library size");
+                    intervened = true;
+                    System.out.println("HARNFEL_INTERVENTION " + key + " step=" + steps + " turn=" + game.getPhaseHandler().getTurn()
+                            + " phase=" + game.getPhaseHandler().getPhase() + " nativeAction=true disrupted=true librarySize=" + library
+                            + " knownObjectZone=" + game.getCardState(visible, null).getZone().getZoneType());
+                }
+            }
             if (observed) observe(player, key, steps);
             game.getPhaseHandler().mainLoopStep(); steps++;
             if (opponent.getController() instanceof CounterController counter) counter.report();
@@ -190,6 +208,7 @@ public final class CubeHarnfelTopInterruptionSmoke {
                         + " ownPermission=" + (grant != null && grant.getHostCard().getController() == player));
             }
         }
+        if ((control.equals("shuffle-after-draw") || control.equals("remove-after-dig")) && !intervened) throw new AssertionError("required intervention not reached");
         if (opponent.getController() instanceof CounterController counter && (!counter.attempted || !counter.resolved)) throw new AssertionError("required native counter not reached " + key);
         if (control.equals("complete") != player.hasWon()) throw new AssertionError("native interruption endpoint " + key);
         if (steps >= 1000) throw new AssertionError("native step budget exhausted " + key);
@@ -212,7 +231,7 @@ public final class CubeHarnfelTopInterruptionSmoke {
             for (String control : CASES) for (boolean own : List.of(false,true)) for (Placement p : placements(own,control)) names.add(p.name());
             for (String name : names) StaticData.instance().attemptToLoadCard(name);
             for (String control : CASES) for (int seat = 0; seat < 2; seat++) run(args[1].equals("improved"),args[2].equals("observed"),seat,control);
-            System.out.println("HARNFEL_SUITE_COMPLETE cases=8");
+            System.out.println("HARNFEL_SUITE_COMPLETE cases=12");
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }
 }
