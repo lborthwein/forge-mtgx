@@ -168,7 +168,7 @@ public final class CubeReservoirPreventionSmoke {
         if (control.startsWith("life")) opponent.setLife(Integer.parseInt(control.substring(4)), null);
         if (control.contains("shield")) {
             int amount = Integer.parseInt(control.substring(control.indexOf("shield") + 6));
-            var shield = forge.game.ability.AbilityFactory.getAbility("AB$ DamagePrevent | Cost$ 0 | Amount$ " + amount + " | ValidTgts$ Player", reservoir);
+            var shield = forge.game.ability.AbilityFactory.getAbility("AB$ PreventDamage | Cost$ 0 | Amount$ " + amount + " | ValidTgts$ Player", reservoir);
             shield.setActivatingPlayer(player); shield.getTargets().add(control.startsWith("own-") ? player : opponent);
             new forge.game.ability.effects.DamagePreventEffect().resolve(shield);
             Player target = control.startsWith("own-") ? player : opponent;
