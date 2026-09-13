@@ -170,8 +170,14 @@ final class CubeEmryPlan {
         blinkPartner = partner; blinkTimestamp = partner.getGameTimestamp();
         return true;
     }
+    private boolean selectedSpellPending() {
+        if (selected == null || !selected.isSpell()) return false;
+        for (var item : player.getGame().getStack())
+            if (item.getSpellAbility() == selected) return true;
+        return false;
+    }
     Card untapSource(SpellAbility sa) {
-        if (selected == null || !selected.isSpell() || blinkPartner == null
+        if (!selectedSpellPending() || blinkPartner == null
                 || turn != player.getGame().getPhaseHandler().getTurn() || sa.getActivatingPlayer() != player
                 || sa.getHostCard().getController() != player || sa.getHostCard().getId() != blinkPartner.getId()
                 || sa.getHostCard().getGameTimestamp() == blinkTimestamp
