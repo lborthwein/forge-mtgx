@@ -275,14 +275,12 @@ public final class CubeStormPlan {
      *
      * <p>Own hand, own graveyard, own battlefield and the public storm count
      * only.</p> */
-    // v90 qualification of the historical v72 description above: the replay
-    // term also includes known hand rituals/cantrips, and every extra hand or
-    // battlefield replay term applies only before Will is attempted.
+    // v91 adds pre-Will hand ritual/cantrip replay to the historical
+    // optimistic gate. Preserve the existing sacrifice-rock optimism after
+    // Will; this upper bound is not a certificate of native castability.
     private int reachableStormBound(int storm) {
         boolean willReachable = will() != null || attemptedWill;
-        // Only casts made before Will can enter the graveyard for its replay.
-        // After an attempted Will, hand spells and sacrificed rocks cannot
-        // supply that second cast through this plan's own build order.
+        // Known hand rituals/cantrips may replay only if first cast before Will.
         boolean beforeWill = will() != null && !attemptedWill;
         int countable = will() != null && !attemptedWill ? 1 : 0;
         for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Graveyard)) {
@@ -295,12 +293,13 @@ public final class CubeStormPlan {
                 countable++;
                 // Hand rituals/cantrips, like sacrifice rocks, can be cast
                 // before Will and replayed once. Count no unseen draw.
-                if (zone == ZoneType.Hand && beforeWill && (sacrificeRock(card)
-                        || DRAWS.contains(name) || name.equals("Dark Ritual") || name.equals("Cabal Ritual"))) countable++;
+                if (zone == ZoneType.Hand && ((willReachable && sacrificeRock(card))
+                        || (beforeWill && (DRAWS.contains(name)
+                        || name.equals("Dark Ritual") || name.equals("Cabal Ritual"))))) countable++;
             }
         }
         // v72 R1: the crack step's own rock, replayed once the Will resolves.
-        Card onBoard = beforeWill ? battlefieldSacrificeRock() : null;
+        Card onBoard = willReachable ? battlefieldSacrificeRock() : null;
         if (onBoard != null && onBoard != excluded && sacrificeRock(onBoard)) countable++;
         return storm + countable;
     }
