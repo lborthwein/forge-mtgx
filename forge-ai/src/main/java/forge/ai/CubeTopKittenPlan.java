@@ -175,7 +175,7 @@ final class CubeTopKittenPlan {
     Card knownTop() { return knownTop; }
     boolean isRecoveryCard(Card card) { return knownTop != null && card.getId() == knownTop.getId(); }
     boolean waitingForOwnSpell() {
-        if (!active || turn != player.getGame().getPhaseHandler().getTurn()) return false;
+        if (!active || turn != player.getGame().getPhaseHandler().getTurn() || player.getGame().getStack().isEmpty()) return false;
         var top = player.getGame().getStack().peekAbility();
         return top != null && top.getActivatingPlayer() == player && (KITTEN.equals(top.getHostCard().getName())
                 || partner != null && top.getHostCard().getId() == partner.getId());
