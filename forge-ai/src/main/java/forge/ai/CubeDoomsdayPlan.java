@@ -46,6 +46,8 @@ public final class CubeDoomsdayPlan {
     private int enablerId = -1, enablerTurn = -1;
     private boolean oracleSelected, gushSelected, gushRoute;
     private Card reservedStar;
+    private Card delayedHandOracle;
+    private int delayedHandTurn = -1, delayedDoomId = -1;
     /** Observability only: the token for the check that already declined the
      * most recent {@link #nextAction}. Never read by a decision.
      *
@@ -580,13 +582,18 @@ public final class CubeDoomsdayPlan {
         if (oracleTriggerDisabled()) { decline = "oracle-etb-disabled"; return null; }
         int threshold = oracleThreshold(false);
         if (inHand("Thassa's Oracle") != null) {
-            if (threshold < 5) return null;
-            if (!CubeComboAi.canPayCost(new Cost("B B B U U", false), doom, player, false)) {
-                decline = "mana:5/" + CubeComboAi.ownVisibleMana(player);
-                return null;
+            if (threshold >= 5 && CubeComboAi.canPayCost(new Cost("B B B U U", false), doom, player, false)) {
+                if (lethalOnBoard(true)) { decline = "better-attack"; return null; }
+                return commitDoomsday(doom);
             }
-            if (lethalOnBoard(true)) { decline = "better-attack"; return null; }
-            return commitDoomsday(doom);
+            if (threshold < 4 || !player.canDrawAmount(1) || ownBlueSources() < 2) return null;
+            if (lethalOnBoard(false)) { decline = "better-attack"; return null; }
+            if (!clockSurvivable()) { decline = "clock"; return null; }
+            SpellAbility action = commitDoomsday(doom);
+            delayedHandOracle = inHand("Thassa's Oracle");
+            delayedHandTurn = player.getGame().getPhaseHandler().getTurn();
+            delayedDoomId = doom.getHostCard().getId();
+            return action;
         }
         // Oracle is not in hand, so the availability already checked above means
         // library or graveyard: exactly the zones Doomsday searches.
@@ -965,6 +972,9 @@ public final class CubeDoomsdayPlan {
     }
 
     private SpellAbility commitDoomsday(SpellAbility doom) {
+        delayedHandOracle = null;
+        delayedHandTurn = -1;
+        delayedDoomId = -1;
         turn = player.getGame().getPhaseHandler().getTurn();
         doomsdayId = doom.getHostCard().getId();
         oracleSelected = false;
@@ -1105,7 +1115,8 @@ public final class CubeDoomsdayPlan {
         // trigger-disabled gate, without its B B B U U / B B B payment.
         if (oracleTriggerDisabled()) return false;
         int threshold = oracleThreshold(false);
-        if (inHand("Thassa's Oracle") != null) return threshold >= 5;
+        if (inHand("Thassa's Oracle") != null)
+            return threshold >= 5 || threshold >= 4 && player.canDrawAmount(1) && ownBlueSources() >= 2;
         return threshold >= 4 && player.canDrawAmount(1) && ownBlueSources() >= 2;
     }
 
@@ -1465,6 +1476,22 @@ public final class CubeDoomsdayPlan {
 
     public boolean ownsPileDecision(SpellAbility source) {
         return stage == Stage.DOOMSDAY && source.getHostCard().getId() == doomsdayId;
+    }
+
+    /** Own the exact hand Oracle only during this delayed route's waiting
+     * period. The real resolved Doomsday, public library size and current
+     * devotion establish the hold; a countered spell cannot establish it.
+     * No next-turn draw means expiration, not an indefinite card-name hold. */
+    public boolean holdDelayedOracle(SpellAbility spell) {
+        if (delayedHandOracle == null || spell.getHostCard() != delayedHandOracle || !spell.isSpell()
+                || !delayedHandOracle.isInZone(ZoneType.Hand)
+                || delayedHandOracle.getController() != player) return false;
+        int library = player.getCardsIn(ZoneType.Library).size();
+        int now = player.getGame().getPhaseHandler().getTurn();
+        if (now > delayedHandTurn + 1 || library > 5 || library <= oracleThreshold(false)
+                || oracleThreshold(false) < 4 || oracleTriggerDisabled() || !player.canDrawAmount(1)
+                || player.cantWin() || player.getOpponents().stream().anyMatch(p -> p.cantLose())) return false;
+        return player.getCardsIn(ZoneType.Graveyard).stream().anyMatch(c -> c.getId() == delayedDoomId);
     }
 
     /** v49: is the plan still holding a pile it built, waiting for the Oracle

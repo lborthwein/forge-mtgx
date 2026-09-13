@@ -58,6 +58,11 @@ public class PermanentAi extends SpellAbilityAi {
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 
+        if (ai.getController() instanceof CubeComboPlayerController combo
+                && combo.doomsdayPlan().holdDelayedOracle(sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         // check on legendary
         if (!source.ignoreLegendRule() && ai.isCardInPlay(source.getName())) {
             // TODO check the risk we'd lose the effect with bad timing
