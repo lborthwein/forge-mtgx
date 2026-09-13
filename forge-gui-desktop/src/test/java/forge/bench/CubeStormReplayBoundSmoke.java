@@ -32,7 +32,7 @@ public final class CubeStormReplayBoundSmoke {
     private static final List<String> CASES = List.of("complete", "one-ritual", "rituals-yard", "no-will",
             "no-sac-rock", "mana-short", "rule-of-law", "rest-in-peace", "library-one", "draw-blocked", "pre-cantrip", "late-ritual", "late-rock", "late-cantrip",
             "no-cantrip", "uncastable-cantrip", "no-threshold", "cost-tax", "null-rod",
-            "late-ritual-visible", "late-rock-visible");
+            "late-ritual-visible", "late-rock-visible", "pre-cantrip-replay");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone, boolean tapped) { }
@@ -47,13 +47,13 @@ public final class CubeStormReplayBoundSmoke {
         add(result, 1, "Dark Ritual", ritualZone);
         if (!name.equals("one-ritual")) add(result, 1, "Cabal Ritual", ritualZone);
         if (!name.equals("no-cantrip")) add(result, 1,
-                name.equals("pre-cantrip") || name.equals("uncastable-cantrip") ? "Ponder" : "Gitaxian Probe", ZoneType.Hand);
+                name.startsWith("pre-cantrip") || name.equals("uncastable-cantrip") ? "Ponder" : "Gitaxian Probe", ZoneType.Hand);
         if (!name.equals("no-sac-rock")) {
             add(result, 1, "Lotus Petal", ZoneType.Hand);
             add(result, 1, "Black Lotus", ZoneType.Graveyard);
         }
         if (!name.equals("mana-short")) add(result, 3,
-                name.equals("pre-cantrip") || name.equals("late-cantrip") ? "Underground Sea" : "Swamp", ZoneType.Battlefield);
+                name.startsWith("pre-cantrip") || name.equals("late-cantrip") ? "Underground Sea" : "Swamp", ZoneType.Battlefield);
         if (!name.equals("no-threshold")) add(result, 6, "Forest", ZoneType.Graveyard);
         if (name.startsWith("late-")) add(result, 1, name.startsWith("late-ritual") ? "Dark Ritual"
                 : name.startsWith("late-rock") ? "Lotus Petal" : "Ponder", ZoneType.Library);
@@ -194,6 +194,7 @@ public final class CubeStormReplayBoundSmoke {
         player.setLife(40, null);
         if (name.startsWith("late-") && !name.endsWith("-visible")) opponent.setLife(22, null);
         if (name.equals("no-cantrip")) opponent.setLife(18, null);
+        if (name.equals("pre-cantrip-replay")) opponent.setLife(22, null);
         for (Card c : opponent.getCardsIn(ZoneType.Battlefield))
             if (c.isPlaneswalker()) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 5);
         game.setAge(GameStage.Play);
