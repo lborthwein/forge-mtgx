@@ -22,7 +22,7 @@ import java.util.Set;
  * inspected, and no source is tapped or floating mana reserved by a query. */
 public final class CubeDoomStarResources {
     private CubeDoomStarResources() { }
-    public record Payment(Card source, SpellAbility ability, Mana floating, String color) { }
+    public record Payment(Card source, SpellAbility ability, Mana floating, String color, int damage) { }
     private record Option(Object identity, Payment payment) { }
     private static final List<String> COLORS = List.of("C", "W", "U", "B", "R", "G");
 
