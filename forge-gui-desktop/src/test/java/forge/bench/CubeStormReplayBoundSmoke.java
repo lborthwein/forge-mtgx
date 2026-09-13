@@ -31,7 +31,8 @@ public final class CubeStormReplayBoundSmoke {
     private static final String WILL = "Yawgmoth's Will", TENDRILS = "Tendrils of Agony";
     private static final List<String> CASES = List.of("complete", "one-ritual", "rituals-yard", "no-will",
             "no-sac-rock", "mana-short", "rule-of-law", "rest-in-peace", "library-one", "draw-blocked", "pre-cantrip", "late-ritual", "late-rock", "late-cantrip",
-            "no-cantrip", "uncastable-cantrip", "no-threshold", "cost-tax", "null-rod");
+            "no-cantrip", "uncastable-cantrip", "no-threshold", "cost-tax", "null-rod",
+            "late-ritual-visible", "late-rock-visible");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone, boolean tapped) { }
@@ -54,8 +55,8 @@ public final class CubeStormReplayBoundSmoke {
         if (!name.equals("mana-short")) add(result, 3,
                 name.equals("pre-cantrip") || name.equals("late-cantrip") ? "Underground Sea" : "Swamp", ZoneType.Battlefield);
         if (!name.equals("no-threshold")) add(result, 6, "Forest", ZoneType.Graveyard);
-        if (name.startsWith("late-")) add(result, 1, name.equals("late-ritual") ? "Dark Ritual"
-                : name.equals("late-rock") ? "Lotus Petal" : "Ponder", ZoneType.Library);
+        if (name.startsWith("late-")) add(result, 1, name.startsWith("late-ritual") ? "Dark Ritual"
+                : name.startsWith("late-rock") ? "Lotus Petal" : "Ponder", ZoneType.Library);
         add(result, name.equals("library-one") ? 1 : name.startsWith("late-") ? 19 : 20, "Forest", ZoneType.Library);
         add(result, 40-result.size(), "Forest", ZoneType.Exile);
         if (result.size()!=40) throw new AssertionError("own deck size");
@@ -191,7 +192,7 @@ public final class CubeStormReplayBoundSmoke {
         Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
         populate(player, true, name); populate(opponent, false, name);
         player.setLife(40, null);
-        if (name.startsWith("late-")) opponent.setLife(22, null);
+        if (name.startsWith("late-") && !name.endsWith("-visible")) opponent.setLife(22, null);
         if (name.equals("no-cantrip")) opponent.setLife(18, null);
         for (Card c : opponent.getCardsIn(ZoneType.Battlefield))
             if (c.isPlaneswalker()) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 5);
