@@ -147,6 +147,27 @@ public final class CubeStormReplayBoundSmoke {
             System.out.println("STORM_REPLAY_QUERY " + key + " repeats=6 unchanged=true " + first);
         } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
     }
+    private static String drainReservation(Player player) {
+        var hand = player.getCardsIn(ZoneType.Hand);
+        Card tendrils = hand.stream().filter(c -> !c.isFaceDown() && c.getName().equals(TENDRILS)).findFirst().orElse(null);
+        Card will = hand.stream().filter(c -> !c.isFaceDown() && c.getName().equals(WILL)).findFirst().orElse(null);
+        if (tendrils == null || will == null) return "present=false";
+        var first = tendrils.getSpellAbilities().get(0).copy(player);
+        var second = will.getSpellAbilities().get(0).copy(player);
+        boolean firstLegal = forge.ai.CubeComboAi.canPlayNative(first, player);
+        boolean secondLegal = forge.ai.CubeComboAi.canPlayNative(second, player);
+        boolean firstPay = forge.ai.CubeComboAi.canPayCost(first, player, false);
+        boolean secondPay = forge.ai.CubeComboAi.canPayCost(second, player, false);
+        var joint = forge.ai.ComputerUtilMana.calculateManaCost(first.getPayCosts(), first, player, true, 0, false);
+        var later = forge.ai.ComputerUtilMana.calculateManaCost(second.getPayCosts(), second, player, true, 0, false);
+        joint.addManaCost(later.toManaCost());
+        boolean both = forge.ai.CubeComboAi.canPayManaCost(joint, first, player, false)
+                && forge.ai.CubeComboAi.canPayManaCost(joint, second, player, false);
+        return "present=true firstLegal=" + firstLegal + " secondLegal=" + secondLegal
+                + " firstPay=" + firstPay + " secondPay=" + secondPay + " jointPay=" + both
+                + " jointCost=" + joint.toManaCost().toString().replace(' ', '_');
+    }
+
     private static String observeLive(Player player, String key, int step, String previous) {
         Game game = player.getGame();
         if (!game.getStack().isEmpty() || game.isGameOver()
@@ -173,6 +194,17 @@ public final class CubeStormReplayBoundSmoke {
                 if (!before.equals(snapshot(player))) throw new AssertionError("live bound mutated state/RNG " + key);
             }
             System.out.println("STORM_REPLAY_LIVE_BOUND " + key + " step=" + step + " repeats=3 unchanged=true bound=" + first + " " + stamp);
+            String reservation = null;
+            for (int i = 0; i < 3; i++) {
+                String value = drainReservation(player);
+                if (reservation == null) reservation = value;
+                else if (!reservation.equals(value)) throw new AssertionError("drain reservation drift " + key);
+                if (!before.equals(snapshot(player))) throw new AssertionError("drain reservation mutated state/RNG " + key);
+            }
+            System.out.println("STORM_DRAIN_RESERVATION " + key + " step=" + step + " repeats=3 unchanged=true "
+                    + reservation + " mana=" + player.getManaPool().totalMana()
+                    + " black=" + player.getManaPool().getAmountOfColor(forge.card.MagicColor.BLACK)
+                    + " untappedLands=" + player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.isLand() && !c.isTapped()).count());
             return stamp;
         } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
     }
