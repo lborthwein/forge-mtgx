@@ -93,6 +93,20 @@ public final class CubeWitnessResourceSmoke {
             if (discard == null || discard.getApi() != forge.game.ability.ApiType.Discard) throw new AssertionError("native Frantic discard missing");
             var before = snapshot(player);
             System.out.println("WITNESS_DISCARD_PROBE_BEGIN");
+            if (plan.resourceDiscardProtectedCards(discard).isEmpty()) {
+                var rf = forge.ai.CubeKittenPlan.class.getDeclaredField("resourcePlan"); rf.setAccessible(true); Object helper = rf.get(plan);
+                for (String name : List.of("active", "franticRoute", "blinkChosen", "selected", "petal", "witnessBefore", "witness")) {
+                    var f = helper.getClass().getDeclaredField(name); f.setAccessible(true);
+                    System.err.println("WITNESS_DISCARD_DIAG " + name + "=" + f.get(helper));
+                }
+                var sf = helper.getClass().getDeclaredField("selected"); sf.setAccessible(true);
+                var selected = (forge.game.spellability.SpellAbility) sf.get(helper);
+                var pf = helper.getClass().getDeclaredField("petal"); pf.setAccessible(true); Card tracked = (Card) pf.get(helper);
+                System.err.println("WITNESS_DISCARD_DIAG sameTracked=" + (selected.getHostCard() == tracked)
+                        + " selectedId=" + selected.getHostCard().getId() + " selectedStamp=" + selected.getHostCard().getGameTimestamp()
+                        + " rootId=" + root.getHostCard().getId() + " rootStamp=" + root.getHostCard().getGameTimestamp()
+                        + " actor=" + (discard.getActivatingPlayer() == player) + " api=" + discard.getApi());
+            }
             for (int i = 0; i < 3; i++)
                 if (!plan.resourceDiscardProtectedCards(discard).equals(List.of(ritual))) throw new AssertionError("owned returned Ritual not protected");
             var otherRoot = root.copy(player.getOpponents().get(0));
