@@ -64,6 +64,22 @@ final class CubeTopKittenPlan {
         return cost.getConvertedManaCost() == 1 && birgi != null && birgi.getTriggers().stream().anyMatch(t -> !t.isSuppressed()
                 && "SpellCast".equals(t.getParam("Mode")) && "You".equals(t.getParam("ValidActivatingPlayer")));
     }
+    private boolean returnsUntapped(Card card) {
+        // Public ETB-tapped replacements invalidate both the mana restoration
+        // and Top's next draw activation. No prospective move is executed.
+        for (ZoneType zone : new ZoneType[]{ZoneType.Battlefield, ZoneType.Command})
+            for (Card source : player.getGame().getCardsIn(zone)) {
+                if (source.isFaceDown()) continue;
+                for (var re : source.getReplacementEffects()) {
+                    if (!re.zonesCheck(source.getZone()) || !re.requirementsCheck(player.getGame())
+                            || !"Moved".equals(re.getParam("Event")) || !"Battlefield".equals(re.getParam("Destination"))
+                            || !re.matchesValidParam("ValidCard", card)) continue;
+                    String script = source.getSVar(re.getParamOrDefault("ReplaceWith", ""));
+                    if (script.matches("(?s).*DB\\$\\s*Tap(?:\\s*\\|.*|\\s*)") && script.contains("ETB$ True")) return false;
+                }
+            }
+        return true;
+    }
     private Card manaPartner(int need) {
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (!card.isArtifact() || card.isCreature() || card.isFaceDown() || card.isPhasedOut()
@@ -124,7 +140,7 @@ final class CubeTopKittenPlan {
                 && partner.getCounters(forge.game.card.CounterEnumType.BURDEN) == 0) route = "ring";
         else if (cost != null && refunded(cost) && (partner = find("Narset, Parter of Veils", ZoneType.Battlefield)) != null) route = "narset";
         else return null;
-        if (!enough(top, recovering, need, castBudget)) return null;
+        if (!returnsUntapped(top) || !returnsUntapped(partner) || !enough(top, recovering, need, castBudget)) return null;
         SpellAbility action;
         if (!recovering && top.isInZone(ZoneType.Battlefield)) {
             if (!"mana".equals(route)) {

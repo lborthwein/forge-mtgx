@@ -49,10 +49,22 @@ public final class CubeTopKittenExecutionSmoke {
         String restorer = engine.equals("mystic") ? "Mystic Forge" : engine.startsWith("ring") ? "The One Ring" : "Narset, Parter of Veils";
         piece(own, restorer, control.equals("no-restorer"));
         piece(own, engine.equals("mystic") ? "Sol Ring" : engine.endsWith("birgi") ? "Birgi, God of Storytelling" : "Helm of Awakening", false);
-        own.add(new Entry("Sensei's Divining Top", engine.startsWith("ring") ? ZoneType.Hand : ZoneType.Battlefield));
+        own.add(new Entry(control.equals("no-top") ? "Forest" : "Sensei's Divining Top", control.equals("no-top") ? ZoneType.Exile : engine.startsWith("ring") ? ZoneType.Hand : ZoneType.Battlefield));
         for (int i = 0; i < 2; i++) own.add(new Entry("Island", ZoneType.Battlefield));
-        for (int i = 0; i < 20; i++) own.add(new Entry("Forest", ZoneType.Library));
+        for (int i = 0; i < (control.equals("short-library") ? 2 : 20); i++) own.add(new Entry("Forest", ZoneType.Library));
         while (own.size() < 40) own.add(new Entry("Forest", ZoneType.Exile));
+        String restriction = switch (control) {
+            case "draw-cap" -> "Narset, Parter of Veils";
+            case "cast-cap" -> "Rule of Law";
+            case "no-life-gain" -> "Sulfuric Vortex";
+            case "protected-opponent" -> "Leyline of Sanctity";
+            case "tax-two", "tax-unsustained" -> "Sphere of Resistance";
+            case "tax-three" -> "Trinisphere";
+            case "root-maze" -> "Root Maze";
+            case "activation-off" -> "Stony Silence";
+            default -> null;
+        };
+        if (restriction != null) other.add(new Entry(restriction, ZoneType.Battlefield));
         for (int i = 0; i < 30; i++) other.add(new Entry("Forest", ZoneType.Library));
         while (other.size() < 40) other.add(new Entry("Forest", ZoneType.Exile));
         List<RegisteredPlayer> players = new ArrayList<>();
@@ -65,6 +77,11 @@ public final class CubeTopKittenExecutionSmoke {
         Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
         game.getPhaseHandler().setupFirstTurn(player, () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player));
         populate(player, own); populate(opponent, other); opponent.setLife(40, null);
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (control.equals("no-ready-mana") && (card.isLand() || card.getName().equals("Sol Ring"))) card.setTapped(true);
+            if (control.equals("burden-one") && card.getName().equals("The One Ring")) card.setCounters(CounterEnumType.BURDEN, 1);
+            if (control.equals("loyalty-one") && card.getName().equals("Narset, Parter of Veils")) card.setCounters(CounterEnumType.LOYALTY, 1);
+        }
         game.getAction().checkStateEffects(true); game.getTriggerHandler().resetActiveTriggers();
         BenchRandomAudit.install(850913L + seat);
         String key = "seat=" + seat + " engine=" + engine + " control=" + control
@@ -119,6 +136,19 @@ public final class CubeTopKittenExecutionSmoke {
                 default -> throw new AssertionError(m.getName()); }));
             FModel.initialize(null, p -> {p.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);p.setPref(FPref.UI_LANGUAGE, "en-US");return null;});
             boolean candidate = args.length < 2 || !args[1].equals("baseline"); int cases = 0;
+            if (args.length > 2 && args[2].equals("boundaries")) {
+                for (int seat = 0; seat < 2; seat++) for (String engine : List.of("mystic", "ring-birgi", "ring-helm", "narset-birgi", "narset-helm")) {
+                    List<String> controls = new ArrayList<>(List.of("no-top", "short-library", "draw-cap", "cast-cap",
+                            "no-life-gain", "protected-opponent", "root-maze", "activation-off"));
+                    if (engine.equals("mystic")) controls.addAll(List.of("tax-two", "tax-three", "no-ready-mana"));
+                    else controls.add("tax-unsustained");
+                    if (engine.startsWith("ring")) controls.add("burden-one");
+                    if (engine.startsWith("narset")) controls.add("loyalty-one");
+                    for (String control : controls) { run(seat, engine, control, candidate); cases++; }
+                }
+                System.out.println("TOP_KITTEN_BOUNDARIES_COMPLETE cases=" + cases + " candidate=" + candidate);
+                return;
+            }
             for (int seat = 0; seat < 2; seat++) for (String engine : List.of("mystic", "ring-birgi", "ring-helm", "narset-birgi", "narset-helm"))
                 for (String control : List.of("none", "no-kitten", "no-restorer", "no-outlet")) {
                     run(seat, engine, control, candidate); cases++;
