@@ -316,7 +316,7 @@ final class CubeWitnessResourcePlan {
     }
     List<Card> discardProtectedCards(SpellAbility sa) {
         if (!active || !franticRoute || !blinkChosen || selected == null || sa == null
-                || turn != player.getGame().getPhaseHandler().getTurn() || selected.getHostCard() != petal
+                || turn != player.getGame().getPhaseHandler().getTurn() || selected.getHostCard().getId() != petal.getId()
                 || sa.getActivatingPlayer() != player || sa.getApi() != ApiType.Discard
                 || sa.getRootAbility().getHostCard().getId() != petal.getId()
                 || sa.getRootAbility().getHostCard().getGameTimestamp() != selected.getHostCard().getGameTimestamp()) return List.of();
