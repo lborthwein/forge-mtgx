@@ -133,7 +133,11 @@ public final class CubeHarnfelTopPlan {
                 || card.isFaceDown() || !card.isInZone(ZoneType.Exile)
                 || player.getGame().getCardState(card, null) != card || card.getId() != knownId) return false;
         Card effect = spell.getMayPlay().getHostCard();
-        return effect.getController() == player && effect.getEffectSource() == harnfel
+        if (!effect.isInZone(ZoneType.Command) || !spell.getMayPlay().zonesCheck()) return false;
+        boolean exactSource = false;
+        for (SpellAbility ability = lastDig; ability != null; ability = ability.getSubAbility())
+            if (ability == effect.getEffectSourceAbility()) { exactSource = true; break; }
+        return exactSource && effect.getController() == player && effect.getEffectSource() == harnfel
                 && effect.getEffectSourceAbility() != null
                 && effect.getEffectSourceAbility().getRootAbility() == lastDig;
     }
