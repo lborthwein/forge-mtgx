@@ -32,7 +32,11 @@ public final class CubeStormReplayBoundSmoke {
     private static final List<String> CASES = List.of("complete", "one-ritual", "rituals-yard", "no-will",
             "no-sac-rock", "mana-short", "rule-of-law", "rest-in-peace", "library-one", "draw-blocked", "pre-cantrip", "late-ritual", "late-rock", "late-cantrip",
             "no-cantrip", "uncastable-cantrip", "no-threshold", "cost-tax", "null-rod",
-            "late-ritual-visible", "late-rock-visible", "pre-cantrip-replay");
+            "late-ritual-visible", "late-rock-visible", "pre-cantrip-replay",
+            "drain-ready", "drain-ready-short", "drain-ready-color", "drain-ready-threshold",
+            "drain-ready-no-dark", "drain-ready-no-cabal", "drain-ready-yard", "drain-ready-tax",
+            "drain-ready-rip", "drain-ready-rule", "drain-ready-hexproof",
+            "pre-cantrip-replay-no-forest", "late-ritual-no-forest-visible", "late-rock-no-forest-visible");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone, boolean tapped) { }
@@ -41,6 +45,19 @@ public final class CubeStormReplayBoundSmoke {
     }
     private static List<Placement> own(String name) {
         List<Placement> result = new ArrayList<>();
+        if (name.startsWith("drain-ready")) {
+            add(result, 1, WILL, ZoneType.Hand);
+            add(result, 1, TENDRILS, name.endsWith("-yard") ? ZoneType.Graveyard : ZoneType.Hand);
+            if (!name.endsWith("-no-dark")) add(result, 1, "Dark Ritual", ZoneType.Graveyard);
+            if (!name.endsWith("-no-cabal")) add(result, 1, "Cabal Ritual", ZoneType.Graveyard);
+            add(result, 1, "Black Lotus", ZoneType.Graveyard);
+            add(result, name.endsWith("-threshold") ? 3 : 4, "Forest", ZoneType.Graveyard);
+            add(result, name.endsWith("-short") ? 7 : name.endsWith("-color") ? 2 : 8, "Swamp", ZoneType.Battlefield);
+            if (name.endsWith("-color")) add(result, 6, "Island", ZoneType.Battlefield);
+            add(result, 20, "Forest", ZoneType.Library);
+            add(result, 40-result.size(), "Forest", ZoneType.Exile);
+            return result;
+        }
         if (!name.equals("no-will")) add(result, 1, WILL, ZoneType.Hand);
         add(result, 1, TENDRILS, ZoneType.Hand);
         ZoneType ritualZone = name.equals("rituals-yard") ? ZoneType.Graveyard : ZoneType.Hand;
@@ -54,7 +71,7 @@ public final class CubeStormReplayBoundSmoke {
         }
         if (!name.equals("mana-short")) add(result, 3,
                 name.startsWith("pre-cantrip") || name.equals("late-cantrip") ? "Underground Sea" : "Swamp", ZoneType.Battlefield);
-        if (!name.equals("no-threshold")) add(result, 6, "Forest", ZoneType.Graveyard);
+        if (!name.equals("no-threshold") && !name.contains("no-forest")) add(result, 6, "Forest", ZoneType.Graveyard);
         if (name.startsWith("late-")) add(result, 1, name.startsWith("late-ritual") ? "Dark Ritual"
                 : name.startsWith("late-rock") ? "Lotus Petal" : "Ponder", ZoneType.Library);
         add(result, name.equals("library-one") ? 1 : name.startsWith("late-") ? 19 : 20, "Forest", ZoneType.Library);
@@ -64,10 +81,11 @@ public final class CubeStormReplayBoundSmoke {
     }
     private static List<Placement> other(String name) {
         List<Placement> result = new ArrayList<>();
-        if (name.equals("rule-of-law")) add(result, 1, "Rule of Law", ZoneType.Battlefield);
-        if (name.equals("rest-in-peace")) add(result, 1, "Rest in Peace", ZoneType.Battlefield);
+        if (name.equals("rule-of-law") || name.equals("drain-ready-rule")) add(result, 1, "Rule of Law", ZoneType.Battlefield);
+        if (name.equals("rest-in-peace") || name.equals("drain-ready-rip")) add(result, 1, "Rest in Peace", ZoneType.Battlefield);
         if (name.equals("draw-blocked")) add(result, 1, "Narset, Parter of Veils", ZoneType.Battlefield);
-        if (name.equals("cost-tax")) add(result, 1, "Thalia, Guardian of Thraben", ZoneType.Battlefield);
+        if (name.equals("cost-tax") || name.equals("drain-ready-tax")) add(result, 1, "Thalia, Guardian of Thraben", ZoneType.Battlefield);
+        if (name.equals("drain-ready-hexproof")) add(result, 1, "Leyline of Sanctity", ZoneType.Battlefield);
         if (name.equals("null-rod")) add(result, 1, "Null Rod", ZoneType.Battlefield);
         add(result, 40-result.size(), "Forest", ZoneType.Library);
         return result;
@@ -163,7 +181,17 @@ public final class CubeStormReplayBoundSmoke {
         joint.addManaCost(later.toManaCost());
         boolean both = forge.ai.CubeComboAi.canPayManaCost(joint, first, player, false)
                 && forge.ai.CubeComboAi.canPayManaCost(joint, second, player, false);
-        return "present=true firstLegal=" + firstLegal + " secondLegal=" + secondLegal
+        String helper = "unsupported";
+        try {
+            var method = forge.ai.CubeStormPlan.class.getDeclaredMethod("drainBeforeWill", forge.game.spellability.SpellAbility.class, forge.game.spellability.SpellAbility.class);
+            method.setAccessible(true);
+            var field = forge.ai.CubeComboPlayerController.class.getDeclaredField("stormPlan"); field.setAccessible(true);
+            helper = method.invoke(field.get(player.getController()), firstLegal && firstPay ? first : null,
+                    secondLegal && secondPay ? second : null).toString();
+        } catch (NoSuchMethodException absent) {
+            // The frozen v89 reference predates this helper.
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        return "present=true helper=" + helper + " firstLegal=" + firstLegal + " secondLegal=" + secondLegal
                 + " firstPay=" + firstPay + " secondPay=" + secondPay + " jointPay=" + both
                 + " jointCost=" + joint.toManaCost().toString().replace(' ', '_');
     }
@@ -226,7 +254,8 @@ public final class CubeStormReplayBoundSmoke {
         player.setLife(40, null);
         if (name.startsWith("late-") && !name.endsWith("-visible")) opponent.setLife(22, null);
         if (name.equals("no-cantrip")) opponent.setLife(18, null);
-        if (name.equals("pre-cantrip-replay")) opponent.setLife(22, null);
+        if (name.startsWith("pre-cantrip-replay")) opponent.setLife(22, null);
+        if (name.startsWith("drain-ready")) opponent.setLife(10, null);
         for (Card c : opponent.getCardsIn(ZoneType.Battlefield))
             if (c.isPlaneswalker()) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 5);
         game.setAge(GameStage.Play);
@@ -293,7 +322,7 @@ public final class CubeStormReplayBoundSmoke {
                 preferences.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US"); return null;
             });
-            for (String card : List.of("Ponder", "Underground Sea", "Thalia, Guardian of Thraben", "Null Rod", WILL, TENDRILS, "Dark Ritual", "Cabal Ritual", "Gitaxian Probe", "Lotus Petal", "Black Lotus", "Swamp", "Forest", "Rule of Law", "Rest in Peace", "Narset, Parter of Veils"))
+            for (String card : List.of("Island", "Leyline of Sanctity", "Ponder", "Underground Sea", "Thalia, Guardian of Thraben", "Null Rod", WILL, TENDRILS, "Dark Ritual", "Cabal Ritual", "Gitaxian Probe", "Lotus Petal", "Black Lotus", "Swamp", "Forest", "Rule of Law", "Rest in Peace", "Narset, Parter of Veils"))
                 StaticData.instance().attemptToLoadCard(card);
             for (String name : CASES) for (int seat = 0; seat < 2; seat++) run(args[1].equals("improved"), seat, name);
             System.out.println("STORM_REPLAY_SUITE_COMPLETE cases=" + (CASES.size() * 2));
