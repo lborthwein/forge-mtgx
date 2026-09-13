@@ -202,9 +202,15 @@ final class CubeDoomStarPlan {
         return success;
     }
     boolean ownsSearch(SpellAbility source) {
-        return active() && !failed && pendingDoom != null && source != null && !source.isCopied()
-                && source.getActivatingPlayer() == player && source.getRootAbility() == pendingDoom
-                && player.getGame().getStack().peekAbility() == pendingDoom;
+        if (!active() || failed || pendingDoom == null || source == null || source.isCopied()
+                || source.getActivatingPlayer() != player || source.getRootAbility() != pendingDoom
+                || player.getGame().getStack().isEmpty() || player.getGame().getStack().peekAbility() != pendingDoom) return false;
+        // A copied subability may keep its original parent/root without being
+        // marked as a copied game object. Only the actual native chain grants
+        // this search; equal host, root, parameters or ids are insufficient.
+        for (SpellAbility member = pendingDoom; member != null; member = member.getSubAbility())
+            if (member == source) return true;
+        return false;
     }
     Card choose(CardCollection choices) {
         for (Card c : choices) if (c.getOwner() != player || player.getGame().getCardState(c, null) != c) return null;
@@ -226,7 +232,7 @@ final class CubeDoomStarPlan {
         for (var z : new forge.game.zone.ZoneView[]{event.from(), event.to()})
             if (z != null && z.zoneType() == ZoneType.Library && z.player() != null && z.player().getId() == player.getId()) ownLibrary = true;
         if (!ownLibrary) return;
-        if (pendingDoom != null && player.getGame().getStack().peekAbility() == pendingDoom
+        if (pendingDoom != null && !player.getGame().getStack().isEmpty() && player.getGame().getStack().peekAbility() == pendingDoom
                 && player.getGame().getStack().isResolving(pendingDoom.getHostCard())) return;
         if (filterPaid && event.card().getId() == oracleId && event.to() != null && event.to().zoneType() == ZoneType.Hand) return;
         failed = true;

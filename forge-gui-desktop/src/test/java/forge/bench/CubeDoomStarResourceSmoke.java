@@ -153,11 +153,17 @@ public final class CubeDoomStarResourceSmoke {
         } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
     }
     private static void ownership(Player player,String key,int step) {
-        if(!(player.getController() instanceof forge.ai.CubeComboPlayerController controller)||player.getGame().getStack().isEmpty())return;
+        if(!(player.getController() instanceof forge.ai.CubeComboPlayerController controller))return;
         try {
             var parent=controller.doomsdayPlan();var childField=parent.getClass().getDeclaredField("starPlan");childField.setAccessible(true);Object child=childField.get(parent);
             var pendingField=child.getClass().getDeclaredField("pendingDoom");pendingField.setAccessible(true);SpellAbility pending=(SpellAbility)pendingField.get(child);
-            if(pending==null||player.getGame().getStack().peekAbility()!=pending)return;
+            if(pending==null)return;
+            if(player.getGame().getStack().isEmpty()){
+                Object before=nativeSnapshot(player);boolean accepted=parent.ownsPileDecision(pending);
+                if(accepted||!before.equals(nativeSnapshot(player)))throw new AssertionError("empty-stack search authorization");
+                System.out.println("DOOM_STAR_EMPTY_STACK "+key+" accepted=false unchanged=true");return;
+            }
+            if(player.getGame().getStack().peekAbility()!=pending)return;
             Object before=nativeSnapshot(player),beforeListeners=listeners(player.getGame());int aliases=0,accepted=0,foreign=0;boolean genuine=true;
             for(SpellAbility source=pending;source!=null;source=source.getSubAbility()) {
                 genuine&=parent.ownsPileDecision(source);
