@@ -575,6 +575,53 @@ public final class CubeDoomsdayPlan {
      * <p>This is a fallback: {@code fallback} is the decline token the caller
      * would have printed, so declining here leaves every pre-existing receipt
      * unchanged and every currently-green case still takes its current route.</p> */
+    /** Public loyalty disruption during the one-turn hand-Oracle wait. Only
+     * constant, self-counter costs are forecast: no opponent private resources
+     * or general AI payment probes. Assume the worst legal creature sacrifice,
+     * so the route does not rely on Default choosing a particular spare body. */
+    private boolean handOracleSurvivesPublicDisruption() {
+        int discardDemand = 0, devotionLoss = 0;
+        for (Player opponent : player.getOpponents()) {
+            for (Card source : opponent.getCardsIn(ZoneType.Battlefield)) {
+                if (source.isFaceDown() || source.isPhasedOut() || !source.isPlaneswalker()) continue;
+                int sourceDiscard = 0, sourceLoss = 0;
+                for (SpellAbility original : source.getSpellAbilities()) {
+                    if (!original.isAbility() || !original.hasParam("Planeswalker")) continue;
+                    SpellAbility ability = original.copy(opponent);
+                    if (ability.getPayCosts() == null || ability.getPayCosts().getTotalMana().getCMC() != 0
+                            || forge.game.staticability.StaticAbilityCantBeCast.cantBeActivatedAbility(ability, source, opponent)) continue;
+                    boolean publicCost = true;
+                    for (var cost : ability.getPayCosts().getCostParts()) {
+                        if (cost instanceof forge.game.cost.CostPartMana) continue;
+                        if (!(cost instanceof forge.game.cost.CostPutCounter || cost instanceof forge.game.cost.CostRemoveCounter)
+                                || !cost.payCostFromSource() || !cost.getAmount().matches("[0-9]+")
+                                || !cost.canPay(ability, opponent, false)) { publicCost = false; break; }
+                    }
+                    if (!publicCost || ability.getSubAbility() != null) continue;
+                    boolean affectsUs = ability.usesTargeting() ? ability.canTarget(player)
+                            : forge.game.ability.AbilityUtils.getDefinedPlayers(source, ability.getParamOrDefault("Defined", ""), ability).contains(player);
+                    if (!affectsUs) continue;
+                    if (ability.getApi() == ApiType.Discard && "1".equals(ability.getParam("NumCards"))
+                            && "TgtChoose".equals(ability.getParam("Mode"))) sourceDiscard = 1;
+                    if (ability.getApi() == ApiType.Sacrifice && "Creature".equals(ability.getParam("SacValid"))
+                            && "1".equals(ability.getParamOrDefault("Amount", "1")) && !ability.hasParam("Destroy")) {
+                        for (Card creature : player.getCreaturesInPlay()) {
+                            if (!creature.canBeSacrificedBy(ability, true)) continue;
+                            int blue = 0;
+                            for (var shard : creature.getManaCost()) if (shard.isColor(MagicColor.BLUE)) blue++;
+                            sourceLoss = Math.max(sourceLoss, blue);
+                        }
+                    }
+                }
+                discardDemand += sourceDiscard;
+                devotionLoss += sourceLoss;
+            }
+        }
+        // One card is Doomsday, one is the exact Oracle reserved for the wait.
+        return player.getCardsIn(ZoneType.Hand).size() - 2 >= discardDemand
+                && oracleThreshold(false) - devotionLoss >= 4;
+    }
+
     private SpellAbility naturalRoute(SpellAbility doom, String fallback) {
         decline = fallback;
         gushRoute = false;
@@ -587,6 +634,7 @@ public final class CubeDoomsdayPlan {
                 return commitDoomsday(doom);
             }
             if (threshold < 4 || !player.canDrawAmount(1) || ownBlueSources() < 2) return null;
+            if (!handOracleSurvivesPublicDisruption()) { decline = "other check=public-disruption"; return null; }
             if (lethalOnBoard(false)) { decline = "better-attack"; return null; }
             if (!clockSurvivable()) { decline = "clock"; return null; }
             SpellAbility action = commitDoomsday(doom);
@@ -1529,6 +1577,8 @@ public final class CubeDoomsdayPlan {
      * alternative exists. Own-visible information only.</p> */
     public CardCollection discardProtectedCards() {
         CardCollection kept = new CardCollection();
+        if (delayedHandOracle != null && holdDelayedOracle(delayedHandOracle.getFirstSpellAbility().copy(player)))
+            kept.add(delayedHandOracle);
         if (!holdingPile()) return kept;
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
             if (card.getName().equals("Thassa's Oracle") || gushSelected && card.getName().equals("Gush")) kept.add(card);
