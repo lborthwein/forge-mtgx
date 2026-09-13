@@ -81,6 +81,67 @@ public final class CubeEmryExecutionSmoke {
     }
 
 
+    private static Map<String, Object> snapshot(Player player) {
+        Map<String, Object> state = new LinkedHashMap<>(); Game game = player.getGame();
+        state.put("timestamp", game.getTimestamp());
+        state.put("rng", ((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot().toString());
+        state.put("mana", java.util.stream.StreamSupport.stream(player.getManaPool().spliterator(), false).toList());
+        state.put("conversion", java.util.stream.IntStream.range(0, 6)
+                .map(i -> player.getManaPool().getPossibleColorUses((byte)(1 << i))).boxed().toList());
+        state.put("snow", player.getManaPool().isSnowForColor());
+        for (var memory : forge.ai.AiCardMemory.MemorySet.values())
+            state.put(memory.name(), forge.ai.AiCardMemory.getMemorySet(player, memory).stream().map(Card::getId).sorted().toList());
+        for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile}) {
+            state.put(zone.name(), player.getCardsIn(zone).stream().map(c -> c.getId() + ":" + c.getGameTimestamp()
+                    + ":" + c.isTapped() + ":" + c.isSick() + ":" + c.getAttachedTo() + ":" + c.getView().isTapped() + ":" + c.getPlaneswalkerAbilityActivated() + ":" + c.getCounters() + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
+            state.put(zone.name() + "Abilities", player.getCardsIn(zone).stream().flatMap(c -> c.getSpellAbilities().stream())
+                    .map(sa -> sa.getHostCard().getId() + ":" + sa.getActivatingPlayer() + ":" + sa.getTargets() + ":" + System.identityHashCode(sa.getTargets())
+                            + ":" + (sa.getManaPart() == null ? "null" : sa.getManaPart().getExpressChoice())).toList());
+        }
+        state.put("librarySize", player.getCardsIn(ZoneType.Library).size());
+        state.put("history", game.getStack().getSpellCardsCastThisTurn().stream().map(c -> c.getId() + ":" + c.getCastFrom()).toList());
+        for (Player p : game.getPlayers()) {
+            state.put("public-" + p.getId(), p.getLife() + ":" + p.getPreventNextDamageTotalShields());
+            state.put("command-" + p.getId(), p.getCardsIn(ZoneType.Command).stream()
+                    .map(c -> c.getId() + ":" + c.getGameTimestamp() + ":" + c.getSVars() + ":" + c.getReplacementEffects()).toList());
+        }
+        return state;
+    }
+    private static String available(Player player) {
+        List<String> rows=new ArrayList<>();
+        for (ZoneType zone:List.of(ZoneType.Hand,ZoneType.Graveyard,ZoneType.Battlefield)) for(Card card:player.getCardsIn(zone)) {
+            if(card.isFaceDown() || !(ARTIFACTS.contains(card.getName()) || card.getName().equals(EMRY) || card.getName().equals("Lightning Greaves")))continue;
+            String prefix=card.getId()+":"+card.getName().replace(' ','_')+":"+zone+":tapped="+card.isTapped()+":sick="+card.isSick()+":shroud="+card.hasKeyword(forge.game.keyword.Keyword.SHROUD)+":attached="+(card.getAttachedTo()==null?"none":card.getAttachedTo().getId());
+            rows.add(prefix);
+            for(var original:card.getAllPossibleAbilities(player,false,null,true)) {
+                var ability=original.copy(player);
+                boolean legal=forge.ai.CubeComboAi.canPlayNative(ability,player);
+                boolean pay=ability.getPayCosts()!=null && forge.ai.CubeComboAi.canPayCost(ability,player,false);
+                List<String> targets=new ArrayList<>();
+                if(ability.usesTargeting()) {
+                    if(ability.canTarget(player))targets.add("self");
+                    for(Card target:player.getCardsIn(ZoneType.Battlefield))
+                        if(!target.isFaceDown() && (target.getName().equals(EMRY)||target.getName().equals(KITTEN)) && ability.canTarget(target))targets.add("own-"+target.getId());
+                    for(Card target:player.getCardsIn(ZoneType.Graveyard))
+                        if(!target.isFaceDown() && ARTIFACTS.contains(target.getName()) && ability.canTarget(target))targets.add("own-"+target.getId());
+                }
+                rows.add(prefix+":api="+ability.getApi()+":spell="+ability.isSpell()+":legal="+legal+":pay="+pay+":targets="+targets);
+            }
+        }
+        return String.join(";",rows);
+    }
+    private static String observe(Player player,String key,int step,String previous) {
+        Game game=player.getGame();
+        if(!game.getStack().isEmpty() || game.isGameOver() || !game.getPhaseHandler().is(PhaseType.MAIN1,player) && !game.getPhaseHandler().is(PhaseType.MAIN2,player))return previous;
+        var before=snapshot(player);String first=null;
+        for(int i=0;i<3;i++) {
+            String receipt=available(player);
+            if(first==null)first=receipt;else if(!first.equals(receipt))throw new AssertionError("availability query drift "+key);
+            if(!before.equals(snapshot(player)))throw new AssertionError("availability query mutated state/RNG "+key);
+        }
+        if(!first.equals(previous))System.out.println("EMRY_AVAILABLE "+key+" step="+step+" repeats=3 unchanged=true "+first);
+        return first;
+    }
     private static void run(boolean improved,int seat,String name,int index) {
         List<RegisteredPlayer> players=new ArrayList<>();
         for (int s=0;s<2;s++) {
@@ -96,8 +157,9 @@ public final class CubeEmryExecutionSmoke {
         game.getAction().checkStateEffects(true);game.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(990300L+100L*seat+index);
         String key="arm="+(improved?"improved":"baseline")+" seat="+seat+" case="+name;
         System.out.println("EMRY_FIXTURE "+key+" policy="+forge.ai.CubeComboAi.VERSION+" registered=40 initialMana=0 ownLife=40 opponentLife=20");
-        Set<Integer> seen=new HashSet<>();int steps=0,artifactCasts=0,emryActions=0,kittenActions=0,shots=0;String previous="";
+        Set<Integer> seen=new HashSet<>();int steps=0,artifactCasts=0,emryActions=0,kittenActions=0,shots=0;String previous="",previousAvailable="";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn()<=startTurn+2 && steps<1500) {
+            previousAvailable=observe(player,key,steps,previousAvailable);
             game.getPhaseHandler().mainLoopStep();steps++;
             for (var item:game.getStack()) if (seen.add(item.getId())) {
                 var sa=item.getSpellAbility();if(sa.getActivatingPlayer()!=player)continue;
