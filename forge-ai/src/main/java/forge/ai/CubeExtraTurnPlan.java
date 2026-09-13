@@ -20,9 +20,12 @@ import forge.game.zone.ZoneType;
 public final class CubeExtraTurnPlan {
     private CubeExtraTurnPlan() {}
 
-    private static SpellAbility handPreview(Card card, Player player) {
+    private static SpellAbility castPreview(Card card, Player player) {
         Card preview = CardCopyService.getLKICopy(card);
-        preview.setLastKnownZone(player.getZone(ZoneType.Hand));
+        preview.setLastKnownZone(player.getGame().getStackZone());
+        // CostAdjustment expects a prospective stack card. Keeping the LKI
+        // on the stack also prevents calculateManaCost from replacing our
+        // projected hand origin with the detached copy's null current zone.
         preview.setCastFrom(player.getZone(ZoneType.Hand));
         for (SpellAbility original : card.getSpellAbilities()) {
             if (!original.isSpell()) continue;
@@ -88,11 +91,11 @@ public final class CubeExtraTurnPlan {
                     .anyMatch(card -> card.getId() == blink.getId() && card.getController() == player
                             && card.getCastFrom() != null && card.getCastFrom().getZoneType() == ZoneType.Exile);
             if (!castNow) continue;
-            SpellAbility first = handPreview(blink, player);
+            SpellAbility first = castPreview(blink, player);
             if (!reboundBlink(first, partner) || !staticLegal(first, player)) continue;
             for (ZoneType zone : new ZoneType[] {ZoneType.Hand, ZoneType.Graveyard}) {
                 for (Card card : player.getCardsIn(zone)) {
-                    SpellAbility second = handPreview(card, player);
+                    SpellAbility second = castPreview(card, player);
                     if (!extraTurn(second, player) || !staticLegal(second, player)
                             || !CubeComboAi.castFitsAfter(player, first, second)) continue;
                     ManaCostBeingPaid combined = ComputerUtilMana.calculateManaCost(first.getPayCosts(), first, player, true, 0, false);

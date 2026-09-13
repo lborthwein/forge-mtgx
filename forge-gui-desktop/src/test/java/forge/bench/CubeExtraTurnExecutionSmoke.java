@@ -44,10 +44,14 @@ public final class CubeExtraTurnExecutionSmoke {
         own.add(new Entry(control.equals("no-engine") ? "Forest" : engine,
                 engine.equals("Ephemerate") ? ZoneType.Hand : ZoneType.Battlefield));
         own.add(new Entry(control.equals("no-turn-spell") ? "Forest" : turnSpell, ZoneType.Hand));
+        if (control.equals("conversion")) own.add(new Entry("Dauthi Voidwalker", ZoneType.Battlefield));
         own.add(new Entry("Plains", ZoneType.Battlefield));
         for (int i = 0; i < 5; i++) own.add(new Entry("Island", ZoneType.Battlefield));
         for (int i = 0; i < 20; i++) own.add(new Entry("Forest", ZoneType.Library));
         while (own.size() < 40) own.add(new Entry("Forest", ZoneType.Exile));
+        if (control.equals("conversion")) other.add(new Entry("Old One Eye", ZoneType.Battlefield));
+        if (control.startsWith("tax-")) other.add(new Entry("Sphere of Resistance", ZoneType.Exile));
+        if (control.equals("cast-cap")) other.add(new Entry("Rule of Law", ZoneType.Exile));
         for (int i = 0; i < 30; i++) other.add(new Entry("Forest", ZoneType.Library));
         while (other.size() < 40) other.add(new Entry("Forest", ZoneType.Exile));
         List<RegisteredPlayer> players = new ArrayList<>();
@@ -59,7 +63,8 @@ public final class CubeExtraTurnExecutionSmoke {
         Game game = new Match(rules, players, "Extra-turn native diagnostic").createGame(); game.setAge(GameStage.Play);
         Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
         game.getPhaseHandler().setupFirstTurn(player, () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player));
-        populate(player, own); populate(opponent, other); opponent.setLife(40, null);
+        populate(player, own); populate(opponent, other); opponent.setLife(control.equals("conversion") ? 20 : 40, null);
+        if (control.equals("conversion")) player.setLife(4, null);
         game.getAction().checkStateEffects(true); game.getTriggerHandler().resetActiveTriggers();
         BenchRandomAudit.install(830913L + seat);
         String key = "seat=" + seat + " engine=" + engine.replace(' ', '_') + " spell=" + turnSpell.replace(' ', '_')
@@ -68,6 +73,7 @@ public final class CubeExtraTurnExecutionSmoke {
         Set<Integer> seen = new HashSet<>();
         int steps = 0, turnCasts = 0, engineActions = 0, returns = 0, ownTurns = 0, opponentTurns = 0;
         int lastTurn = -1, streak = 0, longest = 0;
+        boolean intervention = false;
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 12 && steps < 4000) {
             int turn = game.getPhaseHandler().getTurn();
             if (turn != lastTurn) {
@@ -76,6 +82,30 @@ public final class CubeExtraTurnExecutionSmoke {
                 System.out.println("EXTRA_TURN_TURN turn=" + turn + " ours=" + ours + " hand="
                         + player.getCardsIn(ZoneType.Hand) + " graveyard=" + player.getCardsIn(ZoneType.Graveyard));
                 lastTurn = turn;
+            }
+            // Explicit public-state fixture controls at the first real rebound
+            // upkeep. Cast/trigger history is untouched; no target is scripted.
+            if (!intervention && turn == 2 && game.getPhaseHandler().getPhase() == PhaseType.UPKEEP
+                    && game.getPhaseHandler().getPlayerTurn() == player && !control.equals("none")
+                    && !control.startsWith("no-") && !control.equals("conversion")) {
+                int islandsKept = switch (control) {
+                    case "mana-two" -> 1;
+                    case "mana-three" -> 2;
+                    case "missing-blue" -> 0;
+                    case "tax-short" -> 4;
+                    default -> 5;
+                };
+                int islands = 0;
+                for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+                    if (card.getName().equals("Island") && ++islands > islandsKept) card.setTapped(true);
+                    if (card.getName().equals("Plains") && control.equals("missing-white")) card.setTapped(true);
+                }
+                for (Card card : new ArrayList<Card>(opponent.getCardsIn(ZoneType.Exile)))
+                    if (card.getName().equals("Sphere of Resistance") || card.getName().equals("Rule of Law"))
+                        game.getAction().moveToPlay(card, null);
+                game.getAction().checkStateEffects(true);
+                intervention = true;
+                System.out.println("EXTRA_TURN_INTERVENTION control=" + control + " turn=" + turn);
             }
             steps++; game.getPhaseHandler().mainLoopStep();
             for (var item : game.getStack()) if (seen.add(item.getId())) {
@@ -105,6 +135,14 @@ public final class CubeExtraTurnExecutionSmoke {
             FModel.initialize(null, p -> {p.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); p.setPref(FPref.UI_LANGUAGE, "en-US"); return null;});
             boolean candidate = args.length < 2 || !args[1].equals("baseline");
             int cases = 0;
+            if (args.length > 2 && args[2].equals("guards")) {
+                for (int seat = 0; seat < 2; seat++) for (String control : List.of("mana-two", "mana-three", "missing-white",
+                        "missing-blue", "tax-funded", "tax-short", "cast-cap", "conversion")) {
+                    run(seat, "Ephemerate", "Time Walk", control, candidate); cases++;
+                }
+                System.out.println("EXTRA_TURN_GUARDS_COMPLETE cases=" + cases + " candidate=" + candidate);
+                return;
+            }
             for (int seat = 0; seat < 2; seat++) for (String engine : List.of("Ephemerate", "Soulherder", "Kiki-Jiki, Mirror Breaker"))
                 for (String spell : List.of("Time Walk", "Time Warp")) for (String control : List.of("none", "no-witness", "no-engine", "no-turn-spell")) {
                     run(seat, engine, spell, control, candidate); cases++;
