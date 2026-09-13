@@ -43,8 +43,17 @@ public final class CubeWitnessResourceSmoke {
         @com.google.common.eventbus.Subscribe
         public void zone(forge.game.event.GameEventCardChangeZone event) {
             var card = event.card();
-            if (card == null || !owner.getView().equals(card.getOwner())) return;
+            if (card == null) return;
             ZoneType to = event.to() == null ? null : event.to().zoneType();
+            if (!owner.getView().equals(card.getOwner())) {
+                // A revealed opponent permanent entering the public graveyard.
+                // Never inspect an opponent hand, library or face-down object.
+                if (event.from() != null && event.from().zoneType() == ZoneType.Battlefield
+                        && to == ZoneType.Graveyard && !card.isFaceDown())
+                    System.out.println("WITNESS_PUBLIC_ZONE step=" + step + " card=" + card.getCurrentState().getName().replace(' ', '_')
+                            + " from=Battlefield to=Graveyard");
+                return;
+            }
             if (to != null && List.of(ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile).contains(to)
                     && !card.isFaceDown()) known.put(card.getId(), card.getCurrentState().getName());
             String name = known.get(card.getId());
