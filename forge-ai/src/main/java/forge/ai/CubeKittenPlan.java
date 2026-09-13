@@ -746,6 +746,10 @@ public final class CubeKittenPlan {
         return chooseFamily(name,casts==0?fire:loop);
     }
 
+    public java.util.List<Card> resourceDiscardProtectedCards(SpellAbility sa) {
+        return resourceAction ? resourcePlan.discardProtectedCards(sa) : java.util.List.of();
+    }
+
     public boolean chooseBlink(SpellAbility sa) {
         if(resourceAction) return resourcePlan.chooseTargets(sa);
         if(!active||turn!=player.getGame().getPhaseHandler().getTurn()||sa.getActivatingPlayer()!=player) return false;
