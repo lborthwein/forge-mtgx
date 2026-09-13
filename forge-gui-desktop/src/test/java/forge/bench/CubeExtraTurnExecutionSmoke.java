@@ -113,7 +113,15 @@ public final class CubeExtraTurnExecutionSmoke {
                 String name = ability.getHostCard().getName();
                 if (ability.isSpell() && !ability.isCopied() && name.equals(turnSpell)) turnCasts++;
                 if (name.equals(engine)) engineActions++;
-                if (name.equals("Eternal Witness") && ability.getApi() == forge.game.ability.ApiType.ChangeZone) returns++;
+                if (name.equals("Eternal Witness") && ability.getApi() == forge.game.ability.ApiType.ChangeZone) {
+                    returns++;
+                    if (control.startsWith("tax-") && game.getPhaseHandler().getPhase() == PhaseType.UPKEEP) {
+                        System.out.println("EXTRA_TURN_RESOURCES turn=" + game.getPhaseHandler().getTurn()
+                                + " lands=" + player.getCardsIn(ZoneType.Battlefield).stream().filter(Card::isLand)
+                                .map(c -> c.getName().replace(' ', '_') + ":" + (c.isTapped() ? "tapped" : "ready"))
+                                .collect(java.util.stream.Collectors.joining(";")));
+                    }
+                }
                 System.out.println("EXTRA_TURN_STACK turn=" + game.getPhaseHandler().getTurn() + " card=" + name
                         + " api=" + ability.getApi() + " targets=" + ability.getTargets());
             }
