@@ -166,6 +166,7 @@ public final class CubeWitnessResourceSmoke {
         }
         System.out.println("WITNESS_QUERY_END repeats=6 unchanged=true choice=" + first);
         if ("Snap/ChangeZone".equals(first)) {
+            System.out.println("WITNESS_OWNERSHIP_BEGIN");
             var plan = new forge.ai.CubeKittenPlan(player);
             var selected = plan.nextAction();
             Card kitten = player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals(KITTEN)).findFirst().orElseThrow();
