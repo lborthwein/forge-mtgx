@@ -106,8 +106,55 @@ public final class CubeDoomStarResourceSmoke {
             System.out.println("DOOM_STAR_ORDER "+key+" nativeGranted=true size="+cards.size()+" oracleLast=true");return order;
         }
     }
+    private record SavedField(Object owner, java.lang.reflect.Field field, Object value) {}
+    private static void savePlanner(Object plan, List<SavedField> saved) throws ReflectiveOperationException {
+        for (var field : plan.getClass().getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+            field.setAccessible(true); Object value = field.get(plan);
+            if (java.lang.reflect.Modifier.isFinal(field.getModifiers())) {
+                if (value != null && value.getClass().getName().equals("forge.ai.CubeDoomStarPlan")) savePlanner(value, saved);
+            } else saved.add(new SavedField(plan, field, value));
+        }
+    }
+    private static Object listeners(Game game) throws ReflectiveOperationException {
+        var events = Game.class.getDeclaredField("events"); events.setAccessible(true);
+        Object bus = events.get(game);
+        var registry = bus.getClass().getDeclaredField("subscribers"); registry.setAccessible(true);
+        Object holder = registry.get(bus);
+        var subscribers = holder.getClass().getDeclaredField("subscribers"); subscribers.setAccessible(true);
+        Map<?, ?> original = (Map<?, ?>)subscribers.get(holder);
+        Map<Object, Object> copy = new java.util.HashMap<>();
+        for (var entry : original.entrySet()) copy.put(entry.getKey(), Set.copyOf((java.util.Collection<?>)entry.getValue()));
+        return copy;
+    }
+    private static Object nativeSnapshot(Player player) throws ReflectiveOperationException {
+        var m=CubeTopTutorAvailabilitySmoke.class.getDeclaredMethod("snapshot",Player.class);m.setAccessible(true);return m.invoke(null,player);
+    }
+    private static void actualPlan(Player player, String key, int step) {
+        if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return;
+        try {
+            var field = forge.ai.CubeComboPlayerController.class.getDeclaredField("doomsdayPlan"); field.setAccessible(true);
+            Object plan = field.get(player.getController()); List<SavedField> saved = new ArrayList<>(); savePlanner(plan, saved);
+            Object before = nativeSnapshot(player), beforeListeners = listeners(player.getGame()); String first = null;
+            for (int i = 0; i < 3; i++) {
+                String receipt;
+                try {
+                    var action = (forge.game.spellability.SpellAbility)plan.getClass().getMethod("nextAction").invoke(plan);
+                    receipt = action == null ? "none" : action.getHostCard().getId() + ":" + action.getApi() + ":" + action.getTargets();
+                } finally {
+                    for (var value : saved) value.field().set(value.owner(), value.value());
+                }
+                if (first == null) first = receipt;
+                else if (!first.equals(receipt)) throw new AssertionError("actual plan query drift " + key);
+                if (!before.equals(nativeSnapshot(player)) || !beforeListeners.equals(listeners(player.getGame())))
+                    throw new AssertionError("actual plan query changed native state/RNG/listeners " + key);
+            }
+            System.out.println("DOOM_STAR_PLAN_QUERY " + key + " step=" + step + " repeats=3 unchanged=true listenersUnchanged=true action=" + first);
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+    }
     private static void observe(Player player,String key,int step){
         if(!player.getGame().getStack().isEmpty()||!player.getGame().getPhaseHandler().is(PhaseType.MAIN1,player))return;
+        actualPlan(player,key,step);
         try{var m=CubeTopTutorAvailabilitySmoke.class.getDeclaredMethod("snapshot",Player.class);m.setAccessible(true);Object before=m.invoke(null,player);String first=null;
             for(int i=0;i<3;i++){List<String> rows=new ArrayList<>();for(ZoneType zone:List.of(ZoneType.Hand,ZoneType.Battlefield))for(Card c:player.getCardsIn(zone))if(Set.of("Chromatic Star","Doomsday","Thassa's Oracle").contains(c.getName()))for(var original:c.getSpellAbilities()){var a=original.copy(player);rows.add(c.getId()+":"+a.getApi()+":"+forge.ai.CubeComboAi.canPlayNative(a,player)+":"+forge.ai.CubeComboAi.canPayCost(a,player,false));}String receipt=rows.toString();if(first==null)first=receipt;else if(!first.equals(receipt))throw new AssertionError("query drift");if(!before.equals(m.invoke(null,player)))throw new AssertionError("native/RNG mutation");}
             System.out.println("DOOM_STAR_QUERY "+key+" step="+step+" repeats=3 unchanged=true");
