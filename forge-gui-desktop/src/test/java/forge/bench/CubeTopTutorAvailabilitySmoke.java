@@ -39,6 +39,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static final List<String> INTERRUPTIONS = List.of("counter-tutor", "shuffle-after-tutor");
     private static final List<String> DRAW_BOUNDS = List.of("recall-short", "recall-exact", "brainstorm-short",
             "brainstorm-exact", "preordain", "life-three");
+    private static final List<String> PRIORITIES = List.of("kiki-ready", "twin-ready", "doom-ready");
     private static final List<String> CASES = cases();
     private static List<String> cases() {
         List<String> result = new ArrayList<>();
@@ -53,6 +54,8 @@ public final class CubeTopTutorAvailabilitySmoke {
             for (String control : INTERRUPTIONS) result.add(tutor + ":" + half + ":" + control);
         for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
             for (String control : DRAW_BOUNDS) result.add(tutor + ":" + half + ":" + control);
+        for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
+            for (String control : PRIORITIES) result.add(tutor + ":" + half + ":" + control);
         return result;
     }
     private static String tutor(String name) { return TUTORS.get(Integer.parseInt(name.split(":")[0])); }
@@ -75,7 +78,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static List<Placement> placements(boolean owner, String name) {
         List<Placement> result = new ArrayList<>();
         boolean breach = List.of("breach", "freeze").contains(name.split(":")[1]);
-        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name)) || DRAW_BOUNDS.contains(control(name))) return expandedPlacements(owner, name, breach);
+        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name)) || DRAW_BOUNDS.contains(control(name)) || PRIORITIES.contains(control(name))) return expandedPlacements(owner, name, breach);
         if (owner) {
             add(result, 1, tutor(name), ZoneType.Hand);
             add(result, 1, missing(name).equals(WILL) ? TENDRILS : WILL, ZoneType.Hand);
@@ -114,10 +117,21 @@ public final class CubeTopTutorAvailabilitySmoke {
             }
             int lands = control.equals("mana-none") ? 0 : control.equals("mana-shared-short") ? 3 : 8;
             for (int i = 0; i < lands; i++) add(result, 1, control.equals("no-blue") ? "Swamp"
-                    : breach && i >= 4 ? "Volcanic Island" : "Underground Sea", ZoneType.Battlefield);
+                    : (breach || control.equals("twin-ready")) && i >= 4 ? "Volcanic Island" : "Underground Sea", ZoneType.Battlefield);
             if (!control.equals("no-draw")) add(result, 1,
                     control.startsWith("recall-") ? "Ancestral Recall" : control.startsWith("brainstorm-") ? "Brainstorm"
                             : control.equals("preordain") ? "Preordain" : control.equals("ponder") ? "Ponder" : "Gitaxian Probe", ZoneType.Hand);
+            if (control.equals("kiki-ready")) {
+                add(result, 1, "Kiki-Jiki, Mirror Breaker", ZoneType.Battlefield);
+                add(result, 1, "Deceiver Exarch", ZoneType.Battlefield);
+            } else if (control.equals("twin-ready")) {
+                add(result, 1, "Splinter Twin", ZoneType.Hand);
+                add(result, 1, "Deceiver Exarch", ZoneType.Battlefield);
+            } else if (control.equals("doom-ready")) {
+                add(result, 1, "Doomsday", ZoneType.Hand);
+                add(result, 1, "Ancestral Recall", ZoneType.Hand);
+                add(result, 1, "Thassa's Oracle", ZoneType.Hand);
+            }
             add(result, 1, "Echo of Eons", ZoneType.Library);
             add(result, 4, "Forest", ZoneType.Library);
             if (!control.equals("absent-piece")) add(result, 1, missing(name), ZoneType.Library);
