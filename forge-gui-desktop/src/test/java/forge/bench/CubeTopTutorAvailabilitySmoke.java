@@ -32,15 +32,30 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static final String WILL = "Yawgmoth's Will", TENDRILS = "Tendrils of Agony";
     private static final List<String> TUTORS = List.of("Imperial Seal", "Vampiric Tutor", "Mystical Tutor");
     private static final List<String> CONTROLS = List.of("probe", "ponder", "no-draw", "mana-none", "life-two", "search-blocked");
+    private static final List<String> BOUNDARIES = List.of("draw-blocked", "cost-tax", "rule-of-law", "two-short",
+            "absent-piece", "no-blue", "mana-shared-short", "draw-replaced");
     private static final List<String> CASES = cases();
     private static List<String> cases() {
         List<String> result = new ArrayList<>();
         for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils"))
             for (String control : CONTROLS) result.add(tutor + ":" + half + ":" + control);
+        // Keep the original 36 cases and their fixture RNG indices fixed.
+        for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("breach", "freeze"))
+            for (String control : CONTROLS) result.add(tutor + ":" + half + ":" + control);
+        for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
+            for (String control : BOUNDARIES) result.add(tutor + ":" + half + ":" + control);
         return result;
     }
     private static String tutor(String name) { return TUTORS.get(Integer.parseInt(name.split(":")[0])); }
-    private static String missing(String name) { return name.split(":")[1].equals("will") ? WILL : TENDRILS; }
+    private static String missing(String name) {
+        return switch (name.split(":")[1]) {
+            case "will" -> WILL;
+            case "tendrils" -> TENDRILS;
+            case "breach" -> "Underworld Breach";
+            case "freeze" -> "Brain Freeze";
+            default -> throw new AssertionError("unknown half " + name);
+        };
+    }
     private static String control(String name) { return name.split(":")[2]; }
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
@@ -50,6 +65,8 @@ public final class CubeTopTutorAvailabilitySmoke {
     }
     private static List<Placement> placements(boolean owner, String name) {
         List<Placement> result = new ArrayList<>();
+        boolean breach = List.of("breach", "freeze").contains(name.split(":")[1]);
+        if (breach || BOUNDARIES.contains(control(name))) return expandedPlacements(owner, name, breach);
         if (owner) {
             add(result, 1, tutor(name), ZoneType.Hand);
             add(result, 1, missing(name).equals(WILL) ? TENDRILS : WILL, ZoneType.Hand);
@@ -66,6 +83,47 @@ public final class CubeTopTutorAvailabilitySmoke {
         } else if (control(name).equals("search-blocked")) add(result, 1, "Ashiok, Dream Render", ZoneType.Battlefield);
         add(result, 40-result.size(), "Forest", ZoneType.Library);
         if (result.size()!=40) throw new AssertionError("deck size " + name);
+        return result;
+    }
+    private static List<Placement> expandedPlacements(boolean owner, String name, boolean breach) {
+        List<Placement> result = new ArrayList<>(); String control = control(name);
+        if (owner) {
+            add(result, 1, tutor(name), ZoneType.Hand);
+            String otherHalf = breach ? (missing(name).equals("Underworld Breach") ? "Brain Freeze" : "Underworld Breach")
+                    : (missing(name).equals(WILL) ? TENDRILS : WILL);
+            ZoneType otherZone = control.equals("two-short") ? ZoneType.Library
+                    : otherHalf.equals("Underworld Breach") ? ZoneType.Battlefield : ZoneType.Hand;
+            add(result, 1, otherHalf, otherZone);
+            if (breach) {
+                add(result, 1, "Lion's Eye Diamond", ZoneType.Battlefield);
+                add(result, 12, "Ponder", ZoneType.Graveyard);
+            } else {
+                add(result, 1, "Dark Ritual", ZoneType.Graveyard);
+                add(result, 1, "Cabal Ritual", ZoneType.Graveyard);
+                add(result, 1, "Black Lotus", ZoneType.Graveyard);
+                add(result, 4, "Forest", ZoneType.Graveyard);
+            }
+            int lands = control.equals("mana-none") ? 0 : control.equals("mana-shared-short") ? 3 : 8;
+            for (int i = 0; i < lands; i++) add(result, 1, control.equals("no-blue") ? "Swamp"
+                    : breach && i >= 4 ? "Volcanic Island" : "Underground Sea", ZoneType.Battlefield);
+            if (!control.equals("no-draw")) add(result, 1,
+                    control.equals("ponder") ? "Ponder" : "Gitaxian Probe", ZoneType.Hand);
+            add(result, 1, "Echo of Eons", ZoneType.Library);
+            add(result, 4, "Forest", ZoneType.Library);
+            if (!control.equals("absent-piece")) add(result, 1, missing(name), ZoneType.Library);
+        } else {
+            String blocker = switch (control) {
+                case "search-blocked" -> "Ashiok, Dream Render";
+                case "draw-blocked" -> "Omen Machine";
+                case "cost-tax" -> "Thalia, Guardian of Thraben";
+                case "rule-of-law" -> "Rule of Law";
+                case "draw-replaced" -> "Possessed Portal";
+                default -> null;
+            };
+            if (blocker != null) add(result, 1, blocker, ZoneType.Battlefield);
+        }
+        add(result, 40-result.size(), "Forest", ZoneType.Library);
+        if (result.size()!=40) throw new AssertionError("expanded deck size " + name);
         return result;
     }
     private static Deck deck(boolean owner, String name) {
