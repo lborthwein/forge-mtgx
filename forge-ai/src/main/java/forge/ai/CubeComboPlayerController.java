@@ -291,10 +291,26 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
 
     @Override
     public boolean chooseTargetsFor(SpellAbility ability) {
-        return kittenPlan.chooseBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
+        return kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
     }
 
-    public boolean chooseKittenBlink(SpellAbility ability) { return kittenPlan.chooseBlink(ability); }
+    public boolean chooseKittenBlink(SpellAbility ability) { return kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability); }
+
+    @Override
+    public <T extends forge.game.GameEntity> T chooseSingleEntityForEffect(forge.util.collect.FCollectionView<T> options,
+            DelayedReveal delayedReveal, SpellAbility source, String title, boolean optional, Player targetedPlayer,
+            java.util.Map<String, Object> params) {
+        if (topPlan.ownsKittenRecovery(source, targetedPlayer)) {
+            if (delayedReveal != null) reveal(delayedReveal);
+            // Narset's native Dig has already legally shown these candidates.
+            // Match our tracked Top only in that supplied set, never a library.
+            for (T entity : options) if (entity instanceof Card card && topPlan.isKittenRecoveryCard(card)) {
+                System.err.println("CUBE_TOP_KITTEN recover choice=Top legalCandidates=" + options.size());
+                return entity;
+            }
+        }
+        return super.chooseSingleEntityForEffect(options, delayedReveal, source, title, optional, targetedPlayer, params);
+    }
 
     @Override
     public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility source,
