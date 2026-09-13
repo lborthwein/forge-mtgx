@@ -462,6 +462,15 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     }
 
     @Override
+    public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection offered) {
+        var ordinary = super.arrangeForSurveil(offered);
+        if (!breachPlan.ownsChannelerSurveil(offered)) return ordinary;
+        if (!ordinary.getLeft().isEmpty())
+            System.err.println("CUBE_BREACH_CHANNELER changed-surveil kept=" + ordinary.getLeft().size() + " milled=" + offered.size());
+        return org.apache.commons.lang3.tuple.ImmutablePair.of(new CardCollection(), new CardCollection(offered));
+    }
+
+    @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destination, SpellAbility source) {
         if (destination == ZoneType.Library && source != null && doomsdayPlan.ownsPileDecision(source))
             return doomsdayPlan.orderPile(cards);
