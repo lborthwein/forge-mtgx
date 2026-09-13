@@ -142,7 +142,8 @@ public final class CubeTopTutorPlan {
     }
     boolean owns(SpellAbility sa) { return sa != null && sa == selected; }
     boolean waitingForOwnSpell() {
-        return selected != null && player.getGame().getStack().peekAbility() == selected;
+        return selected != null && !player.getGame().getStack().isEmpty()
+                && player.getGame().getStack().peekAbility() == selected;
     }
     boolean play(SpellAbility sa) {
         if (!owns(sa)) return false;
