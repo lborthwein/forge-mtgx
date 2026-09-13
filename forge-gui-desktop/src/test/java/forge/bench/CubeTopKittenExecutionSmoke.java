@@ -54,7 +54,7 @@ public final class CubeTopKittenExecutionSmoke {
             state.put(memory.name(), forge.ai.AiCardMemory.getMemorySet(player, memory).stream().map(Card::getId).sorted().toList());
         for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile}) {
             state.put(zone.name(), player.getCardsIn(zone).stream().map(c -> c.getId() + ":" + c.getGameTimestamp()
-                    + ":" + c.isTapped() + ":" + c.getView().isTapped() + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
+                    + ":" + c.isTapped() + ":" + c.getView().isTapped() + ":" + c.getPlaneswalkerAbilityActivated() + ":" + c.getCounters(CounterEnumType.LOYALTY) + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
             state.put(zone.name() + "Abilities", player.getCardsIn(zone).stream().flatMap(c -> c.getSpellAbilities().stream())
                     .map(sa -> sa.getHostCard().getId() + ":" + sa.getActivatingPlayer() + ":" + sa.getTargets() + ":" + System.identityHashCode(sa.getTargets())
                             + ":" + (sa.getManaPart() == null ? "null" : sa.getManaPart().getExpressChoice())).toList());
@@ -102,6 +102,7 @@ public final class CubeTopKittenExecutionSmoke {
             case "tax-three" -> "Trinisphere";
             case "root-maze" -> "Root Maze";
             case "activation-off" -> "Stony Silence";
+            case "activation-tax" -> "Suppression Field";
             default -> null;
         };
         if (restriction != null) other.add(new Entry(restriction, ZoneType.Battlefield));
@@ -122,14 +123,16 @@ public final class CubeTopKittenExecutionSmoke {
             if (control.equals("purity-tapped-source") && card.getName().equals("Sol Ring")) card.setTapped(true);
             if (control.equals("burden-one") && card.getName().equals("The One Ring")) card.setCounters(CounterEnumType.BURDEN, 1);
             if (control.equals("loyalty-one") && card.getName().equals("Narset, Parter of Veils")) card.setCounters(CounterEnumType.LOYALTY, 1);
+            if (control.equals("loyalty-used") && card.getName().equals("Narset, Parter of Veils")) {
+                card.setCounters(CounterEnumType.LOYALTY, 3); card.addPlaneswalkerAbilityActivated();
+            }
         }
         game.getAction().checkStateEffects(true); game.getTriggerHandler().resetActiveTriggers();
         BenchRandomAudit.install(850913L + seat);
         String key = "seat=" + seat + " engine=" + engine + " control=" + control
                 + " candidate=" + candidate + " policy=" + forge.ai.CubeComboAi.VERSION;
         System.out.println("TOP_KITTEN_FIXTURE " + key);
-        if (candidate && (control.startsWith("purity") || control.startsWith("hidden-") || control.equals("visible-library")
-                || control.equals("recovery-decoy"))) probeInitial(player);
+        if (candidate && !List.of("none", "no-kitten", "no-restorer", "no-outlet").contains(control)) probeInitial(player);
         boolean restrictionLive = restriction != null;
         if (restriction != null) System.out.println("TOP_KITTEN_PUBLIC restriction=" + restriction.replace(' ', '_') + " live=true turn=1");
         Set<Integer> seen = new HashSet<>();
@@ -203,11 +206,11 @@ public final class CubeTopKittenExecutionSmoke {
             if (args.length > 2 && args[2].equals("boundaries")) {
                 for (int seat = 0; seat < 2; seat++) for (String engine : List.of("mystic", "ring-birgi", "ring-helm", "narset-birgi", "narset-helm")) {
                     List<String> controls = new ArrayList<>(List.of("no-top", "short-library", "draw-cap", "cast-cap",
-                            "no-life-gain", "protected-opponent", "root-maze", "activation-off"));
+                            "no-life-gain", "protected-opponent", "root-maze", "activation-off", "activation-tax"));
                     if (engine.equals("mystic")) controls.addAll(List.of("tax-two", "tax-three", "no-ready-mana"));
                     else controls.add("tax-unsustained");
                     if (engine.startsWith("ring")) controls.add("burden-one");
-                    if (engine.startsWith("narset")) controls.add("loyalty-one");
+                    if (engine.startsWith("narset")) controls.addAll(List.of("loyalty-one", "loyalty-used"));
                     for (String control : controls) { run(seat, engine, control, candidate); cases++; }
                 }
                 System.out.println("TOP_KITTEN_BOUNDARIES_COMPLETE cases=" + cases + " candidate=" + candidate);

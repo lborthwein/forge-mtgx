@@ -58,11 +58,28 @@ final class CubeTopKittenPlan {
                 || !CubeComboAi.canPayManaCost(cost, spell, player, false)) return null;
         return cost;
     }
-    private boolean refunded(ManaCostBeingPaid cost) {
-        if (cost.isPaid()) return true;
+    private boolean refunded(int cost) {
+        if (cost == 0) return true;
         Card birgi = find("Birgi, God of Storytelling", ZoneType.Battlefield);
-        return cost.getConvertedManaCost() == 1 && birgi != null && birgi.getTriggers().stream().anyMatch(t -> !t.isSuppressed()
+        return cost == 1 && birgi != null && birgi.getTriggers().stream().anyMatch(t -> !t.isSuppressed()
                 && "SpellCast".equals(t.getParam("Mode")) && "You".equals(t.getParam("ValidActivatingPlayer")));
+    }
+    private int activationMana(Card card, ApiType api, boolean loyalty) {
+        SpellAbility action = ability(card, api);
+        if (action == null) return -1;
+        Card preview = CardCopyService.getLKICopy(card);
+        preview.setLastKnownZone(player.getZone(ZoneType.Battlefield)); action.setHostCard(preview);
+        var adjusted = forge.game.cost.CostAdjustment.adjust(action.getPayCosts(), action, false);
+        if (adjusted == null || adjusted.getCostParts().stream().anyMatch(p -> !(p instanceof CostPartMana)
+                && !(p instanceof CostTap) && !(loyalty && p instanceof forge.game.cost.CostRemoveCounter))) return -1;
+        var mana = ComputerUtilMana.calculateManaCost(action.getPayCosts(), action, player, true, 0, false);
+        if (mana.getXcounter() != 0 || mana.getConvertedManaCost() != mana.getGenericManaAmount()) return -1;
+        return mana.getConvertedManaCost();
+    }
+    private boolean sustainableRecovery(Card top, Card restorer, String kind, int castCost) {
+        int draw = activationMana(top, ApiType.Draw, false);
+        int recovery = activationMana(restorer, "ring".equals(kind) ? ApiType.PutCounter : ApiType.Dig, "narset".equals(kind));
+        return draw >= 0 && recovery >= 0 && refunded(castCost + draw + recovery);
     }
     private boolean returnsUntapped(Card card) {
         // Public ETB-tapped replacements invalidate both the mana restoration
@@ -141,13 +158,19 @@ final class CubeTopKittenPlan {
         if (mystic != null && mystic.getStaticAbilities().stream().noneMatch(st -> !st.isSuppressed()
                 && "True".equals(st.getParam("MayPlay"))
                 && st.checkConditions(forge.game.staticability.StaticAbilityMode.Continuous))) mystic = null;
-        ManaCostBeingPaid cost = recastCost(top, mystic != null);
-        if (cost == null) return null;
-        if (mystic != null && (partner = manaPartner(cost.getConvertedManaCost())) != null) route = "mana";
-        else if ((cost = recastCost(top, false)) != null && refunded(cost) && (partner = find("The One Ring", ZoneType.Battlefield)) != null
-                && partner.getCounters(forge.game.card.CounterEnumType.BURDEN) == 0) route = "ring";
-        else if (cost != null && refunded(cost) && (partner = find("Narset, Parter of Veils", ZoneType.Battlefield)) != null) route = "narset";
-        else return null;
+        ManaCostBeingPaid cost = mystic == null ? null : recastCost(top, true);
+        int drawMana = activationMana(top, ApiType.Draw, false);
+        if (cost != null && drawMana >= 0 && (partner = manaPartner(cost.getConvertedManaCost() + drawMana)) != null) route = "mana";
+        else {
+            cost = recastCost(top, false);
+            if (cost == null) return null;
+            if ((partner = find("The One Ring", ZoneType.Battlefield)) != null
+                    && partner.getCounters(forge.game.card.CounterEnumType.BURDEN) == 0
+                    && sustainableRecovery(top, partner, "ring", cost.getConvertedManaCost())) route = "ring";
+            else if ((partner = find("Narset, Parter of Veils", ZoneType.Battlefield)) != null
+                    && sustainableRecovery(top, partner, "narset", cost.getConvertedManaCost())) route = "narset";
+            else return null;
+        }
         if (!returnsUntapped(top) || !returnsUntapped(partner) || !enough(top, recovering, need, castBudget)) return null;
         SpellAbility action;
         if (!recovering && top.isInZone(ZoneType.Battlefield)) {
