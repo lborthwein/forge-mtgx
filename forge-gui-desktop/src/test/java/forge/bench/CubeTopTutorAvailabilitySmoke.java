@@ -37,6 +37,8 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static final List<String> BOUNDARIES = List.of("draw-blocked", "cost-tax", "rule-of-law", "two-short",
             "absent-piece", "no-blue", "mana-shared-short", "draw-replaced");
     private static final List<String> INTERRUPTIONS = List.of("counter-tutor", "shuffle-after-tutor");
+    private static final List<String> DRAW_BOUNDS = List.of("recall-short", "recall-exact", "brainstorm-short",
+            "brainstorm-exact", "preordain", "life-three");
     private static final List<String> CASES = cases();
     private static List<String> cases() {
         List<String> result = new ArrayList<>();
@@ -49,6 +51,8 @@ public final class CubeTopTutorAvailabilitySmoke {
             for (String control : BOUNDARIES) result.add(tutor + ":" + half + ":" + control);
         for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
             for (String control : INTERRUPTIONS) result.add(tutor + ":" + half + ":" + control);
+        for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
+            for (String control : DRAW_BOUNDS) result.add(tutor + ":" + half + ":" + control);
         return result;
     }
     private static String tutor(String name) { return TUTORS.get(Integer.parseInt(name.split(":")[0])); }
@@ -71,7 +75,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static List<Placement> placements(boolean owner, String name) {
         List<Placement> result = new ArrayList<>();
         boolean breach = List.of("breach", "freeze").contains(name.split(":")[1]);
-        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name))) return expandedPlacements(owner, name, breach);
+        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name)) || DRAW_BOUNDS.contains(control(name))) return expandedPlacements(owner, name, breach);
         if (owner) {
             add(result, 1, tutor(name), ZoneType.Hand);
             add(result, 1, missing(name).equals(WILL) ? TENDRILS : WILL, ZoneType.Hand);
@@ -112,7 +116,8 @@ public final class CubeTopTutorAvailabilitySmoke {
             for (int i = 0; i < lands; i++) add(result, 1, control.equals("no-blue") ? "Swamp"
                     : breach && i >= 4 ? "Volcanic Island" : "Underground Sea", ZoneType.Battlefield);
             if (!control.equals("no-draw")) add(result, 1,
-                    control.equals("ponder") ? "Ponder" : "Gitaxian Probe", ZoneType.Hand);
+                    control.startsWith("recall-") ? "Ancestral Recall" : control.startsWith("brainstorm-") ? "Brainstorm"
+                            : control.equals("preordain") ? "Preordain" : control.equals("ponder") ? "Ponder" : "Gitaxian Probe", ZoneType.Hand);
             add(result, 1, "Echo of Eons", ZoneType.Library);
             add(result, 4, "Forest", ZoneType.Library);
             if (!control.equals("absent-piece")) add(result, 1, missing(name), ZoneType.Library);
@@ -132,6 +137,17 @@ public final class CubeTopTutorAvailabilitySmoke {
             }
         }
         add(result, 40-result.size(), "Forest", ZoneType.Library);
+        if (owner && (control.startsWith("recall-") || control.startsWith("brainstorm-"))) {
+            // Registered cards remain present; only the two/three-card draw
+            // boundary library is prepared. This setup is not an AI observation.
+            int forests = control.endsWith("short") ? 1 : 2;
+            for (int i = 0; i < result.size(); i++) {
+                Placement p = result.get(i);
+                if (p.zone() != ZoneType.Library || p.name().equals(missing(name))) continue;
+                if (p.name().equals("Forest") && forests > 0) { forests--; continue; }
+                result.set(i, new Placement(p.name(), ZoneType.Exile, false));
+            }
+        }
         if (result.size()!=40) throw new AssertionError("expanded deck size " + name);
         return result;
     }
@@ -270,7 +286,8 @@ public final class CubeTopTutorAvailabilitySmoke {
                 + " stormHalves=" + ((own.contains(WILL) ? 1 : 0) + (own.contains(TENDRILS) ? 1 : 0))
                 + " breachHalves=" + ((own.contains("Underworld Breach") ? 1 : 0) + (own.contains("Brain Freeze") ? 1 : 0))
                 + " portalPresent=" + publicCards.contains("Possessed Portal")
-                + " rulePresent=" + publicCards.contains("Rule of Law"));
+                + " rulePresent=" + publicCards.contains("Rule of Law")
+                + " ownLibrary=" + player.getCardsIn(ZoneType.Library).size() + " ownLife=" + player.getLife());
     }
     private static Object planValue(Player player, String fieldName) {
         if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return null;
@@ -413,7 +430,7 @@ public final class CubeTopTutorAvailabilitySmoke {
         rules.setAllowCheatShuffle(false);
         Game game = new Match(rules, players, "native top-tutor availability diagnosis").createGame();
         Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1-seat);
-        player.setLife(control(name).equals("life-two") ? 2 : 20, null);
+        player.setLife(control(name).equals("life-two") ? 2 : control(name).equals("life-three") ? 3 : 20, null);
         opponent.setLife(10, null);
         populate(player, true, name); populate(opponent, false, name);
         for (Card c : opponent.getCardsIn(ZoneType.Battlefield))
