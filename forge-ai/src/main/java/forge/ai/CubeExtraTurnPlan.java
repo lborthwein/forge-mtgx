@@ -66,6 +66,19 @@ public final class CubeExtraTurnPlan {
     }
 
     public static Card preferRecurrence(Player player, SpellAbility trigger, CardCollectionView choices, Card ordinary) {
+        if (Boolean.getBoolean("forge.test.traceExtraTurn") && trigger.getHostCard().getController() == player
+                && trigger.getHostCard().getName().equals("Eternal Witness")) {
+            System.out.println("EXTRA_TURN_GATE phase=" + player.getGame().getPhaseHandler().getPhase()
+                    + " trigger=" + trigger.isTrigger() + " sub=" + (trigger.getSubAbility() != null)
+                    + " min=" + trigger.getMinTargets() + " max=" + trigger.getMaxTargets()
+                    + " owner=" + (trigger.getActivatingPlayer() == player) + " choices=" + choices.size()
+                    + " params=" + (trigger.getTrigger() == null ? "none" : trigger.getTrigger().getMapParams()));
+            for (Card card : choices) System.out.println("EXTRA_TURN_CARD card=" + card.getName()
+                    + " id=" + card.getId() + " from=" + card.getCastFrom());
+            for (Card card : player.getGame().getStack().getSpellCardsCastThisTurn())
+                if (card.getController() == player) System.out.println("EXTRA_TURN_HISTORY card=" + card.getName()
+                        + " id=" + card.getId() + " from=" + card.getCastFrom());
+        }
         if (!CubeComboAi.enabled(player) || ordinary == null || choices.size() < 2
                 || trigger.getActivatingPlayer() != player || !trigger.isTrigger()
                 || trigger.getApi() != ApiType.ChangeZone || trigger.getSubAbility() != null
