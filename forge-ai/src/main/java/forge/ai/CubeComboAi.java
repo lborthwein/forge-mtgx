@@ -1137,13 +1137,25 @@ public final class CubeComboAi {
     static boolean hasImmediateTwinRoute(Player player) {
         if (!enabled(player) || !player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)
                 || !player.getGame().getStack().isEmpty()) return false;
+        for (Card body : player.getCardsIn(ZoneType.Battlefield)) {
+            if (body.isFaceDown() || body.getController() != player || !livePartnerBody(body)
+                    || player.getOpponents().stream().noneMatch(o -> forge.game.combat.CombatUtil.canAttack(body, o))) continue;
+            for (SpellAbility original : body.getSpellAbilities()) {
+                if (!copyEngine(original) || copyPartner(player, original) == null) continue;
+                SpellAbility active = original.copy(player);
+                // Keep the ready route through combat even once its finite copy
+                // budget is met; the ordinary native copy policy then passes.
+                if (canPlayNative(active, player) && canPayCost(active, player, false)) return true;
+            }
+        }
         for (Card aura : player.getCardsIn(ZoneType.Hand)) {
             if (!engineAura(aura)) continue;
             for (SpellAbility original : aura.getSpellAbilities()) {
                 if (!original.isSpell()) continue;
                 for (Card body : player.getCardsIn(ZoneType.Battlefield)) {
                     if (body.isFaceDown() || body.getController() != player || !livePartnerBody(body)
-                            || body.isTapped() || body.isSick() || body.getNetPower() <= 0) continue;
+                            || body.isTapped() || body.isSick() || body.getNetPower() <= 0
+                            || player.getOpponents().stream().noneMatch(o -> forge.game.combat.CombatUtil.canAttack(body, o))) continue;
                     SpellAbility cast = original.copy(player);
                     if (!selectSingleTarget(cast, body) || !canPlayNative(cast, player)
                             || !canPayCost(cast, player, false)) continue;

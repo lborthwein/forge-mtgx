@@ -41,6 +41,7 @@ public final class CubeTopTutorAvailabilitySmoke {
             "brainstorm-exact", "preordain", "life-three");
     private static final List<String> PRIORITIES = List.of("kiki-ready", "twin-ready", "doom-ready");
     private static final List<String> TWIN_BOUNDS = List.of("twin-blocked", "twin-no-red", "twin-sick", "twin-shroud");
+    private static final List<String> TWIN_COMBAT = List.of("twin-moat", "twin-bridge");
     private static final List<String> CASES = cases();
     private static List<String> cases() {
         List<String> result = new ArrayList<>();
@@ -59,6 +60,8 @@ public final class CubeTopTutorAvailabilitySmoke {
             for (String control : PRIORITIES) result.add(tutor + ":" + half + ":" + control);
         for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
             for (String control : TWIN_BOUNDS) result.add(tutor + ":" + half + ":" + control);
+        for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
+            for (String control : TWIN_COMBAT) result.add(tutor + ":" + half + ":" + control);
         return result;
     }
     private static String tutor(String name) { return TUTORS.get(Integer.parseInt(name.split(":")[0])); }
@@ -81,7 +84,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static List<Placement> placements(boolean owner, String name) {
         List<Placement> result = new ArrayList<>();
         boolean breach = List.of("breach", "freeze").contains(name.split(":")[1]);
-        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name)) || DRAW_BOUNDS.contains(control(name)) || PRIORITIES.contains(control(name)) || TWIN_BOUNDS.contains(control(name))) return expandedPlacements(owner, name, breach);
+        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name)) || DRAW_BOUNDS.contains(control(name)) || PRIORITIES.contains(control(name)) || TWIN_BOUNDS.contains(control(name)) || TWIN_COMBAT.contains(control(name))) return expandedPlacements(owner, name, breach);
         if (owner) {
             add(result, 1, tutor(name), ZoneType.Hand);
             add(result, 1, missing(name).equals(WILL) ? TENDRILS : WILL, ZoneType.Hand);
@@ -147,6 +150,8 @@ public final class CubeTopTutorAvailabilitySmoke {
                 case "draw-replaced" -> "Possessed Portal";
                 case "twin-blocked" -> "Cursed Totem";
                 case "twin-shroud" -> "Dense Foliage";
+                case "twin-moat" -> "Moat";
+                case "twin-bridge" -> "Ensnaring Bridge";
                 default -> null;
             };
             if (blocker != null) add(result, 1, blocker, ZoneType.Battlefield);
