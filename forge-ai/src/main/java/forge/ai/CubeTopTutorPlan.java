@@ -71,8 +71,7 @@ public final class CubeTopTutorPlan {
             }
             selected = draw; return selected;
         }
-        if (CubeComboAi.hasImmediateKikiRoute(player) || !player.getManaPool().isEmpty()
-                || !player.canDraw()) return null;
+        if (CubeComboAi.hasImmediateKikiRoute(player) || !player.getManaPool().isEmpty()) return null;
         // Existing native family and hand-tutor actions are consulted first.
         for (Card hand : player.getCardsIn(ZoneType.Hand)) {
             if (hand.isFaceDown()) continue;
