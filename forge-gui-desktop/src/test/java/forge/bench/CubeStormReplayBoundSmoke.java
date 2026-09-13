@@ -30,7 +30,8 @@ import java.util.TreeMap;
 public final class CubeStormReplayBoundSmoke {
     private static final String WILL = "Yawgmoth's Will", TENDRILS = "Tendrils of Agony";
     private static final List<String> CASES = List.of("complete", "one-ritual", "rituals-yard", "no-will",
-            "no-sac-rock", "mana-short", "rule-of-law", "rest-in-peace", "library-one", "draw-blocked");
+            "no-sac-rock", "mana-short", "rule-of-law", "rest-in-peace", "library-one", "draw-blocked", "pre-cantrip", "late-ritual", "late-rock", "late-cantrip",
+            "no-cantrip", "uncastable-cantrip", "no-threshold", "cost-tax", "null-rod");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone, boolean tapped) { }
@@ -44,14 +45,18 @@ public final class CubeStormReplayBoundSmoke {
         ZoneType ritualZone = name.equals("rituals-yard") ? ZoneType.Graveyard : ZoneType.Hand;
         add(result, 1, "Dark Ritual", ritualZone);
         if (!name.equals("one-ritual")) add(result, 1, "Cabal Ritual", ritualZone);
-        add(result, 1, "Gitaxian Probe", ZoneType.Hand);
+        if (!name.equals("no-cantrip")) add(result, 1,
+                name.equals("pre-cantrip") || name.equals("uncastable-cantrip") ? "Ponder" : "Gitaxian Probe", ZoneType.Hand);
         if (!name.equals("no-sac-rock")) {
             add(result, 1, "Lotus Petal", ZoneType.Hand);
             add(result, 1, "Black Lotus", ZoneType.Graveyard);
         }
-        if (!name.equals("mana-short")) add(result, 3, "Swamp", ZoneType.Battlefield);
-        add(result, 6, "Forest", ZoneType.Graveyard);
-        add(result, name.equals("library-one") ? 1 : 20, "Forest", ZoneType.Library);
+        if (!name.equals("mana-short")) add(result, 3,
+                name.equals("pre-cantrip") || name.equals("late-cantrip") ? "Underground Sea" : "Swamp", ZoneType.Battlefield);
+        if (!name.equals("no-threshold")) add(result, 6, "Forest", ZoneType.Graveyard);
+        if (name.startsWith("late-")) add(result, 1, name.equals("late-ritual") ? "Dark Ritual"
+                : name.equals("late-rock") ? "Lotus Petal" : "Ponder", ZoneType.Library);
+        add(result, name.equals("library-one") ? 1 : name.startsWith("late-") ? 19 : 20, "Forest", ZoneType.Library);
         add(result, 40-result.size(), "Forest", ZoneType.Exile);
         if (result.size()!=40) throw new AssertionError("own deck size");
         return result;
@@ -61,6 +66,8 @@ public final class CubeStormReplayBoundSmoke {
         if (name.equals("rule-of-law")) add(result, 1, "Rule of Law", ZoneType.Battlefield);
         if (name.equals("rest-in-peace")) add(result, 1, "Rest in Peace", ZoneType.Battlefield);
         if (name.equals("draw-blocked")) add(result, 1, "Narset, Parter of Veils", ZoneType.Battlefield);
+        if (name.equals("cost-tax")) add(result, 1, "Thalia, Guardian of Thraben", ZoneType.Battlefield);
+        if (name.equals("null-rod")) add(result, 1, "Null Rod", ZoneType.Battlefield);
         add(result, 40-result.size(), "Forest", ZoneType.Library);
         return result;
     }
@@ -139,6 +146,35 @@ public final class CubeStormReplayBoundSmoke {
             System.out.println("STORM_REPLAY_QUERY " + key + " repeats=6 unchanged=true " + first);
         } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
     }
+    private static String observeLive(Player player, String key, int step, String previous) {
+        Game game = player.getGame();
+        if (!game.getStack().isEmpty() || game.isGameOver()
+                || !(game.getPhaseHandler().is(PhaseType.MAIN1, player) || game.getPhaseHandler().is(PhaseType.MAIN2, player))) return previous;
+        try {
+            var f = forge.ai.CubeComboPlayerController.class.getDeclaredField("stormPlan"); f.setAccessible(true);
+            var plan = (forge.ai.CubeStormPlan) f.get(player.getController());
+            var attempted = forge.ai.CubeStormPlan.class.getDeclaredField("attemptedWill"); attempted.setAccessible(true);
+            var bound = forge.ai.CubeStormPlan.class.getDeclaredMethod("reachableStormBound", int.class); bound.setAccessible(true);
+            int storm = game.getStack().getSpellsCastThisTurn().size();
+            StringBuilder visible = new StringBuilder("attempted=" + attempted.getBoolean(plan) + " storm=" + storm);
+            for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Graveyard, ZoneType.Battlefield)) {
+                visible.append(" ").append(zone).append("=[");
+                visible.append(String.join(";", player.getCardsIn(zone).stream().filter(c -> !c.isFaceDown())
+                        .map(c -> c.getName().replace(' ', '_')).sorted().toList())).append("]");
+            }
+            String stamp = visible.toString();
+            if (stamp.equals(previous)) return previous;
+            var before = snapshot(player); Integer first = null;
+            for (int i = 0; i < 3; i++) {
+                int value = (Integer) bound.invoke(plan, storm);
+                if (first == null) first = value;
+                else if (first != value) throw new AssertionError("live bound drift " + key);
+                if (!before.equals(snapshot(player))) throw new AssertionError("live bound mutated state/RNG " + key);
+            }
+            System.out.println("STORM_REPLAY_LIVE_BOUND " + key + " step=" + step + " repeats=3 unchanged=true bound=" + first + " " + stamp);
+            return stamp;
+        } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
+    }
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
         var lobby = new forge.ai.LobbyPlayerAi("Default-" + seat, null);
         lobby.setAiProfile("Default");
@@ -155,6 +191,8 @@ public final class CubeStormReplayBoundSmoke {
         Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
         populate(player, true, name); populate(opponent, false, name);
         player.setLife(40, null);
+        if (name.startsWith("late-")) opponent.setLife(22, null);
+        if (name.equals("no-cantrip")) opponent.setLife(18, null);
         for (Card c : opponent.getCardsIn(ZoneType.Battlefield))
             if (c.isPlaneswalker()) c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 5);
         game.setAge(GameStage.Play);
@@ -172,8 +210,9 @@ public final class CubeStormReplayBoundSmoke {
         Set<Integer> ids = new HashSet<>();
         int steps = 0;
         TreeMap<String, Integer> casts = new TreeMap<>();
-        String previous = "";
+        String previous = "", previousBound = "";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= startTurn + 1 && steps < 900) {
+            if (improved) previousBound = observeLive(player, key, steps, previousBound);
             game.getPhaseHandler().mainLoopStep(); steps++;
             for (var item : game.getStack()) if (ids.add(item.getId())) {
                 var sa = item.getSpellAbility();
@@ -220,7 +259,7 @@ public final class CubeStormReplayBoundSmoke {
                 preferences.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US"); return null;
             });
-            for (String card : List.of(WILL, TENDRILS, "Dark Ritual", "Cabal Ritual", "Gitaxian Probe", "Lotus Petal", "Black Lotus", "Swamp", "Forest", "Rule of Law", "Rest in Peace", "Narset, Parter of Veils"))
+            for (String card : List.of("Ponder", "Underground Sea", "Thalia, Guardian of Thraben", "Null Rod", WILL, TENDRILS, "Dark Ritual", "Cabal Ritual", "Gitaxian Probe", "Lotus Petal", "Black Lotus", "Swamp", "Forest", "Rule of Law", "Rest in Peace", "Narset, Parter of Veils"))
                 StaticData.instance().attemptToLoadCard(card);
             for (String name : CASES) for (int seat = 0; seat < 2; seat++) run(args[1].equals("improved"), seat, name);
             System.out.println("STORM_REPLAY_SUITE_COMPLETE cases=" + (CASES.size() * 2));
