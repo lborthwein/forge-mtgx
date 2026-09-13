@@ -164,7 +164,7 @@ public final class CubeReservoirPreventionSmoke {
         String control = name.split(":")[1];
         Card reservoir = player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> OUTLET.equals(c.getName())).findFirst().orElseThrow();
         if (control.equals("damage49")) for (var sa : reservoir.getSpellAbilities())
-            if (sa.getApi() == forge.game.ability.ApiType.DealDamage) sa.setParam("NumDmg", "49");
+            if (sa.getApi() == forge.game.ability.ApiType.DealDamage) sa.putParam("NumDmg", "49");
         if (control.startsWith("life")) opponent.setLife(Integer.parseInt(control.substring(4)), null);
         if (control.contains("shield")) {
             int amount = Integer.parseInt(control.substring(control.indexOf("shield") + 6));
