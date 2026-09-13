@@ -466,7 +466,7 @@ public final class CubeDoomsdayPlan {
         SpellAbility oracle = handSpell("Thassa's Oracle");
         if (oracle == null || !CubeComboAi.canPlayNative(oracle, player)
                 || !oracle.getPayCosts().isOnlyManaCost()
-                || !oracle.getPayCosts().getTotalMana().equals(new Cost("U U", false).getTotalMana())) return null;
+                || !oracle.getPayCosts().getTotalMana().toString().equals("{U}{U}")) return null;
         var memory = AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown() || !card.isUntapped() || AiCardMemory.isRememberedCard(player, card, memory)) continue;
