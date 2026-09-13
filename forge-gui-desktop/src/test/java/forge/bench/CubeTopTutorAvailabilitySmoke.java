@@ -281,6 +281,62 @@ public final class CubeTopTutorAvailabilitySmoke {
             return field.get(plan);
         } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
     }
+    /** Inspect the card supplied by a real library-to-library native event
+     * during our resolving search, never locate a card by a hidden name. */
+    private static final class SelectionObserver {
+        private final Player player;
+        private final String key;
+        SelectionObserver(Player player, String key) { this.player = player; this.key = key; }
+        @com.google.common.eventbus.Subscribe public void changed(forge.game.event.GameEventCardChangeZone event) {
+            if (event.from() == null || event.to() == null || event.from().zoneType() != ZoneType.Library
+                    || event.to().zoneType() != ZoneType.Library || event.to().player() == null
+                    || event.to().player().getId() != player.getId()
+                    || !Boolean.TRUE.equals(planValue(player, "selectedPiece"))) return;
+            var game = player.getGame();
+            var source = (forge.game.spellability.SpellAbility) planValue(player, "tutor");
+            if (source == null || game.getStack().isEmpty() || game.getStack().peekAbility() != source
+                    || !game.getStack().isResolving(source.getHostCard())) return;
+            Card choice = game.findByView(event.card());
+            if (choice == null || choice.getOwner() != player || !choice.getName().equals(planValue(player, "expected"))) return;
+            try {
+                var holder = forge.ai.CubeComboPlayerController.class.getDeclaredField("topTutorPlan");
+                holder.setAccessible(true); Object plan = holder.get(player.getController());
+                var selected = plan.getClass().getDeclaredField("selectedPiece"); selected.setAccessible(true);
+                var callback = plan.getClass().getDeclaredMethod("selectedFromSearch", forge.game.spellability.SpellAbility.class, Card.class);
+                callback.setAccessible(true); boolean saved = selected.getBoolean(plan);
+                var before = snapshot(player);
+                java.util.function.BiFunction<forge.game.spellability.SpellAbility, Card, Boolean> query = (ability, card) -> {
+                    try {
+                        selected.setBoolean(plan, false); callback.invoke(plan, ability, card);
+                        return selected.getBoolean(plan);
+                    } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+                    finally { try { selected.setBoolean(plan, saved); } catch (IllegalAccessException failure) { throw new AssertionError(failure); } }
+                };
+                boolean positive = query.apply(source, choice);
+                boolean copiedSource = query.apply(source.copy(player), choice);
+                Player opponent = player.getOpponents().get(0);
+                boolean foreignCopy = query.apply(source.copy(opponent), choice);
+                boolean foreignActor = forge.ai.CubeComboAi.probePayment(player, () -> {
+                    source.setActivatingPlayer(opponent); return query.apply(source, choice);
+                }, source);
+                boolean wrongZone = query.apply(source, source.getHostCard());
+                Card detached = forge.game.card.CardFactory.getCard(choice.getPaperCard(), player, -1, game);
+                detached.setZone(player.getZone(ZoneType.Library));
+                boolean detachedAccepted = query.apply(source, detached);
+                Card alias = forge.game.card.CardFactory.getCard(choice.getPaperCard(), player, choice.getId(), game);
+                alias.setZone(player.getZone(ZoneType.Library));
+                boolean aliasAccepted = query.apply(source, alias);
+                if (!before.equals(snapshot(player)) || source.getActivatingPlayer() != player || selected.getBoolean(plan) != saved)
+                    throw new AssertionError("ownership observer mutated native state " + key);
+                int rejected = (copiedSource ? 0 : 1) + (foreignCopy ? 0 : 1) + (foreignActor ? 0 : 1)
+                        + (wrongZone ? 0 : 1) + (detachedAccepted ? 0 : 1) + (aliasAccepted ? 0 : 1);
+                System.out.println("TOP_TUTOR_SELECTION_OWNERSHIP " + key + " nativeResolving=true positive=" + positive
+                        + " copiedSource=" + copiedSource + " foreignCopy=" + foreignCopy + " foreignActor=" + foreignActor
+                        + " wrongZone=" + wrongZone + " detachedAccepted=" + detachedAccepted + " aliasAccepted=" + aliasAccepted
+                        + " negativeTotal=6 negativeRejected=" + rejected + " unchanged=true");
+            } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        }
+    }
     private static final class CounterLobby extends forge.ai.LobbyPlayerAi {
         CounterLobby(int seat) { super("Default-" + seat, null); setAiProfile("Default"); }
         @Override public Player createIngamePlayer(Game game, int id) {
@@ -291,7 +347,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     }
     private static final class CounterController extends forge.ai.PlayerControllerAi {
         private forge.game.spellability.SpellAbility counterChoice, target;
-        private boolean attempted;
+        private boolean attempted, resolved, ownedTarget;
         private String key;
         CounterController(Game game, Player player, forge.LobbyPlayer lobby) { super(game, player, lobby); }
         @Override public List<forge.game.spellability.SpellAbility> chooseSpellAbilityToPlay() {
@@ -318,6 +374,7 @@ public final class CubeTopTutorAvailabilitySmoke {
                 throw new AssertionError("counter without native priority");
             boolean owned = planValue(target.getActivatingPlayer(), "tutor") == target
                     && Boolean.TRUE.equals(planValue(target.getActivatingPlayer(), "playedTutor"));
+            ownedTarget = owned;
             boolean played = super.playChosenSpellAbility(action); attempted = true;
             if (!played) throw new AssertionError("scripted native counter payment failed " + key);
             System.out.println("TOP_TUTOR_COUNTER_EXECUTION " + key + " turn=" + getGame().getPhaseHandler().getTurn()
@@ -325,6 +382,20 @@ public final class CubeTopTutorAvailabilitySmoke {
                     + " nativePriority=true remainingMana=" + getPlayer().getManaPool().totalMana()
                     + " tappedIslands=" + getPlayer().getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.isLand() && c.isTapped()).count());
             return true;
+        }
+        void reportResolution() {
+            if (!attempted || resolved || !getGame().getStack().isEmpty()) return;
+            Card targetCard = getGame().getCardState(target.getHostCard());
+            Card counterCard = getGame().getCardState(counterChoice.getHostCard());
+            if (!counterCard.isInZone(ZoneType.Graveyard)
+                    || !(targetCard.isInZone(ZoneType.Graveyard) || targetCard.isInZone(ZoneType.Exile)))
+                throw new AssertionError("counter did not natively move spells off stack " + key);
+            if (ownedTarget && Boolean.TRUE.equals(planValue(target.getActivatingPlayer(), "selectedPiece")))
+                throw new AssertionError("countered tutor selected a piece " + key);
+            resolved = true;
+            System.out.println("TOP_TUTOR_COUNTER_RESOLVED " + key + " turn=" + getGame().getPhaseHandler().getTurn()
+                    + " owned=" + ownedTarget + " targetZone=" + targetCard.getZone().getZoneType()
+                    + " counterZone=Graveyard selectedPiece=false nativeStackEmpty=true");
         }
     }
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
@@ -358,6 +429,7 @@ public final class CubeTopTutorAvailabilitySmoke {
         System.out.println("TOP_TUTOR_FIXTURE " + key + " policy=" + forge.ai.CubeComboAi.VERSION
                 + " observed=" + observed + " ownLife=" + player.getLife() + " registered=40 initialMana=0 startTurn=" + startTurn);
         if (opponent.getController() instanceof CounterController counter) counter.key = key;
+        if (observed && improved) game.subscribeToEvents(new SelectionObserver(player, key));
         boolean shuffled = false;
         Set<Integer> ids = new HashSet<>();
         int steps = 0;
@@ -378,6 +450,7 @@ public final class CubeTopTutorAvailabilitySmoke {
             liveGate(player, key, steps);
             if (observed) previous = observe(player, key, steps, previous);
             game.getPhaseHandler().mainLoopStep(); steps++;
+            if (opponent.getController() instanceof CounterController counter) counter.reportResolution();
             for (var item : game.getStack()) if (ids.add(item.getId())) {
                 var sa = item.getSpellAbility();
                 if (sa.getActivatingPlayer() != player) continue;
