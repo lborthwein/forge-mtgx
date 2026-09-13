@@ -167,6 +167,47 @@ public final class CubeEmryExecutionSmoke {
             System.out.println("EMRY_PLAN_QUERY "+key+" step="+step+" repeats=3 unchanged=true action="+first);
         } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
     }
+    private static void observeOwnership(Player player, forge.game.spellability.SpellAbility trigger, String key, int step) {
+        if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return;
+        try {
+            var owner = forge.ai.CubeComboPlayerController.class.getDeclaredField("emryPlan"); owner.setAccessible(true);
+            Object plan = owner.get(player.getController());
+            var method = plan.getClass().getDeclaredMethod("untapSource", forge.game.spellability.SpellAbility.class); method.setAccessible(true);
+            Card expected = (Card)method.invoke(plan, trigger);
+            if (expected == null) return;
+            var before = snapshot(player);
+            var selected = plan.getClass().getDeclaredField("selected"); selected.setAccessible(true);
+            var partner = plan.getClass().getDeclaredField("blinkPartner"); partner.setAccessible(true);
+            var timestamp = plan.getClass().getDeclaredField("blinkTimestamp"); timestamp.setAccessible(true);
+            var turn = plan.getClass().getDeclaredField("turn"); turn.setAccessible(true);
+            var cast = (forge.game.spellability.SpellAbility)selected.get(plan);
+            Object oldPartner=partner.get(plan); long oldTimestamp=timestamp.getLong(plan); int oldTurn=turn.getInt(plan);
+            boolean pendingIdentity=false;
+            for(var item:player.getGame().getStack()) if(item.getSpellAbility()==cast) pendingIdentity=true;
+            List<String> accepted=new ArrayList<>();
+            for(String condition:List.of("selected-null","partner-null","same-timestamp","stale-turn","selected-copy","wrong-host","wrong-player")) {
+                var query=trigger.copy(player);
+                try {
+                    switch(condition) {
+                        case "selected-null" -> selected.set(plan,null);
+                        case "partner-null" -> partner.set(plan,null);
+                        case "same-timestamp" -> timestamp.setLong(plan,trigger.getHostCard().getGameTimestamp());
+                        case "stale-turn" -> turn.setInt(plan,oldTurn-1);
+                        case "selected-copy" -> selected.set(plan,cast.copy(player));
+                        case "wrong-host" -> query.setHostCard(expected);
+                        case "wrong-player" -> query.setActivatingPlayer(player.getOpponents().get(0));
+                    }
+                    if(method.invoke(plan,query)!=null)accepted.add(condition);
+                    if(!before.equals(snapshot(player)))throw new AssertionError("ownership query mutated native state/RNG "+key);
+                } finally {
+                    selected.set(plan,cast);partner.set(plan,oldPartner);timestamp.setLong(plan,oldTimestamp);turn.setInt(plan,oldTurn);
+                }
+            }
+            if(method.invoke(plan,trigger)!=expected)throw new AssertionError("ownership restoration drift "+key);
+            System.out.println("EMRY_OWNERSHIP "+key+" step="+step+" source="+trigger.getHostCard().getName().replace(' ','_')
+                    +" positive=true pendingIdentity="+pendingIdentity+" negatives=7 accepted="+String.join(",",accepted)+" unchanged=true");
+        } catch(ReflectiveOperationException e) {throw new AssertionError(e);}
+    }
     private static String observe(Player player,String key,int step,String previous) {
         Game game=player.getGame();
         if(!game.getStack().isEmpty() || game.isGameOver() || !game.getPhaseHandler().is(PhaseType.MAIN1,player) && !game.getPhaseHandler().is(PhaseType.MAIN2,player))return previous;
@@ -202,6 +243,7 @@ public final class CubeEmryExecutionSmoke {
             game.getPhaseHandler().mainLoopStep();steps++;
             for (var item:game.getStack()) if (seen.add(item.getId())) {
                 var sa=item.getSpellAbility();if(sa.getActivatingPlayer()!=player)continue;
+                for(var part=sa;part!=null;part=part.getSubAbility())observeOwnership(player,part,key,steps);
                 String host=sa.getHostCard().getName();
                 if(sa.isSpell()&&!sa.isCopied()&&ARTIFACTS.contains(host))artifactCasts++;
                 if(host.equals(EMRY))emryActions++;if(host.equals(KITTEN))kittenActions++;
