@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v92";
+    public static final String VERSION = "cube-combo-execution-v93";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -726,6 +726,10 @@ public final class CubeComboAi {
     }
 
     public static Card untapSource(Player player, SpellAbility trigger) {
+        if (player.getController() instanceof CubeComboPlayerController combo) {
+            Card emry = combo.emryUntapSource(trigger);
+            if (emry != null) return emry;
+        }
         if (!enabled(player) || !untapBody(trigger.getHostCard()) || !trigger.usesTargeting()) return null;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             // This is an effect untap, not that player's untap step (exert and

@@ -20,6 +20,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     private final CubeDoomsdayPlan doomsdayPlan;
     private final CubeBreachPlan breachPlan;
     private final CubeStormPlan stormPlan;
+    private final CubeEmryPlan emryPlan;
     private final CubeMonolithPlan monolithPlan;
     private final CubeKittenPlan kittenPlan;
     private final CubeTopPlan topPlan;
@@ -67,6 +68,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
      * needs: the SPELL form's reanimation target is chosen inside that method
      * and no controller hook exists for it. */
     public CubeReanimatorPlan reanimatorPlan() { return reanimatorPlan; }
+    Card emryUntapSource(SpellAbility sa) { return emryPlan.untapSource(sa); }
     public CubeDoomsdayPlan doomsdayPlan() { return doomsdayPlan; }
     public int getComboSelectionChanges() { return comboSelectionChanges; }
     public int getComboTutorPlanCasts() { return comboTutorPlanCasts; }
@@ -77,6 +79,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         doomsdayPlan = new CubeDoomsdayPlan(player);
         breachPlan = new CubeBreachPlan(player);
         stormPlan = new CubeStormPlan(player);
+        emryPlan = new CubeEmryPlan(player);
         monolithPlan = new CubeMonolithPlan(player);
         kittenPlan = new CubeKittenPlan(player);
         topPlan = new CubeTopPlan(player);
@@ -89,7 +92,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         planAction = null;
-        if (doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
+        if (emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
@@ -118,6 +121,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         // byte-identical, and a log gains exactly one decline line per
         // (turn, phase) at which the draw-out family also declined.
         if (action == null && (action = reanimatorPlan.nextAction()) != null) plan = "reanimator";
+        if (action == null && (action = emryPlan.nextAction()) != null) plan = "emry";
         if (action == null) {
             tutorConsulted = true;
             tutorPlan = CubeComboAi.planTutor(getPlayer());
@@ -277,6 +281,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             tutorPlan = null;
             return played;
         }
+        if (emryPlan.owns(ability)) return emryPlan.play(ability);
         if (breachPlan.owns(ability)) return breachPlan.play(ability);
         if (stormPlan.owns(ability)) return stormPlan.play(ability);
         if (monolithPlan.owns(ability)) return monolithPlan.play(ability);
@@ -291,10 +296,10 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
 
     @Override
     public boolean chooseTargetsFor(SpellAbility ability) {
-        return kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
+        return emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
     }
 
-    public boolean chooseKittenBlink(SpellAbility ability) { return kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability); }
+    public boolean chooseKittenBlink(SpellAbility ability) { return emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability); }
 
     @Override
     public <T extends forge.game.GameEntity> T chooseSingleEntityForEffect(forge.util.collect.FCollectionView<T> options,
