@@ -17,6 +17,8 @@ final class CubeEmryPlan {
     private SpellAbility selected;
     private Card blinkPartner;
     private long blinkTimestamp;
+    private boolean pendingCast;
+    private int lifeBeforeCast;
     CubeEmryPlan(Player player) { this.player = player; }
     private Card find(String name, ZoneType zone) {
         for (Card card : player.getCardsIn(zone))
@@ -51,10 +53,18 @@ final class CubeEmryPlan {
     }
     SpellAbility nextAction() {
         var game = player.getGame(); var phase = game.getPhaseHandler();
-        if (turn != phase.getTurn()) { turn = phase.getTurn(); actions = 0; selected = null; }
+        if (turn != phase.getTurn()) { turn = phase.getTurn(); actions = 0; selected = null; pendingCast = false; }
         if (failedTurn == turn || actions >= 128 || player.cantWin() || !game.getStack().isEmpty()
                 || !(phase.is(PhaseType.MAIN1, player) || phase.is(PhaseType.MAIN2, player))
                 || player.getOpponents().size() != 1) return null;
+        if (pendingCast) {
+            pendingCast = false;
+            if (player.getLife() <= lifeBeforeCast) {
+                failedTurn = turn;
+                System.err.println("CUBE_EMRY_PLAN stopped-no-life-progress turn=" + turn);
+                return null;
+            }
+        }
         Card emry = find(EMRY, ZoneType.Battlefield), kitten = find(KITTEN, ZoneType.Battlefield);
         Card reservoir = find("Aetherflux Reservoir", ZoneType.Battlefield);
         if (emry == null || kitten == null || reservoir == null
@@ -73,7 +83,7 @@ final class CubeEmryPlan {
                 || !shot.getRestrictions().canPlay(reservoir, shot) || !shot.isLegalAfterStack()
                 || !shot.checkRestrictions(reservoir, player)) return null;
         if (player.getLife() > 50 && payable(shot)) return select(shot);
-        if (!player.canGainLife() || reservoir.getTriggers().stream().noneMatch(t -> !t.isSuppressed()
+        if (!knownLifeGainWorks(reservoir) || reservoir.getTriggers().stream().noneMatch(t -> !t.isSuppressed()
                 && "SpellCast".equals(t.getParam("Mode")))) return null;
         for (String name : new String[]{"Lotus Petal", "Mishra's Bauble", "Lion's Eye Diamond"}) {
             Card artifact = find(name, ZoneType.Graveyard);
@@ -102,6 +112,23 @@ final class CubeEmryPlan {
         }
         return null;
     }
+    /** Do not traverse hidden zones to forecast life-gain replacements. */
+    private boolean knownLifeGainWorks(Card reservoir) {
+        if (!player.canGainLife()) return false;
+        var params = forge.game.ability.AbilityKey.mapFromAffected(player);
+        params.put(forge.game.ability.AbilityKey.LifeGained, 1);
+        params.put(forge.game.ability.AbilityKey.Source, reservoir);
+        for (ZoneType zone : new ZoneType[]{ZoneType.Battlefield, ZoneType.Command})
+            for (Card source : player.getGame().getCardsIn(zone)) {
+                if (source.isFaceDown()) continue;
+                for (var re : source.getReplacementEffects()) {
+                    if (java.util.Set.of("NoLife", "LoseLife", "LichDraw").contains(re.getParamOrDefault("AILogic", ""))
+                            && re.modeCheck(forge.game.replacement.ReplacementType.GainLife, params)
+                            && re.zonesCheck(source.getZone()) && re.requirementsCheck(player.getGame()) && re.canReplace(params)) return false;
+                }
+            }
+        return true;
+    }
     boolean chooseBlink(SpellAbility sa) {
         if (selected == null || !selected.isSpell() || turn != player.getGame().getPhaseHandler().getTurn()
                 || sa.getActivatingPlayer() != player || !KITTEN.equals(sa.getHostCard().getName())
@@ -129,9 +156,11 @@ final class CubeEmryPlan {
     }
     boolean owns(SpellAbility sa) { return sa == selected; }
     boolean play(SpellAbility sa) {
+        int life = player.getLife();
         boolean played = ComputerUtil.handlePlayingSpellAbility(player, sa, null,
                 current -> new AiCostDecision(player, current, false));
         if (!played) failedTurn = turn;
+        if (played && sa.isSpell()) { pendingCast = true; lifeBeforeCast = life; }
         System.err.println("CUBE_EMRY_PLAN " + (played ? "played" : "native-payment-failed")
                 + " turn=" + turn + " card=" + sa.getHostCard().getName().replace(' ', '_')
                 + " api=" + sa.getApi() + " actions=" + actions);
