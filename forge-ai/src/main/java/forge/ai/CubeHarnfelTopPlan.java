@@ -128,7 +128,8 @@ public final class CubeHarnfelTopPlan {
         return CubeComboAi.canPayManaCost(total, spell, player, false);
     }
     private boolean permission(SpellAbility spell, Card card) {
-        if (lastDig == null || spell.getMayPlay() == null || card.getOwner() != player
+        if (lastDig == null || !spell.isSpell() || spell.getActivatingPlayer() != player
+                || spell.getHostCard() != card || spell.getMayPlay() == null || card.getOwner() != player
                 || card.isFaceDown() || !card.isInZone(ZoneType.Exile)
                 || player.getGame().getCardState(card, null) != card || card.getId() != knownId) return false;
         Card effect = spell.getMayPlay().getHostCard();
