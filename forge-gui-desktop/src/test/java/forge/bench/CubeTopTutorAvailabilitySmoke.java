@@ -128,7 +128,8 @@ public final class CubeTopTutorAvailabilitySmoke {
                 var sa = original.copy(player);
                 boolean legal = forge.ai.CubeComboAi.canPlayNative(sa, player);
                 boolean payable = forge.ai.CubeComboAi.canPayCost(sa, player, false);
-                result.add(card.getName().replace(' ', '_') + ":legal=" + legal + ":payable=" + payable);
+                result.add(card.getName().replace(' ', '_') + ":legal=" + legal + ":payable=" + payable
+                        + (TUTORS.contains(card.getName()) ? ":searchAllowed=" + player.canSearchLibraryWith(sa, player) : ""));
             }
         }
         return String.join(";", result);
