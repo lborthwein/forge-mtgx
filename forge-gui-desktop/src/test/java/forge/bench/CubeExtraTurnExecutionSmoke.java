@@ -102,7 +102,7 @@ public final class CubeExtraTurnExecutionSmoke {
                 }
                 for (Card card : new ArrayList<Card>(opponent.getCardsIn(ZoneType.Exile)))
                     if (card.getName().equals("Sphere of Resistance") || card.getName().equals("Rule of Law"))
-                        game.getAction().moveToPlay(card, null);
+                        game.getAction().moveToPlay(card, null, forge.game.ability.AbilityKey.newMap());
                 game.getAction().checkStateEffects(true);
                 intervention = true;
                 System.out.println("EXTRA_TURN_INTERVENTION control=" + control + " turn=" + turn);

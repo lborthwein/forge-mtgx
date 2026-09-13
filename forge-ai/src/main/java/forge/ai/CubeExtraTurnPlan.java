@@ -98,6 +98,11 @@ public final class CubeExtraTurnPlan {
                     SpellAbility second = castPreview(card, player);
                     if (!extraTurn(second, player) || !staticLegal(second, player)
                             || !CubeComboAi.castFitsAfter(player, first, second)) continue;
+                    var firstCost = forge.game.cost.CostAdjustment.adjust(first.getPayCosts(), first, false);
+                    var secondCost = forge.game.cost.CostAdjustment.adjust(second.getPayCosts(), second, false);
+                    if (firstCost == null || secondCost == null
+                            || firstCost.getCostParts().stream().anyMatch(p -> !(p instanceof CostPartMana))
+                            || secondCost.getCostParts().stream().anyMatch(p -> !(p instanceof CostPartMana))) continue;
                     ManaCostBeingPaid combined = ComputerUtilMana.calculateManaCost(first.getPayCosts(), first, player, true, 0, false);
                     ManaCostBeingPaid later = ComputerUtilMana.calculateManaCost(second.getPayCosts(), second, player, true, 0, false);
                     if (combined.getXcounter() != 0 || later.getXcounter() != 0) continue;
