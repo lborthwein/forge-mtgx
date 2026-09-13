@@ -74,7 +74,7 @@ final class CubeWitnessResourcePlan {
     private boolean renewableMana(int need) {
         List<Land> lands = new ArrayList<>();
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
-            if (!card.isLand() || !card.canUntap(null, false)) continue;
+            if (!card.isLand() || !card.canUntap(null, true)) continue;
             for (SpellAbility original : card.getManaAbilities()) {
                 if (original.getApi() != ApiType.Mana || original.getSubAbility() != null || original.usesTargeting()
                         || !original.getPayCosts().hasTapCost()
