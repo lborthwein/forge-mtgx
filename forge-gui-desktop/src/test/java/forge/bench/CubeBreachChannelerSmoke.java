@@ -276,6 +276,9 @@ public final class CubeBreachChannelerSmoke {
         int startTurn = seat == 0 ? 1 : 2;
         game.getPhaseHandler().setupFirstTurn(seat == 0 ? player : opponent,
                 () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player, startTurn));
+        // setupFirstTurn executes the first player's untap before the main-phase hook.
+        if (name.equals("tapped")) for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (card.isLand()) card.setTapped(true);
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
         BenchRandomAudit.install(987100L + 100L * seat + (CASES.contains(name) ? CASES.indexOf(name) : 1000 + BOUNDARIES.indexOf(name)));
