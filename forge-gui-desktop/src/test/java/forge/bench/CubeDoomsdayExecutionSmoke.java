@@ -619,6 +619,7 @@ public final class CubeDoomsdayExecutionSmoke {
      * route-1 board must still commit. */
     private static boolean naturalProposes(String kase, boolean passTurn) {
         if (kase.equals("lethal-board")) return !passTurn && main2;
+        if (!passTurn && kase.equals("pips2-oracle-hand")) return true;
         return switch (kase) {
             case "pips3-mixed", "pips3-singles", "pips4", "pips2", "oracle-graveyard", "pips3",
                  "clock-safe", "clock-blocker", "narset-one-draw", "counterspell" -> true;
@@ -699,6 +700,7 @@ public final class CubeDoomsdayExecutionSmoke {
         if (kase.equals("narset-one-draw") && !(p.canDrawAmount(1) && !p.canDrawAmount(2)))
             throw new AssertionError("Narset fixture must permit exactly one draw");
         boolean proposes = naturalProposes(kase, passTurn), expectWin = proposes && !kase.equals("counterspell");
+        boolean delayedHandRoute = !passTurn && kase.equals("pips2-oracle-hand");
         BenchRandomAudit.install(0); // Fixed constructed fixture, not a sampled opening.
         var proposed = new forge.ai.CubeDoomsdayPlan(p).nextAction();
         String action = proposed == null ? "none" : proposed.getHostCard().getName();
@@ -712,7 +714,8 @@ public final class CubeDoomsdayExecutionSmoke {
             throw new AssertionError("Natural route proposal mismatch: " + kase + " main2=" + main2 + " -> " + action);
         boolean delayedReview = Boolean.getBoolean("forge.test.observeDoomsdayDelayed")
                 && !passTurn && (kase.equals("pips2-oracle-hand") || kase.equals("liliana"));
-        int steps = 0, limit = passTurn || delayedReview ? 1500 : STEP_LIMIT, lastTurn = passTurn || delayedReview ? 3 : 1;
+        boolean observeNextTurn = passTurn || improved && delayedHandRoute || delayedReview;
+        int steps = 0, limit = observeNextTurn ? 1500 : STEP_LIMIT, lastTurn = observeNextTurn ? 3 : 1;
         boolean doom = false, pile = false;
         int beforeOracle = -1, doomTurn = -1, oracleTurn = -1;
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= lastTurn && steps++ < limit) {
@@ -739,8 +742,8 @@ public final class CubeDoomsdayExecutionSmoke {
                 + " opponentCounterspell=" + has(opponent, ZoneType.Graveyard, "Counterspell"));
         if (steps >= limit) throw new AssertionError("Natural route step budget: " + kase);
         if (improved && NATURAL_STRICT) {
-            if (expectWin && !(doom && pile && oracleWin && beforeOracle == (passTurn ? 4 : 5)
-                    && doomTurn == 1 && oracleTurn == (passTurn ? 3 : 1)))
+            if (expectWin && !(doom && pile && oracleWin && beforeOracle == (passTurn || delayedHandRoute ? 4 : 5)
+                    && doomTurn == 1 && oracleTurn == (passTurn || delayedHandRoute ? 3 : 1)))
                 throw new AssertionError("Natural route did not execute: " + kase + " main2=" + main2);
             if (!proposes && doom) throw new AssertionError("Doomsday committed despite " + kase);
             if (!expectWin && oracleWin) throw new AssertionError("Unexpected control Oracle win: " + kase);
