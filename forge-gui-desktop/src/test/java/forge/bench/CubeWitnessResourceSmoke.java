@@ -165,6 +165,30 @@ public final class CubeWitnessResourceSmoke {
             if (!before.equals(snapshot(player))) throw new AssertionError("initial recurrence query changed native state");
         }
         System.out.println("WITNESS_QUERY_END repeats=6 unchanged=true choice=" + first);
+        if ("Snap/ChangeZone".equals(first)) {
+            var plan = new forge.ai.CubeKittenPlan(player);
+            var selected = plan.nextAction();
+            Card kitten = player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals(KITTEN)).findFirst().orElseThrow();
+            Card witness = player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals(PARTNER)).findFirst().orElseThrow();
+            var kt = kitten.getTriggers().stream().filter(t -> "SpellCast".equals(t.getParam("Mode"))).findFirst().orElseThrow();
+            var blink = forge.game.ability.AbilityFactory.getAbility(kitten.getSVar(kt.getParam("Execute")), kitten);
+            blink.setActivatingPlayer(player);
+            if (plan.chooseBlink(blink)) throw new AssertionError("unowned missing-cause Kitten trigger");
+            var alien = selected.copy(player.getOpponents().get(0));
+            blink.setTriggeringObject(forge.game.ability.AbilityKey.SpellAbility, alien);
+            if (plan.chooseBlink(blink)) throw new AssertionError("unowned opponent-cause Kitten trigger");
+            blink.setTriggeringObject(forge.game.ability.AbilityKey.SpellAbility, witness.getSpellAbilities().get(0).copy(player));
+            if (plan.chooseBlink(blink)) throw new AssertionError("unowned other-spell Kitten trigger");
+            blink.setTriggeringObject(forge.game.ability.AbilityKey.SpellAbility, selected);
+            if (!plan.chooseBlink(blink) || !blink.getTargets().getTargetCards().contains(witness)) throw new AssertionError("owned Kitten target missing");
+            var wt = witness.getTriggers().stream().filter(t -> "ChangesZone".equals(t.getParam("Mode"))).findFirst().orElseThrow();
+            var restore = forge.game.ability.AbilityFactory.getAbility(witness.getSVar(wt.getParam("Execute")), witness);
+            restore.setActivatingPlayer(player);
+            restore.setTriggeringObject(forge.game.ability.AbilityKey.Card, witness);
+            if (plan.chooseBlink(restore) || plan.confirmFamilyTrigger(restore) != null) throw new AssertionError("stale Witness return acquired");
+            if (!before.equals(snapshot(player))) throw new AssertionError("ownership probes changed native state");
+            System.out.println("WITNESS_OWNERSHIP checks=6 unchanged=true");
+        }
     }
     private static void run(int seat, String engine, String control, boolean candidate) {
         List<Entry> own = layout(engine, control), other = opposing(control);

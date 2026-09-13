@@ -469,14 +469,11 @@ public final class CubeKittenPlan {
      *
      * <p>Readable only for a spell whose WHOLE ability chain is mana production
      * and which targets nothing anywhere in that chain. Both halves are
-     * deliberately narrower than the catalogue. A chain with any other part is
-     * an effect this plan would have to model - catalogue row
-     * {@code 864-1170-2196-2701} alternates a ritual with Frantic Search, whose
-     * {@code Mode$ TgtChoose} discard would discard, from our own hand, the very
-     * card the partner just returned. A chain that targets is a choice this plan
-     * does not own - row {@code 802-864-1170-1414--52} alternates a ritual with
-     * Snap, whose only creature targets in an L position are Displacer Kitten and
-     * the partner itself, and bouncing either ENDS the loop.</p> */
+     * deliberately narrower than the catalogue. Frantic Search includes native
+     * draw/discard and untap choices, so it is not a mana-only ritual. The Snap
+     * row requires a separate one-coloured-mana auxiliary creature, Lotus Petal,
+     * and Witness restoration; CubeWitnessResourcePlan owns that sequence.
+     * Neither sequence is represented by this mana-only net calculation.</p> */
     private int ritualNet(SpellAbility sa) {
         if(sa==null||!sa.isSpell()) return UNREADABLE;
         int cost=castCost(sa);
