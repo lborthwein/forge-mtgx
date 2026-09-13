@@ -56,7 +56,7 @@ public final class CubeTopKittenExecutionSmoke {
             state.put(zone.name(), player.getCardsIn(zone).stream().map(c -> c.getId() + ":" + c.getGameTimestamp()
                     + ":" + c.isTapped() + ":" + c.getView().isTapped() + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
             state.put(zone.name() + "Abilities", player.getCardsIn(zone).stream().flatMap(c -> c.getSpellAbilities().stream())
-                    .map(sa -> sa.getHostCard().getId() + ":" + sa.getActivatingPlayer() + ":" + sa.getTargets()
+                    .map(sa -> sa.getHostCard().getId() + ":" + sa.getActivatingPlayer() + ":" + sa.getTargets() + ":" + System.identityHashCode(sa.getTargets())
                             + ":" + (sa.getManaPart() == null ? "null" : sa.getManaPart().getExpressChoice())).toList());
         }
         state.put("librarySize", player.getCardsIn(ZoneType.Library).size());
@@ -119,6 +119,7 @@ public final class CubeTopKittenExecutionSmoke {
         populate(player, own); populate(opponent, other); opponent.setLife(40, null);
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (control.equals("no-ready-mana") && (card.isLand() || card.getName().equals("Sol Ring"))) card.setTapped(true);
+            if (control.equals("purity-tapped-source") && card.getName().equals("Sol Ring")) card.setTapped(true);
             if (control.equals("burden-one") && card.getName().equals("The One Ring")) card.setCounters(CounterEnumType.BURDEN, 1);
             if (control.equals("loyalty-one") && card.getName().equals("Narset, Parter of Veils")) card.setCounters(CounterEnumType.LOYALTY, 1);
         }
@@ -127,7 +128,7 @@ public final class CubeTopKittenExecutionSmoke {
         String key = "seat=" + seat + " engine=" + engine + " control=" + control
                 + " candidate=" + candidate + " policy=" + forge.ai.CubeComboAi.VERSION;
         System.out.println("TOP_KITTEN_FIXTURE " + key);
-        if (candidate && (control.equals("purity") || control.startsWith("hidden-") || control.equals("visible-library")
+        if (candidate && (control.startsWith("purity") || control.startsWith("hidden-") || control.equals("visible-library")
                 || control.equals("recovery-decoy"))) probeInitial(player);
         boolean restrictionLive = restriction != null;
         if (restriction != null) System.out.println("TOP_KITTEN_PUBLIC restriction=" + restriction.replace(' ', '_') + " live=true turn=1");
@@ -191,7 +192,7 @@ public final class CubeTopKittenExecutionSmoke {
             if (args.length > 2 && args[2].equals("privacy")) {
                 for (int seat = 0; seat < 2; seat++) for (String engine : List.of("mystic", "ring-birgi", "ring-helm", "narset-birgi", "narset-helm")) {
                     List<String> controls = new ArrayList<>(List.of("purity", "hidden-swamp", "hidden-mountain"));
-                    if (engine.equals("mystic")) controls.add("visible-library");
+                    if (engine.equals("mystic")) controls.addAll(List.of("visible-library", "purity-tapped-source"));
                     else controls.addAll(List.of("hidden-library-top", "hidden-library-nontop"));
                     if (engine.startsWith("narset")) controls.add("recovery-decoy");
                     for (String control : controls) { run(seat, engine, control, candidate); cases++; }
