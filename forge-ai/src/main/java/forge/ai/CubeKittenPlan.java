@@ -57,6 +57,8 @@ public final class CubeKittenPlan {
     private static final java.util.Set<String> MANA_KEYS=java.util.Set.of(
         "AB","Cost","Produced","Amount","Activation","PrecostDesc","StackDescription","SpellDescription");
     private final Player player;
+    private final CubeWitnessResourcePlan resourcePlan;
+    private boolean resourceAction;
     private int turn=-1, actions, failedTurn=-1, libraryBefore;
     private SpellAbility selected, pending;
     private boolean active;
@@ -116,7 +118,7 @@ public final class CubeKittenPlan {
         if(teferi==null) {if(names.length()>0) names.append(';');names.append(TEFERI.replace(' ','_'));}
         return names.toString();
     }
-    public CubeKittenPlan(Player player) {this.player=player;}
+    public CubeKittenPlan(Player player) {this.player=player;resourcePlan=new CubeWitnessResourcePlan(player);}
 
     private Card find(String name,ZoneType zone) {
         for(Card c:player.getCardsIn(zone)) if(!c.isFaceDown()&&c.getName().equals(name)) return c;
@@ -287,7 +289,7 @@ public final class CubeKittenPlan {
     public SpellAbility nextAction() {
         var game=player.getGame();var phase=game.getPhaseHandler();
         if(turn!=phase.getTurn()) {turn=phase.getTurn();actions=0;active=false;selected=null;pending=null;rockName=null;
-            familyRoute=null;partnerName=null;loopName=null;outletName=null;loopReturn=null;forecastLogged=false;}
+            familyRoute=null;partnerName=null;loopName=null;outletName=null;loopReturn=null;forecastLogged=false;resourceAction=false;resourcePlan.reset();}
         if(failedTurn==turn||actions>=200||player.cantWin()||!game.getStack().isEmpty()
                 ||!(phase.is(PhaseType.MAIN1,player)||phase.is(PhaseType.MAIN2,player))) return decline(gateReason());
         decline="other check=kitten-plan";
@@ -295,7 +297,7 @@ public final class CubeKittenPlan {
         Card kitten=find(KITTEN,ZoneType.Battlefield), teferi=find(TEFERI,ZoneType.Battlefield);
         if(pending!=null) {
             Card partner=find(partnerName,ZoneType.Battlefield);
-            boolean stalled=pending.getHostCard().getName().equals(TEFERI) && library>=libraryBefore
+            boolean stalled=resourceAction ? resourcePlan.stalled(pending) : pending.getHostCard().getName().equals(TEFERI) && library>=libraryBefore
                 || pending.getHostCard().getName().equals(rockName)&&pending.isSpell()
                    && (teferi==null||teferi.getGameTimestamp()==teferiBefore)
                 // A family iteration that did not blink its partner made no
@@ -306,6 +308,7 @@ public final class CubeKittenPlan {
             pending=null;
             if(stalled) {failedTurn=turn;active=false;System.err.println("CUBE_KITTEN_PLAN stopped-no-progress turn="+turn);return decline("stopped-no-progress");}
         }
+        resourceAction=false;
         SpellAbility action=teferiRoute(kitten,teferi,library);
         if(action!=null) return action;
         // The Teferi route has already recorded its own token. A family route is
@@ -315,6 +318,11 @@ public final class CubeKittenPlan {
         if(kitten!=null) {
             SpellAbility family=familyAction();
             if(family!=null) return family;
+            SpellAbility resource=resourcePlan.nextAction(200-actions);
+            if(resource!=null) {
+                resourceAction=true;familyRoute=null;partnerName=null;loopName=null;
+                return choose(resource);
+            }
             if(familyPartnerSeen) return decline("family:"+familyRoute+":"+familyDecline);
         }
         return decline(teferiToken);
@@ -742,6 +750,7 @@ public final class CubeKittenPlan {
     }
 
     public boolean chooseBlink(SpellAbility sa) {
+        if(resourceAction) return resourcePlan.chooseTargets(sa);
         if(!active||turn!=player.getGame().getPhaseHandler().getTurn()||sa.getActivatingPlayer()!=player) return false;
         if(familyRoute!=null) return chooseFamilyTarget(sa);
         if(!sa.getHostCard().getName().equals(KITTEN)||sa.getApi()!=ApiType.ChangeZone
@@ -804,6 +813,7 @@ public final class CubeKittenPlan {
      * Witness enter-the-battlefield trigger in a position this plan does not own
      * is answered byte-identically to the way it was before v70.</p> */
     public Boolean confirmFamilyTrigger(SpellAbility sa) {
+        if(resourceAction) return resourcePlan.confirm(sa);
         if(sa==null||!active||!"witness".equals(familyRoute)||partnerName==null
             ||turn!=player.getGame().getPhaseHandler().getTurn()
             ||sa.getActivatingPlayer()!=player) return null;
@@ -819,8 +829,10 @@ public final class CubeKittenPlan {
         libraryBefore=player.getCardsIn(ZoneType.Library).size();
         Card teferi=find(TEFERI,ZoneType.Battlefield);teferiBefore=teferi==null?-1:teferi.getGameTimestamp();
         Card partner=find(partnerName,ZoneType.Battlefield);partnerBefore=partner==null?-1:partner.getGameTimestamp();
-        broadenColor(sa);
-        boolean ok=reserveBlue(sa,()->ComputerUtil.handlePlayingSpellAbility(player,sa,null,current->new AiCostDecision(player,current,false)));
+        if(!resourceAction) broadenColor(sa);
+        boolean ok=resourceAction
+            ? ComputerUtil.handlePlayingSpellAbility(player,sa,null,current->new AiCostDecision(player,current,false))
+            : reserveBlue(sa,()->ComputerUtil.handlePlayingSpellAbility(player,sa,null,current->new AiCostDecision(player,current,false)));
         if(ok&&!sa.isManaAbility()) pending=sa;
         if(!ok) {failedTurn=turn;active=false;}
         System.err.println("CUBE_KITTEN_PLAN "+(ok?"played":"native-payment-failed")+" turn="+turn+" card="+sa.getHostCard().getName()+" api="+sa.getApi()+" library="+libraryBefore);
@@ -833,7 +845,7 @@ public final class CubeKittenPlan {
         // A family iteration puts the loop spell, Kitten's blink, the partner's
         // own return trigger and the outlet's spell-cast trigger on the stack in
         // one pass. All four are ours, and the plan waits for all four.
-        if(familyRoute!=null) return true;
+        if(familyRoute!=null||resourceAction) return true;
         return top.getHostCard().getName().equals(KITTEN)
             ||top.getHostCard().getName().equals(TEFERI)||top.getHostCard().getName().equals(ORACLE)
             ||top.getHostCard().getName().equals(rockName);
