@@ -257,6 +257,12 @@ public final class CubeEmryExecutionSmoke {
                 Card remedy=null;
                 for(Card card:opponent.getCardsIn(ZoneType.Exile)) if(!card.isFaceDown() && card.getName().equals("Tainted Remedy"))remedy=card;
                 if(remedy==null)throw new AssertionError("missing public interruption card");
+                boolean gainPending=false;
+                for(var item:game.getStack()) {var action=item.getSpellAbility();
+                    if(action.getActivatingPlayer()==player && action.getHostCard().getName().equals("Aetherflux Reservoir")
+                            && action.getApi()==forge.game.ability.ApiType.GainLife)gainPending=true;
+                }
+                if(!gainPending || artifactCasts!=1)throw new AssertionError("interruption missed first pending Reservoir gain");
                 int life=player.getLife();
                 game.getAction().moveToPlay(remedy,null,forge.game.ability.AbilityKey.newMap());
                 game.getAction().checkStateEffects(true);
