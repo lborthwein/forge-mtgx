@@ -1131,6 +1131,40 @@ public final class CubeComboAi {
         return false;
     }
 
+    /** A ready Twin cast can use the existing native Aura/copy policy now.
+     * Parse the printed grant against its prospective own-visible host only;
+     * never install an ability or change the battlefield during this forecast. */
+    static boolean hasImmediateTwinRoute(Player player) {
+        if (!enabled(player) || !player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)
+                || !player.getGame().getStack().isEmpty()) return false;
+        for (Card aura : player.getCardsIn(ZoneType.Hand)) {
+            if (!engineAura(aura)) continue;
+            for (SpellAbility original : aura.getSpellAbilities()) {
+                if (!original.isSpell()) continue;
+                for (Card body : player.getCardsIn(ZoneType.Battlefield)) {
+                    if (body.isFaceDown() || body.getController() != player || !livePartnerBody(body)
+                            || body.isTapped() || body.isSick() || body.getNetPower() <= 0) continue;
+                    SpellAbility cast = original.copy(player);
+                    if (!selectSingleTarget(cast, body) || !canPlayNative(cast, player)
+                            || !canPayCost(cast, player, false)) continue;
+                    for (var statik : aura.getStaticAbilities()) {
+                        if (!statik.checkMode(forge.game.staticability.StaticAbilityMode.Continuous)
+                                || !statik.hasParam("AddAbility")) continue;
+                        for (String name : statik.getParam("AddAbility").split(" & ")) {
+                            String printed = aura.getSVar(name);
+                            if (printed == null || !printed.contains("CopyPermanent")) continue;
+                            SpellAbility grant = forge.game.ability.AbilityFactory.getAbility(printed, body, aura);
+                            grant.setActivatingPlayer(player);
+                            if (copyEngine(grant) && needsMoreCopies(player, grant)
+                                    && canPlayNative(grant, player) && canPayCost(grant, player, false)) return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     /** A search of our own library that writes its top: Imperial Seal, Vampiric
      * Tutor. The fetched card is drawn on our next turn whichever main phase
      * the search resolved in, and native ChangeZoneAi refuses to cast such a

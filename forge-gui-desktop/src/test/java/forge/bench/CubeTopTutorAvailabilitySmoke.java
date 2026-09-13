@@ -40,6 +40,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static final List<String> DRAW_BOUNDS = List.of("recall-short", "recall-exact", "brainstorm-short",
             "brainstorm-exact", "preordain", "life-three");
     private static final List<String> PRIORITIES = List.of("kiki-ready", "twin-ready", "doom-ready");
+    private static final List<String> TWIN_BOUNDS = List.of("twin-blocked", "twin-no-red", "twin-sick", "twin-shroud");
     private static final List<String> CASES = cases();
     private static List<String> cases() {
         List<String> result = new ArrayList<>();
@@ -56,6 +57,8 @@ public final class CubeTopTutorAvailabilitySmoke {
             for (String control : DRAW_BOUNDS) result.add(tutor + ":" + half + ":" + control);
         for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
             for (String control : PRIORITIES) result.add(tutor + ":" + half + ":" + control);
+        for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
+            for (String control : TWIN_BOUNDS) result.add(tutor + ":" + half + ":" + control);
         return result;
     }
     private static String tutor(String name) { return TUTORS.get(Integer.parseInt(name.split(":")[0])); }
@@ -78,7 +81,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static List<Placement> placements(boolean owner, String name) {
         List<Placement> result = new ArrayList<>();
         boolean breach = List.of("breach", "freeze").contains(name.split(":")[1]);
-        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name)) || DRAW_BOUNDS.contains(control(name)) || PRIORITIES.contains(control(name))) return expandedPlacements(owner, name, breach);
+        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name)) || DRAW_BOUNDS.contains(control(name)) || PRIORITIES.contains(control(name)) || TWIN_BOUNDS.contains(control(name))) return expandedPlacements(owner, name, breach);
         if (owner) {
             add(result, 1, tutor(name), ZoneType.Hand);
             add(result, 1, missing(name).equals(WILL) ? TENDRILS : WILL, ZoneType.Hand);
@@ -107,7 +110,7 @@ public final class CubeTopTutorAvailabilitySmoke {
                     : otherHalf.equals("Underworld Breach") ? ZoneType.Battlefield : ZoneType.Hand;
             add(result, 1, otherHalf, otherZone);
             if (breach) {
-                add(result, 1, "Lion's Eye Diamond", ZoneType.Battlefield);
+                add(result, 1, "Lion's Eye Diamond", control.equals("twin-no-red") ? ZoneType.Exile : ZoneType.Battlefield);
                 add(result, 12, "Ponder", ZoneType.Graveyard);
             } else {
                 add(result, 1, "Dark Ritual", ZoneType.Graveyard);
@@ -117,14 +120,14 @@ public final class CubeTopTutorAvailabilitySmoke {
             }
             int lands = control.equals("mana-none") ? 0 : control.equals("mana-shared-short") ? 3 : 8;
             for (int i = 0; i < lands; i++) add(result, 1, control.equals("no-blue") ? "Swamp"
-                    : (breach || control.equals("twin-ready")) && i >= 4 ? "Volcanic Island" : "Underground Sea", ZoneType.Battlefield);
+                    : !control.equals("twin-no-red") && (breach || control.startsWith("twin-")) && i >= 4 ? "Volcanic Island" : "Underground Sea", ZoneType.Battlefield);
             if (!control.equals("no-draw")) add(result, 1,
                     control.startsWith("recall-") ? "Ancestral Recall" : control.startsWith("brainstorm-") ? "Brainstorm"
                             : control.equals("preordain") ? "Preordain" : control.equals("ponder") ? "Ponder" : "Gitaxian Probe", ZoneType.Hand);
             if (control.equals("kiki-ready")) {
                 add(result, 1, "Kiki-Jiki, Mirror Breaker", ZoneType.Battlefield);
                 add(result, 1, "Deceiver Exarch", ZoneType.Battlefield);
-            } else if (control.equals("twin-ready")) {
+            } else if (control.startsWith("twin-")) {
                 add(result, 1, "Splinter Twin", ZoneType.Hand);
                 add(result, 1, "Deceiver Exarch", ZoneType.Battlefield);
             } else if (control.equals("doom-ready")) {
@@ -142,6 +145,8 @@ public final class CubeTopTutorAvailabilitySmoke {
                 case "cost-tax" -> "Thalia, Guardian of Thraben";
                 case "rule-of-law" -> "Rule of Law";
                 case "draw-replaced" -> "Possessed Portal";
+                case "twin-blocked" -> "Cursed Totem";
+                case "twin-shroud" -> "Dense Foliage";
                 default -> null;
             };
             if (blocker != null) add(result, 1, blocker, ZoneType.Battlefield);
@@ -178,7 +183,7 @@ public final class CubeTopTutorAvailabilitySmoke {
                     FModel.getMagicDb().getCommonCards().getCard(p.name()), p.name()), player);
             card.setGameTimestamp(player.getGame().getNextTimestamp());
             player.getZone(p.zone()).add(card);
-            card.setSickness(false);
+            card.setSickness(owner && control(name).equals("twin-sick") && p.name().equals("Deceiver Exarch"));
             if (p.tapped()) card.setTapped(true);
         }
         TreeMap<String, Integer> actual = new TreeMap<>(), registered = new TreeMap<>();
@@ -461,6 +466,19 @@ public final class CubeTopTutorAvailabilitySmoke {
                 + " observed=" + observed + " ownLife=" + player.getLife() + " registered=40 initialMana=0 startTurn=" + startTurn);
         if (opponent.getController() instanceof CounterController counter) counter.key = key;
         if (observed && improved) game.subscribeToEvents(new SelectionObserver(player, key));
+        if (improved && control(name).startsWith("twin-")) {
+            try {
+                var method = forge.ai.CubeComboAi.class.getDeclaredMethod("hasImmediateTwinRoute", Player.class);
+                method.setAccessible(true);
+                var before = snapshot(player); boolean expected = control(name).equals("twin-ready");
+                for (int repeat = 0; repeat < 3; repeat++) {
+                    boolean actual = (Boolean) method.invoke(null, player);
+                    if (actual != expected || !before.equals(snapshot(player)))
+                        throw new AssertionError("Twin forecast boundary/purity " + key + " expected=" + expected + " actual=" + actual);
+                }
+                System.out.println("TOP_TUTOR_TWIN_FORECAST " + key + " ready=" + expected + " repeats=3 unchanged=true");
+            } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        }
         boolean shuffled = false;
         Set<Integer> ids = new HashSet<>();
         int steps = 0;
