@@ -48,6 +48,9 @@ public final class CubeTopTutorPlan {
     void selectedFromSearch(SpellAbility source, Card choice) {
         if (playedTutor && source == tutor && resolvingOwnedTutor() && choice != null
                 && choice.getOwner() == player && !choice.isFaceDown() && choice.isInZone(ZoneType.Library)
+                // A granted identity must still be the native game object,
+                // not a detached forecast or last-known-information copy.
+                && player.getGame().getCardState(choice, null) == choice
                 && choice.getName().equals(expected)) selectedPiece = true;
     }
 
