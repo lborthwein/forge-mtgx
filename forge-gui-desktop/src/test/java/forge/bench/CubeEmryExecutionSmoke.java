@@ -188,7 +188,8 @@ public final class CubeEmryExecutionSmoke {
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);
         Game game=new Match(rules,players,"native Emry recurrence diagnosis").createGame();
         Player player=game.getPlayers().get(seat),opponent=game.getPlayers().get(1-seat);
-        populate(player,true,name);populate(opponent,false,name);player.setLife(name.endsWith(":life50")?50:name.endsWith(":life51")?51:40,null);opponent.setLife(20,null);game.setAge(GameStage.Play);
+        populate(player,true,name);player.setLife(name.endsWith(":life50")?50:name.endsWith(":life51")?51:40,null);
+        populate(opponent,false,name);opponent.setLife(20,null);game.setAge(GameStage.Play);
         int startTurn=seat==0?1:2;
         game.getPhaseHandler().setupFirstTurn(seat==0?player:opponent,()->game.getPhaseHandler().devModeSet(PhaseType.MAIN1,player,startTurn));
         game.getAction().checkStateEffects(true);game.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(990300L+100L*seat+index);
@@ -229,8 +230,12 @@ public final class CubeEmryExecutionSmoke {
             for(int p=1;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:CONTROLS)cases.add(p+":"+a+":"+control);
             for(int p=0;p<PARTNERS.size();p++)for(int a=0;a<ARTIFACTS.size();a++)for(String control:BOUNDARIES)cases.add(p+":"+a+":"+control);
             if(cases.size()!=240)throw new AssertionError("case count");
-            for(int i=0;i<cases.size();i++)for(int seat=0;seat<2;seat++)run(args[1].equals("improved"),seat,cases.get(i),i);
-            System.out.println("EMRY_SUITE_COMPLETE cases=480");
+            int executed=0;
+            for(int i=0;i<cases.size();i++) {
+                if(args.length>2 && !cases.get(i).endsWith(":"+args[2]))continue;
+                for(int seat=0;seat<2;seat++) {run(args[1].equals("improved"),seat,cases.get(i),i);executed++;}
+            }
+            System.out.println("EMRY_SUITE_COMPLETE cases="+executed);
         } catch(Throwable failure){failure.printStackTrace();System.exit(1);}
     }
 }
