@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v93";
+    public static final String VERSION = "cube-combo-execution-v94";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -1131,6 +1131,54 @@ public final class CubeComboAi {
         return false;
     }
 
+    /** A ready Twin cast can use the existing native Aura/copy policy now.
+     * Parse the printed grant against its prospective own-visible host only;
+     * never install an ability or change the battlefield during this forecast. */
+    static boolean hasImmediateTwinRoute(Player player) {
+        if (!enabled(player) || !player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)
+                || !player.getGame().getStack().isEmpty()) return false;
+        for (Card body : player.getCardsIn(ZoneType.Battlefield)) {
+            if (body.isFaceDown() || body.getController() != player || !livePartnerBody(body)
+                    || player.getOpponents().stream().noneMatch(o -> forge.game.combat.CombatUtil.canAttack(body, o)
+                            && o.staticDamagePrevention(body.getNetPower(), 0, body, true) > 0)) continue;
+            for (SpellAbility original : body.getSpellAbilities()) {
+                if (!copyEngine(original) || copyPartner(player, original) == null) continue;
+                SpellAbility active = original.copy(player);
+                // Keep the ready route through combat even once its finite copy
+                // budget is met; the ordinary native copy policy then passes.
+                if (canPlayNative(active, player) && canPayCost(active, player, false)) return true;
+            }
+        }
+        for (Card aura : player.getCardsIn(ZoneType.Hand)) {
+            if (!engineAura(aura)) continue;
+            for (SpellAbility original : aura.getSpellAbilities()) {
+                if (!original.isSpell()) continue;
+                for (Card body : player.getCardsIn(ZoneType.Battlefield)) {
+                    if (body.isFaceDown() || body.getController() != player || !livePartnerBody(body)
+                            || body.isTapped() || body.isSick() || body.getNetPower() <= 0
+                            || player.getOpponents().stream().noneMatch(o -> forge.game.combat.CombatUtil.canAttack(body, o)
+                            && o.staticDamagePrevention(body.getNetPower(), 0, body, true) > 0)) continue;
+                    SpellAbility cast = original.copy(player);
+                    if (!selectSingleTarget(cast, body) || !canPlayNative(cast, player)
+                            || !canPayCost(cast, player, false)) continue;
+                    for (var statik : aura.getStaticAbilities()) {
+                        if (!statik.checkMode(forge.game.staticability.StaticAbilityMode.Continuous)
+                                || !statik.hasParam("AddAbility")) continue;
+                        for (String name : statik.getParam("AddAbility").split(" & ")) {
+                            String printed = aura.getSVar(name);
+                            if (printed == null || !printed.contains("CopyPermanent")) continue;
+                            SpellAbility grant = forge.game.ability.AbilityFactory.getAbility(printed, body, aura);
+                            grant.setActivatingPlayer(player);
+                            if (copyEngine(grant) && needsMoreCopies(player, grant)
+                                    && canPlayNative(grant, player) && canPayCost(grant, player, false)) return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     /** A search of our own library that writes its top: Imperial Seal, Vampiric
      * Tutor. The fetched card is drawn on our next turn whichever main phase
      * the search resolved in, and native ChangeZoneAi refuses to cast such a
@@ -1646,6 +1694,36 @@ public final class CubeComboAi {
                     () -> CubeComboAi.canPayCost(tutor, player, false))) return new TutorPlan(tutor, reserve, name);
         }
         return null;
+    }
+
+    record TopTutorForecast(CardCollection allReserved, CardCollection pieceReserved, String partner) { }
+
+    /** Native top-search plus optional immediate draw; reserve disjoint sources
+     * for the draw and the missing piece before checking the tutor payment.
+     * planFor uses registered composition and detached previews, not a library. */
+    static TopTutorForecast topTutorForecast(Player player, SpellAbility tutor, SpellAbility draw) {
+        java.util.List<String> pieces = new java.util.ArrayList<>(CubeBreachPlan.completingPieceNames(player));
+        pieces.addAll(CubeStormPlan.completingPieceNames(player));
+        if (pieces.isEmpty()) return null;
+        CardCollection drawReserve = new CardCollection();
+        if (draw != null) {
+            if (!manaOnly(draw) || !castFitsAfter(player, tutor, draw)) return null;
+            // Decline public cast caps for the three-spell forecast. Pairwise
+            // checks alone cannot prove that all three fit the same limit.
+            for (Card card : player.getGame().getCardsIn(ZoneType.Battlefield))
+                if (!card.isFaceDown()) for (var st : card.getStaticAbilities())
+                    if (st.hasParam("NumLimitEachTurn") && !st.isSuppressed()
+                            && st.checkConditions(forge.game.staticability.StaticAbilityMode.CantBeCast)) return null;
+            var cost = ComputerUtilMana.calculateManaCost(draw.getPayCosts(), draw, player, true, 0, false);
+            drawReserve = getManaSourcesToPayCost(cost, draw, player, false);
+            if (drawReserve == null) return null;
+        }
+        final CardCollection reserve = drawReserve;
+        TutorPlan planned = withReservedSources(player, reserve,
+                () -> planFor(player, tutor, tutor, false, false, null, pieces));
+        if (planned == null) return null;
+        CardCollection all = new CardCollection(reserve); all.addAll(planned.reservedSources());
+        return new TopTutorForecast(all, new CardCollection(planned.reservedSources()), planned.plannedPartner());
     }
 
     /** v60 - the land-drop half of the second-piece forecast: what has to fit
