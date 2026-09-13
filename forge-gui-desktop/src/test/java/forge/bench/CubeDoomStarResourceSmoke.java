@@ -152,6 +152,25 @@ public final class CubeDoomStarResourceSmoke {
             System.out.println("DOOM_STAR_PLAN_QUERY " + key + " step=" + step + " repeats=3 unchanged=true listenersUnchanged=true action=" + first);
         } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
     }
+    private static void ownership(Player player,String key,int step) {
+        if(!(player.getController() instanceof forge.ai.CubeComboPlayerController controller)||player.getGame().getStack().isEmpty())return;
+        try {
+            var parent=controller.doomsdayPlan();var childField=parent.getClass().getDeclaredField("starPlan");childField.setAccessible(true);Object child=childField.get(parent);
+            var pendingField=child.getClass().getDeclaredField("pendingDoom");pendingField.setAccessible(true);SpellAbility pending=(SpellAbility)pendingField.get(child);
+            if(pending==null||player.getGame().getStack().peekAbility()!=pending)return;
+            Object before=nativeSnapshot(player),beforeListeners=listeners(player.getGame());int aliases=0,accepted=0,foreign=0;boolean genuine=true;
+            for(SpellAbility source=pending;source!=null;source=source.getSubAbility()) {
+                genuine&=parent.ownsPileDecision(source);
+                if(source instanceof forge.game.spellability.AbilitySub sub){
+                    var alias=(forge.game.spellability.AbilitySub)source.copy(player);alias.setParent(sub.getParent());aliases++;if(parent.ownsPileDecision(alias))accepted++;
+                    alias.setActivatingPlayer(player.getOpponents().get(0));if(parent.ownsPileDecision(alias))foreign++;
+                }
+            }
+            boolean detached=parent.ownsPileDecision(pending.copy(player));
+            if(!before.equals(nativeSnapshot(player))||!beforeListeners.equals(listeners(player.getGame())))throw new AssertionError("ownership query native mutation");
+            System.out.println("DOOM_STAR_OWNERSHIP "+key+" step="+step+" genuine="+genuine+" aliases="+aliases+" acceptedAliases="+accepted+" foreign="+foreign+" detached="+detached+" unchanged=true");
+        }catch(ReflectiveOperationException e){throw new AssertionError(e);}
+    }
     private static void observe(Player player,String key,int step){
         if(!player.getGame().getStack().isEmpty()||!player.getGame().getPhaseHandler().is(PhaseType.MAIN1,player))return;
         actualPlan(player,key,step);
@@ -165,7 +184,7 @@ public final class CubeDoomStarResourceSmoke {
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);Game game=new Match(rules,entries,"Doom Star diagnostic").createGame();Player p=game.getPlayers().get(seat),op=game.getPlayers().get(1-seat);p.setLife(5,null);op.setLife(20,null);populate(p,true,control);populate(op,false,control);game.setAge(GameStage.Play);int start=seat==0?1:2;game.getPhaseHandler().setupFirstTurn(seat==0?p:op,()->game.getPhaseHandler().devModeSet(PhaseType.MAIN1,p,start));game.getAction().checkStateEffects(true);game.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(989300L+seat*100L+CASES.indexOf(control));String key="arm="+arm+" seat="+seat+" case="+control;if(p.getController() instanceof ScriptController c)c.key=key;
         if(p.getManaPool().totalMana()!=0)throw new AssertionError("initial mana");
         System.out.println("DOOM_STAR_FIXTURE "+key+" registered=40 initialMana=0 initialLife=5 observed="+observed+" policy="+forge.ai.CubeComboAi.VERSION);
-        int steps=0;Set<Integer> seen=new HashSet<>();while(!game.isGameOver()&&game.getPhaseHandler().getTurn()<=start&&steps<1000){if(observed)observe(p,key,steps);game.getPhaseHandler().mainLoopStep();steps++;for(var entry:game.getStack())if(seen.add(entry.getId())){var a=entry.getSpellAbility();if(a.getActivatingPlayer()==p)System.out.println("DOOM_STAR_STACK "+key+" step="+steps+" source="+a.getHostCard().getName().replace(' ','_')+" api="+a.getApi()+" spell="+a.isSpell()+" copied="+a.isCopied());}}
+        int steps=0;Set<Integer> seen=new HashSet<>();while(!game.isGameOver()&&game.getPhaseHandler().getTurn()<=start&&steps<1000){if(observed){ownership(p,key,steps);observe(p,key,steps);}game.getPhaseHandler().mainLoopStep();steps++;for(var entry:game.getStack())if(seen.add(entry.getId())){var a=entry.getSpellAbility();if(a.getActivatingPlayer()==p)System.out.println("DOOM_STAR_STACK "+key+" step="+steps+" source="+a.getHostCard().getName().replace(' ','_')+" api="+a.getApi()+" spell="+a.isSpell()+" copied="+a.isCopied());}}
         if(steps>=1000)throw new AssertionError("step cap");System.out.println("DOOM_STAR_RESULT "+key+" won="+p.hasWon()+" gameOver="+game.isGameOver()+" steps="+steps+" life="+p.getLife()+" library="+p.getCardsIn(ZoneType.Library).size()+" oracleInPlay="+p.getCardsIn(ZoneType.Battlefield).stream().anyMatch(c->c.getName().equals("Thassa's Oracle"))+" scriptPlays="+(p.getController() instanceof ScriptController c?c.plays:0)+" searches="+(p.getController() instanceof ScriptController c?c.searchChoices:0));
     }
     public static void main(String[] args){try{GuiBase.setInterface((IGuiBase)Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),new Class<?>[]{IGuiBase.class},(proxy,method,values)->switch(method.getName()){case "getAssetsDir"->args[0]+"/forge-gui/";case "isRunningOnDesktop","isLibgdxPort","isGuiThread","hasNetGame"->false;case "getCurrentVersion"->"doom-star-observation-v1";default->throw new AssertionError("Unexpected GUI call "+method.getName());}));FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);for(String c:CASES)for(int seat=0;seat<2;seat++)run(args[1],args[2].equals("observed"),seat,c);System.out.println("DOOM_STAR_SUITE_COMPLETE cases=12");}catch(Throwable failure){failure.printStackTrace();System.exit(1);}}
