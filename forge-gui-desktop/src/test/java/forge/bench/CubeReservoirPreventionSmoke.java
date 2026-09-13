@@ -33,9 +33,10 @@ public final class CubeReservoirPreventionSmoke {
     private static final List<String> ENGINES = List.of("shot", "top", "top-kitten", "witness-snap", "witness-frantic");
     private static final List<String> CONTROLS = List.of("clear", "opponent-chasm", "own-chasm");
     private static final List<String> BOUNDARIES = List.of("shield30", "shield31", "own-shield50", "damage49", "life50", "life51");
-    private static final List<String> CASES = java.util.stream.Stream.concat(
+    private static final List<String> CASES = java.util.stream.Stream.concat(java.util.stream.Stream.concat(
             ENGINES.stream().flatMap(e -> CONTROLS.stream().map(c -> e + ":" + c)),
-            ENGINES.stream().flatMap(e -> BOUNDARIES.stream().map(c -> e + ":" + c))).toList();
+            ENGINES.stream().flatMap(e -> BOUNDARIES.stream().map(c -> e + ":" + c))),
+            java.util.stream.Stream.concat(CONTROLS.stream(), BOUNDARIES.stream()).map(c -> "channeler:" + c)).toList();
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone, boolean tapped) { }
@@ -48,6 +49,13 @@ public final class CubeReservoirPreventionSmoke {
         add(result, 1, OUTLET, ZoneType.Battlefield);
         switch (engine) {
             case "shot" -> { }
+            case "channeler" -> {
+                add(result, 1, BREACH, ZoneType.Battlefield);
+                add(result, 1, DRC, ZoneType.Battlefield);
+                add(result, 1, FRANTIC, ZoneType.Graveyard);
+                add(result, 3, "Forest", ZoneType.Graveyard);
+                add(result, 3, "Island", ZoneType.Battlefield);
+            }
             case "top" -> {
                 add(result, 1, "Sensei's Divining Top", ZoneType.Battlefield);
                 add(result, 1, "Mystic Forge", ZoneType.Battlefield);
@@ -147,11 +155,12 @@ public final class CubeReservoirPreventionSmoke {
     private static void probeInitial(Player player, String key, String name) {
         Map<String, Object> before = snapshot(player);
         boolean witness = name.startsWith("witness-");
+        var breach = new forge.ai.CubeBreachPlan(player);
         var top = new forge.ai.CubeTopPlan(player);
         var kitten = new forge.ai.CubeKittenPlan(player);
         String first = null;
         for (int i = 0; i < 6; i++) {
-            var action = witness ? (i < 3 ? new forge.ai.CubeKittenPlan(player) : kitten).nextAction()
+            var action = name.startsWith("channeler:") ? (i < 3 ? new forge.ai.CubeBreachPlan(player) : breach).nextAction() : witness ? (i < 3 ? new forge.ai.CubeKittenPlan(player) : kitten).nextAction()
                     : (i < 3 ? new forge.ai.CubeTopPlan(player) : top).nextAction();
             String choice = action == null ? "none" : action.getHostCard().getName().replace(' ', '_') + "/" + action.getApi();
             if (i == 0) first = choice;
@@ -164,7 +173,9 @@ public final class CubeReservoirPreventionSmoke {
         String control = name.split(":")[1];
         Card reservoir = player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> OUTLET.equals(c.getName())).findFirst().orElseThrow();
         if (control.equals("damage49")) for (var sa : reservoir.getSpellAbilities())
-            if (sa.getApi() == forge.game.ability.ApiType.DealDamage) sa.putParam("NumDmg", "49");
+            if (sa.getApi() == forge.game.ability.ApiType.DealDamage) {
+                sa.putParam("NumDmg", "49"); sa.getOriginalMapParams().put("NumDmg", "49");
+            }
         if (control.startsWith("life")) opponent.setLife(Integer.parseInt(control.substring(4)), null);
         if (control.contains("shield")) {
             int amount = Integer.parseInt(control.substring(control.indexOf("shield") + 6));
@@ -253,7 +264,7 @@ public final class CubeReservoirPreventionSmoke {
                 preferences.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US"); return null;
             });
-            for (String card : List.of(FRANTIC, OUTLET, "Forest", "Island", "Swamp", "Glacial Chasm", "Sensei's Divining Top", "Mystic Forge", "Helm of Awakening", "Displacer Kitten", "Sol Ring", "Eternal Witness", "Snap", "Lotus Petal", "Elvish Mystic", "Dark Ritual"))
+            for (String card : List.of(BREACH, DRC, FRANTIC, OUTLET, "Forest", "Island", "Swamp", "Glacial Chasm", "Sensei's Divining Top", "Mystic Forge", "Helm of Awakening", "Displacer Kitten", "Sol Ring", "Eternal Witness", "Snap", "Lotus Petal", "Elvish Mystic", "Dark Ritual"))
                 StaticData.instance().attemptToLoadCard(card);
             for (String name : CASES) for (int seat = 0; seat < 2; seat++) run(args[1].equals("improved"), seat, name);
             System.out.println("RESERVOIR_SUITE_COMPLETE cases=" + (CASES.size() * 2));

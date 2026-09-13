@@ -164,7 +164,7 @@ final class CubeWitnessResourcePlan {
             }
         for (SpellAbility original : reservoir.getSpellAbilities()) {
             if (original.getApi() != ApiType.DealDamage || !"50".equals(original.getParam("NumDmg"))) continue;
-            if (ComputerUtilCombat.predictDamageTo(opponent, 50, opponent.getPreventNextDamageTotalShields(),
+            if (ComputerUtilCombat.predictDamageTo(opponent, 50,
                     reservoir, false) < opponent.getLife()) continue;
             SpellAbility shot = original.copy(player);
             if (!shot.canTarget(opponent)) continue;

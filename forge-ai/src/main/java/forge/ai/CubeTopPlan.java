@@ -338,7 +338,7 @@ public final class CubeTopPlan {
         // The native shot can be targetable but completely prevented. Forecast
         // its public damage before spending cards or fifty life on the finish.
         if (!"50".equals(shot.getParam("NumDmg"))
-                || ComputerUtilCombat.predictDamageTo(opponent, 50, opponent.getPreventNextDamageTotalShields(),
+                || ComputerUtilCombat.predictDamageTo(opponent, 50,
                     reservoir, false) < opponent.getLife()) return declineShot("damage-prevented");
         shot.resetTargets(); shot.getTargets().add(opponent);
         // Forecast only activation restrictions here: canPlay() also checks
