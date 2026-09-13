@@ -304,7 +304,10 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             if (delayedReveal != null) reveal(delayedReveal);
             // Narset's native Dig has already legally shown these candidates.
             // Match our tracked Top only in that supplied set, never a library.
-            for (T entity : options) if (entity instanceof Card card && topPlan.isKittenRecoveryCard(card)) return entity;
+            for (T entity : options) if (entity instanceof Card card && topPlan.isKittenRecoveryCard(card)) {
+                System.err.println("CUBE_TOP_KITTEN recover choice=Top legalCandidates=" + options.size());
+                return entity;
+            }
         }
         return super.chooseSingleEntityForEffect(options, delayedReveal, source, title, optional, targetedPlayer, params);
     }

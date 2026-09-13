@@ -42,6 +42,39 @@ public final class CubeTopKittenExecutionSmoke {
     private static void piece(List<Entry> list, String name, boolean removed) {
         list.add(new Entry(removed ? "Forest" : name, removed ? ZoneType.Exile : ZoneType.Battlefield));
     }
+    private static Map<String, Object> snapshot(Player player) {
+        Map<String, Object> state = new LinkedHashMap<>(); Game game = player.getGame();
+        state.put("timestamp", game.getTimestamp());
+        state.put("rng", ((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot().toString());
+        state.put("mana", java.util.stream.StreamSupport.stream(player.getManaPool().spliterator(), false).toList());
+        state.put("conversion", java.util.stream.IntStream.range(0, 6)
+                .map(i -> player.getManaPool().getPossibleColorUses((byte)(1 << i))).boxed().toList());
+        state.put("snow", player.getManaPool().isSnowForColor());
+        for (var memory : forge.ai.AiCardMemory.MemorySet.values())
+            state.put(memory.name(), forge.ai.AiCardMemory.getMemorySet(player, memory).stream().map(Card::getId).sorted().toList());
+        for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile}) {
+            state.put(zone.name(), player.getCardsIn(zone).stream().map(c -> c.getId() + ":" + c.getGameTimestamp()
+                    + ":" + c.isTapped() + ":" + c.getView().isTapped() + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
+            state.put(zone.name() + "Abilities", player.getCardsIn(zone).stream().flatMap(c -> c.getSpellAbilities().stream())
+                    .map(sa -> sa.getHostCard().getId() + ":" + sa.getActivatingPlayer() + ":" + sa.getTargets()
+                            + ":" + (sa.getManaPart() == null ? "null" : sa.getManaPart().getExpressChoice())).toList());
+        }
+        state.put("librarySize", player.getCardsIn(ZoneType.Library).size());
+        state.put("history", game.getStack().getSpellCardsCastThisTurn().stream().map(c -> c.getId() + ":" + c.getCastFrom()).toList());
+        return state;
+    }
+    private static void probeInitial(Player player) {
+        Map<String, Object> before = snapshot(player); String first = null;
+        System.out.println("TOP_KITTEN_QUERY_BEGIN");
+        for (int repeat = 0; repeat < 3; repeat++) {
+            var action = new forge.ai.CubeTopPlan(player).nextAction();
+            String choice = action == null ? "none" : action.getHostCard().getName().replace(' ', '_') + "/" + action.getApi();
+            if (first == null) first = choice;
+            if (!first.equals(choice)) throw new AssertionError("initial recurrence query is unstable");
+            if (!before.equals(snapshot(player))) throw new AssertionError("initial recurrence query changed native state");
+        }
+        System.out.println("TOP_KITTEN_QUERY_END repeats=3 unchanged=true choice=" + first);
+    }
     private static void run(int seat, String engine, String control, boolean candidate) {
         List<Entry> own = new ArrayList<>(), other = new ArrayList<>();
         piece(own, "Displacer Kitten", control.equals("no-kitten"));
@@ -49,9 +82,16 @@ public final class CubeTopKittenExecutionSmoke {
         String restorer = engine.equals("mystic") ? "Mystic Forge" : engine.startsWith("ring") ? "The One Ring" : "Narset, Parter of Veils";
         piece(own, restorer, control.equals("no-restorer"));
         piece(own, engine.equals("mystic") ? "Sol Ring" : engine.endsWith("birgi") ? "Birgi, God of Storytelling" : "Helm of Awakening", false);
-        own.add(new Entry(control.equals("no-top") ? "Forest" : "Sensei's Divining Top", control.equals("no-top") ? ZoneType.Exile : engine.startsWith("ring") ? ZoneType.Hand : ZoneType.Battlefield));
+        boolean libraryStart = control.equals("visible-library") || control.startsWith("hidden-library");
+        own.add(new Entry(control.equals("no-top") || control.equals("hidden-library-nontop") ? "Forest" : "Sensei's Divining Top",
+                control.equals("no-top") ? ZoneType.Exile : libraryStart ? ZoneType.Library : engine.startsWith("ring") ? ZoneType.Hand : ZoneType.Battlefield));
         for (int i = 0; i < 2; i++) own.add(new Entry("Island", ZoneType.Battlefield));
-        for (int i = 0; i < (control.equals("short-library") ? 2 : 20); i++) own.add(new Entry("Forest", ZoneType.Library));
+        for (int i = 0; i < (control.equals("short-library") ? 2 : 20); i++) {
+            String card = control.equals("hidden-swamp") ? "Swamp" : control.equals("hidden-mountain") ? "Mountain"
+                    : control.equals("recovery-decoy") && i == 1 ? "Black Lotus"
+                    : control.equals("recovery-decoy") && i == 2 ? "Ancestral Recall" : "Forest";
+            own.add(new Entry(card, ZoneType.Library));
+        }
         while (own.size() < 40) own.add(new Entry("Forest", ZoneType.Exile));
         String restriction = switch (control) {
             case "draw-cap" -> "Narset, Parter of Veils";
@@ -87,6 +127,10 @@ public final class CubeTopKittenExecutionSmoke {
         String key = "seat=" + seat + " engine=" + engine + " control=" + control
                 + " candidate=" + candidate + " policy=" + forge.ai.CubeComboAi.VERSION;
         System.out.println("TOP_KITTEN_FIXTURE " + key);
+        if (candidate && (control.equals("purity") || control.startsWith("hidden-") || control.equals("visible-library")
+                || control.equals("recovery-decoy"))) probeInitial(player);
+        boolean restrictionLive = restriction != null;
+        if (restriction != null) System.out.println("TOP_KITTEN_PUBLIC restriction=" + restriction.replace(' ', '_') + " live=true turn=1");
         Set<Integer> seen = new HashSet<>();
         int steps = 0, casts = 0, draws = 0, kittenTriggers = 0, restores = 0, lastTurn = -1, entries = 0;
         Map<Integer, Long> timestamps = new HashMap<>();
@@ -100,6 +144,14 @@ public final class CubeTopKittenExecutionSmoke {
                 lastTurn = turn;
             }
             steps++; game.getPhaseHandler().mainLoopStep();
+            if (restriction != null) {
+                boolean live = opponent.getCardsIn(ZoneType.Battlefield).stream().anyMatch(c -> c.getName().equals(restriction));
+                if (live != restrictionLive) {
+                    System.out.println("TOP_KITTEN_PUBLIC restriction=" + restriction.replace(' ', '_') + " live=" + live
+                            + " turn=" + game.getPhaseHandler().getTurn());
+                    restrictionLive = live;
+                }
+            }
             for (Card card : player.getCardsIn(ZoneType.Battlefield)) if (timestamps.containsKey(card.getId())
                     && timestamps.get(card.getId()) != card.getGameTimestamp()) {
                 entries++; timestamps.put(card.getId(), card.getGameTimestamp());
@@ -136,6 +188,17 @@ public final class CubeTopKittenExecutionSmoke {
                 default -> throw new AssertionError(m.getName()); }));
             FModel.initialize(null, p -> {p.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);p.setPref(FPref.UI_LANGUAGE, "en-US");return null;});
             boolean candidate = args.length < 2 || !args[1].equals("baseline"); int cases = 0;
+            if (args.length > 2 && args[2].equals("privacy")) {
+                for (int seat = 0; seat < 2; seat++) for (String engine : List.of("mystic", "ring-birgi", "ring-helm", "narset-birgi", "narset-helm")) {
+                    List<String> controls = new ArrayList<>(List.of("purity", "hidden-swamp", "hidden-mountain"));
+                    if (engine.equals("mystic")) controls.add("visible-library");
+                    else controls.addAll(List.of("hidden-library-top", "hidden-library-nontop"));
+                    if (engine.startsWith("narset")) controls.add("recovery-decoy");
+                    for (String control : controls) { run(seat, engine, control, candidate); cases++; }
+                }
+                System.out.println("TOP_KITTEN_PRIVACY_COMPLETE cases=" + cases + " candidate=" + candidate);
+                return;
+            }
             if (args.length > 2 && args[2].equals("boundaries")) {
                 for (int seat = 0; seat < 2; seat++) for (String engine : List.of("mystic", "ring-birgi", "ring-helm", "narset-birgi", "narset-helm")) {
                     List<String> controls = new ArrayList<>(List.of("no-top", "short-library", "draw-cap", "cast-cap",

@@ -125,6 +125,14 @@ final class CubeTopKittenPlan {
                 && "SpellCast".equals(t.getParam("Mode")))) return null;
         Card top = find(TOP, ZoneType.Battlefield);
         if (top == null) top = find(TOP, ZoneType.Hand);
+        if (top == null && knownTop == null && !player.getCardsIn(ZoneType.Library).isEmpty()) {
+            Card visible = player.getCardsIn(ZoneType.Library).get(0);
+            // Permission precedes identity. This can resume a native-visible
+            // library Top without assuming the planner owned its earlier draw.
+            if (visible.mayPlayerLook(player) && !visible.isFaceDown() && TOP.equals(visible.getName())) {
+                knownTop = visible; recoveryNeeded = true;
+            }
+        }
         if (top != null) { knownTop = top; recoveryNeeded = false; recoveryAttempted = false; }
         else if (knownTop == null || !recoveryNeeded || recoveryAttempted) return null;
         boolean recovering = top == null;
