@@ -323,7 +323,7 @@ public final class CubeTopTutorAvailabilitySmoke {
                 Card detached = forge.game.card.CardFactory.getCard(choice.getPaperCard(), player, -1, game);
                 detached.setZone(player.getZone(ZoneType.Library));
                 boolean detachedAccepted = query.apply(source, detached);
-                Card alias = forge.game.card.CardFactory.getCard(choice.getPaperCard(), player, choice.getId(), game);
+                Card alias = forge.game.card.CardCopyService.getLKICopy(choice);
                 alias.setZone(player.getZone(ZoneType.Library));
                 boolean aliasAccepted = query.apply(source, alias);
                 if (!before.equals(snapshot(player)) || source.getActivatingPlayer() != player || selected.getBoolean(plan) != saved)
