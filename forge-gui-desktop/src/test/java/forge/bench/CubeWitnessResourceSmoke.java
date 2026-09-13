@@ -35,6 +35,7 @@ public final class CubeWitnessResourceSmoke {
         private final Player owner;
         private final Map<Integer, String> known = new TreeMap<>();
         int step;
+        private boolean discardProbed;
         ResourceObserver(Player owner) {
             this.owner = owner;
             for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile})
@@ -60,6 +61,8 @@ public final class CubeWitnessResourceSmoke {
             if (name == null) return;
             System.out.println("WITNESS_EVENT_ZONE step=" + step + " id=" + card.getId() + " card=" + name.replace(' ', '_')
                     + " from=" + (event.from() == null ? null : event.from().zoneType()) + " to=" + to);
+            if (!discardProbed && to == ZoneType.Hand && event.from() != null && event.from().zoneType() == ZoneType.Library)
+                discardProbed = probeOwnedDiscard(owner);
         }
         @com.google.common.eventbus.Subscribe
         public void tap(forge.game.event.GameEventCardTapped event) {
@@ -68,6 +71,62 @@ public final class CubeWitnessResourceSmoke {
             System.out.println("WITNESS_EVENT_TAP step=" + step + " id=" + card.getId() + " card=" + known.get(card.getId()).replace(' ', '_')
                     + " tapped=" + event.tapped());
         }
+    }
+    /** Direct contract probes while a real owned Frantic is resolving. */
+    private static boolean probeOwnedDiscard(Player player) {
+        if (!(player.getController() instanceof forge.ai.CubeComboPlayerController controller)) return false;
+        var hand = player.getCardsIn(ZoneType.Hand);
+        Card ritual = hand.stream().filter(c -> c.getName().equals(DARK)).findFirst().orElse(null);
+        List<Card> alternatives = hand.stream().filter(c -> c != ritual).toList();
+        if (ritual == null || alternatives.size() < 2) return false;
+        forge.game.spellability.SpellAbility root = null;
+        for (var item : player.getGame().getStack()) {
+            var sa = item.getSpellAbility();
+            if (sa.isSpell() && sa.getActivatingPlayer() == player && sa.getHostCard().getName().equals("Frantic Search")
+                    && player.getGame().getStack().isResolving(sa.getHostCard())) { root = sa; break; }
+        }
+        if (root == null) return false;
+        try {
+            var field = forge.ai.CubeComboPlayerController.class.getDeclaredField("kittenPlan"); field.setAccessible(true);
+            var plan = (forge.ai.CubeKittenPlan) field.get(controller);
+            var discard = root.getSubAbility();
+            if (discard == null || discard.getApi() != forge.game.ability.ApiType.Discard) throw new AssertionError("native Frantic discard missing");
+            var before = snapshot(player);
+            System.out.println("WITNESS_DISCARD_PROBE_BEGIN");
+            for (int i = 0; i < 3; i++)
+                if (!plan.resourceDiscardProtectedCards(discard).equals(List.of(ritual))) throw new AssertionError("owned returned Ritual not protected");
+            var otherRoot = root.copy(player.getOpponents().get(0));
+            otherRoot.getSubAbility().setActivatingPlayer(player.getOpponents().get(0));
+            if (!plan.resourceDiscardProtectedCards(otherRoot.getSubAbility()).isEmpty()) throw new AssertionError("other actor discard owned");
+            var unrelated = forge.game.ability.AbilityFactory.getAbility("SP$ Discard | NumCards$ 2 | Mode$ TgtChoose", ritual);
+            unrelated.setActivatingPlayer(player);
+            if (!plan.resourceDiscardProtectedCards(unrelated).isEmpty()) throw new AssertionError("other root discard owned");
+            var staleRoot = root.copy(player);
+            Card stale = forge.game.card.CardCopyService.getLKICopy(root.getHostCard());
+            stale.setGameTimestamp(stale.getGameTimestamp() + 1000); staleRoot.setHostCard(stale);
+            if (!plan.resourceDiscardProtectedCards(staleRoot.getSubAbility()).isEmpty()) throw new AssertionError("stale root discard owned");
+            var swap = forge.ai.CubeComboPlayerController.class.getDeclaredMethod("ownDiscardChoice",
+                    forge.game.card.CardCollectionView.class, forge.game.card.CardCollectionView.class,
+                    forge.game.card.CardCollection.class, String.class); swap.setAccessible(true);
+            var count = forge.ai.CubeComboPlayerController.class.getDeclaredField("comboDiscardSwaps"); count.setAccessible(true);
+            int oldCount = count.getInt(null);
+            try {
+                var valid = new forge.game.card.CardCollection(List.of(ritual, alternatives.get(0), alternatives.get(1)));
+                var ordinary = new forge.game.card.CardCollection(List.of(ritual, alternatives.get(0)));
+                var reserved = new forge.game.card.CardCollection(plan.resourceDiscardProtectedCards(discard));
+                var result = (forge.game.card.CardCollection) swap.invoke(controller, valid, ordinary, reserved, "Frantic-contract-probe");
+                if (result.size() != 2 || result.contains(ritual) || !result.contains(alternatives.get(0))
+                        || !result.contains(alternatives.get(1)) || count.getInt(null) != oldCount + 1)
+                    throw new AssertionError("legal protected discard swap failed");
+                var forced = new forge.game.card.CardCollection(List.of(ritual));
+                var kept = (forge.game.card.CardCollection) swap.invoke(controller, forced, forced, reserved, "Frantic-forced-probe");
+                if (kept.size() != 1 || !kept.contains(ritual) || count.getInt(null) != oldCount + 1)
+                    throw new AssertionError("forced discard was bypassed");
+            } finally { count.setInt(null, oldCount); }
+            if (!before.equals(snapshot(player))) throw new AssertionError("discard contract probes changed native state");
+            System.out.println("WITNESS_DISCARD_PROBE_END checks=9 queries=3 unchanged=true swap=true forced=true");
+            return true;
+        } catch (ReflectiveOperationException e) { throw new AssertionError("discard contract reflection", e); }
     }
     private static String auxiliaryName(String control) {
         return control.equals("white-auxiliary") ? "Mother of Runes" : (control.equals("aux-shroud") || control.equals("partial-before-sac-shroud")) ? "Nimble Mongoose" : "Elvish Mystic";
@@ -156,7 +215,7 @@ public final class CubeWitnessResourceSmoke {
             state.put(memory.name(), forge.ai.AiCardMemory.getMemorySet(player, memory).stream().map(Card::getId).sorted().toList());
         for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile}) {
             state.put(zone.name(), player.getCardsIn(zone).stream().map(c -> c.getId() + ":" + c.getGameTimestamp()
-                    + ":" + c.isTapped() + ":" + c.getView().isTapped() + ":" + c.getPlaneswalkerAbilityActivated() + ":" + c.getCounters(forge.game.card.CounterEnumType.LOYALTY) + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
+                    + ":" + c.isTapped() + ":" + c.getView().isTapped() + ":" + c.getPlaneswalkerAbilityActivated() + ":" + c.getCounters() + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
             state.put(zone.name() + "Abilities", player.getCardsIn(zone).stream().flatMap(c -> c.getSpellAbilities().stream())
                     .map(sa -> sa.getHostCard().getId() + ":" + sa.getActivatingPlayer() + ":" + sa.getTargets() + ":" + System.identityHashCode(sa.getTargets())
                             + ":" + (sa.getManaPart() == null ? "null" : sa.getManaPart().getExpressChoice())).toList());
@@ -177,7 +236,7 @@ public final class CubeWitnessResourceSmoke {
             if (!before.equals(snapshot(player))) throw new AssertionError("initial recurrence query changed native state");
         }
         System.out.println("WITNESS_QUERY_END repeats=6 unchanged=true choice=" + first);
-        if ("Snap/ChangeZone".equals(first)) {
+        if ("Snap/ChangeZone".equals(first) || "Dark_Ritual/Mana".equals(first)) {
             System.out.println("WITNESS_OWNERSHIP_BEGIN");
             var plan = new forge.ai.CubeKittenPlan(player);
             var selected = plan.nextAction();
