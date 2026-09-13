@@ -91,6 +91,36 @@ public final class CubeBreachChannelerSmoke {
     }
 
 
+    /** Observe the actual partition after native surveil, without reading library identities. */
+    public static final class SurveilObserver {
+        private final Player owner;
+        private final String key;
+        int step;
+        SurveilObserver(Player owner, String key) { this.owner = owner; this.key = key; }
+        @com.google.common.eventbus.Subscribe
+        public void surveil(forge.game.event.GameEventSurveil event) {
+            if (!owner.getView().equals(event.player())) return;
+            var resolving = owner.getGame().getStack().peekAbility();
+            Object triggering = resolving == null ? null
+                    : resolving.getTriggeringObject(forge.game.ability.AbilityKey.SpellAbility);
+            var cast = triggering instanceof forge.game.spellability.SpellAbility value ? value : null;
+            boolean castOnStack = false;
+            if (cast != null) for (var item : owner.getGame().getStack())
+                if (item.getSpellAbility() == cast) castOnStack = true;
+            System.out.println("CHANNELER_SURVEIL " + key + " step=" + step
+                    + " kept=" + event.toLibrary() + " milled=" + event.toGraveyard()
+                    + " api=" + (resolving == null ? "none" : resolving.getApi())
+                    + " source=" + (resolving == null ? "none" : resolving.getHostCard().getName().replace(' ', '_'))
+                    + " actor=" + (resolving != null && resolving.getActivatingPlayer() == owner)
+                    + " sourceId=" + (resolving == null ? -1 : resolving.getHostCard().getId())
+                    + " sourceTimestamp=" + (resolving == null ? -1 : resolving.getHostCard().getGameTimestamp())
+                    + " cast=" + (cast == null ? "none" : cast.getHostCard().getName().replace(' ', '_'))
+                    + " castActor=" + (cast != null && cast.getActivatingPlayer() == owner)
+                    + " castId=" + (cast == null ? -1 : cast.getHostCard().getId())
+                    + " castTimestamp=" + (cast == null ? -1 : cast.getHostCard().getGameTimestamp())
+                    + " castOnStack=" + castOnStack);
+        }
+    }
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
         var lobby = new forge.ai.LobbyPlayerAi("Default-" + seat, null);
         lobby.setAiProfile("Default");
@@ -118,10 +148,13 @@ public final class CubeBreachChannelerSmoke {
         System.out.println("CHANNELER_FIXTURE " + key + " policy=" + forge.ai.CubeComboAi.VERSION
                 + " ownLife=40 registered=40 initialMana=0 startTurn=" + startTurn
                 + " ownLibrary=" + player.getCardsIn(ZoneType.Library).size());
+        SurveilObserver observer = new SurveilObserver(player, key);
+        game.subscribeToEvents(observer);
         Set<Integer> ids = new HashSet<>();
         int steps = 0, frantic = 0, escapes = 0, surveilTriggers = 0;
         String previous = "";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= startTurn + 1 && steps < 900) {
+            observer.step = steps + 1;
             game.getPhaseHandler().mainLoopStep(); steps++;
             for (var item : game.getStack()) if (ids.add(item.getId())) {
                 var sa = item.getSpellAbility();
