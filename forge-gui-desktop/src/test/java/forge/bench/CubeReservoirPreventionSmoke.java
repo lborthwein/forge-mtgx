@@ -20,6 +20,8 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
@@ -30,7 +32,10 @@ public final class CubeReservoirPreventionSmoke {
     private static final String DRC = "Dragon's Rage Channeler", OUTLET = "Aetherflux Reservoir";
     private static final List<String> ENGINES = List.of("shot", "top", "top-kitten", "witness-snap", "witness-frantic");
     private static final List<String> CONTROLS = List.of("clear", "opponent-chasm", "own-chasm");
-    private static final List<String> CASES = ENGINES.stream().flatMap(e -> CONTROLS.stream().map(c -> e + ":" + c)).toList();
+    private static final List<String> BOUNDARIES = List.of("shield30", "shield31", "own-shield50", "damage49", "life50", "life51");
+    private static final List<String> CASES = java.util.stream.Stream.concat(
+            ENGINES.stream().flatMap(e -> CONTROLS.stream().map(c -> e + ":" + c)),
+            ENGINES.stream().flatMap(e -> BOUNDARIES.stream().map(c -> e + ":" + c))).toList();
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand,
             ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone, boolean tapped) { }
@@ -113,6 +118,63 @@ public final class CubeReservoirPreventionSmoke {
     }
 
 
+    private static Map<String, Object> snapshot(Player player) {
+        Map<String, Object> state = new LinkedHashMap<>(); Game game = player.getGame();
+        state.put("timestamp", game.getTimestamp());
+        state.put("rng", ((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot().toString());
+        state.put("mana", java.util.stream.StreamSupport.stream(player.getManaPool().spliterator(), false).toList());
+        state.put("conversion", java.util.stream.IntStream.range(0, 6)
+                .map(i -> player.getManaPool().getPossibleColorUses((byte)(1 << i))).boxed().toList());
+        state.put("snow", player.getManaPool().isSnowForColor());
+        for (var memory : forge.ai.AiCardMemory.MemorySet.values())
+            state.put(memory.name(), forge.ai.AiCardMemory.getMemorySet(player, memory).stream().map(Card::getId).sorted().toList());
+        for (ZoneType zone : new ZoneType[]{ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile}) {
+            state.put(zone.name(), player.getCardsIn(zone).stream().map(c -> c.getId() + ":" + c.getGameTimestamp()
+                    + ":" + c.isTapped() + ":" + c.getView().isTapped() + ":" + c.getPlaneswalkerAbilityActivated() + ":" + c.getCounters() + ":" + c.getCastFrom() + ":" + c.getCastSA()).toList());
+            state.put(zone.name() + "Abilities", player.getCardsIn(zone).stream().flatMap(c -> c.getSpellAbilities().stream())
+                    .map(sa -> sa.getHostCard().getId() + ":" + sa.getActivatingPlayer() + ":" + sa.getTargets() + ":" + System.identityHashCode(sa.getTargets())
+                            + ":" + (sa.getManaPart() == null ? "null" : sa.getManaPart().getExpressChoice())).toList());
+        }
+        state.put("librarySize", player.getCardsIn(ZoneType.Library).size());
+        state.put("history", game.getStack().getSpellCardsCastThisTurn().stream().map(c -> c.getId() + ":" + c.getCastFrom()).toList());
+        for (Player p : game.getPlayers()) {
+            state.put("public-" + p.getId(), p.getLife() + ":" + p.getPreventNextDamageTotalShields());
+            state.put("command-" + p.getId(), p.getCardsIn(ZoneType.Command).stream()
+                    .map(c -> c.getId() + ":" + c.getGameTimestamp() + ":" + c.getSVars() + ":" + c.getReplacementEffects()).toList());
+        }
+        return state;
+    }
+    private static void probeInitial(Player player, String key, String name) {
+        Map<String, Object> before = snapshot(player);
+        boolean witness = name.startsWith("witness-");
+        var top = new forge.ai.CubeTopPlan(player);
+        var kitten = new forge.ai.CubeKittenPlan(player);
+        String first = null;
+        for (int i = 0; i < 6; i++) {
+            var action = witness ? (i < 3 ? new forge.ai.CubeKittenPlan(player) : kitten).nextAction()
+                    : (i < 3 ? new forge.ai.CubeTopPlan(player) : top).nextAction();
+            String choice = action == null ? "none" : action.getHostCard().getName().replace(' ', '_') + "/" + action.getApi();
+            if (i == 0) first = choice;
+            else if (!first.equals(choice)) throw new AssertionError("query drift " + key);
+            if (!before.equals(snapshot(player))) throw new AssertionError("query mutated native state/RNG " + key);
+        }
+        System.out.println("RESERVOIR_QUERY " + key + " repeats=6 unchanged=true choice=" + first);
+    }
+    private static void boundarySetup(Player player, Player opponent, String name) {
+        String control = name.split(":")[1];
+        Card reservoir = player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> OUTLET.equals(c.getName())).findFirst().orElseThrow();
+        if (control.equals("damage49")) for (var sa : reservoir.getSpellAbilities())
+            if (sa.getApi() == forge.game.ability.ApiType.DealDamage) sa.setParam("NumDmg", "49");
+        if (control.startsWith("life")) opponent.setLife(Integer.parseInt(control.substring(4)), null);
+        if (control.contains("shield")) {
+            int amount = Integer.parseInt(control.substring(control.indexOf("shield") + 6));
+            var shield = forge.game.ability.AbilityFactory.getAbility("AB$ DamagePrevent | Cost$ 0 | Amount$ " + amount + " | ValidTgts$ Player", reservoir);
+            shield.setActivatingPlayer(player); shield.getTargets().add(control.startsWith("own-") ? player : opponent);
+            new forge.game.ability.effects.DamagePreventEffect().resolve(shield);
+            Player target = control.startsWith("own-") ? player : opponent;
+            if (target.getPreventNextDamageTotalShields() != amount) throw new AssertionError("shield setup " + name);
+        }
+    }
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
         var lobby = new forge.ai.LobbyPlayerAi("Default-" + seat, null);
         lobby.setAiProfile("Default");
@@ -135,11 +197,13 @@ public final class CubeReservoirPreventionSmoke {
                 () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player, startTurn));
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
+        boundarySetup(player, opponent, name);
         BenchRandomAudit.install(989100L + 100L * seat + CASES.indexOf(name));
         String key = "arm=" + (improved ? "improved" : "baseline") + " seat=" + seat + " case=" + name;
         System.out.println("RESERVOIR_FIXTURE " + key + " policy=" + forge.ai.CubeComboAi.VERSION
                 + " ownLife=" + player.getLife() + " registered=40 initialMana=0 startTurn=" + startTurn
                 + " ownLibrary=" + player.getCardsIn(ZoneType.Library).size());
+        if (improved) probeInitial(player, key, name);
         Set<Integer> ids = new HashSet<>();
         int steps = 0, frantic = 0, escapes = 0, surveilTriggers = 0, shotAbilities = 0;
         String previous = "";
