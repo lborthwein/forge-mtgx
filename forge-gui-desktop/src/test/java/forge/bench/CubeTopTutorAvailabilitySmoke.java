@@ -134,6 +134,41 @@ public final class CubeTopTutorAvailabilitySmoke {
         }
         return String.join(";", result);
     }
+    /** Probe the controller's actual persistent plan, restoring only planner
+     * bookkeeping between queries. Native state and RNG may never move. */
+    private static void probeActualPlan(Player player, String key, int step) {
+        if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return;
+        try {
+            var planField = forge.ai.CubeComboPlayerController.class.getDeclaredField("topTutorPlan");
+            planField.setAccessible(true);
+            Object plan = planField.get(player.getController());
+            Map<java.lang.reflect.Field, Object> saved = new LinkedHashMap<>();
+            for (var field : plan.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers()) || java.lang.reflect.Modifier.isFinal(field.getModifiers())) continue;
+                field.setAccessible(true); saved.put(field, field.get(plan));
+            }
+            var declineField = forge.ai.CubeComboAi.class.getDeclaredField("TUTOR_DECLINE");
+            declineField.setAccessible(true);
+            @SuppressWarnings("unchecked") ThreadLocal<String> decline = (ThreadLocal<String>) declineField.get(null);
+            String oldDecline = decline.get();
+            var before = snapshot(player); String first = null;
+            for (int i = 0; i < 3; i++) {
+                String receipt;
+                try {
+                    var action = (forge.game.spellability.SpellAbility) plan.getClass().getMethod("nextAction").invoke(plan);
+                    receipt = action == null ? "none" : action.getHostCard().getId() + ":"
+                            + action.getHostCard().getName().replace(' ', '_') + ":" + action.getApi() + ":" + action.getTargets();
+                } finally {
+                    for (var entry : saved.entrySet()) entry.getKey().set(plan, entry.getValue());
+                    if (oldDecline == null) decline.remove(); else decline.set(oldDecline);
+                }
+                if (first == null) first = receipt;
+                else if (!first.equals(receipt)) throw new AssertionError("actual plan query drift " + key);
+                if (!before.equals(snapshot(player))) throw new AssertionError("actual plan query mutated native state/RNG " + key);
+            }
+            System.out.println("TOP_TUTOR_PLAN_QUERY " + key + " step=" + step + " repeats=3 unchanged=true action=" + first);
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+    }
     private static String observe(Player player, String key, int step, String previous) {
         Game game = player.getGame();
         if (game.isGameOver() || !game.getStack().isEmpty()
@@ -152,6 +187,7 @@ public final class CubeTopTutorAvailabilitySmoke {
             if (!before.equals(snapshot(player))) throw new AssertionError("availability mutated state/RNG " + key);
         }
         System.out.println("TOP_TUTOR_AVAILABLE " + key + " step=" + step + " repeats=3 unchanged=true " + stamp + " spells=" + first);
+        probeActualPlan(player, key, step);
         return stamp;
     }
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
