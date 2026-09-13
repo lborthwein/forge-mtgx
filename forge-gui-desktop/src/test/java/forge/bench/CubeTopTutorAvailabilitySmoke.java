@@ -26,14 +26,17 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 
-/** Prepared native top-tutor availability diagnosis. No policy changes or forced actions.
- * Queries use only our hand and public state. No hidden-library identities are logged. */
+/** Prepared native top-tutor diagnosis. Counter controls use a scripted opponent
+ * through the normal native priority/cost path; shuffle controls explicitly inject
+ * a native shuffle after selection. Neither is a natural opponent policy claim.
+ * Queries use own hand/public state; no hidden-library identities are logged. */
 public final class CubeTopTutorAvailabilitySmoke {
     private static final String WILL = "Yawgmoth's Will", TENDRILS = "Tendrils of Agony";
     private static final List<String> TUTORS = List.of("Imperial Seal", "Vampiric Tutor", "Mystical Tutor");
     private static final List<String> CONTROLS = List.of("probe", "ponder", "no-draw", "mana-none", "life-two", "search-blocked");
     private static final List<String> BOUNDARIES = List.of("draw-blocked", "cost-tax", "rule-of-law", "two-short",
             "absent-piece", "no-blue", "mana-shared-short", "draw-replaced");
+    private static final List<String> INTERRUPTIONS = List.of("counter-tutor", "shuffle-after-tutor");
     private static final List<String> CASES = cases();
     private static List<String> cases() {
         List<String> result = new ArrayList<>();
@@ -44,6 +47,8 @@ public final class CubeTopTutorAvailabilitySmoke {
             for (String control : CONTROLS) result.add(tutor + ":" + half + ":" + control);
         for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
             for (String control : BOUNDARIES) result.add(tutor + ":" + half + ":" + control);
+        for (int tutor = 0; tutor < 3; tutor++) for (String half : List.of("will", "tendrils", "breach", "freeze"))
+            for (String control : INTERRUPTIONS) result.add(tutor + ":" + half + ":" + control);
         return result;
     }
     private static String tutor(String name) { return TUTORS.get(Integer.parseInt(name.split(":")[0])); }
@@ -66,7 +71,7 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static List<Placement> placements(boolean owner, String name) {
         List<Placement> result = new ArrayList<>();
         boolean breach = List.of("breach", "freeze").contains(name.split(":")[1]);
-        if (breach || BOUNDARIES.contains(control(name))) return expandedPlacements(owner, name, breach);
+        if (breach || BOUNDARIES.contains(control(name)) || INTERRUPTIONS.contains(control(name))) return expandedPlacements(owner, name, breach);
         if (owner) {
             add(result, 1, tutor(name), ZoneType.Hand);
             add(result, 1, missing(name).equals(WILL) ? TENDRILS : WILL, ZoneType.Hand);
@@ -121,6 +126,10 @@ public final class CubeTopTutorAvailabilitySmoke {
                 default -> null;
             };
             if (blocker != null) add(result, 1, blocker, ZoneType.Battlefield);
+            if (control.equals("counter-tutor")) {
+                add(result, 2, "Island", ZoneType.Battlefield);
+                add(result, 1, "Counterspell", ZoneType.Hand);
+            }
         }
         add(result, 40-result.size(), "Forest", ZoneType.Library);
         if (result.size()!=40) throw new AssertionError("expanded deck size " + name);
@@ -257,11 +266,66 @@ public final class CubeTopTutorAvailabilitySmoke {
             for (Card card : player.getCardsIn(zone)) if (!card.isFaceDown()) own.add(card.getName());
         Set<String> publicCards = new HashSet<>();
         for (Card card : game.getCardsIn(ZoneType.Battlefield)) if (!card.isFaceDown()) publicCards.add(card.getName());
-        System.out.println("TOP_TUTOR_LIVE_GATE " + key + " step=" + step + " canDraw=" + player.canDraw()
+        System.out.println("TOP_TUTOR_LIVE_GATE " + key + " step=" + step + " turn=" + game.getPhaseHandler().getTurn() + " canDraw=" + player.canDraw()
                 + " stormHalves=" + ((own.contains(WILL) ? 1 : 0) + (own.contains(TENDRILS) ? 1 : 0))
                 + " breachHalves=" + ((own.contains("Underworld Breach") ? 1 : 0) + (own.contains("Brain Freeze") ? 1 : 0))
                 + " portalPresent=" + publicCards.contains("Possessed Portal")
                 + " rulePresent=" + publicCards.contains("Rule of Law"));
+    }
+    private static Object planValue(Player player, String fieldName) {
+        if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return null;
+        try {
+            var holder = forge.ai.CubeComboPlayerController.class.getDeclaredField("topTutorPlan");
+            holder.setAccessible(true); Object plan = holder.get(player.getController());
+            var field = plan.getClass().getDeclaredField(fieldName); field.setAccessible(true);
+            return field.get(plan);
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+    }
+    private static final class CounterLobby extends forge.ai.LobbyPlayerAi {
+        CounterLobby(int seat) { super("Default-" + seat, null); setAiProfile("Default"); }
+        @Override public Player createIngamePlayer(Game game, int id) {
+            Player player = new Player(getName(), game, id);
+            player.setFirstController(new CounterController(game, player, this));
+            return player;
+        }
+    }
+    private static final class CounterController extends forge.ai.PlayerControllerAi {
+        private forge.game.spellability.SpellAbility counterChoice, target;
+        private boolean attempted;
+        private String key;
+        CounterController(Game game, Player player, forge.LobbyPlayer lobby) { super(game, player, lobby); }
+        @Override public List<forge.game.spellability.SpellAbility> chooseSpellAbilityToPlay() {
+            if (!attempted && !getGame().getStack().isEmpty()) {
+                var pending = getGame().getStack().peekAbility();
+                if (pending.isSpell() && !pending.isCopied() && pending.getActivatingPlayer() != getPlayer()
+                        && TUTORS.contains(pending.getHostCard().getName())) {
+                    for (Card card : getPlayer().getCardsIn(ZoneType.Hand)) {
+                        if (!card.getName().equals("Counterspell")) continue;
+                        var action = card.getSpellAbilities().get(0).copy(getPlayer());
+                        if (!action.canTarget(pending)) continue;
+                        action.resetTargets(); action.getTargets().add(pending);
+                        if (!forge.ai.CubeComboAi.canPlayNative(action, getPlayer())
+                                || !forge.ai.CubeComboAi.canPayCost(action, getPlayer(), false)) continue;
+                        target = pending; counterChoice = action; return List.of(action);
+                    }
+                }
+            }
+            return super.chooseSpellAbilityToPlay();
+        }
+        @Override public boolean playChosenSpellAbility(forge.game.spellability.SpellAbility action) {
+            if (action != counterChoice) return super.playChosenSpellAbility(action);
+            if (getGame().getPhaseHandler().getPriorityPlayer() != getPlayer())
+                throw new AssertionError("counter without native priority");
+            boolean owned = planValue(target.getActivatingPlayer(), "tutor") == target
+                    && Boolean.TRUE.equals(planValue(target.getActivatingPlayer(), "playedTutor"));
+            boolean played = super.playChosenSpellAbility(action); attempted = true;
+            if (!played) throw new AssertionError("scripted native counter payment failed " + key);
+            System.out.println("TOP_TUTOR_COUNTER_EXECUTION " + key + " turn=" + getGame().getPhaseHandler().getTurn()
+                    + " played=true owned=" + owned + " target=" + target.getHostCard().getName().replace(' ', '_')
+                    + " nativePriority=true remainingMana=" + getPlayer().getManaPool().totalMana()
+                    + " tappedIslands=" + getPlayer().getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.isLand() && c.isTapped()).count());
+            return true;
+        }
     }
     private static forge.ai.LobbyPlayerAi defaultAi(int seat) {
         var lobby = new forge.ai.LobbyPlayerAi("Default-" + seat, null);
@@ -271,7 +335,8 @@ public final class CubeTopTutorAvailabilitySmoke {
     private static void run(boolean improved, boolean observed, int seat, String name) {
         List<RegisteredPlayer> players = new ArrayList<>();
         for (int s = 0; s < 2; s++) players.add(new RegisteredPlayer(deck(s == seat, name)).setPlayer(
-                improved && s == seat ? new forge.ai.LobbyPlayerCubeComboAi("Combo-" + s) : defaultAi(s)));
+                improved && s == seat ? new forge.ai.LobbyPlayerCubeComboAi("Combo-" + s)
+                        : s != seat && control(name).equals("counter-tutor") ? new CounterLobby(s) : defaultAi(s)));
         GameRules rules = new GameRules(GameType.Constructed);
         rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);
         rules.setAllowCheatShuffle(false);
@@ -292,11 +357,24 @@ public final class CubeTopTutorAvailabilitySmoke {
         String key = "arm=" + (improved ? "improved" : "baseline") + " seat=" + seat + " case=" + name;
         System.out.println("TOP_TUTOR_FIXTURE " + key + " policy=" + forge.ai.CubeComboAi.VERSION
                 + " observed=" + observed + " ownLife=" + player.getLife() + " registered=40 initialMana=0 startTurn=" + startTurn);
+        if (opponent.getController() instanceof CounterController counter) counter.key = key;
+        boolean shuffled = false;
         Set<Integer> ids = new HashSet<>();
         int steps = 0;
         TreeMap<String, Integer> casts = new TreeMap<>();
         String previous = "";
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= startTurn + 2 && steps < 1000) {
+            if (!shuffled && control(name).equals("shuffle-after-tutor") && game.getStack().isEmpty()
+                    && Boolean.TRUE.equals(planValue(player, "playedTutor"))
+                    && Boolean.TRUE.equals(planValue(player, "selectedPiece"))) {
+                String beforeRng = ((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot().toString();
+                player.shuffle(null); shuffled = true;
+                String afterRng = ((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot().toString();
+                if (beforeRng.equals(afterRng) || !Boolean.TRUE.equals(planValue(player, "disrupted")))
+                    throw new AssertionError("native shuffle did not disrupt selected setup " + key);
+                System.out.println("TOP_TUTOR_SHUFFLE_EXECUTION " + key + " turn=" + game.getPhaseHandler().getTurn()
+                        + " owned=true nativeRngAdvanced=true disrupted=true");
+            }
             liveGate(player, key, steps);
             if (observed) previous = observe(player, key, steps, previous);
             game.getPhaseHandler().mainLoopStep(); steps++;
