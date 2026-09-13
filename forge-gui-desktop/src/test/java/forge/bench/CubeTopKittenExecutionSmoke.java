@@ -71,7 +71,10 @@ public final class CubeTopKittenExecutionSmoke {
                 + " candidate=" + candidate + " policy=" + forge.ai.CubeComboAi.VERSION;
         System.out.println("TOP_KITTEN_FIXTURE " + key);
         Set<Integer> seen = new HashSet<>();
-        int steps = 0, casts = 0, draws = 0, blinks = 0, restores = 0, lastTurn = -1;
+        int steps = 0, casts = 0, draws = 0, kittenTriggers = 0, restores = 0, lastTurn = -1, entries = 0;
+        Map<Integer, Long> timestamps = new HashMap<>();
+        for (Card card : player.getCardsIn(ZoneType.Battlefield))
+            if (card.getName().equals(restorer) || card.getName().equals("Sol Ring")) timestamps.put(card.getId(), card.getGameTimestamp());
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps < 4000) {
             int turn = game.getPhaseHandler().getTurn();
             if (turn != lastTurn) {
@@ -80,6 +83,14 @@ public final class CubeTopKittenExecutionSmoke {
                 lastTurn = turn;
             }
             steps++; game.getPhaseHandler().mainLoopStep();
+            for (Card card : player.getCardsIn(ZoneType.Battlefield)) if (timestamps.containsKey(card.getId())
+                    && timestamps.get(card.getId()) != card.getGameTimestamp()) {
+                entries++; timestamps.put(card.getId(), card.getGameTimestamp());
+                System.out.println("TOP_KITTEN_RESTORE turn=" + game.getPhaseHandler().getTurn()
+                        + " card=" + card.getName().replace(' ', '_') + " tapped=" + card.isTapped()
+                        + " loyalty=" + card.getCounters(CounterEnumType.LOYALTY)
+                        + " burden=" + card.getCounters(CounterEnumType.BURDEN));
+            }
             for (var item : game.getStack()) if (seen.add(item.getId())) {
                 var ability = item.getSpellAbility(); if (ability.getActivatingPlayer() != player) continue;
                 String name = ability.getHostCard().getName();
@@ -87,14 +98,14 @@ public final class CubeTopKittenExecutionSmoke {
                     if (ability.isSpell() && !ability.isCopied()) casts++;
                     if (ability.getApi() == forge.game.ability.ApiType.Draw) draws++;
                 }
-                if (name.equals("Displacer Kitten") && ability.getApi() == forge.game.ability.ApiType.ChangeZone) blinks++;
+                if (name.equals("Displacer Kitten") && ability.getApi() == forge.game.ability.ApiType.ChangeZone) kittenTriggers++;
                 if (name.equals(restorer) && !ability.isSpell()) restores++;
                 System.out.println("TOP_KITTEN_STACK turn=" + game.getPhaseHandler().getTurn() + " card=" + name
                         + " api=" + ability.getApi() + " targets=" + ability.getTargets());
             }
         }
         System.out.println("TOP_KITTEN_RESULT " + key + " steps=" + steps + " topCasts=" + casts + " topDraws=" + draws
-                + " blinks=" + blinks + " restores=" + restores + " librarySize=" + player.getCardsIn(ZoneType.Library).size()
+                + " kittenTriggers=" + kittenTriggers + " restores=" + restores + " entries=" + entries + " librarySize=" + player.getCardsIn(ZoneType.Library).size()
                 + " won=" + player.hasWon() + " gameOver=" + game.isGameOver() + " life=" + player.getLife()
                 + " opponentLife=" + opponent.getLife() + " budgetExhausted=" + (steps >= 4000));
         if (steps >= 4000) throw new AssertionError("Diagnostic budget exhausted: " + key);
