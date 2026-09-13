@@ -21,7 +21,7 @@ import java.util.*;
 public final class CubeHarnfelTopBoundarySmoke {
     private static final String BIRGI = "Birgi, God of Storytelling", HARNFEL = "Harnfel, Horn of Bounty";
     private static final String TOP = "Sensei's Divining Top", HELM = "Helm of Awakening", OUTLET = "Aetherflux Reservoir";
-    private static final List<String> CASES = List.of("bf-15", "bf-14", "hand-13", "hand-12", "paid-8", "paid-6");
+    private static final List<String> CASES = List.of("bf-15", "bf-14", "hand-13", "hand-12", "paid-8", "paid-6", "root-maze", "draw-limit", "activation-tax");
     private static final List<ZoneType> ZONES = List.of(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard, ZoneType.Exile);
     private record Placement(String name, ZoneType zone) { }
     private static void add(List<Placement> out, int n, String name, ZoneType zone) {
@@ -38,6 +38,9 @@ public final class CubeHarnfelTopBoundarySmoke {
             if (!control.equals("empty-hand")) add(out, 1, "Forest", ZoneType.Hand);
         } else {
             String blocker = switch (control) {
+                case "root-maze" -> "Root Maze";
+                case "draw-limit" -> "Spirit of the Labyrinth";
+                case "activation-tax" -> "Suppression Field";
                 case "draw-blocked" -> "Omen Machine";
                 case "life-replaced" -> "Tainted Remedy";
                 case "activation-blocked" -> "Damping Matrix";
@@ -145,7 +148,7 @@ public final class CubeHarnfelTopBoundarySmoke {
             for (String control : CASES) for (boolean own : List.of(false,true)) for (Placement p : placements(own,control)) names.add(p.name());
             for (String name : names) StaticData.instance().attemptToLoadCard(name);
             for (String control : CASES) for (int seat = 0; seat < 2; seat++) run(args[1].equals("improved"),args[2].equals("observed"),seat,control);
-            System.out.println("HARNFEL_SUITE_COMPLETE cases=12");
+            System.out.println("HARNFEL_SUITE_COMPLETE cases=18");
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }
 }
