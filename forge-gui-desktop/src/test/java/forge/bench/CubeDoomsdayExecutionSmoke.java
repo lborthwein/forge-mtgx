@@ -716,6 +716,7 @@ public final class CubeDoomsdayExecutionSmoke {
                 && !passTurn && (kase.equals("pips2-oracle-hand") || kase.equals("liliana"));
         boolean observeNextTurn = passTurn || improved && delayedHandRoute || delayedReview;
         int steps = 0, limit = observeNextTurn ? 1500 : STEP_LIMIT, lastTurn = observeNextTurn ? 3 : 1;
+        if (Boolean.getBoolean("forge.test.observeTrampleClock") && passTurn && kase.equals("clock")) lastTurn = 5;
         boolean doom = false, pile = false;
         int beforeOracle = -1, doomTurn = -1, oracleTurn = -1;
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= lastTurn && steps++ < limit) {
