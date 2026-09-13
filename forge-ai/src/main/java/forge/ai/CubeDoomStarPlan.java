@@ -67,14 +67,19 @@ final class CubeDoomStarPlan {
         // or constructing a hidden card. Native checks still apply at each step.
         for (ZoneType z : new ZoneType[]{ZoneType.Battlefield, ZoneType.Command})
             for (Card c : player.getGame().getCardsIn(z)) if (!c.isFaceDown()) {
+                for (var trigger : c.getTriggers()) if (!trigger.isSuppressed()
+                        && Set.of("Taps", "TapsForMana").contains(trigger.getMode().name())
+                        && trigger.getParamOrDefault("TriggerZones", "Battlefield").contains(z.name())) return false;
                 for (var a : c.getStaticAbilities()) if (a.zonesCheck()
                         && Set.of("RaiseCost", "ReduceCost", "SetCost", "CantBeCast", "CantBeActivated", "DisableTriggers").contains(a.getParamOrDefault("Mode", ""))) return false;
                 for (var e : c.getReplacementEffects()) if (e.zonesCheck(c.getZone()) && e.requirementsCheck(player.getGame())
-                        && Set.of("Draw", "LifeReduced", "ProduceMana").contains(e.getParamOrDefault("Event", ""))) return false;
+                        && Set.of("Draw", "LifeReduced", "ProduceMana", "DamageDone").contains(e.getParamOrDefault("Event", ""))) return false;
             }
         return true;
     }
     private boolean untappedEntry(Card card) {
+        if (card.isLand() && card.isInZone(ZoneType.Hand)
+                && (!card.getReplacementEffects().isEmpty() || !card.getTriggers().isEmpty() || !card.getStaticAbilities().isEmpty())) return false;
         for (ZoneType z : new ZoneType[]{ZoneType.Battlefield, ZoneType.Command})
             for (Card c : player.getGame().getCardsIn(z)) if (!c.isFaceDown())
                 for (var e : c.getReplacementEffects()) if (e.zonesCheck(c.getZone()) && e.requirementsCheck(player.getGame())
@@ -115,13 +120,13 @@ final class CubeDoomStarPlan {
         if (castStar && (!printedCost(spell(candidate), 1, "{1}") || !payable(spell(candidate)))) return null;
         star = candidate; doom = doomSpell.getHostCard();
         List<String> demands = castStar ? List.of("1", "B", "B", "B", "1", "U") : List.of("B", "B", "B", "1", "U");
-        payments = CubeDoomStarResources.assign(player, demands, Set.of(star));
+        payments = CubeDoomStarResources.assign(player, demands, Set.of(star), null, player.getLife() / 2 - 1);
         if (payments == null) for (Card c : player.getCardsIn(ZoneType.Hand)) {
-            if (!c.isBasicLand() || c.isFaceDown() || !untappedEntry(c)) continue;
+            if (!c.isLand() || c.isFaceDown() || !untappedEntry(c)) continue;
             for (SpellAbility original : c.getAllPossibleAbilities(player, false, null, true)) {
                 SpellAbility a = original.copy(player);
                 if (!a.isLandAbility() || !payable(a)) continue;
-                var proposal = CubeDoomStarResources.assign(player, demands, Set.of(star), c);
+                var proposal = CubeDoomStarResources.assign(player, demands, Set.of(star), c, player.getLife() / 2 - 1);
                 if (proposal != null) { payments = proposal; land = c; selected = a; return a; }
             }
         }
@@ -138,7 +143,9 @@ final class CubeDoomStarPlan {
         if (source == null || !source.isInZone(ZoneType.Battlefield) || source.getController() != player) return null;
         for (SpellAbility original : source.getManaAbilities()) {
             SpellAbility a = original.copy(player);
-            if (a.getSubAbility() != null || a.getManaPart() == null || !a.canProduce(payment.color())
+            if (CubeDoomStarResources.selfDamage(a) != payment.damage() || a.getManaPart() == null || !a.canProduce(payment.color())
+                    || !a.getManaPart().getManaRestrictions().isEmpty() || !a.getManaPart().getExtraManaRestriction().isEmpty()
+                    || a.amountOfManaGenerated(false) != 1 || payment.damage() >= player.getLife()
                     || !a.getPayCosts().toString().equals(payment.ability().getPayCosts().toString())) continue;
             if (!"C".equals(payment.color())) a.setManaExpressChoice(ColorSet.fromMask(switch (payment.color()) { case "W" -> MagicColor.WHITE; case "U" -> MagicColor.BLUE; case "B" -> MagicColor.BLACK; case "R" -> MagicColor.RED; default -> MagicColor.GREEN; }));
             if (payable(a)) return a;
