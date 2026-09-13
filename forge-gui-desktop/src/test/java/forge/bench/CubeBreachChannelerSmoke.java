@@ -162,6 +162,8 @@ public final class CubeBreachChannelerSmoke {
         private void probeOwnership() throws ReflectiveOperationException {
             var controller = (forge.ai.CubeComboPlayerController) owner.getController();
             var before = snapshot(owner);
+            var bf = controller.getClass().getDeclaredField("breachPlan"); bf.setAccessible(true);
+            var breach = (forge.ai.CubeBreachPlan) bf.get(controller);
             // This card was just revealed by our real native surveil. Recreate
             // only that permitted offered object, never look up a hidden top.
             Card offeredCard = forge.game.card.CardCopyService.getLKICopy(lastMilled);
@@ -169,19 +171,17 @@ public final class CubeBreachChannelerSmoke {
             var offered = new forge.game.card.CardCollection(); offered.add(offeredCard);
             int checks = 0;
             for (int i = 0; i < 3; i++) {
-                if (!controller.ownsChannelerSurveil(offered)) throw new AssertionError("real cause rejected");
+                if (!breach.ownsChannelerSurveil(offered)) throw new AssertionError("real cause rejected");
                 checks++;
             }
-            if (controller.ownsChannelerSurveil(null)) throw new AssertionError("null offered"); checks++;
-            if (controller.ownsChannelerSurveil(new forge.game.card.CardCollection())) throw new AssertionError("empty offered"); checks++;
+            if (breach.ownsChannelerSurveil(null)) throw new AssertionError("null offered"); checks++;
+            if (breach.ownsChannelerSurveil(new forge.game.card.CardCollection())) throw new AssertionError("empty offered"); checks++;
             var wrongZone = new forge.game.card.CardCollection(); wrongZone.add(lastMilled);
-            if (controller.ownsChannelerSurveil(wrongZone)) throw new AssertionError("graveyard offered"); checks++;
+            if (breach.ownsChannelerSurveil(wrongZone)) throw new AssertionError("graveyard offered"); checks++;
             Card foreign = forge.game.card.CardCopyService.getLKICopy(offeredCard);
             foreign.setOwner(owner.getOpponents().get(0));
             var wrongOwner = new forge.game.card.CardCollection(); wrongOwner.add(foreign);
-            if (controller.ownsChannelerSurveil(wrongOwner)) throw new AssertionError("foreign offered"); checks++;
-            var bf = controller.getClass().getDeclaredField("breachPlan"); bf.setAccessible(true);
-            Object breach = bf.get(controller);
+            if (breach.ownsChannelerSurveil(wrongOwner)) throw new AssertionError("foreign offered"); checks++;
             var cf = breach.getClass().getDeclaredField("channelerPlan"); cf.setAccessible(true);
             Object plan = cf.get(breach);
             for (String name : List.of("castTimestamp", "sourceTimestamp", "turn", "sourceId", "castId")) {
@@ -190,7 +190,7 @@ public final class CubeBreachChannelerSmoke {
                 try {
                     if (old instanceof Long value) field.setLong(plan, value + 1);
                     else field.setInt(plan, ((Integer) old) + 1);
-                    if (controller.ownsChannelerSurveil(offered)) throw new AssertionError("stale " + name);
+                    if (breach.ownsChannelerSurveil(offered)) throw new AssertionError("stale " + name);
                     checks++;
                 } finally { field.set(plan, old); }
             }
@@ -201,13 +201,13 @@ public final class CubeBreachChannelerSmoke {
             try {
                 var copy = cast.copy(owner);
                 top.setTriggeringObject(key, copy);
-                if (controller.ownsChannelerSurveil(offered)) throw new AssertionError("unstacked copy"); checks++;
+                if (breach.ownsChannelerSurveil(offered)) throw new AssertionError("unstacked copy"); checks++;
                 copy.setActivatingPlayer(owner.getOpponents().get(0));
-                if (controller.ownsChannelerSurveil(offered)) throw new AssertionError("wrong actor"); checks++;
+                if (breach.ownsChannelerSurveil(offered)) throw new AssertionError("wrong actor"); checks++;
                 top.setTriggeringObject(key, null);
-                if (controller.ownsChannelerSurveil(offered)) throw new AssertionError("missing cause"); checks++;
+                if (breach.ownsChannelerSurveil(offered)) throw new AssertionError("missing cause"); checks++;
             } finally { top.setTriggeringObject(key, oldCause); }
-            if (!controller.ownsChannelerSurveil(offered)) throw new AssertionError("restored cause rejected"); checks++;
+            if (!breach.ownsChannelerSurveil(offered)) throw new AssertionError("restored cause rejected"); checks++;
             if (!before.equals(snapshot(owner))) throw new AssertionError("ownership probe changed native state/RNG");
             System.out.println("CHANNELER_OWNERSHIP " + key() + " checks=" + checks + " queries=3 unchanged=true");
         }
