@@ -458,6 +458,14 @@ public final class CubeTopTutorAvailabilitySmoke {
         int startTurn = seat == 0 ? 1 : 2;
         game.getPhaseHandler().setupFirstTurn(seat == 0 ? player : opponent,
                 () -> game.getPhaseHandler().devModeSet(PhaseType.MAIN1, player, startTurn));
+        // setupFirstTurn clears pre-turn sickness. Prepare this boundary in
+        // the actual starting main phase, before any controller decision.
+        if (control(name).equals("twin-sick")) {
+            Card body = player.getCardsIn(ZoneType.Battlefield).stream()
+                    .filter(c -> c.getName().equals("Deceiver Exarch")).findFirst().orElseThrow();
+            body.setSickness(true);
+            if (!body.isSick()) throw new AssertionError("sick fixture not established");
+        }
         game.getAction().checkStateEffects(true);
         game.getTriggerHandler().resetActiveTriggers();
         BenchRandomAudit.install(989800L + 100L * seat + CASES.indexOf(name));
