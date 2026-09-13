@@ -619,6 +619,7 @@ public final class CubeDoomsdayExecutionSmoke {
      * route-1 board must still commit. */
     private static boolean naturalProposes(String kase, boolean passTurn) {
         if (kase.equals("lethal-board")) return !passTurn && main2;
+        if (!passTurn && kase.equals("pips2-oracle-hand")) return true;
         return switch (kase) {
             case "pips3-mixed", "pips3-singles", "pips4", "pips2", "oracle-graveyard", "pips3",
                  "clock-safe", "clock-blocker", "narset-one-draw", "counterspell" -> true;
@@ -699,6 +700,7 @@ public final class CubeDoomsdayExecutionSmoke {
         if (kase.equals("narset-one-draw") && !(p.canDrawAmount(1) && !p.canDrawAmount(2)))
             throw new AssertionError("Narset fixture must permit exactly one draw");
         boolean proposes = naturalProposes(kase, passTurn), expectWin = proposes && !kase.equals("counterspell");
+        boolean delayedHandRoute = !passTurn && kase.equals("pips2-oracle-hand");
         BenchRandomAudit.install(0); // Fixed constructed fixture, not a sampled opening.
         var proposed = new forge.ai.CubeDoomsdayPlan(p).nextAction();
         String action = proposed == null ? "none" : proposed.getHostCard().getName();
@@ -710,7 +712,10 @@ public final class CubeDoomsdayExecutionSmoke {
                 + " mustMove=" + proposes + " action=" + action);
         if (improved && NATURAL_STRICT && proposes != action.equals("Doomsday"))
             throw new AssertionError("Natural route proposal mismatch: " + kase + " main2=" + main2 + " -> " + action);
-        int steps = 0, limit = passTurn ? 1500 : STEP_LIMIT, lastTurn = passTurn ? 3 : 1;
+        boolean delayedReview = Boolean.getBoolean("forge.test.observeDoomsdayDelayed")
+                && !passTurn && (kase.equals("pips2-oracle-hand") || kase.equals("liliana"));
+        boolean observeNextTurn = passTurn || improved && delayedHandRoute || delayedReview;
+        int steps = 0, limit = observeNextTurn ? 1500 : STEP_LIMIT, lastTurn = observeNextTurn ? 3 : 1;
         boolean doom = false, pile = false;
         int beforeOracle = -1, doomTurn = -1, oracleTurn = -1;
         while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= lastTurn && steps++ < limit) {
@@ -737,8 +742,8 @@ public final class CubeDoomsdayExecutionSmoke {
                 + " opponentCounterspell=" + has(opponent, ZoneType.Graveyard, "Counterspell"));
         if (steps >= limit) throw new AssertionError("Natural route step budget: " + kase);
         if (improved && NATURAL_STRICT) {
-            if (expectWin && !(doom && pile && oracleWin && beforeOracle == (passTurn ? 4 : 5)
-                    && doomTurn == 1 && oracleTurn == (passTurn ? 3 : 1)))
+            if (expectWin && !(doom && pile && oracleWin && beforeOracle == (passTurn || delayedHandRoute ? 4 : 5)
+                    && doomTurn == 1 && oracleTurn == (passTurn || delayedHandRoute ? 3 : 1)))
                 throw new AssertionError("Natural route did not execute: " + kase + " main2=" + main2);
             if (!proposes && doom) throw new AssertionError("Doomsday committed despite " + kase);
             if (!expectWin && oracleWin) throw new AssertionError("Unexpected control Oracle win: " + kase);
@@ -1767,6 +1772,149 @@ public final class CubeDoomsdayExecutionSmoke {
         }
     }
 
+    /** Entry guards and explicit public-board interventions after a real pile. */
+    private static void handPassControl(int seat, String control) {
+        List<Placement> own = new ArrayList<>();
+        boolean disruption = control.startsWith("disruption-");
+        for (String name : List.of("Swamp", "Creeping Tar Pit", "Watery Grave", "Underground Sea", "Island")) {
+            if (disruption && name.equals("Island")) continue;
+            own.add(new Placement(control.equals("no-blue") ? "Swamp" : name, ZoneType.Battlefield, false));
+        }
+        if (control.equals("disruption-safe") || control.equals("disruption-no-spare"))
+            own.add(new Placement("True-Name Nemesis", ZoneType.Battlefield, false));
+        if (control.equals("disruption-safe") || control.equals("disruption-low-devotion"))
+            own.add(new Placement("Forest", ZoneType.Hand, false));
+        if (control.equals("disruption-disabled")) own.add(new Placement("The Immortal Sun", ZoneType.Battlefield, false));
+        own.add(new Placement(control.equals("no-devotion") ? "Llanowar Elves" : "True-Name Nemesis", ZoneType.Battlefield, false));
+        own.add(new Placement("Doomsday", ZoneType.Hand, false));
+        own.add(new Placement("Thassa's Oracle", ZoneType.Hand, false));
+        own.add(new Placement("Thassa's Oracle", ZoneType.Exile, false)); // identity control, never cast
+        if (control.equals("orb-after")) own.add(new Placement("Torpor Orb", ZoneType.Exile, false));
+        if (control.equals("draw-after")) own.add(new Placement("Maralen of the Mornsong", ZoneType.Exile, false));
+        for (int i = 0; i < 20; i++) own.add(new Placement("Forest", ZoneType.Library, false));
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        List<Placement> other = new ArrayList<>();
+        if (disruption) other.add(new Placement("Liliana of the Veil", ZoneType.Battlefield, false));
+        switch (control) {
+            case "clock" -> other.add(new Placement("Griselbrand", ZoneType.Battlefield, false));
+            case "orb" -> other.add(new Placement("Torpor Orb", ZoneType.Battlefield, false));
+            case "no-draw" -> other.add(new Placement("Maralen of the Mornsong", ZoneType.Battlefield, false));
+            case "cannot-win" -> other.add(new Placement("Platinum Angel", ZoneType.Battlefield, false));
+            case "counterspell" -> {
+                other.add(new Placement("Counterspell", ZoneType.Hand, false));
+                other.add(new Placement("Island", ZoneType.Battlefield, false));
+                other.add(new Placement("Island", ZoneType.Battlefield, false));
+            }
+            default -> { }
+        }
+        while (other.size() < 40) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player player = game.getPlayers().get(seat), opponent = game.getPlayers().get(1 - seat);
+        if (control.equals("clock")) player.setLife(12, null);
+        if (control.equals("lethal-board")) opponent.setLife(3, null);
+        BenchRandomAudit.install(98800 + seat * 100);
+        var plan = improved ? ((forge.ai.CubeComboPlayerController) player.getController()).doomsdayPlan()
+                : new forge.ai.CubeDoomsdayPlan(player);
+        var proposal = new forge.ai.CubeDoomsdayPlan(player).nextAction();
+        boolean shouldPropose = List.of("hold-live", "break-devotion", "orb-after", "draw-after", "counterspell", "disruption-safe", "disruption-disabled").contains(control);
+        if ((proposal != null) != shouldPropose) throw new AssertionError("Hand-pass entry " + control + " main2=" + main2);
+        Card oracle = player.getCardsIn(ZoneType.Hand).stream().filter(c -> c.getName().equals("Thassa's Oracle")).findFirst().orElseThrow();
+        Card otherOracle = player.getCardsIn(ZoneType.Exile).stream().filter(c -> c.getName().equals("Thassa's Oracle")).findFirst().orElseThrow();
+        var oracleSpell = oracle.getFirstSpellAbility().copy(player);
+        if (plan.holdDelayedOracle(oracleSpell)) throw new AssertionError("Hold before Doomsday resolution");
+        int steps = 0; boolean sawPile = false, sawHold = false, released = false, sawCounter = false;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps++ < 1500) {
+            game.getPhaseHandler().mainLoopStep();
+            boolean doomGone = has(player, ZoneType.Graveyard, "Doomsday");
+            int library = player.getCardsIn(ZoneType.Library).size();
+            if (improved && !sawPile && doomGone && library == 5 && shouldPropose) {
+                sawPile = true;
+                sawHold = plan.holdDelayedOracle(oracleSpell) || plan.discardProtectedCards().contains(oracle);
+                if (!sawHold) throw new AssertionError("Missing owned Oracle hold " + control);
+                if (plan.holdDelayedOracle(otherOracle.getFirstSpellAbility().copy(player)))
+                    throw new AssertionError("Hold leaked to a different Oracle object");
+                if (control.equals("break-devotion")) {
+                    Card pips = player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals("True-Name Nemesis")).findFirst().orElseThrow();
+                    game.getAction().moveTo(ZoneType.Exile, pips, null, null);
+                } else if (control.equals("orb-after") || control.equals("draw-after")) {
+                    String hate = control.equals("orb-after") ? "Torpor Orb" : "Maralen of the Mornsong";
+                    Card card = player.getCardsIn(ZoneType.Exile).stream().filter(c -> c.getName().equals(hate)).findFirst().orElseThrow();
+                    game.getAction().moveToPlay(card, null, null);
+                }
+                game.getAction().checkStateEffects(true);
+                if (List.of("break-devotion", "orb-after", "draw-after").contains(control)) {
+                    released = !plan.holdDelayedOracle(oracleSpell);
+                    if (!released) throw new AssertionError("Hold survived broken route " + control);
+                }
+            }
+            if (improved && control.equals("counterspell") && doomGone && library > 5) {
+                sawCounter = true;
+                if (plan.holdDelayedOracle(oracleSpell)) throw new AssertionError("Hold after countered Doomsday");
+            }
+            if (sawHold && library <= 4 && !plan.holdDelayedOracle(oracleSpell)) released = true;
+        }
+        if (steps >= 1500) throw new AssertionError("Hand-pass control step bound");
+        if (improved && shouldPropose && !control.equals("counterspell") && !(sawPile && sawHold && released))
+            throw new AssertionError("Incomplete hold/release control " + control);
+        if (improved && control.equals("counterspell") && (!sawCounter || !has(opponent, ZoneType.Graveyard, "Counterspell")))
+            throw new AssertionError("Counterspell control did not counter Doomsday");
+        if (improved && List.of("hold-live", "disruption-safe", "disruption-disabled").contains(control) && !(player.hasWon() && "Thassa's Oracle".equals(player.getOutcome().altWinSourceName)))
+            throw new AssertionError("Live hold did not finish Oracle");
+        System.out.println("HAND_PASS_CONTROL improved=" + improved + " policy=" + policy() + " seat=" + seat
+                + " main2=" + main2 + " control=" + control + " proposed=" + (proposal != null)
+                + " pile=" + sawPile + " held=" + sawHold + " released=" + released + " countered=" + sawCounter
+                + " won=" + player.hasWon());
+    }
+
+    /** Delayed hand-Oracle diagnosis; scripted casts are explicit interventions. */
+    private static void handPassDiagnosis(int seat, int lands, boolean scripted) {
+        List<Placement> own = new ArrayList<>();
+        for (String name : List.of("Swamp", "Creeping Tar Pit", "Watery Grave", "Underground Sea"))
+            own.add(new Placement(name, ZoneType.Battlefield, false));
+        if (lands == 5) own.add(new Placement("Island", ZoneType.Battlefield, false));
+        own.add(new Placement("True-Name Nemesis", ZoneType.Battlefield, false));
+        own.add(new Placement("Doomsday", ZoneType.Hand, false));
+        own.add(new Placement("Thassa's Oracle", ZoneType.Hand, false));
+        for (int i = 0; i < 20; i++) own.add(new Placement("Forest", ZoneType.Library, false));
+        while (own.size() < 40) own.add(new Placement("Forest", ZoneType.Exile, false));
+        List<Placement> other = new ArrayList<>();
+        for (int i = 0; i < 40; i++) other.add(new Placement("Forest", ZoneType.Library, false));
+        Game game = fixtureGame(own, other, seat);
+        Player player = game.getPlayers().get(seat);
+        BenchRandomAudit.install(98400 + seat * 100 + lands);
+        var proposal = new forge.ai.CubeDoomsdayPlan(player).nextAction();
+        String first = proposal == null ? "none" : proposal.getHostCard().getName().replace(' ', '_');
+        if (scripted) {
+            Card card = player.getCardsIn(ZoneType.Hand).stream()
+                    .filter(c -> c.getName().equals("Doomsday")).findFirst().orElseThrow();
+            var doom = card.getFirstSpellAbility().copy(player);
+            if (!forge.ai.CubeComboAi.canPlayNative(doom, player)
+                    || !forge.ai.CubeComboAi.canPayCost(doom, player, false)
+                    || !player.getController().playChosenSpellAbility(doom))
+                throw new AssertionError("Scripted native Doomsday failed");
+            settle(game);
+            if (player.getLife() != 10 || player.getCardsIn(ZoneType.Library).size() != 5)
+                throw new AssertionError("Scripted Doomsday did not resolve its real cost and pile");
+        }
+        int steps = 0, oracleTurn = -1, beforeOracle = -1;
+        while (!game.isGameOver() && game.getPhaseHandler().getTurn() <= 3 && steps++ < 1500) {
+            game.getPhaseHandler().mainLoopStep();
+            if (!game.getStack().isEmpty()) {
+                var sa = game.getStack().peekAbility();
+                if (sa.isSpell() && sa.getHostCard().getName().equals("Thassa's Oracle")) {
+                    oracleTurn = game.getPhaseHandler().getTurn();
+                    beforeOracle = player.getCardsIn(ZoneType.Library).size();
+                }
+            }
+        }
+        if (steps >= 1500) throw new AssertionError("Hand-Oracle diagnosis step bound");
+        String altWin = player.getOutcome() == null ? null : player.getOutcome().altWinSourceName;
+        System.out.println("HAND_PASS_RESULT improved=" + improved + " policy=" + policy() + " seat=" + seat
+                + " main2=" + main2 + " lands=" + lands + " scripted=" + scripted + " first=" + first
+                + " doom=" + has(player, ZoneType.Graveyard, "Doomsday") + " oracleTurn=" + oracleTurn
+                + " libraryBeforeOracle=" + beforeOracle + " won=" + player.hasWon() + " altWin=" + altWin);
+    }
+
     /** Diagnostic intervention only: distinguish native payment legality from
      * Default's willingness to use a painful mana source for a terminal. */
     private static void painDiagnosis(int seat, String variant) {
@@ -1868,6 +2016,26 @@ public final class CubeDoomsdayExecutionSmoke {
                 preferences.setPref(FPref.UI_LANGUAGE, "en-US");
                 return null;
             });
+            if (suite.equals("hand-pass-controls")) {
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++)
+                        for (String control : List.of("no-blue", "no-devotion", "clock", "orb", "no-draw", "cannot-win", "lethal-board",
+                                "hold-live", "break-devotion", "orb-after", "draw-after", "counterspell", "disruption-unsafe",
+                                "disruption-safe", "disruption-no-spare", "disruption-low-devotion", "disruption-disabled")) handPassControl(seat, control);
+                }
+                System.out.println("HAND_PASS_CONTROL_COMPLETE cases=68 improved=" + improved + " policy=" + policy());
+                return;
+            }
+            if (suite.equals("hand-pass-diagnosis")) {
+                for (boolean second : new boolean[] {false, true}) {
+                    main2 = second;
+                    for (int seat = 0; seat < 2; seat++) for (int lands : new int[] {4, 5})
+                        for (boolean scripted : new boolean[] {false, true}) handPassDiagnosis(seat, lands, scripted);
+                }
+                System.out.println("HAND_PASS_SUITE_COMPLETE cases=16 improved=" + improved + " policy=" + policy());
+                return;
+            }
             if (suite.equals("pain-diagnosis")) {
                 for (int seat = 0; seat < 2; seat++)
                     for (String variant : List.of("pain-1", "pain-2", "pain-4", "pain-5",

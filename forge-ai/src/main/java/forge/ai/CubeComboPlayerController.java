@@ -67,6 +67,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
      * needs: the SPELL form's reanimation target is chosen inside that method
      * and no controller hook exists for it. */
     public CubeReanimatorPlan reanimatorPlan() { return reanimatorPlan; }
+    public CubeDoomsdayPlan doomsdayPlan() { return doomsdayPlan; }
     public int getComboSelectionChanges() { return comboSelectionChanges; }
     public int getComboTutorPlanCasts() { return comboTutorPlanCasts; }
     public CubeComboPlayerController(Game game, Player player, LobbyPlayer lobby) {
