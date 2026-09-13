@@ -168,6 +168,7 @@ public final class CubeEmryExecutionSmoke {
         } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
     }
     private static void observeOwnership(Player player, forge.game.spellability.SpellAbility trigger, String key, int step) {
+        if (trigger instanceof forge.game.trigger.WrappedAbility wrapper) trigger=wrapper.getWrappedAbility();
         if (!(player.getController() instanceof forge.ai.CubeComboPlayerController)) return;
         try {
             var owner = forge.ai.CubeComboPlayerController.class.getDeclaredField("emryPlan"); owner.setAccessible(true);
