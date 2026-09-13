@@ -74,7 +74,10 @@ final class CubeWitnessResourcePlan {
     private boolean renewableMana(int need) {
         List<Land> lands = new ArrayList<>();
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
-            if (!card.isLand() || !card.canUntap(null, true)) continue;
+            // canUntap checks permission; native untap instead removes a stun
+            // counter without untapping. That source is not renewable yet.
+            if (!card.isLand() || !card.canUntap(null, true)
+                    || card.getCounters(forge.game.card.CounterEnumType.STUN) > 0) continue;
             for (SpellAbility original : card.getManaAbilities()) {
                 if (original.getApi() != ApiType.Mana || original.getSubAbility() != null || original.usesTargeting()
                         || !original.getPayCosts().hasTapCost()
