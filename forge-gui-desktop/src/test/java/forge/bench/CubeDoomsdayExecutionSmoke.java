@@ -1796,7 +1796,10 @@ public final class CubeDoomsdayExecutionSmoke {
             // Explicit synthetic restriction control, not a printed-card claim.
             for (Card card : player.getCardsIn(ZoneType.Battlefield))
                 if (card.getName().equals("Talisman of Dominance"))
-                    for (var mana : card.getManaAbilities()) mana.getManaPart().setExtraManaRestriction("nonSpell");
+                    for (var mana : card.getManaAbilities()) {
+                        mana.setParam("RestrictValid", "nonSpell");
+                        mana.setManaPart(new forge.game.spellability.AbilityManaPart(mana, mana.getMapParams()));
+                    }
         }
         Card held = null;
         var memory = forge.ai.AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL;
