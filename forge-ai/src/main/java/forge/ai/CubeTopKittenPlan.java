@@ -72,7 +72,7 @@ final class CubeTopKittenPlan {
                 if (original.getApi() != ApiType.Mana || original.getSubAbility() != null || original.usesTargeting()
                         || !original.getPayCosts().hasTapCost()
                         || original.getPayCosts().getCostParts().stream().anyMatch(p -> !(p instanceof CostTap)
-                            && (!(p instanceof CostPartMana mana) || mana.getManaCost().getCMC() != 0))) continue;
+                            && (!(p instanceof CostPartMana mana) || mana.getManaCostFor(original).getCMC() != 0))) continue;
                 int amount;
                 try { amount = Integer.parseInt(original.getParamOrDefault("Amount", "1")); }
                 catch (NumberFormatException ignored) { continue; }
