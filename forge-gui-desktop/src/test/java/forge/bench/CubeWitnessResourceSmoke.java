@@ -61,7 +61,7 @@ public final class CubeWitnessResourceSmoke {
         }
     }
     private static String auxiliaryName(String control) {
-        return control.equals("white-auxiliary") ? "Mother of Runes" : control.equals("aux-shroud") ? "Nimble Mongoose" : "Elvish Mystic";
+        return control.equals("white-auxiliary") ? "Mother of Runes" : (control.equals("aux-shroud") || control.equals("partial-before-sac-shroud")) ? "Nimble Mongoose" : "Elvish Mystic";
     }
     private static List<Entry> layout(String engine, String control) {
         List<Entry> cards = new ArrayList<>();
@@ -71,7 +71,7 @@ public final class CubeWitnessResourceSmoke {
         if (engine.equals("snap")) {
             cards.add(new Entry("Snap", control.equals("partial-after-snap") ? ZoneType.Graveyard : ZoneType.Hand));
             cards.add(new Entry(control.equals("no-petal") ? "Forest" : "Lotus Petal",
-                    control.equals("partial-after-snap") ? ZoneType.Hand : control.equals("partial-before-sac") ? ZoneType.Battlefield : ZoneType.Graveyard));
+                    control.equals("partial-after-snap") ? ZoneType.Hand : control.startsWith("partial-before-sac") ? ZoneType.Battlefield : ZoneType.Graveyard));
             cards.add(new Entry(control.equals("no-auxiliary") || control.equals("opposing-creatures")
                     ? "Forest" : auxiliaryName(control), control.startsWith("partial-") ? ZoneType.Hand : ZoneType.Battlefield));
             cards.add(new Entry(control.equals("missing-blue") ? "Forest" : "Island", ZoneType.Battlefield));
@@ -156,14 +156,15 @@ public final class CubeWitnessResourceSmoke {
     private static void probeInitial(Player player) {
         Map<String, Object> before = snapshot(player); String first = null;
         System.out.println("WITNESS_QUERY_BEGIN");
-        for (int repeat = 0; repeat < 3; repeat++) {
-            var action = new forge.ai.CubeKittenPlan(player).nextAction();
+        var persistent = new forge.ai.CubeKittenPlan(player);
+        for (int repeat = 0; repeat < 6; repeat++) {
+            var action = (repeat < 3 ? new forge.ai.CubeKittenPlan(player) : persistent).nextAction();
             String choice = action == null ? "none" : action.getHostCard().getName().replace(' ', '_') + "/" + action.getApi();
             if (first == null) first = choice;
             if (!first.equals(choice)) throw new AssertionError("initial recurrence query is unstable");
             if (!before.equals(snapshot(player))) throw new AssertionError("initial recurrence query changed native state");
         }
-        System.out.println("WITNESS_QUERY_END repeats=3 unchanged=true choice=" + first);
+        System.out.println("WITNESS_QUERY_END repeats=6 unchanged=true choice=" + first);
     }
     private static void run(int seat, String engine, String control, boolean candidate) {
         List<Entry> own = layout(engine, control), other = opposing(control);
@@ -271,7 +272,7 @@ public final class CubeWitnessResourceSmoke {
         return List.of("missing-blue", "no-ready-mana", "aux-shroud", "witness-shroud", "graveyard-shroud", "no-etb",
                 "no-life", "protected-opponent", "cast-cap", "nonartifact-cap", "activation-off", "root-maze", "spell-tax",
                 "activation-tax", "expensive-outlet", "stasis", "helm-one-land", "white-auxiliary", "partial-after-snap",
-                "partial-before-sac", "partial-before-aux-funded", "partial-before-aux-short", "hidden-swamp", "hidden-mountain", "purity-tapped-land");
+                "partial-before-sac", "partial-before-aux-funded", "partial-before-aux-short", "hidden-swamp", "hidden-mountain", "purity-tapped-land", "partial-before-sac-shroud");
     }
     public static void main(String[] args) {
         try {
