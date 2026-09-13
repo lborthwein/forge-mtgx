@@ -127,6 +127,7 @@ public final class CubeHarnfelTopBoundarySmoke {
         System.out.println("HARNFEL_RESULT " + key + " won=" + player.hasWon() + " gameOver=" + game.isGameOver()
                 + " steps=" + steps + " turn=" + game.getPhaseHandler().getTurn() + " topCasts=" + topCasts
                 + " exileCasts=" + exileCasts + " harnfelActivations=" + harnfelActivations + " shots=" + shots
+                + " tappedLands=" + player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.isLand() && c.isTapped()).count()
                 + " tappedMountains=" + player.getCardsIn(ZoneType.Battlefield).stream().filter(c -> c.getName().equals("Mountain") && c.isTapped()).count()
                 + " life=" + player.getLife() + " opponentLife=" + opponent.getLife() + " librarySize=" + player.getCardsIn(ZoneType.Library).size());
     }
