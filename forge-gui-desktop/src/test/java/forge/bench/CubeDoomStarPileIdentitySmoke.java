@@ -170,6 +170,11 @@ public final class CubeDoomStarPileIdentitySmoke {
             return true;
         }catch(ReflectiveOperationException e){throw new AssertionError(e);}
     }
+    private static SpellAbility waitAlias(SpellAbility top,Player actor) {
+        SpellAbility alias=top instanceof forge.game.trigger.WrappedAbility w
+                ?new forge.game.trigger.WrappedAbility(w.getTrigger(),w.getWrappedAbility().copy(actor),actor):top.copy(actor);
+        if(alias==null||alias==top)throw new AssertionError("alias construction");return alias;
+    }
     private static void waitingReceipt(Player player,String key,Set<Integer> seen) {
         if(player.getGame().getStack().isEmpty())return;
         var top=player.getGame().getStack().peekAbility();
@@ -182,9 +187,14 @@ public final class CubeDoomStarPileIdentitySmoke {
             boolean childWait=(boolean)waiting.invoke(child),parentWait=parent.waitingForOwnSpell();
             for(int i=0;i<3;i++)if(childWait!=(boolean)waiting.invoke(child)||parentWait!=parent.waitingForOwnSpell())throw new AssertionError("waiting drift");
             if(!before.equals(nativeSnapshot(player))||!beforeListeners.equals(listeners(player.getGame())))throw new AssertionError("waiting mutation");
-            if(!childWait||!parentWait)throw new AssertionError("genuine native wait rejected");
+            if(!childWait||!parentWait) {
+                Card h=top.getHostCard(),c=player.getGame().getCardState(h,null);Object event=top.getTriggeringObject(forge.game.ability.AbilityKey.Card);
+                var stepField=child.getClass().getDeclaredField("step");stepField.setAccessible(true);var failedField=child.getClass().getDeclaredField("failed");failedField.setAccessible(true);var idField=child.getClass().getDeclaredField("oracleEnterTrigger");idField.setAccessible(true);
+                System.out.println("DOOM_STAR_WAIT_DIFF "+key+" api="+top.getApi()+" step="+stepField.getInt(child)+" failed="+failedField.getBoolean(child)+" trigger="+top.getSourceTrigger()+" recorded="+idField.getInt(child)+" hostCurrent="+(h==c)+" eventCurrent="+(event==c)+" eventHost="+(event==h)+" hostStamp="+h.getGameTimestamp()+" currentStamp="+(c==null?-1:c.getGameTimestamp())+" eventStamp="+(event instanceof Card e?e.getGameTimestamp():-1));
+                throw new AssertionError("genuine native wait rejected");
+            }
             var waitingOn=child.getClass().getDeclaredMethod("waitingOn",SpellAbility.class);waitingOn.setAccessible(true);
-            if((boolean)waitingOn.invoke(child,top.copy(player))||(boolean)waitingOn.invoke(child,top.copy(player.getOpponents().get(0))))throw new AssertionError("detached wait alias accepted");
+            if((boolean)waitingOn.invoke(child,waitAlias(top,player))||(boolean)waitingOn.invoke(child,waitAlias(top,player.getOpponents().get(0))))throw new AssertionError("detached wait alias accepted");
             var saved=new ArrayList<SavedField>();savePlanner(parent,saved);
             try {
                 for(String name:List.of("pendingSpell","pendingDoom")){var f=child.getClass().getDeclaredField(name);f.setAccessible(true);f.set(child,null);}
