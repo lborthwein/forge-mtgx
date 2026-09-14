@@ -31,6 +31,7 @@ public final class ProductionPaymentDomainEngineSmoke {
     private static void check(boolean value, String label) { if (!value) throw new AssertionError(label); checks++; }
     private static Scenario scenario(String name) {
         return switch (name) {
+            case "wild-growth-full" -> new Scenario(name, "Grizzly Bears", "Forest", 1, "", false, false);
             case "twenty-plains" -> new Scenario(name, "Savannah Lions", "Plains", 20, "", false, false);
             case "twenty-surplus" -> new Scenario(name, "Savannah Lions", "Plains", 20, "", true, false);
             case "two-shards" -> new Scenario(name, "Silvercoat Lion", "Plains", 2, "", true, false);
@@ -165,7 +166,10 @@ public final class ProductionPaymentDomainEngineSmoke {
         var sources = new ArrayList<Card>();
         for (int i = 0; i < scenario.count(); i++) sources.add(card(scenario.source(), payer, ZoneType.Battlefield));
         boolean kinnanCase=scenario.name().startsWith("kinnan-");
-        Card kinnan=kinnanCase?card("Kinnan, Bonder Prodigy",payer,ZoneType.Battlefield):null;
+        boolean fixedTriggerCase=scenario.name().equals("wild-growth-full");
+        Card bonusProducer=kinnanCase?card("Kinnan, Bonder Prodigy",payer,ZoneType.Battlefield)
+                :fixedTriggerCase?card("Wild Growth",payer,ZoneType.Battlefield):null;
+        if(fixedTriggerCase)bonusProducer.attachToEntity(sources.get(0),null);
         boolean xTax = scenario.name().startsWith("x-tax-");
         boolean topTax = scenario.name().equals("top-tax");
         if (topTax) {
@@ -292,7 +296,7 @@ public final class ProductionPaymentDomainEngineSmoke {
         check(priority.get("paymentVersion").getAsString().equals(RulesCostFeasibility.PAYMENT_VERSION)
                 && payment.get("paymentVersion").getAsString().equals(RulesCostFeasibility.PAYMENT_VERSION)
                 && !payment.has("menu") && payment.get("complete").getAsBoolean()
-                && payment.get("representation").getAsString().equals(kinnanCase?"token-shard-domain-v2-producers":RulesPaymentDomain.REPRESENTATION), "Consistent advertised complete symbolic capability; no eager production menu");
+                && payment.get("representation").getAsString().equals(kinnanCase||fixedTriggerCase?"token-shard-domain-v2-producers":RulesPaymentDomain.REPRESENTATION), "Consistent advertised complete symbolic capability; no eager production menu");
         String privateLog = audit.toString(StandardCharsets.UTF_8);
         var summaries = privateLog.lines().filter(l -> l.startsWith("[bench-action] ")).map(l -> JsonParser.parseString(l.substring("[bench-action] ".length())).getAsJsonObject()).toList();
         var summary = summaries.stream().filter(r -> r.get("kind").getAsString().equals("summary")).findFirst().orElseThrow();
@@ -336,11 +340,11 @@ public final class ProductionPaymentDomainEngineSmoke {
                 var option = options.get(tokenId.substring(0, split)); int slot = Integer.parseInt(tokenId.substring(split + 1));
                 var source = sources.stream().filter(c -> c.getId() == option.get("fid").getAsInt()).findFirst().orElseThrow();
                 var actualTokens = List.copyOf(source.getManaAbilities().get(option.get("abilityIndex").getAsInt()).getManaPart().getLastManaProduced());
-                if(kinnanCase && slot==3) {
+                if((kinnanCase && slot==3)||(fixedTriggerCase && slot==1)) {
                     var actualBonus=selected.getPayingMana().get(i);
-                    check(actualBonus.getSourceCard().getId()==kinnan.getId() && actualBonus.getPlayer()==payer
-                            && actualTokens.stream().noneMatch(m->m==actualBonus),"Actual independent Kinnan bonus consumed, not a fourth Monolith unit");
-                    check(option.getAsJsonArray("outputOrigins").get(slot).getAsJsonObject().get("sourceFid").getAsInt()==kinnan.getId(),"Wire bonus provenance agrees with native payment");
+                    check(actualBonus.getSourceCard().getId()==bonusProducer.getId() && actualBonus.getPlayer()==payer
+                            && actualTokens.stream().noneMatch(m->m==actualBonus),"Actual independent bonus consumed with its own physical producer");
+                    check(option.getAsJsonArray("outputOrigins").get(slot).getAsJsonObject().get("sourceFid").getAsInt()==bonusProducer.getId(),"Wire bonus provenance agrees with native payment");
                 } else check(selected.getPayingMana().get(i) == actualTokens.get(slot), "Exact host-selected output unit consumed");
             }
             check(payer.getLife() == lifeBefore - hostAnswer.get("lifePaid").getAsInt()
@@ -387,7 +391,7 @@ public final class ProductionPaymentDomainEngineSmoke {
                 // original stdout handle explicitly, not this diagnostic stream.
                 stdout.println(run(scenario(args[2]), null, true));
             } else {
-                for (String name : List.of("twenty-plains", "twenty-surplus", "two-shards", "mixed-rw", "mixed-hybrid", "hybrid-generic", "source-life", "noble-white", "noble-blue", "ignoble-black", "life-only", "face-down-exile", "adventure-exile", "kinnan-basalt-full", "kinnan-grim-full")) run(scenario(name), null, false);
+                for (String name : List.of("wild-growth-full", "twenty-plains", "twenty-surplus", "two-shards", "mixed-rw", "mixed-hybrid", "hybrid-generic", "source-life", "noble-white", "noble-blue", "ignoble-black", "life-only", "face-down-exile", "adventure-exile", "kinnan-basalt-full", "kinnan-grim-full")) run(scenario(name), null, false);
                 for (String fault : List.of("legacy-choice", "wrong-version", "order-wrong-type", "spend-wrong-type", "life-wrong-type", "unknown-order-source",
                         "duplicate-source", "source-not-selected", "duplicate-token", "duplicate-shard", "partial-payment", "shard-wrong-type", "delegate"))
                     runFailedGameValidation(scenario("two-shards"), fault);
