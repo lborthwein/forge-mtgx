@@ -266,7 +266,6 @@ final class CubeDoomStarPlan {
             starSacrificeStamp = a.getHostCard().getGameTimestamp();
             starDrawTrigger = zoneTrigger(a.getHostCard(), "Battlefield", "Graveyard", "TrigDraw");
         }
-        if (step == 10) oracleEnterTrigger = zoneTrigger(a.getHostCard(), "Any", "Battlefield", "TrigDig");
         boolean success;
         if (a.isLandAbility()) { a.resolve(); success = current(land) != null && current(land).isInZone(ZoneType.Battlefield); }
         else {
@@ -274,6 +273,10 @@ final class CubeDoomStarPlan {
             try { success = ComputerUtil.handlePlayingSpellAbility(player, a, null, current -> new AiCostDecision(player, current, false)); }
             finally { paying = null; }
         }
+        // Casting moves Oracle from hand to stack and creates the trigger
+        // identity used by its later native battlefield object. Capture after
+        // that successful native move, not the older hand-card trigger.
+        if (success && step == 10) oracleEnterTrigger = zoneTrigger(a.getHostCard(), "Any", "Battlefield", "TrigDig");
         System.err.println("CUBE_DOOM_STAR step=" + step + " paid=" + success + " card=" + a.getHostCard().getName().replace(' ', '_'));
         if (!success) stop();
         else {
