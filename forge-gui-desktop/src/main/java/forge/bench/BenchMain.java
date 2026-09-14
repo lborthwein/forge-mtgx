@@ -119,6 +119,44 @@ public final class BenchMain {
             return;
         }
 
+        if (cfg.has("gameConfigs")) {
+            final java.util.List<JsonObject> jobs = BenchNativeBatch.parse(cfg);
+            if (!Boolean.getBoolean("forge.bench.sequentialAi")) {
+                throw new IllegalArgumentException("native batch requires sequential AI");
+            }
+            final JsonObject begin = new JsonObject();
+            begin.addProperty("type", "batchBegin");
+            begin.addProperty("version", 1);
+            begin.addProperty("games", jobs.size());
+            ch.send(begin);
+            for (int i = 0; i < jobs.size(); i++) {
+                final JsonObject job = jobs.get(i);
+                batchBoundary(ch, "batchGameBegin", job, i);
+                runConfig(ch, job.getAsJsonObject("config"), i == 0);
+                batchBoundary(ch, "batchGameEnd", job, i);
+            }
+            final JsonObject end = new JsonObject();
+            end.addProperty("type", "batchEnd");
+            end.addProperty("games", jobs.size());
+            ch.send(end);
+        } else {
+            runConfig(ch, cfg, true);
+        }
+        System.exit(0);
+    }
+
+    private static void batchBoundary(JsonRpcChannel ch, String type, JsonObject job, int index) {
+        final JsonObject message = new JsonObject();
+        message.addProperty("type", type);
+        message.addProperty("id", job.get("id").getAsString());
+        message.addProperty("index", index);
+        System.err.println("[bench-batch] " + message);
+        ch.send(message);
+    }
+
+    // The existing full-game implementation: a fresh session, decks and Match
+    // per explicit configuration. Only immutable Forge initialization is shared.
+    private static void runConfig(final JsonRpcChannel ch, final JsonObject cfg, final boolean initialize) {
         final long seed = cfg.has("seed") ? cfg.get("seed").getAsLong() : 0L;
         final int games = cfg.has("games") ? cfg.get("games").getAsInt() : 1;
         final int timeoutSec = cfg.has("timeoutSec") ? cfg.get("timeoutSec").getAsInt() : 120;
@@ -270,12 +308,14 @@ public final class BenchMain {
         final boolean deterministic = !aiCanUseTimeout;
 
         // ---------------------------------------------------------------- boot Forge
-        GuiBase.setInterface(new GuiDesktop());
-        FModel.initialize(null, prefs -> {
-            prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
-            prefs.setPref(FPref.UI_LANGUAGE, "en-US");
-            return null;
-        });
+        if (initialize) {
+            GuiBase.setInterface(new GuiDesktop());
+            FModel.initialize(null, prefs -> {
+                prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
+                prefs.setPref(FPref.UI_LANGUAGE, "en-US");
+                return null;
+            });
+        }
         BenchRandomAudit.install(seed);
 
         final BenchSession session = new BenchSession(ch);
@@ -598,7 +638,6 @@ public final class BenchMain {
         final JsonObject bye = new JsonObject();
         bye.addProperty("type", "bye");
         ch.send(bye);
-        System.exit(0);
     }
 
     /** Explicit per-seat identity, never a silent global replacement for Default. */
