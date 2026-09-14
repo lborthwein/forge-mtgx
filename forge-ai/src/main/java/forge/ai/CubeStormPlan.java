@@ -24,6 +24,34 @@ public final class CubeStormPlan {
     private int turn = -1, actions, failedTurn = -1;
     private boolean attemptedWill;
     private SpellAbility selected;
+    private ProbeSelection selectedProbe;
+    /** Binding only for the copied Probe action whose AI payment hint this
+     * plan changes. Ordinary policy actions retain their existing path. */
+    private record ProbeSelection(SpellAbility action, Card host, long stamp, ZoneType zone,
+            PhaseType phase, SpellAbility draw, forge.game.cost.Cost cost, String costText,
+            forge.game.staticability.StaticAbility permission, java.util.Map<String,String> params,
+            java.util.Map<String,String> drawParams) {
+        static ProbeSelection capture(Player p, SpellAbility a) {
+            return new ProbeSelection(a,a.getHostCard(),a.getHostCard().getGameTimestamp(),a.getHostCard().getZone().getZoneType(),
+                    p.getGame().getPhaseHandler().getPhase(),a.getSubAbility(),a.getPayCosts(),a.getPayCosts().toString(),a.getMayPlay(),
+                    java.util.Map.copyOf(a.getMapParams()),java.util.Map.copyOf(a.getSubAbility().getMapParams()));
+        }
+        boolean matches(Player p,SpellAbility a,int turn) {
+            var ph=p.getGame().getPhaseHandler();
+            return a==action && !a.isCopied() && !a.isWrapper() && a.isSpell() && a.getRootAbility()==a
+                    && a.getActivatingPlayer()==p && a.getHostCard()==host && host.getOwner()==p && host.getController()==p
+                    && !host.isFaceDown() && p.getGame().getCardState(host,null)==host && host.getGameTimestamp()==stamp && host.isInZone(zone)
+                    && ph.getTurn()==turn && ph.getPhase()==phase && (ph.is(PhaseType.MAIN1,p)||ph.is(PhaseType.MAIN2,p))
+                    && p.getGame().getStack().isEmpty() && a.getApi()==forge.game.ability.ApiType.RevealHand
+                    && a.getTargets().size()==1 && a.getTargets().get(0)==p
+                    && a.getPayCosts()==cost && costText.equals(cost.toString()) && a.getMayPlay()==permission && params.equals(a.getMapParams())
+                    && a.getSubAbility()==draw && draw.getRootAbility()==a && draw.getApi()==forge.game.ability.ApiType.Draw
+                    && draw.getSubAbility()==null && drawParams.equals(draw.getMapParams());
+        }
+    }
+    private static boolean lifeProbe(SpellAbility a) {
+        return a!=null && "Gitaxian Probe".equals(a.getHostCard().getName()) && !a.hasParam("AIPhyrexianPayment");
+    }
     /** Observability only: the token for the check that already declined the
      * most recent {@link #nextAction}. Never read by a decision, exactly like
      * {@link CubeDoomsdayPlan#declineReason}.
@@ -105,7 +133,10 @@ public final class CubeStormPlan {
     }
 
     private SpellAbility select(SpellAbility ability) {
-        if (ability != null) { selected = ability; actions++; }
+        if (ability != null) {
+            selected = ability; actions++;
+            selectedProbe = lifeProbe(ability) ? ProbeSelection.capture(player,ability) : null;
+        }
         return ability;
     }
 
@@ -588,6 +619,15 @@ public final class CubeStormPlan {
     public boolean owns(SpellAbility ability) { return ability == selected; }
 
     public boolean play(SpellAbility ability) {
+        if (selectedProbe != null || lifeProbe(ability)) {
+            if (selectedProbe == null || !selectedProbe.matches(player,ability,turn)
+                    || !CubeComboAi.canPlayNative(ability,player) || !CubeComboAi.canPayCost(ability,player,false)) {
+                selectedProbe = null; failedTurn = turn;
+                System.err.println("CUBE_STORM_PROBE_REJECTED before-native-payment");
+                return false;
+            }
+            selectedProbe = null;
+        }
         boolean played = ComputerUtil.handlePlayingSpellAbility(player, ability, null,
                 current -> new AiCostDecision(player, current, false));
         if (played) {
