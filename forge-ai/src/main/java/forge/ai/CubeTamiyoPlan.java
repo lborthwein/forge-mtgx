@@ -27,19 +27,22 @@ final class CubeTamiyoPlan {
     private enum Kind { RETURN, CAST, SACRIFICE }
     private record Bound(SpellAbility action,Card host,long stamp,Object cost,String costText,
                          Map<String,String> params,Map<String,String> original,List<Object> targets,Object permission,
-                         Object mana,String manaChoice,ApiType api) {
+                         Object mana,String manaChoice,ApiType api,SpellAbility root,SpellAbility parent,
+                         Player actor,Object trigger,Bound sub) {
         static Bound of(SpellAbility a) {
             return new Bound(a,a.getHostCard(),a.getHostCard().getGameTimestamp(),a.getPayCosts(),String.valueOf(a.getPayCosts()),
                     Map.copyOf(a.getMapParams()),Map.copyOf(a.getOriginalMapParams()),new ArrayList<>(a.getTargets()),a.getMayPlay(),
-                    a.getManaPart(),a.getManaPart()==null?null:a.getManaPart().getExpressChoice(),a.getApi());
+                    a.getManaPart(),a.getManaPart()==null?null:a.getManaPart().getExpressChoice(),a.getApi(),a.getRootAbility(),a.getParent(),
+                    a.getActivatingPlayer(),a.getTrigger(),a.getSubAbility()==null?null:Bound.of(a.getSubAbility()));
         }
         boolean matches(SpellAbility a,boolean targetsMayChange) {
-            if(a!=action||a.getApi()!=api||a.isCopied()||a.isWrapper()||a.getRootAbility()!=a||a.getHostCard()!=host||host.getGameTimestamp()!=stamp
+            if(a==null||a!=action||a.getApi()!=api||a.isCopied()||a.isWrapper()||a.getRootAbility()!=root||a.getParent()!=parent
+                    ||a.getActivatingPlayer()!=actor||a.getTrigger()!=trigger||a.getHostCard()!=host||host.getGameTimestamp()!=stamp
                     ||a.getPayCosts()!=cost||!String.valueOf(a.getPayCosts()).equals(costText)||a.getMayPlay()!=permission
                     ||!a.getMapParams().equals(params)||!a.getOriginalMapParams().equals(original)||a.getManaPart()!=mana
                     ||!Objects.equals(manaChoice,a.getManaPart()==null?null:a.getManaPart().getExpressChoice()))return false;
             if(!targetsMayChange){if(a.getTargets().size()!=targets.size())return false;for(int i=0;i<targets.size();i++)if(a.getTargets().get(i)!=targets.get(i))return false;}
-            return true;
+            return sub==null?a.getSubAbility()==null:sub.matches(a.getSubAbility(),false);
         }
     }
     CubeTamiyoPlan(Player p){player=p;}
