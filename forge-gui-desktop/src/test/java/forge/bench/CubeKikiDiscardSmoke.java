@@ -19,14 +19,14 @@ import java.util.*;
 /** Scripted native Pyromancer cast; the real controller owns every discard.
  * Prepared choice/transition evidence only, never autonomous assembly or strength. */
 public final class CubeKikiDiscardSmoke {
-    private static final List<String> CASES=List.of("twin-conscripts","twin-exarch","twin-pestermite","kiki-conscripts","kiki-restoration","wrong-twin-restoration","missing-source","forced-pair");
+    private static final List<String> CASES=List.of("twin-conscripts","twin-exarch","twin-pestermite","kiki-conscripts","kiki-restoration","wrong-twin-restoration","missing-source","forced-pair", "no-blue-twin-exarch", "two-red-kiki-restoration", "hand-island-twin-exarch", "hand-mountain-kiki-restoration", "field-body-twin-exarch", "field-body-kiki-restoration", "field-engine-kiki-conscripts", "both-field-kiki-conscripts", "duplicate-twin-conscripts");
     private static final List<ZoneType> ZONES=List.of(ZoneType.Battlefield,ZoneType.Hand,ZoneType.Library,ZoneType.Graveyard,ZoneType.Exile);
     private record Placement(String name,ZoneType zone) {}
-    private static String source(String key){return key.startsWith("kiki-")?"Kiki-Jiki, Mirror Breaker":key.equals("missing-source")?"Mountain":"Splinter Twin";}
+    private static String source(String key){return key.contains("kiki-")?"Kiki-Jiki, Mirror Breaker":key.equals("missing-source")?"Mountain":"Splinter Twin";}
     private static String partner(String key){return key.contains("exarch")?"Deceiver Exarch":key.contains("pestermite")?"Pestermite":key.contains("restoration")?"Restoration Angel":"Zealous Conscripts";}
     private static List<Placement> placements(boolean own,String key) {
         List<Placement> out=new ArrayList<>();
-        if(own){for(int i=0;i<3;i++)out.add(new Placement("Mountain",ZoneType.Battlefield));out.add(new Placement("Island",ZoneType.Battlefield));out.add(new Placement("Plains",ZoneType.Battlefield));out.add(new Placement("Seasoned Pyromancer",ZoneType.Hand));out.add(new Placement(source(key),ZoneType.Hand));out.add(new Placement(partner(key),ZoneType.Hand));if(!key.equals("forced-pair")){out.add(new Placement("Inti, Seneschal of the Sun",ZoneType.Hand));out.add(new Placement("Orcish Lumberjack",ZoneType.Hand));}}
+        if(own){for(int i=0;i<3;i++)out.add(new Placement(i==2&&(key.contains("two-red")||key.contains("hand-mountain"))?"Forest":"Mountain",ZoneType.Battlefield));out.add(new Placement(key.contains("no-blue")||key.contains("hand-island")?"Forest":"Island",ZoneType.Battlefield));out.add(new Placement("Plains",ZoneType.Battlefield));out.add(new Placement("Seasoned Pyromancer",ZoneType.Hand));out.add(new Placement(source(key),key.contains("field-engine")||key.contains("both-field")?ZoneType.Battlefield:ZoneType.Hand));out.add(new Placement(partner(key),key.contains("field-body")||key.contains("both-field")?ZoneType.Battlefield:ZoneType.Hand));if(key.contains("hand-island"))out.add(new Placement("Island",ZoneType.Hand));if(key.contains("hand-mountain"))out.add(new Placement("Mountain",ZoneType.Hand));if(key.contains("duplicate"))out.add(new Placement(source(key),ZoneType.Hand));if(!key.equals("forced-pair")){out.add(new Placement("Inti, Seneschal of the Sun",ZoneType.Hand));out.add(new Placement("Orcish Lumberjack",ZoneType.Hand));}}
         while(out.size()<40)out.add(new Placement("Forest",ZoneType.Library));return out;
     }
     private static Deck deck(boolean own,String key){Deck d=new Deck("Kiki native mandatory discard");for(var p:placements(own,key))d.getMain().add(p.name(),1);return d;}
@@ -54,8 +54,10 @@ public final class CubeKikiDiscardSmoke {
         if(!forge.ai.CubeComboAi.canPlayNative(cast,p)||!forge.ai.ComputerUtil.handlePlayingSpellAbility(p,cast,null,a->new forge.ai.AiCostDecision(p,a,false))||cast.getPayingMana().size()!=3)throw new AssertionError("native cast/payment");
         int steps=0;while(steps<400&&!g.isGameOver()&&g.getPhaseHandler().getTurn()==start){g.getPhaseHandler().mainLoopStep();steps++;if(events.discarded.size()==2&&events.drawn.size()==2&&g.getStack().isEmpty())break;}
         if(steps>=400||events.discarded.size()!=2||events.drawn.size()!=2||!events.drawn.equals(List.of("Forest","Forest")))throw new AssertionError("native discard/draw receipts");
-        Set<String> hand=names(p,ZoneType.Hand);boolean kept=hand.contains(source(control))&&hand.contains(partner(control));boolean require=arm.equals("improved")&&!Set.of("wrong-twin-restoration","missing-source","forced-pair").contains(control);
+        Set<String> hand=names(p,ZoneType.Hand);Set<String> available=new TreeSet<>(hand);available.addAll(names(p,ZoneType.Battlefield));boolean kept=available.contains(source(control))&&available.contains(partner(control));boolean require=arm.equals("improved")&&!Set.of("wrong-twin-restoration","missing-source","forced-pair","no-blue-twin-exarch","two-red-kiki-restoration").contains(control);
         System.out.println("KIKI_DISCARD_RESULT "+key+" keptPair="+kept+" discarded="+events.discarded.toString().replace(' ','_')+" drawn=2 paidMana=3 steps="+steps+" rng="+((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot());
+        if(require&&control.contains("hand-island")&&!hand.contains("Island"))throw new AssertionError("discarded required blue source");
+        if(require&&control.contains("hand-mountain")&&!hand.contains("Mountain"))throw new AssertionError("discarded required third red source");
         if(require&&!kept)throw new AssertionError("complete own combo discarded despite two legal alternatives "+key);
         if(control.equals("forced-pair")&&kept)throw new AssertionError("mandatory discard evaded");
     }
@@ -65,7 +67,7 @@ public final class CubeKikiDiscardSmoke {
             FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
             Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);
             for(String c:CASES)for(int seat=0;seat<2;seat++)run(args[1],seat,c);
-            System.out.println("KIKI_DISCARD_SUITE_COMPLETE cases=16");
+            System.out.println("KIKI_DISCARD_SUITE_COMPLETE cases="+(2*CASES.size()));
         }catch(Throwable e){e.printStackTrace();System.exit(1);}
     }
 }
