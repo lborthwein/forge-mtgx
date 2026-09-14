@@ -30,8 +30,13 @@ public final class CubeTamiyoCounterSmoke {
         CounterController(Game g,Player p,forge.LobbyPlayer lobby,String control){super(g,p,lobby);this.control=control;}
         @Override public List<forge.game.spellability.SpellAbility> chooseSpellAbilityToPlay(){
             if(!control.startsWith("counter")||attempted||getGame().getStack().isEmpty())return null;
-            var top=getGame().getStack().peekAbility();if(top==null||!top.isSpell()||top.isCopied()||top.getActivatingPlayer()==getPlayer()||!ARTIFACTS.contains(top.getHostCard().getName()))return null;
-            String name=control.equals("counterspell")?"Counterspell":"Force of Negation";
+            var top=getGame().getStack().peekAbility();
+            if(control.equals("counterspell-early")){
+                var first=top;top=null;for(var item:getGame().getStack()){var a=item.getSpellAbility();if(a.isSpell()&&!a.isCopied()&&a.getActivatingPlayer()!=getPlayer()&&ARTIFACTS.contains(a.getHostCard().getName())){top=a;break;}}
+                if(top==first)return null;
+            }
+            if(top==null||!top.isSpell()||top.isCopied()||top.getActivatingPlayer()==getPlayer()||!ARTIFACTS.contains(top.getHostCard().getName()))return null;
+            String name=control.startsWith("counterspell")?"Counterspell":"Force of Negation";
             for(Card c:getPlayer().getCardsIn(ZoneType.Hand))if(c.getName().equals(name)){
                 var a=c.getSpellAbilities().get(0).copy(getPlayer());if(!a.canTarget(top))continue;a.getTargets().add(top);
                 if(forge.ai.CubeComboAi.canPlayNative(a,getPlayer())&&forge.ai.CubeComboAi.canPayCost(a,getPlayer(),false)){choice=a;target=top;return List.of(a);}
@@ -42,18 +47,18 @@ public final class CubeTamiyoCounterSmoke {
             boolean live=false;for(var item:getGame().getStack())if(item.getSpellAbility()==target)live=true;
             if(!live||!target.isSpell()||target.isCopied()||target.getActivatingPlayer()==getPlayer())throw new AssertionError("counter target not actual public native spell");
             boolean paid=forge.ai.ComputerUtil.handlePlayingSpellAbility(getPlayer(),a,null,current->new forge.ai.AiCostDecision(getPlayer(),current,false));
-            if(!paid||a.getPayingMana().size()!=(control.equals("counterspell")?2:3))throw new AssertionError("native counter mana payment");attempted=true;
+            if(!paid||a.getPayingMana().size()!=(control.startsWith("counterspell")?2:3))throw new AssertionError("native counter mana payment");attempted=true;
             System.out.println("TAMIYO_COUNTER_PLAY "+key+" card="+a.getHostCard().getName().replace(' ','_')+" nativePriority=true nativePaid=true mana="+a.getPayingMana().size());return true;
         }
         void report(){
             if(!attempted||resolved||!getGame().getStack().isEmpty())return;
-            ZoneType destination=control.equals("counterspell")?ZoneType.Graveyard:ZoneType.Exile;
+            ZoneType destination=control.startsWith("counterspell")?ZoneType.Graveyard:ZoneType.Exile;
             if(!getGame().getCardState(choice.getHostCard()).isInZone(ZoneType.Graveyard)||!getGame().getCardState(target.getHostCard()).isInZone(destination))throw new AssertionError("native counter resolution destination");
             resolved=true;System.out.println("TAMIYO_COUNTER_RESOLVED "+key+" artifactZone="+destination+" counterZone=Graveyard");
         }
     }
     private static final List<String> ARTIFACTS=List.of("Lotus Petal","Lion's Eye Diamond");
-    private static final List<String> CONTROLS=List.of("complete","counterspell","counter-exile");
+    private static final List<String> CONTROLS=List.of("complete","counterspell","counterspell-early","counter-exile");
     private static final List<String> CASES=ARTIFACTS.stream().flatMap(a->CONTROLS.stream().map(c->a+":"+c)).toList();
     private static final List<ZoneType> ZONES=List.of(ZoneType.Battlefield,ZoneType.Hand,ZoneType.Library,ZoneType.Graveyard,ZoneType.Exile);
     private record Placement(String name,ZoneType zone) {}
@@ -67,7 +72,7 @@ public final class CubeTamiyoCounterSmoke {
             out.add(new Placement(artifact,control.equals("bf-start")?ZoneType.Battlefield:ZoneType.Graveyard));
             if(control.equals("held-card"))out.add(new Placement("Counterspell",ZoneType.Hand));
         }
-        if(!own&&control.startsWith("counter")){for(int i=0;i<(control.equals("counterspell")?2:3);i++)out.add(new Placement("Island",ZoneType.Battlefield));out.add(new Placement(control.equals("counterspell")?"Counterspell":"Force of Negation",ZoneType.Hand));}
+        if(!own&&control.startsWith("counter")){for(int i=0;i<(control.startsWith("counterspell")?2:3);i++)out.add(new Placement("Island",ZoneType.Battlefield));out.add(new Placement(control.startsWith("counterspell")?"Counterspell":"Force of Negation",ZoneType.Hand));}
         while(out.size()<40)out.add(new Placement("Forest",ZoneType.Library));return out;
     }
     private static Deck deck(boolean own,String control) {
@@ -167,7 +172,7 @@ public final class CubeTamiyoCounterSmoke {
             FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
             Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);
             for(String c:CASES)for(int seat=0;seat<2;seat++)run(args[1],args[2].equals("observed"),seat,c);
-            System.out.println("TAMIYO_COUNTER_SUITE_COMPLETE cases=12");
+            System.out.println("TAMIYO_COUNTER_SUITE_COMPLETE cases=16");
         }catch(Throwable e){e.printStackTrace();System.exit(1);}
     }
 }
