@@ -128,7 +128,7 @@ public final class CubeKikiDiscardSmoke {
             int steps=0;
             while(!g.isGameOver()&&steps<400) {
                 g.getPhaseHandler().mainLoopStep();steps++;
-                if(angel.isInPlay()&&g.getStack().isEmpty()&&!g.getStack().hasSimultaneousStackEntries())break;
+                if(names(p,ZoneType.Battlefield).contains("Restoration Angel")&&g.getStack().isEmpty()&&!g.getStack().hasSimultaneousStackEntries())break;
             }
             boolean kept=names(p,ZoneType.Hand).contains("Kiki-Jiki, Mirror Breaker");
             System.out.println("KIKI_BLINK_NATIVE_RESULT "+key+" keptKiki="+kept+" paidMana=4 steps="+steps+" blinked="+events.blinked.toString().replace(' ','_')+" discarded="+events.discarded.toString().replace(' ','_')+" drawn="+events.drawn.size());
