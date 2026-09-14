@@ -99,7 +99,7 @@ public final class CubeDoomStarResources {
         return false;
     }
     static boolean usableFloating(Mana mana, Player player) {
-        return mana.getPlayer() == player && !mana.isRestricted() && !mana.isCombatMana() && !mana.isSnow()
+        return mana.getPlayer() == player && !mana.isRestricted() && !mana.isCombatMana()
                 && !mana.triggersWhenSpent() && !mana.addsKeywordsType() && !mana.addsKeywordsUntil();
     }
     static boolean safePool(Player player) {
