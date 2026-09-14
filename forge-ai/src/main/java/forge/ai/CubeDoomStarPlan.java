@@ -22,7 +22,9 @@ import java.util.function.BooleanSupplier;
  * The resource proposal is committed only by actual native play. */
 final class CubeDoomStarPlan {
     private final Player player;
-    private SpellAbility selected, pendingDoom, paying;
+    private SpellAbility selected, pendingDoom, paying, pendingSpell;
+    private int starDrawTrigger = -1, oracleEnterTrigger = -1;
+    private long starSacrificeStamp = -1;
     private List<Card> chosenPile = List.of();
     private List<CubeDoomStarResources.Payment> currentCost;
     private List<CubeDoomStarResources.Payment> payments;
@@ -38,7 +40,8 @@ final class CubeDoomStarPlan {
     }
     private void reset() {
         active = failed = searched = ordered = filterPaid = false;
-        selected = pendingDoom = paying = null; currentCost = null; star = doom = land = oracleSnapshot = null;
+        selected = pendingDoom = paying = pendingSpell = null;
+        starDrawTrigger = oracleEnterTrigger = -1; starSacrificeStamp = -1; currentCost = null; star = doom = land = oracleSnapshot = null;
         chosenPile = List.of();
         payments = null; oracleId = -1; step = 0;
         turn = player.getGame().getPhaseHandler().getTurn();
@@ -215,11 +218,41 @@ final class CubeDoomStarPlan {
         return action();
     }
     boolean waiting() {
-        if (!active() || failed || player.getGame().getStack().isEmpty()) return false;
-        var top = player.getGame().getStack().peekAbility();
-        return top.getActivatingPlayer() == player && !top.isCopied()
-                && (top == pendingDoom || star != null && top.getHostCard().getId() == star.getId()
-                    || oracleId >= 0 && top.getHostCard().getId() == oracleId);
+        return !player.getGame().getStack().isEmpty() && waitingOn(player.getGame().getStack().peekAbility());
+    }
+    /** Only the actual stack entry may hold priority for this plan. The Star
+     * trigger uses its sacrificed battlefield snapshot, not the newer graveyard
+     * card; Oracle's enter trigger uses the actual current battlefield object. */
+    boolean waitingOn(SpellAbility top) {
+        if (!active() || failed || top == null || player.getGame().getStack().isEmpty()
+                || player.getGame().getStack().peekAbility() != top
+                || top.getActivatingPlayer() != player || top.isCopied()) return false;
+        if (top == pendingDoom || top == pendingSpell) return true;
+        if (!top.isWrapper() || !top.isTrigger()) return false;
+        Object triggered = top.getTriggeringObject(forge.game.ability.AbilityKey.Card);
+        if (!(triggered instanceof Card eventCard)) return false;
+        Card host = top.getHostCard();
+        if (filterPaid && step == 9 && star != null && top.getApi() == ApiType.Draw
+                && top.getSourceTrigger() == starDrawTrigger && starDrawTrigger >= 0)
+            return host.getId() == star.getId() && eventCard.getId() == star.getId()
+                    && host.getGameTimestamp() == starSacrificeStamp
+                    && eventCard.getGameTimestamp() == starSacrificeStamp;
+        Card oracle = current(oracleSnapshot);
+        return step == 11 && top.getApi() == ApiType.Dig && oracleEnterTrigger >= 0
+                && top.getSourceTrigger() == oracleEnterTrigger && oracle != null
+                && oracle.isInZone(ZoneType.Battlefield) && oracle.getController() == player
+                && host == oracle && eventCard == oracle;
+    }
+    private int zoneTrigger(Card card, String origin, String destination, String execute) {
+        int result = -1;
+        for (var trigger : card.getTriggers()) if (trigger.isIntrinsic()
+                && trigger.getMode() == forge.game.trigger.TriggerType.ChangesZone
+                && origin.equals(trigger.getParam("Origin")) && destination.equals(trigger.getParam("Destination"))
+                && "Card.Self".equals(trigger.getParam("ValidCard")) && execute.equals(trigger.getParam("Execute"))) {
+            if (result >= 0) return -1;
+            result = trigger.getId();
+        }
+        return result;
     }
     boolean owns(SpellAbility a) { return a != null && a == selected; }
     boolean play(SpellAbility a) {
@@ -227,7 +260,13 @@ final class CubeDoomStarPlan {
         if (!subscribed) { player.getGame().subscribeToEvents(this); subscribed = true; }
         active = true;
         if (step == 6) pendingDoom = a;
-        if (step == 8) filterPaid = true;
+        if (a.isSpell()) pendingSpell = a;
+        if (step == 8) {
+            filterPaid = true;
+            starSacrificeStamp = a.getHostCard().getGameTimestamp();
+            starDrawTrigger = zoneTrigger(a.getHostCard(), "Battlefield", "Graveyard", "TrigDraw");
+        }
+        if (step == 10) oracleEnterTrigger = zoneTrigger(a.getHostCard(), "Any", "Battlefield", "TrigDig");
         boolean success;
         if (a.isLandAbility()) { a.resolve(); success = current(land) != null && current(land).isInZone(ZoneType.Battlefield); }
         else {

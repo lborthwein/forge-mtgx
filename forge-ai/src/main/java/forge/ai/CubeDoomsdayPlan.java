@@ -535,7 +535,7 @@ public final class CubeDoomsdayPlan {
     /** Don't spend the plan's draw in response to our own unresolved combo spell.
      * An opposing spell/trigger still goes to Default's response policy. */
     public boolean waitingForOwnSpell() {
-        if (starPlan.waiting()) return true;
+        if (starPlan.active()) return starPlan.waiting();
         if (stage == Stage.NONE || player.getGame().getStack().isEmpty()) return false;
         SpellAbility top = player.getGame().getStack().peekAbility();
         return top.getActivatingPlayer() == player && ((stage == Stage.RITUAL && top.getHostCard().getId() == ritualId)
