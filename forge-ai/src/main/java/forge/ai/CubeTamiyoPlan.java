@@ -121,7 +121,7 @@ final class CubeTamiyoPlan {
     SpellAbility nextAction(){
         int now=player.getGame().getPhaseHandler().getTurn();if(now!=turn){turn=now;active=failed=castOutstanding=false;actions=0;selected=played=pending=null;choice=null;triggerChoices.clear();}
         if(failed||!window()||!player.getGame().getStack().isEmpty())return null;
-        if(selected!=null)return choice.matches(selected,false)&&board()&&domain()&&payable(selected)?selected:stop();
+        if(selected!=null)return choice.matches(selected,false)&&board()&&domain()&&resourceReady()&&payable(selected)?selected:stop();
         if(!active){
             tamiyo=find(TAMIYO,ZoneType.Battlefield);kitten=find(KITTEN,ZoneType.Battlefield);outlet=find(OUTLET,ZoneType.Battlefield);
             if(tamiyo==null||kitten==null||outlet==null)return null;tamiyoStamp=tamiyo.getGameTimestamp();kittenStamp=kitten.getGameTimestamp();outletStamp=outlet.getGameTimestamp();
