@@ -40,7 +40,7 @@ final class CubeFastbondPlan {
         return a;
     }
     private boolean bound(SpellAbility a) {
-        if(!owns(a) || a.isCopied() || a.isWrapper() || a.getRootAbility() != a || a.getActivatingPlayer() != player
+        if(!owns(a) || a.isCopied() || a.isWrapper() || a.getSubAbility() != null || a.getRootAbility() != a || a.getActivatingPlayer() != player
                 || a.getHostCard() != selectedHost || selectedHost.getGameTimestamp() != selectedHostStamp
                 || a.getApi() != selectedApi || a.getPayCosts() != selectedCost || a.getMayPlay() != selectedPermission
                 || !java.util.Objects.equals(selectedCostText, a.getPayCosts() == null ? null : a.getPayCosts().toString())
