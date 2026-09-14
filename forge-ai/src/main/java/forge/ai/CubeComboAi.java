@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v101";
+    public static final String VERSION = "cube-combo-execution-v102";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -747,6 +747,54 @@ public final class CubeComboAi {
         return null;
     }
 
+    /** Decline an optional Restoration blink that would force a retained
+     * combo card through Pyromancer's mandatory discard. Tokens vanish when
+     * blinked, so they are not alternative value targets. A different legal
+     * non-token target is handled by the companion target-selection hook.
+     * Own hand and public battlefield only; no target or game state changes.
+     */
+    private static boolean riskyComboBlink(Player player, SpellAbility trigger, boolean mandatory) {
+        if (mandatory || !enabled(player) || trigger.getActivatingPlayer() != player
+                || trigger.getHostCard().getController() != player
+                || !trigger.getHostCard().getName().equals("Restoration Angel")
+                || trigger.getApi() != ApiType.ChangeZone || !trigger.usesTargeting()
+                || !"Battlefield".equals(trigger.getParam("Origin")) || !"Exile".equals(trigger.getParam("Destination"))
+                || trigger.getSubAbility() == null || trigger.getSubAbility().getApi() != ApiType.ChangeZone
+                || !"Battlefield".equals(trigger.getSubAbility().getParam("Destination"))) return false;
+        CardCollection reserved = kikiDiscardProtectedCards(player);
+        if (reserved.isEmpty()) return false;
+        int expendable = 0;
+        for (Card card : player.getCardsIn(ZoneType.Hand)) if (!reserved.contains(card)) expendable++;
+        return expendable < 2;
+    }
+
+    public static boolean declineDestructiveComboBlink(Player player, SpellAbility trigger, boolean mandatory) {
+        if (!riskyComboBlink(player, trigger, mandatory)) return false;
+        boolean pyromancer = false;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || card.isPhasedOut() || !trigger.canTarget(card) || card.isToken()) continue;
+            if (!card.getName().equals("Seasoned Pyromancer")) return false;
+            pyromancer = true;
+        }
+        return pyromancer;
+    }
+
+    /** The native ordinary chooser can still prefer Pyromancer over another
+     * legal body. Exclude that destructive target before using its existing
+     * card preference, and commit targets only through native validation. */
+    public static boolean selectNonDiscardingComboBlink(Player player, SpellAbility trigger, boolean mandatory) {
+        if (!riskyComboBlink(player, trigger, mandatory)) return false;
+        CardCollection alternatives = new CardCollection();
+        boolean pyromancer = false;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || card.isPhasedOut() || card.isToken() || !trigger.canTarget(card)) continue;
+            if (card.getName().equals("Seasoned Pyromancer")) pyromancer = true;
+            else alternatives.add(card);
+        }
+        if (!pyromancer || alternatives.isEmpty()) return false;
+        return selectSingleTarget(trigger, ComputerUtilCard.getBestAI(alternatives));
+    }
+
     /** Restoration Angel resets a non-token Kiki through an actual zone change. */
     public static boolean selectBlinkSource(Player player, SpellAbility trigger) {
         if (!enabled(player) || !trigger.getHostCard().getName().equals("Restoration Angel")
@@ -1300,6 +1348,13 @@ public final class CubeComboAi {
         CardCollection sources = new CardCollection();
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown() || card.isPhasedOut() || card.getController() != player) continue;
+            // The live Twin grant already completes this route without a hand
+            // card. Do not reserve another Aura merely because it can enchant
+            // the same body. Read the actual granted ability, not the Aura name.
+            if (livePartnerBody(card) && card.getNetPower() > 0
+                    && card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
+                    && "Self".equals(sa.getParam("Defined"))
+                    && sa.copyForEnumeration(player).checkRestrictions(card, player))) return new CardCollection();
             if (partnerHalf(card)) bodies.add(card);
             if (card.getName().equals("Kiki-Jiki, Mirror Breaker")
                     && card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
