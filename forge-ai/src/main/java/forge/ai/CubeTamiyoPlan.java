@@ -55,9 +55,20 @@ final class CubeTamiyoPlan {
         System.err.println("CUBE_PLAN_DECLINE family=tamiyo reason="+reason);
         return false;
     }
+    private boolean nativeLoyaltyEntry(Card c, forge.game.replacement.ReplacementEffect e) {
+        if(c!=tamiyo||!c.isPlaneswalker()||!"5".equals(c.getCurrentState().getBaseLoyalty())
+                ||e!=c.getCurrentState().getLoyaltyRep()||e.getHostCard()!=c||!e.isIntrinsic())return false;
+        Map<String,String> params=new HashMap<>(e.getMapParams());params.remove("Description");
+        if(!params.equals(Map.of("Event","Moved","ValidCard","Card.Self","Destination","Battlefield","Secondary","True","ReplacementResult","Updated")))return false;
+        SpellAbility a=e.getOverridingAbility();
+        return a!=null&&a.getHostCard()==c&&a.isIntrinsic()&&!a.isCopied()&&!a.isWrapper()&&!a.isTrigger()
+                &&a.getApi()==ApiType.PutCounter&&a.getSubAbility()==null&&a.getPayCosts()==null&&!a.usesTargeting()
+                &&a.getMapParams().equals(Map.of("DB","PutCounter","Defined","Self","CounterType","LOYALTY","ETB","True","CounterNum","5"))
+                &&a.getOriginalMapParams().equals(a.getMapParams());
+    }
     private boolean domain(){
         for(ZoneType z:List.of(ZoneType.Battlefield,ZoneType.Command,ZoneType.Graveyard))for(Card c:player.getGame().getCardsIn(z))if(!c.isFaceDown()&&!c.isPhasedOut()){
-            for(var e:c.getReplacementEffects())if(e.zonesCheck(c.getZone())&&e.requirementsCheck(player.getGame())&&Set.of("Moved","GainLife","LifeReduced","DamageDone","PayLife").contains(e.getParamOrDefault("Event","")))return decline("replacement:"+c.getName().replace(' ','_')+":"+e.getParamOrDefault("Event",""));
+            for(var e:c.getReplacementEffects())if(e.zonesCheck(c.getZone())&&e.requirementsCheck(player.getGame())&&Set.of("Moved","GainLife","LifeReduced","DamageDone","PayLife").contains(e.getParamOrDefault("Event",""))&&!nativeLoyaltyEntry(c,e))return decline("replacement:"+c.getName().replace(' ','_')+":"+e.getParamOrDefault("Event",""));
             for(var s:c.getStaticAbilities())if(s.zonesCheck()&&Set.of("RaiseCost","ReduceCost","SetCost","CantBeCast","CantBeActivated","CantSacrifice","CantPayLife","DisableTriggers").contains(s.getParamOrDefault("Mode",""))){
                 if(c==tamiyo&&"CantSacrifice".equals(s.getParam("Mode"))&&"False".equals(s.getParam("ForCost"))&&"SpellAbility.OppCtrl".equals(s.getParam("ValidCause")))continue;
                 return decline("static:"+c.getName().replace(' ','_')+":"+s.getParam("Mode"));
