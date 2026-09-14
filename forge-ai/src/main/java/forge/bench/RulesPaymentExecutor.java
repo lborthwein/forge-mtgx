@@ -110,10 +110,7 @@ public final class RulesPaymentExecutor {
                         || bonus.recipient() != payer || !(tapped instanceof Card tappedCard)
                         || tappedCard.getId() != activeSource.getHostCard().getId()
                         || effect.getTriggeringObject(forge.game.ability.AbilityKey.Activator) != payer
-                        || !ReflectedManaProduction.supported(wrapper.getTrigger())
-                        || !effect.getMapParams().equals(java.util.Map.of("DB", "ManaReflected", "ColorOrType", "Type",
-                            "ReflectProperty", "Produced", "Defined", "You"))
-                        || effect.getSubAbility()!=null || effect.usesTargeting())
+                        || !ReflectedManaProduction.matchesEffect(wrapper.getTrigger(), effect, bonus.color()))
                     fail("reflected mana callback identity/definition changed");
             }
             boolean result = run.getAsBoolean();
