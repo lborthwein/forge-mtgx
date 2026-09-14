@@ -182,6 +182,17 @@ public final class CubeDoomStarPileIdentitySmoke {
             boolean childWait=(boolean)waiting.invoke(child),parentWait=parent.waitingForOwnSpell();
             for(int i=0;i<3;i++)if(childWait!=(boolean)waiting.invoke(child)||parentWait!=parent.waitingForOwnSpell())throw new AssertionError("waiting drift");
             if(!before.equals(nativeSnapshot(player))||!beforeListeners.equals(listeners(player.getGame())))throw new AssertionError("waiting mutation");
+            if(!childWait||!parentWait)throw new AssertionError("genuine native wait rejected");
+            var waitingOn=child.getClass().getDeclaredMethod("waitingOn",SpellAbility.class);waitingOn.setAccessible(true);
+            if((boolean)waitingOn.invoke(child,top.copy(player))||(boolean)waitingOn.invoke(child,top.copy(player.getOpponents().get(0))))throw new AssertionError("detached wait alias accepted");
+            var saved=new ArrayList<SavedField>();savePlanner(parent,saved);
+            try {
+                for(String name:List.of("pendingSpell","pendingDoom")){var f=child.getClass().getDeclaredField(name);f.setAccessible(true);f.set(child,null);}
+                for(String name:List.of("starDrawTrigger","oracleEnterTrigger")){var f=child.getClass().getDeclaredField(name);f.setAccessible(true);f.setInt(child,-1);}
+                if((boolean)waiting.invoke(child)||parent.waitingForOwnSpell())throw new AssertionError("host-only wait survived lost lineage");
+            }finally{for(var value:saved)value.field().set(value.owner(),value.value());}
+            if(!before.equals(nativeSnapshot(player))||!beforeListeners.equals(listeners(player.getGame())))throw new AssertionError("waiting boundary mutation");
+            System.out.println("DOOM_STAR_WAIT_BOUNDARY "+key+" aliases=2 rejected=true lostLineageRejected=true parentRejected=true unchanged=true");
             Card host=top.getHostCard(),current=player.getGame().getCardState(host,null);
             Object event=top.getTriggeringObject(forge.game.ability.AbilityKey.Card);
             String eventCard=event instanceof Card c?c.getId()+":"+c.getGameTimestamp():"none";
