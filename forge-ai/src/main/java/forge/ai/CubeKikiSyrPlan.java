@@ -74,6 +74,12 @@ final class CubeKikiSyrPlan {
     }
     private boolean stable(){return current(meta,metaStamp)&&meta.getName().equals(META)&&!meta.getType().isLegendary()&&meta.getNetToughness()>0
             &&current(outlet,outletStamp)&&outlet.getName().equals(SHOT)&&!player.cantWin()&&player.getLife()>0;}
+    private boolean ready(SpellAbility a){
+        if(!stable())return false;
+        if(a.getApi()==ApiType.DealDamage)return true;
+        if(!current(syr,syrStamp)||!gainUnreplaced())return false;
+        return a.getApi()!=ApiType.CopyPermanent||current(kiki,kikiStamp)&&ability(syr,ApiType.GainLife,null)!=null;
+    }
     private boolean activeStack(){
         if(pending==null)return false;
         for(var e:player.getGame().getStack())if(e.getSpellAbility()==pending)return true;
@@ -91,7 +97,7 @@ final class CubeKikiSyrPlan {
         int now=player.getGame().getPhaseHandler().getTurn();
         if(now!=turn){turn=now;active=false;failed=false;selected=null;pending=null;pendingApi=null;actions=0;}
         if(failed||!window()||!player.getGame().getStack().isEmpty())return null;
-        if(selected!=null)return bound(selected)&&payable(selected)?selected:stop();
+        if(selected!=null)return bound(selected)&&ready(selected)&&payable(selected)?selected:stop();
         if(active&&pendingApi!=null){
             if(pendingApi==ApiType.CopyPermanent){
                 Card next=null;for(Card c:player.getCardsIn(ZoneType.Battlefield))if(c.getId()==newToken)next=c;
@@ -119,7 +125,7 @@ final class CubeKikiSyrPlan {
         return select(ability(kiki,ApiType.CopyPermanent,meta));
     }
     boolean play(SpellAbility a){
-        if(!bound(a)||!stable()||a.getApi()!=ApiType.DealDamage&&!gainUnreplaced()||!payable(a)){stop();return false;}
+        if(!bound(a)||!ready(a)||!payable(a)){stop();return false;}
         beforeLife=player.getLife();beforeCounters=syr==null?0:syr.getCounters(CounterEnumType.P1P1);
         expectedCounters=beforeCounters+(kiki!=null&&kiki.isArtifact()?1:0);gainPower=syr==null?0:syr.getNetPower();
         cloneChosen=false;legendChosen=false;newToken=-1;
