@@ -78,9 +78,18 @@ final class CubeTamiyoPlan {
                 &&a.getMapParams().equals(Map.of("DB","PutCounter","Defined","Self","CounterType","LOYALTY","ETB","True","CounterNum","5"))
                 &&a.getOriginalMapParams().equals(a.getMapParams());
     }
+    // This native qualifier cannot apply to our owned loop pieces or hand.
+    // Check the effect controller, not its owner; opposing Voidwalker still matters.
+    private boolean excludesOwnedGraveyardMoves(forge.game.replacement.ReplacementEffect e) {
+        if(e.getClass()!=forge.game.replacement.ReplaceMoved.class||e.getHostCard()==null||e.getHostCard().getController()!=player
+                ||!"Moved".equals(e.getParam("Event"))||!"Graveyard".equals(e.getParam("Destination"))
+                ||!"Card.!token+OppOwn".equals(e.getParam("ValidCard")))return false;
+        for(Card c:player.getCardsIn(ZoneType.Hand))if(c.getOwner()!=player)return false;
+        return tamiyo!=null&&tamiyo.getOwner()==player&&!e.matchesValidParam("ValidCard",tamiyo);
+    }
     private boolean domain(){
         for(ZoneType z:List.of(ZoneType.Battlefield,ZoneType.Command,ZoneType.Graveyard))for(Card c:player.getGame().getCardsIn(z))if(!c.isFaceDown()&&!c.isPhasedOut()){
-            for(var e:c.getReplacementEffects())if(e.zonesCheck(c.getZone())&&e.requirementsCheck(player.getGame())&&Set.of("Moved","GainLife","LifeReduced","DamageDone","PayLife").contains(e.getParamOrDefault("Event",""))&&!nativeLoyaltyEntry(c,e))return decline("replacement:"+c.getName().replace(' ','_')+":"+e.getParamOrDefault("Event",""));
+            for(var e:c.getReplacementEffects())if(e.zonesCheck(c.getZone())&&e.requirementsCheck(player.getGame())&&Set.of("Moved","GainLife","LifeReduced","DamageDone","PayLife").contains(e.getParamOrDefault("Event",""))&&!nativeLoyaltyEntry(c,e)&&!excludesOwnedGraveyardMoves(e))return decline("replacement:"+c.getName().replace(' ','_')+":"+e.getParamOrDefault("Event",""));
             for(var s:c.getStaticAbilities())if(s.zonesCheck()&&Set.of("RaiseCost","ReduceCost","SetCost","CantBeCast","CantBeActivated","CantSacrifice","CantPayLife","DisableTriggers").contains(s.getParamOrDefault("Mode",""))){
                 if(c==tamiyo&&"CantSacrifice".equals(s.getParam("Mode"))&&"False".equals(s.getParam("ForCost"))&&"SpellAbility.OppCtrl".equals(s.getParam("ValidCause")))continue;
                 return decline("static:"+c.getName().replace(' ','_')+":"+s.getParam("Mode"));
