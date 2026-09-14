@@ -70,6 +70,17 @@ public final class CubeStormPlan {
         if (card == null) return null;
         for (SpellAbility original : card.getAllPossibleAbilities(player, false, null, true)) {
             SpellAbility ability = original.copy(player);
+            // The printed Probe AI hint forbids life payment even inside a
+            // committed Storm resource plan. Override only this copied action;
+            // the cantrip selection below targets our own player, never an
+            // opponent hand. Native mana/life payment remains authoritative.
+            if (player.getController() instanceof CubeComboPlayerController && card.getOwner() == player
+                    && "Gitaxian Probe".equals(card.getName()) && ability.isSpell()
+                    && ability.getApi() == forge.game.ability.ApiType.RevealHand
+                    && ability.getSubAbility() != null && ability.getSubAbility().getApi() == forge.game.ability.ApiType.Draw
+                    && "Never".equals(ability.getParam("AIPhyrexianPayment")) && player.getLife() > 2) {
+                ability.getMapParams().remove("AIPhyrexianPayment");
+            }
             if (!ability.isSpell() || !CubeComboAi.canPlayNative(ability, player)
                     || !CubeComboAi.canPayCost(ability, player, false)) continue;
             return ability;
