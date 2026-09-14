@@ -130,10 +130,10 @@ public final class CubeKikiDiscardSmoke {
                 if(control.equals("reserve-facedown-partner"))c.turnFaceDown(true);
                 if(control.equals("reserve-other-controller"))c.setController(op,g.getNextTimestamp());
             }
-            if(control.equals("reserve-suppressed-engine")&&c.getName().equals("Kiki-Jiki, Mirror Breaker"))for(var a:c.getSpellAbilities())a.setSuppressed(true);
         }
         if(aura!=null)aura.attachToEntity(Objects.requireNonNull(body),null);
         g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();
+        if(control.equals("reserve-suppressed-engine"))for(Card c:p.getCardsIn(ZoneType.Battlefield))if(c.getName().equals("Kiki-Jiki, Mirror Breaker"))for(var a:c.getSpellAbilities())a.setSuppressed(true);
         if(control.equals("reserve-active-twin")&&body.getSpellAbilities().stream().noneMatch(a->a.getApi()==forge.game.ability.ApiType.CopyPermanent&&"Self".equals(a.getParam("Defined"))))throw new AssertionError("native Twin grant missing");
         BenchRandomAudit.install(998100L+100L*seat+RESERVE_CASES.indexOf(control));
         var before=observationState(p);
