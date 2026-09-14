@@ -337,7 +337,27 @@ final class CubeDoomStarPlan {
             if (z != null && z.zoneType() == ZoneType.Library && z.player() != null && z.player().getId() == player.getId()) ownLibrary = true;
         if (!ownLibrary) return;
         if (pendingDoom != null && !player.getGame().getStack().isEmpty() && player.getGame().getStack().peekAbility() == pendingDoom
-                && player.getGame().getStack().isResolving(pendingDoom.getHostCard())) return;
+                && player.getGame().getStack().isResolving(pendingDoom.getHostCard())) {
+            // Doomsday first moves its selected graveyard cards into the
+            // library, then its native subability offers the pile for ordering.
+            // Rebind only a selected identity on that actual resolving move;
+            // never discover a replacement by scanning the library.
+            if (event.to() != null && event.to().zoneType() == ZoneType.Library
+                    && event.to().player() != null && event.to().player().getId() == player.getId()
+                    && event.from() != null && (event.from().zoneType() == ZoneType.Graveyard
+                        || event.from().zoneType() == ZoneType.Library)) {
+                var next = new java.util.ArrayList<>(chosenPile);
+                for (int i = 0; i < next.size(); i++) if (next.get(i).getId() == event.card().getId()) {
+                    Card prior = next.get(i), moved = current(prior);
+                    if (moved == null || moved.getOwner() != player || !moved.isInZone(ZoneType.Library)) { failed = true; return; }
+                    next.set(i, moved);
+                    if (prior != moved) System.err.println("CUBE_DOOM_STAR_SELECTED_MOVE nativeDoom=true from="
+                            + event.from().zoneType() + " identityChanged=true");
+                }
+                chosenPile = List.copyOf(next);
+            }
+            return;
+        }
         if (filterPaid && event.card().getId() == oracleId && event.to() != null && event.to().zoneType() == ZoneType.Hand) return;
         failed = true;
     }
