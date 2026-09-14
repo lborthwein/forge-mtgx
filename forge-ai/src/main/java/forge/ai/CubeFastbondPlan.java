@@ -21,7 +21,45 @@ final class CubeFastbondPlan {
     private SpellAbility selected, pending;
     private int turn = -1, actions, beforeLife, expectedLife, landPlays, painTrigger = -1;
     private boolean active, failed, replayPending;
-    private long landStamp;
+    private long landStamp, selectedHostStamp;
+    private Card selectedHost;
+    private forge.game.cost.Cost selectedCost;
+    private forge.game.staticability.StaticAbility selectedPermission;
+    private java.util.Map<String,String> selectedParams = java.util.Map.of();
+    private java.util.List<?> selectedTargets = java.util.List.of();
+    private String selectedCostText;
+    private ApiType selectedApi;
+    private SpellAbility select(SpellAbility a) {
+        selected = a;
+        if(a != null) {
+            selectedHost = a.getHostCard(); selectedHostStamp = selectedHost.getGameTimestamp();
+            selectedApi = a.getApi(); selectedCost = a.getPayCosts(); selectedCostText = selectedCost == null ? null : selectedCost.toString();
+            selectedPermission = a.getMayPlay(); selectedParams = java.util.Map.copyOf(a.getMapParams());
+            selectedTargets = java.util.List.copyOf(a.getTargets());
+        }
+        return a;
+    }
+    private boolean bound(SpellAbility a) {
+        if(!owns(a) || a.isCopied() || a.isWrapper() || a.getRootAbility() != a || a.getActivatingPlayer() != player
+                || a.getHostCard() != selectedHost || selectedHost.getGameTimestamp() != selectedHostStamp
+                || a.getApi() != selectedApi || a.getPayCosts() != selectedCost || a.getMayPlay() != selectedPermission
+                || !java.util.Objects.equals(selectedCostText, a.getPayCosts() == null ? null : a.getPayCosts().toString())
+                || !selectedParams.equals(a.getMapParams()) || a.getTargets().size() != selectedTargets.size()) return false;
+        for(int i=0;i<selectedTargets.size();i++)if(a.getTargets().get(i)!=selectedTargets.get(i))return false;
+        return true;
+    }
+    private SpellAbility nativePending(SpellAbility played) {
+        SpellAbility found = null;
+        for(var entry : player.getGame().getStack()) {
+            SpellAbility a = entry.getSpellAbility();
+            if(a.getOriginalAbility() == played && !a.isCopied() && a.getActivatingPlayer() == player
+                    && a.getHostCard() == played.getHostCard() && a.getApi() == played.getApi()) {
+                if(found != null)return null;
+                found = a;
+            }
+        }
+        return found;
+    }
 
     CubeFastbondPlan(Player player) { this.player = player; }
     private SpellAbility stop() { failed = true; selected = null; return null; }
@@ -130,14 +168,14 @@ final class CubeFastbondPlan {
         }
         SpellAbility shot = shot();
         if (shot == null) return stop();
-        if (player.getLife() > 50) return selected = payable(shot) ? shot : null;
-        if (current(land, ZoneType.Graveyard)) { if (player.getLife() <= 1 && player.getLandsPlayedThisTurn() > 0) return stop(); selected = replay(); return selected == null ? stop() : selected; }
+        if (player.getLife() > 50) return select(payable(shot) ? shot : null);
+        if (current(land, ZoneType.Graveyard)) { if (player.getLife() <= 1 && player.getLandsPlayedThisTurn() > 0) return stop(); selected = replay(); return selected == null ? stop() : select(selected); }
         if (!current(land, ZoneType.Battlefield)) return stop();
         SpellAbility gain = ability(orb, ApiType.GainLife);
         if (gain == null || !"2".equals(gain.getParam("LifeAmount")) || !land.canBeSacrificedBy(gain, false) || !payable(gain)) return stop();
         var parts = gain.getPayCosts().getCostParts();
         if (parts.size() != 1 || !(parts.get(0) instanceof CostSacrifice cost) || !"Land".equals(cost.getType()) || cost.getAbilityAmount(gain) != 1) return stop();
-        return selected = gain;
+        return select(gain);
     }
     boolean lethalFallbackReplay(SpellAbility a) {
         // This owns only the tracked converter land in the already established
@@ -150,7 +188,7 @@ final class CubeFastbondPlan {
     }
     boolean owns(SpellAbility a) { return a != null && a == selected; }
     boolean play(SpellAbility a) {
-        if (!owns(a) || !window() || !board() || !domain() || land.getGameTimestamp() != landStamp
+        if (!bound(a) || !window() || !board() || !domain() || land.getGameTimestamp() != landStamp
                 || !current(land, a.isLandAbility() ? ZoneType.Graveyard : (a.getApi() == ApiType.GainLife ? ZoneType.Battlefield : land.getZone().getZoneType()))
                 || !payable(a)) { stop(); return false; }
         beforeLife = player.getLife(); landPlays = player.getLandsPlayedThisTurn();
@@ -175,8 +213,9 @@ final class CubeFastbondPlan {
                 land = player.getGame().getCardState(paidLand, null);
                 played &= current(land, ZoneType.Graveyard); expectedLife = beforeLife + 2;
             } else expectedLife = beforeLife - 50;
-            if (played) pending = a;
+            if (played) { pending = nativePending(a); played = pending != null; }
         }
+        selected = null;
         if (!played) stop();
         else { actions++; landStamp = land.getGameTimestamp(); }
         System.err.println("CUBE_FASTBOND_PLAN played=" + played + " actions=" + actions + " api=" + a.getApi() + " land=" + a.isLandAbility());

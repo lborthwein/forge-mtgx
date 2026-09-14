@@ -25,6 +25,10 @@ public final class CubeFastbondInterruptionSmoke {
         try { var f=forge.ai.CubeComboPlayerController.class.getDeclaredField("fastbondPlan");f.setAccessible(true);Object plan=f.get(p.getController());var v=plan.getClass().getDeclaredField(name);v.setAccessible(true);return v.get(plan); }
         catch(ReflectiveOperationException e){throw new AssertionError(e);}
     }
+    private static Object topPending(Player p) {
+        try {var f=forge.ai.CubeComboPlayerController.class.getDeclaredField("topPlan");f.setAccessible(true);Object plan=f.get(p.getController());var v=plan.getClass().getDeclaredField("pending");v.setAccessible(true);return v.get(plan);}
+        catch(ReflectiveOperationException e){throw new AssertionError(e);}
+    }
     private static final class CounterLobby extends forge.ai.LobbyPlayerAi {
         CounterLobby(int seat){super("Counter-"+seat,null);setAiProfile("Default");}
         @Override public Player createIngamePlayer(Game g,int id){Player p=new Player(getName(),g,id);p.setFirstController(new CounterController(g,p,this));return p;}
@@ -46,7 +50,8 @@ public final class CubeFastbondInterruptionSmoke {
         }
         @Override public boolean playChosenSpellAbility(forge.game.spellability.SpellAbility a) {
             if(a!=choice)throw new AssertionError("foreign counter choice");
-            if(getGame().getPhaseHandler().getPriorityPlayer()!=getPlayer()||value(target.getActivatingPlayer(),"pending")!=target)throw new AssertionError("not actual native owned counter window");
+            Object owner=control.equals("counter-orb")?value(target.getActivatingPlayer(),"pending"):topPending(target.getActivatingPlayer());
+            if(getGame().getPhaseHandler().getPriorityPlayer()!=getPlayer()||(owner!=target&&owner!=target.getOriginalAbility()))throw new AssertionError("not actual native owned counter window");
             actionsAtCounter=(Integer)value(target.getActivatingPlayer(),"actions");
             boolean paid=forge.ai.ComputerUtil.handlePlayingSpellAbility(getPlayer(),a,null,current->new forge.ai.AiCostDecision(getPlayer(),current,false));
             if(!paid)throw new AssertionError("counter payment failed");attempted=true;
