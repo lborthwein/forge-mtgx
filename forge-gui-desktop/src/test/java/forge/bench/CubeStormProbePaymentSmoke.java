@@ -289,8 +289,8 @@ public final class CubeStormProbePaymentSmoke {
                     boolean printedNever=sa.getHostCard().getSpellAbilities().stream().anyMatch(a->a.getApi()==forge.game.ability.ApiType.RevealHand && "Never".equals(a.getParam("AIPhyrexianPayment")));
                     if(!printedNever)throw new AssertionError("Probe original AI instruction mutated");
                     int phy=sa.getSpendPhyrexianMana();
-                    if(phy>0 && lifeBeforeStep-player.getLife()!=phy*2)throw new AssertionError("native Phyrexian life receipt mismatch");
-                    System.out.println("STORM_PROBE_PAYMENT "+key+" ownTarget="+ownTarget+" printedNeverUnchanged="+printedNever+" phyrexianSymbols="+phy+" lifeBefore="+lifeBeforeStep+" lifeAfter="+player.getLife()+" paidMana="+sa.getPayingMana().size());
+                    if(phy>0 && lifeBeforeStep-player.getLife()!=phy)throw new AssertionError("native Phyrexian life receipt mismatch");
+                    System.out.println("STORM_PROBE_PAYMENT "+key+" ownTarget="+ownTarget+" printedNeverUnchanged="+printedNever+" phyrexianLife="+phy+" lifeBefore="+lifeBeforeStep+" lifeAfter="+player.getLife()+" paidMana="+sa.getPayingMana().size());
                 }
                 System.out.println("STORM_REPLAY_STACK " + key + " step=" + steps + " source="
                         + host.replace(' ', '_') + " api=" + sa.getApi() + " spell=" + sa.isSpell()
