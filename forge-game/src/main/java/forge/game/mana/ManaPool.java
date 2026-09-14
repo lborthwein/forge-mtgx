@@ -48,7 +48,24 @@ import java.util.*;
  */
 public class ManaPool extends ManaConversionMatrix implements Iterable<Mana> {
     private final Player owner;
-    private final ArrayListMultimap<Byte, Mana> floatingMana = ArrayListMultimap.create();
+    private com.google.common.collect.Multimap<Byte, Mana> floatingMana = ArrayListMultimap.create();
+    private boolean paymentProbe;
+
+    /** Isolate speculative payment's remove/refund operations from the live pool.
+     * Preserve token identity and initial iteration order in the scratch pool,
+     * and restore the original container (including its iteration order) even
+     * on exceptions or nested probes. Actual payment never enters this scope.
+     * This isolates only pool structure and its view/events, not arbitrary game
+     * mutations or the mutable objects referenced by individual mana tokens.
+     */
+    public <T> T probePaymentPool(java.util.function.Supplier<T> probe) {
+        var original = floatingMana;
+        boolean previous = paymentProbe;
+        floatingMana = com.google.common.collect.LinkedListMultimap.create(original);
+        paymentProbe = true;
+        try { return probe.get(); }
+        finally { floatingMana = original; paymentProbe = previous; }
+    }
 
     public ManaPool(final Player player) {
         owner = player;
@@ -73,7 +90,7 @@ public class ManaPool extends ManaConversionMatrix implements Iterable<Mana> {
             floatingMana.put(m.getColor(), m);
             colors.add(MagicColor.Color.fromByte(m.getColor()));
         }
-        if (!colors.isEmpty()) {
+        if (!colors.isEmpty() && !paymentProbe) {
             owner.updateManaForView();
             owner.getGame().fireEvent(new GameEventManaPool(owner, EventValueChangeType.Added, colors));
         }
@@ -199,7 +216,7 @@ public class ManaPool extends ManaConversionMatrix implements Iterable<Mana> {
                 colors.add(MagicColor.Color.fromByte(m.getColor()));
             }
         }
-        if (!colors.isEmpty()) {
+        if (!colors.isEmpty() && !paymentProbe) {
             owner.updateManaForView();
             owner.getGame().fireEvent(new GameEventManaPool(owner, EventValueChangeType.Removed, colors));
         }

@@ -284,6 +284,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             tutorPlan = null;
             return played;
         }
+        if (doomsdayPlan.ownsStarAction(ability)) return doomsdayPlan.playStarAction(ability);
         if (topTutorPlan.owns(ability)) return topTutorPlan.play(ability);
         if (emryPlan.owns(ability)) return emryPlan.play(ability);
         if (breachPlan.owns(ability)) return breachPlan.play(ability);
@@ -296,6 +297,12 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (drawOutPlan.owns(ability)) return drawOutPlan.play(ability); // v66 drawout
         if (reanimatorPlan.owns(ability)) return reanimatorPlan.play(ability); // v73 reanimator
         return doomsdayPlan.withReservedDrawSource(ability, () -> super.playChosenSpellAbility(ability));
+    }
+
+    @Override
+    public forge.game.mana.Mana chooseManaFromPool(List<forge.game.mana.Mana> offered) {
+        var selected = doomsdayPlan.chooseStarMana(offered);
+        return selected == null ? super.chooseManaFromPool(offered) : selected;
     }
 
     @Override
