@@ -15,6 +15,7 @@ import forge.game.ability.AbilityUtils;
 import forge.game.ability.ApiType;
 import forge.game.card.*;
 import forge.game.combat.Combat;
+import forge.game.combat.CombatUtil;
 import forge.game.cost.*;
 import forge.game.keyword.Keyword;
 import forge.game.phase.PhaseHandler;
@@ -1134,7 +1135,7 @@ public class ChangeZoneAi extends SpellAbilityAi {
 
         // Only care about combatants during combat
         if (game.getPhaseHandler().inCombat() && origin.contains(ZoneType.Battlefield)) {
-            CardCollection newList = CardLists.getValidCards(list, "Card.attacking,Card.blocking", null, null, null);
+            CardCollection newList = CardLists.filter(list, c -> isCombatRemovalCandidate(ai, c));
             if (!newList.isEmpty() || !sa.isTrigger()) {
                 list = newList;
             }
@@ -1146,6 +1147,13 @@ public class ChangeZoneAi extends SpellAbilityAi {
 
         if (list.isEmpty() && !doWithoutTarget) {
             return false;
+        }
+
+        // Bouncing a doomed chump does not undo its block. Leave saving our own
+        // permanents, mandatory effects and explicit immediate-use reasons above intact.
+        if (!mandatory && !immediately && sa.isSpell() && sa.getMaxTargets() == 1
+                && origin.contains(ZoneType.Battlefield) && destination == ZoneType.Hand) {
+            list.removeIf(c -> isWastefulDoomedBlockerBounce(ai, sa, c));
         }
 
         // Check if the opponent can save a creature from bounce/blink/whatever by paying
@@ -1289,6 +1297,75 @@ public class ChangeZoneAi extends SpellAbilityAi {
             }
         }
 
+        return true;
+    }
+
+    /** During declare attackers a legal prospective blocker is a combat target too. */
+    static boolean isCombatRemovalCandidate(Player ai, Card target) {
+        Combat combat = ai.getGame().getCombat();
+        if (combat == null) return false;
+        if (combat.isAttacking(target) || combat.isBlocking(target)) return true;
+        if (!ai.getGame().getPhaseHandler().is(PhaseType.COMBAT_DECLARE_ATTACKERS)
+                || !target.getController().isOpponentOf(ai)) return false;
+        for (Card attacker : combat.getAttackers()) {
+            if (attacker.getController() == ai && CombatUtil.canBlock(attacker, target, combat)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * A narrow dominance check, not a post-block phase veto. Preserve unknown
+     * spell payloads, stack responses, combat saves, trample, and public trigger
+     * payoffs for the ordinary evaluator. No opponent hidden zones are read.
+     */
+    static boolean isWastefulDoomedBlockerBounce(Player ai, SpellAbility sa, Card target) {
+        Game game = ai.getGame();
+        Combat combat = game.getCombat();
+        if (!game.getPhaseHandler().is(PhaseType.COMBAT_DECLARE_BLOCKERS, ai)
+                || !game.getStack().isEmpty() || combat == null
+                || !target.getController().isOpponentOf(ai) || !combat.isBlocking(target)
+                || target.hasKeyword(Keyword.LIFELINK) || target.isWitherDamage()
+                || target.hasKeyword(Keyword.PERSIST) || target.hasKeyword(Keyword.UNDYING)
+                || target.hasKeyword(Keyword.MODULAR) || target.isEnchanted()) return false;
+        // Snap's ordinary land refund is understood; arbitrary secondary effects
+        // (draw, damage, etc.) can justify casting even without combat benefit.
+        for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+            if (sub.getApi() != ApiType.Untap || !"Land".equals(sub.getParam("UntapType"))) return false;
+        }
+        // An untap refund can be a mana engine. Decline this dominance proof
+        // when floating mana, non-unit land production, or public mana modifiers
+        // make the "merely refunds the spell" assumption unsafe.
+        if (sa.getSubAbility() != null) {
+            if (ai.getManaPool().totalMana() > 0) return false;
+            for (Card land : ai.getLandsInPlay()) for (SpellAbility mana : land.getManaAbilities()) {
+                if (!"1".equals(mana.getParamOrDefault("Amount", "1"))
+                        || mana.getParamOrDefault("Produced", "").contains(" ")) return false;
+            }
+        }
+        CardCollection publicPermanents = new CardCollection(game.getCardsIn(ZoneType.Battlefield));
+        publicPermanents.addAll(game.getCardsIn(ZoneType.Command));
+        for (Card permanent : publicPermanents) {
+            if (sa.getSubAbility() != null) {
+                for (var replacement : permanent.getReplacementEffects()) {
+                    if ("ProduceMana".equals(replacement.getParam("Event"))) return false;
+                }
+            }
+            for (var trigger : permanent.getTriggers()) {
+                String mode = trigger.getMode().name();
+                if (sa.getSubAbility() != null && (mode.equals("TapsForMana") || mode.equals("ManaAdded"))) return false;
+                if (mode.startsWith("SpellCast") || mode.equals("SpellAbilityCast")) return false;
+                if (permanent.getController().isOpponentOf(ai)
+                        && (mode.startsWith("ChangesZone") || mode.startsWith("DamageDone")
+                            || mode.startsWith("LifeGained"))) return false;
+            }
+        }
+        if (!ComputerUtilCombat.blockerWouldBeDestroyed(ai, target, combat)) return false;
+        for (Card attacker : combat.getAttackersBlockedBy(target)) {
+            if (attacker.getController() != ai || attacker.hasKeyword(Keyword.TRAMPLE)
+                    || forge.game.staticability.StaticAbilityAssignCombatDamageAsUnblocked
+                        .assignCombatDamageAsUnblocked(attacker)
+                    || ComputerUtilCombat.attackerWouldBeDestroyed(ai, attacker, combat)) return false;
+        }
         return true;
     }
 
