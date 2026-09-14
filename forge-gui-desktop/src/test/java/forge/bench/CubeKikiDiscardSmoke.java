@@ -39,7 +39,7 @@ public final class CubeKikiDiscardSmoke {
         final Player player;final String key;final List<String> discarded=new ArrayList<>(),drawn=new ArrayList<>();
         NativeEvents(Player p,String k){player=p;key=k;}
         @Subscribe public void moved(GameEventCardChangeZone e){
-            if(e.card().getOwner()!=player||e.from()==null||e.to()==null)return;
+            if(e.card().getOwner().getId()!=player.getId()||e.from()==null||e.to()==null)return;
             if(e.from().zoneType()==ZoneType.Hand&&e.to().zoneType()==ZoneType.Graveyard)discarded.add(e.card().getName());
             if(e.from().zoneType()==ZoneType.Library&&e.to().zoneType()==ZoneType.Hand)drawn.add(e.card().getName());
             System.out.println("KIKI_DISCARD_ZONE "+key+" card="+e.card().getName().replace(' ','_')+" from="+e.from().zoneType()+" to="+e.to().zoneType());
