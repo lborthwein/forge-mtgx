@@ -57,7 +57,7 @@ public final class CubeComboAi {
         for (SpellAbility ability : queried) if (ability != null) abilities.add(new ProbeAbilityState(ability.getRootAbility()));
         Player previousProbe = PAYMENT_PROBE.get();
         PAYMENT_PROBE.set(player);
-        try { return probe.get(); }
+        try { return player.getManaPool().probePaymentPool(probe); }
         finally {
             if (previousProbe == null) PAYMENT_PROBE.remove(); else PAYMENT_PROBE.set(previousProbe);
             for (var entry : memory.entrySet()) {
