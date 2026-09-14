@@ -20,7 +20,7 @@ import java.util.*;
 /** Prepared native decision fixtures, not natural-game or strength evidence. */
 public final class SnapBlockerTimingSmoke {
     private static final List<String> CASES = List.of("before", "after", "tapped", "flying", "save",
-            "trample", "as-unblocked", "survivor", "lifelink", "death-trigger", "cast-trigger", "enhanced-mana");
+            "trample", "as-unblocked", "survivor", "lifelink", "death-trigger", "cast-trigger", "enhanced-mana", "cost-reducer", "free-cost-object");
     private static List<String> cards(boolean own, String key) {
         List<String> names = new ArrayList<>();
         if (own) {
@@ -29,6 +29,7 @@ public final class SnapBlockerTimingSmoke {
                 default -> "Sundering Titan";});
             names.add("Snap"); names.add("Island"); names.add(key.equals("enhanced-mana") ? "Ancient Tomb" : "Island");
             if (key.equals("cast-trigger")) names.add("Monastery Swiftspear");
+            if (key.equals("cost-reducer")) names.add("Baral, Chief of Compliance");
         } else names.add(switch(key) {case "save", "survivor" -> "Colossal Dreadmaw";
             case "lifelink" -> "Sacred Cat"; case "death-trigger" -> "Doomed Traveler";
             default -> "Magda, Brazen Outlaw";});
@@ -62,6 +63,7 @@ public final class SnapBlockerTimingSmoke {
         if(key.equals("tapped"))blocker.setTapped(true);
         if(!before){combat.addBlocker(attacker,blocker);combat.setBlocked(attacker,true);}
         var snap=ai.getCardsIn(ZoneType.Hand).get(0).getSpellAbilities().get(0);snap.setActivatingPlayer(ai);
+        if(key.equals("free-cost-object")) snap.setPayCosts(new forge.game.cost.Cost("0",false));
         boolean eligible=baseline?!before:ChangeZoneAi.isCombatRemovalCandidate(ai,blocker);
         if(!baseline)check(eligible != List.of("tapped","flying").contains(key),"candidate "+key);
         boolean reject=!baseline&&ChangeZoneAi.isWastefulDoomedBlockerBounce(ai,snap,blocker);
@@ -103,7 +105,7 @@ public final class SnapBlockerTimingSmoke {
             for(String key:CASES)for(boolean own:List.of(true,false))for(String name:cards(own,key))StaticData.instance().attemptToLoadCard(name);
             boolean baseline=args.length>1&&args[1].equals("baseline");
             for(String key:baseline?List.of("before","after"):CASES)for(int seat=0;seat<2;seat++)run(seat,key,baseline);
-            System.out.println("SNAP_TIMING_COMPLETE cases="+(baseline?4:24));
+            System.out.println("SNAP_TIMING_COMPLETE cases="+(baseline?4:28));
         }catch(Throwable e){e.printStackTrace();System.exit(1);}
     }
 }

@@ -1336,7 +1336,19 @@ public class ChangeZoneAi extends SpellAbilityAi {
         // when floating mana, non-unit land production, or public mana modifiers
         // make the "merely refunds the spell" assumption unsafe.
         if (sa.getSubAbility() != null) {
-            if (ai.getManaPool().totalMana() > 0) return false;
+            if (ai.getManaPool().totalMana() > 0 || sa.getAlternativeCost() != null
+                    || sa.isCastFromPlayEffect() || sa.getPayCosts() == null) return false;
+            int maximumRefund = 0;
+            for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+                try {
+                    int amount = Integer.parseInt(sub.getParamOrDefault("Amount", ""));
+                    if (amount < 0) return false;
+                    maximumRefund = Math.addExact(maximumRefund, amount);
+                } catch (NumberFormatException | ArithmeticException unknownAmount) {
+                    return false;
+                }
+            }
+            if (sa.getPayCosts().getTotalMana().getCMC() < maximumRefund) return false;
             for (Card land : ai.getLandsInPlay()) for (SpellAbility mana : land.getManaAbilities()) {
                 if (!"1".equals(mana.getParamOrDefault("Amount", "1"))
                         || mana.getParamOrDefault("Produced", "").contains(" ")) return false;
@@ -1346,6 +1358,13 @@ public class ChangeZoneAi extends SpellAbilityAi {
         publicPermanents.addAll(game.getCardsIn(ZoneType.Command));
         for (Card permanent : publicPermanents) {
             if (sa.getSubAbility() != null) {
+                // Do not ask a potentially stateful adjusted-cost/payment forecast
+                // here. A public cost modifier makes this simple refund proof unknown.
+                for (var ability : permanent.getStaticAbilities()) {
+                    String mode = ability.getParam("Mode");
+                    if ("ReduceCost".equals(mode) || "SetCost".equals(mode)
+                            || "AlternativeCost".equals(mode)) return false;
+                }
                 for (var replacement : permanent.getReplacementEffects()) {
                     if ("ProduceMana".equals(replacement.getParam("Event"))) return false;
                 }
