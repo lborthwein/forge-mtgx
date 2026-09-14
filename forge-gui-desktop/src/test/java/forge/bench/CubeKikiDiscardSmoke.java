@@ -97,6 +97,20 @@ public final class CubeKikiDiscardSmoke {
             System.out.println("KIKI_DISCARD_QUERY "+key+" initial="+initial+" repeats=3 reserved="+first.size()+" stateUnchanged=true");
         }catch(ReflectiveOperationException e){throw new AssertionError(e);}
     }
+    private static void mandatoryFixtureTriggers(List<forge.game.spellability.SpellAbility> abilities) {
+        for(var a:abilities)if(a.getHostCard().getName().equals("Restoration Angel")&&a.isTrigger()) {
+            a.setOptionalTrigger(false);
+            System.out.println("KIKI_BLINK_MANDATORY_FIXTURE optional=false beforeNativePreparation=true");
+        }
+    }
+    private static final class MandatoryDefaultController extends forge.ai.PlayerControllerAi {
+        MandatoryDefaultController(Game g,Player p,forge.LobbyPlayer lobby){super(g,p,lobby);}
+        @Override public void orderAndPlaySimultaneousSa(List<forge.game.spellability.SpellAbility> abilities){mandatoryFixtureTriggers(abilities);super.orderAndPlaySimultaneousSa(abilities);}
+    }
+    private static final class MandatoryComboController extends forge.ai.CubeComboPlayerController {
+        MandatoryComboController(Game g,Player p,forge.LobbyPlayer lobby){super(g,p,lobby);}
+        @Override public void orderAndPlaySimultaneousSa(List<forge.game.spellability.SpellAbility> abilities){mandatoryFixtureTriggers(abilities);super.orderAndPlaySimultaneousSa(abilities);}
+    }
     private static void blinkBoundary(String arm,int seat,String control) {
         List<RegisteredPlayer> entries=new ArrayList<>();
         for(int i=0;i<2;i++) {
@@ -117,7 +131,8 @@ public final class CubeKikiDiscardSmoke {
         }
         if(nativeBlink)for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Restoration Angel"))angel=c;
         if(control.equals("blink-facedown-kiki"))for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Kiki-Jiki, Mirror Breaker"))c.turnFaceDown(true);
-        if(nativeBlink&&control.startsWith("blink-mandatory-"))for(var trigger:Objects.requireNonNull(angel).getTriggers()) { trigger.removeParam("OptionalDecider");trigger.getOriginalMapParams().remove("OptionalDecider"); }
+        if(nativeBlink&&control.startsWith("blink-mandatory-"))p.setFirstController(arm.equals("improved")
+                ?new MandatoryComboController(g,p,p.getLobbyPlayer()):new MandatoryDefaultController(g,p,p.getLobbyPlayer()));
         g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();
         if(nativeBlink) {
             BenchRandomAudit.install(997100L+100L*seat+BLINK_CASES.indexOf(control));
