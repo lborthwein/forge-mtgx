@@ -48,7 +48,7 @@ public final class SnapBlockerTimingSmoke {
         if(i!=40)throw new AssertionError("deck conservation");return first;
     }
     private static void check(boolean b, String message) {if(!b)throw new AssertionError(message);}
-    private static void run(int seat, String key) throws Exception {
+    private static void run(int seat, String key, boolean baseline) throws Exception {
         List<RegisteredPlayer> players=new ArrayList<>();
         for(int s=0;s<2;s++){LobbyPlayerAi l=new LobbyPlayerAi("seat"+s,null);l.setAiProfile("Default");players.add(new RegisteredPlayer(deck(s==seat,key)).setPlayer(l));}
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);
@@ -62,22 +62,22 @@ public final class SnapBlockerTimingSmoke {
         if(key.equals("tapped"))blocker.setTapped(true);
         if(!before){combat.addBlocker(attacker,blocker);combat.setBlocked(attacker,true);}
         var snap=ai.getCardsIn(ZoneType.Hand).get(0).getSpellAbilities().get(0);snap.setActivatingPlayer(ai);
-        boolean eligible=ChangeZoneAi.isCombatRemovalCandidate(ai,blocker);
-        check(eligible != List.of("tapped","flying").contains(key),"candidate "+key);
-        boolean reject=ChangeZoneAi.isWastefulDoomedBlockerBounce(ai,snap,blocker);
+        boolean eligible=baseline?!before:ChangeZoneAi.isCombatRemovalCandidate(ai,blocker);
+        if(!baseline)check(eligible != List.of("tapped","flying").contains(key),"candidate "+key);
+        boolean reject=!baseline&&ChangeZoneAi.isWastefulDoomedBlockerBounce(ai,snap,blocker);
         // The survivor control must survive the attack: lower the attacker's power
         // before asking the predictor, retaining its identity and blocked status.
         if(key.equals("survivor")) {
             attacker.setBasePower(1);reject=ChangeZoneAi.isWastefulDoomedBlockerBounce(ai,snap,blocker);
         }
-        check(reject==key.equals("after"),"doomed rejection "+key+" was "+reject);
+        check(reject==(!baseline&&key.equals("after")),"doomed rejection "+key+" was "+reject);
         if(key.equals("before")||key.equals("after")) {
             var method=ChangeZoneAi.class.getDeclaredMethod("isPreferredTarget",Player.class,forge.game.spellability.SpellAbility.class,boolean.class,boolean.class);
             method.setAccessible(true);
             // Deliberately expose any admitted randomized tempo play; no sampled game claim.
             MyRandom.setRandom(new Random(914L){@Override public float nextFloat(){return 0f;}});
             boolean selected=(Boolean)method.invoke(null,ai,snap,false,false);
-            check(selected==before,"actual selector "+key+" selected="+selected);
+            check(selected==(baseline?!before:before),"actual selector "+key+" selected="+selected);
             if(selected)check(snap.getTargetCard()==blocker,"selected wrong card");
             if(!before){
                 // Script the bad action only for a separate rules consequence check.
@@ -92,7 +92,7 @@ public final class SnapBlockerTimingSmoke {
                 System.out.println("SNAP_RULES seat="+seat+" nativeResolved=true blocked=true playerDamage=0");
             }
         }
-        System.out.println("SNAP_TIMING_CASE seat="+seat+" case="+key+" candidate="+eligible+" reject="+reject+" registered=40 PASS");
+        System.out.println("SNAP_TIMING_CASE arm="+(baseline?"baseline":"candidate")+" seat="+seat+" case="+key+" candidate="+eligible+" reject="+reject+" registered=40 PASS");
     }
     public static void main(String[] args) {
         try {
@@ -101,8 +101,9 @@ public final class SnapBlockerTimingSmoke {
                 case "getCurrentVersion"->"snap-timing-diagnostic-1";default->throw new AssertionError("Unexpected GUI call "+method.getName());}));
             FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
             for(String key:CASES)for(boolean own:List.of(true,false))for(String name:cards(own,key))StaticData.instance().attemptToLoadCard(name);
-            for(String key:CASES)for(int seat=0;seat<2;seat++)run(seat,key);
-            System.out.println("SNAP_TIMING_COMPLETE cases=24");
+            boolean baseline=args.length>1&&args[1].equals("baseline");
+            for(String key:baseline?List.of("before","after"):CASES)for(int seat=0;seat<2;seat++)run(seat,key,baseline);
+            System.out.println("SNAP_TIMING_COMPLETE cases="+(baseline?4:24));
         }catch(Throwable e){e.printStackTrace();System.exit(1);}
     }
 }
