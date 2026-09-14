@@ -750,10 +750,10 @@ public final class CubeComboAi {
     /** Decline an optional Restoration blink that would force a retained
      * combo card through Pyromancer's mandatory discard. Tokens vanish when
      * blinked, so they are not alternative value targets. A different legal
-     * non-token target leaves the ordinary target chooser in charge.
+     * non-token target is handled by the companion target-selection hook.
      * Own hand and public battlefield only; no target or game state changes.
      */
-    public static boolean declineDestructiveComboBlink(Player player, SpellAbility trigger, boolean mandatory) {
+    private static boolean riskyComboBlink(Player player, SpellAbility trigger, boolean mandatory) {
         if (mandatory || !enabled(player) || trigger.getActivatingPlayer() != player
                 || trigger.getHostCard().getController() != player
                 || !trigger.getHostCard().getName().equals("Restoration Angel")
@@ -765,7 +765,11 @@ public final class CubeComboAi {
         if (reserved.isEmpty()) return false;
         int expendable = 0;
         for (Card card : player.getCardsIn(ZoneType.Hand)) if (!reserved.contains(card)) expendable++;
-        if (expendable >= 2) return false;
+        return expendable < 2;
+    }
+
+    public static boolean declineDestructiveComboBlink(Player player, SpellAbility trigger, boolean mandatory) {
+        if (!riskyComboBlink(player, trigger, mandatory)) return false;
         boolean pyromancer = false;
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown() || card.isPhasedOut() || !trigger.canTarget(card) || card.isToken()) continue;
@@ -773,6 +777,22 @@ public final class CubeComboAi {
             pyromancer = true;
         }
         return pyromancer;
+    }
+
+    /** The native ordinary chooser can still prefer Pyromancer over another
+     * legal body. Exclude that destructive target before using its existing
+     * card preference, and commit targets only through native validation. */
+    public static boolean selectNonDiscardingComboBlink(Player player, SpellAbility trigger, boolean mandatory) {
+        if (!riskyComboBlink(player, trigger, mandatory)) return false;
+        CardCollection alternatives = new CardCollection();
+        boolean pyromancer = false;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || card.isPhasedOut() || card.isToken() || !trigger.canTarget(card)) continue;
+            if (card.getName().equals("Seasoned Pyromancer")) pyromancer = true;
+            else alternatives.add(card);
+        }
+        if (!pyromancer || alternatives.isEmpty()) return false;
+        return selectSingleTarget(trigger, ComputerUtilCard.getBestAI(alternatives));
     }
 
     /** Restoration Angel resets a non-token Kiki through an actual zone change. */

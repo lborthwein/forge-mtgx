@@ -210,6 +210,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
      */
     @Override
     protected AiAbilityDecision doTriggerNoCost(Player aiPlayer, SpellAbility sa, boolean mandatory) {
+        if (CubeComboAi.selectNonDiscardingComboBlink(aiPlayer, sa, mandatory)) {
+            System.err.println("CUBE_COMBO_BLINK selected=non-pyromancer-alternative source=" + sa.getHostCard().getName());
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
         if (CubeComboAi.declineDestructiveComboBlink(aiPlayer, sa, mandatory)) {
             System.err.println("CUBE_COMBO_BLINK declined=forced-reserved-discard source=" + sa.getHostCard().getName());
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
