@@ -22,7 +22,8 @@ import java.util.function.BooleanSupplier;
  * The resource proposal is committed only by actual native play. */
 final class CubeDoomStarPlan {
     private final Player player;
-    private SpellAbility selected, pendingDoom;
+    private SpellAbility selected, pendingDoom, paying;
+    private List<CubeDoomStarResources.Payment> currentCost;
     private List<CubeDoomStarResources.Payment> payments;
     private Card star, doom, land, oracleSnapshot;
     private int turn = -1, step, oracleId = -1;
@@ -36,7 +37,7 @@ final class CubeDoomStarPlan {
     }
     private void reset() {
         active = failed = searched = ordered = filterPaid = false;
-        selected = pendingDoom = null; star = doom = land = oracleSnapshot = null;
+        selected = pendingDoom = paying = null; currentCost = null; star = doom = land = oracleSnapshot = null;
         payments = null; oracleId = -1; step = 0;
         turn = player.getGame().getPhaseHandler().getTurn();
     }
@@ -111,7 +112,7 @@ final class CubeDoomStarPlan {
     SpellAbility begin(SpellAbility doomSpell) {
         if (active()) return null;
         reset();
-        if (!player.getManaPool().isEmpty() || player.getLife() <= 1 || !staticDomain()
+        if (!CubeDoomStarResources.safePool(player) || player.getLife() <= 1 || !staticDomain()
                 || find("Thassa's Oracle", ZoneType.Hand) != null || !printedCost(doomSpell, 0, "{B}{B}{B}")) return null;
         Card candidate = find("Chromatic Star", ZoneType.Battlefield);
         castStar = candidate == null;
@@ -134,10 +135,6 @@ final class CubeDoomStarPlan {
         step = castStar ? 1 : 3;
         return action();
     }
-    private int paymentSlot() {
-        int slot = switch (step) { case 1 -> 0; case 3 -> 1; case 4 -> 2; case 5 -> 3; case 7 -> 4; case 9 -> 5; default -> -1; };
-        return slot < 0 ? -1 : slot - (castStar ? 0 : 1);
-    }
     private SpellAbility mana(CubeDoomStarResources.Payment payment) {
         Card source = current(payment.source());
         if (source == null || !source.isInZone(ZoneType.Battlefield) || source.getController() != player) return null;
@@ -153,12 +150,30 @@ final class CubeDoomStarPlan {
         return null;
     }
     private SpellAbility action() {
+        int phase = step <= 2 ? 1 : step <= 6 ? 3 : step <= 8 ? 7 : 9;
+        List<String> demands = phase == 1 ? List.of("1", "B", "B", "B", "1", "U")
+                : phase == 3 ? List.of("B", "B", "B", "1", "U")
+                : phase == 7 ? List.of("1", "U") : List.of("U", "U");
+        int slots = phase == 3 ? 3 : phase == 9 ? 2 : 1;
+        if (!CubeDoomStarResources.safePool(player)) return stop();
+        // Rebuild from current public sources and actual floating mana. A
+        // removed future source invalidates the finish before another resource
+        // is spent, and equivalent floating units need no stale object binding.
+        payments = CubeDoomStarResources.assign(player, demands, Set.of(star), null,
+                (phase <= 3 ? player.getLife() / 2 : player.getLife()) - 1);
+        if (payments == null) return stop();
+        currentCost = List.copyOf(payments.subList(0, slots));
+        for (int i = 0; i < slots; i++) if (currentCost.get(i).floating() == null) {
+            SpellAbility mana = mana(currentCost.get(i));
+            if (!payable(mana)) return stop();
+            step = phase == 3 ? 3 + i : phase;
+            selected = mana; return mana;
+        }
         SpellAbility a = null;
-        int slot = paymentSlot();
-        if (slot >= 0) a = mana(payments.get(slot));
-        else if (step == 2) a = spell(current(star));
-        else if (step == 6) a = spell(current(doom));
-        else if (step == 8) {
+        if (phase == 1) { step = 2; a = spell(current(star)); }
+        else if (phase == 3) { step = 6; a = spell(current(doom)); }
+        else if (phase == 7) {
+            step = 8;
             Card c = current(star);
             if (c != null && c.isInZone(ZoneType.Battlefield) && c.getController() == player)
                 for (SpellAbility original : c.getManaAbilities()) {
@@ -168,12 +183,19 @@ final class CubeDoomStarPlan {
                         if (payable(ability)) { a = ability; break; }
                     }
                 }
-        } else if (step == 10) {
+        } else {
+            step = 10;
             Card c = current(oracleSnapshot);
             if (c != null && c.getId() == oracleId && c.isInZone(ZoneType.Hand)) a = spell(c);
         }
         if (!payable(a)) return stop();
         selected = a; return a;
+    }
+    forge.game.mana.Mana chooseMana(List<forge.game.mana.Mana> offered) {
+        if (paying == null || currentCost == null || CubeComboAi.isPaymentProbeFor(player)) return null;
+        for (var option : offered) for (var payment : currentCost)
+            if (payment.floating() != null && payment.floating().equals(option)) return option;
+        return null;
     }
     SpellAbility nextAction(BooleanSupplier finishLegal) {
         if (!active() || failed || !finishLegal.getAsBoolean() || !staticDomain()) return stop();
@@ -202,10 +224,18 @@ final class CubeDoomStarPlan {
         if (step == 8) filterPaid = true;
         boolean success;
         if (a.isLandAbility()) { a.resolve(); success = current(land) != null && current(land).isInZone(ZoneType.Battlefield); }
-        else success = ComputerUtil.handlePlayingSpellAbility(player, a, null, current -> new AiCostDecision(player, current, false));
+        else {
+            paying = a;
+            try { success = ComputerUtil.handlePlayingSpellAbility(player, a, null, current -> new AiCostDecision(player, current, false)); }
+            finally { paying = null; }
+        }
         System.err.println("CUBE_DOOM_STAR step=" + step + " paid=" + success + " card=" + a.getHostCard().getName().replace(' ', '_'));
         if (!success) stop();
-        else { step = step == 0 ? (castStar ? 1 : 3) : step + 1; selected = null; }
+        else {
+            if (step == 0) step = castStar ? 1 : 3;
+            else if (!a.isManaAbility() || step == 8) step++;
+            selected = null; currentCost = null;
+        }
         return success;
     }
     boolean ownsSearch(SpellAbility source) {

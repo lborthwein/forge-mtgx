@@ -300,6 +300,12 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     }
 
     @Override
+    public forge.game.mana.Mana chooseManaFromPool(List<forge.game.mana.Mana> offered) {
+        var selected = doomsdayPlan.chooseStarMana(offered);
+        return selected == null ? super.chooseManaFromPool(offered) : selected;
+    }
+
+    @Override
     public boolean chooseTargetsFor(SpellAbility ability) {
         return emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
     }

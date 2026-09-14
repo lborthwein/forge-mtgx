@@ -46,8 +46,7 @@ public final class CubeDoomStarResources {
             return null;
         List<Option> options = new ArrayList<>();
         for (Mana mana : player.getManaPool()) {
-            if (mana.getPlayer() != player || mana.isRestricted() || mana.isCombatMana()
-                    || mana.triggersWhenSpent() || mana.addsKeywordsType() || mana.addsKeywordsUntil()) continue;
+            if (!usableFloating(mana, player)) continue;
             String color = color(mana.getColor());
             if (color != null) options.add(new Option(mana, new Payment(null, null, mana, color, 0)));
         }
@@ -78,7 +77,7 @@ public final class CubeDoomStarResources {
         // Constrained colors first prevents an early generic payment from
         // needlessly consuming the only blue source. Backtracking also handles
         // dual sources without counting their alternative colors twice.
-        options.sort(java.util.Comparator.comparingInt(x -> x.payment().damage()));
+        options.sort(java.util.Comparator.<Option>comparingInt(x -> x.payment().damage()).thenComparingInt(x -> x.payment().floating() != null && x.payment().floating().isColorless() ? 0 : 1));
         List<Integer> order = new ArrayList<>();
         for (int i = 0; i < demands.size(); i++) if (!"1".equals(demands.get(i))) order.add(i);
         for (int i = 0; i < demands.size(); i++) if ("1".equals(demands.get(i))) order.add(i);
@@ -98,6 +97,14 @@ public final class CubeDoomStarResources {
             used.remove(option.identity()); result.set(slot, null);
         }
         return false;
+    }
+    static boolean usableFloating(Mana mana, Player player) {
+        return mana.getPlayer() == player && !mana.isRestricted() && !mana.isCombatMana() && !mana.isSnow()
+                && !mana.triggersWhenSpent() && !mana.addsKeywordsType() && !mana.addsKeywordsUntil();
+    }
+    static boolean safePool(Player player) {
+        for (Mana mana : player.getManaPool()) if (!usableFloating(mana, player)) return false;
+        return true;
     }
     /** Only a fixed native self-damage tail, with no further effect, is
      * budgeted. Damage replacement/tap triggers remain the caller's domain. */

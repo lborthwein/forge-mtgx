@@ -104,6 +104,7 @@ public final class CubeDoomsdayPlan {
     static int pileEnablers;
 
     public CubeDoomsdayPlan(Player player) { this.player = player; this.starPlan = new CubeDoomStarPlan(player); }
+    public forge.game.mana.Mana chooseStarMana(java.util.List<forge.game.mana.Mana> offered) { return starPlan.chooseMana(offered); }
     public boolean ownsStarAction(SpellAbility action) { return starPlan.owns(action); }
     public boolean playStarAction(SpellAbility action) { return starPlan.play(action); }
     private boolean starFinishLegal() { return !player.cantWin() && player.canDrawAmount(1)
