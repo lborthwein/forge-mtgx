@@ -104,9 +104,10 @@ public final class CubeTamiyoPaymentSmoke {
         int returns,casts,sacrifices,discarded;
         final Set<SpellAbility> seen=Collections.newSetFromMap(new IdentityHashMap<>());
         private record Before(int actions,int mana,int loyalty,int life,Set<Integer> hand) {}
-        PaidReceipts(Player p,String key){player=p;this.key=key;Object found;
-            try {Field f=p.getController().getClass().getDeclaredField("tamiyoPlan");f.setAccessible(true);found=f.get(p.getController());}
-            catch(NoSuchFieldException e){found=null;}catch(ReflectiveOperationException e){throw new AssertionError(e);}
+        PaidReceipts(Player p,String key){player=p;this.key=key;Object found=null;
+            if(p.getController() instanceof forge.ai.CubeComboPlayerController)try {
+                Field f=forge.ai.CubeComboPlayerController.class.getDeclaredField("tamiyoPlan");f.setAccessible(true);found=f.get(p.getController());
+            }catch(ReflectiveOperationException e){throw new AssertionError(e);}
             plan=found;
         }
         private Object field(String name){try{Field f=plan.getClass().getDeclaredField(name);f.setAccessible(true);return f.get(plan);}catch(ReflectiveOperationException e){throw new AssertionError(e);}}
@@ -149,20 +150,34 @@ public final class CubeTamiyoPaymentSmoke {
             System.out.println("TAMIYO_PAYMENT_RESULT "+key+" returns="+returns+" casts="+casts+" sacrifices="+sacrifices+" discarded="+discarded+" observerOnly=true");
         }
     }
+    private static final class PaymentController extends forge.ai.CubeComboPlayerController {
+        PaidReceipts observer;
+        PaymentController(Game game,Player player,forge.LobbyPlayer lobby){super(game,player,lobby);}
+        @Override public boolean playChosenSpellAbility(SpellAbility ability){
+            if(observer==null)return super.playChosenSpellAbility(ability);
+            var before=observer.before();boolean result=super.playChosenSpellAbility(ability);observer.after(before);return result;
+        }
+    }
+    private static final class PaymentLobby extends forge.ai.LobbyPlayerAi {
+        PaymentLobby(String name){super(name,null);setAiProfile("Default");}
+        @Override public Player createIngamePlayer(Game game,int id){
+            Player p=new Player(getName(),game,id);p.setFirstController(new PaymentController(game,p,this));return p;
+        }
+    }
     private static void run(String arm,boolean observed,int seat,String control) {
         List<RegisteredPlayer> entries=new ArrayList<>();
-        for(int s=0;s<2;s++){forge.LobbyPlayer lobby=s==seat&&arm.equals("improved")?new forge.ai.LobbyPlayerCubeComboAi("Candidate-"+s):new forge.ai.LobbyPlayerAi("Default-"+s,null);if(lobby instanceof forge.ai.LobbyPlayerAi ai)ai.setAiProfile("Default");entries.add(new RegisteredPlayer(deck(s==seat,control)).setPlayer(lobby));}
+        for(int s=0;s<2;s++){forge.LobbyPlayer lobby=s==seat&&arm.equals("improved")?new PaymentLobby("Candidate-"+s):new forge.ai.LobbyPlayerAi("Default-"+s,null);if(lobby instanceof forge.ai.LobbyPlayerAi ai)ai.setAiProfile("Default");entries.add(new RegisteredPlayer(deck(s==seat,control)).setPlayer(lobby));}
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);
         Game g=new Match(rules,entries,"Tamiyo Kitten observation").createGame();Player p=g.getPlayers().get(seat),op=g.getPlayers().get(1-seat);
         p.setLife(20,null);op.setLife(20,null);populate(p,true,control);populate(op,false,control);
         g.setAge(GameStage.Play);int start=seat==0?1:2;g.getPhaseHandler().setupFirstTurn(seat==0?p:op,()->g.getPhaseHandler().devModeSet(PhaseType.MAIN1,p,start));g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();
         BenchRandomAudit.install(992300L+100L*seat+CASES.indexOf(control));String key="arm="+arm+" seat="+seat+" case="+control.replace(' ','_');
-        NativeEvents events=new NativeEvents(p,key);g.subscribeToEvents(events);PaidReceipts payments=new PaidReceipts(p,key);
+        NativeEvents events=new NativeEvents(p,key);g.subscribeToEvents(events);PaidReceipts payments=new PaidReceipts(p,key);if(p.getController() instanceof PaymentController controller)controller.observer=payments;
         if(p.getManaPool().totalMana()!=0||p.getLandsPlayedThisTurn()!=0)throw new AssertionError("prepared initial resources");
         System.out.println("TAMIYO_FIXTURE "+key+" registered=40 initialLife="+p.getLife()+" initialMana=0 landsPlayed=0 observed="+observed+" policy="+forge.ai.CubeComboAi.VERSION+" extraPayoff="+(control.endsWith(":no-outlet")?"absent":"Aetherflux_Reservoir"));
         int steps=0,casts=0,loyaltyActions=0;Set<Integer> seen=new HashSet<>();
         while(!g.isGameOver()&&g.getPhaseHandler().getTurn()<=start&&steps<2000) {
-            if(observed)observe(p,key);var beforePayment=payments.before();g.getPhaseHandler().mainLoopStep();payments.after(beforePayment);steps++;
+            if(observed)observe(p,key);g.getPhaseHandler().mainLoopStep();steps++;
             for(var item:g.getStack())if(seen.add(item.getId())) {
                 var a=item.getSpellAbility();if(a.getActivatingPlayer()!=p)continue;
                 System.out.println("TAMIYO_STACK "+key+" source="+a.getHostCard().getName().replace(' ','_')+" api="+a.getApi()+" spell="+a.isSpell()+" copied="+a.isCopied());
