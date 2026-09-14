@@ -59,6 +59,19 @@ final class CubeKikiSyrPlan {
         for(int i=0;i<selectedTargets.size();i++)if(a.getTargets().get(i)!=selectedTargets.get(i))return false;
         return true;
     }
+    /** Inspect only public active life-gain replacements; future native gain remains authoritative. */
+    private boolean gainUnreplaced(){
+        if(syr==null||!player.canGainLife())return false;
+        var params=forge.game.ability.AbilityKey.mapFromAffected(player);
+        params.put(forge.game.ability.AbilityKey.Source,syr);
+        params.put(forge.game.ability.AbilityKey.LifeGained,Math.max(syr.getNetPower(),51-player.getLife()));
+        for(ZoneType zone:new ZoneType[]{ZoneType.Battlefield,ZoneType.Command})for(Card c:player.getGame().getCardsIn(zone)){
+            if(c.isFaceDown())continue;
+            for(var re:c.getReplacementEffects())if(re.modeCheck(forge.game.replacement.ReplacementType.GainLife,params)
+                    &&re.zonesCheck(c.getZone())&&re.requirementsCheck(player.getGame())&&re.canReplace(params))return false;
+        }
+        return true;
+    }
     private boolean stable(){return current(meta,metaStamp)&&meta.getName().equals(META)&&!meta.getType().isLegendary()&&meta.getNetToughness()>0
             &&current(outlet,outletStamp)&&outlet.getName().equals(SHOT)&&!player.cantWin()&&player.getLife()>0;}
     private boolean activeStack(){
@@ -95,18 +108,18 @@ final class CubeKikiSyrPlan {
             meta=find(META);syr=find(SYR);outlet=find(SHOT);kiki=find(KIKI);
             if(meta==null||syr==null||outlet==null||kiki==null||meta.getType().isLegendary()||meta.getNetToughness()<=0||!player.canGainLife())return null;
             metaStamp=meta.getGameTimestamp();syrStamp=syr.getGameTimestamp();outletStamp=outlet.getGameTimestamp();kikiStamp=kiki.getGameTimestamp();
-            if(!stable()||ability(syr,ApiType.GainLife,null)==null)return null;
+            if(!stable()||!gainUnreplaced()||ability(syr,ApiType.GainLife,null)==null)return null;
             active=true;
         }
         if(!stable()||actions>=64)return stop();
         if(player.getLife()>50)return select(ability(outlet,ApiType.DealDamage,null));
-        if(!current(syr,syrStamp)||!current(kiki,kikiStamp)||!player.canGainLife())return stop();
+        if(!current(syr,syrStamp)||!current(kiki,kikiStamp)||!gainUnreplaced())return stop();
         SpellAbility gain=ability(syr,ApiType.GainLife,null);if(gain==null)return stop();
         if((long)player.getLife()+syr.getNetPower()>50)return select(gain);
         return select(ability(kiki,ApiType.CopyPermanent,meta));
     }
     boolean play(SpellAbility a){
-        if(!bound(a)||!stable()||!payable(a)){stop();return false;}
+        if(!bound(a)||!stable()||a.getApi()!=ApiType.DealDamage&&!gainUnreplaced()||!payable(a)){stop();return false;}
         beforeLife=player.getLife();beforeCounters=syr==null?0:syr.getCounters(CounterEnumType.P1P1);
         expectedCounters=beforeCounters+(kiki!=null&&kiki.isArtifact()?1:0);gainPower=syr==null?0:syr.getNetPower();
         cloneChosen=false;legendChosen=false;newToken=-1;
