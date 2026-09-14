@@ -1320,7 +1320,7 @@ public final class CubeComboAi {
             if (kiki && engine.isToken() && body.getName().equals("Restoration Angel")) continue;
             if (body.isInPlay() && engine.getSpellAbilities().stream().noneMatch(sa ->
                     (kiki ? copyEngine(sa) : sa.isSpell() && sa.usesTargeting())
-                    && !sa.isSuppressed() && sa.copy(player).canTarget(body))) continue;
+                    && !sa.isSuppressed() && sa.copyForEnumeration(player).canTarget(body))) continue;
             // -1 means no land: all zero-, one- and two-land subsets, once.
             for (int first = -1; first < lands.size(); first++) {
                 for (int second = first; second < lands.size(); second++) {
