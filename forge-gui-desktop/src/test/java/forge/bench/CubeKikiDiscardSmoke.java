@@ -21,6 +21,7 @@ import java.util.*;
 public final class CubeKikiDiscardSmoke {
     private static final List<String> CASES=List.of("twin-conscripts","twin-exarch","twin-pestermite","kiki-conscripts","kiki-restoration","wrong-twin-restoration","missing-source","forced-pair", "no-blue-twin-exarch", "two-red-kiki-restoration", "hand-island-twin-exarch", "hand-mountain-kiki-restoration", "field-body-twin-exarch", "field-body-kiki-restoration", "field-engine-kiki-conscripts", "both-field-kiki-conscripts", "duplicate-twin-conscripts", "shroud-field-body-twin-exarch");
     private static boolean nativeBlink;
+    private static final List<String> RESERVE_CASES=List.of("reserve-active-twin","reserve-wrong-twin-body","reserve-suppressed-engine","reserve-phased-partner","reserve-facedown-partner","reserve-other-controller");
     private static final List<String> BLINK_CASES=List.of("blink-risk","blink-zero-expendable","blink-enough","blink-mandatory","blink-other-actor","blink-no-kiki","blink-no-pyro","blink-alternative","blink-shroud-pyro","blink-phased-pyro","blink-facedown-kiki","blink-wrong-shape","blink-mandatory-risk","blink-mandatory-alternative");
     private static final List<ZoneType> ZONES=List.of(ZoneType.Battlefield,ZoneType.Hand,ZoneType.Library,ZoneType.Graveyard,ZoneType.Exile);
     private record Placement(String name,ZoneType zone) {}
@@ -28,6 +29,20 @@ public final class CubeKikiDiscardSmoke {
     private static String partner(String key){return key.contains("exarch")?"Deceiver Exarch":key.contains("pestermite")?"Pestermite":key.contains("restoration")?"Restoration Angel":"Zealous Conscripts";}
     private static List<Placement> placements(boolean own,String key) {
         List<Placement> out=new ArrayList<>();
+        if(own&&key.startsWith("reserve-")) {
+            for(int i=0;i<3;i++)out.add(new Placement("Mountain",ZoneType.Battlefield));
+            out.add(new Placement("Island",ZoneType.Battlefield));out.add(new Placement("Plains",ZoneType.Battlefield));
+            if(key.equals("reserve-active-twin")) {
+                out.add(new Placement("Splinter Twin",ZoneType.Battlefield));out.add(new Placement("Deceiver Exarch",ZoneType.Battlefield));out.add(new Placement("Splinter Twin",ZoneType.Hand));
+            }else if(key.equals("reserve-wrong-twin-body")) {
+                out.add(new Placement("Splinter Twin",ZoneType.Battlefield));out.add(new Placement("Seasoned Pyromancer",ZoneType.Battlefield));out.add(new Placement("Deceiver Exarch",ZoneType.Hand));
+            }else {
+                boolean engine=key.equals("reserve-suppressed-engine");
+                out.add(new Placement("Kiki-Jiki, Mirror Breaker",engine?ZoneType.Battlefield:ZoneType.Hand));
+                out.add(new Placement("Restoration Angel",engine?ZoneType.Hand:ZoneType.Battlefield));
+            }
+            while(out.size()<40)out.add(new Placement("Forest",ZoneType.Library));return out;
+        }
         if(own&&key.startsWith("blink-")) {
             for(int i=0;i<3;i++)out.add(new Placement("Mountain",ZoneType.Battlefield));
             out.add(new Placement("Island",ZoneType.Battlefield));out.add(new Placement("Plains",ZoneType.Battlefield));
@@ -96,6 +111,41 @@ public final class CubeKikiDiscardSmoke {
             }
             System.out.println("KIKI_DISCARD_QUERY "+key+" initial="+initial+" repeats=3 reserved="+first.size()+" stateUnchanged=true");
         }catch(ReflectiveOperationException e){throw new AssertionError(e);}
+    }
+    private static void reserveBoundary(String arm,int seat,String control) {
+        List<RegisteredPlayer> entries=new ArrayList<>();
+        for(int i=0;i<2;i++) {
+            forge.ai.LobbyPlayerAi lobby=i==seat&&arm.equals("improved")?new forge.ai.LobbyPlayerCubeComboAi("Candidate-"+i):new forge.ai.LobbyPlayerAi("Default-"+i,null);
+            lobby.setAiProfile("Default");entries.add(new RegisteredPlayer(deck(i==seat,control)).setPlayer(lobby));
+        }
+        GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);
+        Game g=new Match(rules,entries,"Discard reservation boundaries").createGame();Player p=g.getPlayers().get(seat),op=g.getPlayers().get(1-seat);
+        populate(p,true,control);populate(op,false,control);g.setAge(GameStage.Play);g.getPhaseHandler().setupFirstTurn(p,()->g.getPhaseHandler().devModeSet(PhaseType.MAIN1,p));
+        Card aura=null,body=null;
+        for(Card c:p.getCardsIn(ZoneType.Battlefield)) {
+            if(c.getName().equals("Splinter Twin"))aura=c;
+            if(c.getName().equals(control.equals("reserve-wrong-twin-body")?"Seasoned Pyromancer":"Deceiver Exarch"))body=c;
+            if(c.getName().equals("Restoration Angel")) {
+                if(control.equals("reserve-phased-partner"))c.setPhasedOut(p);
+                if(control.equals("reserve-facedown-partner"))c.turnFaceDown(true);
+                if(control.equals("reserve-other-controller"))c.setController(op,g.getNextTimestamp());
+            }
+            if(control.equals("reserve-suppressed-engine")&&c.getName().equals("Kiki-Jiki, Mirror Breaker"))for(var a:c.getSpellAbilities())a.setSuppressed(true);
+        }
+        if(aura!=null)aura.attachToEntity(Objects.requireNonNull(body),null);
+        g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();
+        if(control.equals("reserve-active-twin")&&body.getSpellAbilities().stream().noneMatch(a->a.getApi()==forge.game.ability.ApiType.CopyPermanent&&"Self".equals(a.getParam("Defined"))))throw new AssertionError("native Twin grant missing");
+        BenchRandomAudit.install(998100L+100L*seat+RESERVE_CASES.indexOf(control));
+        var before=observationState(p);
+        try {
+            var query=forge.ai.CubeComboAi.class.getDeclaredMethod("kikiDiscardProtectedCards",Player.class);query.setAccessible(true);
+            for(int i=0;i<3;i++) {
+                CardCollection reserved=(CardCollection)query.invoke(null,p);
+                if(!reserved.isEmpty())throw new AssertionError("unnecessary or invalid reservation "+control+" count="+reserved.size());
+                if(!before.equals(observationState(p)))throw new AssertionError("reservation boundary query mutation");
+            }
+        }catch(ReflectiveOperationException e){throw new AssertionError(e);}
+        System.out.println("KIKI_RESERVE_BOUNDARY arm="+arm+" seat="+seat+" case="+control+" reserved=0 repeats=3 stateUnchanged=true registered=40");
     }
     private static void mandatoryFixtureTriggers(List<forge.game.spellability.SpellAbility> abilities) {
         for(var a:abilities)if(a.getHostCard().getName().equals("Restoration Angel")&&a.isTrigger()) {
@@ -210,7 +260,11 @@ public final class CubeKikiDiscardSmoke {
             GuiBase.setInterface((IGuiBase)Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),new Class<?>[]{IGuiBase.class},(proxy,method,values)->switch(method.getName()){case "getAssetsDir"->args[0]+"/forge-gui/";case "isRunningOnDesktop","isLibgdxPort","isGuiThread","hasNetGame"->false;case "getCurrentVersion"->"kiki-native-discard";default->throw new AssertionError("Unexpected GUI call "+method.getName());}));
             FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
             nativeBlink=args.length>2&&args[2].equals("blink-native");
-            Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String c:BLINK_CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);
+            Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String c:BLINK_CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String c:RESERVE_CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);
+            if(args.length>2&&args[2].equals("reserve-boundaries")) {
+                for(String c:RESERVE_CASES)for(int seat=0;seat<2;seat++)reserveBoundary(args[1],seat,c);
+                System.out.println("KIKI_RESERVE_BOUNDARY_COMPLETE cases=12");return;
+            }
             if(nativeBlink) {
                 for(String c:List.of("blink-risk","blink-enough","blink-alternative","blink-no-kiki","blink-shroud-pyro","blink-mandatory-risk","blink-mandatory-alternative"))for(int seat=0;seat<2;seat++)blinkBoundary(args[1],seat,c);
                 System.out.println("KIKI_BLINK_NATIVE_COMPLETE cases=14");return;
