@@ -135,7 +135,7 @@ public final class CubeDoomStarFloatingSmoke {
                 var a=original.copy(p);if(a.getManaPart()!=null&&a.canProduce(color)&&a.getSubAbility()==null){source=card;ability=a;break producer;}
             }
             if(source==null)throw new AssertionError("missing declared floating producer");source.setTapped(true);
-            byte mask=switch(color){case "B"->forge.card.MagicColor.BLACK;case "U"->forge.card.MagicColor.BLUE;case "R"->forge.card.MagicColor.RED;default->forge.card.MagicColor.COLORLESS;};
+            byte mask=switch(color){case "B"->forge.card.MagicColor.BLACK;case "U"->forge.card.MagicColor.BLUE;case "R"->forge.card.MagicColor.RED;default->(byte)forge.card.mana.ManaAtom.COLORLESS;};
             p.getManaPool().addMana(new forge.game.mana.Mana(mask,source,ability.getManaPart(),p));
         }
         if(control.equals("float-all"))p.setLandsPlayedThisTurn(1);

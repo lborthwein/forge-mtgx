@@ -119,7 +119,7 @@ public final class CubeDoomStarResources {
     private static byte mask(String color) {
         return switch (color) { case "W" -> MagicColor.WHITE; case "U" -> MagicColor.BLUE;
             case "B" -> MagicColor.BLACK; case "R" -> MagicColor.RED; case "G" -> MagicColor.GREEN;
-            default -> MagicColor.COLORLESS; };
+            default -> (byte)forge.card.mana.ManaAtom.COLORLESS; };
     }
     private static String color(byte mask) {
         for (String color : COLORS) if (mask(color) == mask) return color;
