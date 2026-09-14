@@ -83,7 +83,7 @@ public final class CubeKikiDiscardSmoke {
             System.out.println("KIKI_DISCARD_QUERY "+key+" initial="+initial+" repeats=3 reserved="+first.size()+" stateUnchanged=true");
         }catch(ReflectiveOperationException e){throw new AssertionError(e);}
     }
-    private static void run(String arm,int seat,String control,boolean observed,boolean badCopy){
+    private static void run(String arm,int seat,String control,boolean observed,boolean badCopy,boolean continuation){
         List<RegisteredPlayer> entries=new ArrayList<>();for(int s=0;s<2;s++){forge.LobbyPlayer lobby=s==seat&&arm.equals("improved")?new forge.ai.LobbyPlayerCubeComboAi("Candidate-"+s):new forge.ai.LobbyPlayerAi("Default-"+s,null);if(lobby instanceof forge.ai.LobbyPlayerAi ai)ai.setAiProfile("Default");entries.add(new RegisteredPlayer(deck(s==seat,control)).setPlayer(lobby));}
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);Game g=new Match(rules,entries,"Kiki discard").createGame();Player p=g.getPlayers().get(seat),op=g.getPlayers().get(1-seat);p.setLife(20,null);op.setLife(20,null);populate(p,true,control);populate(op,false,control);g.setAge(GameStage.Play);int start=seat==0?1:2;g.getPhaseHandler().setupFirstTurn(seat==0?p:op,()->g.getPhaseHandler().devModeSet(PhaseType.MAIN1,p,start));g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(995100L+100L*seat+CASES.indexOf(control));
         String key="arm="+arm+" seat="+seat+" case="+control;NativeEvents events=new NativeEvents(p,key);g.subscribeToEvents(events);Card pyro=null;for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Seasoned Pyromancer"))pyro=c;if(pyro==null)throw new AssertionError("source");var cast=pyro.getFirstSpellAbility();cast.setActivatingPlayer(p);
@@ -99,14 +99,31 @@ public final class CubeKikiDiscardSmoke {
         if(require&&!kept)throw new AssertionError("complete own combo discarded despite two legal alternatives "+key);
         if(control.contains("shroud")&&arm.equals("improved")&&hand.contains(source(control)))throw new AssertionError("reserved Twin despite public shroud on only partner");
         if(control.equals("forced-pair")&&kept)throw new AssertionError("mandatory discard evaded");
+        if(continuation) {
+            int nativeSteps=0,copies=0,maxTokens=0;Set<Integer> seen=new HashSet<>();
+            while(!g.isGameOver()&&g.getPhaseHandler().getTurn()<=start+8&&nativeSteps<5000) {
+                g.getPhaseHandler().mainLoopStep();nativeSteps++;
+                maxTokens=Math.max(maxTokens,(int)p.getCardsIn(ZoneType.Battlefield).stream().filter(Card::isToken).count());
+                for(var item:g.getStack())if(seen.add(item.getId())) {
+                    var a=item.getSpellAbility();if(a.getActivatingPlayer()!=p)continue;
+                    if(a.isActivatedAbility()&&!a.isCopied()&&a.getApi()==forge.game.ability.ApiType.CopyPermanent)copies++;
+                    System.out.println("KIKI_CONTINUATION_STACK "+key+" host="+a.getHostCard().getName().replace(' ','_')+" api="+a.getApi()+" spell="+a.isSpell()+" paidMana="+a.getPayingMana().size());
+                }
+            }
+            System.out.println("KIKI_CONTINUATION_RESULT "+key+" won="+p.hasWon()+" gameOver="+g.isGameOver()+" turns="+(g.getPhaseHandler().getTurn()-start)+" steps="+nativeSteps+" nativeCopyActivations="+copies+" maxOwnTokens="+maxTokens+" furtherScriptedActions=0");
+            if(nativeSteps>=5000)throw new AssertionError("continuation step cap");
+            if(arm.equals("improved")&&!control.contains("shroud")&&(!p.hasWon()||copies<3))throw new AssertionError("retained pair did not reach native combo win "+key);
+        }
     }
     public static void main(String[] args) {
         try {
             GuiBase.setInterface((IGuiBase)Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),new Class<?>[]{IGuiBase.class},(proxy,method,values)->switch(method.getName()){case "getAssetsDir"->args[0]+"/forge-gui/";case "isRunningOnDesktop","isLibgdxPort","isGuiThread","hasNetGame"->false;case "getCurrentVersion"->"kiki-native-discard";default->throw new AssertionError("Unexpected GUI call "+method.getName());}));
             FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
             Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);
-            for(String c:CASES)for(int seat=0;seat<2;seat++)run(args[1],seat,c,args.length>2&&!args[2].equals("plain"),args.length>2&&args[2].equals("bad-copy"));
-            System.out.println("KIKI_DISCARD_SUITE_COMPLETE cases="+(2*CASES.size()));
+            boolean continuation=args.length>2&&args[2].equals("continue");
+            List<String> selected=continuation?List.of("twin-conscripts","twin-exarch","kiki-restoration","shroud-field-body-twin-exarch"):CASES;
+            for(String c:selected)for(int seat=0;seat<2;seat++)run(args[1],seat,c,args.length>2&&!args[2].equals("plain")&&!continuation,args.length>2&&args[2].equals("bad-copy"),continuation);
+            System.out.println("KIKI_DISCARD_SUITE_COMPLETE cases="+(2*selected.size()));
         }catch(Throwable e){e.printStackTrace();System.exit(1);}
     }
 }
