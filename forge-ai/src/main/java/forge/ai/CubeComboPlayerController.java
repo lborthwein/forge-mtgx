@@ -17,6 +17,7 @@ import java.util.List;
 
 /** Explicit per-player opt-in; the opposing Default controller is unchanged. */
 public final class CubeComboPlayerController extends PlayerControllerAi {
+    private final CubeFastbondPlan fastbondPlan;
     private final CubeDoomsdayPlan doomsdayPlan;
     private final CubeBreachPlan breachPlan;
     private final CubeStormPlan stormPlan;
@@ -77,6 +78,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         super(game, player, lobby);
         if (game.getRules().getAiInformationPolicy() != GameRules.AiInformationPolicy.CLOSED_REPAIR)
             throw new IllegalArgumentException("Cube combo AI requires closed-decklist-repair-v1");
+        fastbondPlan = new CubeFastbondPlan(player);
         doomsdayPlan = new CubeDoomsdayPlan(player);
         breachPlan = new CubeBreachPlan(player);
         stormPlan = new CubeStormPlan(player);
@@ -94,7 +96,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         planAction = null;
-        if (topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
+        if (fastbondPlan.waitingForOwnSpell() || topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
@@ -124,6 +126,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         // (turn, phase) at which the draw-out family also declined.
         if (action == null && (action = reanimatorPlan.nextAction()) != null) plan = "reanimator";
         if (action == null && (action = emryPlan.nextAction()) != null) plan = "emry";
+        if (action == null && (action = fastbondPlan.nextAction()) != null) plan = "fastbond";
         if (action == null) {
             tutorConsulted = true;
             tutorPlan = CubeComboAi.planTutor(getPlayer());
@@ -134,6 +137,12 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         }
         if (action == null && (action = topTutorPlan.nextAction()) != null) plan = "top-tutor";
         List<SpellAbility> chosen = action == null ? super.chooseSpellAbilityToPlay() : List.of(action);
+        if (action == null && chosen != null && chosen.stream().anyMatch(fastbondPlan::lethalFallbackReplay)) {
+            List<SpellAbility> safe = new ArrayList<>();
+            for (SpellAbility a : chosen) if (!fastbondPlan.lethalFallbackReplay(a)) safe.add(a);
+            System.err.println("CUBE_FASTBOND_PLAN declined-lethal-ordinary-replay");
+            chosen = safe.isEmpty() ? null : safe;
+        }
         planAction = action;
         logDecision(plan, action, chosen, tutorConsulted);
         return chosen;
@@ -284,6 +293,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             tutorPlan = null;
             return played;
         }
+        if (fastbondPlan.owns(ability)) return fastbondPlan.play(ability);
         if (doomsdayPlan.ownsStarAction(ability)) return doomsdayPlan.playStarAction(ability);
         if (topTutorPlan.owns(ability)) return topTutorPlan.play(ability);
         if (emryPlan.owns(ability)) return emryPlan.play(ability);
