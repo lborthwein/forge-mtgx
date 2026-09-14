@@ -31,6 +31,7 @@ public final class ProductionPaymentDomainEngineSmoke {
     private static void check(boolean value, String label) { if (!value) throw new AssertionError(label); checks++; }
     private static Scenario scenario(String name) {
         return switch (name) {
+            case "wild-growth-partial-primary", "wild-growth-partial-bonus" -> new Scenario(name, "Llanowar Elves", "Forest", 1, "", false, false);
             case "wild-growth-full" -> new Scenario(name, "Grizzly Bears", "Forest", 1, "", false, false);
             case "twenty-plains" -> new Scenario(name, "Savannah Lions", "Plains", 20, "", false, false);
             case "twenty-surplus" -> new Scenario(name, "Savannah Lions", "Plains", 20, "", true, false);
@@ -116,6 +117,8 @@ public final class ProductionPaymentDomainEngineSmoke {
             check(red>=0&&selected.get(0).getAsJsonArray("output").get(0).getAsString().equals("R"),"Forth fixture red token/shard verified");
             Collections.swap(tokenIds,0,red);
         }
+        // Test-only host choice: explicitly exercise both surviving producers.
+        if (scenario.name().equals("wild-growth-partial-bonus")) Collections.swap(tokenIds, 0, 1);
         var spend = new JsonArray();
         for (int i = 0; i < ask.getAsJsonObject("cost").getAsJsonArray("shards").size(); i++) {
             var allocation = new JsonObject(); allocation.addProperty("token", tokenIds.get(i)); allocation.addProperty("shardIndex", i); spend.add(allocation);
@@ -166,7 +169,7 @@ public final class ProductionPaymentDomainEngineSmoke {
         var sources = new ArrayList<Card>();
         for (int i = 0; i < scenario.count(); i++) sources.add(card(scenario.source(), payer, ZoneType.Battlefield));
         boolean kinnanCase=scenario.name().startsWith("kinnan-");
-        boolean fixedTriggerCase=scenario.name().equals("wild-growth-full");
+        boolean fixedTriggerCase=scenario.name().startsWith("wild-growth-");
         Card bonusProducer=kinnanCase?card("Kinnan, Bonder Prodigy",payer,ZoneType.Battlefield)
                 :fixedTriggerCase?card("Wild Growth",payer,ZoneType.Battlefield):null;
         if(fixedTriggerCase)bonusProducer.attachToEntity(sources.get(0),null);
@@ -347,6 +350,22 @@ public final class ProductionPaymentDomainEngineSmoke {
                     check(option.getAsJsonArray("outputOrigins").get(slot).getAsJsonObject().get("sourceFid").getAsInt()==bonusProducer.getId(),"Wire bonus provenance agrees with native payment");
                 } else check(selected.getPayingMana().get(i) == actualTokens.get(slot), "Exact host-selected output unit consumed");
             }
+            if (scenario.name().startsWith("wild-growth-partial-")) {
+                var remainingTokens = new ArrayList<forge.game.mana.Mana>();
+                for (var mana : payer.getManaPool()) remainingTokens.add(mana);
+                check(remainingTokens.size() == 1 && selected.getPayingMana().size() == 1,
+                        "Partial composite payment spends one and retains one actual unit");
+                var remainingToken = remainingTokens.get(0);
+                var spentToken = selected.getPayingMana().get(0);
+                boolean spendBonus = scenario.name().endsWith("-bonus");
+                int expectedRemaining = spendBonus ? sources.get(0).getId() : bonusProducer.getId();
+                int expectedSpent = spendBonus ? bonusProducer.getId() : sources.get(0).getId();
+                check(remainingToken != spentToken && remainingToken.getSourceCard().getId() == expectedRemaining
+                        && spentToken.getSourceCard().getId() == expectedSpent,
+                        "Partial payment preserves the explicitly selected spent and surviving producer identities");
+                check(!remainingToken.isPersistentMana() && !remainingToken.isCombatMana() && !remainingToken.isSnow(),
+                        "Surviving ordinary green token retains its advertised traits");
+            }
             check(payer.getLife() == lifeBefore - hostAnswer.get("lifePaid").getAsInt()
                     && payer.getManaPool().totalMana() == produced - spend.size(), "Actual life and surplus equal requested payment");
             if (xTax) {
@@ -385,7 +404,10 @@ public final class ProductionPaymentDomainEngineSmoke {
                         default -> throw new AssertionError("Unexpected GUI call " + method.getName());
                     }));
             FModel.initialize(null, prefs -> { prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); prefs.setPref(FPref.UI_LANGUAGE, "en-US"); return null; });
-            if (stdio) {
+            if (args.length > 1 && args[1].equals("--partial")) {
+                for (String name : List.of("wild-growth-partial-primary", "wild-growth-partial-bonus")) run(scenario(name), null, false);
+                System.out.println("PASS " + checks + " partial composite token-identity checks; scripted host fixture only");
+            } else if (stdio) {
                 // Keep incidental engine render chatter off the stdio protocol
                 // during execution as well as bootstrap. The channel owns the
                 // original stdout handle explicitly, not this diagnostic stream.
