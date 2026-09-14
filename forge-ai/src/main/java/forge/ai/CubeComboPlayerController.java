@@ -336,6 +336,14 @@ public class CubeComboPlayerController extends PlayerControllerAi {
 
     @Override
     public boolean chooseTargetsFor(SpellAbility ability) {
+        // Native setupTargets clears the earlier trigger-preparation choice.
+        // This callback is final target ownership; preserve the real optional
+        // flag instead of PlayerControllerAi's generic mandatory=true path.
+        if (CubeComboAi.selectNonDiscardingComboBlink(getPlayer(), ability, !ability.isOptionalTrigger())) {
+            System.err.println("CUBE_COMBO_BLINK final-target=" + ability.getTargets().getTargetCards().stream().map(Card::getName).toList()
+                    + " optional=" + ability.isOptionalTrigger());
+            return true;
+        }
         return tamiyoPlan.chooseBlink(ability) || emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
     }
 
