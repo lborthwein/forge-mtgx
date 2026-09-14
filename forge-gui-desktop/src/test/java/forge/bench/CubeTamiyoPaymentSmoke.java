@@ -104,9 +104,10 @@ public final class CubeTamiyoPaymentSmoke {
         int returns,casts,sacrifices,discarded;
         final Set<SpellAbility> seen=Collections.newSetFromMap(new IdentityHashMap<>());
         private record Before(int actions,int mana,int loyalty,int life,Set<Integer> hand) {}
-        PaidReceipts(Player p,String key){player=p;this.key=key;
-            try {Field f=p.getController().getClass().getDeclaredField("tamiyoPlan");f.setAccessible(true);plan=f.get(p.getController());}
-            catch(NoSuchFieldException e){plan=null;}catch(ReflectiveOperationException e){throw new AssertionError(e);}
+        PaidReceipts(Player p,String key){player=p;this.key=key;Object found;
+            try {Field f=p.getController().getClass().getDeclaredField("tamiyoPlan");f.setAccessible(true);found=f.get(p.getController());}
+            catch(NoSuchFieldException e){found=null;}catch(ReflectiveOperationException e){throw new AssertionError(e);}
+            plan=found;
         }
         private Object field(String name){try{Field f=plan.getClass().getDeclaredField(name);f.setAccessible(true);return f.get(plan);}catch(ReflectiveOperationException e){throw new AssertionError(e);}}
         private int loyalty(){for(Card c:player.getCardsIn(ZoneType.Battlefield))if(c.getName().equals(TAMIYO))return c.getCounters(CounterEnumType.LOYALTY);return -1;}
