@@ -157,8 +157,9 @@ final class CubeFastbondPlan {
                 }
             });
             if (played && a.getApi() == ApiType.GainLife) {
-                var paid = a.getPaidList("Sacrificed");
-                played = paid.size() == 1 && paid.get(0).getId() == paidLand.getId();
+                int paidCount = 0, trackedCount = 0;
+                for (Card paid : a.getPaidList("Sacrificed")) { paidCount++; if (paid.getId() == paidLand.getId()) trackedCount++; }
+                played = paidCount == 1 && trackedCount == 1;
                 land = player.getGame().getCardState(paidLand, null);
                 played &= current(land, ZoneType.Graveyard); expectedLife = beforeLife + 2;
             } else expectedLife = beforeLife - 50;
