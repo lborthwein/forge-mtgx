@@ -56,6 +56,14 @@ final class CubeTamiyoPlan {
         return false;
     }
     private boolean nativeLoyaltyEntry(Card c, forge.game.replacement.ReplacementEffect e) {
+        if(c==tamiyo) {
+            SpellAbility diagnostic=e.getOverridingAbility();
+            System.err.println("TAMIYO_NATIVE_SHAPE sameRule="+(e==c.getCurrentState().getLoyaltyRep())+" sameHost="+(e.getHostCard()==c)
+                    +" base="+c.getCurrentState().getBaseLoyalty()+" intrinsic="+e.isIntrinsic()+" replacement="+e.getMapParams()
+                    +" effect="+(diagnostic==null?"null":diagnostic.getMapParams())+" original="+(diagnostic==null?"null":diagnostic.getOriginalMapParams())
+                    +" effectFlags="+(diagnostic==null?"null":((diagnostic.getHostCard()==c)+":"+diagnostic.isIntrinsic()+":"+diagnostic.isCopied()+":"+diagnostic.isWrapper()+":"+diagnostic.isTrigger()))
+                    +" effectCost="+(diagnostic==null?"null":diagnostic.getPayCosts())+" sub="+(diagnostic!=null&&diagnostic.getSubAbility()!=null)+" targeting="+(diagnostic!=null&&diagnostic.usesTargeting()));
+        }
         if(c!=tamiyo||!c.isPlaneswalker()||!"5".equals(c.getCurrentState().getBaseLoyalty())
                 ||e!=c.getCurrentState().getLoyaltyRep()||e.getHostCard()!=c||!e.isIntrinsic())return false;
         Map<String,String> params=new HashMap<>(e.getMapParams());params.remove("Description");
