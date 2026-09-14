@@ -18,6 +18,7 @@ import java.util.List;
 /** Explicit per-player opt-in; the opposing Default controller is unchanged. */
 public final class CubeComboPlayerController extends PlayerControllerAi {
     private final CubeFastbondPlan fastbondPlan;
+    private final CubeKikiSyrPlan kikiSyrPlan;
     private final CubeDoomsdayPlan doomsdayPlan;
     private final CubeBreachPlan breachPlan;
     private final CubeStormPlan stormPlan;
@@ -79,6 +80,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (game.getRules().getAiInformationPolicy() != GameRules.AiInformationPolicy.CLOSED_REPAIR)
             throw new IllegalArgumentException("Cube combo AI requires closed-decklist-repair-v1");
         fastbondPlan = new CubeFastbondPlan(player);
+        kikiSyrPlan = new CubeKikiSyrPlan(player);
         doomsdayPlan = new CubeDoomsdayPlan(player);
         breachPlan = new CubeBreachPlan(player);
         stormPlan = new CubeStormPlan(player);
@@ -96,7 +98,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         planAction = null;
-        if (fastbondPlan.waitingForOwnSpell() || topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
+        if (kikiSyrPlan.waitingForOwnSpell() || fastbondPlan.waitingForOwnSpell() || topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
@@ -127,6 +129,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         if (action == null && (action = reanimatorPlan.nextAction()) != null) plan = "reanimator";
         if (action == null && (action = emryPlan.nextAction()) != null) plan = "emry";
         if (action == null && (action = fastbondPlan.nextAction()) != null) plan = "fastbond";
+        if (action == null && (action = kikiSyrPlan.nextAction()) != null) plan = "kiki-syr";
         if (action == null) {
             tutorConsulted = true;
             tutorPlan = CubeComboAi.planTutor(getPlayer());
@@ -293,6 +296,7 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
             tutorPlan = null;
             return played;
         }
+        if (kikiSyrPlan.owns(ability)) return kikiSyrPlan.play(ability);
         if (fastbondPlan.owns(ability)) return fastbondPlan.play(ability);
         if (doomsdayPlan.ownsStarAction(ability)) return doomsdayPlan.playStarAction(ability);
         if (topTutorPlan.owns(ability)) return topTutorPlan.play(ability);
@@ -316,6 +320,12 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     }
 
     @Override
+    public boolean confirmReplacementEffect(forge.game.replacement.ReplacementEffect replacement, SpellAbility effect,
+            forge.game.GameEntity affected, String question) {
+        return kikiSyrPlan.confirmClone(effect) || super.confirmReplacementEffect(replacement, effect, affected, question);
+    }
+
+    @Override
     public boolean chooseTargetsFor(SpellAbility ability) {
         return emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
     }
@@ -326,6 +336,8 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
     public <T extends forge.game.GameEntity> T chooseSingleEntityForEffect(forge.util.collect.FCollectionView<T> options,
             DelayedReveal delayedReveal, SpellAbility source, String title, boolean optional, Player targetedPlayer,
             java.util.Map<String, Object> params) {
+        T kikiChoice = kikiSyrPlan.choose(options, source);
+        if (kikiChoice != null) return kikiChoice;
         if (topPlan.ownsKittenRecovery(source, targetedPlayer)) {
             if (delayedReveal != null) reveal(delayedReveal);
             // Narset's native Dig has already legally shown these candidates.
