@@ -210,6 +210,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
      */
     @Override
     protected AiAbilityDecision doTriggerNoCost(Player aiPlayer, SpellAbility sa, boolean mandatory) {
+        if (CubeComboAi.declineDestructiveComboBlink(aiPlayer, sa, mandatory)) {
+            System.err.println("CUBE_COMBO_BLINK declined=forced-reserved-discard source=" + sa.getHostCard().getName());
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
         if (aiPlayer.getController() instanceof forge.ai.CubeComboPlayerController combo && combo.chooseKittenBlink(sa))
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         if (CubeComboAi.selectBlinkSource(aiPlayer, sa)) return new AiAbilityDecision(100, AiPlayDecision.WillPlay);

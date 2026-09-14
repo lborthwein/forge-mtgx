@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v101";
+    public static final String VERSION = "cube-combo-execution-v102";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -745,6 +745,34 @@ public final class CubeComboAi {
             }
         }
         return null;
+    }
+
+    /** Decline an optional Restoration blink that would force a retained
+     * combo card through Pyromancer's mandatory discard. Tokens vanish when
+     * blinked, so they are not alternative value targets. A different legal
+     * non-token target leaves the ordinary target chooser in charge.
+     * Own hand and public battlefield only; no target or game state changes.
+     */
+    public static boolean declineDestructiveComboBlink(Player player, SpellAbility trigger, boolean mandatory) {
+        if (mandatory || !enabled(player) || trigger.getActivatingPlayer() != player
+                || trigger.getHostCard().getController() != player
+                || !trigger.getHostCard().getName().equals("Restoration Angel")
+                || trigger.getApi() != ApiType.ChangeZone || !trigger.usesTargeting()
+                || !"Battlefield".equals(trigger.getParam("Origin")) || !"Exile".equals(trigger.getParam("Destination"))
+                || trigger.getSubAbility() == null || trigger.getSubAbility().getApi() != ApiType.ChangeZone
+                || !"Battlefield".equals(trigger.getSubAbility().getParam("Destination"))) return false;
+        CardCollection reserved = kikiDiscardProtectedCards(player);
+        if (reserved.isEmpty()) return false;
+        int expendable = 0;
+        for (Card card : player.getCardsIn(ZoneType.Hand)) if (!reserved.contains(card)) expendable++;
+        if (expendable >= 2) return false;
+        boolean pyromancer = false;
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || card.isPhasedOut() || !trigger.canTarget(card) || card.isToken()) continue;
+            if (!card.getName().equals("Seasoned Pyromancer")) return false;
+            pyromancer = true;
+        }
+        return pyromancer;
     }
 
     /** Restoration Angel resets a non-token Kiki through an actual zone change. */
