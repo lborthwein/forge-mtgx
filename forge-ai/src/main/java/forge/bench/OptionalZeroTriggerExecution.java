@@ -1,7 +1,6 @@
 package forge.bench;
 
 import forge.card.mana.ManaCost;
-import forge.game.ability.AbilityUtils;
 import forge.game.cost.*;
 import forge.game.mana.ManaConversionMatrix;
 import forge.game.player.Player;
