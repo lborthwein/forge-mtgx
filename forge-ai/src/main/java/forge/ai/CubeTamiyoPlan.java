@@ -49,16 +49,22 @@ final class CubeTamiyoPlan {
     private boolean window(){return player.getGame().getPhaseHandler().getTurn()==turn&&player.getGame().getPhaseHandler().is(PhaseType.MAIN1,player);}
     private boolean board(){return current(kitten,ZoneType.Battlefield)&&kitten.getGameTimestamp()==kittenStamp&&current(outlet,ZoneType.Battlefield)&&outlet.getGameTimestamp()==outletStamp
             &&current(tamiyo,ZoneType.Battlefield)&&tamiyo.getGameTimestamp()==tamiyoStamp&&player.getLife()>0&&player.canGainLife()&&!player.cantWin();}
+    // Diagnostic only: report the first rejecting own/public precondition without
+    // repeating a native query or changing the selected action.
+    private boolean decline(String reason) {
+        System.err.println("CUBE_PLAN_DECLINE family=tamiyo reason="+reason);
+        return false;
+    }
     private boolean domain(){
         for(ZoneType z:List.of(ZoneType.Battlefield,ZoneType.Command,ZoneType.Graveyard))for(Card c:player.getGame().getCardsIn(z))if(!c.isFaceDown()&&!c.isPhasedOut()){
-            for(var e:c.getReplacementEffects())if(e.zonesCheck(c.getZone())&&e.requirementsCheck(player.getGame())&&Set.of("Moved","GainLife","LifeReduced","DamageDone","PayLife").contains(e.getParamOrDefault("Event","")))return false;
+            for(var e:c.getReplacementEffects())if(e.zonesCheck(c.getZone())&&e.requirementsCheck(player.getGame())&&Set.of("Moved","GainLife","LifeReduced","DamageDone","PayLife").contains(e.getParamOrDefault("Event","")))return decline("replacement:"+c.getName().replace(' ','_')+":"+e.getParamOrDefault("Event",""));
             for(var s:c.getStaticAbilities())if(s.zonesCheck()&&Set.of("RaiseCost","ReduceCost","SetCost","CantBeCast","CantBeActivated","CantSacrifice","CantPayLife","DisableTriggers").contains(s.getParamOrDefault("Mode",""))){
                 if(c==tamiyo&&"CantSacrifice".equals(s.getParam("Mode"))&&"False".equals(s.getParam("ForCost"))&&"SpellAbility.OppCtrl".equals(s.getParam("ValidCause")))continue;
-                return false;
+                return decline("static:"+c.getName().replace(' ','_')+":"+s.getParam("Mode"));
             }
             for(var t:c.getTriggers())if(!t.isSuppressed()&&t.getParamOrDefault("TriggerZones","Battlefield").contains(z.name())){
                 if((c==kitten||c==outlet)&&t.isIntrinsic()&&"SpellCast".equals(t.getMode().name()))continue;
-                if(Set.of("SpellCast","SpellAbilityCast","AbilityCast","AbilityResolves","AbilityTriggered","ChangesZone","ChangesZoneAll","Sacrificed","SacrificedOnce","LifeGained","LifeLost","Always").contains(t.getMode().name()))return false;
+                if(Set.of("SpellCast","SpellAbilityCast","AbilityCast","AbilityResolves","AbilityTriggered","ChangesZone","ChangesZoneAll","Sacrificed","SacrificedOnce","LifeGained","LifeLost","Always").contains(t.getMode().name()))return decline("trigger:"+c.getName().replace(' ','_')+":"+t.getMode().name());
             }
         }return true;
     }
@@ -66,12 +72,12 @@ final class CubeTamiyoPlan {
     private boolean payable(SpellAbility a){return a!=null&&a.getPayCosts()!=null&&CubeComboAi.canPlayNative(a,player)&&CubeComboAi.canPayCost(a,player,false);}
     private boolean target(SpellAbility a,forge.game.GameEntity target){if(a==null||!a.canTarget(target))return false;a.resetTargets();a.getTargets().add(target);return a.isTargetNumberValid()&&forge.game.staticability.StaticAbilityMustTarget.meetsMustTargetRestriction(a);}
     private boolean finishAvailable(){
-        if(player.getOpponents().size()!=1)return false;Player op=player.getOpponents().get(0);SpellAbility a=ability(outlet,ApiType.DealDamage);
-        if(op.getLife()<=0||op.getLife()>50||op.cantLose()||op.cantLoseForZeroOrLessLife()||!op.canLoseLife()||!target(a,op)||!"50".equals(a.getParam("NumDmg")))return false;
+        if(player.getOpponents().size()!=1)return decline("opponent-count");Player op=player.getOpponents().get(0);SpellAbility a=ability(outlet,ApiType.DealDamage);
+        if(op.getLife()<=0||op.getLife()>50||op.cantLose()||op.cantLoseForZeroOrLessLife()||!op.canLoseLife()||!target(a,op)||!"50".equals(a.getParam("NumDmg")))return decline("shot-target-or-shape");
         var parts=a.getPayCosts().getCostParts();
         return parts.size()==1&&parts.get(0) instanceof forge.game.cost.CostPayLife cost&&cost.getAbilityAmount(a)==50&&!a.isSuppressed()&&!outlet.isDetained()
                 &&a.getRestrictions().canPlay(outlet,a)&&a.isLegalAfterStack()&&a.checkRestrictions(outlet,player)
-                &&ComputerUtilCombat.predictDamageTo(op,50,outlet,false)>=op.getLife();
+                &&ComputerUtilCombat.predictDamageTo(op,50,outlet,false)>=op.getLife() || decline("shot-cost-or-restrictions:"+a.getPayCosts());
     }
     private boolean canReturn(){SpellAbility a=ability(tamiyo,ApiType.ChangeZone);return a!=null&&"Graveyard".equals(a.getParam("Origin"))&&"Hand".equals(a.getParam("Destination"))
             &&tamiyo.getCounters(CounterEnumType.LOYALTY)>3&&tamiyo.getPlaneswalkerAbilityActivated()==0&&!a.isSuppressed()&&!tamiyo.isDetained()
@@ -90,9 +96,11 @@ final class CubeTamiyoPlan {
         if(!active){
             tamiyo=find(TAMIYO,ZoneType.Battlefield);kitten=find(KITTEN,ZoneType.Battlefield);outlet=find(OUTLET,ZoneType.Battlefield);
             if(tamiyo==null||kitten==null||outlet==null)return null;tamiyoStamp=tamiyo.getGameTimestamp();kittenStamp=kitten.getGameTimestamp();outletStamp=outlet.getGameTimestamp();
-            if(!board()||!domain()||!finishAvailable())return null;
+            if(!board()){decline("initial-board");return null;}
+            if(!domain()||!finishAvailable())return null;
             artifact=null;for(String name:List.of("Lotus Petal","Lion's Eye Diamond")){for(ZoneType z:List.of(ZoneType.Hand,ZoneType.Graveyard,ZoneType.Battlefield)){artifact=find(name,z);if(artifact!=null)break;}if(artifact!=null)break;}
-            if(artifact==null||!current(artifact,ZoneType.Hand)&&!canReturn())return null;
+            if(artifact==null){decline("no-artifact");return null;}
+            if(!current(artifact,ZoneType.Hand)&&!canReturn()){decline("return-restrictions");return null;}
             artifactStamp=artifact.getGameTimestamp();active=true;
         }
         if(played!=null){
