@@ -1348,6 +1348,13 @@ public final class CubeComboAi {
         CardCollection sources = new CardCollection();
         for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
             if (card.isFaceDown() || card.isPhasedOut() || card.getController() != player) continue;
+            // The live Twin grant already completes this route without a hand
+            // card. Do not reserve another Aura merely because it can enchant
+            // the same body. Read the actual granted ability, not the Aura name.
+            if (livePartnerBody(card) && card.getNetPower() > 0
+                    && card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
+                    && "Self".equals(sa.getParam("Defined"))
+                    && sa.copyForEnumeration(player).checkRestrictions(card, player))) return new CardCollection();
             if (partnerHalf(card)) bodies.add(card);
             if (card.getName().equals("Kiki-Jiki, Mirror Breaker")
                     && card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
