@@ -154,7 +154,7 @@ public final class CubeFastbondInterruptionSmoke {
                 String name=switch(control){case "remove-orb"->"Zuran Orb";case "remove-permission"->"Crucible of Worlds";case "remove-outlet"->"Aetherflux Reservoir";default->"Island";};
                 ZoneType zone=control.equals("exile-land")?ZoneType.Graveyard:ZoneType.Battlefield;
                 Card c=p.getCardsIn(zone).stream().filter(x->x.getName().equals(name)).findFirst().orElseThrow();
-                actionsAtIntervention=(Integer)value(p,"actions");g.getAction().moveToExile(c,null,null);g.getAction().checkStateEffects(true);intervened=true;
+                actionsAtIntervention=(Integer)value(p,"actions");g.getAction().exile(c,null,forge.game.ability.AbilityKey.newMap());g.getAction().checkStateEffects(true);intervened=true;
                 System.out.println("FASTBOND_INTERVENTION "+key+" nativeMove=true destination=Exile source="+name.replace(' ','_')+" planActions="+actionsAtIntervention);
             }
         }
