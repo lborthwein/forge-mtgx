@@ -46,13 +46,51 @@ public final class CubeKikiDiscardSmoke {
         }
     }
     private static Set<String> names(Player p,ZoneType zone){Set<String> out=new TreeSet<>();for(Card c:p.getCardsIn(zone))out.add(c.getName());return out;}
-    private static void run(String arm,int seat,String control){
+    private static Map<String,Object> observationState(Player p) {
+        try {
+            var snapshot=CubeTopTutorAvailabilitySmoke.class.getDeclaredMethod("snapshot",Player.class);
+            snapshot.setAccessible(true);
+            @SuppressWarnings("unchecked") Map<String,Object> state=new LinkedHashMap<>((Map<String,Object>)snapshot.invoke(null,p));
+            var ids=forge.game.spellability.SpellAbility.class.getDeclaredField("maxId");ids.setAccessible(true);
+            state.put("abilityMaxId",ids.getInt(null));
+            for(ZoneType zone:List.of(ZoneType.Hand,ZoneType.Battlefield)) {
+                state.put(zone+"AbilityScratch",p.getCardsIn(zone).stream().flatMap(c->c.getSpellAbilities().stream())
+                        .map(a->a.getId()+":"+a.getPipsToReduce()+":"+a.getPayingMana()+":"+a.getPayCosts()).toList());
+            }
+            return state;
+        }catch(ReflectiveOperationException e){throw new AssertionError(e);}
+    }
+    private static void observe(Player p,String key,String control,boolean initial,boolean badCopy) {
+        try {
+            var query=forge.ai.CubeComboAi.class.getDeclaredMethod("kikiDiscardProtectedCards",Player.class);query.setAccessible(true);
+            var before=observationState(p);List<Integer> first=null;
+            for(int i=0;i<3;i++) {
+                if(badCopy)p.getCardsIn(ZoneType.Hand).get(0).getFirstSpellAbility().copy(p);
+                CardCollection reserved=(CardCollection)query.invoke(null,p);
+                List<Integer> ids=reserved.stream().map(Card::getId).toList();
+                if(first==null)first=ids;else if(!first.equals(ids))throw new AssertionError("discard reservation identity drift");
+                var after=observationState(p);
+                if(!before.equals(after)) {
+                    List<String> changed=new ArrayList<>();for(String field:before.keySet())if(!Objects.equals(before.get(field),after.get(field)))changed.add(field);
+                    throw new AssertionError("discard observation mutated "+changed);
+                }
+                if(initial) {
+                    int expected=Set.of("wrong-twin-restoration","missing-source","no-blue-twin-exarch","two-red-kiki-restoration","both-field-kiki-conscripts","shroud-field-body-twin-exarch").contains(control)?0:control.contains("hand-island")||control.contains("hand-mountain")?3:control.contains("field-body")||control.contains("field-engine")?1:2;
+                    if(ids.size()!=expected)throw new AssertionError("reservation count "+control+" expected="+expected+" actual="+ids.size());
+                    for(Card c:reserved)if(!c.isInZone(ZoneType.Hand)||c.getOwner()!=p)throw new AssertionError("reservation outside own hand");
+                }
+            }
+            System.out.println("KIKI_DISCARD_QUERY "+key+" initial="+initial+" repeats=3 reserved="+first.size()+" stateUnchanged=true");
+        }catch(ReflectiveOperationException e){throw new AssertionError(e);}
+    }
+    private static void run(String arm,int seat,String control,boolean observed,boolean badCopy){
         List<RegisteredPlayer> entries=new ArrayList<>();for(int s=0;s<2;s++){forge.LobbyPlayer lobby=s==seat&&arm.equals("improved")?new forge.ai.LobbyPlayerCubeComboAi("Candidate-"+s):new forge.ai.LobbyPlayerAi("Default-"+s,null);if(lobby instanceof forge.ai.LobbyPlayerAi ai)ai.setAiProfile("Default");entries.add(new RegisteredPlayer(deck(s==seat,control)).setPlayer(lobby));}
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);Game g=new Match(rules,entries,"Kiki discard").createGame();Player p=g.getPlayers().get(seat),op=g.getPlayers().get(1-seat);p.setLife(20,null);op.setLife(20,null);populate(p,true,control);populate(op,false,control);g.setAge(GameStage.Play);int start=seat==0?1:2;g.getPhaseHandler().setupFirstTurn(seat==0?p:op,()->g.getPhaseHandler().devModeSet(PhaseType.MAIN1,p,start));g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(995100L+100L*seat+CASES.indexOf(control));
         String key="arm="+arm+" seat="+seat+" case="+control;NativeEvents events=new NativeEvents(p,key);g.subscribeToEvents(events);Card pyro=null;for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Seasoned Pyromancer"))pyro=c;if(pyro==null)throw new AssertionError("source");var cast=pyro.getFirstSpellAbility();cast.setActivatingPlayer(p);
         System.out.println("KIKI_DISCARD_FIXTURE "+key+" registered=40 scriptedInitiatingCasts=1 nativeDiscardChoice=true policy="+forge.ai.CubeComboAi.VERSION);
+        if(observed)observe(p,key,control,true,badCopy);
         if(!forge.ai.CubeComboAi.canPlayNative(cast,p)||!forge.ai.ComputerUtil.handlePlayingSpellAbility(p,cast,null,a->new forge.ai.AiCostDecision(p,a,false))||cast.getPayingMana().size()!=3)throw new AssertionError("native cast/payment");
-        int steps=0;while(steps<400&&!g.isGameOver()&&g.getPhaseHandler().getTurn()==start){g.getPhaseHandler().mainLoopStep();steps++;if(events.discarded.size()==2&&events.drawn.size()==2&&g.getStack().isEmpty())break;}
+        int steps=0;while(steps<400&&!g.isGameOver()&&g.getPhaseHandler().getTurn()==start){if(observed)observe(p,key,control,false,false);g.getPhaseHandler().mainLoopStep();steps++;if(events.discarded.size()==2&&events.drawn.size()==2&&g.getStack().isEmpty())break;}
         if(steps>=400||events.discarded.size()!=2||events.drawn.size()!=2||!events.drawn.equals(List.of("Forest","Forest")))throw new AssertionError("native discard/draw receipts");
         Set<String> hand=names(p,ZoneType.Hand);Set<String> available=new TreeSet<>(hand);available.addAll(names(p,ZoneType.Battlefield));boolean kept=available.contains(source(control))&&available.contains(partner(control));boolean require=arm.equals("improved")&&!Set.of("wrong-twin-restoration","missing-source","forced-pair","no-blue-twin-exarch","two-red-kiki-restoration","shroud-field-body-twin-exarch").contains(control);
         System.out.println("KIKI_DISCARD_RESULT "+key+" keptPair="+kept+" discarded="+events.discarded.toString().replace(' ','_')+" drawn=2 paidMana=3 steps="+steps+" rng="+((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot());
@@ -67,7 +105,7 @@ public final class CubeKikiDiscardSmoke {
             GuiBase.setInterface((IGuiBase)Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),new Class<?>[]{IGuiBase.class},(proxy,method,values)->switch(method.getName()){case "getAssetsDir"->args[0]+"/forge-gui/";case "isRunningOnDesktop","isLibgdxPort","isGuiThread","hasNetGame"->false;case "getCurrentVersion"->"kiki-native-discard";default->throw new AssertionError("Unexpected GUI call "+method.getName());}));
             FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
             Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);
-            for(String c:CASES)for(int seat=0;seat<2;seat++)run(args[1],seat,c);
+            for(String c:CASES)for(int seat=0;seat<2;seat++)run(args[1],seat,c,args.length>2&&!args[2].equals("plain"),args.length>2&&args[2].equals("bad-copy"));
             System.out.println("KIKI_DISCARD_SUITE_COMPLETE cases="+(2*CASES.size()));
         }catch(Throwable e){e.printStackTrace();System.exit(1);}
     }
