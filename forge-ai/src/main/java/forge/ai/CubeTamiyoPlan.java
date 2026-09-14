@@ -149,7 +149,10 @@ final class CubeTamiyoPlan {
             if(kind==Kind.RETURN){if(!current(fresh,ZoneType.Hand)||fresh.getGameTimestamp()==artifactStamp||player.getLife()!=lifeBefore)return stop();}
             else if(kind==Kind.CAST){
                 Card freshTamiyo=player.getGame().getCardState(tamiyo,null);
-                if(!current(fresh,ZoneType.Battlefield)||fresh.getGameTimestamp()==artifactStamp||!current(freshTamiyo,ZoneType.Battlefield)||freshTamiyo.getGameTimestamp()==tamiyoStamp
+                // A countered artifact can be returned again after its cast
+                // still produced the verified blink/reset and Reservoir gain.
+                boolean resourceAvailable=current(fresh,ZoneType.Battlefield)||current(fresh,ZoneType.Graveyard);
+                if(!resourceAvailable||fresh.getGameTimestamp()==artifactStamp||!current(freshTamiyo,ZoneType.Battlefield)||freshTamiyo.getGameTimestamp()==tamiyoStamp
                         ||freshTamiyo.getCounters(CounterEnumType.LOYALTY)!=5||freshTamiyo.getPlaneswalkerAbilityActivated()!=0||player.getLife()!=lifeBefore+expectedGain)return stop();
                 tamiyo=freshTamiyo;tamiyoStamp=tamiyo.getGameTimestamp();castOutstanding=false;
             }else if(!current(fresh,ZoneType.Graveyard)||fresh.getGameTimestamp()==artifactStamp||player.getLife()!=lifeBefore)return stop();
