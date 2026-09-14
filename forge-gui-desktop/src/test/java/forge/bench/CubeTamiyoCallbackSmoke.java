@@ -32,10 +32,14 @@ public final class CubeTamiyoCallbackSmoke {
             var f=forge.ai.CubeComboPlayerController.class.getDeclaredField("tamiyoPlan");f.setAccessible(true);Object plan=f.get(this);
             var m=plan.getClass().getDeclaredMethod("chooseBlink",forge.game.spellability.SpellAbility.class);m.setAccessible(true);return (boolean)m.invoke(plan,a);
         }catch(ReflectiveOperationException e){throw new AssertionError(e);}}
+        private boolean offered(forge.game.spellability.SpellAbility a){try{
+            var f=forge.ai.CubeComboPlayerController.class.getDeclaredField("tamiyoPlan");f.setAccessible(true);Object plan=f.get(this);
+            var choices=plan.getClass().getDeclaredField("triggerChoices");choices.setAccessible(true);return ((Map<?,?>)choices.get(plan)).containsKey(a);
+        }catch(ReflectiveOperationException e){throw new AssertionError(e);}}
         private Card outlet(){for(Card c:own.getCardsIn(ZoneType.Battlefield))if(c.getName().equals("Aetherflux Reservoir"))return c;throw new AssertionError("outlet missing");}
         private Card tamiyo(){for(Card c:own.getCardsIn(ZoneType.Battlefield))if(c.getName().equals(TAMIYO))return c;throw new AssertionError("Tamiyo missing");}
         @Override public boolean chooseKittenBlink(forge.game.spellability.SpellAbility a){
-            if(!tested&&captured==null&&a.getHostCard().getName().equals(KITTEN)){
+            if(!tested&&captured==null&&a.getHostCard().getName().equals(KITTEN)&&offered(a)){
                 captured=a;
                 if(!control.equals("outside-offer")){
                     var actor=a.getActivatingPlayer();Card host=a.getHostCard();boolean copied=a.isCopied();var child=a.getSubAbility();var cleanup=child.getSubAbility();var trigger=a.getTrigger();Object cause=a.getTriggeringObject(forge.game.ability.AbilityKey.SpellAbility);
