@@ -194,7 +194,11 @@ final class CubeDoomStarPlan {
     forge.game.mana.Mana chooseMana(List<forge.game.mana.Mana> offered) {
         if (paying == null || currentCost == null || CubeComboAi.isPaymentProbeFor(player)) return null;
         for (var option : offered) for (var payment : currentCost)
-            if (payment.floating() != null && payment.floating().equals(option)) return option;
+            if (payment.floating() != null && payment.floating().equals(option)) {
+                System.err.println("CUBE_DOOM_STAR_MANA phase=" + step + " nativeOffered=true color="
+                        + MagicColor.toShortString(option.getColor()) + " choices=" + offered.size());
+                return option;
+            }
         return null;
     }
     SpellAbility nextAction(BooleanSupplier finishLegal) {
