@@ -19,7 +19,7 @@ import java.util.*;
 /** Scripted native Pyromancer cast; the real controller owns every discard.
  * Prepared choice/transition evidence only, never autonomous assembly or strength. */
 public final class CubeKikiDiscardSmoke {
-    private static final List<String> CASES=List.of("twin-conscripts","twin-exarch","twin-pestermite","kiki-conscripts","kiki-restoration","wrong-twin-restoration","missing-source","forced-pair", "no-blue-twin-exarch", "two-red-kiki-restoration", "hand-island-twin-exarch", "hand-mountain-kiki-restoration", "field-body-twin-exarch", "field-body-kiki-restoration", "field-engine-kiki-conscripts", "both-field-kiki-conscripts", "duplicate-twin-conscripts");
+    private static final List<String> CASES=List.of("twin-conscripts","twin-exarch","twin-pestermite","kiki-conscripts","kiki-restoration","wrong-twin-restoration","missing-source","forced-pair", "no-blue-twin-exarch", "two-red-kiki-restoration", "hand-island-twin-exarch", "hand-mountain-kiki-restoration", "field-body-twin-exarch", "field-body-kiki-restoration", "field-engine-kiki-conscripts", "both-field-kiki-conscripts", "duplicate-twin-conscripts", "shroud-field-body-twin-exarch");
     private static final List<ZoneType> ZONES=List.of(ZoneType.Battlefield,ZoneType.Hand,ZoneType.Library,ZoneType.Graveyard,ZoneType.Exile);
     private record Placement(String name,ZoneType zone) {}
     private static String source(String key){return key.contains("kiki-")?"Kiki-Jiki, Mirror Breaker":key.equals("missing-source")?"Mountain":"Splinter Twin";}
@@ -32,7 +32,7 @@ public final class CubeKikiDiscardSmoke {
     private static Deck deck(boolean own,String key){Deck d=new Deck("Kiki native mandatory discard");for(var p:placements(own,key))d.getMain().add(p.name(),1);return d;}
     private static void populate(Player p,boolean own,String key){
         for(ZoneType z:ZoneType.values())if(p.getZone(z)!=null)p.getZone(z).removeAllCards(true);
-        for(var placement:placements(own,key)){Card c=Card.fromPaperCard(Objects.requireNonNull(FModel.getMagicDb().getCommonCards().getCard(placement.name())),p);c.setGameTimestamp(p.getGame().getNextTimestamp());p.getZone(placement.zone()).add(c);c.setSickness(false);}
+        for(var placement:placements(own,key)){Card c=Card.fromPaperCard(Objects.requireNonNull(FModel.getMagicDb().getCommonCards().getCard(placement.name())),p);c.setGameTimestamp(p.getGame().getNextTimestamp());p.getZone(placement.zone()).add(c);c.setSickness(false);if(key.contains("shroud")&&c.getName().equals(partner(key)))c.addIntrinsicKeyword("Shroud");}
         Map<String,Integer> actual=new TreeMap<>(),registered=new TreeMap<>();for(ZoneType z:ZONES)for(Card c:p.getCardsIn(z))actual.merge(c.getPaperCard().getName(),1,Integer::sum);for(var e:p.getRegisteredPlayer().getDeck().getMain())registered.merge(e.getKey().getName(),e.getValue(),Integer::sum);if(!actual.equals(registered)||actual.values().stream().mapToInt(Integer::intValue).sum()!=40)throw new AssertionError("registered identity");
     }
     public static final class NativeEvents {
@@ -54,11 +54,12 @@ public final class CubeKikiDiscardSmoke {
         if(!forge.ai.CubeComboAi.canPlayNative(cast,p)||!forge.ai.ComputerUtil.handlePlayingSpellAbility(p,cast,null,a->new forge.ai.AiCostDecision(p,a,false))||cast.getPayingMana().size()!=3)throw new AssertionError("native cast/payment");
         int steps=0;while(steps<400&&!g.isGameOver()&&g.getPhaseHandler().getTurn()==start){g.getPhaseHandler().mainLoopStep();steps++;if(events.discarded.size()==2&&events.drawn.size()==2&&g.getStack().isEmpty())break;}
         if(steps>=400||events.discarded.size()!=2||events.drawn.size()!=2||!events.drawn.equals(List.of("Forest","Forest")))throw new AssertionError("native discard/draw receipts");
-        Set<String> hand=names(p,ZoneType.Hand);Set<String> available=new TreeSet<>(hand);available.addAll(names(p,ZoneType.Battlefield));boolean kept=available.contains(source(control))&&available.contains(partner(control));boolean require=arm.equals("improved")&&!Set.of("wrong-twin-restoration","missing-source","forced-pair","no-blue-twin-exarch","two-red-kiki-restoration").contains(control);
+        Set<String> hand=names(p,ZoneType.Hand);Set<String> available=new TreeSet<>(hand);available.addAll(names(p,ZoneType.Battlefield));boolean kept=available.contains(source(control))&&available.contains(partner(control));boolean require=arm.equals("improved")&&!Set.of("wrong-twin-restoration","missing-source","forced-pair","no-blue-twin-exarch","two-red-kiki-restoration","shroud-field-body-twin-exarch").contains(control);
         System.out.println("KIKI_DISCARD_RESULT "+key+" keptPair="+kept+" discarded="+events.discarded.toString().replace(' ','_')+" drawn=2 paidMana=3 steps="+steps+" rng="+((BenchRandomAudit.AuditedRandom)forge.util.MyRandom.getRandom()).snapshot());
         if(require&&control.contains("hand-island")&&!hand.contains("Island"))throw new AssertionError("discarded required blue source");
         if(require&&control.contains("hand-mountain")&&!hand.contains("Mountain"))throw new AssertionError("discarded required third red source");
         if(require&&!kept)throw new AssertionError("complete own combo discarded despite two legal alternatives "+key);
+        if(control.contains("shroud")&&arm.equals("improved")&&hand.contains(source(control)))throw new AssertionError("reserved Twin despite public shroud on only partner");
         if(control.equals("forced-pair")&&kept)throw new AssertionError("mandatory discard evaded");
     }
     public static void main(String[] args) {
