@@ -14,7 +14,7 @@ import forge.game.zone.ZoneType;
  * The finite token budget is a combat heuristic, not a proof of a forced win.
  * Costs, legality, triggers, and response windows remain native Forge's. */
 public final class CubeComboAi {
-    public static final String VERSION = "cube-combo-execution-v100";
+    public static final String VERSION = "cube-combo-execution-v101";
     private static final ThreadLocal<Player> PAYMENT_PROBE = new ThreadLocal<>();
     private CubeComboAi() { }
 
@@ -1281,6 +1281,107 @@ public final class CubeComboAi {
     private static boolean partnerHalf(Card card) {
         return (untapBody(card) || card.getName().equals("Restoration Angel"))
                 && !sacsWhenTargeted(card);
+    }
+
+    /** Reserve one complete named Kiki/Twin route at our own discard choice.
+     * This forecasts separate future turns, not a payable spell or a forced win.
+     * Existing sources may untap; at most two own hand lands may be played, and
+     * every land used by the forecast is itself reserved. Each source supplies
+     * at most one mana per spell, with distinct sources for repeated pips.
+     * No native payment, ability copying, choices, RNG or hidden zones are read.
+     * Prefer the route requiring the fewest retained cards; redundant copies
+     * remain ordinary discards. Native mandatory discard counts still prevail.
+     */
+    static CardCollection kikiDiscardProtectedCards(Player player) {
+        CardCollection bodies = new CardCollection();
+        CardCollection engines = new CardCollection();
+        CardCollection lands = new CardCollection();
+        CardCollection sources = new CardCollection();
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card.isFaceDown() || card.isPhasedOut() || card.getController() != player) continue;
+            if (partnerHalf(card)) bodies.add(card);
+            if (card.getName().equals("Kiki-Jiki, Mirror Breaker")
+                    && card.getSpellAbilities().stream().anyMatch(sa -> copyEngine(sa) && !sa.isSuppressed()
+                    && sa.checkRestrictions(card, player)))
+                engines.add(card);
+            if (card.getManaAbilities().stream().anyMatch(CubeComboAi::discardManaSource)) sources.add(card);
+        }
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.isFaceDown() || card.getOwner() != player || card.getController() != player) continue;
+            if (engineHalf(card)) engines.add(card);
+            if (partnerHalf(card)) bodies.add(card);
+            if (card.isLand() && card.getManaAbilities().stream().anyMatch(CubeComboAi::discardManaSource)) lands.add(card);
+        }
+        CardCollection best = null;
+        for (Card engine : engines) for (Card body : bodies) {
+            boolean kiki = engine.getName().equals("Kiki-Jiki, Mirror Breaker");
+            if (!kiki && !livePartnerBody(body)) continue;
+            if (kiki && engine.isToken() && body.getName().equals("Restoration Angel")) continue;
+            if (engine.isInPlay() && body.isInPlay()
+                    && engine.getSpellAbilities().stream().noneMatch(sa -> copyEngine(sa)
+                    && !sa.isSuppressed() && sa.canTarget(body))) continue;
+            // -1 means no land: all zero-, one- and two-land subsets, once.
+            for (int first = -1; first < lands.size(); first++) {
+                for (int second = first; second < lands.size(); second++) {
+                    if (first == -1 && second != -1) continue;
+                    CardCollection retained = new CardCollection();
+                    CardCollection futureSources = new CardCollection(sources);
+                    if (first >= 0) { retained.add(lands.get(first)); futureSources.add(lands.get(first)); }
+                    if (second > first) { retained.add(lands.get(second)); futureSources.add(lands.get(second)); }
+                    if (!discardHalfFunded(engine, futureSources) || !discardHalfFunded(body, futureSources)) continue;
+                    if (engine.isInZone(ZoneType.Hand)) retained.add(engine);
+                    if (body.isInZone(ZoneType.Hand)) retained.add(body);
+                    if (best == null || retained.size() < best.size()) best = retained;
+                }
+            }
+        }
+        return best == null ? new CardCollection() : best;
+    }
+
+    private static boolean discardHalfFunded(Card half, CardCollection sources) {
+        if (half.isInPlay()) return true;
+        var cost = half.getManaCost();
+        if (cost == null || cost.isNoCost() || cost.getCMC() > sources.size()) return false;
+        java.util.List<Byte> pips = new java.util.ArrayList<>();
+        for (var shard : cost) {
+            byte colors = shard.getColorMask();
+            if (colors == 0) return false; // Named route spells have only ordinary coloured pips.
+            pips.add(colors);
+        }
+        return discardPipsFunded(pips, 0, sources, new boolean[sources.size()]);
+    }
+
+    private static boolean discardPipsFunded(java.util.List<Byte> pips, int index,
+            CardCollection sources, boolean[] used) {
+        if (index == pips.size()) return true;
+        for (int i = 0; i < sources.size(); i++) {
+            if (used[i] || !discardSourceProduces(sources.get(i), pips.get(index))) continue;
+            used[i] = true;
+            if (discardPipsFunded(pips, index + 1, sources, used)) return true;
+            used[i] = false;
+        }
+        return false;
+    }
+
+    // Exclude sacrifice, life, counters and mana-input engines from this
+    // one-mana-per-source forecast. Native payment still decides real casts.
+    private static boolean discardManaSource(SpellAbility mana) {
+        return !mana.isSuppressed() && mana.getManaPart() != null
+                && mana.getPayCosts() != null && mana.getPayCosts().hasTapCost()
+                && mana.getPayCosts().getCostParts().stream().allMatch(part -> part instanceof forge.game.cost.CostTap);
+    }
+
+    private static boolean discardSourceProduces(Card source, byte colors) {
+        for (SpellAbility mana : source.getManaAbilities()) {
+            if (!discardManaSource(mana)) continue;
+            var part = mana.getManaPart();
+            String produced = part == null ? null : part.getOrigProduced();
+            if (produced == null) continue;
+            if (produced.contains("Any")) return true;
+            for (byte color : forge.card.MagicColor.WUBRG)
+                if ((colors & color) != 0 && produced.contains(forge.card.MagicColor.toShortString(color))) return true;
+        }
+        return false;
     }
 
     /** Complete a Kiki pair that is one card short. Each half may be on our

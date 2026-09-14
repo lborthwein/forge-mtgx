@@ -569,6 +569,7 @@ public class CubeComboPlayerController extends PlayerControllerAi {
      * this class returns the ordinary AI's own choice object untouched. */
     private CardCollection reservedDiscardCards() {
         CardCollection reserved = new CardCollection();
+        reserved.addAll(CubeComboAi.kikiDiscardProtectedCards(getPlayer()));
         reserved.addAll(doomsdayPlan.discardProtectedCards());
         reserved.addAll(CubeBreachPlan.discardProtectedCards(getPlayer()));
         reserved.addAll(CubeStormPlan.discardProtectedCards(getPlayer()));
