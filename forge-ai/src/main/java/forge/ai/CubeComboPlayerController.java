@@ -16,7 +16,7 @@ import java.util.Collections;
 import java.util.List;
 
 /** Explicit per-player opt-in; the opposing Default controller is unchanged. */
-public final class CubeComboPlayerController extends PlayerControllerAi {
+public class CubeComboPlayerController extends PlayerControllerAi {
     private final CubeFastbondPlan fastbondPlan;
     private final CubeKikiSyrPlan kikiSyrPlan;
     private final CubeDoomsdayPlan doomsdayPlan;
