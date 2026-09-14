@@ -19,7 +19,7 @@ import java.util.*;
  * Mutations are explicit adversarial fixture interventions. Rejection must
  * occur without payment, stack insertion or other native/RNG changes. */
 public final class CubeFastbondOwnershipSmoke {
-    private static final List<String> CASES=List.of("copy-action","copied-flag","foreign-actor","foreign-host","retarget-shot","exile-orb","exile-permission","exile-outlet","blink-land","other-turn","combat-phase","replay-paid-action","actual-action");
+    private static final List<String> CASES=List.of("copy-action","copied-flag","changed-cost","changed-param","added-subability","foreign-actor","foreign-host","retarget-shot","exile-orb","exile-permission","exile-outlet","blink-land","other-turn","combat-phase","replay-paid-action","actual-action");
     private static Object invoke(Object object,String name,Class<?>[] types,Object...args)throws Exception {var m=object.getClass().getDeclaredMethod(name,types);m.setAccessible(true);return m.invoke(object,args);}
     private static Object plan(Player p)throws Exception {var f=forge.ai.CubeComboPlayerController.class.getDeclaredField("fastbondPlan");f.setAccessible(true);return f.get(p.getController());}
     private static Object snapshot(Player p)throws Exception {var m=CubeTopTutorAvailabilitySmoke.class.getDeclaredMethod("snapshot",Player.class);m.setAccessible(true);return m.invoke(null,p);}
@@ -39,6 +39,9 @@ public final class CubeFastbondOwnershipSmoke {
         switch(control){
             case "copy-action"->a=a.copy(p);
             case "copied-flag"->a.setCopied(true);
+            case "changed-cost"->a.setPayCosts(a.getPayCosts().copy());
+            case "changed-param"->a.getMapParams().put("LifeAmount","99");
+            case "added-subability"->a.setSubAbility((forge.game.spellability.AbilitySub)forge.game.ability.AbilityFactory.getAbility("DB$ GainLife | LifeAmount$ 99",a.getHostCard()));
             case "foreign-actor"->a.setActivatingPlayer(op);
             case "foreign-host"->a.setHostCard(find(p,"Island"));
             case "retarget-shot"->{a.resetTargets();a.getTargets().add(p);}
@@ -60,6 +63,6 @@ public final class CubeFastbondOwnershipSmoke {
         FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
         for(String name:List.of("Zuran Orb","Aetherflux Reservoir","Island","Fastbond","Crucible of Worlds","Forest"))StaticData.instance().attemptToLoadCard(name);
         for(String c:CASES)for(int seat=0;seat<2;seat++)run(c,seat);
-        System.out.println("FASTBOND_OWNERSHIP_COMPLETE cases=26");
+        System.out.println("FASTBOND_OWNERSHIP_COMPLETE cases=32");
     }catch(Throwable e){e.printStackTrace();System.exit(1);}}
 }
