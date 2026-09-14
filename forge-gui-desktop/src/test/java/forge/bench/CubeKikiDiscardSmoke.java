@@ -117,7 +117,7 @@ public final class CubeKikiDiscardSmoke {
         }
         if(nativeBlink)for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Restoration Angel"))angel=c;
         if(control.equals("blink-facedown-kiki"))for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Kiki-Jiki, Mirror Breaker"))c.turnFaceDown(true);
-        if(nativeBlink&&control.startsWith("blink-mandatory-"))for(var trigger:Objects.requireNonNull(angel).getTriggers())trigger.removeParam("OptionalDecider");
+        if(nativeBlink&&control.startsWith("blink-mandatory-"))for(var trigger:Objects.requireNonNull(angel).getTriggers()) { trigger.removeParam("OptionalDecider");trigger.getOriginalMapParams().remove("OptionalDecider"); }
         g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();
         if(nativeBlink) {
             BenchRandomAudit.install(997100L+100L*seat+BLINK_CASES.indexOf(control));
