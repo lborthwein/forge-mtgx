@@ -193,7 +193,7 @@ public final class CubeReanimatorPlan {
                 String body = card.getSVar(svar);
                 if (body == null || body.isEmpty()) break;
                 String api = scriptParam(body, "DB$");
-                if (VALUE_ZONE_APIS.contains(api)
+                if (api != null && VALUE_ZONE_APIS.contains(api)
                         && "Graveyard".equals(scriptParam(body, "Origin$"))
                         && !"Graveyard".equals(scriptParam(body, "Destination$"))) return false;
                 svar = scriptParam(body, "SubAbility$");
@@ -540,7 +540,8 @@ public final class CubeReanimatorPlan {
                 String body = card.getSVar(svar);
                 if (body == null || body.isEmpty()) break;
                 String type = scriptParam(body, "ChangeType$");
-                if (VALUE_ZONE_APIS.contains(scriptParam(body, "DB$"))
+                String api = scriptParam(body, "DB$");
+                if (api != null && VALUE_ZONE_APIS.contains(api)
                         && "Battlefield".equals(scriptParam(body, "Origin$"))
                         && type != null && type.contains("YouCtrl")) return true;
                 svar = scriptParam(body, "SubAbility$");
