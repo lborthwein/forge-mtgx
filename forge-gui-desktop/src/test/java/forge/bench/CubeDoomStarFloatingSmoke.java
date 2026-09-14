@@ -119,6 +119,48 @@ public final class CubeDoomStarFloatingSmoke {
             System.out.println("DOOM_STAR_QUERY "+key+" step="+step+" repeats=3 unchanged=true");
         }catch(ReflectiveOperationException e){throw new AssertionError(e);}
     }
+    public static final class PoolEvents {
+        int count;
+        @com.google.common.eventbus.Subscribe
+        public void mana(forge.game.event.GameEventManaPool event) { count++; }
+    }
+    private static void exactPool(Player player, Object container, List<forge.game.mana.Mana> tokens) {
+        try {
+            var field=forge.game.mana.ManaPool.class.getDeclaredField("floatingMana");field.setAccessible(true);
+            var current=java.util.stream.StreamSupport.stream(player.getManaPool().spliterator(),false).toList();
+            if(field.get(player.getManaPool())!=container||current.size()!=tokens.size())throw new AssertionError("pool container/count changed");
+            for(int i=0;i<tokens.size();i++)if(tokens.get(i)!=current.get(i))throw new AssertionError("pool token identity/order changed");
+        }catch(ReflectiveOperationException e){throw new AssertionError(e);}
+    }
+    private static PoolEvents poolBoundary(Player player,String key) {
+        try {
+            var field=forge.game.mana.ManaPool.class.getDeclaredField("floatingMana");field.setAccessible(true);
+            var pool=player.getManaPool();Object original=field.get(pool),before=nativeSnapshot(player);
+            var tokens=java.util.stream.StreamSupport.stream(pool.spliterator(),false).toList();
+            if(tokens.isEmpty())throw new AssertionError("declared pool required");
+            PoolEvents events=new PoolEvents();player.getGame().subscribeToEvents(events);
+            RuntimeException sentinel=new RuntimeException("registered probe unwind");
+            forge.ai.CubeComboAi.probePayment(player,()->{
+                if(!pool.removeMana(tokens.get(0)))throw new AssertionError("probe did not remove token");
+                pool.addMana(tokens.get(0));
+                Object outer;
+                try{outer=field.get(pool);}catch(ReflectiveOperationException e){throw new AssertionError(e);}
+                var outerTokens=java.util.stream.StreamSupport.stream(pool.spliterator(),false).toList();
+                try{forge.ai.CubeComboAi.probePayment(player,()->{pool.removeMana(tokens.get(0));throw sentinel;});throw new AssertionError("exception lost");}
+                catch(RuntimeException e){if(e!=sentinel)throw e;}
+                exactPool(player,outer,outerTokens);
+                if(!forge.ai.CubeComboAi.isPaymentProbeFor(player))throw new AssertionError("outer probe flag lost");
+                return true;
+            });
+            exactPool(player,original,tokens);
+            try{forge.ai.CubeComboAi.probePayment(player,()->{pool.removeMana(tokens.get(0));throw sentinel;});throw new AssertionError("outer exception lost");}
+            catch(RuntimeException e){if(e!=sentinel)throw e;}
+            exactPool(player,original,tokens);
+            if(forge.ai.CubeComboAi.isPaymentProbeFor(player)||events.count!=0||!before.equals(nativeSnapshot(player)))throw new AssertionError("probe unwind leaked state/events");
+            System.out.println("DOOM_STAR_POOL_BOUNDARY "+key+" nested=true exceptional=true container=true tokenIdentity=true order=true unchanged=true events=0");
+            return events;
+        }catch(ReflectiveOperationException e){throw new AssertionError(e);}
+    }
     private static void run(String arm,boolean observed,int seat,String control){
         List<RegisteredPlayer> entries=new ArrayList<>();for(int s=0;s<2;s++){forge.LobbyPlayer lobby=s==seat?new forge.ai.LobbyPlayerCubeComboAi("Candidate-"+s):new forge.ai.LobbyPlayerAi("Default-"+s,null);entries.add(new RegisteredPlayer(deck(s==seat,control)).setPlayer(lobby));}
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);Game game=new Match(rules,entries,"Doom Star diagnostic").createGame();Player p=game.getPlayers().get(seat),op=game.getPlayers().get(1-seat);p.setLife(control.equals("life-one")?1:control.endsWith("life-two")||control.equals("life-two")?2:5,null);op.setLife(20,null);populate(p,true,control);populate(op,false,control);game.setAge(GameStage.Play);int start=seat==0?1:2;game.getPhaseHandler().setupFirstTurn(seat==0?p:op,()->game.getPhaseHandler().devModeSet(PhaseType.MAIN1,p,start));game.getAction().checkStateEffects(true);game.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(989900L+seat*100L+CASES.indexOf(control));String key="arm="+arm+" seat="+seat+" case="+control;
@@ -142,7 +184,9 @@ public final class CubeDoomStarFloatingSmoke {
         if(p.getManaPool().totalMana()!=colors.size())throw new AssertionError("prepared floating count");
         System.out.println("DOOM_STAR_FLOATING "+key+" declared=true initialLife="+p.getLife()+" mana="+colors.toString().replace(" ","")+" count="+colors.size()+" landsPlayed="+p.getLandsPlayedThisTurn());
         System.out.println("DOOM_STAR_FIXTURE "+key+" registered=40 observed="+observed+" policy="+forge.ai.CubeComboAi.VERSION);
+        PoolEvents poolEvents=observed?poolBoundary(p,key):null;
         int steps=0;Set<Integer> seen=new HashSet<>();while(!game.isGameOver()&&game.getPhaseHandler().getTurn()<=start&&steps<1000){if(observed){ownership(p,key,steps);observe(p,key,steps);}game.getPhaseHandler().mainLoopStep();steps++;for(var entry:game.getStack())if(seen.add(entry.getId())){var a=entry.getSpellAbility();if(a.getActivatingPlayer()==p)System.out.println("DOOM_STAR_STACK "+key+" step="+steps+" source="+a.getHostCard().getName().replace(' ','_')+" api="+a.getApi()+" spell="+a.isSpell()+" copied="+a.isCopied());}}
+        if(poolEvents!=null){if(p.hasWon()&&poolEvents.count==0)throw new AssertionError("actual payment events suppressed");System.out.println("DOOM_STAR_REAL_POOL_EVENTS "+key+" count="+poolEvents.count+" won="+p.hasWon());}
         if(steps>=1000)throw new AssertionError("step cap");System.out.println("DOOM_STAR_RESULT "+key+" won="+p.hasWon()+" gameOver="+game.isGameOver()+" steps="+steps+" life="+p.getLife()+" library="+p.getCardsIn(ZoneType.Library).size()+" oracleInPlay="+p.getCardsIn(ZoneType.Battlefield).stream().anyMatch(c->c.getName().equals("Thassa's Oracle"))+" scriptPlays="+0+" searches="+0);
     }
     public static void main(String[] args){try{GuiBase.setInterface((IGuiBase)Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),new Class<?>[]{IGuiBase.class},(proxy,method,values)->switch(method.getName()){case "getAssetsDir"->args[0]+"/forge-gui/";case "isRunningOnDesktop","isLibgdxPort","isGuiThread","hasNetGame"->false;case "getCurrentVersion"->"doom-star-observation-v1";default->throw new AssertionError("Unexpected GUI call "+method.getName());}));FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);for(String c:CASES)for(int seat=0;seat<2;seat++)run(args[1],args[2].equals("observed"),seat,c);System.out.println("DOOM_STAR_SUITE_COMPLETE cases=16");}catch(Throwable failure){failure.printStackTrace();System.exit(1);}}
