@@ -21,7 +21,7 @@ import java.util.*;
 public final class CubeKikiDiscardSmoke {
     private static final List<String> CASES=List.of("twin-conscripts","twin-exarch","twin-pestermite","kiki-conscripts","kiki-restoration","wrong-twin-restoration","missing-source","forced-pair", "no-blue-twin-exarch", "two-red-kiki-restoration", "hand-island-twin-exarch", "hand-mountain-kiki-restoration", "field-body-twin-exarch", "field-body-kiki-restoration", "field-engine-kiki-conscripts", "both-field-kiki-conscripts", "duplicate-twin-conscripts", "shroud-field-body-twin-exarch");
     private static boolean nativeBlink;
-    private static final List<String> BLINK_CASES=List.of("blink-risk","blink-zero-expendable","blink-enough","blink-mandatory","blink-other-actor","blink-no-kiki","blink-no-pyro","blink-alternative","blink-shroud-pyro","blink-phased-pyro","blink-facedown-kiki","blink-wrong-shape");
+    private static final List<String> BLINK_CASES=List.of("blink-risk","blink-zero-expendable","blink-enough","blink-mandatory","blink-other-actor","blink-no-kiki","blink-no-pyro","blink-alternative","blink-shroud-pyro","blink-phased-pyro","blink-facedown-kiki","blink-wrong-shape","blink-mandatory-risk","blink-mandatory-alternative");
     private static final List<ZoneType> ZONES=List.of(ZoneType.Battlefield,ZoneType.Hand,ZoneType.Library,ZoneType.Graveyard,ZoneType.Exile);
     private record Placement(String name,ZoneType zone) {}
     private static String source(String key){return key.contains("kiki-")?"Kiki-Jiki, Mirror Breaker":key.equals("missing-source")?"Mountain":"Splinter Twin";}
@@ -36,7 +36,7 @@ public final class CubeKikiDiscardSmoke {
             if(!key.equals("blink-no-kiki"))out.add(new Placement("Kiki-Jiki, Mirror Breaker",ZoneType.Hand));
             if(!key.equals("blink-zero-expendable"))out.add(new Placement("Forest",ZoneType.Hand));
             if(key.equals("blink-enough"))out.add(new Placement("Forest",ZoneType.Hand));
-            if(key.equals("blink-alternative"))out.add(new Placement("Wall of Omens",ZoneType.Battlefield));
+            if(key.contains("alternative"))out.add(new Placement("Wall of Omens",ZoneType.Battlefield));
             while(out.size()<40)out.add(new Placement("Forest",ZoneType.Library));return out;
         }
         if(own){for(int i=0;i<3;i++)out.add(new Placement(i==2&&(key.contains("two-red")||key.contains("hand-mountain"))?"Forest":"Mountain",ZoneType.Battlefield));out.add(new Placement(key.contains("no-blue")||key.contains("hand-island")?"Forest":"Island",ZoneType.Battlefield));out.add(new Placement("Plains",ZoneType.Battlefield));out.add(new Placement("Seasoned Pyromancer",ZoneType.Hand));out.add(new Placement(source(key),key.contains("field-engine")||key.contains("both-field")?ZoneType.Battlefield:ZoneType.Hand));out.add(new Placement(partner(key),key.contains("field-body")||key.contains("both-field")?ZoneType.Battlefield:ZoneType.Hand));if(key.contains("hand-island"))out.add(new Placement("Island",ZoneType.Hand));if(key.contains("hand-mountain"))out.add(new Placement("Mountain",ZoneType.Hand));if(key.contains("duplicate"))out.add(new Placement(source(key),ZoneType.Hand));if(!key.equals("forced-pair")){out.add(new Placement("Inti, Seneschal of the Sun",ZoneType.Hand));out.add(new Placement("Orcish Lumberjack",ZoneType.Hand));}}
@@ -117,6 +117,7 @@ public final class CubeKikiDiscardSmoke {
         }
         if(nativeBlink)for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Restoration Angel"))angel=c;
         if(control.equals("blink-facedown-kiki"))for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Kiki-Jiki, Mirror Breaker"))c.turnFaceDown(true);
+        if(nativeBlink&&control.startsWith("blink-mandatory-"))for(var trigger:Objects.requireNonNull(angel).getTriggers())trigger.removeParam("OptionalDecider");
         g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();
         if(nativeBlink) {
             BenchRandomAudit.install(997100L+100L*seat+BLINK_CASES.indexOf(control));
@@ -125,15 +126,23 @@ public final class CubeKikiDiscardSmoke {
             var cast=Objects.requireNonNull(angel).getFirstSpellAbility();cast.setActivatingPlayer(p);
             System.out.println("KIKI_BLINK_NATIVE_FIXTURE "+key+" registered=40 scriptedInitiatingCasts=1");
             if(!forge.ai.CubeComboAi.canPlayNative(cast,p)||!forge.ai.ComputerUtil.handlePlayingSpellAbility(p,cast,null,a->new forge.ai.AiCostDecision(p,a,false))||cast.getPayingMana().size()!=4)throw new AssertionError("native Restoration cast/payment");
-            int steps=0;
+            int steps=0;boolean mandatoryReceipt=false;
             while(!g.isGameOver()&&steps<400) {
                 g.getPhaseHandler().mainLoopStep();steps++;
+                for(var item:g.getStack()) {
+                    var a=item.getSpellAbility();
+                    if(!a.isSpell()&&a.getHostCard().getName().equals("Restoration Angel")&&a.getApi()==forge.game.ability.ApiType.ChangeZone&&control.startsWith("blink-mandatory-")) {
+                        if(a.isOptionalTrigger())throw new AssertionError("mandatory fixture retained optional flag");
+                        mandatoryReceipt=true;
+                    }
+                }
                 if(names(p,ZoneType.Battlefield).contains("Restoration Angel")&&g.getStack().isEmpty()&&!g.getStack().hasSimultaneousStackEntries())break;
             }
             boolean kept=names(p,ZoneType.Hand).contains("Kiki-Jiki, Mirror Breaker");
             System.out.println("KIKI_BLINK_NATIVE_RESULT "+key+" keptKiki="+kept+" paidMana=4 steps="+steps+" blinked="+events.blinked.toString().replace(' ','_')+" discarded="+events.discarded.toString().replace(' ','_')+" drawn="+events.drawn.size());
             if(steps>=400)throw new AssertionError("native blink step cap");
-            if(arm.equals("improved")&&!control.equals("blink-no-kiki")&&!kept)throw new AssertionError("native blink discarded Kiki "+key);
+            if(control.startsWith("blink-mandatory-")&&(!mandatoryReceipt||kept))throw new AssertionError("mandatory native trigger control");
+            if(arm.equals("improved")&&!control.equals("blink-no-kiki")&&!control.startsWith("blink-mandatory-")&&!kept)throw new AssertionError("native blink discarded Kiki "+key);
             return;
         }
         var effect=forge.game.ability.AbilityFactory.getAbility(Objects.requireNonNull(angel).getSVar("RestorationExile"),angel);
@@ -143,7 +152,7 @@ public final class CubeKikiDiscardSmoke {
         var before=observationState(p);var actor=effect.getActivatingPlayer();var targets=effect.getTargets();String targetText=targets.toString();
         boolean expected=arm.equals("improved")&&Set.of("blink-risk","blink-zero-expendable").contains(control);
         for(int i=0;i<3;i++) {
-            boolean actual=forge.ai.CubeComboAi.declineDestructiveComboBlink(p,effect,control.equals("blink-mandatory"));
+            boolean actual=forge.ai.CubeComboAi.declineDestructiveComboBlink(p,effect,control.startsWith("blink-mandatory"));
             if(actual!=expected)throw new AssertionError("blink boundary "+control+" expected="+expected+" actual="+actual);
             if(!before.equals(observationState(p))||actor!=effect.getActivatingPlayer()||targets!=effect.getTargets()||!targetText.equals(targets.toString()))throw new AssertionError("blink query mutation "+control);
         }
@@ -188,12 +197,12 @@ public final class CubeKikiDiscardSmoke {
             nativeBlink=args.length>2&&args[2].equals("blink-native");
             Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String c:BLINK_CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);
             if(nativeBlink) {
-                for(String c:List.of("blink-risk","blink-enough","blink-alternative","blink-no-kiki","blink-shroud-pyro"))for(int seat=0;seat<2;seat++)blinkBoundary(args[1],seat,c);
-                System.out.println("KIKI_BLINK_NATIVE_COMPLETE cases=10");return;
+                for(String c:List.of("blink-risk","blink-enough","blink-alternative","blink-no-kiki","blink-shroud-pyro","blink-mandatory-risk","blink-mandatory-alternative"))for(int seat=0;seat<2;seat++)blinkBoundary(args[1],seat,c);
+                System.out.println("KIKI_BLINK_NATIVE_COMPLETE cases=14");return;
             }
             if(args.length>2&&args[2].equals("blink-boundaries")) {
                 for(String c:BLINK_CASES)for(int seat=0;seat<2;seat++)blinkBoundary(args[1],seat,c);
-                System.out.println("KIKI_BLINK_BOUNDARY_COMPLETE cases=24");return;
+                System.out.println("KIKI_BLINK_BOUNDARY_COMPLETE cases=28");return;
             }
             boolean continuation=args.length>2&&args[2].equals("continue");
             List<String> selected=continuation?List.of("twin-conscripts","twin-exarch","kiki-restoration","shroud-field-body-twin-exarch"):CASES;
