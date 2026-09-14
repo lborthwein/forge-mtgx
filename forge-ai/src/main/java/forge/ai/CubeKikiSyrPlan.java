@@ -144,19 +144,26 @@ final class CubeKikiSyrPlan {
     }
     private boolean cloneEvent(SpellAbility a){
         if(!active||failed||!window()||pendingApi!=ApiType.CopyPermanent||!activeStack()||!player.getGame().getStack().isResolving()
-                ||a==null||a.getApi()!=ApiType.Clone||!a.isReplacementAbility()||a.isCopied()
+                ||a==null||a.getApi()!=ApiType.Clone||!a.isReplacementAbility()||a.isCopied()||a.isWrapper()
+                ||a.getRootAbility()!=a||a.getSubAbility()!=null||!a.getMapParams().equals(a.getOriginalMapParams())
+                ||a.getReplacementEffect()==null||a.getReplacementEffect().getOverridingAbility()!=a
                 ||a.getActivatingPlayer()!=null&&a.getActivatingPlayer()!=player||!current(kiki,kikiStamp)||!current(meta,metaStamp))return false;
-        Card host=a.getHostCard();return host!=null&&host.isToken()&&host.getOwner()==player&&host.getController()==player
+        Card host=a.getHostCard();
+        if(host==null||a.getReplacementEffect().getHostCard()!=host)return false;
+        boolean attached=false;for(var re:host.getReplacementEffects())if(re==a.getReplacementEffect())attached=true;
+        return attached&&host.isToken()&&host.getOwner()==player&&host.getController()==player
                 &&host.getName().equals(META)&&host.getId()!=meta.getId()&&!host.isInZone(ZoneType.Battlefield)
                 &&pending.getTargets().size()==1&&pending.getTargetCard()==meta;
     }
     boolean confirmClone(SpellAbility a){return cloneEvent(a);}
     <T extends GameEntity>T choose(FCollectionView<T> options,SpellAbility a){
-        if(cloneEvent(a)&&!cloneChosen){
+        if(cloneEvent(a)&&(!cloneChosen||newToken==a.getHostCard().getId())){
             for(T e:options)if(e==kiki){newToken=a.getHostCard().getId();cloneChosen=true;return e;}
         }
-        if(active&&!failed&&window()&&pendingApi==ApiType.CopyPermanent&&cloneChosen&&!legendChosen&&a!=null
-                &&a.getApi()==ApiType.InternalLegendaryRule&&a.getActivatingPlayer()==player&&current(kiki,kikiStamp)){
+        if(active&&!failed&&window()&&pendingApi==ApiType.CopyPermanent&&cloneChosen&&a!=null
+                &&a.getApi()==ApiType.InternalLegendaryRule&&a instanceof SpellAbility.EmptySa&&!a.isCopied()&&!a.isWrapper()
+                &&a.getRootAbility()==a&&a.getSubAbility()==null&&a.getHostCard()!=null&&a.getHostCard().getId()==-1
+                &&a.getActivatingPlayer()==player&&current(kiki,kikiStamp)){
             T next=null;boolean old=false;
             for(T e:options){
                 if(e==kiki)old=true;
