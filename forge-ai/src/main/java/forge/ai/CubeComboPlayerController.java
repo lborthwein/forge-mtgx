@@ -20,6 +20,7 @@ public class CubeComboPlayerController extends PlayerControllerAi {
     private final CubeFastbondPlan fastbondPlan;
     private final CubeKikiSyrPlan kikiSyrPlan;
     private final CubeDoomsdayPlan doomsdayPlan;
+    private final CubeTamiyoPlan tamiyoPlan;
     private final CubeBreachPlan breachPlan;
     private final CubeStormPlan stormPlan;
     private final CubeEmryPlan emryPlan;
@@ -82,6 +83,7 @@ public class CubeComboPlayerController extends PlayerControllerAi {
         fastbondPlan = new CubeFastbondPlan(player);
         kikiSyrPlan = new CubeKikiSyrPlan(player);
         doomsdayPlan = new CubeDoomsdayPlan(player);
+        tamiyoPlan = new CubeTamiyoPlan(player);
         breachPlan = new CubeBreachPlan(player);
         stormPlan = new CubeStormPlan(player);
         emryPlan = new CubeEmryPlan(player);
@@ -98,7 +100,7 @@ public class CubeComboPlayerController extends PlayerControllerAi {
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         planAction = null;
-        if (kikiSyrPlan.waitingForOwnSpell() || fastbondPlan.waitingForOwnSpell() || topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
+        if (tamiyoPlan.waitingForOwnSpell() || kikiSyrPlan.waitingForOwnSpell() || fastbondPlan.waitingForOwnSpell() || topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
@@ -130,6 +132,7 @@ public class CubeComboPlayerController extends PlayerControllerAi {
         if (action == null && (action = emryPlan.nextAction()) != null) plan = "emry";
         if (action == null && (action = fastbondPlan.nextAction()) != null) plan = "fastbond";
         if (action == null && (action = kikiSyrPlan.nextAction()) != null) plan = "kiki-syr";
+        if (action == null && (action = tamiyoPlan.nextAction()) != null) plan = "tamiyo";
         if (action == null) {
             tutorConsulted = true;
             tutorPlan = CubeComboAi.planTutor(getPlayer());
@@ -296,6 +299,7 @@ public class CubeComboPlayerController extends PlayerControllerAi {
             tutorPlan = null;
             return played;
         }
+        if (tamiyoPlan.owns(ability)) return tamiyoPlan.play(ability);
         if (kikiSyrPlan.owns(ability)) return kikiSyrPlan.play(ability);
         if (fastbondPlan.owns(ability)) return fastbondPlan.play(ability);
         if (doomsdayPlan.ownsStarAction(ability)) return doomsdayPlan.playStarAction(ability);
@@ -326,11 +330,16 @@ public class CubeComboPlayerController extends PlayerControllerAi {
     }
 
     @Override
-    public boolean chooseTargetsFor(SpellAbility ability) {
-        return emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
+    public void orderAndPlaySimultaneousSa(List<SpellAbility> abilities) {
+        tamiyoPlan.withTriggers(abilities, () -> super.orderAndPlaySimultaneousSa(abilities));
     }
 
-    public boolean chooseKittenBlink(SpellAbility ability) { return emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability); }
+    @Override
+    public boolean chooseTargetsFor(SpellAbility ability) {
+        return tamiyoPlan.chooseBlink(ability) || emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || super.chooseTargetsFor(ability);
+    }
+
+    public boolean chooseKittenBlink(SpellAbility ability) { return tamiyoPlan.chooseBlink(ability) || emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability); }
 
     @Override
     public <T extends forge.game.GameEntity> T chooseSingleEntityForEffect(forge.util.collect.FCollectionView<T> options,
