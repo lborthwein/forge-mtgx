@@ -125,6 +125,7 @@ public final class CubeFastbondAdverseSmoke {
         }
         boolean expected=arm.equals("improved")&&Set.of("crucible","multiple-lands","grave-start").contains(control);
         if(p.hasWon()!=expected)throw new AssertionError("adverse native win expectation "+key+" expected="+expected);
+        if(arm.equals("improved")&&control.equals("grave-low-life-used")&&(p.getLife()!=1||events.landPlays!=0||g.isGameOver()))throw new AssertionError("lethal ordinary replay escaped converter guard");
         if(steps>=2000)throw new AssertionError("step cap");
         System.out.println("FASTBOND_RESULT "+key+" won="+p.hasWon()+" gameOver="+g.isGameOver()+" life="+p.getLife()+" steps="+steps+" landToGrave="+events.sacrifices+" graveReturns="+events.returns+" paidOrbActivations="+events.paidOrbActivations+" nativeLandPlays="+events.landPlays+" lifeGainEvents="+events.gainEvents+" lifeLossEvents="+events.lossEvents+" scriptActions=0");
     }

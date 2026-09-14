@@ -121,6 +121,9 @@ final class CubeFastbondPlan {
             landStamp = land.getGameTimestamp(); active = true;
         }
         if (actions >= 180 || !board() || !domain() || land.getGameTimestamp() != landStamp) return stop();
+        // A shot selected as lethal has no profitable resource continuation
+        // if the game is still live after its stack entry disappears.
+        if (pending != null && pending.getApi() == ApiType.DealDamage) return stop();
         if (pending != null || replayPending) {
             if (player.getLife() != expectedLife || replayPending && player.getLandsPlayedThisTurn() != landPlays + 1) return stop();
             pending = null; replayPending = false;
@@ -135,6 +138,15 @@ final class CubeFastbondPlan {
         var parts = gain.getPayCosts().getCostParts();
         if (parts.size() != 1 || !(parts.get(0) instanceof CostSacrifice cost) || !"Land".equals(cost.getType()) || cost.getAbilityAmount(gain) != 1) return stop();
         return selected = gain;
+    }
+    boolean lethalFallbackReplay(SpellAbility a) {
+        // This owns only the tracked converter land in the already established
+        // complete-board domain. Other ordinary land decisions are untouched.
+        return active && window() && player.getGame().getStack().isEmpty() && board() && domain()
+                && player.getLife() == 1 && player.getLandsPlayedThisTurn() > 0
+                && a != null && a.isLandAbility() && a.getActivatingPlayer() == player
+                && a.getHostCard() == land && current(land, ZoneType.Graveyard)
+                && land.getGameTimestamp() == landStamp;
     }
     boolean owns(SpellAbility a) { return a != null && a == selected; }
     boolean play(SpellAbility a) {

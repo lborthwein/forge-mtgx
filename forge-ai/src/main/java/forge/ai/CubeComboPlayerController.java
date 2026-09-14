@@ -137,6 +137,12 @@ public final class CubeComboPlayerController extends PlayerControllerAi {
         }
         if (action == null && (action = topTutorPlan.nextAction()) != null) plan = "top-tutor";
         List<SpellAbility> chosen = action == null ? super.chooseSpellAbilityToPlay() : List.of(action);
+        if (action == null && chosen != null && chosen.stream().anyMatch(fastbondPlan::lethalFallbackReplay)) {
+            List<SpellAbility> safe = new ArrayList<>();
+            for (SpellAbility a : chosen) if (!fastbondPlan.lethalFallbackReplay(a)) safe.add(a);
+            System.err.println("CUBE_FASTBOND_PLAN declined-lethal-ordinary-replay");
+            chosen = safe.isEmpty() ? null : safe;
+        }
         planAction = action;
         logDecision(plan, action, chosen, tutorConsulted);
         return chosen;
