@@ -37,6 +37,8 @@ public final class CubeKikiSyrCallbackSmoke {
             boolean legend=a.getApi()==forge.game.ability.ApiType.InternalLegendaryRule;
             if(!tested&&(control.startsWith("clone-")&&clone||control.startsWith("legend-")&&legend)){
                 tested=true;
+                if(clone){var re=a.getReplacementEffect();boolean attached=false;if(re!=null)for(var x:a.getHostCard().getReplacementEffects())if(x==re)attached=true;
+                    System.out.println("KIKI_SYR_CALLBACK_NATIVE rootSelf="+(a.getRootAbility()==a)+" sub="+(a.getSubAbility()!=null)+" mapsEqual="+a.getMapParams().equals(a.getOriginalMapParams())+" overridingSelf="+(re!=null&&re.getOverridingAbility()==a)+" replacementHostSame="+(re!=null&&re.getHostCard()==a.getHostCard())+" attached="+attached+" params="+a.getMapParams()+" original="+a.getOriginalMapParams());}
                 try{
                     var candidate=a;var offered=new forge.util.collect.FCollection<T>();for(T e:options)offered.add(e);
                     Player actor=a.getActivatingPlayer();Card host=a.getHostCard();boolean copied=a.isCopied();var sub=a.getSubAbility();Map<String,String> original=new HashMap<>(a.getMapParams());
