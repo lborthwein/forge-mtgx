@@ -78,7 +78,7 @@ public final class ControllerSurfaceSmoke {
                     if (method.getBody() != null) new TreeScanner<Void, Void>() {
                         @Override public Void visitMethodInvocation(MethodInvocationTree call, Void ignored) {
                             String name = call.getMethodSelect().toString();
-                            if ((name.equals("count") || name.endsWith(".beginCall") || name.equals("beginCall"))
+                            if ((name.equals("count") || name.equals("stockCall") || name.endsWith(".beginCall") || name.equals("beginCall"))
                                     && !call.getArguments().isEmpty() && call.getArguments().get(0) instanceof LiteralTree literal
                                     && literal.getValue() instanceof String value) counts.add(value);
                             return super.visitMethodInvocation(call, ignored);
@@ -154,6 +154,10 @@ public final class ControllerSurfaceSmoke {
         var lost = new TreeMap<>(bridge); lost.put("chooseBinary(SpellAbility,String,BinaryChoiceType,Map)", new SourceMethod("", Set.of()));
         try { validate(surface, lost); throw new IllegalStateException("Mutation escaped"); }
         catch (AssertionError expected) { System.out.println("PASS removing one overload's count is detected"); }
+        var lostStock = new TreeMap<>(bridge);
+        lostStock.put("acceptsDrawOffer()", new SourceMethod("", Set.of()));
+        try { validate(surface, lostStock); throw new IllegalStateException("Stock wrapper mutation escaped"); }
+        catch (AssertionError expected) { System.out.println("PASS removing classified stock wrapper is detected"); }
         var added = new TreeMap<>(surface); added.put("futureChoice()", surface.firstEntry().getValue());
         try { validate(added, bridge); throw new IllegalStateException("Mutation escaped"); }
         catch (AssertionError expected) { System.out.println("PASS new unreviewed API signature is detected"); }

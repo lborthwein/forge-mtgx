@@ -71,6 +71,10 @@ public final class SourceOutputTraitsEngineSmoke {
     private static void execute(Fixture fixture, RulesCostFeasibility.PaymentWitness witness) {
         final RulesPaymentExecutor[] payment = {null};
         fixture.payer().dangerouslySetController(new forge.ai.PlayerControllerAi(fixture.game(), fixture.payer(), fixture.payer().getLobbyPlayer()) {
+            @Override public byte chooseColor(String message, SpellAbility ability, forge.card.ColorSet colors) {
+                if (payment[0] == null) throw new AssertionError("Unexpected color callback");
+                return payment[0].chooseSourceColor(ability, colors);
+            }
             @Override public boolean payManaCost(forge.card.mana.ManaCost cost, forge.game.cost.CostPartMana part, SpellAbility ability,
                     String prompt, forge.game.mana.ManaConversionMatrix matrix, boolean effect) {
                 if (payment[0] == null || matrix != null) throw new AssertionError("Unexpected callback");

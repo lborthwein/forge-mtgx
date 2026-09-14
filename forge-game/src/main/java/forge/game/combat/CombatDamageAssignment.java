@@ -3,7 +3,6 @@ package forge.game.combat;
 import forge.game.GameEntity;
 import forge.game.card.*;
 import forge.game.keyword.Keyword;
-import forge.game.player.Player;
 import forge.game.player.PlayerController;
 import forge.game.zone.ZoneType;
 import java.util.*;

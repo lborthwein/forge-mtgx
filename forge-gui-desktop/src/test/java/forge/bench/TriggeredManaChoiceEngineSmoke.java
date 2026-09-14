@@ -78,6 +78,12 @@ public final class TriggeredManaChoiceEngineSmoke {
             }));
             FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
             for(int seat=0;seat<2;seat++) {
+                var empty = context(seat,"BRIDGE",null);
+                var source = card("Forest",empty);
+                ready(empty);
+                check(empty.game().getStack().isEmpty(),"negative control has no resolving wrapper");
+                reject(() -> new TriggeredManaChoice(empty.actor(),source.getManaAbilities().get(0)),
+                    "missing resolving wrapper fails explicitly without a null-pointer crash");
                 for(String color:List.of("W","U","B","R","G"))check(run(seat,"native",color,"").equals(run(seat,"BRIDGE",color,"")),"native/bridge color receipts equal seat="+seat);
                 for(String fault:List.of("delegate","missing","number","illegal","mutate-source","mutate-amount","mutate-copy"))run(seat,"BRIDGE",fault.equals("illegal")?"C":"G",fault);
             }

@@ -2655,7 +2655,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             activeOptionalManaResolution.finishRepeatedPayments();
         } else payZeroTrigger(effectSA, true);
         counters.instrument("hostTrigger.rulesNoStackExecution");
-        if (effectSA.getApi() == forge.game.ability.ApiType.Mana && activeRulesPayment == null) {
+        // Only an actual color choice belongs to the queued-trigger host
+        // choice scope. Fixed-color mana triggers (e.g. Wild Growth) resolve
+        // natively and may run immediately with an empty ordinary stack.
+        if (effectSA.getApi() == forge.game.ability.ApiType.Mana && activeRulesPayment == null
+                && effectSA.getManaPart() != null && "Any".equals(effectSA.getManaPart().getOrigProduced())) {
             var previous = activeTriggeredManaChoice;
             try (var scope = new TriggeredManaChoice(getPlayer(), effectSA)) {
                 activeTriggeredManaChoice = scope;

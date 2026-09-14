@@ -125,7 +125,7 @@ public final class SourceLifePaymentEngineSmoke {
             "unpayable painful source does not hide a free legal mana source");
     }
     private static void distinctUnsupported() {
-        for (String name : List.of("City of Brass", "Ancient Tomb")) {
+        for (String name : List.of("Ancient Tomb")) {
             var game = game(); var player = game.getPlayers().get(0);
             card(name, player, ZoneType.Battlefield); var ability = spell(player, "Sol Ring");
             game.getAction().checkStateEffects(true);
@@ -200,6 +200,10 @@ public final class SourceLifePaymentEngineSmoke {
             execute("Mana Confluence", 1); execute("Myr Convert", 2);
             execute("Silent Clearing", 1); execute("Horizon Canopy", 1);
             execute("Mana Confluence", 1, 1);
+            // City damage is a queued trigger, not a life cost paid during the
+            // mana ability. The current domain admits it without inventing life
+            // payment; actual trigger execution is checked by trigger fixtures.
+            execute("City of Brass", 0);
             aggregate(); skipAndZero(); distinctUnsupported(); replacements(); production();
             System.out.println("PASS all " + checks + " source-life checks; development only"); System.exit(0);
         } catch (Throwable error) { error.printStackTrace(); System.exit(1); }

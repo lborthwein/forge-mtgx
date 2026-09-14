@@ -26,7 +26,8 @@ final class TriggeredManaChoice implements AutoCloseable {
 
     TriggeredManaChoice(Player actor, SpellAbility ability) {
         this.actor=actor; this.ability=ability; source=ability.getHostCard(); timestamp=source.getGameTimestamp();
-        if (!(actor.getGame().getStack().peekAbility() instanceof WrappedAbility actual))
+        if (actor.getGame().getStack().isEmpty()
+                || !(actor.getGame().getStack().peekAbility() instanceof WrappedAbility actual))
             throw unsupported("not a native resolving wrapper");
         wrapper=actual; params=Map.copyOf(ability.getMapParams()); producer=ability.getManaPart();
         require();
@@ -37,7 +38,8 @@ final class TriggeredManaChoice implements AutoCloseable {
             throw unsupported("unrepresented mana production definition");
     }
     private void require() {
-        if (closed || !actor.getGame().getStack().isResolving() || actor.getGame().getStack().peekAbility()!=wrapper
+        if (closed || !actor.getGame().getStack().isResolving() || actor.getGame().getStack().isEmpty()
+                || actor.getGame().getStack().peekAbility()!=wrapper
                 || wrapper.getWrappedAbility()!=ability || wrapper.getTrigger()!=ability.getTrigger()
                 || wrapper.getHostCard()!=source || source.getGameTimestamp()!=timestamp
                 || source.getController()!=actor || !source.isInZone(ZoneType.Battlefield)
