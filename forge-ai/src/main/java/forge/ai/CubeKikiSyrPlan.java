@@ -32,7 +32,7 @@ final class CubeKikiSyrPlan {
     private boolean current(Card c,long stamp){return c!=null&&c.getGameTimestamp()==stamp&&c==player.getGame().getCardState(c,null)
             &&c.isInZone(ZoneType.Battlefield)&&c.getController()==player&&c.getOwner()==player&&!c.isFaceDown()&&!c.isPhasedOut();}
     private Card find(String name){for(Card c:player.getCardsIn(ZoneType.Battlefield))if(c.getName().equals(name)&&current(c,c.getGameTimestamp()))return c;return null;}
-    private SpellAbility stop(){failed=true;selected=null;return null;}
+    private SpellAbility stop(){System.err.println("CUBE_KIKI_SYR_PLAN stopped stage="+pendingApi+" token="+newToken+" cloned="+cloneChosen+" legend="+legendChosen);failed=true;selected=null;return null;}
     private boolean window(){return player.getGame().getPhaseHandler().getTurn()==turn&&player.getGame().getPhaseHandler().is(PhaseType.MAIN1,player);}
     private boolean payable(SpellAbility a){return a!=null&&CubeComboAi.canPlayNative(a,player)&&CubeComboAi.canPayCost(a,player,false);}
     private SpellAbility ability(Card c,ApiType api,Card target){
@@ -59,7 +59,7 @@ final class CubeKikiSyrPlan {
         for(int i=0;i<selectedTargets.size();i++)if(a.getTargets().get(i)!=selectedTargets.get(i))return false;
         return true;
     }
-    private boolean stable(){return current(meta,metaStamp)&&meta.getName().equals(META)&&!meta.isLegendary()&&meta.getNetToughness()>0
+    private boolean stable(){return current(meta,metaStamp)&&meta.getName().equals(META)&&!meta.getType().isLegendary()&&meta.getNetToughness()>0
             &&current(outlet,outletStamp)&&outlet.getName().equals(SHOT)&&!player.cantWin()&&player.getLife()>0;}
     private boolean activeStack(){
         if(pending==null)return false;
@@ -93,7 +93,7 @@ final class CubeKikiSyrPlan {
         }
         if(!active){
             meta=find(META);syr=find(SYR);outlet=find(SHOT);kiki=find(KIKI);
-            if(meta==null||syr==null||outlet==null||kiki==null||meta.isLegendary()||meta.getNetToughness()<=0||!player.canGainLife())return null;
+            if(meta==null||syr==null||outlet==null||kiki==null||meta.getType().isLegendary()||meta.getNetToughness()<=0||!player.canGainLife())return null;
             metaStamp=meta.getGameTimestamp();syrStamp=syr.getGameTimestamp();outletStamp=outlet.getGameTimestamp();kikiStamp=kiki.getGameTimestamp();
             if(!stable()||ability(syr,ApiType.GainLife,null)==null)return null;
             active=true;
@@ -119,7 +119,7 @@ final class CubeKikiSyrPlan {
         }
         if(pending==null){stop();return false;}
         if(pendingApi==ApiType.GainLife){
-            var paid=a.getPaidList("Sacrificed");if(paid.size()!=1||paid.get(0).getId()!=syr.getId()||paid.get(0).getNetPower()!=gainPower||a.getPayingMana().size()!=2){stop();return false;}
+            java.util.List<Card> paid=new java.util.ArrayList<>();a.getPaidList("Sacrificed").forEach(paid::add);if(paid.size()!=1||paid.get(0).getId()!=syr.getId()||paid.get(0).getNetPower()!=gainPower||a.getPayingMana().size()!=2){stop();return false;}
         }
         selected=null;System.err.println("CUBE_KIKI_SYR_PLAN played action="+actions+" source="+a.getHostCard().getName().replace(' ','_')+" api="+pendingApi);return true;
     }
