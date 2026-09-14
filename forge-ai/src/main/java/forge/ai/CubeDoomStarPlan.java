@@ -23,6 +23,7 @@ import java.util.function.BooleanSupplier;
 final class CubeDoomStarPlan {
     private final Player player;
     private SpellAbility selected, pendingDoom, paying;
+    private List<Card> chosenPile = List.of();
     private List<CubeDoomStarResources.Payment> currentCost;
     private List<CubeDoomStarResources.Payment> payments;
     private Card star, doom, land, oracleSnapshot;
@@ -38,6 +39,7 @@ final class CubeDoomStarPlan {
     private void reset() {
         active = failed = searched = ordered = filterPaid = false;
         selected = pendingDoom = paying = null; currentCost = null; star = doom = land = oracleSnapshot = null;
+        chosenPile = List.of();
         payments = null; oracleId = -1; step = 0;
         turn = player.getGame().getPhaseHandler().getTurn();
     }
@@ -253,17 +255,36 @@ final class CubeDoomStarPlan {
             if (member == source) return true;
         return false;
     }
+    private boolean canonicalSearchCard(Card card) {
+        return card != null && card.getOwner() == player
+                && player.getGame().getCardState(card, null) == card
+                && (card.isInZone(ZoneType.Library) || card.isInZone(ZoneType.Graveyard));
+    }
     Card choose(CardCollection choices) {
-        for (Card c : choices) if (c.getOwner() != player || player.getGame().getCardState(c, null) != c) return null;
-        if (!searched) for (Card c : choices) if ("Thassa's Oracle".equals(c.getName())) {
-            searched = true; oracleId = c.getId(); oracleSnapshot = CardCopyService.getLKICopy(c); return c;
-        }
-        return choices.isEmpty() ? null : choices.get(0);
+        if (failed || !active() || chosenPile.size() >= 5) return null;
+        for (Card c : choices) if (!canonicalSearchCard(c)
+                || chosenPile.stream().anyMatch(prior -> prior == c)) { stop(); return null; }
+        Card picked = null;
+        if (!searched) for (Card c : choices) if ("Thassa's Oracle".equals(c.getName())) { picked = c; break; }
+        if (!searched && picked == null) { stop(); return null; }
+        if (picked == null && !choices.isEmpty()) picked = choices.get(0);
+        if (picked == null) { stop(); return null; }
+        if (!searched) { searched = true; oracleId = picked.getId(); oracleSnapshot = CardCopyService.getLKICopy(picked); }
+        var next = new java.util.ArrayList<>(chosenPile); next.add(picked); chosenPile = List.copyOf(next);
+        return picked;
     }
     CardCollectionView order(CardCollectionView cards) {
+        if (failed || !active() || !searched || cards.size() != 5 || chosenPile.size() != 5
+                || cards.stream().anyMatch(c -> !canonicalSearchCard(c)
+                    || chosenPile.stream().noneMatch(picked -> picked == c))
+                || cards.stream().filter(c -> c.getId() == oracleId).count() != 1) {
+            stop(); return cards;
+        }
         CardCollection out = new CardCollection();
         for (Card c : cards) if (c.getId() != oracleId) out.add(c);
-        for (Card c : cards) if (c.getId() == oracleId) { out.add(c); ordered = true; }
+        for (Card c : cards) if (c.getId() == oracleId) out.add(c);
+        ordered = true;
+        System.err.println("CUBE_DOOM_STAR_PILE selected=5 canonical=true exactSelected=true oracleLast=true");
         return out;
     }
     @Subscribe public void shuffled(GameEventShuffle event) { if (active() && event.player().getId() == player.getId()) failed = true; }
