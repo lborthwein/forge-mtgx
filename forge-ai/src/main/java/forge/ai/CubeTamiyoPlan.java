@@ -107,7 +107,16 @@ final class CubeTamiyoPlan {
         for(var original:artifact.getAllPossibleAbilities(player,false,null,true)){var a=original.copy(player);if(a.isSpell()&&!a.isCopied()&&a.getSubAbility()==null&&payable(a))return a;}return null;
     }
     private SpellAbility select(SpellAbility a,Kind k){if(a==null)return stop();selected=a;kind=k;choice=Bound.of(a);return a;}
-    private SpellAbility nativePending(SpellAbility a){for(var e:player.getGame().getStack()){var b=e.getSpellAbility();if(b.getOriginalAbility()==a&&b.getActivatingPlayer()==player&&!b.isCopied()&&b.getHostCard()==a.getHostCard())return b;}return null;}
+    private SpellAbility nativePending(SpellAbility a){
+        if(a==null)return null;
+        for(var e:player.getGame().getStack()){
+            var b=e.getSpellAbility();
+            // Native spell insertion can retain the submitted ability itself;
+            // activated-ability insertion can retain it as the original link.
+            if((b==a||b.getOriginalAbility()==a)&&b.getActivatingPlayer()==player&&!b.isCopied()
+                    &&b.getHostCard()==a.getHostCard())return b;
+        }return null;
+    }
     private boolean pendingCast(){return castOutstanding&&played!=null&&played.isSpell()&&nativePending(played)!=null;}
     SpellAbility nextAction(){
         int now=player.getGame().getPhaseHandler().getTurn();if(now!=turn){turn=now;active=failed=castOutstanding=false;actions=0;selected=played=pending=null;choice=null;triggerChoices.clear();}
