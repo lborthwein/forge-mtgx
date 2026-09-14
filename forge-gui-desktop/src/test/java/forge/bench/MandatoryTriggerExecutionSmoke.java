@@ -214,8 +214,8 @@ public final class MandatoryTriggerExecutionSmoke {
         try { c.controller.playSpellAbilityNoStack(replacement,true);throw new AssertionError("Non-trigger effect borrowed mandatory permission"); }
         catch(RulesCostFeasibility.Unsupported expected) { check(expected.getMessage().contains("not an ordinary owned trigger"),"non-trigger/replacement path explicitly unsupported"); }
     }
-    /** A real engine effect reaches a still-legacy controller callback. Successful
-     * resolution must not conceal that missing policy correspondence. */
+    /** A real engine effect reaches a classified STOCK controller callback.
+     * Successful resolution must not promote that child to host control. */
     private static void unknownNestedEffect(int seat) {
         var c=context(seat,"BRIDGE"); var source=card("Luminarch Aspirant",c);
         StaticData.instance().attemptToLoadCard("Forest");
@@ -225,8 +225,9 @@ public final class MandatoryTriggerExecutionSmoke {
         ability.setActivatingPlayer(c.actor); ability.setTrigger(source.getTriggers().get(0));
         c.controller.playSpellAbilityNoStack(ability,false);
         check(source.isRemembered(hidden),"actual native reveal effect completes with selected hand card");
-        check(bucket(c,"chooseCardsToRevealFromHand","unclassified")==1,"legacy reveal selection retains its missing ownership receipt");
-        check(bucket(c,"playSpellAbilityNoStack","unclassified")==1&&bucket(c,"playSpellAbilityNoStack","rules")==0,"successful native effect cannot certify parent over unknown child");
+        check(bucket(c,"chooseCardsToRevealFromHand","stock")==1
+                &&bucket(c,"chooseCardsToRevealFromHand","unclassified")==0,"inherited reveal selection retains its STOCK ownership receipt");
+        check(bucket(c,"playSpellAbilityNoStack","unclassified")==1&&bucket(c,"playSpellAbilityNoStack","rules")==0,"successful native effect cannot certify parent over STOCK child");
         check(bucket(c,"payManaCost","rules")==1,"known zero-payment child retains independent rules ownership");
         check(c.host.asks==0&&c.game.costPaymentStack.peek()==null,"unknown-child fixture invents no host answer and balances payment stack");
     }
