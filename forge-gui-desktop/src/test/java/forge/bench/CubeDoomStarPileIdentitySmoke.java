@@ -157,10 +157,12 @@ public final class CubeDoomStarPileIdentitySmoke {
                     if(result!=bad||!failed.getBoolean(child)||ordered.getBoolean(child))throw new AssertionError("malformed order accepted "+kind);
                     System.out.println("DOOM_STAR_PILE_BOUNDARY "+key+" kind="+kind+" accepted=false originalOrder=true failed=true");
                 }
-                for(String kind:List.of("same-id-alias","own-wrong-zone","foreign-public","repeat")) {
+                for(String kind:List.of("same-id-alias","own-wrong-zone","foreign-public","repeat","missing-oracle")) {
                     for(var value:saved)value.field().set(value.owner(),value.value());
                     selected.set(child,kind.equals("repeat")?List.of(cards.get(0)):List.of());searched.setBoolean(child,false);failed.setBoolean(child,false);
-                    var bad=new CardCollection();bad.add(kind.equals("repeat")?cards.get(0):kind.equals("same-id-alias")?alias:kind.equals("own-wrong-zone")?own:foreign);
+                    var bad=new CardCollection();
+                    if(kind.equals("missing-oracle")){for(Card c:cards)if(c.getId()!=oracle.getInt(child))bad.add(c);if(bad.size()!=4)throw new AssertionError("missing Oracle control");}
+                    else bad.add(kind.equals("repeat")?cards.get(0):kind.equals("same-id-alias")?alias:kind.equals("own-wrong-zone")?own:foreign);
                     if(parent.choosePileCard(bad)!=null||!failed.getBoolean(child))throw new AssertionError("malformed choice accepted "+kind);
                     System.out.println("DOOM_STAR_CHOICE_BOUNDARY "+key+" kind="+kind+" accepted=false failed=true");
                 }
