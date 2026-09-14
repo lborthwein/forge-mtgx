@@ -4,7 +4,6 @@ import forge.game.cost.*;
 import forge.game.phase.PhaseType;
 import forge.game.player.*;
 import forge.game.spellability.SpellAbility;
-import forge.game.trigger.WrappedAbility;
 import forge.game.zone.ZoneType;
 import forge.gui.GuiBase;
 import forge.gui.interfaces.IGuiBase;

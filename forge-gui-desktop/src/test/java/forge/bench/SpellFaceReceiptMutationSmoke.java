@@ -8,7 +8,6 @@ import forge.game.*;
 import forge.game.card.Card;
 import forge.game.phase.PhaseType;
 import forge.game.player.RegisteredPlayer;
-import forge.game.zone.ZoneType;
 import forge.gui.GuiBase;
 import forge.gui.interfaces.IGuiBase;
 import forge.localinstance.properties.ForgePreferences.FPref;

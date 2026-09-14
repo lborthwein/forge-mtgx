@@ -1,7 +1,6 @@
 package forge.bench;
 
 import forge.game.phase.PhaseType;
-import forge.game.trigger.WrappedAbility;
 import forge.game.zone.ZoneType;
 import forge.gui.GuiBase;
 import forge.gui.interfaces.IGuiBase;

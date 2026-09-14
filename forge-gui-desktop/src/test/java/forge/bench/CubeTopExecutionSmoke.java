@@ -8,7 +8,6 @@ import forge.game.GameStage;
 import forge.game.GameType;
 import forge.game.Match;
 import forge.game.card.Card;
-import forge.item.PaperCard;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.RegisteredPlayer;

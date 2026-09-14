@@ -1,11 +1,9 @@
 package forge.bench;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import forge.StaticData;
 import forge.card.CardStateName;
 import forge.deck.Deck;
-import forge.game.Game;
 import forge.game.GameRules;
 import forge.game.GameStage;
 import forge.game.GameType;
