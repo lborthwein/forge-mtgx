@@ -150,8 +150,14 @@ final class CubeKikiSyrPlan {
                 ||a.getActivatingPlayer()!=null&&a.getActivatingPlayer()!=player||!current(kiki,kikiStamp)||!current(meta,metaStamp))return false;
         Card host=a.getHostCard();
         if(host==null||a.getReplacementEffect().getHostCard()!=host)return false;
-        boolean attached=false;for(var re:host.getReplacementEffects())if(re==a.getReplacementEffect())attached=true;
-        return attached&&host.isToken()&&host.getOwner()==player&&host.getController()==player
+        // ETB replacements can come from native last-known state and be rebound
+        // to this token, so list membership is not their provenance. The actual
+        // move event must be caused by our exact resolving stack activation.
+        Object context=a.getReplacingObject(forge.game.ability.AbilityKey.OriginalParams);
+        if(!(context instanceof Map<?,?> move)||move.get(forge.game.ability.AbilityKey.Cause)!=pending
+                ||move.get(forge.game.ability.AbilityKey.Affected)!=host
+                ||move.get(forge.game.ability.AbilityKey.Destination)!=ZoneType.Battlefield)return false;
+        return host.isToken()&&host.getOwner()==player&&host.getController()==player
                 &&host.getName().equals(META)&&host.getId()!=meta.getId()&&!host.isInZone(ZoneType.Battlefield)
                 &&pending.getTargets().size()==1&&pending.getTargetCard()==meta;
     }
