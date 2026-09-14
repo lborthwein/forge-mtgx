@@ -117,7 +117,7 @@ public final class CubeKikiDiscardSmoke {
         g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();
         var effect=forge.game.ability.AbilityFactory.getAbility(Objects.requireNonNull(angel).getSVar("RestorationExile"),angel);
         effect.setActivatingPlayer(control.equals("blink-other-actor")?op:p);
-        if(control.equals("blink-wrong-shape"))effect.setParam("Destination","Graveyard");
+        if(control.equals("blink-wrong-shape"))effect.putParam("Destination","Graveyard");
         BenchRandomAudit.install(996100L+100L*seat+BLINK_CASES.indexOf(control));
         var before=observationState(p);var actor=effect.getActivatingPlayer();var targets=effect.getTargets();String targetText=targets.toString();
         boolean expected=arm.equals("improved")&&Set.of("blink-risk","blink-zero-expendable").contains(control);
