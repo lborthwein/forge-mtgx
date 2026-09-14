@@ -170,6 +170,24 @@ public final class CubeDoomStarPileIdentitySmoke {
             return true;
         }catch(ReflectiveOperationException e){throw new AssertionError(e);}
     }
+    private static void waitingReceipt(Player player,String key,Set<Integer> seen) {
+        if(player.getGame().getStack().isEmpty())return;
+        var top=player.getGame().getStack().peekAbility();
+        if(top.getActivatingPlayer()!=player||!seen.add(top.getId()))return;
+        try {
+            var parent=((forge.ai.CubeComboPlayerController)player.getController()).doomsdayPlan();
+            var field=parent.getClass().getDeclaredField("starPlan");field.setAccessible(true);Object child=field.get(parent);
+            var waiting=child.getClass().getDeclaredMethod("waiting");waiting.setAccessible(true);
+            Object before=nativeSnapshot(player),beforeListeners=listeners(player.getGame());
+            boolean childWait=(boolean)waiting.invoke(child),parentWait=parent.waitingForOwnSpell();
+            for(int i=0;i<3;i++)if(childWait!=(boolean)waiting.invoke(child)||parentWait!=parent.waitingForOwnSpell())throw new AssertionError("waiting drift");
+            if(!before.equals(nativeSnapshot(player))||!beforeListeners.equals(listeners(player.getGame())))throw new AssertionError("waiting mutation");
+            Card host=top.getHostCard(),current=player.getGame().getCardState(host,null);
+            Object event=top.getTriggeringObject(forge.game.ability.AbilityKey.Card);
+            String eventCard=event instanceof Card c?c.getId()+":"+c.getGameTimestamp():"none";
+            System.out.println("DOOM_STAR_WAIT "+key+" host="+host.getName().replace(' ','_')+" api="+top.getApi()+" spell="+top.isSpell()+" wrapper="+top.isWrapper()+" copied="+top.isCopied()+" hostStamp="+host.getGameTimestamp()+" currentStamp="+(current==null?-1:current.getGameTimestamp())+" trigger="+top.getSourceTrigger()+" currentTriggers="+(current==null?"none":current.getTriggers().stream().map(x->String.valueOf(x.getId())).toList().toString().replace(" ",""))+" eventCard="+eventCard+" child="+childWait+" parent="+parentWait+" unchanged=true");
+        }catch(ReflectiveOperationException e){throw new AssertionError(e);}
+    }
     private static void run(String arm,boolean observed,int seat,String control){
         List<RegisteredPlayer> entries=new ArrayList<>();for(int s=0;s<2;s++){forge.LobbyPlayer lobby=s==seat?new forge.ai.LobbyPlayerCubeComboAi("Candidate-"+s):new forge.ai.LobbyPlayerAi("Default-"+s,null);entries.add(new RegisteredPlayer(deck(s==seat,control)).setPlayer(lobby));}
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);Game game=new Match(rules,entries,"Doom Star diagnostic").createGame();Player p=game.getPlayers().get(seat),op=game.getPlayers().get(1-seat);p.setLife(control.equals("life-one")?1:control.endsWith("life-two")||control.equals("life-two")?2:5,null);op.setLife(20,null);populate(p,true,control);populate(op,false,control);game.setAge(GameStage.Play);int start=seat==0?1:2;game.getPhaseHandler().setupFirstTurn(seat==0?p:op,()->game.getPhaseHandler().devModeSet(PhaseType.MAIN1,p,start));game.getAction().checkStateEffects(true);game.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(990300L+seat*100L+CASES.indexOf(control));String key="arm="+arm+" seat="+seat+" case="+control;
@@ -187,8 +205,8 @@ public final class CubeDoomStarPileIdentitySmoke {
             if(allowed!=expected||!before.equals(nativeSnapshot(p)))throw new AssertionError("public resource domain mismatch");
             System.out.println("DOOM_STAR_PUBLIC_DOMAIN "+key+" allowed="+allowed+" expected="+expected+" unchanged=true");
         }catch(ReflectiveOperationException e){throw new AssertionError(e);}
-        boolean pileProbed=false;
-        int steps=0;Set<Integer> seen=new HashSet<>();while(!game.isGameOver()&&game.getPhaseHandler().getTurn()<=start&&steps<1000){if(observed){if(!pileProbed)pileProbed=pileBoundary(p,key);ownership(p,key,steps);observe(p,key,steps);}game.getPhaseHandler().mainLoopStep();steps++;for(var entry:game.getStack())if(seen.add(entry.getId())){var a=entry.getSpellAbility();if(a.getActivatingPlayer()==p)System.out.println("DOOM_STAR_STACK "+key+" step="+steps+" source="+a.getHostCard().getName().replace(' ','_')+" api="+a.getApi()+" spell="+a.isSpell()+" copied="+a.isCopied());}}
+        boolean pileProbed=false;Set<Integer> waitingSeen=new HashSet<>();
+        int steps=0;Set<Integer> seen=new HashSet<>();while(!game.isGameOver()&&game.getPhaseHandler().getTurn()<=start&&steps<1000){if(observed){waitingReceipt(p,key,waitingSeen);if(!pileProbed)pileProbed=pileBoundary(p,key);ownership(p,key,steps);observe(p,key,steps);}game.getPhaseHandler().mainLoopStep();steps++;for(var entry:game.getStack())if(seen.add(entry.getId())){var a=entry.getSpellAbility();if(a.getActivatingPlayer()==p)System.out.println("DOOM_STAR_STACK "+key+" step="+steps+" source="+a.getHostCard().getName().replace(' ','_')+" api="+a.getApi()+" spell="+a.isSpell()+" copied="+a.isCopied());}}
         if(observed&&!pileProbed)throw new AssertionError("component not reached");
         if(steps>=1000)throw new AssertionError("step cap");System.out.println("DOOM_STAR_RESULT "+key+" won="+p.hasWon()+" gameOver="+game.isGameOver()+" steps="+steps+" life="+p.getLife()+" library="+p.getCardsIn(ZoneType.Library).size()+" oracleInPlay="+p.getCardsIn(ZoneType.Battlefield).stream().anyMatch(c->c.getName().equals("Thassa's Oracle"))+" scriptPlays="+0+" searches="+0);
     }
