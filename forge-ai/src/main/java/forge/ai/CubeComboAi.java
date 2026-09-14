@@ -1288,7 +1288,8 @@ public final class CubeComboAi {
      * Existing sources may untap; at most two own hand lands may be played, and
      * every land used by the forecast is itself reserved. Each source supplies
      * at most one mana per spell, with distinct sources for repeated pips.
-     * No native payment, ability copying, choices, RNG or hidden zones are read.
+     * No native payment, choices, RNG or hidden zones are read. Target checks
+     * use a detached ability copy with our player as activator.
      * Prefer the route requiring the fewest retained cards; redundant copies
      * remain ordinary discards. Native mandatory discard counts still prevail.
      */
@@ -1317,9 +1318,9 @@ public final class CubeComboAi {
             boolean kiki = engine.getName().equals("Kiki-Jiki, Mirror Breaker");
             if (!kiki && !livePartnerBody(body)) continue;
             if (kiki && engine.isToken() && body.getName().equals("Restoration Angel")) continue;
-            if (engine.isInPlay() && body.isInPlay()
-                    && engine.getSpellAbilities().stream().noneMatch(sa -> copyEngine(sa)
-                    && !sa.isSuppressed() && sa.canTarget(body))) continue;
+            if (body.isInPlay() && engine.getSpellAbilities().stream().noneMatch(sa ->
+                    (kiki ? copyEngine(sa) : sa.isSpell() && sa.usesTargeting())
+                    && !sa.isSuppressed() && sa.copy(player).canTarget(body))) continue;
             // -1 means no land: all zero-, one- and two-land subsets, once.
             for (int first = -1; first < lands.size(); first++) {
                 for (int second = first; second < lands.size(); second++) {
