@@ -20,12 +20,24 @@ import java.util.*;
  * Prepared choice/transition evidence only, never autonomous assembly or strength. */
 public final class CubeKikiDiscardSmoke {
     private static final List<String> CASES=List.of("twin-conscripts","twin-exarch","twin-pestermite","kiki-conscripts","kiki-restoration","wrong-twin-restoration","missing-source","forced-pair", "no-blue-twin-exarch", "two-red-kiki-restoration", "hand-island-twin-exarch", "hand-mountain-kiki-restoration", "field-body-twin-exarch", "field-body-kiki-restoration", "field-engine-kiki-conscripts", "both-field-kiki-conscripts", "duplicate-twin-conscripts", "shroud-field-body-twin-exarch");
+    private static final List<String> BLINK_CASES=List.of("blink-risk","blink-zero-expendable","blink-enough","blink-mandatory","blink-other-actor","blink-no-kiki","blink-no-pyro","blink-alternative","blink-shroud-pyro","blink-phased-pyro","blink-facedown-kiki","blink-wrong-shape");
     private static final List<ZoneType> ZONES=List.of(ZoneType.Battlefield,ZoneType.Hand,ZoneType.Library,ZoneType.Graveyard,ZoneType.Exile);
     private record Placement(String name,ZoneType zone) {}
     private static String source(String key){return key.contains("kiki-")?"Kiki-Jiki, Mirror Breaker":key.equals("missing-source")?"Mountain":"Splinter Twin";}
     private static String partner(String key){return key.contains("exarch")?"Deceiver Exarch":key.contains("pestermite")?"Pestermite":key.contains("restoration")?"Restoration Angel":"Zealous Conscripts";}
     private static List<Placement> placements(boolean own,String key) {
         List<Placement> out=new ArrayList<>();
+        if(own&&key.startsWith("blink-")) {
+            for(int i=0;i<3;i++)out.add(new Placement("Mountain",ZoneType.Battlefield));
+            out.add(new Placement("Island",ZoneType.Battlefield));out.add(new Placement("Plains",ZoneType.Battlefield));
+            out.add(new Placement("Restoration Angel",ZoneType.Battlefield));
+            if(!key.equals("blink-no-pyro"))out.add(new Placement("Seasoned Pyromancer",ZoneType.Battlefield));
+            if(!key.equals("blink-no-kiki"))out.add(new Placement("Kiki-Jiki, Mirror Breaker",ZoneType.Hand));
+            if(!key.equals("blink-zero-expendable"))out.add(new Placement("Forest",ZoneType.Hand));
+            if(key.equals("blink-enough"))out.add(new Placement("Forest",ZoneType.Hand));
+            if(key.equals("blink-alternative"))out.add(new Placement("Wall of Omens",ZoneType.Battlefield));
+            while(out.size()<40)out.add(new Placement("Forest",ZoneType.Library));return out;
+        }
         if(own){for(int i=0;i<3;i++)out.add(new Placement(i==2&&(key.contains("two-red")||key.contains("hand-mountain"))?"Forest":"Mountain",ZoneType.Battlefield));out.add(new Placement(key.contains("no-blue")||key.contains("hand-island")?"Forest":"Island",ZoneType.Battlefield));out.add(new Placement("Plains",ZoneType.Battlefield));out.add(new Placement("Seasoned Pyromancer",ZoneType.Hand));out.add(new Placement(source(key),key.contains("field-engine")||key.contains("both-field")?ZoneType.Battlefield:ZoneType.Hand));out.add(new Placement(partner(key),key.contains("field-body")||key.contains("both-field")?ZoneType.Battlefield:ZoneType.Hand));if(key.contains("hand-island"))out.add(new Placement("Island",ZoneType.Hand));if(key.contains("hand-mountain"))out.add(new Placement("Mountain",ZoneType.Hand));if(key.contains("duplicate"))out.add(new Placement(source(key),ZoneType.Hand));if(!key.equals("forced-pair")){out.add(new Placement("Inti, Seneschal of the Sun",ZoneType.Hand));out.add(new Placement("Orcish Lumberjack",ZoneType.Hand));}}
         while(out.size()<40)out.add(new Placement("Forest",ZoneType.Library));return out;
     }
@@ -83,6 +95,39 @@ public final class CubeKikiDiscardSmoke {
             System.out.println("KIKI_DISCARD_QUERY "+key+" initial="+initial+" repeats=3 reserved="+first.size()+" stateUnchanged=true");
         }catch(ReflectiveOperationException e){throw new AssertionError(e);}
     }
+    private static void blinkBoundary(String arm,int seat,String control) {
+        List<RegisteredPlayer> entries=new ArrayList<>();
+        for(int i=0;i<2;i++) {
+            forge.ai.LobbyPlayerAi lobby=i==seat&&arm.equals("improved")?new forge.ai.LobbyPlayerCubeComboAi("Candidate-"+i):new forge.ai.LobbyPlayerAi("Default-"+i,null);
+            lobby.setAiProfile("Default");entries.add(new RegisteredPlayer(deck(i==seat,control)).setPlayer(lobby));
+        }
+        GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);
+        Game g=new Match(rules,entries,"Blink guard boundaries").createGame();Player p=g.getPlayers().get(seat),op=g.getPlayers().get(1-seat);
+        populate(p,true,control);populate(op,false,control);g.setAge(GameStage.Play);
+        g.getPhaseHandler().setupFirstTurn(p,()->g.getPhaseHandler().devModeSet(PhaseType.MAIN1,p));
+        Card angel=null;
+        for(Card c:p.getCardsIn(ZoneType.Battlefield)) {
+            if(c.getName().equals("Restoration Angel"))angel=c;
+            if(c.getName().equals("Seasoned Pyromancer")) {
+                if(control.equals("blink-shroud-pyro"))c.addIntrinsicKeyword("Shroud");
+                if(control.equals("blink-phased-pyro"))c.setPhasedOut(p);
+            }
+        }
+        if(control.equals("blink-facedown-kiki"))for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Kiki-Jiki, Mirror Breaker"))c.turnFaceDown(true);
+        g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();
+        var effect=forge.game.ability.AbilityFactory.getAbility(Objects.requireNonNull(angel).getSVar("RestorationExile"),angel);
+        effect.setActivatingPlayer(control.equals("blink-other-actor")?op:p);
+        if(control.equals("blink-wrong-shape"))effect.setParam("Destination","Graveyard");
+        BenchRandomAudit.install(996100L+100L*seat+BLINK_CASES.indexOf(control));
+        var before=observationState(p);var actor=effect.getActivatingPlayer();var targets=effect.getTargets();String targetText=targets.toString();
+        boolean expected=arm.equals("improved")&&Set.of("blink-risk","blink-zero-expendable").contains(control);
+        for(int i=0;i<3;i++) {
+            boolean actual=forge.ai.CubeComboAi.declineDestructiveComboBlink(p,effect,control.equals("blink-mandatory"));
+            if(actual!=expected)throw new AssertionError("blink boundary "+control+" expected="+expected+" actual="+actual);
+            if(!before.equals(observationState(p))||actor!=effect.getActivatingPlayer()||targets!=effect.getTargets()||!targetText.equals(targets.toString()))throw new AssertionError("blink query mutation "+control);
+        }
+        System.out.println("KIKI_BLINK_BOUNDARY arm="+arm+" seat="+seat+" case="+control+" declined="+expected+" repeats=3 stateUnchanged=true registered=40");
+    }
     private static void run(String arm,int seat,String control,boolean observed,boolean badCopy,boolean continuation){
         List<RegisteredPlayer> entries=new ArrayList<>();for(int s=0;s<2;s++){forge.LobbyPlayer lobby=s==seat&&arm.equals("improved")?new forge.ai.LobbyPlayerCubeComboAi("Candidate-"+s):new forge.ai.LobbyPlayerAi("Default-"+s,null);if(lobby instanceof forge.ai.LobbyPlayerAi ai)ai.setAiProfile("Default");entries.add(new RegisteredPlayer(deck(s==seat,control)).setPlayer(lobby));}
         GameRules rules=new GameRules(GameType.Constructed);rules.setAiInformationPolicy(GameRules.AiInformationPolicy.CLOSED_REPAIR);rules.setAllowCheatShuffle(false);Game g=new Match(rules,entries,"Kiki discard").createGame();Player p=g.getPlayers().get(seat),op=g.getPlayers().get(1-seat);p.setLife(20,null);op.setLife(20,null);populate(p,true,control);populate(op,false,control);g.setAge(GameStage.Play);int start=seat==0?1:2;g.getPhaseHandler().setupFirstTurn(seat==0?p:op,()->g.getPhaseHandler().devModeSet(PhaseType.MAIN1,p,start));g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();BenchRandomAudit.install(995100L+100L*seat+CASES.indexOf(control));
@@ -119,7 +164,11 @@ public final class CubeKikiDiscardSmoke {
         try {
             GuiBase.setInterface((IGuiBase)Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),new Class<?>[]{IGuiBase.class},(proxy,method,values)->switch(method.getName()){case "getAssetsDir"->args[0]+"/forge-gui/";case "isRunningOnDesktop","isLibgdxPort","isGuiThread","hasNetGame"->false;case "getCurrentVersion"->"kiki-native-discard";default->throw new AssertionError("Unexpected GUI call "+method.getName());}));
             FModel.initialize(null,prefs->{prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY,false);prefs.setPref(FPref.UI_LANGUAGE,"en-US");return null;});
-            Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);
+            Set<String> names=new LinkedHashSet<>();for(String c:CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String c:BLINK_CASES)for(boolean own:List.of(true,false))for(var p:placements(own,c))names.add(p.name());for(String name:names)StaticData.instance().attemptToLoadCard(name);
+            if(args.length>2&&args[2].equals("blink-boundaries")) {
+                for(String c:BLINK_CASES)for(int seat=0;seat<2;seat++)blinkBoundary(args[1],seat,c);
+                System.out.println("KIKI_BLINK_BOUNDARY_COMPLETE cases=24");return;
+            }
             boolean continuation=args.length>2&&args[2].equals("continue");
             List<String> selected=continuation?List.of("twin-conscripts","twin-exarch","kiki-restoration","shroud-field-body-twin-exarch"):CASES;
             for(String c:selected)for(int seat=0;seat<2;seat++)run(args[1],seat,c,args.length>2&&!args[2].equals("plain")&&!continuation,args.length>2&&args[2].equals("bad-copy"),continuation);
