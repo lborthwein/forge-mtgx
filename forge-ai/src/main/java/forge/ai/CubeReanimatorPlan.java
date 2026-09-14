@@ -775,22 +775,48 @@ public final class CubeReanimatorPlan {
         return card.isInstant() && opponentEndStep();
     }
 
-    /** Would our own board pay for the search AND the reanimation spell out of
-     * one turn? One native probe over the combined printed mana, the
-     * {@code CubeDrawOutPlan.bothPayable} idiom, so a single source cannot pay
-     * for both halves. Nothing is cast, tapped or changed. */
+    /** Detached prospective-stack ability for native cost adjustment. Never
+     * change the cast origin or actor of a live hand card during a forecast. */
+    private SpellAbility costPreview(SpellAbility original) {
+        if (original.getPayCosts() == null || original.getPayCosts().hasXInAnyCostPart()
+                || original.getPayCosts().getCostParts().stream()
+                        .anyMatch(p -> !(p instanceof forge.game.cost.CostPartMana))) return null;
+        Card preview = forge.game.card.CardCopyService.getLKICopy(original.getHostCard());
+        preview.setLastKnownZone(player.getGame().getStackZone());
+        preview.setCastFrom(player.getZone(ZoneType.Hand));
+        SpellAbility spell = original.copy(player);
+        spell.setHostCard(preview);
+        return spell;
+    }
+
+    /** Sufficient mana for the search and a plain return spell this turn.
+     * Native adjustments include taxes and reductions on each spell. A joint
+     * total avoids counting one source twice; checking both restrictions is
+     * conservative for restricted mana. This does not promise that Default
+     * will choose the plain cast rather than wait for optional buyback. */
     private boolean bothPayable(SpellAbility search) {
+        SpellAbility first = costPreview(search);
+        if (first == null) return false;
         for (Card card : player.getCardsIn(ZoneType.Hand)) {
             if (card.isFaceDown()) continue;
             for (SpellAbility ability : card.getSpellAbilities()) {
                 if (!ability.isSpell() || !reanimationShape(ability) && !(card.isPermanent() && entersReanimates(card))) continue;
-                if (ability.getPayCosts() == null || search.getPayCosts() == null) continue;
-                forge.card.mana.ManaCost extra = ability.getPayCosts().getTotalMana();
-                forge.game.mana.ManaCostBeingPaid combined =
-                        new forge.game.mana.ManaCostBeingPaid(search.getPayCosts().getTotalMana());
-                for (forge.card.mana.ManaCostShard shard : extra) combined.increaseShard(shard, 1);
-                combined.increaseGenericMana(extra.getGenericCost());
-                if (CubeComboAi.canPayManaCost(combined, search, player, false)) return true;
+                SpellAbility second = costPreview(ability);
+                if (second == null || !CubeComboAi.castFitsAfter(player, first, second)) continue;
+                boolean payable = CubeComboAi.probePayment(player, () -> {
+                    var firstCost = forge.game.cost.CostAdjustment.adjust(first.getPayCosts(), first, false);
+                    var secondCost = forge.game.cost.CostAdjustment.adjust(second.getPayCosts(), second, false);
+                    if (firstCost == null || secondCost == null
+                            || firstCost.getCostParts().stream().anyMatch(p -> !(p instanceof forge.game.cost.CostPartMana))
+                            || secondCost.getCostParts().stream().anyMatch(p -> !(p instanceof forge.game.cost.CostPartMana))) return false;
+                    var combined = ComputerUtilMana.calculateManaCost(first.getPayCosts(), first, player, true, 0, false);
+                    var later = ComputerUtilMana.calculateManaCost(second.getPayCosts(), second, player, true, 0, false);
+                    if (combined.getXcounter() != 0 || later.getXcounter() != 0) return false;
+                    combined.addManaCost(later.toManaCost());
+                    return CubeComboAi.canPayManaCost(combined, first, player, false)
+                            && CubeComboAi.canPayManaCost(combined, second, player, false);
+                }, first, second);
+                if (payable) return true;
             }
         }
         return false;
