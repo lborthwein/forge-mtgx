@@ -55,22 +55,23 @@ final class CubeTamiyoPlan {
         System.err.println("CUBE_PLAN_DECLINE family=tamiyo reason="+reason);
         return false;
     }
+    // Native AbilitySub uses Cost.Zero rather than a null cost. Admit only
+    // its plain zero-mana shape; an extra or dynamic cost is not this rule.
+    private boolean nativeZeroCost(SpellAbility a) {
+        var cost=a.getPayCosts();
+        if(cost==null||cost.getCostParts().size()!=1||!cost.isFree())return false;
+        var mana=cost.getCostMana();
+        return mana!=null&&mana.getClass()==forge.game.cost.CostPartMana.class&&mana.getXMin()==0
+                &&!mana.isExiledCreatureCost()&&!mana.isEnchantedCreatureCost()&&mana.getMaxWaterbend()==null;
+    }
     private boolean nativeLoyaltyEntry(Card c, forge.game.replacement.ReplacementEffect e) {
-        if(c==tamiyo) {
-            SpellAbility diagnostic=e.getOverridingAbility();
-            System.err.println("TAMIYO_NATIVE_SHAPE sameRule="+(e==c.getCurrentState().getLoyaltyRep())+" sameHost="+(e.getHostCard()==c)
-                    +" base="+c.getCurrentState().getBaseLoyalty()+" intrinsic="+e.isIntrinsic()+" replacement="+e.getMapParams()
-                    +" effect="+(diagnostic==null?"null":diagnostic.getMapParams())+" original="+(diagnostic==null?"null":diagnostic.getOriginalMapParams())
-                    +" effectFlags="+(diagnostic==null?"null":((diagnostic.getHostCard()==c)+":"+diagnostic.isIntrinsic()+":"+diagnostic.isCopied()+":"+diagnostic.isWrapper()+":"+diagnostic.isTrigger()))
-                    +" effectCost="+(diagnostic==null?"null":diagnostic.getPayCosts())+" sub="+(diagnostic!=null&&diagnostic.getSubAbility()!=null)+" targeting="+(diagnostic!=null&&diagnostic.usesTargeting()));
-        }
         if(c!=tamiyo||!c.isPlaneswalker()||!"5".equals(c.getCurrentState().getBaseLoyalty())
                 ||e!=c.getCurrentState().getLoyaltyRep()||e.getHostCard()!=c||!e.isIntrinsic())return false;
         Map<String,String> params=new HashMap<>(e.getMapParams());params.remove("Description");
         if(!params.equals(Map.of("Event","Moved","ValidCard","Card.Self","Destination","Battlefield","Secondary","True","ReplacementResult","Updated")))return false;
         SpellAbility a=e.getOverridingAbility();
         return a!=null&&a.getHostCard()==c&&a.isIntrinsic()&&!a.isCopied()&&!a.isWrapper()&&!a.isTrigger()
-                &&a.getApi()==ApiType.PutCounter&&a.getSubAbility()==null&&a.getPayCosts()==null&&!a.usesTargeting()
+                &&a.getApi()==ApiType.PutCounter&&a.getSubAbility()==null&&nativeZeroCost(a)&&!a.usesTargeting()
                 &&a.getMapParams().equals(Map.of("DB","PutCounter","Defined","Self","CounterType","LOYALTY","ETB","True","CounterNum","5"))
                 &&a.getOriginalMapParams().equals(a.getMapParams());
     }
