@@ -131,7 +131,7 @@ public final class CubeKikiDiscardSmoke {
         }
         if(nativeBlink)for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Restoration Angel"))angel=c;
         if(control.equals("blink-facedown-kiki"))for(Card c:p.getCardsIn(ZoneType.Hand))if(c.getName().equals("Kiki-Jiki, Mirror Breaker"))c.turnFaceDown(true);
-        if(nativeBlink&&control.startsWith("blink-mandatory-"))p.setFirstController(arm.equals("improved")
+        if(nativeBlink&&control.startsWith("blink-mandatory-"))p.dangerouslySetController(arm.equals("improved")
                 ?new MandatoryComboController(g,p,p.getLobbyPlayer()):new MandatoryDefaultController(g,p,p.getLobbyPlayer()));
         g.getAction().checkStateEffects(true);g.getTriggerHandler().resetActiveTriggers();
         if(nativeBlink) {
