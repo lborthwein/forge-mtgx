@@ -112,6 +112,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private volatile boolean okEnabled;
     private volatile boolean cancelEnabled;
     private volatile String lastInputFingerprint = "";
+    /** Forge's own AI action for this seat, when the hint flag is on. */
+    private volatile ExpertHint expertHint = new ExpertHint(false, 0, 0, "Default");
+    /** The plan opened by the current decision, projected onto its sub-requests. */
+    private volatile HintPlan currentPlan;
+    /** controlIds the last emitted hint named, for divergence detection. */
+    private volatile List<String> hintedControlIds = Collections.emptyList();
     private final ThreadLocal<Set<Integer>> explicitlyOfferedCards =
             ThreadLocal.withInitial(Collections::emptySet);
 
@@ -136,6 +142,14 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         this.game = Objects.requireNonNull(game);
         this.human = Objects.requireNonNull(human);
         this.controller = Objects.requireNonNull(controller);
+        expertHint.bind(game, human);
+    }
+
+    void useExpertHint(final ExpertHint hint) {
+        this.expertHint = Objects.requireNonNull(hint);
+        if (game != null && human != null) {
+            hint.bind(game, human);
+        }
     }
 
     void startReader() {
@@ -240,6 +254,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             finishInput(input, pending, false, "action type does not match advertised control");
             return;
         }
+        noteHintOutcome(controlId);
         if ("concede".equals(binding.type)) {
             if (!request.claimed.compareAndSet(false, true)) {
                 finishInput(input, pending, false,
@@ -343,6 +358,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             finishInput(input, pending, false, rejection);
             return;
         }
+        noteHintOutcome(string(input.action(), "controlId"));
         finishInput(input, pending, true, null);
         modalRequest.compareAndSet(modal, null);
         modal.answer.complete(input.action().deepCopy());
@@ -418,11 +434,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             lastInputFingerprint = fingerprint;
 
             final String requestId = nextRequestId();
+            final JsonObject hint = hintFor(input, kind, bindings);
             final JsonObject body = requestBody(requestId, kind,
                     inputClassName(input), "Forge", cleanPrompt,
                     input instanceof InputLondonMulligan london ? london.getCardsToReturn() : getSelectionMin(),
                     input instanceof InputLondonMulligan london ? london.getCardsToReturn() : getSelectionMax(),
-                    !(input instanceof InputLondonMulligan) && cancelEnabled, controls);
+                    !(input instanceof InputLondonMulligan) && cancelEnabled, controls, hint);
             final ActiveRequest request = new ActiveRequest(requestId, kind, input, bindings);
             activeRequest.set(request);
             channel.send("request", body);
@@ -431,6 +448,135 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         } catch (Throwable failure) {
             fail("engine", "could not publish Forge input: " + safeThrowable(failure),
                     null, "publishCurrentInput", null, failure);
+        }
+    }
+
+    /**
+     * Forge's own AI action for this request, or null when hints are off.
+     *
+     * <p>A {@code priority}, {@code combat}, {@code mulligan} or {@code mana}
+     * request opens a new decision and pays for one AI evaluation. Every other
+     * kind — {@code target}, and the ability/order/number modals — is a
+     * <em>sub-request of a line already chosen</em>, and is answered by
+     * projecting the cached {@link HintPlan} rather than re-running the AI.
+     * That is not only cheaper: re-running target selection against a
+     * SpellAbility the seat is already mid-cast on is the failure mode that
+     * corrupts a game.
+     *
+     * <p>{@code mana} is deliberately its own decision each time. The remaining
+     * cost genuinely changes after every source is tapped, so a projected mana
+     * answer would be stale rather than merely expensive.
+     */
+    private JsonObject hintFor(final Input input, final String kind,
+                               final Map<String, ControlBinding> bindings) {
+        final ExpertHint hint = expertHint;
+        if (hint == null || !hint.isEnabled()) {
+            hintedControlIds = Collections.emptyList();
+            return null;
+        }
+        try {
+            final Set<String> advertised = bindings.keySet();
+            HintPlan plan = currentPlan;
+            boolean projected = true;
+            if (opensDecision(input, kind) || plan == null || plan.hasDiverged()) {
+                plan = hint.planFor(input, kind, hint.nextDecisionId());
+                projected = false;
+                currentPlan = plan;
+            }
+            if (plan == null) {
+                hintedControlIds = Collections.emptyList();
+                return null;
+            }
+            final ExpertHintMapper.Mapped mapped = mapPlan(plan, input, kind, advertised);
+            if (projected) {
+                plan.noteProjection();
+            }
+            hintedControlIds = mapped == null ? Collections.emptyList() : mapped.controlIds();
+            return hint.encode(plan, mapped, projected);
+        } catch (Throwable failure) {
+            // Advice must never end a game. Report the failure as a degraded
+            // hint and let the seat answer the request normally.
+            hintedControlIds = Collections.emptyList();
+            final JsonObject degraded = new JsonObject();
+            degraded.addProperty("source", "forge-ai");
+            degraded.addProperty("degraded", "hint failed: " + safeThrowable(failure));
+            degraded.add("controlIds", new JsonArray());
+            return degraded;
+        }
+    }
+
+    private static boolean opensDecision(final Input input, final String kind) {
+        return input instanceof InputPassPriority
+                || input instanceof InputAttack
+                || input instanceof InputBlock
+                || input instanceof InputPayMana
+                || "mulligan".equals(kind);
+    }
+
+    private ExpertHintMapper.Mapped mapPlan(final HintPlan plan, final Input input,
+                                            final String kind, final Set<String> advertised) {
+        if (plan.isDegraded()) {
+            return null;
+        }
+        if (input instanceof InputAttack) {
+            return ExpertHintMapper.attacks(plan, advertised);
+        }
+        if (input instanceof InputBlock) {
+            return ExpertHintMapper.blocks(plan, advertised);
+        }
+        if (input instanceof InputLondonMulligan london) {
+            return ExpertHintMapper.london(plan, london.getCardsToReturn(), advertised);
+        }
+        if (input instanceof InputPayMana) {
+            return ExpertHintMapper.mana(plan, paymentControlIds(advertised), advertised);
+        }
+        if ("mulligan".equals(kind)) {
+            return ExpertHintMapper.mulligan(plan, advertised);
+        }
+        if ("priority".equals(kind)) {
+            return ExpertHintMapper.priority(plan, advertised);
+        }
+        if ("target".equals(kind)) {
+            return ExpertHintMapper.targets(plan.chosenSa, seatByPlayerId(), advertised);
+        }
+        return null;
+    }
+
+    /** Whole-cost pool payments, in the order Forge enumerated them. */
+    private static List<String> paymentControlIds(final Set<String> advertised) {
+        final List<String> payments = new ArrayList<>();
+        for (String id : advertised) {
+            if (id.startsWith("payment:")) {
+                payments.add(id);
+            }
+        }
+        return payments;
+    }
+
+    private Map<Integer, Integer> seatByPlayerId() {
+        final Map<Integer, Integer> seats = new LinkedHashMap<>();
+        int seat = 0;
+        for (Player player : game.getPlayers()) {
+            seats.put(player.getId(), seat++);
+        }
+        return seats;
+    }
+
+    /**
+     * Records whether the seat took the hint. A submission the plan did not
+     * name invalidates it, so the rest of that line carries no hint rather than
+     * advice for a line the seat has already left.
+     */
+    private void noteHintOutcome(final String controlId) {
+        final List<String> hinted = hintedControlIds;
+        if (hinted.isEmpty() || controlId == null) {
+            return;
+        }
+        if (!hinted.contains(controlId)) {
+            final HintPlan plan = currentPlan;
+            if (plan != null) {
+                plan.markDiverged();
+            }
         }
     }
 
@@ -905,6 +1051,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                                    final String inputClass, final String title,
                                    final String message, final Integer min, final Integer max,
                                    final boolean cancellable, final JsonArray controls) {
+        return requestBody(requestId, kind, inputClass, title, message, min, max,
+                cancellable, controls, null);
+    }
+
+    private JsonObject requestBody(final String requestId, final String kind,
+                                   final String inputClass, final String title,
+                                   final String message, final Integer min, final Integer max,
+                                   final boolean cancellable, final JsonArray controls,
+                                   final JsonObject hint) {
         final JsonObject body = new JsonObject();
         body.addProperty("requestId", requestId);
         body.addProperty("kind", kind);
@@ -949,6 +1104,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         prompt.addProperty("cancellable", cancellable);
         body.add("prompt", prompt);
         body.add("controls", controls);
+        // Optional on every request: a jar that produces no hint, or an older
+        // jar, is indistinguishable from "no advice", so the field is safe to
+        // dark-launch and the client stays compatible in both directions.
+        if (hint != null) {
+            body.add("hint", hint);
+        }
         return body;
     }
 
@@ -956,6 +1117,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                            final String message, final Integer min, final Integer max,
                            final boolean cancellable, final JsonArray controls,
                            final Function<JsonObject, String> validator) {
+        return ask(kind, inputClass, title, message, min, max, cancellable, controls,
+                validator, null);
+    }
+
+    private JsonObject ask(final String kind, final String inputClass, final String title,
+                           final String message, final Integer min, final Integer max,
+                           final boolean cancellable, final JsonArray controls,
+                           final Function<JsonObject, String> validator,
+                           final JsonObject hint) {
         if (channel.isEnded()) {
             throw new InteractiveAbort("protocol session ended");
         }
@@ -971,7 +1141,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         lastInputFingerprint = "";
         try {
             channel.send("request", requestBody(requestId, kind, inputClass, title, message,
-                    min, max, cancellable, controls));
+                    min, max, cancellable, controls, hint));
             return modal.answer.join();
         } catch (InteractiveProtocol.ProtocolException e) {
             modalRequest.compareAndSet(modal, null);
@@ -986,6 +1156,32 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             modalRequest.compareAndSet(modal, null);
             lastInputFingerprint = "";
             scheduleInputPublish();
+        }
+    }
+
+    /**
+     * The ability chooser is a sub-request of a priority line already planned,
+     * so it is answered by projection: find the offered ability whose view id
+     * is the one the cached plan chose. Never a fresh AI evaluation — the seat
+     * is already mid-cast.
+     */
+    private JsonObject abilityHint(final Map<String, SpellAbilityView> byId) {
+        final ExpertHint hint = expertHint;
+        final HintPlan plan = currentPlan;
+        if (hint == null || !hint.isEnabled() || plan == null || plan.hasDiverged()
+                || plan.isDegraded() || plan.chosenSa == null) {
+            hintedControlIds = Collections.emptyList();
+            return null;
+        }
+        try {
+            final ExpertHintMapper.Mapped mapped =
+                    ExpertHintMapper.abilityChoice(plan.chosenSa, byId);
+            plan.noteProjection();
+            hintedControlIds = mapped.controlIds();
+            return hint.encode(plan, mapped, true);
+        } catch (Throwable ignored) {
+            hintedControlIds = Collections.emptyList();
+            return null;
         }
     }
 
@@ -1621,7 +1817,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                         return "answer must select an advertised playable ability or cancel";
                     }
                     return null;
-                });
+                }, abilityHint(byId));
         final String selected = string(answer, "controlId");
         return "ability:cancel".equals(selected) ? null : byId.get(selected);
     }

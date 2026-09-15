@@ -45,6 +45,19 @@ public abstract class InputPayMana extends InputSyncronizedBase {
     public final CardView getPaymentSourceCard() {
         return saPaidFor == null ? null : CardView.get(saPaidFor.getHostCard());
     }
+
+    /**
+     * The cost still outstanding. Read-only for advisory callers: the returned
+     * object is live, so anything that pays against it must copy it first.
+     */
+    public final ManaCostBeingPaid getManaCostBeingPaid() {
+        return manaCost;
+    }
+
+    /** The ability this payment is for, or null for a free-floating payment. */
+    public final SpellAbility getSpellAbilityBeingPaidFor() {
+        return saPaidFor;
+    }
     protected boolean effect;
     protected boolean mandatory = false;
     private final boolean wasFloatingMana;

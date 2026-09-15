@@ -134,6 +134,10 @@ public final class InteractiveMain {
 
             configureHumanPayment(humanController);
             gui = new InteractiveGuiGame(channel, config.humanSeat());
+            // The hint runs the same profile the opponent seat plays, so that
+            // "the hint is the same AI the opponent runs" is a fact and not an
+            // assumption. Off unless -Dforge.interactive.hint=true.
+            gui.useExpertHint(ExpertHint.fromSystemProperties(config.aiProfile()));
             gui.bind(game, human, humanController);
             desktop.bind(gui);
             humanController.setGui(gui);
