@@ -164,10 +164,40 @@ final class ExpertHintMapper {
     }
 
     /**
-     * {@code target}: the targets {@code canPlaySa} already wrote onto the
-     * planned SpellAbility, in the order Forge chose them.
+     * {@code target}: the ids the AI chose for the live in-flight ability.
+     *
+     * One control per request: Forge re-asks after each selection and closes the
+     * input itself once the required count is met, so naming the whole set at
+     * once would push controls the next request has already withdrawn.
      */
-    static Mapped targets(final SpellAbility sa, final Map<Integer, Integer> seatByPlayerId,
+    static Mapped targets(final HintPlan plan, final Set<String> advertised) {
+        final List<String> ids = new ArrayList<>();
+        for (String id : plan.targetControlIds) {
+            if (advertised.contains(id)) {
+                ids.add(id);
+            }
+        }
+        if (ids.isEmpty()) {
+            return Mapped.unmapped("AI targets matched no advertised control");
+        }
+        return Mapped.of(List.copyOf(ids));
+    }
+
+    /** The {@code ability:<i>} whose emitted abilityId is the planned mana ability. */
+    static Mapped manaAbility(final HintPlan plan, final Map<String, SpellAbilityView> byControlId) {
+        if (plan.manaAbilityViewId == null) {
+            return Mapped.none("no mana ability in plan");
+        }
+        for (Map.Entry<String, SpellAbilityView> entry : byControlId.entrySet()) {
+            if (entry.getValue() != null && entry.getValue().getId() == plan.manaAbilityViewId) {
+                return Mapped.of(List.of(entry.getKey()));
+            }
+        }
+        return Mapped.unmapped("planned mana ability " + plan.manaAbilityViewId + " was not offered");
+    }
+
+    /** Legacy projection from a planned ability's own written targets. */
+    static Mapped projectedTargets(final SpellAbility sa, final Map<Integer, Integer> seatByPlayerId,
                           final Set<String> advertised) {
         if (sa == null || sa.getTargets() == null) {
             return Mapped.none("no planned ability to read targets from");

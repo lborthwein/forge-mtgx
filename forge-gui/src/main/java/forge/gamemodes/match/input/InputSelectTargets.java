@@ -44,6 +44,10 @@ public final class InputSelectTargets extends InputSyncronizedBase {
     private boolean mustTargetFiltered;
     private static final long serialVersionUID = -1091595663541356356L;
 
+    /** The in-flight ability these targets are being chosen for. Read-only. */
+    public SpellAbility getSpellAbility() { return sa; }
+    /** The cards this input will accept, as Forge computed them. Read-only. */
+    public List<Card> getSelectableCards() { return java.util.Collections.unmodifiableList(choices); }
     public boolean hasCancelled() { return bCancel; }
     public boolean hasPressedOk() { return bOk; }
 

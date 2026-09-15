@@ -23,13 +23,17 @@ import forge.game.card.CardCollection;
 import forge.game.card.CardCollectionView;
 import forge.game.combat.Combat;
 import forge.game.mana.ManaCostBeingPaid;
+import forge.card.mana.ManaCostShard;
 import forge.game.player.Player;
+import forge.game.spellability.SpellAbilityView;
+import forge.util.collect.FCollection;
 import forge.game.spellability.SpellAbility;
 import forge.gamemodes.match.input.Input;
 import forge.gamemodes.match.input.InputAttack;
 import forge.gamemodes.match.input.InputBlock;
 import forge.gamemodes.match.input.InputLondonMulligan;
 import forge.gamemodes.match.input.InputPayMana;
+import forge.gamemodes.match.input.InputSelectTargets;
 
 /**
  * Forge's own AI action for the bridge's human seat — the "expert hint".
@@ -161,6 +165,9 @@ final class ExpertHint {
             }
             if (input instanceof InputPayMana payment) {
                 return timed(decisionId, kind, started, id -> planMana(id, payment));
+            }
+            if (input instanceof InputSelectTargets targeting) {
+                return timed(decisionId, kind, started, id -> planTargets(id, targeting));
             }
             if ("mulligan".equals(kind)) {
                 return timed(decisionId, kind, started, this::planMulliganKeep);
@@ -361,6 +368,126 @@ final class ExpertHint {
             return HintPlan.degraded(decisionId, "mana", failure.get(), elapsedMs(started));
         }
         return HintPlan.mana(decisionId, sources, elapsedMs(started));
+    }
+
+    // ----------------------------------------------------------------- targets
+
+    /**
+     * Asks the AI to choose targets for the ability actually on the way.
+     *
+     * The options offered are exactly the ones this input will accept — Forge's
+     * own {@code getSelectableCards()} plus the players it says are legal — so
+     * the AI is choosing inside the same set the request advertises, and the
+     * mapper cannot produce a control the seat could not have clicked.
+     */
+    private HintPlan planTargets(final long decisionId, final InputSelectTargets targeting) {
+        final long started = System.nanoTime();
+        final SpellAbility sa = targeting.getSpellAbility();
+        if (sa == null) {
+            return HintPlan.degraded(decisionId, "target", "targeting input exposed no ability", elapsedMs(started));
+        }
+        final List<String> chosen = new ArrayList<>();
+        final AtomicReference<String> failure = new AtomicReference<>();
+        underAi(temp -> {
+            final FCollection<GameEntity> options = new FCollection<>();
+            for (Card card : targeting.getSelectableCards()) {
+                options.add(card);
+            }
+            for (Player player : game.getPlayers()) {
+                if (targeting.canSelectPlayer(player)) {
+                    options.add(player);
+                }
+            }
+            if (options.isEmpty()) {
+                failure.set("no legal target was offered");
+                return;
+            }
+            // Forge's per-API choosers read this map without a null check.
+            final GameEntity picked = temp.chooseSingleEntityForEffect(
+                    options, null, sa, "Choose a target", false, null, new java.util.HashMap<>());
+            if (picked == null) {
+                failure.set("AI declined to choose a target");
+                return;
+            }
+            if (picked instanceof Card card) {
+                chosen.add("card:" + card.getId());
+            } else if (picked instanceof Player player) {
+                int index = 0;
+                for (Player candidate : game.getPlayers()) {
+                    if (candidate == player) {
+                        chosen.add("player:" + index);
+                        break;
+                    }
+                    index++;
+                }
+            }
+        });
+        if (failure.get() != null) {
+            return HintPlan.degraded(decisionId, "target", failure.get(), elapsedMs(started));
+        }
+        if (chosen.isEmpty()) {
+            return HintPlan.degraded(decisionId, "target", "AI target did not resolve to an id", elapsedMs(started));
+        }
+        return HintPlan.targets(decisionId, chosen, elapsedMs(started));
+    }
+
+    // ----------------------------------------------- mana ability chooser
+
+    /**
+     * Which ability of a multi-colour mana source the AI would activate.
+     *
+     * A triome asks this on every tap, so without it the blend stalls the first
+     * time it pays for anything off a dual land. The answer comes from
+     * {@link ComputerUtilMana#chooseManaAbility}, called never edited, so the
+     * pinned bench overlay stays untouched.
+     */
+    HintPlan planManaAbility(final long decisionId, final Card host,
+                             final Map<String, SpellAbilityView> offered,
+                             final InputPayMana payment) {
+        final long started = System.nanoTime();
+        if (!enabled || host == null || payment == null) {
+            return null;
+        }
+        final ManaCostBeingPaid cost = payment.getManaCostBeingPaid();
+        final SpellAbility paying = payment.getSpellAbilityBeingPaidFor();
+        if (cost == null || paying == null) {
+            return HintPlan.degraded(decisionId, "choice", "no live payment context", elapsedMs(started));
+        }
+        final AtomicReference<Integer> viewId = new AtomicReference<>();
+        final AtomicReference<String> failure = new AtomicReference<>();
+        underAi(temp -> {
+            // Only the abilities this request actually offered are candidates.
+            final List<SpellAbility> candidates = new ArrayList<>();
+            for (SpellAbility ability : ComputerUtilMana.getAIPlayableMana(host)) {
+                final SpellAbilityView view = ability.getView();
+                if (view == null) {
+                    continue;
+                }
+                for (SpellAbilityView offeredView : offered.values()) {
+                    if (offeredView != null && offeredView.getId() == view.getId()) {
+                        candidates.add(ability);
+                        break;
+                    }
+                }
+            }
+            if (candidates.isEmpty()) {
+                failure.set("no offered ability was an AI-playable mana ability");
+                return;
+            }
+            for (ManaCostShard shard : cost.getDistinctShards()) {
+                final SpellAbility picked = ComputerUtilMana.chooseManaAbility(
+                        new ManaCostBeingPaid(cost), paying, human, shard, candidates, true);
+                if (picked != null && picked.getView() != null) {
+                    viewId.set(picked.getView().getId());
+                    return;
+                }
+            }
+            failure.set("AI chose no mana ability for any unpaid shard");
+        });
+        if (failure.get() != null) {
+            return HintPlan.degraded(decisionId, "choice", failure.get(), elapsedMs(started));
+        }
+        return HintPlan.manaAbility(decisionId, viewId.get(), elapsedMs(started));
     }
 
     // ------------------------------------------------------------------ encode

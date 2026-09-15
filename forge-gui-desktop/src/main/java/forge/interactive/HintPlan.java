@@ -54,6 +54,12 @@ final class HintPlan {
     /** London mulligan: the card ids Forge's AI would put back, in order. */
     final List<Integer> londonTuckIds;
 
+    /** Target: the entity ids Forge's AI would target, in order. */
+    final List<String> targetControlIds;
+
+    /** Mana ability chooser: the SpellAbilityView id the AI would activate. */
+    final Integer manaAbilityViewId;
+
     /** Wall-clock milliseconds the evaluation cost. */
     final long ms;
     /** Non-null when the evaluation timed out, threw, or produced nothing. */
@@ -72,6 +78,8 @@ final class HintPlan {
                      final Boolean mulliganKeep,
                      final List<Integer> manaSourceIds,
                      final List<Integer> londonTuckIds,
+                     final List<String> targetControlIds,
+                     final Integer manaAbilityViewId,
                      final long ms, final String degraded) {
         this.decisionId = decisionId;
         this.openedKind = openedKind;
@@ -84,6 +92,8 @@ final class HintPlan {
         this.mulliganKeep = mulliganKeep;
         this.manaSourceIds = manaSourceIds;
         this.londonTuckIds = londonTuckIds;
+        this.targetControlIds = targetControlIds;
+        this.manaAbilityViewId = manaAbilityViewId;
         this.ms = ms;
         this.degraded = degraded;
     }
@@ -93,45 +103,70 @@ final class HintPlan {
         final boolean land = sa != null && sa.isLandAbility();
         return new HintPlan(decisionId, "priority", sa, host, land,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                null, Collections.emptyList(), Collections.emptyList(), ms, null);
+                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, null);
     }
 
     static HintPlan attacks(final long decisionId, final Map<Integer, String> kinds,
                             final Map<Integer, Integer> defenders, final long ms) {
         return new HintPlan(decisionId, "combat", null, null, false,
                 new LinkedHashMap<>(kinds), new LinkedHashMap<>(defenders), Collections.emptyMap(),
-                null, Collections.emptyList(), Collections.emptyList(), ms, null);
+                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, null);
     }
 
     static HintPlan blocks(final long decisionId, final Map<Integer, Integer> blocks, final long ms) {
         return new HintPlan(decisionId, "combat", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), new LinkedHashMap<>(blocks),
-                null, Collections.emptyList(), Collections.emptyList(), ms, null);
+                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, null);
     }
 
     static HintPlan mulligan(final long decisionId, final boolean keep, final long ms) {
         return new HintPlan(decisionId, "mulligan", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                keep, Collections.emptyList(), Collections.emptyList(), ms, null);
+                keep, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, null);
     }
 
     static HintPlan mana(final long decisionId, final List<Integer> sourceIds, final long ms) {
         return new HintPlan(decisionId, "mana", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                null, List.copyOf(sourceIds), Collections.emptyList(), ms, null);
+                null, List.copyOf(sourceIds), Collections.emptyList(), Collections.emptyList(), null, ms, null);
     }
 
     static HintPlan london(final long decisionId, final List<Integer> tuckIds, final long ms) {
         return new HintPlan(decisionId, "mulligan", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                null, Collections.emptyList(), List.copyOf(tuckIds), ms, null);
+                null, Collections.emptyList(), List.copyOf(tuckIds), Collections.emptyList(), null, ms, null);
+    }
+
+    /**
+     * Targets for the live in-flight ability.
+     *
+     * This is the one place the plan is recomputed inside a line, deliberately.
+     * Forge builds a fresh SpellAbility when the seat actually casts, so the
+     * targets the AI wrote during its priority evaluation are on a different
+     * object and cannot be projected. Asking the AI to choose over the exact
+     * set this request advertises is both cheaper and more faithful than
+     * pretending the earlier answer still applies.
+     */
+    static HintPlan targets(final long decisionId, final List<String> controlIds, final long ms) {
+        return new HintPlan(decisionId, "target", null, null, false,
+                Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+                null, Collections.emptyList(), Collections.emptyList(),
+                List.copyOf(controlIds), null, ms, null);
+    }
+
+    /** Which mana ability of a multi-colour source the AI would activate. */
+    static HintPlan manaAbility(final long decisionId, final Integer viewId, final long ms) {
+        return new HintPlan(decisionId, "choice", null, null, false,
+                Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+                null, Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), viewId, ms, null);
     }
 
     static HintPlan degraded(final long decisionId, final String openedKind,
                              final String reason, final long ms) {
         return new HintPlan(decisionId, openedKind, null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                null, Collections.emptyList(), Collections.emptyList(), ms, reason);
+                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, reason);
     }
 
     boolean isDegraded() {

@@ -484,8 +484,17 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 currentPlan = plan;
             }
             if (plan == null) {
+                // Absent would read as "no advice"; say instead that this class
+                // has no Forge-AI answer yet, so evidence can count exactly
+                // which decisions a policy still has to own.
                 hintedControlIds = Collections.emptyList();
-                return null;
+                final JsonObject uncovered = new JsonObject();
+                uncovered.addProperty("source", "forge-ai");
+                uncovered.addProperty("openedKind", kind);
+                uncovered.addProperty("degraded",
+                        "class not covered: " + kind + "/" + inputClassName(input));
+                uncovered.add("controlIds", new JsonArray());
+                return uncovered;
             }
             final ExpertHintMapper.Mapped mapped = mapPlan(plan, input, kind, advertised);
             if (projected) {
@@ -505,11 +514,22 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
     }
 
+    /**
+     * Which requests pay for a fresh AI evaluation.
+     *
+     * {@code mana} and {@code target} are each their own decision rather than a
+     * projection of the priority line, because both change under the seat's own
+     * feet: the remaining cost shrinks after every source is tapped, and Forge
+     * builds a brand-new SpellAbility when the seat actually casts, so the
+     * targets written during the priority evaluation live on an object that is
+     * no longer the one in flight.
+     */
     private static boolean opensDecision(final Input input, final String kind) {
         return input instanceof InputPassPriority
                 || input instanceof InputAttack
                 || input instanceof InputBlock
                 || input instanceof InputPayMana
+                || input instanceof InputSelectTargets
                 || "mulligan".equals(kind);
     }
 
@@ -537,9 +557,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             return ExpertHintMapper.priority(plan, advertised);
         }
         if ("target".equals(kind)) {
-            return ExpertHintMapper.targets(plan.chosenSa, seatByPlayerId(), advertised);
+            return ExpertHintMapper.targets(plan, advertised);
         }
-        return null;
+        return ExpertHintMapper.Mapped.none(
+                "class not covered: " + kind + "/" + inputClassName(input));
     }
 
     /** Whole-cost pool payments, in the order Forge enumerated them. */
@@ -1165,15 +1186,41 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * is the one the cached plan chose. Never a fresh AI evaluation — the seat
      * is already mid-cast.
      */
-    private JsonObject abilityHint(final Map<String, SpellAbilityView> byId) {
+    private JsonObject abilityHint(final CardView hostCard, final Map<String, SpellAbilityView> byId) {
         final ExpertHint hint = expertHint;
-        final HintPlan plan = currentPlan;
-        if (hint == null || !hint.isEnabled() || plan == null || plan.hasDiverged()
-                || plan.isDegraded() || plan.chosenSa == null) {
+        if (hint == null || !hint.isEnabled()) {
             hintedControlIds = Collections.emptyList();
             return null;
         }
         try {
+            // A multi-colour mana source asks which colour to add, on every
+            // tap. That is part of paying, not of choosing a line, so it is
+            // answered from the payment context rather than from the priority
+            // plan — whose chosen ability is null during a payment.
+            final Input live = controller == null ? null : controller.getInputProxy().getInput();
+            if (live instanceof InputPayMana payment && hostCard != null) {
+                final Card host = game.findById(hostCard.getId());
+                final HintPlan manaPlan = hint.planManaAbility(
+                        hint.nextDecisionId(), host, byId, payment);
+                if (manaPlan != null) {
+                    final ExpertHintMapper.Mapped mapped = manaPlan.isDegraded() ? null
+                            : ExpertHintMapper.manaAbility(manaPlan, byId);
+                    hintedControlIds = mapped == null ? Collections.emptyList() : mapped.controlIds();
+                    return hint.encode(manaPlan, mapped, false);
+                }
+            }
+            final HintPlan plan = currentPlan;
+            if (plan == null || plan.hasDiverged() || plan.isDegraded() || plan.chosenSa == null) {
+                hintedControlIds = Collections.emptyList();
+                final JsonObject uncovered = new JsonObject();
+                uncovered.addProperty("source", "forge-ai");
+                uncovered.addProperty("openedKind", "choice");
+                uncovered.addProperty("degraded", plan == null ? "no open plan"
+                        : plan.hasDiverged() ? "human diverged"
+                        : plan.isDegraded() ? plan.degraded : "plan chose no ability");
+                uncovered.add("controlIds", new JsonArray());
+                return uncovered;
+            }
             final ExpertHintMapper.Mapped mapped =
                     ExpertHintMapper.abilityChoice(plan.chosenSa, byId);
             plan.noteProjection();
@@ -1817,7 +1864,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                         return "answer must select an advertised playable ability or cancel";
                     }
                     return null;
-                }, abilityHint(byId));
+                }, abilityHint(hostCard, byId));
         final String selected = string(answer, "controlId");
         return "ability:cancel".equals(selected) ? null : byId.get(selected);
     }
