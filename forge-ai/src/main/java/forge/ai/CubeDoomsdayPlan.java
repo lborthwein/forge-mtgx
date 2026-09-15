@@ -1569,6 +1569,50 @@ public final class CubeDoomsdayPlan {
                 && reachableByDrawing("Thassa's Oracle");
     }
 
+    /** Preserve the hand Oracle while an own draw-three/put-back-two effect
+     * finishes a small Doomsday pile. This is a choice of a card to retain,
+     * not permission to cast during resolution: the eventual spell still goes
+     * through the ordinary legality and payment checks. The stack retains the
+     * resolving ability, so canPlayNative would incorrectly test sorcery timing
+     * before the draw effect has finished.
+     *
+     * Only the terminal, mandatory hand-to-top shape is supported. ChangeZone
+     * collects both selections before moving either card; therefore both asks
+     * project library size + 2, not + 1. No hidden library identity is read.
+     */
+    public Card oracleToRetainForPutBack(SpellAbility effect, CardCollectionView choices) {
+        if (effect == null || effect.getApi() != ApiType.ChangeZone
+                || effect.getSubAbility() != null
+                || !"Hand".equals(effect.getParam("Origin"))
+                || !"Library".equals(effect.getParam("Destination"))
+                || !"2".equals(effect.getParam("ChangeNum"))
+                || !"0".equals(effect.getParam("LibraryPosition"))
+                || !"True".equals(effect.getParam("Mandatory"))
+                || !"Card".equals(effect.getParam("ChangeType"))
+                || effect.hasParam("Shuffle")) return null;
+        SpellAbility root = effect.getRootAbility();
+        if (root == effect || root.getSubAbility() != effect || root.getApi() != ApiType.Draw
+                || !"3".equals(root.getParam("NumCards"))
+                || root.getActivatingPlayer() != player
+                || root.hasParam("Defined") && !"You".equals(root.getParam("Defined"))
+                || effect.hasParam("Defined") && !"You".equals(effect.getParam("Defined"))) return null;
+        if (!player.getGame().getPhaseHandler().is(PhaseType.MAIN1, player)
+                && !player.getGame().getPhaseHandler().is(PhaseType.MAIN2, player)) return null;
+        if (player.cantWin() || player.getOpponents().stream().anyMatch(p -> p.cantLose())
+                || oracleTriggerDisabled()) return null;
+        int projected = player.getCardsIn(ZoneType.Library).size() + 2;
+        if (projected > 5 || projected > oracleThreshold(true)
+                || player.getCardsIn(ZoneType.Graveyard).stream()
+                    .noneMatch(c -> c.getName().equals("Doomsday"))) return null;
+        Card oracle = inHand("Thassa's Oracle");
+        if (oracle == null || !choices.contains(oracle)
+                || player.getCardsIn(ZoneType.Hand).stream()
+                    .filter(c -> c.getName().equals("Thassa's Oracle")).count() != 1
+                || choices.stream().anyMatch(c -> c.getController() != player || !c.isInZone(ZoneType.Hand))) return null;
+        SpellAbility spell = handSpell("Thassa's Oracle");
+        return spell != null && CubeComboAi.canPayCost(spell, player, false) ? oracle : null;
+    }
+
     /** v49: which cards in our own hand this plan is currently relying on, for
      * the controller's discard-choice ownership. Empty unless
      * {@link #holdingPile()} - so a plan that never cast Doomsday, or whose

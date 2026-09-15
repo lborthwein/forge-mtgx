@@ -363,6 +363,21 @@ public class CubeComboPlayerController extends PlayerControllerAi {
     public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility source,
             CardCollection choices, DelayedReveal delayedReveal, String prompt, boolean optional, Player decider) {
         if (decider == getPlayer() && destination == ZoneType.Library) {
+            if (!optional && origin.size() == 1 && origin.contains(ZoneType.Hand)) {
+                CardCollection options = new CardCollection(choices);
+                Card ordinary = super.chooseSingleCardForZoneChange(destination, origin, source, choices,
+                        delayedReveal, prompt, optional, decider);
+                Card retained = doomsdayPlan.oracleToRetainForPutBack(source, options);
+                if (retained != null && ordinary == retained) {
+                    for (Card candidate : options) {
+                        if (candidate == retained) continue;
+                        comboSelectionChanges++;
+                        System.err.println("CUBE_DOOMSDAY_PUTBACK kept=Oracle returned=" + candidate.getName());
+                        return candidate;
+                    }
+                }
+                return ordinary;
+            }
             if (doomsdayPlan.ownsPileDecision(source)) {
                 // Doomsday keeps priority on this API: no plan may steal another
                 // plan's decision, so the search branch below is only reached
