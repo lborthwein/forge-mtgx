@@ -1609,7 +1609,10 @@ public final class CubeDoomsdayPlan {
                 || player.getCardsIn(ZoneType.Hand).stream()
                     .filter(c -> c.getName().equals("Thassa's Oracle")).count() != 1
                 || choices.stream().anyMatch(c -> c.getController() != player || !c.isInZone(ZoneType.Hand))) return null;
-        SpellAbility spell = handSpell("Thassa's Oracle");
+        // This is an observation inside a native chooser. An execution copy
+        // would allocate an ability ID even when the plan ultimately abstains.
+        SpellAbility spell = oracle.getSpellAbilities().stream().filter(SpellAbility::isSpell)
+                .findFirst().map(sa -> sa.copyForEnumeration(player)).orElse(null);
         return spell != null && CubeComboAi.canPayCost(spell, player, false) ? oracle : null;
     }
 

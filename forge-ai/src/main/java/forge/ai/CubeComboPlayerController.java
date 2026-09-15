@@ -367,7 +367,8 @@ public class CubeComboPlayerController extends PlayerControllerAi {
                 CardCollection options = new CardCollection(choices);
                 Card ordinary = super.chooseSingleCardForZoneChange(destination, origin, source, choices,
                         delayedReveal, prompt, optional, decider);
-                Card retained = doomsdayPlan.oracleToRetainForPutBack(source, options);
+                Card retained = ordinary != null && ordinary.getName().equals("Thassa's Oracle") && options.size() > 1
+                        ? doomsdayPlan.oracleToRetainForPutBack(source, options) : null;
                 if (retained != null && ordinary == retained) {
                     for (Card candidate : options) {
                         if (candidate == retained) continue;
