@@ -12,6 +12,8 @@ import forge.item.PaperCardPredicates;
 import forge.util.*;
 import org.apache.commons.lang3.StringUtils;
 
+import com.google.common.collect.Iterables;
+
 import forge.StaticData;
 import forge.card.CardRulesPredicates;
 import forge.game.Game;
@@ -87,7 +89,15 @@ public class PlayEffect extends SpellAbilityEffect {
         int totalCMCLimit = Integer.MAX_VALUE;
         final Player controller;
         if (sa.hasParam("Controller")) {
-            controller = AbilityUtils.getDefinedPlayers(source, sa.getParam("Controller"), sa).get(0);
+            // The defined player can be gone by the time this resolves. Spell Queller's
+            // leaves-the-battlefield trigger is the known case: its host is the LKI copy,
+            // which remembers nothing, while the intervening-if reads Remembered from the
+            // card's current game state, so the condition can be met with no remembered
+            // owner to play the card. Fizzle instead of indexing an empty collection.
+            controller = Iterables.getFirst(AbilityUtils.getDefinedPlayers(source, sa.getParam("Controller"), sa), null);
+            if (controller == null) {
+                return;
+            }
         } else {
             controller = sa.getActivatingPlayer();
         }
