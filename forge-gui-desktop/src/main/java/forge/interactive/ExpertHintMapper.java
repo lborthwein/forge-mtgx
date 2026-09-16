@@ -7,6 +7,8 @@ import java.util.Map;
 import java.util.Set;
 
 import forge.game.GameObject;
+import forge.game.GameEntity;
+import forge.game.combat.Combat;
 import forge.game.card.Card;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
@@ -24,6 +26,9 @@ import forge.game.spellability.SpellAbilityView;
  * guesses a nearby control.
  */
 final class ExpertHintMapper {
+    /** Exactly the reason {@code ExpertHint.planMana} records for an unpayable cost. */
+    static final String NO_PAYMENT = "AI found no payment for the remaining cost";
+
     private ExpertHintMapper() {
     }
 
@@ -69,8 +74,9 @@ final class ExpertHintMapper {
      * confirm. Attack pairs whose control was not advertised are dropped rather
      * than guessed; if none survive the hint degrades to the plain confirm.
      */
-    static Mapped attacks(final HintPlan plan, final Set<String> advertised) {
+    static Mapped attacks(final HintPlan plan, final Set<String> advertised, final Combat live) {
         final List<String> ids = new ArrayList<>();
+        int outstanding = 0;
         for (Map.Entry<Integer, Integer> entry : plan.attackDefenderId.entrySet()) {
             final int attackerId = entry.getKey();
             final String kind = plan.attackDefenderKind.get(attackerId);
@@ -80,9 +86,34 @@ final class ExpertHintMapper {
             final String id = "combat:attack:" + attackerId + ":" + kind + ":" + entry.getValue();
             if (advertised.contains(id)) {
                 ids.add(id);
+                outstanding++;
+                continue;
+            }
+            // Declare-attackers is a loop: each assignment re-opens the input,
+            // and an attacker already in combat is offered only as unattack.
+            // Such a pair is satisfied, not unmappable — treating it otherwise
+            // degraded the last request of every single combat.
+            if (!isAlreadyAssigned(live, attackerId, entry.getValue())) {
+                outstanding++;
             }
         }
-        return finishCombat(ids, advertised, plan.attackDefenderId.size());
+        return finishCombat(ids, advertised, outstanding);
+    }
+
+    /** True when the live combat already has this attacker on this defender. */
+    private static boolean isAlreadyAssigned(final Combat live, final int attackerId,
+                                             final int defenderId) {
+        if (live == null) {
+            return false;
+        }
+        for (Card attacker : live.getAttackers()) {
+            if (attacker.getId() != attackerId) {
+                continue;
+            }
+            final GameEntity defender = live.getDefenderByAttacker(attacker);
+            return defender != null && defender.getId() == defenderId;
+        }
+        return false;
     }
 
     /** {@code combat} declare-blockers: one control per assignment, then confirm. */
@@ -254,6 +285,13 @@ final class ExpertHintMapper {
             }
         }
         if (plan.isDegraded()) {
+            // ComputerUtilMana answers the WHOLE remaining cost or nothing, so
+            // "no payment" is a verdict, not a gap: the AI's actual answer is to
+            // back out of the cast. Saying nothing here was worse than useless —
+            // the client then sank mana into a cost it could never complete.
+            if (NO_PAYMENT.equals(plan.degraded) && advertised.contains("button:cancel")) {
+                return Mapped.of(List.of("button:cancel"));
+            }
             return Mapped.none(plan.degraded);
         }
         return Mapped.unmapped("no advertised payment matched "

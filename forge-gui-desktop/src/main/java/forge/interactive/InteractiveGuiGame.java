@@ -165,6 +165,21 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (channel.isEnded() || game == null || human == null) {
             return;
         }
+        // An evaluation running on this thread is advice, not play. The game
+        // thread is parked awaiting the very request being built, so nothing
+        // else can be moving: every event raised inside that window was raised
+        // by the hint itself and must not reach the client.
+        //
+        // This is not hypothetical tidiness. Player.runWithController takes a
+        // game timestamp, which re-applies continuous effects and fires paired
+        // keyword/land-play changes — 32 spurious GameEventPlayerStatsChanged
+        // in one measured game, enough to make the hint count observable in the
+        // event stream and to fail the determinism gate on an otherwise
+        // identical game.
+        final ExpertHint hint = expertHint;
+        if (hint != null && Thread.currentThread().getName().equals(hint.inFlightThread())) {
+            return;
+        }
         try {
             final JsonObject body = new JsonObject();
             final JsonObject event = InteractiveGameEvents.encode(engineEvent, game, human.getView());
@@ -179,8 +194,51 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     void engineFailure(final Throwable failure) {
+        // The wire deliberately carries no stack trace. An engine fault still
+        // has to be attributable, so the whole picture — the stack, every live
+        // thread, and whether a hint evaluation was inside Forge's structures
+        // at that instant — goes to the JVM's own home directory, where it can
+        // be read without widening what the browser is told.
+        dumpEngineFailure(failure);
         fail("engine", "Forge game failed: " + safeThrowable(failure), null,
                 "match.startGame", null, failure);
+    }
+
+    private void dumpEngineFailure(final Throwable failure) {
+        try {
+            final ExpertHint hint = expertHint;
+            final String inFlight = hint == null ? null : hint.inFlightThread();
+            final StringBuilder report = new StringBuilder();
+            report.append("=== interactive engine failure ===\n");
+            report.append("at: ").append(java.time.Instant.now()).append('\n');
+            report.append("thread: ").append(Thread.currentThread().getName()).append('\n');
+            report.append("hintEnabled: ").append(hint != null && hint.isEnabled()).append('\n');
+            report.append("hintEvaluations: ").append(hint == null ? 0 : hint.evaluationCount()).append('\n');
+            // The load-bearing line: non-null means an AI evaluation was live
+            // when the engine faulted.
+            report.append("hintInFlightOnThread: ").append(inFlight == null ? "none" : inFlight).append('\n');
+            final java.io.StringWriter stack = new java.io.StringWriter();
+            failure.printStackTrace(new java.io.PrintWriter(stack));
+            report.append("--- failure ---\n").append(stack).append('\n');
+            report.append("--- all threads ---\n");
+            for (Map.Entry<Thread, StackTraceElement[]> entry : Thread.getAllStackTraces().entrySet()) {
+                report.append('[').append(entry.getKey().getName()).append("] ")
+                        .append(entry.getKey().getState()).append('\n');
+                for (StackTraceElement frame : entry.getValue()) {
+                    report.append("    at ").append(frame).append('\n');
+                }
+            }
+            System.err.println(report);
+            final String home = System.getProperty("forge.interactive.home");
+            if (home != null && !home.isBlank()) {
+                java.nio.file.Files.writeString(
+                        java.nio.file.Path.of(home, "engine-failure.log"), report.toString(),
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+            }
+        } catch (Throwable ignored) {
+            // Diagnostics must never turn one failure into two.
+        }
     }
 
     boolean hasFailed() {
@@ -530,16 +588,22 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 || input instanceof InputBlock
                 || input instanceof InputPayMana
                 || input instanceof InputSelectTargets
+                || input instanceof InputSelectEntitiesFromList<?>
                 || "mulligan".equals(kind);
     }
 
     private ExpertHintMapper.Mapped mapPlan(final HintPlan plan, final Input input,
                                             final String kind, final Set<String> advertised) {
         if (plan.isDegraded()) {
+            // A degraded payment still has an answer — backing out — so it goes
+            // on to the mapper. Every other degradation really is silence.
+            if (input instanceof InputPayMana) {
+                return ExpertHintMapper.mana(plan, paymentControlIds(advertised), advertised);
+            }
             return null;
         }
         if (input instanceof InputAttack) {
-            return ExpertHintMapper.attacks(plan, advertised);
+            return ExpertHintMapper.attacks(plan, advertised, game.getCombat());
         }
         if (input instanceof InputBlock) {
             return ExpertHintMapper.blocks(plan, advertised);
@@ -556,7 +620,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if ("priority".equals(kind)) {
             return ExpertHintMapper.priority(plan, advertised);
         }
-        if ("target".equals(kind)) {
+        if ("target".equals(kind) || input instanceof InputSelectEntitiesFromList<?>) {
             return ExpertHintMapper.targets(plan, advertised);
         }
         return ExpertHintMapper.Mapped.none(

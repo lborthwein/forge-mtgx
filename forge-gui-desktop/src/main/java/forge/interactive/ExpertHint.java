@@ -33,6 +33,7 @@ import forge.gamemodes.match.input.InputAttack;
 import forge.gamemodes.match.input.InputBlock;
 import forge.gamemodes.match.input.InputLondonMulligan;
 import forge.gamemodes.match.input.InputPayMana;
+import forge.gamemodes.match.input.InputSelectEntitiesFromList;
 import forge.gamemodes.match.input.InputSelectTargets;
 
 /**
@@ -94,6 +95,15 @@ final class ExpertHint {
     private final int ceilingSec;
     private final String aiProfile;
     private final AtomicLong decisions = new AtomicLong();
+    /**
+     * Whether an AI evaluation is running right now, and on which thread.
+     *
+     * This exists to answer one question with evidence rather than argument: if
+     * the engine faults, was the hint inside Forge's data structures at that
+     * moment? Without it, a ConcurrentModificationException is unattributable.
+     */
+    private final AtomicReference<String> inFlightOn = new AtomicReference<>();
+    private final AtomicLong evaluations = new AtomicLong();
 
     private volatile Game game;
     private volatile Player human;
@@ -144,6 +154,15 @@ final class ExpertHint {
         return decisions.incrementAndGet();
     }
 
+    /** Null when no evaluation is running, else the thread it is running on. */
+    String inFlightThread() {
+        return inFlightOn.get();
+    }
+
+    long evaluationCount() {
+        return evaluations.get();
+    }
+
     /**
      * Computes one plan for the decision this input opens. Returns null when
      * hints are off or this input does not open a decision of its own.
@@ -168,6 +187,9 @@ final class ExpertHint {
             }
             if (input instanceof InputSelectTargets targeting) {
                 return timed(decisionId, kind, started, id -> planTargets(id, targeting));
+            }
+            if (input instanceof InputSelectEntitiesFromList<?> selection) {
+                return timed(decisionId, kind, started, id -> planSelection(id, selection));
             }
             if ("mulligan".equals(kind)) {
                 return timed(decisionId, kind, started, this::planMulliganKeep);
@@ -212,7 +234,14 @@ final class ExpertHint {
     /** Runs {@code body} with the human seat temporarily controlled by the AI. */
     private void underAi(final java.util.function.Consumer<PlayerControllerAi> body) {
         final PlayerControllerAi temp = new PlayerControllerAi(game, human, syntheticLobby);
-        human.runWithController(() -> body.accept(temp), temp);
+        final String thread = Thread.currentThread().getName();
+        inFlightOn.set(thread);
+        evaluations.incrementAndGet();
+        try {
+            human.runWithController(() -> body.accept(temp), temp);
+        } finally {
+            inFlightOn.compareAndSet(thread, null);
+        }
     }
 
     // ---------------------------------------------------------------- priority
@@ -427,6 +456,68 @@ final class ExpertHint {
         }
         if (chosen.isEmpty()) {
             return HintPlan.degraded(decisionId, "target", "AI target did not resolve to an id", elapsedMs(started));
+        }
+        return HintPlan.targets(decisionId, chosen, elapsedMs(started));
+    }
+
+    // ------------------------------------------------- entity selections
+
+    /**
+     * "Choose N of these" — discard, sacrifice, tutor, and everything else
+     * Forge routes through {@link InputSelectEntitiesFromList}.
+     *
+     * The seat is offered a concrete list, so the AI can be asked to pick from
+     * exactly that list. It is asked once per entity rather than for the whole
+     * set: Forge re-opens the input after each selection with the chosen ones
+     * removed, so one answer per request is what the wire actually wants, and
+     * asking for a set would mean naming controls the next request withdraws.
+     */
+    private HintPlan planSelection(final long decisionId, final InputSelectEntitiesFromList<?> selection) {
+        final long started = System.nanoTime();
+        final List<String> chosen = new ArrayList<>();
+        final AtomicReference<String> failure = new AtomicReference<>();
+        underAi(temp -> {
+            final FCollection<GameEntity> options = new FCollection<>();
+            for (GameEntity option : selection.getValidChoices()) {
+                // Already-selected entities are no longer on offer.
+                if (!selection.getSelected().contains(option)) {
+                    options.add(option);
+                }
+            }
+            if (options.isEmpty()) {
+                failure.set("no unselected entity remained");
+                return;
+            }
+            final SpellAbility sa = selection.getSelectionSpellAbility();
+            if (sa == null) {
+                // Without an ability there is no per-API chooser to consult, and
+                // guessing which of these the seat wants is exactly the thing
+                // this class must not do.
+                failure.set("selection has no ability context");
+                return;
+            }
+            final GameEntity picked = temp.chooseSingleEntityForEffect(
+                    options, null, sa, "Choose", selection.getMinSelected() <= 0, null,
+                    new java.util.HashMap<>());
+            if (picked == null) {
+                failure.set("AI declined to choose");
+                return;
+            }
+            if (picked instanceof Card card) {
+                chosen.add("card:" + card.getId());
+            } else if (picked instanceof Player player) {
+                int index = 0;
+                for (Player candidate : game.getPlayers()) {
+                    if (candidate == player) { chosen.add("player:" + index); break; }
+                    index++;
+                }
+            }
+        });
+        if (failure.get() != null) {
+            return HintPlan.degraded(decisionId, "choice", failure.get(), elapsedMs(started));
+        }
+        if (chosen.isEmpty()) {
+            return HintPlan.degraded(decisionId, "choice", "AI choice did not resolve to an id", elapsedMs(started));
         }
         return HintPlan.targets(decisionId, chosen, elapsedMs(started));
     }

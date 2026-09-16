@@ -21,6 +21,12 @@ public abstract class InputSelectManyBase<T extends GameEntity> extends InputSyn
     protected final int max;
     protected boolean allowCancel = false;
     protected SpellAbility sa = null;
+
+    /** The ability this selection belongs to, or null. Read-only for advisers. */
+    public final SpellAbility getSelectionSpellAbility() { return sa; }
+    /** How many entities Forge requires. Read-only for advisers. */
+    public final int getMinSelected() { return min; }
+    public final int getMaxSelected() { return max; }
     protected CardView card;
     protected String tallyType;
     protected int tally;
