@@ -117,6 +117,14 @@ final class BlendedAiController extends PlayerControllerAi {
         if (picked == null || picked.size() != cardsToReturn) {
             return settle(answer, ai, picked != null);
         }
+        // Identity first, as in every other hook: an answer equal to the AI's is
+        // a defer and returns the AI's own collection. Without this the tape
+        // logged a deferring policy as an override.
+        if (new java.util.LinkedHashSet<>(picked).equals(new java.util.LinkedHashSet<>(idsOf(ai)))) {
+            deferred++;
+            record("mulligan", "defer", idsOf(ai), picked);
+            return ai;
+        }
         final CardCollection chosen = new CardCollection();
         for (String id : picked) {
             final Card card = byId(hand, id);
@@ -248,12 +256,31 @@ final class BlendedAiController extends PlayerControllerAi {
                 aiPairs.add("attack:" + card.getId() + ":" + defender.getId());
             }
         }
+        // The AI's own pairs come first and unconditionally. CombatUtil.canAttack
+        // rejects a tapped creature, and super.declareAttackers has ALREADY tapped
+        // everything it declared — so enumerating legality here silently omits the
+        // AI's own attackers. A "defer" answer then failed the identity test, fell
+        // through to the rebuild, and cleared the combat; Forge re-asked, which is
+        // why this hook made 5596 requests where asking-and-discarding made 114.
         final JsonArray items = new JsonArray();
+        final java.util.Set<String> advertised = new java.util.LinkedHashSet<>();
+        for (Card card : combat.getAttackers()) {
+            final GameEntity defender = combat.getDefenderByAttacker(card);
+            if (defender == null) {
+                continue;
+            }
+            final String id = "attack:" + card.getId() + ":" + defender.getId();
+            if (advertised.add(id)) {
+                items.add(item(id, card.getName() + " -> " + defender.getId()));
+            }
+        }
         for (Card candidate : attacker.getCreaturesInPlay()) {
             for (GameEntity defender : combat.getDefenders()) {
                 if (forge.game.combat.CombatUtil.canAttack(candidate, defender)) {
-                    items.add(item("attack:" + candidate.getId() + ":" + defender.getId(),
-                            candidate.getName() + " -> " + defender.getId()));
+                    final String id = "attack:" + candidate.getId() + ":" + defender.getId();
+                    if (advertised.add(id)) {
+                        items.add(item(id, candidate.getName() + " -> " + defender.getId()));
+                    }
                 }
             }
         }
@@ -262,8 +289,20 @@ final class BlendedAiController extends PlayerControllerAi {
         final JsonArray controls = new JsonArray();
         controls.add(setControl("attackers", "Declare attackers", items));
         hooked++;
+        // Probe: enumerate the candidates but never ask. Separates "the
+        // legality enumeration perturbs the engine" from "the bounded wait
+        // perturbs it", which are the only two things this hook adds.
+        if (ENUM_ONLY_PROBE) {
+            return;
+        }
         final JsonObject answer = offer("combat", "blend:declareAttackers",
                 "Declare attackers", controls, hintOf(aiPairs));
+        // Probe: ask, then throw the answer away and leave the AI's combat
+        // untouched. Isolates the round trip from anything done with the reply.
+        if (ASK_ONLY_PROBE) {
+            deferred++;
+            return;
+        }
         final List<String> picked = idList(answer);
         final java.util.Set<String> legalPairs = new java.util.LinkedHashSet<>();
         for (var element : items) {
@@ -299,8 +338,11 @@ final class BlendedAiController extends PlayerControllerAi {
             for (GameEntity candidate : combat.getDefenders()) {
                 if (candidate.getId() == Integer.parseInt(parts[2])) { defender = candidate; break; }
             }
+            // A pair the AI itself declared is legal by construction; re-checking
+            // canAttack would reject it, because declaring tapped the creature.
             if (card == null || defender == null
-                    || !forge.game.combat.CombatUtil.canAttack(card, defender)) { ok = false; break; }
+                    || (!aiPairs.contains(id)
+                        && !forge.game.combat.CombatUtil.canAttack(card, defender))) { ok = false; break; }
             combat.addAttacker(card, defender);
         }
         if (!ok) {
@@ -330,12 +372,28 @@ final class BlendedAiController extends PlayerControllerAi {
                 aiPairs.add("block:" + blocker.getId() + ":" + blocked.get(0).getId());
             }
         }
+        // Same trap as declareAttackers: canBlock(.., combat) rejects a creature
+        // that is already blocking, and super.declareBlockers has already assigned
+        // the AI's blocks, so the AI's own pairs must be advertised explicitly.
         final JsonArray items = new JsonArray();
+        final java.util.Set<String> advertised = new java.util.LinkedHashSet<>();
+        for (Card blocker : combat.getAllBlockers()) {
+            final CardCollection blocked = combat.getAttackersBlockedBy(blocker);
+            if (blocked == null || blocked.isEmpty()) {
+                continue;
+            }
+            final String id = "block:" + blocker.getId() + ":" + blocked.get(0).getId();
+            if (advertised.add(id)) {
+                items.add(item(id, blocker.getName() + " blocks " + blocked.get(0).getName()));
+            }
+        }
         for (Card blocker : defender.getCreaturesInPlay()) {
             for (Card atk : combat.getAttackers()) {
                 if (forge.game.combat.CombatUtil.canBlock(atk, blocker, combat)) {
-                    items.add(item("block:" + blocker.getId() + ":" + atk.getId(),
-                            blocker.getName() + " blocks " + atk.getName()));
+                    final String id = "block:" + blocker.getId() + ":" + atk.getId();
+                    if (advertised.add(id)) {
+                        items.add(item(id, blocker.getName() + " blocks " + atk.getName()));
+                    }
                 }
             }
         }
@@ -376,8 +434,10 @@ final class BlendedAiController extends PlayerControllerAi {
             if (parts.length != 3) { ok = false; break; }
             final Card blocker = defender.getGame().findById(Integer.parseInt(parts[1]));
             final Card atk = defender.getGame().findById(Integer.parseInt(parts[2]));
+            // As above: a block the AI itself assigned is legal by construction.
             if (blocker == null || atk == null
-                    || !forge.game.combat.CombatUtil.canBlock(atk, blocker, combat)) { ok = false; break; }
+                    || (!aiPairs.contains(id)
+                        && !forge.game.combat.CombatUtil.canBlock(atk, blocker, combat))) { ok = false; break; }
             combat.addBlocker(atk, blocker);
         }
         if (!ok) {
@@ -412,7 +472,10 @@ final class BlendedAiController extends PlayerControllerAi {
             ids.add(id);
             controls.add(control(id, "selectCard", "entity " + option.getId()));
         }
-        if (isOptional) {
+        // "none" is advertised when the effect allows it OR when the AI itself
+        // declined: an unadvertised hint cannot be deferred to, and the policy
+        // would be forced to pick an entity the AI had rejected.
+        if (isOptional || ai == null) {
             controls.add(control("entity:none", "ok", "Choose none"));
         }
         final String aiId = ai == null ? "entity:none" : "entity:" + ai.getId();
@@ -433,6 +496,12 @@ final class BlendedAiController extends PlayerControllerAi {
     }
 
     /** Parses the hook list: "0"/"" none, "1"/"all" every class, else a csv. */
+    /** -Dforge.interactive.blend.probe=enumOnly. Diagnostic; never on in a real run. */
+    private static final boolean ASK_ONLY_PROBE =
+            "askOnly".equals(System.getProperty("forge.interactive.blend.probe"));
+    private static final boolean ENUM_ONLY_PROBE =
+            "enumOnly".equals(System.getProperty("forge.interactive.blend.probe"));
+
     static java.util.Set<String> parseHooks(final String spec) {
         final java.util.Set<String> all = java.util.Set.of("mulligan-keep", "mulligan-bottom",
                 "priority", "attackers", "blockers", "entity");

@@ -1563,7 +1563,11 @@ final class InteractiveGuiGame extends AbstractGuiGame
             body.addProperty("seat", humanSeat);
             body.add("view", new JsonObject());
             final JsonObject prompt = new JsonObject();
-            prompt.addProperty("message", message == null ? "" : message);
+            // Forge hands some effects a null or blank title. The host rejects an
+            // empty prompt message as a protocol violation and ends the session,
+            // so a blank title becomes the decision's own class rather than "".
+            prompt.addProperty("message",
+                    message == null || message.isBlank() ? inputClass : message);
             body.add("prompt", prompt);
             body.add("controls", controls);
             if (hint != null) {
@@ -1638,9 +1642,21 @@ final class InteractiveGuiGame extends AbstractGuiGame
                 }
                 event.addProperty("combat", sb.toString().hashCode());
             }
-            final forge.game.player.PlayerController live = human.getController();
-            if (live instanceof forge.ai.PlayerControllerAi pc) {
-                event.addProperty("aiCarried", pc.getAi().debugCarriedState().hashCode());
+            // BOTH controllers. The opponent's AiController is a separate
+            // instance, and AiAttackController consults it to predict blocks —
+            // it was missing from the first hash, which is exactly the kind of
+            // hole that makes a divergence look causeless.
+            int who = 0;
+            for (Player player : game.getPlayers()) {
+                final forge.game.player.PlayerController live = player.getController();
+                if (live instanceof forge.ai.PlayerControllerAi pc) {
+                    // Carried state only. identityHashCode is per-JVM, so putting
+                    // it on every event makes the comparison log differ between
+                    // any two runs — including a run against itself.
+                    event.addProperty("aiCarried" + who,
+                            pc.getAi().debugCarriedState().hashCode());
+                }
+                who++;
             }
         } catch (Throwable ignored) {
             // diagnostics never cost a game
