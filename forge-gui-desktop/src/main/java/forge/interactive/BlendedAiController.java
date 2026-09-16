@@ -167,8 +167,59 @@ final class BlendedAiController extends PlayerControllerAi {
         return "priority:pass".equals(chose) ? List.of() : ai;
     }
 
+    private boolean loggedAttackIdentity;
+
+    /**
+     * One-shot: who is actually deciding attacks, and with which profile.
+     *
+     * AiAttackController reads its gating props through
+     * ((PlayerControllerAi) ai.getController()).getAi(), so if the two arms
+     * hold different AiController instances or profiles they would attack
+     * differently for reasons that have nothing to do with the hook.
+     */
+    private void logAttackIdentity(final Player attacker) {
+        if (loggedAttackIdentity || bridge == null) {
+            return;
+        }
+        loggedAttackIdentity = true;
+        try {
+            final forge.game.player.PlayerController live = attacker.getController();
+            final forge.ai.AiController aic = live instanceof PlayerControllerAi pc ? pc.getAi() : null;
+            final JsonObject entry = new JsonObject();
+            entry.addProperty("class", "BlendIdentity");
+            entry.addProperty("controller", live == null ? "null" : live.getClass().getSimpleName());
+            entry.addProperty("isBlended", live instanceof BlendedAiController);
+            entry.addProperty("controllerIdentity", System.identityHashCode(live));
+            entry.addProperty("aiIdentity", aic == null ? 0 : System.identityHashCode(aic));
+            entry.addProperty("lobbyProfile", live == null ? "" :
+                    live.getLobbyPlayer() instanceof forge.ai.LobbyPlayerAi lp ? lp.getAiProfile() : "not-ai");
+            if (aic != null) {
+                entry.addProperty("usesFullSimulation", aic.usesFullSimulation());
+                for (forge.ai.AiProps prop : new forge.ai.AiProps[]{
+                        forge.ai.AiProps.PLAY_AGGRO,
+                        forge.ai.AiProps.ATTACK_INTO_TRADE_WHEN_TAPPED_OUT,
+                        forge.ai.AiProps.RANDOMLY_ATKTRADE_ONLY_ON_LOWER_LIFE_PRESSURE,
+                        forge.ai.AiProps.COMBAT_ATTRITION_ATTACK_EVASION_PREDICTION}) {
+                    entry.addProperty(prop.name(), aic.getBoolProperty(prop));
+                }
+                for (forge.ai.AiProps prop : new forge.ai.AiProps[]{
+                        forge.ai.AiProps.CHANCE_TO_ATTACK_INTO_TRADE,
+                        forge.ai.AiProps.CHANCE_TO_ATKTRADE_WHEN_OPP_HAS_MANA}) {
+                    entry.addProperty(prop.name(), aic.getIntProperty(prop));
+                }
+            }
+            if (live instanceof PlayerControllerAi pc2) {
+                entry.addProperty("pilotsNonAggroDeck", pc2.pilotsNonAggroDeck());
+            }
+            bridge.recordBlendDecision(entry);
+        } catch (Throwable ignored) {
+            // diagnostics never cost a game
+        }
+    }
+
     @Override
     public void declareAttackers(final Player attacker, final Combat combat) {
+        logAttackIdentity(attacker);
         super.declareAttackers(attacker, combat);
         if (!on("attackers")) {
             return;
