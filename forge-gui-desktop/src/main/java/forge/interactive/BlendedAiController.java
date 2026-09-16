@@ -669,10 +669,20 @@ final class BlendedAiController extends PlayerControllerAi {
         return host == null ? "ability" : host.getName();
     }
 
+    /**
+     * A label is display text, but the host refuses an empty one and ends the
+     * session — a nameless token or a copy with no name is enough to do it, and
+     * it killed a game 215 decisions in. The id is always non-empty and always
+     * identifies the option, so it stands in.
+     */
+    private static String displayLabel(final String label, final String id) {
+        return label == null || label.isBlank() ? id : label;
+    }
+
     private static JsonObject item(final String id, final String label) {
         final JsonObject item = new JsonObject();
         item.addProperty("id", id);
-        item.addProperty("label", label == null ? "" : label);
+        item.addProperty("label", displayLabel(label, id));
         return item;
     }
 
@@ -680,7 +690,7 @@ final class BlendedAiController extends PlayerControllerAi {
         final JsonObject control = new JsonObject();
         control.addProperty("controlId", id);
         control.addProperty("type", type);
-        control.addProperty("label", label == null ? "" : label);
+        control.addProperty("label", displayLabel(label, id));
         return control;
     }
 
