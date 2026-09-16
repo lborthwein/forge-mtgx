@@ -145,6 +145,31 @@ public final class InteractiveMain {
             gui.setGameView(game.getView());
             gui.setOriginalGameController(human.getView(), humanController);
             gui.openView(new TrackableCollection<>(human.getView()));
+
+            // The blend, done at the controller. The seat stops being a human
+            // whose decisions are projected onto browser controls and becomes a
+            // real PlayerControllerAi that plays natively and offers a policy a
+            // few decision classes. Off unless -Dforge.interactive.blend=true,
+            // so the human-control path — and the live jar — are untouched.
+            if (Boolean.parseBoolean(System.getProperty("forge.interactive.blend", "false"))) {
+                final boolean hooks = Boolean.parseBoolean(
+                        System.getProperty("forge.interactive.blend.hooks", "true"));
+                final long waitMs = longProperty("forge.interactive.blend.timeoutMs", 2000L);
+                final forge.ai.LobbyPlayerAi lobby =
+                        new forge.ai.LobbyPlayerAi("Blended Seat", null);
+                lobby.setAiProfile(config.aiProfile());
+                final BlendedAiController blended =
+                        new BlendedAiController(game, human, lobby, gui, hooks, waitMs);
+                // setFirstController is one-shot and already spent by the human
+                // lobby player, so the swap uses Forge's own control mechanism
+                // instead — the same one Mindslaver uses — installed once and
+                // never removed. getController() consults it first, so from
+                // here the engine calls the AI directly, on the game thread,
+                // for everything. event=false: no GameEventPlayerControl, so
+                // the client sees no spurious "control changed".
+                human.addController(game.getNextTimestamp(), human, blended, false);
+                gui.useBlendedController(blended);
+            }
             for (Player player : game.getPlayers()) {
                 player.updateOpponentsForView();
             }
@@ -335,6 +360,15 @@ public final class InteractiveMain {
             }
         } catch (Exception error) {
             throw new InteractiveProtocol.ProtocolException("invalid_config", "Deck rejected: " + error.getMessage());
+        }
+    }
+
+    private static long longProperty(final String name, final long fallback) {
+        try {
+            final String raw = System.getProperty(name);
+            return raw == null || raw.isBlank() ? fallback : Long.parseLong(raw.trim());
+        } catch (RuntimeException ignored) {
+            return fallback;
         }
     }
 

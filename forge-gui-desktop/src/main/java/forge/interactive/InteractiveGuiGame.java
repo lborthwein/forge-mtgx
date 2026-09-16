@@ -206,6 +206,18 @@ final class InteractiveGuiGame extends AbstractGuiGame
         }
     }
 
+    private volatile BlendedAiController blended;
+
+    void useBlendedController(final BlendedAiController controller) {
+        this.blended = controller;
+    }
+
+    /** Blend counters for the terminal message, or null when the blend is off. */
+    JsonObject blendCounters() {
+        final BlendedAiController controller = blended;
+        return controller == null ? null : controller.counters();
+    }
+
     void useExpertHint(final ExpertHint hint) {
         this.expertHint = Objects.requireNonNull(hint);
         if (game != null && human != null) {
@@ -1507,6 +1519,50 @@ final class InteractiveGuiGame extends AbstractGuiGame
         } catch (Throwable ignored) {
             hintedControlIds = Collections.emptyList();
             return null;
+        }
+    }
+
+    /**
+     * Publishes a decision and waits a bounded time for a policy's answer.
+     *
+     * This is the blend's own channel, not the human-control path. It is called
+     * from {@link BlendedAiController} — that is, on the game thread, where the
+     * controller runs — so the wait blocks the engine and never the EDT. The
+     * engine is meant to wait here: it is asking a question it cannot proceed
+     * without.
+     *
+     * Returns null when nothing answered in time. A policy that is slow, absent
+     * or broken costs the seat its override, never its game.
+     */
+    JsonObject askPolicy(final String kind, final String inputClass, final String message,
+                         final JsonArray controls, final JsonObject hint, final long timeoutMs) {
+        if (channel.isEnded()) {
+            return null;
+        }
+        final String requestId = nextRequestId();
+        final ModalRequest modal = new ModalRequest(requestId, kind, action -> null);
+        if (!modalRequest.compareAndSet(null, modal)) {
+            return null;
+        }
+        try {
+            channel.send("request", requestBody(requestId, kind, inputClass, "Forge", message,
+                    null, null, false, controls, hint));
+            return modal.answer.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException expired) {
+            return null;
+        } catch (Throwable failure) {
+            return null;
+        } finally {
+            modalRequest.compareAndSet(modal, null);
+        }
+    }
+
+    /** Records a hooked decision in the session log, whether or not it was overridden. */
+    void recordBlendDecision(final JsonObject entry) {
+        try {
+            channel.send("event", entry);
+        } catch (Throwable ignored) {
+            // A tape entry must never cost a game.
         }
     }
 
