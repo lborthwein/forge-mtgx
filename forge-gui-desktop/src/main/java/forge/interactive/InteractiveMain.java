@@ -144,6 +144,21 @@ public final class InteractiveMain {
             gui.setGameView(null);
             gui.setGameView(game.getView());
             gui.setOriginalGameController(human.getView(), humanController);
+            // Forge bounds each AI evaluation by game.AI_TIMEOUT (5 s by
+            // default) on WALL CLOCK, and the bound fires regardless of any
+            // aiCanUseTimeout flag. That makes every decision timing-dependent:
+            // the same game on the same seed can diverge because the machine
+            // was busier. A hooked seat is several times slower than an
+            // unhooked one, so the two arms time out at different moments and
+            // cannot be compared at all.
+            //
+            // Panels already set this high for exactly this reason. Off by
+            // default so the live jar keeps Forge's own bound.
+            final long aiTimeout = longProperty("forge.interactive.aiTimeoutSec", 0L);
+            if (aiTimeout > 0) {
+                game.AI_TIMEOUT = (int) Math.min(Integer.MAX_VALUE, aiTimeout);
+            }
+
             gui.openView(new TrackableCollection<>(human.getView()));
 
             // The blend, done at the controller. The seat stops being a human
@@ -152,8 +167,8 @@ public final class InteractiveMain {
             // few decision classes. Off unless -Dforge.interactive.blend=true,
             // so the human-control path — and the live jar — are untouched.
             if (Boolean.parseBoolean(System.getProperty("forge.interactive.blend", "false"))) {
-                final boolean hooks = Boolean.parseBoolean(
-                        System.getProperty("forge.interactive.blend.hooks", "true"));
+                final java.util.Set<String> hooks = BlendedAiController.parseHooks(
+                        System.getProperty("forge.interactive.blend.hooks", "all"));
                 final long waitMs = longProperty("forge.interactive.blend.timeoutMs", 2000L);
                 final forge.ai.LobbyPlayerAi lobby =
                         new forge.ai.LobbyPlayerAi("Blended Seat", null);

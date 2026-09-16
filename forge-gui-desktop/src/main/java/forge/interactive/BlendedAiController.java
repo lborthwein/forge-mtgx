@@ -63,7 +63,8 @@ import forge.util.collect.FCollectionView;
 final class BlendedAiController extends PlayerControllerAi {
     private final InteractiveGuiGame bridge;
     private final long timeoutMs;
-    private final boolean policyHooksOn;
+    /** Which decision classes are offered. Empty means none. */
+    private final java.util.Set<String> hooks;
 
     /** Decisions offered to the policy, and how they were resolved. */
     private long hooked;
@@ -72,11 +73,11 @@ final class BlendedAiController extends PlayerControllerAi {
     private long fallbacks;
 
     BlendedAiController(final Game game, final Player player, final LobbyPlayer lobby,
-                        final InteractiveGuiGame bridge, final boolean policyHooksOn,
+                        final InteractiveGuiGame bridge, final java.util.Set<String> hooks,
                         final long timeoutMs) {
         super(game, player, lobby);
         this.bridge = bridge;
-        this.policyHooksOn = policyHooksOn;
+        this.hooks = hooks == null ? java.util.Set.of() : hooks;
         this.timeoutMs = timeoutMs > 0 ? timeoutMs : 2000L;
     }
 
@@ -85,7 +86,7 @@ final class BlendedAiController extends PlayerControllerAi {
     @Override
     public boolean mulliganKeepHand(final Player firstPlayer, final int cardsToReturn) {
         final boolean ai = super.mulliganKeepHand(firstPlayer, cardsToReturn);
-        if (!policyHooksOn) {
+        if (!on("mulligan-keep")) {
             return ai;
         }
         final JsonArray controls = new JsonArray();
@@ -99,7 +100,7 @@ final class BlendedAiController extends PlayerControllerAi {
     @Override
     public CardCollectionView tuckCardsViaMulligan(final CardCollectionView hand, final int cardsToReturn) {
         final CardCollectionView ai = super.tuckCardsViaMulligan(hand, cardsToReturn);
-        if (!policyHooksOn || cardsToReturn <= 0) {
+        if (!on("mulligan-bottom") || cardsToReturn <= 0) {
             return ai;
         }
         // The legal set is the hand; the answer is an ordered subset of exactly
@@ -132,7 +133,7 @@ final class BlendedAiController extends PlayerControllerAi {
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         final List<SpellAbility> ai = super.chooseSpellAbilityToPlay();
-        if (!policyHooksOn) {
+        if (!on("priority")) {
             return ai;
         }
         // Deliberately NOT an enumeration of every playable ability.
@@ -169,7 +170,7 @@ final class BlendedAiController extends PlayerControllerAi {
     @Override
     public void declareAttackers(final Player attacker, final Combat combat) {
         super.declareAttackers(attacker, combat);
-        if (!policyHooksOn) {
+        if (!on("attackers")) {
             return;
         }
         // The AI has already filled the combat. A policy may replace the whole
@@ -253,7 +254,7 @@ final class BlendedAiController extends PlayerControllerAi {
     @Override
     public void declareBlockers(final Player defender, final Combat combat) {
         super.declareBlockers(defender, combat);
-        if (!policyHooksOn) {
+        if (!on("blockers")) {
             return;
         }
         final List<String> aiPairs = new ArrayList<>();
@@ -335,7 +336,7 @@ final class BlendedAiController extends PlayerControllerAi {
             final Player targetedPlayer, final Map<String, Object> params) {
         final T ai = super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title,
                 isOptional, targetedPlayer, params);
-        if (!policyHooksOn || optionList == null) {
+        if (!on("entity") || optionList == null) {
             return ai;
         }
         final JsonArray controls = new JsonArray();
@@ -359,6 +360,30 @@ final class BlendedAiController extends PlayerControllerAi {
             }
         }
         return ai;
+    }
+
+    private boolean on(final String hook) {
+        return hooks.contains(hook);
+    }
+
+    /** Parses the hook list: "0"/"" none, "1"/"all" every class, else a csv. */
+    static java.util.Set<String> parseHooks(final String spec) {
+        final java.util.Set<String> all = java.util.Set.of("mulligan-keep", "mulligan-bottom",
+                "priority", "attackers", "blockers", "entity");
+        final String raw = spec == null ? "" : spec.trim().toLowerCase();
+        if (raw.isEmpty() || "0".equals(raw) || "false".equals(raw) || "none".equals(raw)) {
+            return java.util.Set.of();
+        }
+        if ("1".equals(raw) || "true".equals(raw) || "all".equals(raw)) {
+            return all;
+        }
+        final java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        for (String part : raw.split("[,\\s]+")) {
+            if (all.contains(part)) {
+                out.add(part);
+            }
+        }
+        return out;
     }
 
     // ------------------------------------------------------------- plumbing
