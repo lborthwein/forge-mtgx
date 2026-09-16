@@ -92,11 +92,35 @@ public class InputQueue extends Observable implements IHasForgeLog {
         return inputStack.toString();
     }
 
+    /**
+     * Notified on the game thread as an input is handed over, before any
+     * observer is told about it.
+     *
+     * The distinction matters: observers are notified on the EDT, and the game
+     * thread does not stop running when it publishes an input — it may go
+     * straight on to run the other seat's AI. Anything that needs to read game
+     * state without racing the engine has to do it here, on this thread, at
+     * this instant.
+     */
+    public interface InputPresentedListener {
+        void onInputPresented(Input input);
+    }
+
+    private volatile InputPresentedListener presentedListener;
+
+    public void setInputPresentedListener(final InputPresentedListener listener) {
+        this.presentedListener = listener;
+    }
+
     public void setInput(final InputSynchronized input) {
         //if (HostedMatch.getHumanCount() > 1) { //update current player if needed
             //HostedMatch.setCurrentPlayer(game.getPlayer(input.getOwner()));
         //}
         inputStack.push(input);
+        final InputPresentedListener listener = presentedListener;
+        if (listener != null) {
+            listener.onInputPresented(input);
+        }
         syncPoint();
         updateObservers();
     }

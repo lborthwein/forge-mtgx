@@ -116,6 +116,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private volatile ExpertHint expertHint = new ExpertHint(false, 0, 0, "Default");
     /** The plan opened by the current decision, projected onto its sub-requests. */
     private volatile HintPlan currentPlan;
+    /** A plan computed on the game thread, awaiting the EDT that will map it. */
+    private final AtomicReference<Map.Entry<Input, HintPlan>> precomputed = new AtomicReference<>();
     /** controlIds the last emitted hint named, for divergence detection. */
     private volatile List<String> hintedControlIds = Collections.emptyList();
     private final ThreadLocal<Set<Integer>> explicitlyOfferedCards =
@@ -143,6 +145,48 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         this.human = Objects.requireNonNull(human);
         this.controller = Objects.requireNonNull(controller);
         expertHint.bind(game, human);
+        // The AI evaluation must happen here, on the game thread, as the input
+        // is handed over — see precomputeHint.
+        controller.getInputQueue().setInputPresentedListener(this::precomputeHint);
+    }
+
+    /**
+     * Runs the hint's AI evaluation on the game thread, before the engine moves on.
+     *
+     * This is not a preference. Publishing a request happens on the EDT, and the
+     * game thread does <em>not</em> stop when it hands an input over — it can go
+     * straight on to run the opposing seat's own {@code chooseSpellAbilityToPlay}.
+     * Evaluating there put two AI passes on one {@link Game} at once, and both
+     * call {@code checkStaticAbilities}, which clears and rebuilds
+     * {@code StaticEffects}' map. That is a
+     * {@link java.util.ConcurrentModificationException} on the game thread, and
+     * it killed a game in testing before this existed.
+     *
+     * <p>Only the evaluation moves. Mapping the plan onto {@code controlId}s
+     * still happens where the advertised controls are built, because it is
+     * read-only and needs the bindings.
+     */
+    private void precomputeHint(final Input input) {
+        final ExpertHint hint = expertHint;
+        if (hint == null || !hint.isEnabled() || input == null || game == null) {
+            return;
+        }
+        // If this is somehow not the game thread, take no hint at all rather
+        // than an unsafe one.
+        if (!forge.util.ThreadUtil.isGameThread()) {
+            return;
+        }
+        try {
+            final String kind = kindFor(input);
+            if (!opensDecision(input, kind)) {
+                return;
+            }
+            final HintPlan plan = hint.planFor(input, kind, hint.nextDecisionId());
+            precomputed.set(plan == null ? null : Map.entry(input, plan));
+        } catch (Throwable ignored) {
+            // Advice must never end a game.
+            precomputed.set(null);
+        }
     }
 
     void useExpertHint(final ExpertHint hint) {
@@ -537,7 +581,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             HintPlan plan = currentPlan;
             boolean projected = true;
             if (opensDecision(input, kind) || plan == null || plan.hasDiverged()) {
-                plan = hint.planFor(input, kind, hint.nextDecisionId());
+                // Never evaluate here: this runs on the EDT, and the game thread
+                // may be busy. Take only what the game thread already computed
+                // for this exact input.
+                final Map.Entry<Input, HintPlan> ready = precomputed.getAndSet(null);
+                plan = ready != null && ready.getKey() == input ? ready.getValue() : null;
                 projected = false;
                 currentPlan = plan;
             }
