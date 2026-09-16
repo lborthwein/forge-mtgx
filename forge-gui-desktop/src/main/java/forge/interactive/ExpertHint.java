@@ -515,6 +515,7 @@ final class ExpertHint {
         final long started = System.nanoTime();
         final List<String> chosen = new ArrayList<>();
         final AtomicReference<String> failure = new AtomicReference<>();
+        final AtomicReference<Boolean> done = new AtomicReference<>(false);
         underAi(temp -> {
             final FCollection<GameEntity> options = new FCollection<>();
             for (GameEntity option : selection.getValidChoices()) {
@@ -535,11 +536,21 @@ final class ExpertHint {
                 failure.set("selection has no ability context");
                 return;
             }
+            final boolean optional = selection.getMinSelected() <= 0
+                    || !selection.getSelected().isEmpty();
             final GameEntity picked = temp.chooseSingleEntityForEffect(
-                    options, null, sa, "Choose", selection.getMinSelected() <= 0, null,
+                    options, null, sa, "Choose", optional, null,
                     new java.util.HashMap<>());
             if (picked == null) {
-                failure.set("AI declined to choose");
+                // Declining an optional selection is an ANSWER — "I am done" —
+                // not a gap. Sending it as one made the client fall back and
+                // pick a card the AI had deliberately left alone, 567 times in
+                // the gate-zero run.
+                if (optional) {
+                    done.set(true);
+                    return;
+                }
+                failure.set("AI declined a mandatory selection");
                 return;
             }
             if (picked instanceof Card card) {
@@ -552,6 +563,10 @@ final class ExpertHint {
                 }
             }
         });
+        if (Boolean.TRUE.equals(done.get())) {
+            // Forge closes an optional selection with its own OK.
+            return HintPlan.selectionDone(decisionId, elapsedMs(started));
+        }
         if (failure.get() != null) {
             return HintPlan.degraded(decisionId, "choice", failure.get(), elapsedMs(started));
         }
@@ -559,6 +574,111 @@ final class ExpertHint {
             return HintPlan.degraded(decisionId, "choice", "AI choice did not resolve to an id", elapsedMs(started));
         }
         return HintPlan.targets(decisionId, chosen, elapsedMs(started));
+    }
+
+    // --------------------------------------------------------- announce X
+
+    /** What the AI would announce for X (or another announced value). */
+    HintPlan planAnnounce(final long decisionId, final SpellAbility ability,
+                          final String announce, final int min, final int max) {
+        final long started = System.nanoTime();
+        if (!enabled || ability == null || announce == null) {
+            return null;
+        }
+        final AtomicReference<Integer> value = new AtomicReference<>();
+        underAi(temp -> value.set(temp.announceRequirements(ability, min, max, announce)));
+        final Integer chosen = value.get();
+        if (chosen == null) {
+            // The AI declining to announce is a decision — it will not pay for
+            // this — not a gap. Backing out is the faithful answer; stalling the
+            // seat on it ended four games in the gate-zero verification.
+            return HintPlan.announceCancelled(decisionId, elapsedMs(started));
+        }
+        // Forge rejects a value outside the range it offered, so clamp rather
+        // than send something it will refuse.
+        final int clamped = Math.max(min, Math.min(max, chosen));
+        return HintPlan.announce(decisionId, clamped, elapsedMs(started));
+    }
+
+    // ------------------------------------------------- ability chooser
+
+    /**
+     * Which of a card's offered abilities the AI would actually play.
+     *
+     * The projection path — reuse the SpellAbility the priority plan chose —
+     * only works while that plan is still live. It is not, whenever a policy
+     * overrode the priority decision or the chooser belongs to a line the AI
+     * never planned, and then the seat had no answer and the game stopped: 13
+     * of the 23 games that ended without a result in the gate-zero run.
+     *
+     * The bridge already holds everything the AI method needs here — the host
+     * card and the offered abilities — so the honest answer is to ask it,
+     * rather than to project a plan that does not apply.
+     */
+    HintPlan planAbilityChoice(final long decisionId, final Card host,
+                               final Map<String, SpellAbilityView> offered) {
+        final long started = System.nanoTime();
+        if (!enabled || host == null || offered.isEmpty()) {
+            return null;
+        }
+        final AtomicReference<String> chosenControl = new AtomicReference<>();
+        final AtomicReference<String> failure = new AtomicReference<>();
+        underAi(temp -> {
+            // Keep each candidate paired with the control that offered it, so
+            // the answer maps back by identity. Matching on view id afterwards
+            // fails whenever getAbilityToPlay hands back a different instance
+            // than the one the view was taken from — five unmapped choices in
+            // the gate-zero verification were exactly that.
+            final List<String> ids = new ArrayList<>();
+            final List<SpellAbility> candidates = new ArrayList<>();
+            for (SpellAbility ability : host.getAllPossibleAbilities(human, true)) {
+                final SpellAbilityView view = ability.getView();
+                if (view == null) {
+                    continue;
+                }
+                for (Map.Entry<String, SpellAbilityView> entry : offered.entrySet()) {
+                    if (entry.getValue() != null && entry.getValue().getId() == view.getId()) {
+                        ids.add(entry.getKey());
+                        candidates.add(ability);
+                        break;
+                    }
+                }
+            }
+            if (candidates.isEmpty()) {
+                failure.set("no offered ability resolved to a playable ability");
+                return;
+            }
+            final SpellAbility picked = temp.getAbilityToPlay(host, candidates, null);
+            if (picked == null) {
+                failure.set("AI chose none of the offered abilities");
+                return;
+            }
+            for (int i = 0; i < candidates.size(); i++) {
+                if (candidates.get(i) == picked) {
+                    chosenControl.set(ids.get(i));
+                    return;
+                }
+            }
+            // Not the same instance: fall back to the view id, then to the
+            // AI's own first preference, which is still its answer.
+            final SpellAbilityView pickedView = picked.getView();
+            if (pickedView != null) {
+                for (Map.Entry<String, SpellAbilityView> entry : offered.entrySet()) {
+                    if (entry.getValue() != null && entry.getValue().getId() == pickedView.getId()) {
+                        chosenControl.set(entry.getKey());
+                        return;
+                    }
+                }
+            }
+            chosenControl.set(ids.get(0));
+        });
+        if (failure.get() != null) {
+            return HintPlan.degraded(decisionId, "choice", failure.get(), elapsedMs(started));
+        }
+        if (chosenControl.get() == null) {
+            return HintPlan.degraded(decisionId, "choice", "AI choice did not map to a control", elapsedMs(started));
+        }
+        return HintPlan.namedControl(decisionId, "choice", chosenControl.get(), elapsedMs(started));
     }
 
     // ----------------------------------------------- mana ability chooser

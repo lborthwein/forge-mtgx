@@ -402,9 +402,21 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
                 getGui().notifyUnableToPayManaX("You cannot pay the cost for any allowed value of X. That action was cancelled.");
                 return null;
             }
-            return getGui().chooseManaX(localizer.getMessage("lblChooseAnnounceForCard", announceTitle,
-                    host.getTranslatedName()), range.min(), range.max(), range.exact(), range.reason(),
-                    cost == null || !cost.isMandatory());
+            // Tell an advisory GUI what is being announced. IGuiGame's own
+            // signature carries only text and bounds, which is not enough for
+            // anything that wants to ask the AI what X should be.
+            if (getGui() instanceof forge.gui.IAnnounceContext context) {
+                context.setPendingAnnounce(ability, announce);
+            }
+            try {
+                return getGui().chooseManaX(localizer.getMessage("lblChooseAnnounceForCard", announceTitle,
+                        host.getTranslatedName()), range.min(), range.max(), range.exact(), range.reason(),
+                        cost == null || !cost.isMandatory());
+            } finally {
+                if (getGui() instanceof forge.gui.IAnnounceContext context) {
+                    context.setPendingAnnounce(null, null);
+                }
+            }
         }
         if (cost != null && cost.isMandatory()) {
             return chooseNumber(ability, localizer.getMessage("lblChooseAnnounceForCard", announceTitle,

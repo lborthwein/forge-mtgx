@@ -298,6 +298,22 @@ final class ExpertHintMapper {
                 + plan.manaSourceIds.size() + " AI mana source(s)");
     }
 
+    /** {@code number}: the X control, whose value rides on the action. */
+    static Mapped announce(final HintPlan plan, final Set<String> advertised) {
+        // A declined announce answers with a named control (cancel) rather than
+        // a value, so the named form has to be honoured here too.
+        if (plan.announcedValue == null) {
+            for (String id : plan.targetControlIds) {
+                if (advertised.contains(id)) {
+                    return Mapped.of(List.of(id));
+                }
+            }
+            return Mapped.none("no announced value");
+        }
+        return advertised.contains("mana-x") ? Mapped.of(List.of("mana-x"))
+                : Mapped.unmapped("no X control was advertised");
+    }
+
     /** {@code confirm}: yes/no. */
     static Mapped confirm(final boolean yes, final Set<String> advertised) {
         final String wanted = yes ? "confirm:yes" : "confirm:no";

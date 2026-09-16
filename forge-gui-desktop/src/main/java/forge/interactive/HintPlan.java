@@ -60,6 +60,9 @@ final class HintPlan {
     /** Mana ability chooser: the SpellAbilityView id the AI would activate. */
     final Integer manaAbilityViewId;
 
+    /** Announce: the numeric value the AI would choose for X and friends. */
+    final Integer announcedValue;
+
     /** Wall-clock milliseconds the evaluation cost. */
     final long ms;
     /** Non-null when the evaluation timed out, threw, or produced nothing. */
@@ -80,6 +83,7 @@ final class HintPlan {
                      final List<Integer> londonTuckIds,
                      final List<String> targetControlIds,
                      final Integer manaAbilityViewId,
+                     final Integer announcedValue,
                      final long ms, final String degraded) {
         this.decisionId = decisionId;
         this.openedKind = openedKind;
@@ -94,6 +98,7 @@ final class HintPlan {
         this.londonTuckIds = londonTuckIds;
         this.targetControlIds = targetControlIds;
         this.manaAbilityViewId = manaAbilityViewId;
+        this.announcedValue = announcedValue;
         this.ms = ms;
         this.degraded = degraded;
     }
@@ -103,38 +108,38 @@ final class HintPlan {
         final boolean land = sa != null && sa.isLandAbility();
         return new HintPlan(decisionId, "priority", sa, host, land,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, null);
+                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, null, ms, null);
     }
 
     static HintPlan attacks(final long decisionId, final Map<Integer, String> kinds,
                             final Map<Integer, Integer> defenders, final long ms) {
         return new HintPlan(decisionId, "combat", null, null, false,
                 new LinkedHashMap<>(kinds), new LinkedHashMap<>(defenders), Collections.emptyMap(),
-                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, null);
+                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, null, ms, null);
     }
 
     static HintPlan blocks(final long decisionId, final Map<Integer, Integer> blocks, final long ms) {
         return new HintPlan(decisionId, "combat", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), new LinkedHashMap<>(blocks),
-                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, null);
+                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, null, ms, null);
     }
 
     static HintPlan mulligan(final long decisionId, final boolean keep, final long ms) {
         return new HintPlan(decisionId, "mulligan", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                keep, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, null);
+                keep, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, null, ms, null);
     }
 
     static HintPlan mana(final long decisionId, final List<Integer> sourceIds, final long ms) {
         return new HintPlan(decisionId, "mana", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                null, List.copyOf(sourceIds), Collections.emptyList(), Collections.emptyList(), null, ms, null);
+                null, List.copyOf(sourceIds), Collections.emptyList(), Collections.emptyList(), null, null, ms, null);
     }
 
     static HintPlan london(final long decisionId, final List<Integer> tuckIds, final long ms) {
         return new HintPlan(decisionId, "mulligan", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                null, Collections.emptyList(), List.copyOf(tuckIds), Collections.emptyList(), null, ms, null);
+                null, Collections.emptyList(), List.copyOf(tuckIds), Collections.emptyList(), null, null, ms, null);
     }
 
     /**
@@ -151,7 +156,7 @@ final class HintPlan {
         return new HintPlan(decisionId, "target", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
                 null, Collections.emptyList(), Collections.emptyList(),
-                List.copyOf(controlIds), null, ms, null);
+                List.copyOf(controlIds), null, null, ms, null);
     }
 
     /** Which mana ability of a multi-colour source the AI would activate. */
@@ -159,14 +164,44 @@ final class HintPlan {
         return new HintPlan(decisionId, "choice", null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
                 null, Collections.emptyList(), Collections.emptyList(),
-                Collections.emptyList(), viewId, ms, null);
+                Collections.emptyList(), viewId, null, ms, null);
+    }
+
+    /** An announced numeric value (X and friends). */
+    static HintPlan announce(final long decisionId, final int value, final long ms) {
+        return new HintPlan(decisionId, "number", null, null, false,
+                Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+                null, Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), null, value, ms, null);
+    }
+
+    /** A plan whose whole answer is one already-advertised control id. */
+    static HintPlan namedControl(final long decisionId, final String kind,
+                                 final String controlId, final long ms) {
+        return new HintPlan(decisionId, kind, null, null, false,
+                Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+                null, Collections.emptyList(), Collections.emptyList(),
+                List.of(controlId), null, null, ms, null);
+    }
+
+    /** The AI will not pay for this announce: back out. */
+    static HintPlan announceCancelled(final long decisionId, final long ms) {
+        return namedControl(decisionId, "number", "mana-x:cancel", ms);
+    }
+
+    /** The AI is finished with an optional selection: answer with Forge's OK. */
+    static HintPlan selectionDone(final long decisionId, final long ms) {
+        return new HintPlan(decisionId, "choice", null, null, false,
+                Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
+                null, Collections.emptyList(), Collections.emptyList(),
+                List.of("button:ok"), null, null, ms, null);
     }
 
     static HintPlan degraded(final long decisionId, final String openedKind,
                              final String reason, final long ms) {
         return new HintPlan(decisionId, openedKind, null, null, false,
                 Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(),
-                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, ms, reason);
+                null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), null, null, ms, reason);
     }
 
     boolean isDegraded() {

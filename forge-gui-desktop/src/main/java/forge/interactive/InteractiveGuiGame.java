@@ -88,7 +88,8 @@ import java.util.function.Function;
  * A real {@link PlayerControllerHuman} GUI whose renderer and input device are an NDJSON
  * browser client. No decision in this class is delegated to an AI or default heuristic.
  */
-final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable {
+final class InteractiveGuiGame extends AbstractGuiGame
+        implements AutoCloseable, forge.gui.IAnnounceContext {
     private final InteractiveProtocol.Channel channel;
     private final int humanSeat;
     private final AtomicLong requestSequence = new AtomicLong();
@@ -1413,11 +1414,40 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
             final HintPlan plan = currentPlan;
             if (plan == null || plan.hasDiverged() || plan.isDegraded() || plan.chosenSa == null) {
+                // No usable plan — a policy overrode the line, or this chooser
+                // belongs to one the AI never planned. Ask the AI about the
+                // abilities actually on offer instead of giving up: the bridge
+                // has the host card and the offered abilities, which is all the
+                // AI method needs. Safe here because the engine is waiting for
+                // this answer inside our own action.
+                final Card host = hostCard == null ? null : game.findById(hostCard.getId());
+                if (host == null) {
+                    // Worth naming: a null host is why this produced no hint at
+                    // all rather than a degraded one.
+                    hintedControlIds = Collections.emptyList();
+                    final JsonObject noHost = new JsonObject();
+                    noHost.addProperty("source", "forge-ai");
+                    noHost.addProperty("openedKind", "choice");
+                    noHost.addProperty("degraded", hostCard == null
+                            ? "ability chooser had no host card"
+                            : "host card " + hostCard.getId() + " is not in game");
+                    noHost.add("controlIds", new JsonArray());
+                    return noHost;
+                }
+                final HintPlan fresh = forge.util.ThreadUtil.isGameThread() || controller != null
+                        ? hint.planAbilityChoice(hint.nextDecisionId(), host, byId) : null;
+                if (fresh != null && !fresh.isDegraded()) {
+                    final ExpertHintMapper.Mapped mapped =
+                            ExpertHintMapper.targets(fresh, byId.keySet());
+                    hintedControlIds = mapped.controlIds();
+                    return hint.encode(fresh, mapped, false);
+                }
                 hintedControlIds = Collections.emptyList();
                 final JsonObject uncovered = new JsonObject();
                 uncovered.addProperty("source", "forge-ai");
                 uncovered.addProperty("openedKind", "choice");
-                uncovered.addProperty("degraded", plan == null ? "no open plan"
+                uncovered.addProperty("degraded", fresh != null && fresh.isDegraded() ? fresh.degraded
+                        : plan == null ? "no open plan"
                         : plan.hasDiverged() ? "human diverged"
                         : plan.isDegraded() ? plan.degraded : "plan chose no ability");
                 uncovered.add("controlIds", new JsonArray());
@@ -1428,6 +1458,52 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             plan.noteProjection();
             hintedControlIds = mapped.controlIds();
             return hint.encode(plan, mapped, true);
+        } catch (Throwable ignored) {
+            hintedControlIds = Collections.emptyList();
+            return null;
+        }
+    }
+
+    /** Set by PlayerControllerHuman immediately around an announce question. */
+    private volatile SpellAbility pendingAnnounceAbility;
+    private volatile String pendingAnnounceKind;
+
+    @Override
+    public void setPendingAnnounce(final SpellAbility ability, final String announce) {
+        this.pendingAnnounceAbility = ability;
+        this.pendingAnnounceKind = announce;
+    }
+
+    /** What the AI would announce here, as a number action on the X control. */
+    private JsonObject announceHint(final int min, final int max) {
+        final ExpertHint hint = expertHint;
+        final SpellAbility ability = pendingAnnounceAbility;
+        if (hint == null || !hint.isEnabled() || ability == null) {
+            hintedControlIds = Collections.emptyList();
+            return null;
+        }
+        try {
+            final HintPlan plan = hint.planAnnounce(hint.nextDecisionId(), ability,
+                    pendingAnnounceKind, min, max);
+            if (plan == null) {
+                hintedControlIds = Collections.emptyList();
+                return null;
+            }
+            final Set<String> offeredX = new java.util.LinkedHashSet<>(
+                    java.util.List.of("mana-x", "mana-x:cancel"));
+            final ExpertHintMapper.Mapped mapped = plan.isDegraded()
+                    ? null : ExpertHintMapper.announce(plan, offeredX);
+            hintedControlIds = mapped == null ? Collections.emptyList() : mapped.controlIds();
+            final JsonObject encoded = hint.encode(plan, mapped, false);
+            if (plan.announcedValue != null) {
+                // The control is a number, so the answer is a value, not a click.
+                final JsonObject action = new JsonObject();
+                action.addProperty("type", "number");
+                action.addProperty("controlId", "mana-x");
+                action.addProperty("number", plan.announcedValue);
+                encoded.add("action", action);
+            }
+            return encoded;
         } catch (Throwable ignored) {
             hintedControlIds = Collections.emptyList();
             return null;
@@ -2266,6 +2342,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (cancellable) controls.add(control("mana-x:cancel", "cancel", "Cancel"));
         final String prompt = exact ? sanitizeText(message) + " (" + min + "–" + max + ")"
                 : sanitizeText(message) + " — maximum affordability is not verified: " + detail;
+        final JsonObject manaXHint = announceHint(min, max);
         final JsonObject answer = ask("number", "modal:announceManaX", "Forge", prompt,
                 min, max, cancellable, controls, action -> {
                     if (cancellable && "cancel".equals(string(action, "type"))
@@ -2276,7 +2353,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                         final int chosen = action.get("number").getAsBigDecimal().intValueExact();
                         return chosen < min || chosen > max ? "X is outside the offered range" : null;
                     } catch (RuntimeException invalid) { return "X must be a 32-bit integer"; }
-                });
+                }, manaXHint);
         return "cancel".equals(string(answer, "type")) ? null : answer.get("number").getAsInt();
     }
 
