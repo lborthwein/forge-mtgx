@@ -190,20 +190,39 @@ final class BlendedAiController extends PlayerControllerAi {
                 aiPairs.add("attack:" + card.getId() + ":" + defender.getId());
             }
         }
-        final JsonArray controls = new JsonArray();
+        final JsonArray items = new JsonArray();
         for (Card candidate : attacker.getCreaturesInPlay()) {
             for (GameEntity defender : combat.getDefenders()) {
                 if (forge.game.combat.CombatUtil.canAttack(candidate, defender)) {
-                    controls.add(control("attack:" + candidate.getId() + ":" + defender.getId(),
-                            "selectCard", "Attack"));
+                    items.add(item("attack:" + candidate.getId() + ":" + defender.getId(),
+                            candidate.getName() + " -> " + defender));
                 }
             }
         }
+        // One control, not one per pair: the host validates a single advertised
+        // controlId per input, so a set answer has to be an order over items.
+        final JsonArray controls = new JsonArray();
+        controls.add(setControl("attackers", "Declare attackers", items));
+        hooked++;
         final JsonObject answer = offer("combat", "blend:declareAttackers",
                 "Declare attackers", controls, hintOf(aiPairs));
         final List<String> picked = idList(answer);
+        final java.util.Set<String> legalPairs = new java.util.LinkedHashSet<>();
+        for (var element : items) {
+            legalPairs.add(element.getAsJsonObject().get("id").getAsString());
+        }
         if (picked == null) {
             settleVoid(answer);
+            return;
+        }
+        // Identity first: if the answer IS the AI's declaration, leave the
+        // combat exactly as the AI left it. Tearing it down and rebuilding
+        // cannot reproduce banding, damage-assignment order, or the attack
+        // costs removeUnpayableAttackers already settled — so a "defer" that
+        // rebuilds is not a defer at all.
+        if (new java.util.LinkedHashSet<>(picked).equals(new java.util.LinkedHashSet<>(aiPairs))) {
+            deferred++;
+            record("combat", "defer", aiPairs, picked);
             return;
         }
         // Rebuild from scratch so a partial override cannot leave a hybrid.
@@ -213,6 +232,8 @@ final class BlendedAiController extends PlayerControllerAi {
         }
         boolean ok = true;
         for (String id : picked) {
+            // Only pairs this decision advertised. A policy cannot invent one.
+            if (!legalPairs.contains(id)) { ok = false; break; }
             final String[] parts = id.split(":");
             if (parts.length != 3) { ok = false; break; }
             final Card card = attacker.getGame().findById(Integer.parseInt(parts[1]));
@@ -251,15 +272,69 @@ final class BlendedAiController extends PlayerControllerAi {
                 aiPairs.add("block:" + blocker.getId() + ":" + blocked.get(0).getId());
             }
         }
-        // Offered for override, but a rejected or malformed answer keeps the
-        // AI's blocks: a bad block assignment loses games outright.
-        final JsonArray controls = new JsonArray();
-        for (String pair : aiPairs) {
-            controls.add(control(pair, "selectCard", "Block"));
+        final JsonArray items = new JsonArray();
+        for (Card blocker : defender.getCreaturesInPlay()) {
+            for (Card atk : combat.getAttackers()) {
+                if (forge.game.combat.CombatUtil.canBlock(atk, blocker, combat)) {
+                    items.add(item("block:" + blocker.getId() + ":" + atk.getId(),
+                            blocker.getName() + " blocks " + atk.getName()));
+                }
+            }
         }
+        final JsonArray controls = new JsonArray();
+        controls.add(setControl("blockers", "Declare blockers", items));
+        hooked++;
         final JsonObject answer = offer("combat", "blend:declareBlockers",
                 "Declare blockers", controls, hintOf(aiPairs));
-        settleVoid(answer);
+        final List<String> picked = idList(answer);
+        if (picked == null) {
+            settleVoid(answer);
+            return;
+        }
+        final java.util.Set<String> legalPairs = new java.util.LinkedHashSet<>();
+        for (var element : items) {
+            legalPairs.add(element.getAsJsonObject().get("id").getAsString());
+        }
+        // Identity first: if the answer IS the AI's declaration, leave the
+        // combat exactly as the AI left it. Tearing it down and rebuilding
+        // cannot reproduce banding, damage-assignment order, or the attack
+        // costs removeUnpayableAttackers already settled — so a "defer" that
+        // rebuilds is not a defer at all.
+        if (new java.util.LinkedHashSet<>(picked).equals(new java.util.LinkedHashSet<>(aiPairs))) {
+            deferred++;
+            record("combat", "defer", aiPairs, picked);
+            return;
+        }
+        // Rebuild from scratch: a partial override must not leave a hybrid of
+        // the AI's blocks and the policy's.
+        final List<Card> previous = new ArrayList<>(combat.getAllBlockers());
+        for (Card blocker : previous) {
+            combat.removeFromCombat(blocker);
+        }
+        boolean ok = true;
+        for (String id : picked) {
+            if (!legalPairs.contains(id)) { ok = false; break; }
+            final String[] parts = id.split(":");
+            if (parts.length != 3) { ok = false; break; }
+            final Card blocker = defender.getGame().findById(Integer.parseInt(parts[1]));
+            final Card atk = defender.getGame().findById(Integer.parseInt(parts[2]));
+            if (blocker == null || atk == null
+                    || !forge.game.combat.CombatUtil.canBlock(atk, blocker, combat)) { ok = false; break; }
+            combat.addBlocker(atk, blocker);
+        }
+        if (!ok) {
+            // A bad block assignment loses games outright, so an invalid answer
+            // restores the AI's declaration rather than leaving a partial one.
+            for (Card blocker : new ArrayList<>(combat.getAllBlockers())) {
+                combat.removeFromCombat(blocker);
+            }
+            super.declareBlockers(defender, combat);
+            fallbacks++;
+            record("combat", "fallback-invalid", aiPairs, picked);
+            return;
+        }
+        overridden++;
+        record("combat", "override", aiPairs, picked);
     }
 
     @Override
@@ -357,6 +432,28 @@ final class BlendedAiController extends PlayerControllerAi {
         return false;
     }
 
+    /**
+     * A set-valued decision: one control, a subset of advertised items.
+     *
+     * Deliberately a multi-select {@code choice} and not an {@code order}: the
+     * host validates an order as a strict reordering — every advertised item
+     * exactly once — which cannot express "attack with three of these six".
+     */
+    private static JsonObject setControl(final String id, final String label, final JsonArray items) {
+        final JsonObject control = control(id, "choice", label);
+        control.add("items", items);
+        control.addProperty("min", 0);
+        control.addProperty("max", items.size());
+        return control;
+    }
+
+    private static JsonObject item(final String id, final String label) {
+        final JsonObject item = new JsonObject();
+        item.addProperty("id", id);
+        item.addProperty("label", label == null ? "" : label);
+        return item;
+    }
+
     private static JsonObject control(final String id, final String type, final String label) {
         final JsonObject control = new JsonObject();
         control.addProperty("controlId", id);
@@ -386,8 +483,25 @@ final class BlendedAiController extends PlayerControllerAi {
             return null;
         }
         final var control = answer.get("controlId");
-        if (control != null) {
+        if (control != null && !"attackers".equals(control.getAsString())
+                && !"blockers".equals(control.getAsString())) {
             return List.of(control.getAsString());
+        }
+        final var choices = answer.get("choices");
+        if (choices != null && choices.isJsonArray()) {
+            final List<String> out = new ArrayList<>();
+            for (var element : choices.getAsJsonArray()) {
+                out.add(element.getAsString());
+            }
+            return out;
+        }
+        final var order = answer.get("order");
+        if (order != null && order.isJsonArray()) {
+            final List<String> out = new ArrayList<>();
+            for (var element : order.getAsJsonArray()) {
+                out.add(element.getAsString());
+            }
+            return out;
         }
         final var ids = answer.get("controlIds");
         if (ids != null && ids.isJsonArray()) {

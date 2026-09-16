@@ -1560,7 +1560,11 @@ final class InteractiveGuiGame extends AbstractGuiGame
     /** Records a hooked decision in the session log, whether or not it was overridden. */
     void recordBlendDecision(final JsonObject entry) {
         try {
-            channel.send("event", entry);
+            // The wire's event message carries its payload under "event"; the
+            // entry is the payload, not the body.
+            final JsonObject body = new JsonObject();
+            body.add("event", entry);
+            channel.send("event", body);
         } catch (Throwable ignored) {
             // A tape entry must never cost a game.
         }
