@@ -1545,8 +1545,24 @@ final class InteractiveGuiGame extends AbstractGuiGame
             return null;
         }
         try {
-            channel.send("request", requestBody(requestId, kind, inputClass, "Forge", message,
-                    null, null, false, controls, hint));
+            // Deliberately NOT requestBody: that serialises the whole game view,
+            // and a hooked seat asks hundreds of times per game. The policy is
+            // given the legal set in controls and the AI's answer in the hint,
+            // which is everything it needs to decide.
+            final JsonObject body = new JsonObject();
+            body.addProperty("requestId", requestId);
+            body.addProperty("kind", kind);
+            body.addProperty("inputClass", inputClass);
+            body.addProperty("seat", humanSeat);
+            body.add("view", new JsonObject());
+            final JsonObject prompt = new JsonObject();
+            prompt.addProperty("message", message == null ? "" : message);
+            body.add("prompt", prompt);
+            body.add("controls", controls);
+            if (hint != null) {
+                body.add("hint", hint);
+            }
+            channel.send("request", body);
             return modal.answer.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.TimeoutException expired) {
             return null;

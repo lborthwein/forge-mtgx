@@ -135,44 +135,35 @@ final class BlendedAiController extends PlayerControllerAi {
         if (!policyHooksOn) {
             return ai;
         }
-        // The legal set is what the AI was choosing between. Anything the engine
-        // did not offer is not on the wire, so it cannot be chosen.
-        final List<SpellAbility> legal = new ArrayList<>();
-        for (Card card : getPlayer().getGame().getCardsInGame()) {
-            if (card.getController() != getPlayer()) {
-                continue;
-            }
-            for (SpellAbility sa : card.getAllPossibleAbilities(getPlayer(), true)) {
-                legal.add(sa);
-            }
-        }
-        final JsonArray controls = new JsonArray();
-        final List<String> ids = new ArrayList<>();
-        for (int i = 0; i < legal.size(); i++) {
-            final String id = "sa:" + i;
-            ids.add(id);
-            controls.add(control(id, "selectAbility", String.valueOf(legal.get(i))));
-        }
-        controls.add(control("priority:pass", "passPriority", "Pass priority"));
-
+        // Deliberately NOT an enumeration of every playable ability.
+        // Card.getAllPossibleAbilities is the heavyweight path — it sets up
+        // targets, defines X and writes AiCardMemory — so re-deriving a legal
+        // set here would mutate the game on every priority window, and a hook
+        // that mutates is not inert when it defers. Measured: enumerating cost
+        // the seat every game of the identity arm, 20 losses against a 49/47
+        // split with the hook off.
+        //
+        // The offer is therefore the AI's own line, or passing it up. A policy
+        // can veto a cast; it cannot yet propose a different one. Widening this
+        // needs the engine to hand over the candidates it already built, not a
+        // second derivation on top.
         final SpellAbility aiChoice = ai == null || ai.isEmpty() ? null : ai.get(0);
-        String aiId = "priority:pass";
-        for (int i = 0; i < legal.size(); i++) {
-            if (legal.get(i) == aiChoice) {
-                aiId = ids.get(i);
-                break;
-            }
+        final JsonArray controls = new JsonArray();
+        final String aiId;
+        if (aiChoice == null) {
+            aiId = "priority:pass";
+            controls.add(control("priority:pass", "passPriority", "Pass priority"));
+        } else {
+            aiId = "sa:ai";
+            controls.add(control("sa:ai", "selectAbility", safeLabel(aiChoice)));
+            controls.add(control("priority:pass", "passPriority", "Pass priority"));
         }
         final String chose = decide("priority", "blend:chooseSpellAbilityToPlay",
                 "Priority", controls, aiId);
-        if ("priority:pass".equals(chose)) {
-            return chose.equals(aiId) ? ai : List.of();
-        }
-        final int index = ids.indexOf(chose);
-        if (index < 0) {
+        if (chose.equals(aiId)) {
             return ai;
         }
-        return chose.equals(aiId) ? ai : List.of(legal.get(index));
+        return "priority:pass".equals(chose) ? List.of() : ai;
     }
 
     @Override
@@ -195,7 +186,7 @@ final class BlendedAiController extends PlayerControllerAi {
             for (GameEntity defender : combat.getDefenders()) {
                 if (forge.game.combat.CombatUtil.canAttack(candidate, defender)) {
                     items.add(item("attack:" + candidate.getId() + ":" + defender.getId(),
-                            candidate.getName() + " -> " + defender));
+                            candidate.getName() + " -> " + defender.getId()));
                 }
             }
         }
@@ -352,7 +343,7 @@ final class BlendedAiController extends PlayerControllerAi {
         for (T option : optionList) {
             final String id = "entity:" + option.getId();
             ids.add(id);
-            controls.add(control(id, "selectCard", String.valueOf(option)));
+            controls.add(control(id, "selectCard", "entity " + option.getId()));
         }
         if (isOptional) {
             controls.add(control("entity:none", "ok", "Choose none"));
@@ -445,6 +436,19 @@ final class BlendedAiController extends PlayerControllerAi {
         control.addProperty("min", 0);
         control.addProperty("max", items.size());
         return control;
+    }
+
+    /**
+     * A label that cannot change the game.
+     *
+     * {@code SpellAbility.toString()} reaches {@code getStackDescription()},
+     * which computes X, targets and modes for display. Putting that in a label
+     * made the hooks mutate, and the identity arm diverged from the hooks-off
+     * arm on the same seed because of it. Host card name only.
+     */
+    private static String safeLabel(final SpellAbility ability) {
+        final Card host = ability == null ? null : ability.getHostCard();
+        return host == null ? "ability" : host.getName();
     }
 
     private static JsonObject item(final String id, final String label) {
