@@ -584,7 +584,16 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 // Never evaluate here: this runs on the EDT, and the game thread
                 // may be busy. Take only what the game thread already computed
                 // for this exact input.
-                final Map.Entry<Input, HintPlan> ready = precomputed.getAndSet(null);
+                //
+                // The plan is kept, not consumed. One Forge Input can ask many
+                // times — a payment re-asks after every source is tapped — and
+                // the game thread is notified once, when the input is handed
+                // over. Consuming the plan left every sub-request after the
+                // first with no hint at all: 3,084 uncovered mana decisions in
+                // one measured game. Keeping it is also the more coherent
+                // answer, because the AI planned the whole payment at once and
+                // tapped sources simply stop being advertised.
+                final Map.Entry<Input, HintPlan> ready = precomputed.get();
                 plan = ready != null && ready.getKey() == input ? ready.getValue() : null;
                 projected = false;
                 currentPlan = plan;
