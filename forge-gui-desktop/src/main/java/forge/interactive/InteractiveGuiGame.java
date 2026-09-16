@@ -539,6 +539,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
         }
 
+        if (input instanceof InputSelectEntitiesFromList<?> selectEntities) {
+            addUnplacedEntityChoices(selectEntities, cardIds, controls, bindings);
+        }
 
         if (input instanceof InputPayMana paymentInput) {
             final InputPayMana.PoolPaymentChoices payments = paymentInput.getPoolPaymentChoices();
@@ -722,6 +725,71 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }));
         }
         return controls;
+    }
+
+    /** Forge's card walk (Game#forEachCardInGame) never visits the sideboard, so a
+     * list-entity input whose candidates sit outside the walked zones — choosing a
+     * companion out of the sideboard is the live case — advertised no control at
+     * all and stranded the browser on an unanswerable prompt. A board card cannot
+     * stand in for those either: the client can only press a selectCard control it
+     * can place on the table. Offer the candidates the card walk did not reach as a
+     * labelled choice control instead, and answer it with the same
+     * PlayerController#selectCard that a click on the card would have used. */
+    private void addUnplacedEntityChoices(final InputSelectEntitiesFromList<?> input,
+                                          final Set<Integer> advertisedCardIds,
+                                          final JsonArray controls,
+                                          final Map<String, ControlBinding> bindings) {
+        final LinkedHashMap<String, Card> byId = new LinkedHashMap<>();
+        final JsonArray items = new JsonArray();
+        for (final GameEntity entity : input.getValidChoices()) {
+            // Players already have their own selectPlayer control above.
+            if (!(entity instanceof Card card) || !advertisedCardIds.add(card.getId())) {
+                continue;
+            }
+            final String id = "entity:" + card.getId();
+            byId.put(id, card);
+            final JsonObject option = item(id,
+                    InteractiveState.safeCardLabel(card.getView(), human.getView()));
+            // The bridge keeps an item's id, label and value, so the card this
+            // option stands for — and whether Forge is currently holding it,
+            // since it toggles an entity in and out of the selection — travel
+            // in value the way manipulateCardList's item state does.
+            final JsonObject itemState = new JsonObject();
+            itemState.addProperty("cardId", card.getId());
+            itemState.addProperty("selected", input.getSelected().contains(card));
+            option.add("value", itemState);
+            items.add(option);
+        }
+        if (byId.isEmpty()) {
+            return;
+        }
+        // One entity per answer, exactly like a card click: a multi-entity input
+        // keeps its own running selection and its OK button decides when it ends.
+        final JsonObject chooser = control("entities", "choice", sanitizeText(promptMessage));
+        chooser.add("items", items);
+        chooser.addProperty("min", 1);
+        chooser.addProperty("max", 1);
+        controls.add(chooser);
+        bindings.put("entities", new ControlBinding("choice", action -> {
+            final List<String> ids;
+            try {
+                ids = actionChoiceIds(action);
+            } catch (RuntimeException e) {
+                return ActionResult.reject("choice values must be string option IDs");
+            }
+            if (ids.size() != 1) {
+                return ActionResult.reject("choose exactly one advertised option");
+            }
+            final Card chosen = byId.get(ids.get(0));
+            if (chosen == null) {
+                return ActionResult.reject("option is not advertised by this request");
+            }
+            if (!input.getValidChoices().contains(chosen)) {
+                return ActionResult.reject("card is no longer a legal choice");
+            }
+            return controller.selectCard(chosen.getView(), null, null)
+                    ? ActionResult.accept() : ActionResult.reject("Forge rejected card selection");
+        }));
     }
 
     /** Advertise complete attacker/defender choices, rather than a hidden future
