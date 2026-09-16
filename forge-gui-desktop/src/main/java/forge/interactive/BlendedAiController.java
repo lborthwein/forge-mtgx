@@ -183,6 +183,21 @@ final class BlendedAiController extends PlayerControllerAi {
         }
         loggedAttackIdentity = true;
         try {
+            // The AI picks attackers by iterating a CardCollection. Two runs
+            // with equal contents in a different ORDER decide differently from
+            // identical randomness, so the order itself has to be compared.
+            final StringBuilder order = new StringBuilder();
+            for (Card creature : attacker.getCreaturesInPlay()) {
+                order.append(creature.getId()).append(',');
+            }
+            final JsonObject ord = new JsonObject();
+            ord.addProperty("class", "BlendIdentity");
+            ord.addProperty("creaturesInPlayOrder", order.toString());
+            bridge.recordBlendDecision(ord);
+        } catch (Throwable ignored) {
+            // fall through to the identity record below
+        }
+        try {
             final forge.game.player.PlayerController live = attacker.getController();
             final forge.ai.AiController aic = live instanceof PlayerControllerAi pc ? pc.getAi() : null;
             final JsonObject entry = new JsonObject();

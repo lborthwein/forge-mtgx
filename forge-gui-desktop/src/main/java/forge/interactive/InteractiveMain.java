@@ -183,6 +183,14 @@ public final class InteractiveMain {
                 // for everything. event=false: no GameEventPlayerControl, so
                 // the client sees no spurious "control changed".
                 human.addController(game.getNextTimestamp(), human, blended, false);
+                // A natively-created AI seat gets setupAutoProfile from
+                // complainCardsCantPlayWell at match start — before this
+                // controller exists, so it never reached it. Without this the
+                // blended seat runs with pilotsNonAggroDeck=false whatever it
+                // is piloting, and that gates PLAY_AGGRO in AiAttackController:
+                // the seat would be measurably less aggressive than the native
+                // Default pilot it is supposed to be compared against.
+                blended.setupAutoProfile(registered.get(config.humanSeat()).getDeck());
                 gui.useBlendedController(blended);
             }
             for (Player player : game.getPlayers()) {

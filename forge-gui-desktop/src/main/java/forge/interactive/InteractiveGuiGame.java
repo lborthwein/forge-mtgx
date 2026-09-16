@@ -261,6 +261,7 @@ final class InteractiveGuiGame extends AbstractGuiGame
             if (Boolean.getBoolean("forge.interactive.blend") && event != null) {
                 event.addProperty("rngDraws", forge.util.MyRandom.drawCount());
                 event.addProperty("timestamps", forge.game.Game.timestampCount());
+                addStateHashes(event);
             }
             body.add("event", event);
             channel.send("event", body);
@@ -1589,6 +1590,60 @@ final class InteractiveGuiGame extends AbstractGuiGame
             channel.send("event", body);
         } catch (Throwable ignored) {
             // A tape entry must never cost a game.
+        }
+    }
+
+    /**
+     * Per-event component hashes, so a divergence can be named rather than
+     * guessed at. Each component is hashed separately: whichever one moves
+     * first is the answer.
+     */
+    private void addStateHashes(final JsonObject event) {
+        try {
+            int seat = 0;
+            for (Player player : game.getPlayers()) {
+                final StringBuilder sb = new StringBuilder();
+                sb.append("life=").append(player.getLife());
+                for (forge.game.zone.ZoneType zone : new forge.game.zone.ZoneType[]{
+                        forge.game.zone.ZoneType.Battlefield, forge.game.zone.ZoneType.Hand,
+                        forge.game.zone.ZoneType.Graveyard, forge.game.zone.ZoneType.Library,
+                        forge.game.zone.ZoneType.Exile}) {
+                    sb.append('|').append(zone).append(':');
+                    // Order is preserved deliberately: two zones with the same
+                    // cards in a different order are a real difference, and the
+                    // AI iterates them to pick attackers.
+                    for (Card card : player.getCardsIn(zone)) {
+                        sb.append(card.getId());
+                        if (card.isTapped()) sb.append('T');
+                        if (card.getCounters() != null && !card.getCounters().isEmpty()) {
+                            sb.append('c').append(card.getCounters().toString().hashCode());
+                        }
+                        if (card.isAttachedToEntity()) sb.append('@').append(
+                                card.getAttachedTo() == null ? 0 : card.getAttachedTo().getId());
+                        sb.append(',');
+                    }
+                }
+                event.addProperty("zones" + seat++, sb.toString().hashCode());
+            }
+            final Combat combat = game.getCombat();
+            if (combat != null) {
+                final StringBuilder sb = new StringBuilder();
+                for (Card attacker : combat.getAttackers()) {
+                    final forge.game.GameEntity def = combat.getDefenderByAttacker(attacker);
+                    sb.append(attacker.getId()).append('>')
+                      .append(def == null ? 0 : def.getId()).append(',');
+                }
+                for (Card blocker : combat.getAllBlockers()) {
+                    sb.append('b').append(blocker.getId()).append(',');
+                }
+                event.addProperty("combat", sb.toString().hashCode());
+            }
+            final forge.game.player.PlayerController live = human.getController();
+            if (live instanceof forge.ai.PlayerControllerAi pc) {
+                event.addProperty("aiCarried", pc.getAi().debugCarriedState().hashCode());
+            }
+        } catch (Throwable ignored) {
+            // diagnostics never cost a game
         }
     }
 

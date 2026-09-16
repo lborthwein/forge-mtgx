@@ -1374,6 +1374,29 @@ public class AiController {
         return Lists.newArrayList(sa);
     }
 
+    /** Carried AI state, for the bridge's divergence bisection. Read-only. */
+    public String debugCarriedState() {
+        final StringBuilder sb = new StringBuilder();
+        sb.append("aggr=").append(lastAttackAggression);
+        sb.append(" predCombat=").append(predictedCombat == null ? "-"
+                : predictedCombat.getAttackers().size());
+        sb.append(" predNext=").append(predictedCombatNextTurn == null ? "-"
+                : predictedCombatNextTurn.getAttackers().size());
+        for (AiCardMemory.MemorySet set : AiCardMemory.MemorySet.values()) {
+            final java.util.Set<forge.game.card.Card> remembered =
+                    AiCardMemory.getMemorySet(player, set);
+            if (remembered != null && !remembered.isEmpty()) {
+                final java.util.List<Integer> ids = new java.util.ArrayList<>();
+                for (forge.game.card.Card c : remembered) {
+                    ids.add(c.getId());
+                }
+                java.util.Collections.sort(ids);
+                sb.append(' ').append(set.name()).append('=').append(ids);
+            }
+        }
+        return sb.toString();
+    }
+
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         AiCache.clear();
         // Reset cached predicted combat, as it may be stale. It will be
