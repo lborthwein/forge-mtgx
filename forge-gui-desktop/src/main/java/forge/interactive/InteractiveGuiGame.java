@@ -593,8 +593,24 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 // one measured game. Keeping it is also the more coherent
                 // answer, because the AI planned the whole payment at once and
                 // tapped sources simply stop being advertised.
-                final Map.Entry<Input, HintPlan> ready = precomputed.get();
-                plan = ready != null && ready.getKey() == input ? ready.getValue() : null;
+                if (input instanceof InputPayMana) {
+                    // The one case that must be evaluated here, and the one case
+                    // where doing so is provably safe.
+                    //
+                    // Must: a payment re-asks after every source is tapped and
+                    // the remaining cost shrinks each time, so a plan fixed at
+                    // the start stops mapping once its sources are spent —
+                    // 3,371 unmapped mana decisions in one measured game.
+                    //
+                    // Safe: the engine is waiting for THIS payment, inside our
+                    // own cast, so the game thread is parked in awaitLatchRelease
+                    // and the other seat's AI cannot be running. That is exactly
+                    // the condition whose absence caused the crash elsewhere.
+                    plan = hint.planFor(input, kind, hint.nextDecisionId());
+                } else {
+                    final Map.Entry<Input, HintPlan> ready = precomputed.get();
+                    plan = ready != null && ready.getKey() == input ? ready.getValue() : null;
+                }
                 projected = false;
                 currentPlan = plan;
             }
