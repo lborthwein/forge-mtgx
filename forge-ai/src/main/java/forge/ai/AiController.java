@@ -100,6 +100,26 @@ public class AiController {
     private boolean useLivingEnd;
     private List<SpellAbility> skipped;
     private volatile boolean timeoutReached;
+    /**
+     * Run the spell-ability evaluation on the CALLING thread.
+     *
+     * Forge normally evaluates on a separate "Game AI Eval" thread and waits on
+     * a future. That thread and the game thread both draw from the one static
+     * {@link forge.util.MyRandom}, so how far the evaluation gets before the
+     * wait returns decides how many draws each takes — and that is wall-clock
+     * dependent. The bridge measured it: two runs of the same game on the same
+     * seed stayed identical for 1,058 events and then declared different
+     * attackers, because {@code AiAttackController} asks
+     * {@code MyRandom.percentTrue} and the interleaving had moved.
+     *
+     * Set only by the interactive bridge ({@code -Dforge.interactive.blend}).
+     * Unset everywhere else, so the desktop client, the bench harness and the
+     * panel instrument keep Forge's existing behaviour exactly.
+     */
+    private static final boolean SYNC_EVAL =
+            Boolean.getBoolean("forge.interactive.blend");
+    /** Wall-clock bound for a synchronous evaluation, checked in the loop. */
+    private long syncEvalDeadlineNanos;
 
     public AiController(final Player computerPlayer, final Game game0) {
         player = computerPlayer;
@@ -1604,6 +1624,10 @@ public class AiController {
 
         // in case of infinite loop reset below would not be reached
         timeoutReached = false;
+        // A synchronous evaluation has no waiter to interrupt it, so it carries
+        // its own deadline and honours it at the same per-ability checkpoint.
+        syncEvalDeadlineNanos = System.nanoTime()
+                + TimeUnit.SECONDS.toNanos(Math.max(1, game.getAITimeout()));
 
         FutureTask<SpellAbility> future = new FutureTask<>(() -> {
             //avoid ComputerUtil.aiLifeInDanger in loops as it slows down a lot.. call this outside loops will generally be fast...
@@ -1614,7 +1638,8 @@ public class AiController {
                     continue;
                 }
 
-                if (timeoutReached || Thread.currentThread().isInterrupted()) {
+                if (timeoutReached || Thread.currentThread().isInterrupted()
+                        || (SYNC_EVAL && System.nanoTime() > syncEvalDeadlineNanos)) {
                     timeoutReached = false;
                     break;
                 }
@@ -1689,6 +1714,20 @@ public class AiController {
 
             return null;
         });
+
+        if (SYNC_EVAL) {
+            // Inline on the game thread: one thread, one RNG consumer, so the
+            // result no longer depends on how the two were scheduled. The
+            // bound is the deadline checked above, not a wait on a future.
+            future.run();
+            try {
+                return future.get();
+            } catch (InterruptedException | ExecutionException e) {
+                e.printStackTrace();
+                timeoutReached = true;
+                return null;
+            }
+        }
 
         Thread t = new Thread(future, "Game AI Eval");
         t.start();
