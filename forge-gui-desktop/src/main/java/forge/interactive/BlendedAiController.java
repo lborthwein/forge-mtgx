@@ -122,7 +122,7 @@ final class BlendedAiController extends PlayerControllerAi {
         // logged a deferring policy as an override.
         if (new java.util.LinkedHashSet<>(picked).equals(new java.util.LinkedHashSet<>(idsOf(ai)))) {
             deferred++;
-            record("mulligan", "defer", idsOf(ai), picked);
+            record("mulligan", "mulligan", "defer", idsOf(ai), picked);
             return ai;
         }
         final CardCollection chosen = new CardCollection();
@@ -134,7 +134,7 @@ final class BlendedAiController extends PlayerControllerAi {
             chosen.add(card);
         }
         overridden++;
-        record("mulligan", "override", idsOf(ai), picked);
+        record("mulligan", "mulligan", "override", idsOf(ai), picked);
         return chosen;
     }
 
@@ -295,8 +295,15 @@ final class BlendedAiController extends PlayerControllerAi {
         if (ENUM_ONLY_PROBE) {
             return;
         }
+        final JsonObject context = new JsonObject();
+        int oppUntapped = 0;
+        for (Player opponent : attacker.getOpponents()) {
+            oppUntapped += untappedCreatures(opponent);
+        }
+        context.addProperty("opponentUntappedCreatures", oppUntapped);
+        context.addProperty("aiDeclaredCount", aiPairs.size());
         final JsonObject answer = offer("combat", "blend:declareAttackers",
-                "Declare attackers", controls, hintOf(aiPairs));
+                "Declare attackers", controls, hintOf(aiPairs), context);
         // Probe: ask, then throw the answer away and leave the AI's combat
         // untouched. Isolates the round trip from anything done with the reply.
         if (ASK_ONLY_PROBE) {
@@ -319,7 +326,7 @@ final class BlendedAiController extends PlayerControllerAi {
         // rebuilds is not a defer at all.
         if (new java.util.LinkedHashSet<>(picked).equals(new java.util.LinkedHashSet<>(aiPairs))) {
             deferred++;
-            record("combat", "defer", aiPairs, picked);
+            record("combat", "declareAttackers", "defer", aiPairs, picked);
             return;
         }
         // Rebuild from scratch so a partial override cannot leave a hybrid.
@@ -352,11 +359,11 @@ final class BlendedAiController extends PlayerControllerAi {
             }
             super.declareAttackers(attacker, combat);
             fallbacks++;
-            record("combat", "fallback-invalid", aiPairs, picked);
+            record("combat", "declareAttackers", "fallback-invalid", aiPairs, picked);
             return;
         }
         overridden++;
-        record("combat", "override", aiPairs, picked);
+        record("combat", "declareAttackers", "override", aiPairs, picked);
     }
 
     @Override
@@ -400,8 +407,39 @@ final class BlendedAiController extends PlayerControllerAi {
         final JsonArray controls = new JsonArray();
         controls.add(setControl("blockers", "Declare blockers", items));
         hooked++;
+        // Decision facts a blocking policy needs that the controls cannot carry:
+        // each advertised pair's own combat arithmetic, read off the engine's
+        // cards. A policy that had to recover this by parsing item labels would
+        // be keyed on presentation rather than on the legal set.
+        final JsonObject context = new JsonObject();
+        final JsonObject pairs = new JsonObject();
+        for (String id : advertised) {
+            final String[] parts = id.split(":");
+            if (parts.length != 3) {
+                continue;
+            }
+            final Card blocker = defender.getGame().findById(Integer.parseInt(parts[1]));
+            final Card atk = defender.getGame().findById(Integer.parseInt(parts[2]));
+            if (blocker == null || atk == null) {
+                continue;
+            }
+            final JsonObject stat = new JsonObject();
+            stat.addProperty("blockerId", blocker.getId());
+            stat.addProperty("blockerPower", blocker.getNetPower());
+            stat.addProperty("blockerToughness", blocker.getNetToughness());
+            stat.addProperty("blockerTapped", blocker.isTapped());
+            stat.addProperty("attackerId", atk.getId());
+            stat.addProperty("attackerPower", atk.getNetPower());
+            stat.addProperty("attackerToughness", atk.getNetToughness());
+            stat.addProperty("attackerDeathtouch",
+                    atk.hasKeyword(forge.game.keyword.Keyword.DEATHTOUCH));
+            pairs.add(id, stat);
+        }
+        context.add("pairs", pairs);
+        context.addProperty("aiDeclaredCount", aiPairs.size());
+        context.addProperty("attackerCount", combat.getAttackers().size());
         final JsonObject answer = offer("combat", "blend:declareBlockers",
-                "Declare blockers", controls, hintOf(aiPairs));
+                "Declare blockers", controls, hintOf(aiPairs), context);
         final List<String> picked = idList(answer);
         if (picked == null) {
             settleVoid(answer);
@@ -418,7 +456,7 @@ final class BlendedAiController extends PlayerControllerAi {
         // rebuilds is not a defer at all.
         if (new java.util.LinkedHashSet<>(picked).equals(new java.util.LinkedHashSet<>(aiPairs))) {
             deferred++;
-            record("combat", "defer", aiPairs, picked);
+            record("combat", "declareBlockers", "defer", aiPairs, picked);
             return;
         }
         // Rebuild from scratch: a partial override must not leave a hybrid of
@@ -448,11 +486,11 @@ final class BlendedAiController extends PlayerControllerAi {
             }
             super.declareBlockers(defender, combat);
             fallbacks++;
-            record("combat", "fallback-invalid", aiPairs, picked);
+            record("combat", "declareBlockers", "fallback-invalid", aiPairs, picked);
             return;
         }
         overridden++;
-        record("combat", "override", aiPairs, picked);
+        record("combat", "declareBlockers", "override", aiPairs, picked);
     }
 
     @Override
@@ -526,6 +564,9 @@ final class BlendedAiController extends PlayerControllerAi {
     /** Offers a single-choice decision and returns the id to act on. */
     private String decide(final String kind, final String inputClass, final String message,
                           final JsonArray controls, final String aiId) {
+        // inputClass doubles as the tape's decision label: "blend:chooseSpellAbility"
+        // and "blend:chooseSingleEntity" are both kind "priority"/"target".
+        final String decision = inputClass;
         hooked++;
         final JsonObject answer = offer(kind, inputClass, message, controls, hintOf(List.of(aiId)));
         final List<String> picked = idList(answer);
@@ -536,25 +577,42 @@ final class BlendedAiController extends PlayerControllerAi {
         final String chosen = picked.get(0);
         if (!hasControl(controls, chosen)) {
             fallbacks++;
-            record(kind, "fallback-illegal", List.of(aiId), picked);
+            record(kind, decision, "fallback-illegal", List.of(aiId), picked);
             return aiId;
         }
         if (chosen.equals(aiId)) {
             deferred++;
-            record(kind, "defer", List.of(aiId), picked);
+            record(kind, decision, "defer", List.of(aiId), picked);
         } else {
             overridden++;
-            record(kind, "override", List.of(aiId), picked);
+            record(kind, decision, "override", List.of(aiId), picked);
         }
         return chosen;
     }
 
     private JsonObject offer(final String kind, final String inputClass, final String message,
                              final JsonArray controls, final JsonObject hint) {
+        return offer(kind, inputClass, message, controls, hint, null);
+    }
+
+    private JsonObject offer(final String kind, final String inputClass, final String message,
+                             final JsonArray controls, final JsonObject hint,
+                             final JsonObject context) {
         if (bridge == null) {
             return null;
         }
-        return bridge.askPolicy(kind, inputClass, message, controls, hint, timeoutMs);
+        return bridge.askPolicy(kind, inputClass, message, controls, hint, timeoutMs, context);
+    }
+
+    /** Untapped creatures the given player controls. A combat decision input. */
+    private static int untappedCreatures(final Player player) {
+        int n = 0;
+        for (Card card : player.getCreaturesInPlay()) {
+            if (!card.isTapped()) {
+                n++;
+            }
+        }
+        return n;
     }
 
     /** Timeout or a decline: the AI's answer stands, and the tape says why. */
@@ -696,7 +754,7 @@ final class BlendedAiController extends PlayerControllerAi {
     }
 
     /** Every hooked decision reaches the tape, deferred or not. */
-    private void record(final String kind, final String resolution,
+    private void record(final String kind, final String decision, final String resolution,
                         final List<String> aiChoice, final List<String> answer) {
         if (bridge == null) {
             return;
@@ -704,6 +762,10 @@ final class BlendedAiController extends PlayerControllerAi {
         final JsonObject entry = new JsonObject();
         entry.addProperty("class", "BlendDecision");
         entry.addProperty("kind", kind);
+        // The decision's own class. Without it an entry whose aiChoice AND answer
+        // are both empty — a combat where nobody attacked — cannot be told apart
+        // from any other empty decision when auditing the tape against the log.
+        entry.addProperty("decision", decision);
         entry.addProperty("resolution", resolution);
         entry.add("aiChoice", hintOf(aiChoice).get("controlIds"));
         if (answer != null) {

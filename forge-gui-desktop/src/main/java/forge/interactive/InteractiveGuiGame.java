@@ -1543,6 +1543,12 @@ final class InteractiveGuiGame extends AbstractGuiGame
      */
     JsonObject askPolicy(final String kind, final String inputClass, final String message,
                          final JsonArray controls, final JsonObject hint, final long timeoutMs) {
+        return askPolicy(kind, inputClass, message, controls, hint, timeoutMs, null);
+    }
+
+    JsonObject askPolicy(final String kind, final String inputClass, final String message,
+                         final JsonArray controls, final JsonObject hint, final long timeoutMs,
+                         final JsonObject context) {
         if (channel.isEnded()) {
             return null;
         }
@@ -1572,6 +1578,12 @@ final class InteractiveGuiGame extends AbstractGuiGame
             body.add("controls", controls);
             if (hint != null) {
                 body.add("hint", hint);
+            }
+            // Decision facts the controls cannot express. A policy that owns a
+            // decision class needs them; serialising the whole view instead would
+            // cost more than the decision is worth at hundreds of asks per game.
+            if (context != null) {
+                body.add("context", context);
             }
             channel.send("request", body);
             return modal.answer.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
