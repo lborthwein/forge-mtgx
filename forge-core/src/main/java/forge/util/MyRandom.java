@@ -51,7 +51,27 @@ public class MyRandom {
      * 
      * @return the random
      */
+    /**
+     * Counts draws so two runs can be compared at the point they diverge.
+     *
+     * The interactive bridge needs to tell "the hook consumed extra randomness"
+     * from "the hook changed the game some other way", and a bare event log
+     * cannot: both look like an identical prefix followed by a different
+     * decision. Off unless the bridge asks; nothing else pays for it.
+     */
+    private static final boolean COUNT_DRAWS =
+            Boolean.getBoolean("forge.interactive.blend");
+    private static final java.util.concurrent.atomic.AtomicLong DRAWS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    public static long drawCount() {
+        return DRAWS.get();
+    }
+
     public static Random getRandom() {
+        if (COUNT_DRAWS) {
+            DRAWS.incrementAndGet();
+        }
         return MyRandom.random;
     }
 

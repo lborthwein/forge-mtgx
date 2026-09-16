@@ -534,7 +534,20 @@ public class Game {
     /**
      * Create and return the next timestamp.
      */
+    /** Counts timestamp consumption for the bridge's divergence bisection. */
+    private static final boolean COUNT_TIMESTAMPS =
+            Boolean.getBoolean("forge.interactive.blend");
+    private static final java.util.concurrent.atomic.AtomicLong TIMESTAMPS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    public static long timestampCount() {
+        return TIMESTAMPS.get();
+    }
+
     public final long getNextTimestamp() {
+        if (COUNT_TIMESTAMPS) {
+            TIMESTAMPS.incrementAndGet();
+        }
         timestamp = getTimestamp() + 1;
         return getTimestamp();
     }

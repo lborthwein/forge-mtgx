@@ -256,6 +256,12 @@ final class InteractiveGuiGame extends AbstractGuiGame
         try {
             final JsonObject body = new JsonObject();
             final JsonObject event = InteractiveGameEvents.encode(engineEvent, game, human.getView());
+            // Draw and timestamp counters ride on each event so two runs can be
+            // compared at the exact point they part company.
+            if (Boolean.getBoolean("forge.interactive.blend") && event != null) {
+                event.addProperty("rngDraws", forge.util.MyRandom.drawCount());
+                event.addProperty("timestamps", forge.game.Game.timestampCount());
+            }
             body.add("event", event);
             channel.send("event", body);
         } catch (InteractiveProtocol.ProtocolException e) {
