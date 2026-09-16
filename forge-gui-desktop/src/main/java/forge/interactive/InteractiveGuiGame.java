@@ -118,6 +118,21 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private volatile HintPlan currentPlan;
     /** A plan computed on the game thread, awaiting the EDT that will map it. */
     private final AtomicReference<Map.Entry<Input, HintPlan>> precomputed = new AtomicReference<>();
+    /**
+     * Priority abilities per card, read on the game thread.
+     *
+     * {@code Card.getAllPossibleAbilities} reaches
+     * {@code GameAction.checkStaticAbilities}, which clears and rebuilds
+     * {@code StaticEffects}' map. Calling it from the EDT while the game thread
+     * does its own state-based checks is a genuine data race, and it ends games
+     * with a ConcurrentModificationException. Reading it where the engine is
+     * single-threaded and handing the EDT the answer removes the overlap.
+     */
+    private final AtomicReference<Map.Entry<Input, Map<Integer, PriorityAbilities>>> precomputedAbilities =
+            new AtomicReference<>();
+
+    /** One card's playable abilities and the affordable subset, read together. */
+    private record PriorityAbilities(List<SpellAbility> all, List<SpellAbility> affordable) { }
     /** controlIds the last emitted hint named, for divergence detection. */
     private volatile List<String> hintedControlIds = Collections.emptyList();
     private final ThreadLocal<Set<Integer>> explicitlyOfferedCards =
@@ -183,6 +198,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
             final HintPlan plan = hint.planFor(input, kind, hint.nextDecisionId());
             precomputed.set(plan == null ? null : Map.entry(input, plan));
+            precomputeAbilities(input);
         } catch (Throwable ignored) {
             // Advice must never end a game.
             precomputed.set(null);
@@ -655,6 +671,16 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * targets written during the priority evaluation live on an object that is
      * no longer the one in flight.
      */
+    /** The game thread's reading for this card, or null to read it here. */
+    private PriorityAbilities cachedAbilitiesFor(final Input input, final int cardId) {
+        final ExpertHint hint = expertHint;
+        if (hint == null || !hint.isEnabled()) {
+            return null;
+        }
+        final Map.Entry<Input, Map<Integer, PriorityAbilities>> ready = precomputedAbilities.get();
+        return ready != null && ready.getKey() == input ? ready.getValue().get(cardId) : null;
+    }
+
     private static boolean opensDecision(final Input input, final String kind) {
         return input instanceof InputPassPriority
                 || input instanceof InputAttack
@@ -663,6 +689,39 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 || input instanceof InputSelectTargets
                 || input instanceof InputSelectEntitiesFromList<?>
                 || "mulligan".equals(kind);
+    }
+
+    /**
+     * Reads every card's playable and affordable abilities on the game thread.
+     *
+     * This is the interim mitigation for the pre-existing race documented in
+     * docs/qa/bug-reports/2026-09-16T02-15-04-… — the real fix is to build the
+     * whole request here, which restructures the control bindings. It is gated
+     * on the hint flag, so a jar running without hints takes exactly the path
+     * it takes today.
+     */
+    private void precomputeAbilities(final Input input) {
+        if (!(input instanceof InputPassPriority)) {
+            precomputedAbilities.set(null);
+            return;
+        }
+        try {
+            final Map<Integer, PriorityAbilities> byCard = new LinkedHashMap<>();
+            game.forEachCardInGame(card -> {
+                try {
+                    final List<SpellAbility> all = card.getAllPossibleAbilities(human, true);
+                    final List<SpellAbility> affordable = all.stream()
+                            .filter(a -> forge.player.HumanManaAffordability.mayAfford(human, a)).toList();
+                    byCard.put(card.getId(), new PriorityAbilities(all, affordable));
+                } catch (Throwable ignored) {
+                    // One unreadable card must not cost the whole request.
+                }
+                return true;
+            });
+            precomputedAbilities.set(Map.entry(input, byCard));
+        } catch (Throwable ignored) {
+            precomputedAbilities.set(null);
+        }
     }
 
     private ExpertHintMapper.Mapped mapPlan(final HintPlan plan, final Input input,
@@ -763,8 +822,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             final boolean londonCard = input instanceof InputLondonMulligan london
                     && london.canSelectCard(card);
             if (input instanceof InputLondonMulligan && !londonCard) return true;
-            final var priorityAbilities = input instanceof InputPassPriority
-                    ? card.getAllPossibleAbilities(human, true) : null;
+            // Prefer the copy the game thread read for us. Falling back to
+            // reading it here keeps a hint-less jar on its existing path.
+            final var cached = cachedAbilitiesFor(input, card.getId());
+            final var priorityAbilities = !(input instanceof InputPassPriority) ? null
+                    : cached != null ? cached.all()
+                    : card.getAllPossibleAbilities(human, true);
             // InputPassPriority.getActivateAction computes this same list.
             // Reuse it without caching across changes in Forge's game state.
             final String activate = priorityAbilities == null ? input.getActivateAction(card)
@@ -772,8 +835,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     : forge.util.Localizer.getInstance().getMessage(priorityAbilities.get(0).isSpell()
                             ? "lblCastSpell" : priorityAbilities.get(0).isLandAbility()
                             ? "lblPlayLand" : "lblActivateAbility");
-            final var affordableAbilities = priorityAbilities == null ? null : priorityAbilities.stream()
-                    .filter(a -> forge.player.HumanManaAffordability.mayAfford(human, a)).toList();
+            final var affordableAbilities = priorityAbilities == null ? null
+                    : cached != null ? cached.affordable()
+                    : priorityAbilities.stream()
+                            .filter(a -> forge.player.HumanManaAffordability.mayAfford(human, a)).toList();
             if (priorityAbilities != null && !priorityAbilities.isEmpty() && affordableAbilities.isEmpty()) return true;
             if (!londonCard && activate == null && !isSelectable(view) && !isWeaklySelectable(view)) {
                 return true;

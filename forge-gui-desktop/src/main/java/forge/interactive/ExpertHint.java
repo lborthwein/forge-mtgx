@@ -252,14 +252,53 @@ final class ExpertHint {
         underAi(temp -> {
             final AiController brains = temp.getAi();
             final List<SpellAbility> line = brains.chooseSpellAbilityToPlay();
-            if (line != null && !line.isEmpty()) {
-                // Forge's own singleSpellAbilityList shape: the head is the
-                // action to take now. A tail, when present, is the follow-up
-                // line the AI intends next, not an alternative to this one.
-                chosen.set(line.get(0));
+            if (line == null || line.isEmpty()) {
+                return;
             }
+            // Forge's own singleSpellAbilityList shape: the head is the action
+            // to take now, and a tail is the follow-up line the AI intends
+            // next.
+            //
+            // Every candidate is checked against the SAME affordability filter
+            // buildStatefulControls applies when deciding what to advertise.
+            // The AI plans its own payment; the seat has to pay through the
+            // human path, and the two do not always agree. When they did not,
+            // the advice was a line the seat could start and never finish: the
+            // cast opened, the payment could not complete, it cancelled, and
+            // priority came back unchanged — a loop that ran a game to its time
+            // budget with 534 fallbacks. Advice the seat cannot act on is worse
+            // than no advice, because it looks actionable.
+            for (SpellAbility candidate : line) {
+                if (candidate != null && affordableThroughHumanPath(candidate)) {
+                    chosen.set(candidate);
+                    return;
+                }
+            }
+            // Nothing the AI wants can actually be paid for. Passing is the
+            // honest answer, and it is one the seat can always act on.
         });
         return HintPlan.priority(decisionId, chosen.get(), elapsedMs(started));
+    }
+
+    /**
+     * Whether the seat could pay for this the way a human would.
+     *
+     * A land drop has no mana cost and is always actionable; anything else goes
+     * through the same check the bridge uses to decide whether to advertise the
+     * card at all, so the adviser and the controls cannot disagree about what
+     * is possible.
+     */
+    private boolean affordableThroughHumanPath(final SpellAbility ability) {
+        try {
+            if (ability.isLandAbility()) {
+                return true;
+            }
+            return forge.player.HumanManaAffordability.mayAfford(human, ability);
+        } catch (Throwable ignored) {
+            // An affordability check that throws is not a licence to advise the
+            // line anyway.
+            return false;
+        }
     }
 
     // ------------------------------------------------------------------ combat
