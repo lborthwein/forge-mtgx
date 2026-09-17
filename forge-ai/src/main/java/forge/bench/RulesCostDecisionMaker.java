@@ -36,6 +36,20 @@ final class RulesCostDecisionMaker extends CostDecisionMakerBase {
     private PaymentDecision unsupported(CostPart cost) {
         throw new RulesCostFeasibility.Unsupported("execution cost " + cost.getClass().getSimpleName());
     }
+    /** A nonmana cost the feasibility layer admitted and the rules leave exactly
+     * one way to pay: pay that. A part with a real choice is NOT decided here —
+     * choosing which card to spend is play, and play belongs to the host. The
+     * refusal names the ask the host would have to answer.
+     */
+    private PaymentDecision forced(CostPart cost, String ask) {
+        if (isEffect()) return unsupported(cost);
+        var selection = RulesCostFeasibility.forcedSelection(player, ability, cost);
+        if (selection == null)
+            throw new RulesCostFeasibility.Unsupported("execution cost " + cost.getClass().getSimpleName()
+                    + ": requires explicit host card selection (" + ask + ")");
+        require(cost);
+        return PaymentDecision.card(selection);
+    }
     private void require(CostPart cost) {
         if (!cost.canPay(ability, player, false))
             throw new RulesCostFeasibility.Unsupported("witness nonmana cost no longer payable");
@@ -46,17 +60,20 @@ final class RulesCostDecisionMaker extends CostDecisionMakerBase {
         return PaymentDecision.number(0);
     }
     @Override public PaymentDecision visit(CostSacrifice cost) {
-        if (!cost.payCostFromSource() || !Integer.valueOf(1).equals(cost.convertAmount()))
-            return unsupported(cost);
-        require(cost);
-        return PaymentDecision.card(source);
+        if (cost.payCostFromSource() && Integer.valueOf(1).equals(cost.convertAmount())) {
+            require(cost);
+            return PaymentDecision.card(source);
+        }
+        return forced(cost, "sacrificeCost");
     }
     @Override public PaymentDecision visit(CostRemoveCounter cost) {
-        if (!cost.payCostFromSource() || cost.convertAmount() == null || cost.counter == null)
-            return unsupported(cost);
+        if (!cost.payCostFromSource() || cost.counter == null) return unsupported(cost);
+        Integer amount = cost.convertAmount() != null ? cost.convertAmount()
+                : RulesCostFeasibility.literalAmount(ability, cost);
+        if (amount == null) return unsupported(cost);
         require(cost);
         GameEntityCounterTable table = new GameEntityCounterTable();
-        table.put(null, source, cost.counter, cost.convertAmount());
+        table.put(null, source, cost.counter, amount);
         return PaymentDecision.counters(table);
     }
     @Override public PaymentDecision visit(CostPutCounter cost) {
@@ -77,16 +94,18 @@ final class RulesCostDecisionMaker extends CostDecisionMakerBase {
             require(cost);
             return PaymentDecision.card(discardSelector.apply(cost));
         }
-        if (!RulesCostFeasibility.isSingleSelfDiscard(cost) || !ability.isActivatedAbility()
-                || source != ability.getHostCard() || source.getOwner() != player
-                || player.getCardsIn(forge.game.zone.ZoneType.Hand).stream().noneMatch(c -> c == source))
-            return unsupported(cost);
-        require(cost);
-        return PaymentDecision.card(source);
+        if (RulesCostFeasibility.isSingleSelfDiscard(cost)) {
+            if (!ability.isActivatedAbility() || source != ability.getHostCard() || source.getOwner() != player
+                    || player.getCardsIn(forge.game.zone.ZoneType.Hand).stream().noneMatch(c -> c == source))
+                return unsupported(cost);
+            require(cost);
+            return PaymentDecision.card(source);
+        }
+        return forced(cost, "discardCost");
     }
     @Override public PaymentDecision visit(CostDamage cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostDraw cost) { return unsupported(cost); }
-    @Override public PaymentDecision visit(CostExile cost) { return unsupported(cost); }
+    @Override public PaymentDecision visit(CostExile cost) { return forced(cost, "exileCost"); }
     @Override public PaymentDecision visit(CostExileFromStack cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostExiledMoveToGrave cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostExert cost) { return unsupported(cost); }
@@ -97,7 +116,9 @@ final class RulesCostDecisionMaker extends CostDecisionMakerBase {
     @Override public PaymentDecision visit(CostMill cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostAddMana cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostPayLife cost) {
-        if (selectedLife == null || !selectedLife.equals(cost.convertAmount())) return unsupported(cost);
+        Integer amount = cost.convertAmount() != null ? cost.convertAmount()
+                : RulesCostFeasibility.literalAmount(ability, cost);
+        if (selectedLife == null || amount == null || !selectedLife.equals(amount)) return unsupported(cost);
         require(cost);
         return PaymentDecision.number(selectedLife);
     }
@@ -117,7 +138,7 @@ final class RulesCostDecisionMaker extends CostDecisionMakerBase {
     @Override public PaymentDecision visit(CostUntapType cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostUntap cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostUnattach cost) { return unsupported(cost); }
-    @Override public PaymentDecision visit(CostTapType cost) { return unsupported(cost); }
+    @Override public PaymentDecision visit(CostTapType cost) { return forced(cost, "tapTypeCost"); }
     @Override public PaymentDecision visit(CostPayShards cost) { return unsupported(cost); }
     @Override public PaymentDecision visit(CostBlight cost) { return unsupported(cost); }
 }

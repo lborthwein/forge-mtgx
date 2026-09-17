@@ -45,6 +45,11 @@ public final class RulesPaymentExecutor {
     private final Map<Integer,Player> returnOwners = new LinkedHashMap<>();
     private List<Card> chosenDiscard;
     private final Map<Integer,Long> discardVisits = new LinkedHashMap<>();
+    /** Receipts for nonmana costs whose payment the rules left forced, keyed by
+     * the part's own paid-list hash. Recorded before anything is paid. */
+    private final Map<String,List<Card>> forcedSpend = new LinkedHashMap<>();
+    private final Map<Integer,Long> forcedVisits = new LinkedHashMap<>();
+    private boolean forcedRecorded;
 
     private static final class NestedTrigger {
         final Card host;
@@ -195,8 +200,32 @@ public final class RulesPaymentExecutor {
                 || payer.getCardsIn(forge.game.zone.ZoneType.Hand).stream().noneMatch(c -> c == discardedSource)))
             fail("source-discard hand visit changed before payment");
         if (triggerAuthority != null) triggerAuthority.requirePayment(payer, actual);
+        recordForcedSpend(actual);
         return new RulesCostDecisionMaker(payer, actual, witness.life(), triggerAuthority != null,
                 cost -> selectDiscard(actual,cost), cost -> selectReturn(actual,cost));
+    }
+
+    /** The exact cards a forced nonmana cost must consume, captured before any
+     * part of the cost is paid. A part with a genuine choice is not recorded:
+     * the decision maker refuses it and names the host ask instead.
+     */
+    private void recordForcedSpend(SpellAbility actual) {
+        if (forcedRecorded) return;
+        forcedRecorded = true;
+        var paymentCost = triggerAuthority == null ? actual.getPayCosts() : triggerAuthority.cost(payer, actual);
+        for (forge.game.cost.CostPart part : paymentCost.getCostParts()) {
+            if (!(part instanceof forge.game.cost.CostPartWithList listed)) continue;
+            if (RulesCostFeasibility.isSingleSelfDiscard(part) || RulesCostFeasibility.isSingleSelfSacrifice(part)
+                    || RulesDiscardCostDomain.supports(part) || RulesReturnCostDomain.supports(part)) continue;
+            var selection = RulesCostFeasibility.forcedSelection(payer, actual, part);
+            if (selection == null) continue;
+            String key = listed.getHashForLKIList();
+            if (("Sacrificed".equals(key) && sacrificedSource != null)
+                    || ("Discarded".equals(key) && discardedSource != null)
+                    || forcedSpend.put(key, List.copyOf(selection)) != null)
+                fail("two nonmana cost parts share one paid-list receipt");
+            for (Card card : selection) forcedVisits.put(card.getId(), card.getGameTimestamp());
+        }
     }
 
     private List<Card> selectReturn(SpellAbility actual, forge.game.cost.CostReturn cost) {
@@ -433,6 +462,16 @@ public final class RulesPaymentExecutor {
                     || payer.getGame().getCardsIn(forge.game.zone.ZoneType.Battlefield).stream()
                         .anyMatch(c -> c.getId() == sacrificedSource.getId()))
                 fail("native tap/self-sacrifice did not consume the exact selected source");
+        }
+        for (var receipt : forcedSpend.entrySet()) {
+            var lki = paidAction.getPaidList(receipt.getKey(), true);
+            var expected = receipt.getValue();
+            if (lki == null || lki.size() != expected.size()) fail("forced nonmana cost receipt count mismatch");
+            var spent = lki.stream().map(Card::getId).sorted().toList();
+            if (!spent.equals(expected.stream().map(Card::getId).sorted().toList()))
+                fail("forced nonmana cost spent cards differ from the rules-forced selection");
+            for (Card card : lki) if (!java.util.Objects.equals(forcedVisits.get(card.getId()), card.getGameTimestamp()))
+                fail("forced nonmana cost receipt consumed a different visit");
         }
         if (witness.totalLife() > 0 && ((witness.life() > 0 && paidAction.getAmountLifePaid() != witness.life())
                 || payer.getLife() != lifeBefore - witness.totalLife())) fail("actual life payment differs from host-selected witness");

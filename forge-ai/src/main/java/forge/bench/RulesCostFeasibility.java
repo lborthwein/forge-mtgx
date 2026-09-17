@@ -32,6 +32,11 @@ public final class RulesCostFeasibility {
     public static final String VERSION = "rules-cost-v5-explicit-x";
     public static final String PAYMENT_VERSION = "rules-payment-v5-explicit-x";
     public static final String LIFE_VERSION = "rules-fixed-life-v1";
+    /** Additive nonmana-cost coverage. The three versions above are pinned wire
+     * identities and MUST NOT move for a coverage change; this key is new, so a
+     * host that does not know it is unaffected and a host that does can tell a
+     * widened jar from the pinned one. */
+    public static final String NONMANA_COST_VERSION = "rules-nonmana-cost-v1";
     public enum Status { PAYABLE, UNPAYABLE, UNSUPPORTED }
     public record Result(Status status, String reason, PaymentWitness witness, PaymentSpace space) {}
     public record PaymentSpace(ManaCost cost, List<ManaCostShard> shards, List<Token> pool, List<List<SourceChoice>> sources, int life, int x) {
@@ -197,11 +202,46 @@ public final class RulesCostFeasibility {
                 && parts.stream().filter(p -> p instanceof CostPayLife).count() <= 1
                 && parts.stream().filter(RulesCostFeasibility::isSingleSelfSacrifice).count() <= 1
                 && parts.stream().filter(RulesCostFeasibility::isSingleSelfDiscard).count() <= 1;
+        // Newly covered nonmana costs (rules-nonmana-cost-v1). The analysis runs
+        // only when some part is outside the legacy set, so no previously
+        // emitted verdict or refusal string changes.
+        var prints = new java.util.IdentityHashMap<CostPart, Footprint>();
+        if (parts.stream().anyMatch(p -> !legacyPart(p, ability))) {
+            for (CostPart part : parts) {
+                var print = footprint(payer, ability, part);
+                if (print == null) return unknown("nonmana cost: " + part.getClass().getSimpleName());
+                prints.put(part, print);
+            }
+            // A card spent on a nonmana cost is tapped or gone before the mana
+            // payment finishes, and a mana source may be sacrificed for mana by
+            // the witness itself. Admit only a conjunction that some legal
+            // selection can satisfy WITHOUT touching a card that could fund the
+            // mana witness; the host card is already withheld from the source
+            // enumeration when a part spends it.
+            var cardParts = prints.values().stream().filter(p -> p.mode() != Mode.NONE).toList();
+            // Not enough cards at all is a rules answer, not a coverage gap:
+            // report UNPAYABLE and never dress it as a competition refusal.
+            for (var print : cardParts) if (print.pool().size() < print.need()) return answer(false);
+            if (!jointlySelectable(cardParts.stream().filter(p -> p.mode() == Mode.CONSUME).toList())
+                    || !jointlySelectable(cardParts.stream().filter(p -> p.mode() == Mode.TAP).toList()))
+                return answer(false);
+            var reduced = cardParts.stream()
+                    .map(p -> new Footprint(p.part(), p.mode(), spendable(ability, p), p.need(), 0)).toList();
+            for (var print : reduced) if (print.pool().size() < print.need())
+                return unknown("nonmana cost competes with mana sources: " + print.part().getClass().getSimpleName());
+            if (!jointlySelectable(reduced.stream().filter(p -> p.mode() == Mode.CONSUME).toList())
+                    || !jointlySelectable(reduced.stream().filter(p -> p.mode() == Mode.TAP).toList()))
+                return unknown("joint nonmana costs");
+            // One life payment prices one witness; two would need an ordered
+            // budget this layer does not represent.
+            if (parts.stream().filter(p -> p instanceof CostPayLife).count() > 1)
+                return unknown("joint nonmana costs");
+        }
         for (CostPart part : paymentCost.getCostParts()) {
             if (part instanceof CostPartMana) continue;
             // Multiple nonmana costs can compete for the same resource. Do not prove
             // joint feasibility by checking each independently.
-            if (++nonMana > 1 && !independentSourceCosts) return unknown("joint nonmana costs");
+            if (++nonMana > 1 && !independentSourceCosts && prints.isEmpty()) return unknown("joint nonmana costs");
             if (part instanceof CostTap) {
                 hostUsed = true;
             } else if (isSingleSelfDiscard(part)) {
@@ -248,6 +288,13 @@ public final class RulesCostFeasibility {
             } else if (part instanceof CostPayLife payLife && payLife.convertAmount() != null) {
                 life = payLife.convertAmount();
                 if (life < 0 || life > 1_000_000) return unknown("fixed life cost outside bounded scope");
+            } else if (prints.containsKey(part)) {
+                Footprint print = prints.get(part);
+                // Covered by rules-nonmana-cost-v1: the conjunction, the shared
+                // resources and this part's own canPay were all proved above.
+                // Spending the source withholds it from the mana enumeration.
+                if (print.mode() != Mode.NONE && part.payCostFromSource()) hostUsed = true;
+                if (print.life() > 0) life = Math.addExact(life, print.life());
             } else return unknown("nonmana cost: " + part.getClass().getSimpleName());
             if (!part.canPay(ability, payer, false)) return answer(false);
         }
@@ -428,6 +475,201 @@ public final class RulesCostFeasibility {
             choices = List.copyOf(next);
         }
         return choices;
+    }
+
+    // ---------------------------------------------------------------------
+    // Nonmana cost coverage (rules-nonmana-cost-v1).
+    //
+    // A nonmana cost part is admitted only when THIS layer can reproduce
+    // Forge's own verdict: the candidate set below is mirrored from the exact
+    // CardLists/CardPredicates screen the part's own canPay uses, and the
+    // mirror must agree with `part.canPay` or the whole assessment is
+    // UNSUPPORTED. Nothing here decides which card to spend; a genuine choice
+    // stays a choice (see RulesCostDecisionMaker), and an unmirrorable cost
+    // shape keeps its refusal.
+    // ---------------------------------------------------------------------
+
+    /** How a part uses a card: TAP leaves it on the battlefield, CONSUME removes
+     * it from its zone, NONE touches no card (life, counters on the source). */
+    enum Mode { NONE, TAP, CONSUME }
+
+    /** `need` cards drawn from `pool`; `pool` is already reduced to cards that
+     * cannot fund this assessment's mana witness. `forced` means the rules leave
+     * exactly one selection, so no policy decision exists. */
+    record Footprint(CostPart part, Mode mode, List<Card> pool, int need, int life) {
+        Footprint {
+            pool = List.copyOf(pool);
+        }
+        boolean forced() { return mode != Mode.NONE && pool.size() == need; }
+    }
+
+    /** Cards that could fund the mana witness enumerated below. The source loop
+     * refuses a nonbattlefield mana source outright, so only battlefield cards
+     * can fund a PAYABLE witness; a hand/graveyard candidate never competes. */
+    private static boolean mayFundMana(Card card) {
+        return card.isInZone(ZoneType.Battlefield) && !card.isPhasedOut() && !card.getManaAbilities().isEmpty();
+    }
+
+    /** The kinds the CostPart loop admitted before this coverage change. Their
+     * branches, verdicts and refusal strings are left exactly as they were; the
+     * joint analysis only runs when some part is newly covered. */
+    private static boolean legacyPart(CostPart part, SpellAbility ability) {
+        return part instanceof CostTap
+                || isSingleSelfDiscard(part)
+                || isSingleSelfSacrifice(part)
+                || RulesDiscardCostDomain.supports(part)
+                || RulesReturnCostDomain.supports(part)
+                || (part instanceof CostRemoveCounter remove && remove.payCostFromSource()
+                    && remove.convertAmount() != null && remove.counter != null && remove.counter.is(CounterEnumType.LOYALTY))
+                || (part instanceof CostPutCounter put && put.payCostFromSource()
+                    && put.convertAmount() != null && put.getCounter().is(CounterEnumType.LOYALTY) && ability.isActivatedAbility())
+                || (part instanceof CostPayLife life && life.convertAmount() != null);
+    }
+
+    /** A literal, bounded amount. A cost whose amount is announced or derived
+     * from changing state is refused rather than priced from a stale snapshot. */
+    static Integer literalAmount(SpellAbility ability, CostPart part) {
+        Integer fixed = part.convertAmount();
+        if (fixed != null) return fixed >= 0 && fixed <= 16 ? fixed : null;
+        String amount = part.getAmount();
+        if (amount == null || amount.contains("X") || amount.contains("Y") || "All".equalsIgnoreCase(amount)) return null;
+        final int derived;
+        try { derived = part.getAbilityAmount(ability); }
+        catch (RuntimeException failure) { return null; }
+        // A second evaluation catches an amount that is not a pure function of
+        // the current state; only a stable literal may price a payment.
+        try { if (derived != part.getAbilityAmount(ability)) return null; }
+        catch (RuntimeException failure) { return null; }
+        return derived >= 0 && derived <= 16 ? derived : null;
+    }
+
+    private static boolean simpleType(String type) {
+        return type != null && !type.isEmpty() && !type.contains("+with") && !type.contains("+With")
+                && !type.contains("X") && !type.contains("sharesCreatureTypeWith")
+                && !type.contains("FromTopGrave") && !"All".equals(type) && !"OriginalHost".equals(type)
+                && !"Random".equals(type) && !"LastDrawn".equals(type);
+    }
+
+    /** Mirrors `CostExile.canPay`'s own screen for the shapes it is exact for. */
+    private static List<Card> exileCandidates(Player payer, SpellAbility ability, CostExile cost) {
+        if (cost.zoneRestriction != 1 || cost.getFrom().size() != 1 || !simpleType(cost.getType())) return null;
+        ZoneType from = cost.getFrom().get(0);
+        if (from != ZoneType.Battlefield && from != ZoneType.Hand && from != ZoneType.Graveyard) return null;
+        var list = forge.game.card.CardLists.filter(payer.getCardsIn(from),
+                forge.game.card.CardPredicates.canExiledBy(ability, false));
+        if (cost.payCostFromSource())
+            return list.contains(ability.getHostCard()) ? List.of(ability.getHostCard()) : List.of();
+        return List.copyOf(forge.game.card.CardLists.getValidCards(list, cost.getType().split(";"),
+                payer, ability.getHostCard(), ability));
+    }
+
+    /** Mirrors `CostSacrifice.getMaxAmountX`, which is what its canPay counts. */
+    private static List<Card> sacrificeCandidates(Player payer, SpellAbility ability, CostSacrifice cost) {
+        if (!simpleType(cost.getType()) || "All".equalsIgnoreCase(cost.getAmount())) return null;
+        if (cost.payCostFromSource())
+            return ability.getHostCard().canBeSacrificedBy(ability, false) ? List.of(ability.getHostCard()) : List.of();
+        return List.copyOf(forge.game.card.CardLists.filter(
+                forge.game.card.CardLists.getValidCards(payer.getCardsIn(ZoneType.Battlefield),
+                        cost.getType().split(";"), payer, ability.getHostCard(), ability),
+                forge.game.card.CardPredicates.canBeSacrificedBy(ability, false)));
+    }
+
+    /** Mirrors `CostTapType.canPay`'s own screen, including the source removal. */
+    private static List<Card> tapTypeCandidates(Player payer, SpellAbility ability, CostTapType cost) {
+        if (!simpleType(cost.getType())) return null;
+        var list = new forge.game.card.CardCollection(forge.game.card.CardLists.getValidCards(
+                payer.getCardsIn(ZoneType.Battlefield), cost.getType().split(";"), payer, ability.getHostCard(), ability));
+        if (!cost.canTapSource) list.remove(ability.getHostCard());
+        return List.copyOf(forge.game.card.CardLists.filter(list,
+                ability.isCrew() ? forge.game.card.CardPredicates.CAN_CREW : forge.game.card.CardPredicates.CAN_TAP));
+    }
+
+    /** Mirrors `CostDiscard.canPay` for the two shapes it is exact for: the whole
+     * hand (no choice at all) and a typed selection from hand. */
+    private static List<Card> discardCandidates(Player payer, SpellAbility ability, CostDiscard cost) {
+        if (cost.payCostFromSource()) return null; // handled by the self-discard branch
+        if (!payer.canDiscardBy(ability, false)) return List.of();
+        if ("Hand".equals(cost.getType())) return List.copyOf(payer.getCardsIn(ZoneType.Hand));
+        if (!simpleType(cost.getType())) return null;
+        return List.copyOf(forge.game.card.CardLists.getValidCards(payer.getCardsIn(ZoneType.Hand),
+                cost.getType().split(";"), payer, ability.getHostCard(), ability));
+    }
+
+    /** The exact resource this part will take, or null when this layer cannot
+     * reproduce Forge's verdict for that cost shape. */
+    private static Footprint footprint(Player payer, SpellAbility ability, CostPart part) {
+        Card host = ability.getHostCard();
+        if (part instanceof CostTap) return new Footprint(part, Mode.TAP, List.of(host), 1, 0);
+        if (isSingleSelfDiscard(part) || isSingleSelfSacrifice(part))
+            return new Footprint(part, Mode.CONSUME, List.of(host), 1, 0);
+        if (part instanceof CostPayLife payLife) {
+            Integer amount = literalAmount(ability, payLife);
+            if (amount == null) return null;
+            return new Footprint(part, Mode.NONE, List.of(), 0, amount);
+        }
+        if (part instanceof CostRemoveCounter remove) {
+            // Counters live on the source and are a resource of their own; the
+            // amount must be a literal and Forge's own canPay decides whether
+            // enough are there. Any other permanent's counters stay refused.
+            if (!remove.payCostFromSource() || remove.counter == null || literalAmount(ability, remove) == null) return null;
+            return new Footprint(part, Mode.NONE, List.of(), 0, 0);
+        }
+        if (part instanceof CostPutCounter put) {
+            if (!put.payCostFromSource() || put.convertAmount() == null || !ability.isActivatedAbility()) return null;
+            return new Footprint(part, Mode.NONE, List.of(), 0, 0);
+        }
+        final List<Card> candidates;
+        final Mode mode;
+        if (part instanceof CostExile exile) { candidates = exileCandidates(payer, ability, exile); mode = Mode.CONSUME; }
+        else if (part instanceof CostSacrifice sacrifice) { candidates = sacrificeCandidates(payer, ability, sacrifice); mode = Mode.CONSUME; }
+        else if (part instanceof CostDiscard discard) { candidates = discardCandidates(payer, ability, discard); mode = Mode.CONSUME; }
+        else if (part instanceof CostTapType tapType) { candidates = tapTypeCandidates(payer, ability, tapType); mode = Mode.TAP; }
+        else return null;
+        if (candidates == null) return null;
+        Integer need = "Hand".equals(part.getType()) && part instanceof CostDiscard
+                ? candidates.size() : literalAmount(ability, part);
+        if (need == null) return null;
+        // The integrity device: this mirror is only usable if it reproduces the
+        // part's own verdict. A disagreement means the shape is outside scope.
+        if (part.canPay(ability, payer, false) != (candidates.size() >= need)) return null;
+        return new Footprint(part, mode, candidates, need, 0);
+    }
+
+    /** The pool reduced to cards that cannot fund the mana witness. A part that
+     * spends the source itself keeps the source: the source enumeration
+     * withholds that card in turn (`hostUsed`), so nothing is double-counted. */
+    private static List<Card> spendable(SpellAbility ability, Footprint print) {
+        boolean source = print.part() instanceof CostTap || print.part().payCostFromSource();
+        return print.pool().stream().filter(c -> !mayFundMana(c) || (source && c == ability.getHostCard())).toList();
+    }
+
+    /** The one selection the rules leave for this nonmana part, or null when a
+     * real choice exists (that choice belongs to the host, never to this layer)
+     * or the cost shape is outside the mirrored domain. Called before any part
+     * of the cost is paid, so it sees the state the assessment saw. */
+    static List<Card> forcedSelection(Player payer, SpellAbility ability, CostPart part) {
+        var print = footprint(payer, ability, part);
+        if (print == null || print.mode() == Mode.NONE) return null;
+        var pool = spendable(ability, print);
+        return pool.size() == print.need() ? pool : null;
+    }
+
+    /** Hall's condition: every subset of parts must have at least as many
+     * distinct candidate cards available as the cards they jointly need. This
+     * is what "one permanent cannot pay two parts" means, checked exactly. */
+    private static boolean jointlySelectable(List<Footprint> group) {
+        if (group.isEmpty()) return true;
+        if (group.size() > 8) return false;
+        for (int mask = 1; mask < (1 << group.size()); mask++) {
+            var union = new java.util.LinkedHashSet<Card>();
+            int need = 0;
+            for (int i = 0; i < group.size(); i++) if ((mask & (1 << i)) != 0) {
+                union.addAll(group.get(i).pool());
+                need += group.get(i).need();
+            }
+            if (union.size() < need) return false;
+        }
+        return true;
     }
 
     static boolean isSingleSelfDiscard(CostPart part) {

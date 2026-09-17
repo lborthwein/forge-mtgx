@@ -194,6 +194,189 @@ public final class PermissionEnumerationEngineSmoke {
         check(payment.pay(zero, part, selected, false), "original action payment still executes"); payment.assertPaid();
         refuses(() -> payment.pay(zero, part, selected, false), "original action remains single-use");
     }
+    // ---------------------------------------------------------------------
+    // Nonmana cost coverage (rules-nonmana-cost-v1). Expectations first: the
+    // layer may only say PAYABLE where Forge's own canPay accepts a payment,
+    // a forced payment must execute and leave an exact receipt, a cost that
+    // competes with the mana witness must stay UNSUPPORTED, and a genuine card
+    // choice must stay a choice that names the host ask it needs.
+    // ---------------------------------------------------------------------
+    private static void refusesWith(Runnable run, String fragment, String label) {
+        try { run.run(); }
+        catch (RulesCostFeasibility.Unsupported expected) {
+            check(expected.getMessage().contains(fragment), label + " (got: " + expected.getMessage() + ")");
+            return;
+        }
+        throw new AssertionError("Accepted " + label);
+    }
+    private static SpellAbility ability(Card card, Player player, String contains) {
+        var found = card.getSpellAbilities().stream()
+                .filter(a -> a.getPayCosts() != null && (String.valueOf(a.getPayCosts()).contains(contains)
+                        || a.getPayCosts().toSimpleString().contains(contains)
+                        || a.getPayCosts().getCostParts().stream()
+                            .anyMatch(p -> p.getClass().getSimpleName().equals("Cost" + contains))))
+                .findFirst().orElseThrow(() -> new AssertionError("no ability with cost " + contains + " on " + card));
+        found.setActivatingPlayer(player);
+        return found;
+    }
+    private static RulesCostFeasibility.Result assessed(Player player, SpellAbility ability, RulesCostFeasibility.Status status, String label) {
+        var result = RulesCostFeasibility.assess(player, ability);
+        check(result.status() == status, label + " is " + status + " (got " + result.status() + " " + result.reason() + ")");
+        return result;
+    }
+    private static void refusedAssessment(Player player, SpellAbility ability, String fragment, String label) {
+        var result = RulesCostFeasibility.assess(player, ability);
+        check(result.status() == RulesCostFeasibility.Status.UNSUPPORTED && result.reason().contains(fragment),
+            label + " refused as '" + fragment + "' (got " + result.status() + " " + result.reason() + ")");
+    }
+    /** Pay and execute the selected action exactly as production does, then let
+     * the executor prove its own receipt. No AI cost visitor is involved. */
+    private static void executeAction(Player player, SpellAbility selected, java.util.function.Consumer<SpellAbility> aim, String label) {
+        var result = RulesCostFeasibility.assess(player, selected);
+        check(result.status() == RulesCostFeasibility.Status.PAYABLE, label + " is payable before execution: " + result.reason());
+        if (aim != null) aim.accept(selected);
+        var payment = new RulesPaymentExecutor(player, selected, result.witness());
+        player.dangerouslySetController(new forge.ai.PlayerControllerAi(player.getGame(), player, player.getLobbyPlayer()) {
+            @Override public boolean playTrigger(Card host, forge.game.trigger.WrappedAbility wrapper, boolean mandatory) {
+                return payment.duringMandatoryTrigger(host, wrapper, mandatory, () -> super.playTrigger(host, wrapper, mandatory));
+            }
+            @Override public boolean payManaCost(forge.card.mana.ManaCost cost, forge.game.cost.CostPartMana part,
+                    SpellAbility actual, String prompt, forge.game.mana.ManaConversionMatrix matrix, boolean effect) {
+                if (matrix != null) throw new AssertionError("Unexpected conversion");
+                return payment.pay(cost, part, actual, effect);
+            }
+        });
+        check(forge.ai.ComputerUtil.handlePlayingSpellAbility(player, selected, null, payment::decisions), label + " executes");
+        payment.assertPaid();
+        check(true, label + " receipt verified by the executor");
+    }
+    /** Relic of Progenitus: {1}, Exile Relic of Progenitus. Self-exile of the
+     * source, one generic; no choice exists anywhere in the payment. */
+    private static void selfExileCost() {
+        var game = game(); var player = game.getPlayers().get(0);
+        var relic = card("Relic of Progenitus", player, ZoneType.Battlefield);
+        card("Plains", player, ZoneType.Battlefield);
+        game.getAction().checkStateEffects(true);
+        var selected = ability(relic, player, "Exile");
+        executeAction(player, selected, null, "self-exile cost (Relic of Progenitus)");
+        check(relic.isInZone(ZoneType.Exile), "the exiled source actually left the battlefield for exile");
+    }
+    /** Grim Lavamancer: {R}, {T}, Exile two cards from your graveyard. Two cards
+     * in the graveyard leave one legal selection; three leave a real choice. */
+    private static void forcedAndChosenExileCost(boolean forced) {
+        var game = game(); var player = game.getPlayers().get(0);
+        var lavamancer = card("Grim Lavamancer", player, ZoneType.Battlefield);
+        card("Mountain", player, ZoneType.Battlefield);
+        var graveyard = new ArrayList<Card>();
+        for (int i = 0; i < (forced ? 2 : 3); i++) graveyard.add(card("Grizzly Bears", player, ZoneType.Graveyard));
+        game.getAction().checkStateEffects(true);
+        var selected = ability(lavamancer, player, "Exile");
+        if (forced) {
+            executeAction(player, selected, sa -> sa.getTargets().add(game.getPlayers().get(1)),
+                "tap + forced graveyard exile (Grim Lavamancer)");
+            check(graveyard.stream().allMatch(c -> c.isInZone(ZoneType.Exile)), "both forced graveyard cards actually exiled");
+            check(lavamancer.isTapped(), "the joint tap cost was actually paid");
+        } else {
+            // The menu answer is a rules fact: some legal payment exists. WHICH
+            // two cards to exile is play, so it is not decided here.
+            var result = assessed(player, selected, RulesCostFeasibility.Status.PAYABLE, "three-card graveyard exile menu entry");
+            check(RulesCostFeasibility.forcedSelection(player, selected, selected.getPayCosts().getCostParts().stream()
+                    .filter(p -> p instanceof forge.game.cost.CostExile).findFirst().orElseThrow()) == null,
+                "a three-card graveyard leaves no forced exile selection");
+            selected.getTargets().add(game.getPlayers().get(1));
+            var payment = new RulesPaymentExecutor(player, selected, result.witness());
+            var decisions = payment.decisions(selected);
+            var exile = selected.getPayCosts().getCostParts().stream()
+                    .filter(p -> p instanceof forge.game.cost.CostExile).findFirst().orElseThrow();
+            refusesWith(() -> exile.accept(decisions), "requires explicit host card selection (exileCost)",
+                "a real exile choice names the host ask instead of picking a card");
+        }
+    }
+    /** Elvish Reclaimer: {2}, {T}, Sacrifice a land. Every candidate funds mana,
+     * so no payment avoids the mana witness and the verdict stays UNSUPPORTED. */
+    private static void sacrificeCompetingWithMana() {
+        var game = game(); var player = game.getPlayers().get(0);
+        var reclaimer = card("Elvish Reclaimer", player, ZoneType.Battlefield);
+        for (int i = 0; i < 3; i++) card("Plains", player, ZoneType.Battlefield);
+        game.getAction().checkStateEffects(true);
+        refusedAssessment(player, ability(reclaimer, player, "Sac"),
+            "nonmana cost competes with mana sources: CostSacrifice", "sacrifice of a land");
+    }
+    /** Goblin Engineer: {R}, {T}, Sacrifice an artifact. One non-mana artifact
+     * forces the selection; a mana rock as the only artifact competes instead. */
+    private static void forcedAndCompetingSacrifice(boolean manaRock) {
+        var game = game(); var player = game.getPlayers().get(0);
+        var engineer = card("Goblin Engineer", player, ZoneType.Battlefield);
+        card("Mountain", player, ZoneType.Battlefield);
+        var artifact = card(manaRock ? "Sol Ring" : "Memnite", player, ZoneType.Battlefield);
+        var target = card("Memnite", player, ZoneType.Graveyard);
+        game.getAction().checkStateEffects(true);
+        var selected = ability(engineer, player, "Sac");
+        if (manaRock) {
+            refusedAssessment(player, selected, "nonmana cost competes with mana sources: CostSacrifice",
+                "sacrifice whose only candidate is a mana source");
+            return;
+        }
+        var sacrifice = selected.getPayCosts().getCostParts().stream()
+                .filter(p -> p instanceof forge.game.cost.CostSacrifice).findFirst().orElseThrow();
+        check(List.of(artifact).equals(RulesCostFeasibility.forcedSelection(player, selected, sacrifice)),
+            "the one non-mana artifact is the forced sacrifice selection");
+        executeAction(player, selected, sa -> sa.getTargets().add(target), "tap + forced artifact sacrifice (Goblin Engineer)");
+        check(!artifact.isInZone(ZoneType.Battlefield), "the forced sacrifice actually left the battlefield");
+    }
+    /** Bomat Courier: {R}, Discard your hand, Sacrifice Bomat Courier. Three
+     * resources at once — mana, the whole hand and the source — none shared. */
+    private static void jointDiscardHandAndSelfSacrifice() {
+        var game = game(); var player = game.getPlayers().get(0);
+        var courier = card("Bomat Courier", player, ZoneType.Battlefield);
+        card("Mountain", player, ZoneType.Battlefield);
+        var hand = List.of(card("Grizzly Bears", player, ZoneType.Hand), card("Savannah Lions", player, ZoneType.Hand));
+        game.getAction().checkStateEffects(true);
+        var selected = ability(courier, player, "Discard");
+        executeAction(player, selected, null, "joint discard-hand + self-sacrifice (Bomat Courier)");
+        check(player.getCardsIn(ZoneType.Hand).isEmpty() && hand.stream().allMatch(c -> c.isInZone(ZoneType.Graveyard)),
+            "the whole hand was actually discarded");
+        check(!courier.isInZone(ZoneType.Battlefield), "the source was actually sacrificed");
+    }
+    /** Walking Ballista: remove a +1/+1 counter. A non-loyalty counter on the
+     * source is its own resource; the amount must be a bounded literal. */
+    private static void nonLoyaltyCounterCost() {
+        var game = game(); var player = game.getPlayers().get(0);
+        var ballista = card("Walking Ballista", player, ZoneType.Battlefield);
+        ballista.addCounterInternal(forge.game.card.CounterType.getType("P1P1"), 2,
+            player, false, new forge.game.GameEntityCounterTable(), forge.game.ability.AbilityKey.newMap());
+        game.getAction().checkStateEffects(true);
+        var selected = ability(ballista, player, "RemoveCounter");
+        executeAction(player, selected, sa -> sa.getTargets().add(game.getPlayers().get(1)),
+            "non-loyalty source counter cost (Walking Ballista)");
+        check(ballista.getCounters(forge.game.card.CounterEnumType.P1P1) == 1, "exactly one counter was actually removed");
+        check(!game.getStack().isEmpty(), "the paid ability actually reached the stack");
+    }
+    /** Two consuming parts cannot spend one card: Hall's condition, exactly. */
+    private static void sharedResourceRefusal() {
+        var game = game(); var player = game.getPlayers().get(0);
+        var courier = card("Bomat Courier", player, ZoneType.Battlefield);
+        card("Mountain", player, ZoneType.Battlefield);
+        game.getAction().checkStateEffects(true);
+        // An empty hand needs no card, so the conjunction is still satisfiable;
+        // this pins that an empty selection is not silently treated as a gap.
+        var selected = ability(courier, player, "Discard");
+        assessed(player, selected, RulesCostFeasibility.Status.PAYABLE, "discard of an empty hand plus self-sacrifice");
+        var exile = new forge.game.cost.CostExile("2", "Card", null, ZoneType.Graveyard);
+        check(RulesCostFeasibility.forcedSelection(player, selected, exile) == null,
+            "an unsatisfiable exile cost yields no forced selection");
+    }
+    private static void nonManaCostCoverage() {
+        selfExileCost();
+        forcedAndChosenExileCost(true);
+        forcedAndChosenExileCost(false);
+        sacrificeCompetingWithMana();
+        forcedAndCompetingSacrifice(false);
+        forcedAndCompetingSacrifice(true);
+        jointDiscardHandAndSelfSacrifice();
+        nonLoyaltyCounterCost();
+        sharedResourceRefusal();
+    }
     public static void main(String[] args) {
         try {
             GuiBase.setInterface((IGuiBase) java.lang.reflect.Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),
@@ -210,6 +393,7 @@ public final class PermissionEnumerationEngineSmoke {
             library(true, false, false); library(true, false, true);
             library(false, true, false); library(false, true, true);
             faceDownExile();
+            nonManaCostCoverage();
             System.out.println("PASS all " + checks + " permission enumeration checks; development only"); System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }

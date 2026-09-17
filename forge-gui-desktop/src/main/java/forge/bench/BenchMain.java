@@ -294,6 +294,9 @@ public final class BenchMain {
         hello.addProperty("stackIdentityVersion", "host-stack-instance-v1");
         hello.addProperty("priorityStackTargetsVersion", PriorityStackTargetDomain.VERSION);
         hello.addProperty("priorityBoardTargetsVersion", PriorityBoardTargetDomain.VERSION);
+        // Additive: a host that does not know this key is unaffected, and a host
+        // that does can tell a widened nonmana-cost jar from the pinned one.
+        hello.addProperty("nonManaCostCoverageVersion", RulesCostFeasibility.NONMANA_COST_VERSION);
         // Explicit identity: a diagnostic no-op run is never a strength panel.
         hello.addProperty("auditMenuProbe", auditMenuProbe);
         hello.addProperty("forgeCommit", forgeCommit());

@@ -392,6 +392,79 @@ public final class ProductionPaymentDomainEngineSmoke {
         else System.out.println("PASS production symbolic payment " + scenario.name() + " fault=" + fault);
         return result;
     }
+    // ---------------------------------------------------------------------
+    // Nonmana cost coverage (rules-nonmana-cost-v1), as production sees it:
+    // the verdict per newly covered cost kind, whether the rules leave a
+    // choice, and the wire the host is actually given. Expectations first.
+    // ---------------------------------------------------------------------
+    private record CostCase(String name, String label, String costMarker, List<String> board, List<String> graveyard,
+                            List<String> hand, RulesCostFeasibility.Status status, String reason, boolean forced) {}
+    private static Game plainGame(String label) {
+        var players = List.of(new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("P0", 0, 0, null, "Default")),
+                new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("P1", 1, 0, null, "Default")));
+        var game = new Match(new GameRules(GameType.Constructed), players, label).createGame();
+        game.setAge(GameStage.Play);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, game.getPlayers().get(0));
+        return game;
+    }
+    private static void runCostCase(CostCase fixture) {
+        var game = plainGame("nonmana cost domain " + fixture.name());
+        var payer = game.getPlayers().get(0);
+        var host = card(fixture.name(), payer, ZoneType.Battlefield);
+        for (String name : fixture.board()) card(name, payer, ZoneType.Battlefield);
+        for (String name : fixture.graveyard()) card(name, payer, ZoneType.Graveyard);
+        for (String name : fixture.hand()) card(name, payer, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        var selected = host.getSpellAbilities().stream()
+                .filter(a -> a.getPayCosts() != null && a.getPayCosts().getCostParts().stream()
+                        .anyMatch(p -> p.getClass().getSimpleName().equals("Cost" + fixture.costMarker())))
+                .findFirst().orElseThrow(() -> new AssertionError("no " + fixture.costMarker() + " ability on " + fixture.name()));
+        selected.setActivatingPlayer(payer);
+        var result = RulesCostFeasibility.assess(payer, selected);
+        check(result.status() == fixture.status(), fixture.label() + " is " + fixture.status()
+                + " (got " + result.status() + " " + result.reason() + ")");
+        check(fixture.reason() == null || result.reason().contains(fixture.reason()),
+                fixture.label() + " reason contains '" + fixture.reason() + "' (got " + result.reason() + ")");
+        var part = selected.getPayCosts().getCostParts().stream()
+                .filter(p -> p.getClass().getSimpleName().equals("Cost" + fixture.costMarker())).findFirst().orElseThrow();
+        check(fixture.forced() == (RulesCostFeasibility.forcedSelection(payer, selected, part) != null), fixture.label()
+                + (fixture.forced() ? " leaves exactly one legal selection" : " leaves a host choice, not a forced selection"));
+        // What production actually sends: the cost part kind reaches the host on
+        // the wire, so a widened menu is never an unexplained menu entry.
+        var kinds = new ArrayList<String>();
+        for (var raw : StateEncoder.encodeSpellAbility(selected, payer.getView())
+                .getAsJsonObject("cost").getAsJsonArray("parts")) kinds.add(raw.getAsJsonObject().get("kind").getAsString());
+        check(kinds.contains("Cost" + fixture.costMarker()),
+                fixture.label() + " cost part reaches the host wire as Cost" + fixture.costMarker());
+        System.out.println("PASS nonmana cost domain: " + fixture.label());
+    }
+    private static void nonManaCostDomain() {
+        for (var fixture : List.of(
+                new CostCase("Relic of Progenitus", "self-exile of the source", "Exile",
+                        List.of("Plains"), List.of(), List.of(), RulesCostFeasibility.Status.PAYABLE, null, true),
+                new CostCase("Grim Lavamancer", "tap + exile exactly two graveyard cards", "Exile",
+                        List.of("Mountain"), List.of("Grizzly Bears", "Grizzly Bears"), List.of(),
+                        RulesCostFeasibility.Status.PAYABLE, null, true),
+                new CostCase("Grim Lavamancer", "tap + exile two of three graveyard cards", "Exile",
+                        List.of("Mountain"), List.of("Grizzly Bears", "Grizzly Bears", "Grizzly Bears"), List.of(),
+                        RulesCostFeasibility.Status.PAYABLE, null, false),
+                new CostCase("Grim Lavamancer", "tap + exile with only one graveyard card", "Exile",
+                        List.of("Mountain"), List.of("Grizzly Bears"), List.of(),
+                        RulesCostFeasibility.Status.UNPAYABLE, null, false),
+                new CostCase("Elvish Reclaimer", "sacrifice a land that funds the mana witness", "Sacrifice",
+                        List.of("Plains", "Plains", "Plains"), List.of(), List.of(),
+                        RulesCostFeasibility.Status.UNSUPPORTED, "nonmana cost competes with mana sources: CostSacrifice", false),
+                new CostCase("Goblin Engineer", "sacrifice the one non-mana artifact", "Sacrifice",
+                        List.of("Mountain", "Memnite"), List.of("Memnite"), List.of(),
+                        RulesCostFeasibility.Status.PAYABLE, null, true),
+                new CostCase("Bomat Courier", "discard the whole hand plus self-sacrifice", "Discard",
+                        List.of("Mountain"), List.of(), List.of("Grizzly Bears", "Savannah Lions"),
+                        RulesCostFeasibility.Status.PAYABLE, null, true),
+                new CostCase("Urza, Lord High Artificer", "tap an artifact that funds the mana witness", "TapType",
+                        List.of("Sol Ring"), List.of(), List.of(),
+                        RulesCostFeasibility.Status.UNSUPPORTED, "nonmana cost competes with mana sources: CostTapType", false)))
+            runCostCase(fixture);
+    }
     public static void main(String[] args) {
         boolean stdio = args.length > 1 && args[1].equals("--stdio"); PrintStream stdout = System.out; protocolOutput = stdout;
         try {
@@ -417,6 +490,7 @@ public final class ProductionPaymentDomainEngineSmoke {
                 for (String fault : List.of("legacy-choice", "wrong-version", "order-wrong-type", "spend-wrong-type", "life-wrong-type", "unknown-order-source",
                         "duplicate-source", "source-not-selected", "duplicate-token", "duplicate-shard", "partial-payment", "shard-wrong-type", "delegate"))
                     runFailedGameValidation(scenario("two-shards"), fault);
+                nonManaCostDomain();
                 System.out.println("PASS " + checks + " production symbolic-payment checks; no games or strength claim");
             }
             System.exit(0);
