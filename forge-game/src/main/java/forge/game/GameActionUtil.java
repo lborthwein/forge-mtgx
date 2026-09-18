@@ -109,7 +109,19 @@ public final class GameActionUtil {
                 // EffectZone restricts where the effect's SOURCE is active.
                 // checkConditions above already enforces that through zonesCheck;
                 // it does not change the prospective card's characteristics.
-                if (!st.hasParam("MayPlay") || !java.util.Set.of("Mode", "EffectZone", "MayPlay", "MayPlayIgnoreType", "MayPlayIgnoreColor",
+                // A grant of PERMISSION is not a characteristic change: neither
+                // MayPlay nor MayLookAt touches layers 1-7, so the prospective
+                // face is the same either way. MayLookAt alone is admitted for
+                // the same reason MayPlay already is -- it is an information
+                // permission (CR 701.16 / 400.2), and the whitelist below is
+                // what guarantees no other verb rode in with it. Measured case:
+                // Shelldock Isle's hideaway effect, {Affected=Card.IsRemembered,
+                // AffectedZone=Exile, EffectZone=Command,
+                // MayLookAt=EffectSourceController, Mode=Continuous} -- every
+                // param already inside the whitelist, refused only for lacking
+                // MayPlay.
+                if (!(st.hasParam("MayPlay") || st.hasParam("MayLookAt"))
+                        || !java.util.Set.of("Mode", "EffectZone", "MayPlay", "MayPlayIgnoreType", "MayPlayIgnoreColor",
                         "Affected", "AffectedZone", "Description", "MayLookAt", "MayPlayText").containsAll(st.getMapParams().keySet()))
                     throw prospectiveEnumerationFailure(prospective, st);
             }

@@ -42,10 +42,12 @@ final class MandatoryZeroTriggerExecution {
     }
 
     static void require(Player payer, SpellAbility ability) {
-        if (payer == null || ability == null || ability.getHostCard() == null
-                || ability.getHostCard().getGame() != payer.getGame() || ability.getActivatingPlayer() != payer
-                || !ability.isTrigger() || ability.getTrigger() == null || ability.isSpell() || ability.isCopied())
-            fail("not an ordinary owned trigger");
+        // Each cause names itself. One string, "not an ordinary owned trigger",
+        // reported eight distinct causes as a single census row, so a corpus
+        // read could not tell which one it met. Verdicts are unchanged: every
+        // branch below is still the same failure.
+        String ordinary = notOrdinaryOwnedTrigger(payer, ability);
+        if (ordinary != null) fail("not an ordinary owned trigger: " + ordinary);
         if (ability.isOptionalTrigger() || ability.getTrigger().hasParam("OptionalDecider")
                 || ability instanceof WrappedAbility wrapper && wrapper.getDecider() != null)
             fail("optional trigger confirmation is not yet host controlled");
@@ -58,6 +60,22 @@ final class MandatoryZeroTriggerExecution {
             requireZero(wrapper.getWrappedAbility().getPayCosts());
         }
         requirePreparation(ability);
+    }
+
+    /** Named causes for what was one "not an ordinary owned trigger" row.
+     * Order is the evaluation order of the disjunction it replaces, so the
+     * failure point is unchanged for every input; only the reason is specific. */
+    private static String notOrdinaryOwnedTrigger(Player payer, SpellAbility ability) {
+        if (payer == null) return "no payer";
+        if (ability == null) return "no ability";
+        if (ability.getHostCard() == null) return "no host card";
+        if (ability.getHostCard().getGame() != payer.getGame()) return "host card from another game";
+        if (ability.getActivatingPlayer() != payer) return "activator is not the payer";
+        if (!ability.isTrigger()) return "not a trigger";
+        if (ability.getTrigger() == null) return "trigger is null";
+        if (ability.isSpell()) return "trigger is a spell";
+        if (ability.isCopied()) return "trigger is a copy";
+        return null;
     }
 
     private static void requirePreparation(SpellAbility ability) {

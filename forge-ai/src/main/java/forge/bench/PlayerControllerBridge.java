@@ -1720,6 +1720,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
                 throw new RulesCostFeasibility.Unsupported("host target callback returned invalid target count");
             if (invocation != null) invocation.classify(CallCounter.Ownership.HOST);
             return result;
+        } catch (NoLegalHostTarget empty) {
+            // Not a host answer and not a refusal: the rules answered. `false` is
+            // exactly what stock Forge returns when no legal target exists, and
+            // the caller applies CR 603.3d to it.
+            if (invocation != null) invocation.classify(CallCounter.Ownership.FORCED);
+            return false;
         } finally { strictHostTargets = previous; }
     }
 
@@ -1738,8 +1744,18 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         final List<SpellAbilityStackInstance> stack = stackCandidates(currentAbility);
         final int min = currentAbility.getMinTargets();
         final int max = currentAbility.getMaxTargets();
-        if (preparingOptionalTrigger && min>0 && candidates.isEmpty() && stack.isEmpty())
-            throw new NoLegalOptionalTriggerTarget();
+        // CR 603.3d: an ability that requires a target and has no legal target is
+        // removed from the stack. There is no decision to route, and the host
+        // cannot form a legal answer to an empty menu -- measured on jar
+        // 0355cdb5 in ~/runs/2026-09-17-bridge-cost-coverage/evidence/after-v1/:
+        // {delegate:true} -> "explicit host targets required";
+        // {choices: []}   -> "chose 0 targets outside [1,1]".
+        // Forge's own candidate enumeration is the authority here and the jar
+        // chooses nothing; it reports that the rules left nothing to choose.
+        if (min>0 && candidates.isEmpty() && stack.isEmpty()) {
+            if (preparingOptionalTrigger) throw new NoLegalOptionalTriggerTarget();
+            throw new NoLegalHostTarget();
+        }
 
         final JsonObject body = envelope(true);
         body.add("ability", selectingExternalTargets
@@ -2754,6 +2770,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     private boolean failedOptionalResolution;
     private boolean preparingOptionalTrigger;
     private static final class NoLegalOptionalTriggerTarget extends RuntimeException {}
+    /** CR 603.3d: a required target with no legal candidate. Not a host refusal. */
+    private static final class NoLegalHostTarget extends RuntimeException {}
 
     @Override public boolean requiresTriggerResolutionScope(WrappedAbility ability) {
         return mode==BenchSession.Mode.BRIDGE && isLiveGame() && ability.isOptionalTrigger();

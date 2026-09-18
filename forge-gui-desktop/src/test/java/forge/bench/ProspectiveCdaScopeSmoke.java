@@ -126,6 +126,46 @@ public final class ProspectiveCdaScopeSmoke {
         guard(CardCopyService.getLKICopy(hand),true);
         System.out.println("BATTLEFIELD_SCOPE seat="+seat+" own="+ownPermanent+" card="+name);
     }
+    /** A grant of PERMISSION is not a characteristic change. Shelldock Isle's
+     * hideaway effect is a Continuous static whose only verb is MayLookAt, and
+     * it used to refuse every prospective face in the game for lacking MayPlay
+     * -- two of the twenty monoU games. Admitting it is scoped by the SAME
+     * param whitelist MayPlay is scoped by, which is what this case pins:
+     * permission alone is admitted, permission plus any characteristic verb is
+     * still refused. */
+    private static void permissionOnlyScope(int seat) throws Exception {
+        for (String grant : List.of("MayLookAt$ EffectSourceController", "MayPlay$ True")) {
+            var g = fixture(seat);
+            var actor = g.getPlayers().get(seat);
+            var hidden = card("Narset, Parter of Veils", actor, ZoneType.Exile);
+            var effect = card("Island", actor, ZoneType.Command);
+            effect.addStaticAbility("Mode$ Continuous | Affected$ Card.IsRemembered | AffectedZone$ Exile"
+                    + " | EffectZone$ Command | " + grant + " | Description$ permission only");
+            g.getAction().checkStaticAbilities();
+            guard(hidden, false);
+        }
+        // Controls: the same permission carrying a characteristic verb, and a
+        // static with no permission verb at all, both still refuse.
+        for (String extra : List.of(" | AddPower$ 3", "")) {
+            var g = fixture(seat);
+            var actor = g.getPlayers().get(seat);
+            var hidden = card("Narset, Parter of Veils", actor, ZoneType.Exile);
+            var effect = card("Island", actor, ZoneType.Command);
+            effect.addStaticAbility("Mode$ Continuous | Affected$ Card.IsRemembered | AffectedZone$ Exile"
+                    + " | EffectZone$ Command" + (extra.isEmpty() ? "" : " | MayLookAt$ EffectSourceController")
+                    + extra + " | Description$ control");
+            g.getAction().checkStaticAbilities();
+            guard(hidden, true);
+        }
+    }
+    private static Game fixture(int seat) {
+        var players = List.of(new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("A",0,0,null,"Default")),
+            new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("B",1,0,null,"Default")));
+        var g = new Match(new GameRules(GameType.Constructed), players, "permission scope").createGame();
+        g.setAge(GameStage.Play);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, g.getPlayers().get(seat));
+        return g;
+    }
     public static void main(String[] args) {
         try {
             GuiBase.setInterface((IGuiBase)java.lang.reflect.Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),new Class<?>[]{IGuiBase.class},
@@ -142,6 +182,7 @@ public final class ProspectiveCdaScopeSmoke {
                 for(int seat=0;seat<2;seat++)for(var zone:List.of(ZoneType.Stack,ZoneType.Battlefield))run(seat,zone,false);
                 for(int seat=0;seat<2;seat++)for(boolean own:List.of(false,true))
                     for(String name:List.of("Valki, God of Lies","Embereth Shieldbreaker"))battlefieldAlternates(seat,own,name);
+                for(int seat=0;seat<2;seat++)permissionOnlyScope(seat);
             }
             System.out.println("PASS "+checks+" prospective CDA scope checks; NOT CERTIFIED");System.exit(0);
         }catch(Throwable failure){failure.printStackTrace();System.exit(1);}
