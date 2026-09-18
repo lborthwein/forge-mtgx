@@ -347,6 +347,80 @@ public final class RulesCostFeasibilityEngineSmoke {
             if(!before.equals(state(game)))throw new AssertionError("Skipped-cost fault injection changed game");
         }
     }
+    /** rules-cost-adjust-v1. An ability's own generic ReduceCost, on the exact
+     * pinned card the monoU corpus refuses on (Otawara's Channel), plus the
+     * named-reason surface that replaced "complex announcement or payment".
+     */
+    private static void abilityReduceCostChecks() {
+        for (int seat = 0; seat < 2; seat++) {
+            // No legendary creature: Channel is the printed {3}{U}. Four sources
+            // pay it, three do not -- the reduction is real, not free money.
+            var game = game(); var player = game.getPlayers().get(seat);
+            var otawara = card("Otawara, Soaring City", player, ZoneType.Hand);
+            for (int n = 0; n < 3; n++) card("Island", player, ZoneType.Battlefield);
+            var sa = channel(otawara);
+            verify(player, sa, UNPAYABLE, "Otawara channel unreduced needs four sources seat=" + seat);
+            card("Island", player, ZoneType.Battlefield);
+            verify(player, sa, PAYABLE, "Otawara channel unreduced is payable at four seat=" + seat);
+            requireAmount(sa, 0, "Otawara channel unreduced reduction seat=" + seat);
+        }
+        for (int seat = 0; seat < 2; seat++) {
+            // One legendary creature reduces the activation by exactly {1}, so
+            // three sources now pay it. Forge's own Count$ is the amount; this
+            // fixture never states it independently.
+            var game = game(); var player = game.getPlayers().get(seat);
+            var otawara = card("Otawara, Soaring City", player, ZoneType.Hand);
+            card("Thalia, Guardian of Thraben", player, ZoneType.Battlefield);
+            for (int n = 0; n < 3; n++) card("Island", player, ZoneType.Battlefield);
+            game.getAction().checkStateEffects(true);
+            var sa = channel(otawara);
+            requireAmount(sa, 1, "Otawara channel one legend reduces by one seat=" + seat);
+            verify(player, sa, PAYABLE, "Otawara channel reduced is payable at three seat=" + seat);
+        }
+        for (int seat = 0; seat < 2; seat++) {
+            // The shard-subtracting ReduceAmount shape is a different proof and
+            // keeps its refusal -- BY NAME, not under the old umbrella.
+            var game = game(); var player = game.getPlayers().get(seat);
+            var otawara = card("Otawara, Soaring City", player, ZoneType.Hand);
+            for (int n = 0; n < 4; n++) card("Island", player, ZoneType.Battlefield);
+            var sa = channel(otawara);
+            sa.putParam("ReduceAmount", "1");
+            verify(player, sa, UNSUPPORTED, "Otawara channel ReduceAmount refused seat=" + seat);
+            requireReason(player, sa, "payment: ability ReduceCost param",
+                    "ReduceAmount refusal names itself seat=" + seat);
+            if (forge.game.cost.CostAdjustment.benchmarkAbilityReduceCost(sa) != null)
+                throw new AssertionError("ReduceAmount priced");
+            checks++;
+        }
+        for (int seat = 0; seat < 2; seat++) {
+            // One more cause that shared the umbrella string now names itself.
+            var game = game(); var player = game.getPlayers().get(seat);
+            var bestow = card("Boon Satyr", player, ZoneType.Hand);
+            var bestowSa = bestow.getSpellAbilities().stream().filter(SpellAbility::isBestow).findFirst().orElseThrow();
+            requireReason(player, bestowSa, "announcement: bestow", "bestow names itself seat=" + seat);
+        }
+    }
+    private static SpellAbility channel(Card otawara) {
+        return otawara.getSpellAbilities().stream()
+                .filter(a -> "Channel \u2014 ".equals(a.getParam("PrecostDesc"))).findFirst()
+                .orElseGet(() -> otawara.getSpellAbilities().stream()
+                        .filter(a -> a.hasParam("ReduceCost")).findFirst().orElseThrow());
+    }
+    private static void requireAmount(SpellAbility sa, int expected, String label) {
+        Integer actual = forge.game.cost.CostAdjustment.benchmarkAbilityReduceCost(sa);
+        if (actual == null || actual != expected)
+            throw new AssertionError(label + ": reduction " + actual + " expected " + expected);
+        checks++;
+        System.out.println("PASS " + label + " reduction=" + expected);
+    }
+    private static void requireReason(Player player, SpellAbility sa, String expected, String label) {
+        sa.setActivatingPlayer(player);
+        var actual = RulesCostFeasibility.assess(player, sa);
+        if (actual.status() != UNSUPPORTED || !expected.equals(actual.reason()))
+            throw new AssertionError(label + ": " + actual.status() + " / " + actual.reason() + " expected UNSUPPORTED / " + expected);
+        checks++;
+        System.out.println("PASS " + label + " \"" + expected + "\"");
+    }
     public static void main(String[] args) {
         try {
             // No screen/window needed to load card scripts. Unexpected GUI calls fail
@@ -377,6 +451,7 @@ public final class RulesCostFeasibilityEngineSmoke {
             reductionScopeChecks();
             reductionPaymentBindingChecks();
             selfSacrificeScopeChecks();
+            abilityReduceCostChecks();
             spell("Dismember", new String[]{"Swamp"}, null, UNSUPPORTED);
             var wallGame = game(); var wallPlayer = wallGame.getPlayers().get(0);
             var wall = card("Wall of Roots", wallPlayer, ZoneType.Battlefield);
