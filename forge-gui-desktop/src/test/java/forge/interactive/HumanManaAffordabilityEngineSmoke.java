@@ -28,6 +28,55 @@ import java.util.List;
 /** Actual pinned card scripts and game objects; never runs AI decisions or a shared match. */
 public final class HumanManaAffordabilityEngineSmoke {
     private static int checks;
+
+    /** Beseech the Mirror: "you may cast the exiled card without paying its mana cost."
+     * PlayEffect asks the chooser while the spell still carries its printed cost and
+     * only then applies WithoutManaCost, so the presentation affordability filter must
+     * not veto the offer -- it used to, silently, and the card went to hand uncast. */
+    private static void checkPlayEffectFreeCastSurvivesAffordability() {
+        var game = game(); var player = game.getPlayers().get(0);
+        // The filed board: Beseech's {1}{B}{B}{B} is spent, two Islands remain.
+        card("Island", player, ZoneType.Battlefield);
+        card("Island", player, ZoneType.Battlefield);
+        var exiled = card("Doomsday", player, ZoneType.Exile);
+        var inHand = card("Doomsday", player, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        var offered = forge.game.ability.AbilityUtils.getSpellsFromPlayEffect(
+                exiled, player, forge.card.CardStateName.Original, true, null);
+        if (offered.size() != 1) throw new AssertionError("Expected one play-effect spell, got " + offered.size());
+        var freeCast = offered.get(0);
+        freeCast.setActivatingPlayer(player);
+        if (!freeCast.isCastFromPlayEffect())
+            throw new AssertionError("Play-effect spell must be marked cast-from-play-effect");
+        // The precondition of the old silent cancel must still hold, or this fixture proves nothing.
+        if (HumanManaAffordability.assess(player, freeCast) != HumanManaAffordability.Assessment.PROVEN_UNAFFORDABLE)
+            throw new AssertionError("Fixture must be proven unaffordable at the printed {B}{B}{B}");
+        if (!InteractiveGuiGame.affordabilityMayVeto(inHand.getFirstSpellAbility())
+                || InteractiveGuiGame.affordabilityMayVeto(freeCast))
+            throw new AssertionError("Only a play-effect offer may skip the affordability filter");
+
+        // Control: the same spell offered from hand at priority must stay filtered out.
+        var normal = inHand.getFirstSpellAbility();
+        normal.setActivatingPlayer(player);
+
+        var controller = new forge.player.PlayerControllerHuman(game, player, player.getLobbyPlayer());
+        try (var gui = new InteractiveGuiGame(new InteractiveProtocol.Channel(
+                new java.io.BufferedReader(new java.io.StringReader("")),
+                new java.io.PrintStream(java.io.OutputStream.nullOutputStream()), "affordability-smoke"), 0)) {
+            gui.bind(game, player, controller);
+            controller.setGui(gui);
+            String before = state(game);
+            // PlayEffect's exact call: getAbilityToPlay(tgtCard, sas), triggerEvent null.
+            if (controller.getAbilityToPlay(exiled, offered) != freeCast)
+                throw new AssertionError("Play-effect free cast was silently cancelled by the affordability filter");
+            if (controller.getAbilityToPlay(inHand, List.of(normal)) != null)
+                throw new AssertionError("Priority menu must keep the affordability filter");
+            if (!before.equals(state(game))) throw new AssertionError("Chooser mutated game state");
+        }
+        System.out.println("PASS play-effect free cast survives PROVEN_UNAFFORDABLE; priority offer still filtered");
+        checks++;
+    }
+
     private static void checkCosmeticExileOrder() {
         var game = game(); var player = game.getPlayers().get(0);
         var relic = card("Relic of Progenitus", player, ZoneType.Battlefield);
@@ -167,6 +216,7 @@ public final class HumanManaAffordabilityEngineSmoke {
             GuiBase.setInterface(new GuiDesktop() { @Override public String getAssetsDir() { return args[0] + "/forge-gui/"; } });
             FModel.initialize(null, prefs -> { prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); prefs.setPref(FPref.UI_LANGUAGE, "en-US"); return null; });
             checkCosmeticExileOrder();
+            checkPlayEffectFreeCastSurvivesAffordability();
             check("Lightning Bolt", new String[]{}, null, false);
             check("Lightning Bolt", new String[]{"Plains"}, null, false);
             check("Lightning Bolt", new String[]{"Mountain"}, null, true);

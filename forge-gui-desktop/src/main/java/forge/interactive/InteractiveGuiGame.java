@@ -1626,6 +1626,21 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         scheduleInputPublish();
     }
 
+    /** False only for a play effect, whose printed cost is not what will be paid. */
+    static boolean affordabilityMayVeto(final SpellAbility actual) {
+        // CR 601.2f–h price a spell only after the player has chosen to cast it.
+        // PlayEffect/DiscoverEffect ask this chooser while the offered spell
+        // still carries its PRINTED cost and rewrite it afterwards
+        // (PlayEffect copyWithNoManaCost / PlayCost, DiscoverEffect
+        // copyWithNoManaCost), so a presentation-only affordability veto here
+        // silently cancels a free cast the player is entitled to take -- e.g.
+        // Beseech the Mirror's "you may cast the exiled card without paying its
+        // mana cost", or cascade. Forge's desktop chooser applies no such
+        // filter. Keep the filter for priority menus, where the printed cost is
+        // the cost.
+        return actual == null || !actual.isCastFromPlayEffect();
+    }
+
     private boolean canChooseOfferedAbility(final SpellAbilityView view) {
         final SpellAbility actual = controller.getBrowserAbility(view);
         // Forge also invokes this chooser while preparing an engine-triggered
@@ -1634,7 +1649,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         // Trust only the current controller's exact engine-offered trigger,
         // never a null mouse event or an arbitrary client-provided ability.
         return (view.canPlay() || (actual != null && actual.isTrigger()))
-                && controller.mayAffordAbility(view);
+                && (!affordabilityMayVeto(actual) || controller.mayAffordAbility(view));
     }
 
     @Override
