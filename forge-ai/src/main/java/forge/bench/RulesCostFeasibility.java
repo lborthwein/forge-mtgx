@@ -37,6 +37,10 @@ public final class RulesCostFeasibility {
      * host that does not know it is unaffected and a host that does can tell a
      * widened jar from the pinned one. */
     public static final String NONMANA_COST_VERSION = "rules-nonmana-cost-v1";
+    /** Additive: names the ability-ReduceCost pricing and the per-cause
+     * refusal reasons. An older host ignores it; a newer host can tell the
+     * two jars apart. The three pinned wire identities do not move. */
+    public static final String COST_ADJUST_VERSION = "rules-cost-adjust-v1";
     public enum Status { PAYABLE, UNPAYABLE, UNSUPPORTED }
     public record Result(Status status, String reason, PaymentWitness witness, PaymentSpace space) {}
     public record PaymentSpace(ManaCost cost, List<ManaCostShard> shards, List<Token> pool, List<List<SourceChoice>> sources, int life, int x) {
@@ -143,6 +147,35 @@ public final class RulesCostFeasibility {
         return new XRange(min,low);
     }
 
+    /** Named causes for what was one "complex announcement or payment" row.
+     * Order is the evaluation order of the disjunction it replaces, so the
+     * verdict and the refusal POINT are unchanged for every input; only the
+     * reported reason is specific. The one exception is declared in place:
+     * an ability's own generic `ReduceCost` is now priced by
+     * `CostAdjustment.benchmarkAbilityReduceCost` when it is a bounded literal,
+     * and still refused -- by name -- when it is not.
+     */
+    private static String complexAnnouncement(SpellAbility ability, RulesResolutionPayment trigger) {
+        if (ability.isTrigger() && trigger == null) return "announcement: unquoted trigger ability";
+        if (ability.isReplacementAbility()) return "announcement: replacement ability";
+        if (ability.isOffering()) return "announcement: offering";
+        if (ability.isEmerge()) return "announcement: emerge";
+        if (ability.isBestow()) return "announcement: bestow";
+        if (ability.isCastFaceDown()) return "announcement: cast face down";
+        if ((ability.hasParam("Announce") || ability.hasSVar("NumTimes")) && !(trigger != null && trigger.repeated()))
+            return "announcement: announced amount ("
+                    + (ability.hasParam("Announce") ? "Announce" : "NumTimes") + ")";
+        if (!ability.getPipsToReduce().isEmpty()) return "payment: pip reduction";
+        if (ability.hasParam("ReduceCost") && CostAdjustment.benchmarkAbilityReduceCost(ability) == null)
+            return "payment: ability ReduceCost param";
+        if (ability.hasParam("RaiseCost")) return "payment: ability RaiseCost param";
+        if (ability.hasParam("TapCreaturesForMana")) return "payment: TapCreaturesForMana";
+        if (ability.hasParam("ManaRestriction")) return "payment: ManaRestriction";
+        if (ability.hasParam("ManaConversion")) return "payment: ManaConversion";
+        if (ability.getHostCard().isCommander()) return "payment: commander tax";
+        return null;
+    }
+
     private static Result unknown(String reason) { return new Result(Status.UNSUPPORTED, reason, null, null); }
     private static Result answer(boolean yes) { return answer(yes, 0); }
     private static Result answer(boolean yes, int life) { return new Result(yes ? Status.PAYABLE : Status.UNPAYABLE, VERSION,
@@ -163,15 +196,13 @@ public final class RulesCostFeasibility {
         if (trigger != null) trigger.requireQuote(payer, ability);
         if (payer == null || ability == null || ability.getActivatingPlayer() != payer
                 || ability.getPayCosts() == null) return unknown("missing cost/activator");
-        if ((ability.isTrigger() && trigger == null) || ability.isReplacementAbility() || ability.isOffering()
-                || ability.isEmerge() || ability.isBestow() || ability.isCastFaceDown()
-                || ((ability.hasParam("Announce") || ability.hasSVar("NumTimes")) && !(trigger != null && trigger.repeated()))
-                || !ability.getPipsToReduce().isEmpty()
-                || ability.hasParam("ReduceCost") || ability.hasParam("RaiseCost")
-                || ability.hasParam("TapCreaturesForMana") || ability.hasParam("ManaRestriction")
-                || ability.hasParam("ManaConversion")
-                || ability.getHostCard().isCommander())
-            return unknown("complex announcement or payment");
+        // rules-cost-adjust-v1: each cause names itself. One string,
+        // "complex announcement or payment", used to report fourteen distinct
+        // causes as a single census row, so a corpus read could not tell which
+        // of them it actually met. The STATUS for every input below is the
+        // UNSUPPORTED it always was; only the reason is now specific.
+        String complex = complexAnnouncement(ability, trigger);
+        if (complex != null) return unknown(complex);
         var permission = ability.getMayPlayOption();
         if (permission != null) {
             if (announcement == null && (permission.getPlayer() != payer || !permission.getAbility().checkConditions()

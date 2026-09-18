@@ -297,6 +297,7 @@ public final class BenchMain {
         // Additive: a host that does not know this key is unaffected, and a host
         // that does can tell a widened nonmana-cost jar from the pinned one.
         hello.addProperty("nonManaCostCoverageVersion", RulesCostFeasibility.NONMANA_COST_VERSION);
+        hello.addProperty("costAdjustmentCoverageVersion", RulesCostFeasibility.COST_ADJUST_VERSION);
         // Explicit identity: a diagnostic no-op run is never a strength panel.
         hello.addProperty("auditMenuProbe", auditMenuProbe);
         hello.addProperty("forgeCommit", forgeCommit());

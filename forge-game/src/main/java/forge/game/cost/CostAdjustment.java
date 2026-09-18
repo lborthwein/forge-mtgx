@@ -52,7 +52,12 @@ public class CostAdjustment {
     public static BenchmarkManaPrice benchmarkManaPrice(final SpellAbility sa) {
         if (sa == null || sa.getPayCosts() == null || sa.getActivatingPlayer() == null
                 || sa.isCastFaceDown() || sa.isBestow() || sa.getHostCard().isCommander()
-                || sa.hasParam("RaiseCost") || sa.hasParam("ReduceCost")) return null;
+                || sa.hasParam("RaiseCost")) return null;
+        // rules-cost-adjust-v1. An ability's own generic ReduceCost is priced
+        // here when -- and only when -- it is the bounded literal form; every
+        // other shape keeps the refusal it already had.
+        final Integer abilityReduce = benchmarkAbilityReduceCost(sa);
+        if (abilityReduce == null) return null;
         Cost adjusted = sa.getPayCosts().copy();
         CardCollection active = new CardCollection(sa.getActivatingPlayer().getGame().getCardsIn(ZoneType.Battlefield));
         active.addAll(sa.getActivatingPlayer().getGame().getCardsIn(ZoneType.Stack));
@@ -125,16 +130,46 @@ public class CostAdjustment {
         if (mana.isExiledCreatureCost() || mana.isEnchantedCreatureCost() || mana.getMaxWaterbend() != null
                 || mana.getXMin() < 0 || (mana.getXMin()>0 && mana.getMana().countX()==0)) return null;
         ManaCost before = mana.getMana();
-        if (reductions.isEmpty() || before.isNoCost() || before.isZero()) return new BenchmarkManaPrice(before, before);
+        if ((reductions.isEmpty() && abilityReduce == 0) || before.isNoCost() || before.isZero())
+            return new BenchmarkManaPrice(before, before);
         // Same implementation as ordinary Forge payment, operating on a private
         // cost value. No controller selection, RNG, or temporary card mutation.
         ManaCostBeingPaid payable = new ManaCostBeingPaid(before);
-        int sum = 0;
+        // Seeded exactly as adjust() seeds sumGeneric: the ability's own
+        // ReduceCost is folded in BEFORE the static reducers, so their MinMana
+        // floors see the same running total Forge's own payment gives them.
+        int sum = abilityReduce;
         for (StaticAbility st : reductions) sum += applyReduceCostAbility(st, sa, payable, sum);
         payable.decreaseGenericMana(sum);
         // ManaCostBeingPaid renders an empty shard set as NO_COST. Reduction
         // to zero is payable {0}, not the absence of a payable mana cost.
         return new BenchmarkManaPrice(before, payable.isPaid() ? ManaCost.ZERO : payable.toManaCost());
+    }
+
+    /** Bench coverage for an ability's OWN {@code ReduceCost} param
+     * (rules-cost-adjust-v1). Only the generic shape {@link #adjust} folds into
+     * {@code sumGeneric}: no {@code ReduceAmount} shard subtraction, no
+     * announced X on the cost, and an amount that is a bounded literal --
+     * Forge's own {@code calculateAmount} evaluated twice to the same value in
+     * [0,16]. Announcing or re-reading a moving amount is play, not
+     * feasibility, so every other shape returns null and the bench keeps its
+     * refusal. Returns 0 when the ability has no such param.
+     */
+    public static Integer benchmarkAbilityReduceCost(final SpellAbility sa) {
+        if (sa == null || sa.getPayCosts() == null || sa.getHostCard() == null) return null;
+        if (!sa.hasParam("ReduceCost")) return 0;
+        // ReduceAmount subtracts coloured shards, which is a different proof
+        // (which shard, and in what order) and is not attempted here.
+        if (sa.hasParam("ReduceAmount")) return null;
+        // Expanding X and applying reductions do not commute; same rule the
+        // static reducers above already follow.
+        if (sa.getPayCosts().getTotalMana().countX() > 0) return null;
+        final String amount = sa.getParam("ReduceCost");
+        if (amount == null) return null;
+        final int first = AbilityUtils.calculateAmount(sa.getHostCard(), amount, sa);
+        final int second = AbilityUtils.calculateAmount(sa.getHostCard(), amount, sa);
+        if (first != second || first < 0 || first > 16) return null;
+        return first;
     }
 
     private static boolean benchmarkPermissionTax(StaticAbility st) {
