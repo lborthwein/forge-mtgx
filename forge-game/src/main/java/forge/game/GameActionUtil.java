@@ -109,10 +109,33 @@ public final class GameActionUtil {
                 // EffectZone restricts where the effect's SOURCE is active.
                 // checkConditions above already enforces that through zonesCheck;
                 // it does not change the prospective card's characteristics.
-                if (!st.hasParam("MayPlay") || !java.util.Set.of("Mode", "EffectZone", "MayPlay", "MayPlayIgnoreType", "MayPlayIgnoreColor",
-                        "Affected", "AffectedZone", "Description", "MayLookAt", "MayPlayText").containsAll(st.getMapParams().keySet()))
-                    throw prospectiveEnumerationFailure(prospective, st);
+                if (!st.hasParam("MayPlay") || !PROSPECTIVE_PERMISSION_PARAMS.containsAll(st.getMapParams().keySet())) {
+                    // Default-inert bench hook. Unset -- which is the case in
+                    // ordinary Forge and in EVERY --null arm -- this branch is
+                    // the unchanged throw, line for line. A bench BRIDGE session
+                    // may widen it; nothing else may. Because the hook is inert
+                    // in a --null arm, a do-no-harm control CANNOT police it:
+                    // its acceptance is the bridge-arm enumeration differential.
+                    final java.util.function.Predicate<StaticAbility> policy = benchProspectivePolicy;
+                    if (policy == null || !policy.test(st)) throw prospectiveEnumerationFailure(prospective, st);
+                }
             }
+    }
+
+    /** The params a permission-granting Continuous static may carry and still
+     * leave the prospective face untouched. Exposed so a bench policy can scope
+     * itself by the SAME whitelist this guard uses, rather than a copy. */
+    public static final java.util.Set<String> PROSPECTIVE_PERMISSION_PARAMS = java.util.Set.of(
+            "Mode", "EffectZone", "MayPlay", "MayPlayIgnoreType", "MayPlayIgnoreColor",
+            "Affected", "AffectedZone", "Description", "MayLookAt", "MayPlayText");
+
+    /** Null in ordinary Forge and in every --null arm; a bench BRIDGE session
+     * sets it once at session start. Volatile, write-once in practice, and the
+     * ONLY way this class's behaviour can differ from stock. */
+    private static volatile java.util.function.Predicate<StaticAbility> benchProspectivePolicy;
+
+    public static void setBenchProspectivePolicy(java.util.function.Predicate<StaticAbility> policy) {
+        benchProspectivePolicy = policy;
     }
 
     private static IllegalStateException prospectiveEnumerationFailure(Card prospective, StaticAbility effect) {

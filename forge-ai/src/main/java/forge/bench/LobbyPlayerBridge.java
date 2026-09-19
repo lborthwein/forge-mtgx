@@ -50,6 +50,19 @@ public class LobbyPlayerBridge extends LobbyPlayerAi {
         this.session = session;
         this.mode = mode;
         this.seat = seat;
+        // Bench-only widening of the prospective-face guard, armed ONLY for a
+        // live bridge session. A permission grant -- MayPlay or MayLookAt --
+        // touches no characteristic layer, so the prospective face is the same
+        // either way; the whitelist, shared with the guard rather than copied,
+        // is what keeps any other verb out. Never armed for NULL/NULL_PROBE, so
+        // a --null do-no-harm arm is byte-identical to stock and CANNOT police
+        // this: its acceptance is the bridge-arm enumeration differential.
+        if (mode == BenchSession.Mode.BRIDGE) {
+            forge.game.GameActionUtil.setBenchProspectivePolicy(st ->
+                    (st.hasParam("MayPlay") || st.hasParam("MayLookAt"))
+                    && forge.game.GameActionUtil.PROSPECTIVE_PERMISSION_PARAMS
+                            .containsAll(st.getMapParams().keySet()));
+        }
         this.option = (options == null || options.isEmpty()) ? null : options.iterator().next();
     }
 
