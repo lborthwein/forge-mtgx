@@ -377,6 +377,35 @@ public final class PermissionEnumerationEngineSmoke {
         nonLoyaltyCounterCost();
         sharedResourceRefusal();
     }
+    /** Card.mayPlay is an ORDERING input to play: mayPlay(Player) returns its
+     * values as a List and GameActionUtil.getMayPlaySpellOptions builds the
+     * AI's alternative play options from that list. With a HashMap the order
+     * followed StaticAbility.hashCode(), which folds in the Class object's
+     * identity hash and is therefore not stable between binaries. Pinned here:
+     * the order is INSERTION order, for every permutation of insertion. */
+    private static void mayPlayOrderIsInsertionOrder() {
+        final int N = 6;
+        for (int rotation = 0; rotation < N; rotation++) {
+            var game = game();
+            var player = game.getPlayers().get(0);
+            var subject = card("Lightning Bolt", player, ZoneType.Graveyard);
+            var grantors = new java.util.ArrayList<forge.game.staticability.StaticAbility>();
+            for (int n = 0; n < N; n++) {
+                var host = card("Serra Paragon", player, ZoneType.Battlefield);
+                grantors.add(host.getStaticAbilities().iterator().next());
+            }
+            // Insert under a rotated permutation; the readback must follow it.
+            var order = new java.util.ArrayList<forge.game.staticability.StaticAbility>();
+            for (int n = 0; n < N; n++) order.add(grantors.get((n + rotation) % N));
+            for (var sta : order) subject.setMayPlay(player, false, null, false, false, sta);
+            var seen = subject.mayPlay(player);
+            check(seen.size() == N, "every grant is present rotation=" + rotation);
+            boolean ordered = true;
+            for (int n = 0; n < N; n++)
+                if (seen.get(n).getAbility() != order.get(n)) ordered = false;
+            check(ordered, "may-play option order is insertion order rotation=" + rotation);
+        }
+    }
     public static void main(String[] args) {
         try {
             GuiBase.setInterface((IGuiBase) java.lang.reflect.Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),
@@ -394,6 +423,7 @@ public final class PermissionEnumerationEngineSmoke {
             library(false, true, false); library(false, true, true);
             faceDownExile();
             nonManaCostCoverage();
+            mayPlayOrderIsInsertionOrder();
             System.out.println("PASS all " + checks + " permission enumeration checks; development only"); System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }

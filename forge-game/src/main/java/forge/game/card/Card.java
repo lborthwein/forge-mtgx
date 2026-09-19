@@ -165,7 +165,16 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
 
     private final Table<Long, Long, Map<String, String>> changedSVars = TreeBasedTable.create();
 
-    private Map<StaticAbility, CardPlayOption> mayPlay = Maps.newHashMap();
+    // Determinism: iteration order of this map is returned to callers as a List
+    // by mayPlay(Player) and reaches the AI through
+    // GameActionUtil.getMayPlaySpellOptions, so it is an ORDERING input to play.
+    // StaticAbility.hashCode() is Objects.hash(StaticAbility.class, getId()),
+    // which folds in the Class object's identity hash, so a HashMap here is not
+    // order-stable between binaries. Measured: two jars differing only by an
+    // unreachable bench guard consumed Serra Paragon's MayPlayLimit$ 1
+    // permission on different cards (event 461 of p700004034/s0/g1).
+    // Insertion order is stable and binary-independent.
+    private Map<StaticAbility, CardPlayOption> mayPlay = Maps.newLinkedHashMap();
 
     private final Map<Long, PlayerCollection> mayLook = Maps.newHashMap();
     private final PlayerCollection mayLookFaceDownExile = new PlayerCollection();
