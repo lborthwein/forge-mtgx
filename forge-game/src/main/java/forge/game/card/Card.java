@@ -173,7 +173,7 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
     // order-stable between binaries. Measured: two jars differing only by an
     // unreachable bench guard consumed Serra Paragon's MayPlayLimit$ 1
     // permission on different cards (event 461 of p700004034/s0/g1).
-    // Insertion order is stable and binary-independent.
+    // Preserve this order through getMayPlay/setMayPlay and LKI copies too.
     private Map<StaticAbility, CardPlayOption> mayPlay = Maps.newLinkedHashMap();
 
     private final Map<Long, PlayerCollection> mayLook = Maps.newHashMap();
@@ -3881,10 +3881,10 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         this.updateMayPlay();
     }
     public final Map<StaticAbility, CardPlayOption> getMayPlay() {
-        return Maps.newHashMap(mayPlay);
+        return Maps.newLinkedHashMap(mayPlay);
     }
     public final Map<StaticAbility, CardPlayOption> setMayPlay(Map<StaticAbility, CardPlayOption> mp) {
-        return mayPlay = mp;
+        return mayPlay = Maps.newLinkedHashMap(mp);
     }
 
     public void resetMayPlayTurn() {

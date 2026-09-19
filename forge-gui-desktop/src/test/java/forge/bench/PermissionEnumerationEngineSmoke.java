@@ -404,6 +404,24 @@ public final class PermissionEnumerationEngineSmoke {
             for (int n = 0; n < N; n++)
                 if (seen.get(n).getAbility() != order.get(n)) ordered = false;
             check(ordered, "may-play option order is insertion order rotation=" + rotation);
+            var saved = subject.getMayPlay();
+            check(new java.util.ArrayList<>(saved.keySet()).equals(order),
+                "permission snapshot preserves order rotation=" + rotation);
+            subject.setMayPlay(saved);
+            saved.clear();
+            check(subject.mayPlay(player).stream().map(o -> o.getAbility()).toList().equals(order),
+                "restore preserves order and owns its map rotation=" + rotation);
+            var copy = forge.game.card.CardCopyService.getLKICopy(subject);
+            check(copy.mayPlay(player).stream().map(o -> o.getAbility()).toList().equals(order),
+                "LKI copy preserves permission order rotation=" + rotation);
+            subject.removeMayPlay(order.get(0));
+            check(copy.mayPlay(player).size() == N,
+                "LKI permission map is independent rotation=" + rotation);
+            subject.setMayPlay(player, false, null, false, false, order.get(0));
+            var reinserted = new java.util.ArrayList<>(order.subList(1, N));
+            reinserted.add(order.get(0));
+            check(subject.mayPlay(player).stream().map(o -> o.getAbility()).toList().equals(reinserted),
+                "remove and reinsert appends permission rotation=" + rotation);
         }
     }
     public static void main(String[] args) {
