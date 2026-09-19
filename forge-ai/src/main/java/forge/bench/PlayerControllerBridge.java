@@ -2713,6 +2713,32 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         // previous triggers are on the stack; a later host failure invalidates
         // the game, it is not a transaction rollback of those legal choices.
         if (activePlayerSAs == null) throw new RulesCostFeasibility.Unsupported("null pending trigger list");
+        // This callback carries TWO different batches. Forge uses it to order
+        // simultaneous triggered abilities, and ALSO to put spell COPIES on the
+        // stack -- CopySpellAbilityEffect.java:204, reached by Storm, Casualty,
+        // Conspire, Demonstrate and Replicate. A copy is not a trigger, so the
+        // trigger guard refused every storm count with
+        // "not an ordinary owned trigger: not a trigger" and voided the game.
+        // The two batches get two guards; a mixed batch is refused by name
+        // rather than assumed to be one of them.
+        final boolean anyCopy = activePlayerSAs.stream().anyMatch(this::isOrdinaryStackCopy);
+        final boolean allCopy = !activePlayerSAs.isEmpty()
+                && activePlayerSAs.stream().allMatch(this::isOrdinaryStackCopy);
+        if (anyCopy && !allCopy)
+            throw new RulesCostFeasibility.Unsupported("simultaneous batch mixes spell copies and triggers");
+        if (allCopy) {
+            for (var ability : activePlayerSAs) requireStackCopy(ability);
+            for (var ability : orderSimultaneousSa(activePlayerSAs)) {
+                requireStackCopy(ability);
+                if (!prepareSingleSa(ability.getHostCard(), ability, true)) continue;
+                // CR 707.10: a copy is CREATED on the stack, not cast. Nothing
+                // is announced and no cost is paid, so there is deliberately no
+                // payZeroTrigger call here -- and requireStackCopy has just
+                // verified the copy carries no paid mana.
+                getGame().getStack().add(ability);
+                counters.instrument("hostCopy.rulesStackInsertion");
+            }
+        } else {
         for (var ability : activePlayerSAs) requireZeroTrigger(ability);
         for (var ability : orderSimultaneousSa(activePlayerSAs)) {
             requireZeroTrigger(ability);
@@ -2720,6 +2746,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             payZeroTrigger(ability, false);
             getGame().getStack().add(ability);
             counters.instrument("hostTrigger.rulesStackInsertion");
+        }
         }
         requireHostChannel("completed simultaneous trigger execution");
         if (invocation != null) invocation.classifyRulesIfChildrenAccounted();
@@ -2781,6 +2808,32 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             throw failure;
         }
         finally { activeOptionalResolution=previous; activeOptionalManaResolution=previousPaid; }
+    }
+
+    /** A spell copy put on the stack by a resolving effect (CR 707.10), as
+     * distinct from a triggered ability. Deliberately narrow: an ordinary,
+     * owned, non-trigger copy of this seat's own spell and nothing else. */
+    private boolean isOrdinaryStackCopy(SpellAbility ability) {
+        return ability != null && ability.isCopied() && !ability.isTrigger()
+                && !ability.isReplacementAbility()
+                && ability.getActivatingPlayer() == getPlayer()
+                && ability.getHostCard() != null
+                && ability.getHostCard().getGame() == getGame();
+    }
+
+    /** The copy counterpart of {@link MandatoryZeroTriggerExecution#require}.
+     * A copy is created on the stack, never cast: no announcement, no cost.
+     * Anything that would make it a payment or a choice is refused by name.
+     */
+    private void requireStackCopy(SpellAbility ability) {
+        if (!isOrdinaryStackCopy(ability))
+            throw new RulesCostFeasibility.Unsupported("stack copy: not an ordinary owned copy");
+        if (!ability.getPayingMana().isEmpty())
+            throw new RulesCostFeasibility.Unsupported("stack copy: copy carries paid mana");
+        for (SpellAbility current = ability; current != null; current = current.getSubAbility()) {
+            if (current.getApi() == forge.game.ability.ApiType.Charm || current.hasParam("Announce"))
+                throw new RulesCostFeasibility.Unsupported("stack copy: modal or announced copy preparation");
+        }
     }
 
     private void requireZeroTrigger(SpellAbility ability) {
