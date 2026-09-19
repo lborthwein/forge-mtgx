@@ -121,6 +121,48 @@ public final class MandatoryTriggerExecutionSmoke {
      * owned copy is inserted with no payment, and everything that is not one is
      * still refused by name. Singleton batches only, so ordering stays identity
      * and no host order ask is involved. */
+    /** CR 603.3d: a required target with no legal candidate is not a decision.
+     * Measured card: Snapcaster Mage's ETB with an empty graveyard, where BOTH
+     * answers a host can form were refused on jar 0355cdb5 ({delegate:true} ->
+     * "explicit host targets required"; {choices: []} -> "chose 0 targets
+     * outside [1,1]"). Pinned both ways: empty menu answers FORCED without an
+     * ask, a legal menu still goes to the host. */
+    private static void emptyTargetMenuScope(int seat) {
+        // (a) empty legal-target menu: the rules answer, the host is not asked.
+        {
+            var c = context(seat, "BRIDGE");
+            var snap = card("Snapcaster Mage", c);
+            ready(c);
+            var sa = snap.getTriggers().get(0).ensureAbility();
+            sa.setActivatingPlayer(c.actor);
+            sa.setHostCard(snap);
+            boolean result = c.controller.chooseTargetsFor(sa);
+            check(!result, "CR 603.3d empty menu answers false, not a refusal seat=" + seat);
+            check(c.host.asks == 0, "empty legal-target menu never reaches the host seat=" + seat);
+            check(bucket(c, "chooseTargetsFor", "forced") == 1
+                    && bucket(c, "chooseTargetsFor", "host") == 0,
+                    "empty menu is FORCED by the rules, not a host answer seat=" + seat);
+        }
+        // (b) control: one legal target and the host IS asked and owns it.
+        {
+            var c = context(seat, "BRIDGE");
+            var snap = card("Snapcaster Mage", c);
+            var bolt = card("Lightning Bolt", c);
+            c.actor.getZone(ZoneType.Battlefield).remove(bolt);
+            c.actor.getZone(ZoneType.Graveyard).add(bolt);
+            ready(c);
+            var sa = snap.getTriggers().get(0).ensureAbility();
+            sa.setActivatingPlayer(c.actor);
+            sa.setHostCard(snap);
+            c.host.target = bolt.getId();
+            boolean result = c.controller.chooseTargetsFor(sa);
+            check(result, "a legal target menu still resolves through the host seat=" + seat);
+            check(c.host.asks == 1, "a legal target menu asks the host exactly once seat=" + seat);
+            check(bucket(c, "chooseTargetsFor", "host") == 1
+                    && bucket(c, "chooseTargetsFor", "forced") == 0,
+                    "a real choice stays HOST-owned, never FORCED seat=" + seat);
+        }
+    }
     private static void stackCopyScope(int seat) {
         // (a) an ordinary owned copy is admitted, inserted, and pays nothing.
         {
@@ -376,6 +418,7 @@ public final class MandatoryTriggerExecutionSmoke {
                 check(nativeResult.equals(run(seat,"BRIDGE",1)),"same chosen target matches Default outcome and RNG seat="+seat);
                 for(String response:List.of("target","missing","delegate","eof"))invalid(seat,response);
                 stackCopyScope(seat);
+                emptyTargetMenuScope(seat);
                 unsupportedOtherOptionalDecider(seat);hypotheticalGame(seat);
                 paidTrigger(seat,"1");paidTrigger(seat,"0 PayLife<1>");multiple(seat);
                 var nativeStatic=staticMana(seat,"native");
