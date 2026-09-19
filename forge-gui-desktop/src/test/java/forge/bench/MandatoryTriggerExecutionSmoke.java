@@ -8,6 +8,7 @@ import forge.game.ability.AbilityKey;
 import forge.game.card.*;
 import forge.game.phase.PhaseType;
 import forge.game.player.*;
+import forge.game.spellability.SpellAbility;
 import forge.game.trigger.TriggerType;
 import forge.game.zone.ZoneType;
 import forge.gui.GuiBase;
@@ -113,6 +114,80 @@ public final class MandatoryTriggerExecutionSmoke {
         System.out.println("OUTCOME seat="+seat+" mode="+mode+" "+outcome);
         if(c.controller instanceof PlayerControllerBridge bridge)System.out.println("LEDGER "+bridge.getCounters().toJson());
         return outcome;
+    }
+    /** Forge routes spell COPIES through orderAndPlaySimultaneousSa as well as
+     * triggered abilities (CopySpellAbilityEffect.java:204 -- Storm, Casualty,
+     * Conspire, Demonstrate, Replicate). Pinned in BOTH directions: an ordinary
+     * owned copy is inserted with no payment, and everything that is not one is
+     * still refused by name. Singleton batches only, so ordering stays identity
+     * and no host order ask is involved. */
+    private static void stackCopyScope(int seat) {
+        // (a) an ordinary owned copy is admitted, inserted, and pays nothing.
+        {
+            var c = context(seat, "BRIDGE");
+            var copy = spellCopy(c, "Timetwister");
+            ready(c);
+            int before = c.game.getStack().size();
+            c.controller.orderAndPlaySimultaneousSa(new ArrayList<>(List.of(copy)));
+            check(c.game.getStack().size() == before + 1, "actual spell copy reaches the stack seat=" + seat);
+            check(copy.getPayingMana().isEmpty(), "CR 707.10 copy is created, not cast: no mana paid seat=" + seat);
+            var instruments = ((PlayerControllerBridge) c.controller).getCounters().toJson().getAsJsonObject("instruments");
+            check(instruments.has("hostCopy.rulesStackInsertion")
+                    && instruments.get("hostCopy.rulesStackInsertion").getAsInt() == 1,
+                    "copy insertion is accounted on the copy path seat=" + seat);
+            check(!instruments.has("hostTrigger.rulesStackInsertion")
+                    || instruments.get("hostTrigger.rulesStackInsertion").getAsInt() == 0,
+                    "a copy is never accounted as a trigger insertion seat=" + seat);
+            check(c.host.asks == 0, "a singleton copy batch asks the host nothing seat=" + seat);
+        }
+        // (b) a copy carrying paid mana is refused: that would be a cast.
+        refusedCopy(seat, "copy carries paid mana", copy -> copy.getPayingMana()
+                .add(new forge.game.mana.Mana((byte) forge.card.mana.ManaAtom.BLUE, copy.getHostCard(), null, copy.getActivatingPlayer())));
+        // (c) a non-copy in the batch is not a copy batch, and the trigger guard
+        //     still rejects it -- the exact refusal the monoU corpus met.
+        {
+            var c = context(seat, "BRIDGE");
+            var plain = spellCopy(c, "Timetwister");
+            plain.setCopied(false);
+            ready(c);
+            try {
+                c.controller.orderAndPlaySimultaneousSa(new ArrayList<>(List.of(plain)));
+                throw new AssertionError("Non-copy admitted through the copy path");
+            } catch (RulesCostFeasibility.Unsupported expected) {
+                // jar A's message; the per-cause suffix ("… : not a trigger") is
+                // jar B's diagnostic split, which is out of this branch.
+                check(expected.getMessage().contains("not an ordinary owned trigger"),
+                        "non-copy still meets the trigger guard seat=" + seat + " -> " + expected.getMessage());
+            }
+        }
+    }
+    private static void refusedCopy(int seat, String expected, java.util.function.Consumer<SpellAbility> mutate) {
+        var c = context(seat, "BRIDGE");
+        var copy = spellCopy(c, "Timetwister");
+        mutate.accept(copy);
+        ready(c);
+        int before = c.game.getStack().size();
+        try {
+            c.controller.orderAndPlaySimultaneousSa(new ArrayList<>(List.of(copy)));
+            throw new AssertionError("Refused copy accepted: " + expected);
+        } catch (RulesCostFeasibility.Unsupported failure) {
+            check(failure.getMessage().contains(expected),
+                    "copy refusal names itself seat=" + seat + " -> " + failure.getMessage());
+        }
+        check(c.game.getStack().size() == before, "refused copy never reaches the stack seat=" + seat);
+    }
+    private static SpellAbility spellCopy(Context c, String name) {
+        StaticData.instance().attemptToLoadCard(name);
+        var paper = Objects.requireNonNull(FModel.getMagicDb().getCommonCards().getCard(name));
+        var host = Card.fromPaperCard(paper, c.actor);
+        host.setGameTimestamp(c.game.getNextTimestamp());
+        c.actor.getZone(ZoneType.Hand).add(host);
+        var sa = host.getFirstSpellAbility();
+        sa.setActivatingPlayer(c.actor);
+        var copy = forge.game.card.CardFactory.copySpellAbilityAndPossiblyHost(sa, sa, c.actor);
+        copy.setActivatingPlayer(c.actor);
+        copy.setCopied(true);
+        return copy;
     }
     private static void invalid(int seat,String response) {
         var c=context(seat,"BRIDGE"); var a=card("Luminarch Aspirant",c); var b=card("Grizzly Bears",c); ready(c);
@@ -300,6 +375,7 @@ public final class MandatoryTriggerExecutionSmoke {
                 run(seat,"BRIDGE",0);
                 check(nativeResult.equals(run(seat,"BRIDGE",1)),"same chosen target matches Default outcome and RNG seat="+seat);
                 for(String response:List.of("target","missing","delegate","eof"))invalid(seat,response);
+                stackCopyScope(seat);
                 unsupportedOtherOptionalDecider(seat);hypotheticalGame(seat);
                 paidTrigger(seat,"1");paidTrigger(seat,"0 PayLife<1>");multiple(seat);
                 var nativeStatic=staticMana(seat,"native");
