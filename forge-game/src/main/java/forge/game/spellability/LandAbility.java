@@ -51,13 +51,22 @@ public class LandAbility extends AbilityStatic {
 
     @Override
     public boolean canPlay() {
+        return canPlayFromHost(false);
+    }
+
+    @Override
+    public boolean canPlayForEnumeration() {
+        return canPlayFromHost(true);
+    }
+
+    private boolean canPlayFromHost(boolean readOnly) {
         Card land = this.getHostCard();
         final Player p = this.getActivatingPlayer();
         if (p == null || land.isInZone(ZoneType.Battlefield)) {
             return false;
         }
  
-        land = Objects.requireNonNullElse(getAlternateHost(land), land);
+        land = Objects.requireNonNullElse(readOnly ? getAlternateHostForEnumeration(land) : getAlternateHost(land), land);
 
         // A face-down exiled object can satisfy a nonLand permission while its
         // prospective face-up land does not (Thief of Sanity). Do not reuse that
@@ -115,19 +124,33 @@ public class LandAbility extends AbilityStatic {
 
     @Override
     public Card getAlternateHost(Card source) {
+        return getAlternateHost(source, false);
+    }
+
+    @Override
+    public Card getAlternateHostForEnumeration(Card source) {
+        return getAlternateHost(source, true);
+    }
+
+    private Card getAlternateHost(Card source, boolean readOnly) {
         boolean lkicheck = false;
 
         if (source.isFaceDown() && source.isInZone(ZoneType.Exile)) {
-            if (!source.isLKI()) {
+            if (readOnly && (source.hasMergedCard() || getHostCard().hasMergedCard()))
+                throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: face-up projection requires merged-card execution");
+            if (readOnly && (source.hasPendingFaceupCommands() || getHostCard().hasPendingFaceupCommands()))
+                throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: face-up projection requires face-up command execution");
+            if (!source.isLKI() || readOnly) {
                 source = CardCopyService.getLKICopy(source);
             }
 
-            source.forceTurnFaceUp();
+            if (readOnly) source.forceTurnFaceUpForEnumeration();
+            else source.forceTurnFaceUp();
             lkicheck = true;
         }
 
         if (getCardState() != null && source.getCurrentStateName() != getCardStateName()) {
-            if (!source.isLKI()) {
+            if (!source.isLKI() || readOnly) {
                 source = CardCopyService.getLKICopy(source);
             }
             CardStateName stateName = getCardState().getStateName();
