@@ -83,6 +83,17 @@ public final class EchoPaymentEngineSmoke {
             "echo callback outside actual stack resolution rejected");
         check(c.host().kinds.isEmpty(),"unscoped echo never asks or pays");
     }
+    private static void emptyStack(int seat) {
+        var c=context(seat,"BRIDGE",null); c.game().getPhaseHandler().devModeSet(PhaseType.UPKEEP,c.actor());
+        card("Deranged Hermit",c);for(int i=0;i<5;i++)card("Forest",c);ready(c);
+        var wrapper=queue(c);var effect=wrapper.getWrappedAbility(); c.game().getStack().clear();
+        var state=BenchMenuStateAudit.capture(c.game()); var rng=BenchRandomAudit.begin();
+        reject(() -> c.actor().getController().payCostToPreventEffect(new Cost(effect.getParam("Echo"),true),effect,false,new PlayerCollection(c.actor())),
+            "empty echo stack rejects without peeking");
+        check(c.game().getStack().isEmpty(),"empty echo stack remains empty");
+        BenchMenuStateAudit.assertUnchanged(state,c.game()); BenchRandomAudit.assertUnchanged(rng,"empty echo stack guard");
+        check(c.host().kinds.isEmpty(),"empty echo stack never asks or pays");
+    }
     public static void main(String[] args) {
         try {
             GuiBase.setInterface((IGuiBase)java.lang.reflect.Proxy.newProxyInstance(IGuiBase.class.getClassLoader(),new Class<?>[]{IGuiBase.class},
@@ -100,7 +111,7 @@ public final class EchoPaymentEngineSmoke {
                 }
                 for(String fault:List.of("delegate","string","missing","payment-delegate","payment-missing","payment-overspend",
                     "mutate-cost","mutate-source","mutate-effect","mutate-copy")) run(seat,5,true,false,true,fault);
-                unscoped(seat);
+                unscoped(seat); emptyStack(seat);
             }
             System.out.println("PASS "+checks+" echo native/bridge execution checks");System.exit(0);
         } catch(Throwable failure) {failure.printStackTrace();System.exit(1);}

@@ -35,6 +35,7 @@ final class EchoManaPayment implements RulesResolutionPayment, AutoCloseable {
     EchoManaPayment(Player actor, Cost cost, SpellAbility ability, boolean alreadyPaid, FCollectionView<Player> payers) {
         if (actor == null || cost == null || ability == null || alreadyPaid || payers == null
                 || payers.size() != 1 || payers.get(0) != actor
+                || actor.getGame().getStack().isEmpty()
                 || !(actor.getGame().getStack().peekAbility() instanceof WrappedAbility wrapped))
             throw unsupported("not one native echo payer/resolving wrapper");
         this.actor = actor; this.ability = ability; this.wrapper = wrapped;
