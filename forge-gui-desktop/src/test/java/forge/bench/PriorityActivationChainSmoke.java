@@ -56,6 +56,65 @@ public final class PriorityActivationChainSmoke {
             System.out.println("CHAIN_ACTIVATION_CASE " + row);
         }
     }
+    /** A real source-paid, named literal counter cost. This is deliberately
+     * separate from the v5 chain witnesses: it exercises the v6 structural
+     * cost identity and emits the exact option consumed by the TS fixture. */
+    private static void sourceCounterRefuses(forge.game.spellability.SpellAbility sa,
+            List<forge.game.cost.CostPart> replacement, String label) {
+        var parts = sa.getPayCosts().getCostParts();
+        var original = new java.util.ArrayList<>(parts);
+        try {
+            parts.clear();
+            parts.addAll(replacement);
+            var identity = PriorityActivationIdentity.encode(sa);
+            check("unsupported".equals(identity.get("kind").getAsString()), label);
+        } finally {
+            parts.clear();
+            parts.addAll(original);
+        }
+    }
+    private static void sourceCounterWitness(forge.game.player.Player player, forge.game.player.Player opponent) {
+        var wave = card("Parallax Wave", player, ZoneType.Battlefield);
+        var fade = forge.game.card.CounterType.getType("FADE");
+        wave.addCounterInternal(fade, 1, player, false, new forge.game.GameEntityCounterTable(), forge.game.ability.AbilityKey.newMap());
+        card("Grizzly Bears", opponent, ZoneType.Battlefield);
+        player.getGame().getAction().checkStateEffects(true);
+        for (var sa : wave.getSpellAbilities()) {
+            if (!sa.isActivatedAbility() || sa.isManaAbility()) continue;
+            sa.setActivatingPlayer(player);
+            var before = BenchMenuStateAudit.capture(player.getGame());
+            var option = StateEncoder.encodePriorityAbilityWithTargetDomains(sa, player.getView());
+            BenchMenuStateAudit.assertUnchanged(before, player.getGame());
+            var identity = option.getAsJsonObject("activationIdentity");
+            check(identity != null, "source-counter identity present");
+            check("priority-activation-identity-v6".equals(identity.get("version").getAsString()), "Parallax uses v6");
+            check("intrinsic-source-counter".equals(identity.get("kind").getAsString()), "Parallax is source-counter");
+            check("fade".equals(identity.get("counter").getAsString()), "Parallax counter kind is fade");
+            check(identity.get("amount").getAsInt() == 1, "Parallax counter amount is one");
+            check(identity.getAsJsonArray("modes").size() == 0, "Parallax has no modes");
+            check(identity.get("text").getAsString().equals(option.get("description").getAsString()), "Parallax identity equals menu chain");
+            check(true, "Parallax priority encoding is menu-pure");
+            // A state-derived SVar may currently resolve to one, but it is not
+            // a literal cost token and must never be emitted as v6.
+            wave.setSVar("CounterCostAmount", "Count$CardCounters.FADE");
+            var dynamic = new forge.game.cost.CostRemoveCounter("SVar$CounterCostAmount", fade,
+                    "CARDNAME", null, List.of(ZoneType.Battlefield), false);
+            check(dynamic.convertAmount() == null, "state-derived source counter is not literal");
+            check(dynamic.getAbilityAmount(sa) == 1, "state-derived source counter resolves in fixture state");
+            sourceCounterRefuses(sa, List.of(dynamic), "state-derived source counter cost refuses v6");
+            sourceCounterRefuses(sa, List.of(new forge.game.cost.CostRemoveCounter("1", fade,
+                    "CARDNAME", null, List.of(ZoneType.Battlefield), false), new forge.game.cost.CostTap()),
+                    "mixed source-counter and tap cost refuses v6");
+            sourceCounterRefuses(sa, List.of(new forge.game.cost.CostRemoveCounter("1", fade,
+                    "Creature.YouCtrl", null, List.of(ZoneType.Battlefield), false)),
+                    "non-source counter cost refuses v6");
+            sourceCounterRefuses(sa, List.of(new forge.game.cost.CostRemoveCounter("1", fade,
+                    "CARDNAME", null, List.of(ZoneType.Battlefield), true)),
+                    "one-or-more source counter cost refuses v6");
+            var row = new JsonObject(); row.addProperty("source", "Parallax Wave"); row.add("option", option);
+            System.out.println("COUNTER_ACTIVATION_CASE " + row);
+        }
+    }
     private static void specialized(String name, ZoneType zone, String kind, String version,
             forge.game.player.Player player) {
         var source = card(name, player, zone);
@@ -88,6 +147,7 @@ public final class PriorityActivationChainSmoke {
             game.getPhaseHandler().devModeSet(PhaseType.MAIN1, actor);
             witness("Mishra's Bauble", actor);
             witness("Currency Converter", actor);
+            sourceCounterWitness(actor, game.getPlayers().get(1));
             specialized("Generous Ent", ZoneType.Hand, "intrinsic-hand-discard", "priority-activation-identity-v2", actor);
             specialized("Pack Rat", ZoneType.Battlefield, "intrinsic-discard", "priority-activation-identity-v3", actor);
             specialized("Student of Warfare", ZoneType.Battlefield, "intrinsic-level-up", "priority-activation-identity-v4", actor);
