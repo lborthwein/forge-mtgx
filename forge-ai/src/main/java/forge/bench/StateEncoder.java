@@ -190,6 +190,7 @@ public final class StateEncoder {
             o.addProperty("damage", c.getDamage());
         }
         o.add("keywords", encodeKeywords(c));
+        o.addProperty("oracleText", c.getOracleText());
         // Protocol v2.15 sent `producedMana` only when non-empty, and v2.15's own comment
         // here claimed that kept "absent" and "produces nothing" distinguishable. IT DID
         // NOT: absent carried FOUR meanings the host could not separate -- a pre-2.15 jar,
