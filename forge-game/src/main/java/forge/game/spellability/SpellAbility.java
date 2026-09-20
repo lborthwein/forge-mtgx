@@ -469,17 +469,21 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
     /** Timing/zone fallback on an already detached enumeration copy. The normal
      * canPlay(true) path allocates new IDs while testing optional variants. */
     public boolean canPlayForEnumeration() {
-        if (canPlay()) return true;
+        if (this instanceof Spell spell ? spell.canPlayFromHostForEnumeration() != null : canPlay()) return true;
         // Spell.canPlayFromHost rejects this before every face, permission and
         // cost check. Optional costs cannot move the host off the battlefield.
         // Keep this tied to Spell, not spell-like wrappers or LandAbility.
         if (this instanceof Spell && getHostCard().isInPlay()) return false;
         for (OptionalCostValue value : GameActionUtil.getOptionalCostValues(this, true))
-            if (GameActionUtil.addOptionalCosts(this, Lists.newArrayList(value), true).canPlay()) return true;
+            if (canPlayWithoutOptionalEnumerationFallback(GameActionUtil.addOptionalCosts(this, Lists.newArrayList(value), true))) return true;
         if (isActivatedAbility() && hasParam("AlternateCost"))
             for (SpellAbility alternative : GameActionUtil.getAdditionalCostSpell(this, true))
                 if (alternative != this && alternative.canPlay()) return true;
         return false;
+    }
+
+    private static boolean canPlayWithoutOptionalEnumerationFallback(SpellAbility sa) {
+        return sa instanceof Spell spell ? spell.canPlayFromHostForEnumeration() != null : sa.canPlay();
     }
 
     public boolean canPlayWithOptionalCost(OptionalCostValue opt) {
@@ -2686,6 +2690,11 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
 
     public Card getAlternateHost(Card source) {
         return null;
+    }
+
+    /** Prospective host for a detached decision copy. Execution uses the original overload. */
+    public Card getAlternateHostForEnumeration(Card source) {
+        return getAlternateHost(source);
     }
 
     public boolean hasOptionalKeywordAmount(KeywordInterface kw) {

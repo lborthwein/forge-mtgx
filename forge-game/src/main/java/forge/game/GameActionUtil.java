@@ -159,7 +159,7 @@ public final class GameActionUtil {
         if (sa.isSpell() || sa.isLandAbility()) {
             boolean lkicheck = false;
 
-            Card newHost = sa.getAlternateHost(source);
+            Card newHost = readOnly ? sa.getAlternateHostForEnumeration(source) : sa.getAlternateHost(source);
             if (newHost != null) {
                 source = newHost;
                 lkicheck = true;
@@ -491,7 +491,7 @@ public final class GameActionUtil {
         final Game game = source.getGame();
         boolean lkicheck = false;
 
-        Card newHost = sa.getAlternateHost(source);
+        Card newHost = readOnly ? sa.getAlternateHostForEnumeration(source) : sa.getAlternateHost(source);
         if (newHost != null) {
             source = newHost;
             lkicheck = true;

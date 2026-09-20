@@ -55,6 +55,11 @@ public final class BenchMenuPurityVariantsSmoke {
         if (f.wire().size() != 0) throw new AssertionError("No-op probe asked the host");
         System.out.println("PASS original fields/IDs/memory and no-RPC probe: " + label);
     }
+    private static void assertTimestamp(long before, Fixture f, String label) {
+        if (before != f.game().getTimestamp())
+            throw new AssertionError("Read-only Prototype query advanced game timestamp: " + label);
+        System.out.println("PASS Prototype timestamp " + before + " unchanged: " + label);
+    }
     private static void optional() {
         var f = fixture();
         for (String name : List.of("Forest", "Forest", "Forest", "Mountain", "Plains")) card(name, f.player(), ZoneType.Battlefield);
@@ -103,6 +108,67 @@ public final class BenchMenuPurityVariantsSmoke {
         if (affordable != 1) throw new AssertionError("Only five-color alternate should be affordable");
         BenchMenuStateAudit.assertUnchanged(before, f.game());
     }
+    private static void steelSeraph() {
+        var f = fixture();
+        var host = card("Steel Seraph", f.player(), ZoneType.Hand);
+        for (int i = 0; i < 6; i++) card("Plains", f.player(), ZoneType.Battlefield);
+        f.game().getAction().checkStateEffects(true);
+        long timestamp = f.game().getTimestamp();
+        probe(f, "Steel Seraph prototype spell variants");
+        assertTimestamp(timestamp, f, "repeated no-op priority menu");
+        var before = BenchMenuStateAudit.capture(f.game());
+        var abilities = BenchmarkAbilityEnumeration.spells(ComputerUtilAbility.getAvailableCards(f.game(), f.player()), f.player());
+        var seraph = abilities.stream().filter(a -> a.isSpell() && a.getHostCard() == host).toList();
+        if (seraph.size() < 2 || seraph.stream().map(a -> a.getPayCosts().getTotalMana().toString()).distinct().count() < 2) throw new AssertionError("Steel Seraph normal/prototype variants missing");
+        var prototype = seraph.stream().filter(a -> a.hasParam("Prototype")).findFirst().orElseThrow();
+        var prospective = prototype.getAlternateHostForEnumeration(host);
+        if (prospective == null || prospective == host || !prospective.isLKI()
+                || prospective.getCMC() != 3 || prospective.getBasePower() != 3
+                || prospective.getBaseToughness() != 3 || prospective.getColor() != forge.card.ColorSet.W
+                || host.getCMC() != 6 || host.getBasePower() != 5 || host.getBaseToughness() != 4)
+            throw new AssertionError("Prototype prospective characteristics or original host drifted");
+        var lki = forge.game.card.CardCopyService.getLKICopy(host);
+        var fromLki = prototype.getAlternateHostForEnumeration(lki);
+        if (fromLki == lki || fromLki.getCMC() != 3 || lki.getCMC() != 6
+                || lki.getBasePower() != 5 || lki.getColor() != forge.card.ColorSet.C)
+            throw new AssertionError("Prototype mutated an input LKI host");
+        var unsupported = prototype.copyForEnumeration(f.player());
+        unsupported.putParam("SetPower", "DynamicPower");
+        try {
+            unsupported.getAlternateHostForEnumeration(host);
+            throw new AssertionError("Dynamic Prototype P/T must refuse read-only enumeration");
+        } catch (IllegalStateException expected) {
+            if (!expected.getMessage().startsWith("BENCH_INTEGRITY_UNSUPPORTED:")) throw expected;
+        }
+        BenchMenuStateAudit.assertUnchanged(before, f.game());
+        assertTimestamp(timestamp, f, "variant expansion and prospective host");
+    }
+    private static void prototypeCastingRestriction(String measure, String operator, String operand, boolean prototypeAllowed) {
+        var f = fixture();
+        var host = card("Steel Seraph", f.player(), ZoneType.Hand);
+        for (int i = 0; i < 6; i++) card("Plains", f.player(), ZoneType.Battlefield);
+        int restricted = 0;
+        for (var ability : host.getSpellAbilities()) {
+            if (!ability.isSpell()) continue;
+            ability.getRestrictions().setSvarToCheck(measure);
+            ability.getRestrictions().setSvarOperator(operator);
+            ability.getRestrictions().setSvarOperand(operand);
+            restricted++;
+        }
+        if (restricted < 2) throw new AssertionError("Both printed Seraph cast choices need the same restriction");
+        f.game().getAction().checkStateEffects(true);
+        long timestamp = f.game().getTimestamp();
+        probe(f, "Steel Seraph casting restriction " + measure + " " + operator + operand);
+        assertTimestamp(timestamp, f, "restricted no-op priority menu " + measure + operator + operand);
+        var before = BenchMenuStateAudit.capture(f.game());
+        var offered = BenchmarkAbilityEnumeration.spells(ComputerUtilAbility.getAvailableCards(f.game(), f.player()), f.player())
+                .stream().filter(a -> a.isSpell() && a.getHostCard() == host).toList();
+        if (offered.size() != 1 || offered.get(0).hasParam("Prototype") != prototypeAllowed)
+            throw new AssertionError("Wrong Seraph variant survived casting restriction " + measure + " " + operator + operand
+                    + ": " + offered.stream().map(a -> a.getPayCosts().getTotalMana().toString()).toList());
+        BenchMenuStateAudit.assertUnchanged(before, f.game());
+        assertTimestamp(timestamp, f, "restricted variant expansion " + measure + operator + operand);
+    }
     private static void inactiveOptional() {
         var f = fixture();
         var host = card("Thornscape Battlemage", f.player(), ZoneType.Graveyard);
@@ -144,7 +210,12 @@ public final class BenchMenuPurityVariantsSmoke {
                         default -> throw new AssertionError("Unexpected GUI call " + method.getName());
                     }));
             FModel.initialize(null, prefs -> { prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false); prefs.setPref(FPref.UI_LANGUAGE, "en-US"); return null; });
-            optional(); modal(); alternateCosts(); inactiveOptional(); exile("Thief of Sanity", false); exile("Decadent Dragon", true);
+            optional(); modal(); alternateCosts(); steelSeraph();
+            prototypeCastingRestriction("Count$CardManaCost", "LE", "3", true);
+            prototypeCastingRestriction("Count$CardManaCost", "GE", "6", false);
+            prototypeCastingRestriction("Count$CardNumColors", "GE", "1", true);
+            prototypeCastingRestriction("Count$CardNumColors", "EQ", "0", false);
+            inactiveOptional(); exile("Thief of Sanity", false); exile("Decadent Dragon", true);
             System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }

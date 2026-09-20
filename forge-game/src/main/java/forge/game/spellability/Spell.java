@@ -27,8 +27,11 @@ import forge.game.Game;
 import forge.game.ability.AbilityKey;
 import forge.game.card.Card;
 import forge.game.card.CardFactory;
+import forge.card.ColorSet;
+import forge.card.mana.ManaCost;
 import forge.game.cost.Cost;
 import forge.game.cost.CostPayment;
+import forge.game.keyword.Keyword;
 import forge.game.player.Player;
 import forge.game.player.PlayerController.FullControlFlag;
 import forge.game.replacement.ReplacementType;
@@ -74,6 +77,14 @@ public abstract class Spell extends SpellAbility implements java.io.Serializable
     }
 
     public Card canPlayFromHost() {
+        return canPlayFromHost(false);
+    }
+
+    public Card canPlayFromHostForEnumeration() {
+        return canPlayFromHost(true);
+    }
+
+    private Card canPlayFromHost(boolean readOnly) {
         Card card = this.getHostCard();
         if (card.isInPlay()) {
             return null;
@@ -104,7 +115,7 @@ public abstract class Spell extends SpellAbility implements java.io.Serializable
             card.setController(activator, 0);
         }
 
-        card = Objects.requireNonNullElse(getAlternateHost(card), card);
+        card = Objects.requireNonNullElse(readOnly ? getAlternateHostForEnumeration(card) : getAlternateHost(card), card);
 
         if (!this.getRestrictions().canPlay(card, this)) {
             return null;
@@ -156,11 +167,20 @@ public abstract class Spell extends SpellAbility implements java.io.Serializable
 
     @Override
     public Card getAlternateHost(Card source) {
+        return getAlternateHost(source, false);
+    }
+
+    @Override
+    public Card getAlternateHostForEnumeration(Card source) {
+        return getAlternateHost(source, true);
+    }
+
+    private Card getAlternateHost(Card source, boolean readOnly) {
         boolean lkicheck = false;
 
         // need to be done before so it works with Vivien and Zoetic Cavern
         if (source.isFaceDown() && source.isInZone(ZoneType.Exile)) {
-            if (!source.isLKI()) {
+            if (!source.isLKI() || readOnly) {
                 source = CardCopyService.getLKICopy(source);
             }
 
@@ -171,7 +191,7 @@ public abstract class Spell extends SpellAbility implements java.io.Serializable
         }
 
         if (isBestow() && !source.isBestowed()) {
-            if (!source.isLKI()) {
+            if (!source.isLKI() || readOnly) {
                 source = CardCopyService.getLKICopy(source);
             }
 
@@ -179,13 +199,13 @@ public abstract class Spell extends SpellAbility implements java.io.Serializable
             lkicheck = true;
         } else if (isCastFaceDown()) {
             // need a copy of the card to turn facedown without trigger anything
-            if (!source.isLKI()) {
+            if (!source.isLKI() || readOnly) {
                 source = CardCopyService.getLKICopy(source);
             }
             source.turnFaceDownNoUpdate();
             lkicheck = true;
         } else if (getCardState() != null && source.getCurrentStateName() != getCardStateName() && getHostCard().getState(getCardStateName()) != null) {
-            if (!source.isLKI()) {
+            if (!source.isLKI() || readOnly) {
                 source = CardCopyService.getLKICopy(source);
             }
             CardStateName stateName = getCardStateName();
@@ -204,11 +224,46 @@ public abstract class Spell extends SpellAbility implements java.io.Serializable
             source.setLKICMC(source.getCMC());
             lkicheck = true;
         } else if (hasParam("Prototype") && source.getPrototypeTimestamp() == -1) {
-            if (!source.isLKI()) {
+            if (!source.isLKI() || readOnly) {
                 source = CardCopyService.getLKICopy(source);
             }
-            long next = source.getGame().getNextTimestamp();
-            source.addCloneState(CardFactory.getCloneStates(source, source, this), next);
+            if (readOnly) {
+                // Prototype's printed alternative changes only cost, color and P/T.
+                // Applying those values to this LKI state gives legality checks a
+                // prospective host without cloning abilities or taking a timestamp.
+                if (!hasParam("SetManaCost") || !hasParam("SetColorByManaCost")
+                        || !hasParam("SetPower") || !hasParam("SetToughness"))
+                    throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: incomplete Prototype characteristics");
+                for (String param : new String[] {"AddAbilities", "AddColors", "AddKeywords", "AddSVars",
+                        "AddStaticAbilities", "AddTriggers", "AddTypes", "GainTextAbilities", "GainTextOf",
+                        "GainThisAbility", "KeepName", "NewName", "NonLegendary", "RemoveCardTypes",
+                        "RemoveCost", "RemoveKeywords", "RemoveSubTypes", "SetColor", "SetCreatureTypes",
+                        "SetLoyalty"})
+                    if (hasParam(param)) throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: Prototype clone parameter " + param);
+                for (var staticAbility : source.getCurrentState().getStaticAbilities())
+                    if (staticAbility.isCharacteristicDefining() && (staticAbility.hasParam("SetPower")
+                            || staticAbility.hasParam("SetToughness") || staticAbility.hasParam("SetColor")))
+                        throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: Prototype characteristic-defining ability");
+                final int power;
+                final int toughness;
+                try {
+                    power = Integer.parseInt(getParam("SetPower"));
+                    toughness = Integer.parseInt(getParam("SetToughness"));
+                } catch (NumberFormatException invalid) {
+                    throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: dynamic Prototype P/T", invalid);
+                }
+                ManaCost cost = new ManaCost(getParam("SetManaCost"));
+                source.getCurrentState().setManaCost(cost);
+                source.getCurrentState().setColor(ColorSet.fromManaCost(cost));
+                source.getCurrentState().setBasePower(power);
+                source.getCurrentState().setBaseToughness(toughness);
+                source.getCurrentState().removeIntrinsicKeyword(Keyword.DEVOID);
+                source.setLKICMC(-1);
+                source.setLKICMC(source.getCMC());
+            } else {
+                long next = source.getGame().getNextTimestamp();
+                source.addCloneState(CardFactory.getCloneStates(source, source, this), next);
+            }
             lkicheck = true;
         }
 
