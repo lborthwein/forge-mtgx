@@ -96,7 +96,9 @@ public final class ExileKnownObservationEngineSmoke {
                 .equals(options.stream().map(ExileKnownObservationEngineSmoke::semantic).sorted().toList()),
                 "read-only permission variants equal independent native one-pass variants");
         var lions = options.stream().filter(a -> a.getHostCard().getId() == first.getId()).findFirst().orElseThrow();
-        check(lions.canPlay(), "real permission makes actor's Savannah Lions cast legal");
+        // This legality check is inside the read-only audit. Execution canPlay
+        // may turn a prospective LKI face up and consume a game timestamp.
+        check(lions.canPlayForEnumeration(), "real permission makes actor's Savannah Lions cast legal");
         check(StateEncoder.encodeSpellAbility(lions, actor.getView()).get("source").getAsString().equals("Savannah Lions"), "actor menu source identity agrees with known state");
         check(StateEncoder.encodeSpellAbility(lions, owner.getView()).get("source").getAsString().isEmpty(), "source identity is not granted to unauthorized menu recipient");
         BenchMenuStateAudit.assertUnchanged(before, game); BenchRandomAudit.assertUnchanged(rng, "exile observation and enumeration");
