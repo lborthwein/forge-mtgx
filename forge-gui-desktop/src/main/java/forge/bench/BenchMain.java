@@ -123,6 +123,7 @@ public final class BenchMain {
         final int games = cfg.has("games") ? cfg.get("games").getAsInt() : 1;
         final int timeoutSec = cfg.has("timeoutSec") ? cfg.get("timeoutSec").getAsInt() : 120;
         final boolean useSimulation = cfg.has("useSimulation") && cfg.get("useSimulation").getAsBoolean();
+        final boolean requireHostAnswers = booleanConfig(cfg, "requireHostAnswers", false);
         final String aiProfile = cfg.has("aiProfile") ? cfg.get("aiProfile").getAsString() : "Default";
         final JsonElement informationSetting = cfg.get("aiInformationPolicy");
         if (informationSetting != null && (!informationSetting.isJsonPrimitive()
@@ -280,6 +281,7 @@ public final class BenchMain {
 
         final BenchSession session = new BenchSession(ch);
         session.setStopAfterEchoKind(stopAfterEchoKind);
+        session.setRequireHostAnswers(requireHostAnswers);
 
         final JsonObject hello = new JsonObject();
         hello.addProperty("type", "hello");
@@ -298,6 +300,8 @@ public final class BenchMain {
         // that does can tell a widened nonmana-cost jar from the pinned one.
         hello.addProperty("nonManaCostCoverageVersion", RulesCostFeasibility.NONMANA_COST_VERSION);
         hello.addProperty("costAdjustmentCoverageVersion", RulesCostFeasibility.COST_ADJUST_VERSION);
+        hello.addProperty("requireHostAnswers", requireHostAnswers);
+        hello.addProperty("hostAnswerPolicyVersion", BenchSession.HOST_ANSWER_POLICY_VERSION);
         // Explicit identity: a diagnostic no-op run is never a strength panel.
         hello.addProperty("auditMenuProbe", auditMenuProbe);
         hello.addProperty("forgeCommit", forgeCommit());
@@ -603,6 +607,17 @@ public final class BenchMain {
         bye.addProperty("type", "bye");
         ch.send(bye);
         System.exit(0);
+    }
+
+    private static boolean booleanConfig(final JsonObject cfg, final String key, final boolean defaultValue) {
+        if (!cfg.has(key)) {
+            return defaultValue;
+        }
+        final JsonElement value = cfg.get(key);
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isBoolean()) {
+            throw new IllegalArgumentException(key + " must be a boolean");
+        }
+        return value.getAsBoolean();
     }
 
     /** Explicit per-seat identity, never a silent global replacement for Default. */

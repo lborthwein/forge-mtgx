@@ -34,6 +34,10 @@ public final class PriorityOwnershipEngineSmoke {
         var methods = c.controller.getCounters().toJson().getAsJsonObject("controllerCoverage").getAsJsonObject("methods");
         return methods.has(method) ? methods.getAsJsonObject(method).get(owner).getAsInt() : 0;
     }
+    private static int instrument(Context c, String name) {
+        var instruments = c.controller.getCounters().toJson().getAsJsonObject("instruments");
+        return instruments.has(name) ? instruments.get(name).getAsInt() : 0;
+    }
     private static void ownership(Context c, String owner) {
         for (String name : List.of("host", "forced", "rules", "stock", "unclassified"))
             check(bucket(c, PRIORITY, name) == (name.equals(owner) ? 1 : 0), "priority " + name + " seat=" + seat + " scenario=" + c.host.scenario);
@@ -98,7 +102,11 @@ public final class PriorityOwnershipEngineSmoke {
     }
     private record Context(Game game, Player payer, PlayerControllerBridge controller, Host host, BenchSession session) {}
     private static Context context(BenchSession.Mode mode) {
+        return context(mode, false);
+    }
+    private static Context context(BenchSession.Mode mode, boolean requireHostAnswers) {
         var host = new Host(); var session = new BenchSession(new JsonRpcChannel(host, host.wire));
+        session.setRequireHostAnswers(requireHostAnswers);
         var lobby = new LobbyPlayerBridge("Payer", null, session, mode, seat); lobby.setAiProfile("Default");
         var own = new RegisteredPlayer(new Deck()).setPlayer(lobby);
         var other = new RegisteredPlayer(new Deck()).setPlayer(GamePlayerUtil.createAiPlayer("Opponent", 1 - seat, 0, null, "Default"));
@@ -168,6 +176,60 @@ public final class PriorityOwnershipEngineSmoke {
         if (mode != BenchSession.Mode.BRIDGE) check(c.host.asks.isEmpty(), "null/probe makes no host asks");
         if (mode == BenchSession.Mode.NULL_PROBE) check(c.controller.getCounters().toJson().getAsJsonObject("instruments").get("auditPriorityProbe").getAsInt() == 1, "actual null-probe subclass executed production purity probe");
         if (scenario.equals("delegate")) check(c.host.wire.toString(StandardCharsets.UTF_8).contains("\"type\":\"delegated\""), "actual stock fallback emits existing delegated echo");
+    }
+    private static void strictDelegate() {
+        var c = context(BenchSession.Mode.BRIDGE, true); card("Plains", c.payer, ZoneType.Hand); c.host.scenario = "delegate"; ready(c);
+        rejects(() -> c.controller.chooseSpellAbilityToPlay());
+        check(bucket(c, PRIORITY, "stock") == 0, "strict delegated priority never dispatches stock");
+        check(bucket(c, PRIORITY, "unclassified") == 1, "strict delegated priority remains unclassified");
+        check(instrument(c, "hostAnswer.missingOrDelegated") == 1, "strict delegated answer is instrumented");
+        check(c.session.integrityFailure(c.game) != null, "strict delegated answer persists integrity failure");
+    }
+    private static void strictRefusal() {
+        var c = context(BenchSession.Mode.BRIDGE, true); var land = card("Plains", c.payer, ZoneType.Hand);
+        c.host.fid = land.getId(); c.host.scenario = "invalid-choice"; ready(c);
+        rejects(() -> c.controller.chooseSpellAbilityToPlay());
+        check(bucket(c, PRIORITY, "stock") == 0, "strict refused priority never dispatches stock");
+        check(instrument(c, "hostAnswer.refused") == 1, "strict refused answer is instrumented");
+        check(c.session.integrityFailure(c.game) != null, "strict refused answer persists integrity failure");
+    }
+    private static void strictEof() {
+        var c = context(BenchSession.Mode.BRIDGE, true); card("Plains", c.payer, ZoneType.Hand); c.host.scenario = "eof"; ready(c);
+        rejects(() -> c.controller.chooseSpellAbilityToPlay());
+        check(c.session.getChannel().isClosed(), "strict EOF closes host channel");
+        rejects(() -> c.controller.chooseSpellAbilityToPlay());
+        check(bucket(c, PRIORITY, "stock") == 0, "strict EOF never dispatches stock");
+        check(instrument(c, "hostAnswer.missingOrDelegated") == 2, "strict EOF is instrumented as missing answers");
+        check(instrument(c, "hostAnswer.stockFallbackBlocked") == 0, "strict EOF has no stock fallback");
+        check(c.session.integrityFailure(c.game) != null, "strict EOF persists integrity failure");
+    }
+    private static void strictStockCallback() {
+        var c = context(BenchSession.Mode.BRIDGE, true); ready(c);
+        rejects(() -> c.controller.chooseRollToIgnore(List.of(1)));
+        check(bucket(c, "chooseRollToIgnore", "stock") == 0, "strict stock callback never dispatches stock");
+        check(bucket(c, "chooseRollToIgnore", "unclassified") == 1, "strict stock callback remains unclassified");
+        check(instrument(c, "hostAnswer.stockFallbackBlocked") == 1, "strict stock callback is instrumented");
+        check(c.session.integrityFailure(c.game) != null, "strict stock callback persists integrity failure");
+    }
+    private static void strictEmptyDomain() {
+        var c = context(BenchSession.Mode.BRIDGE, true); ready(c);
+        rejects(() -> c.controller.chooseNumber(null, "empty domain", List.of(), c.payer));
+        check(bucket(c, "chooseNumber", "stock") == 0, "strict empty domain never dispatches stock");
+        check(bucket(c, "chooseNumber", "unclassified") == 1, "strict empty domain remains unclassified");
+        check(instrument(c, "hostAnswer.stockFallbackBlocked") == 1, "strict empty domain is instrumented");
+        check(c.session.integrityFailure(c.game) != null, "strict empty domain persists integrity failure");
+    }
+    private static void strictControls() {
+        strictDelegate(); strictRefusal(); strictEof(); strictStockCallback(); strictEmptyDomain();
+        var legacy = context(BenchSession.Mode.BRIDGE); var land = card("Plains", legacy.payer, ZoneType.Hand);
+        legacy.host.fid = land.getId(); legacy.host.scenario = "delegate"; ready(legacy);
+        check(legacy.controller.chooseSpellAbilityToPlay().get(0).isLandAbility(), "legacy bridge still falls back on delegation");
+        check(bucket(legacy, PRIORITY, "stock") == 1 && instrument(legacy, "hostAnswer.missingOrDelegated") == 0,
+                "legacy bridge preserves stock delegation and strict counters stay zero");
+        var nul = context(BenchSession.Mode.NULL, true); card("Plains", nul.payer, ZoneType.Hand); ready(nul);
+        check(nul.controller.chooseSpellAbilityToPlay().get(0).isLandAbility(), "null mode ignores strict host policy");
+        check(nul.host.asks.isEmpty() && bucket(nul, PRIORITY, "stock") == 1 && instrument(nul, "hostAnswer.stockFallbackBlocked") == 0,
+                "null mode remains native and strict counters stay zero");
     }
     private static void pendingFailure() {
         var c = context(BenchSession.Mode.BRIDGE); var land = card("Plains", c.payer, ZoneType.Hand); c.host.fid = land.getId(); ready(c);
@@ -249,6 +311,7 @@ public final class PriorityOwnershipEngineSmoke {
                 for (String failure : List.of("invalid-x", "invalid-target", "invalid-payment")) failure(failure);
                 stock(BenchSession.Mode.NULL, "null"); stock(BenchSession.Mode.NULL_PROBE, "null-probe");
                 stock(BenchSession.Mode.BRIDGE, "delegate"); stock(BenchSession.Mode.BRIDGE, "invalid-choice"); pendingFailure();
+                strictControls();
                 staleAction(); eof(); unsupportedMenu(BenchSession.Mode.BRIDGE); unsupportedMenu(BenchSession.Mode.NULL_PROBE); nonliveCopy();
                 malformedChoices(false);
                 exactNumericIndices();

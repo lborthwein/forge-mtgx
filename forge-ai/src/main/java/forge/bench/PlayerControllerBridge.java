@@ -158,6 +158,17 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
      * upgraded to HOST merely because a bridge controller is installed. */
     private <T> T stockCall(final String method, final java.util.function.Supplier<T> action) {
         final var invocation = isLiveGame() ? counters.beginCall(method) : null;
+        return stockCall(invocation, method, action);
+    }
+
+    /** Classify an already-open invocation after applying strict host policy. */
+    private <T> T stockCall(final CallCounter.Invocation invocation, final String method,
+            final java.util.function.Supplier<T> action) {
+        if (mode == BenchSession.Mode.BRIDGE && isLiveGame() && session.requireHostAnswers()) {
+            final RulesCostFeasibility.Unsupported failure = hostAnswerFailure(
+                    "hostAnswer.stockFallbackBlocked", method, "callback has no host answer path");
+            throw failure;
+        }
         return classifiedResult(invocation, CallCounter.Ownership.STOCK, action.get());
     }
 
@@ -173,7 +184,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     }
 
     private boolean bridged() {
-        return mode == BenchSession.Mode.BRIDGE && isLiveGame() && !session.getChannel().isClosed();
+        return mode == BenchSession.Mode.BRIDGE && isLiveGame()
+                && (session.requireHostAnswers() || !session.getChannel().isClosed());
     }
 
     /** Envelope shared by every ask: game id, seat and the seat-visible state. */
@@ -206,8 +218,20 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
      */
     private JsonObject ask(final String method, final String kind, final JsonObject body) {
         final JsonObject ans = session.getChannel().ask(kind, body);
-        if (ans == null || (ans.has("delegate") && ans.get("delegate").getAsBoolean())) {
+        final boolean delegated;
+        try {
+            delegated = ans == null || (ans.has("delegate") && ans.get("delegate").getAsBoolean());
+        } catch (RuntimeException malformed) {
+            if (mode == BenchSession.Mode.BRIDGE && isLiveGame() && session.requireHostAnswers()) {
+                throw hostAnswerFailure("hostAnswer.refused", method, "malformed delegation marker");
+            }
+            throw malformed;
+        }
+        if (delegated) {
             counters.delegateRequested(method);
+            if (mode == BenchSession.Mode.BRIDGE && isLiveGame() && session.requireHostAnswers()) {
+                throw hostAnswerFailure("hostAnswer.missingOrDelegated", method, "host answer was missing or delegated");
+            }
             final Integer id = optInt(ans, "id");
             pendingEcho = new Echo(id == null ? -1 : id, kind, method);
             return null;
@@ -548,7 +572,19 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
 
     private void refuse(final String method, final String why) {
         counters.delegateRefused(method, why);
+        if (mode == BenchSession.Mode.BRIDGE && isLiveGame() && session.requireHostAnswers()) {
+            throw hostAnswerFailure("hostAnswer.refused", method, why);
+        }
         if (selectingExternalTargets || strictHostTargets) throw new RulesCostFeasibility.Unsupported("selected action " + method + ": " + why);
+    }
+
+    private RulesCostFeasibility.Unsupported hostAnswerFailure(final String instrument,
+            final String method, final String why) {
+        counters.instrument(instrument);
+        final RulesCostFeasibility.Unsupported failure = new RulesCostFeasibility.Unsupported(
+                "host answer required for " + method + ": " + why);
+        session.noteIntegrityFailure(getGame(), seat, "host answer " + method, failure);
+        return failure;
     }
 
     private static Integer optInt(final JsonObject o, final String key) {
@@ -1133,7 +1169,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             return classifiedResult(invocation, CallCounter.Ownership.RULES, Collections.emptyList());
         }
         if (!bridged() || optionalCostValues == null || optionalCostValues.isEmpty()) {
-            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseOptionalCosts(chosen, optionalCostValues));
+            return stockCall(invocation, "chooseOptionalCosts", () -> super.chooseOptionalCosts(chosen, optionalCostValues));
         }
         final JsonObject body = envelope(true);
         body.add("ability", StateEncoder.encodeSpellAbility(chosen));
@@ -2025,7 +2061,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             }
         }
         if (!bridged() || optionList == null || optionList.isEmpty()) {
-            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional,
+            return stockCall(invocation, "chooseSingleEntityForEffect", () -> super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional,
                     relatedPlayer, params));
         }
         final List<T> options = Lists.newArrayList(optionList);
@@ -2067,7 +2103,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             final String title, final Player relatedPlayer, final Map<String, Object> params) {
         final var invocation = isLiveGame() ? counters.beginCall("chooseEntitiesForEffect") : null;
         if (!bridged() || optionList == null || optionList.isEmpty()) {
-            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
+            return stockCall(invocation, "chooseEntitiesForEffect", () -> super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title,
                     relatedPlayer, params));
         }
         final List<T> options = Lists.newArrayList(optionList);
@@ -2138,7 +2174,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             final Player relatedPlayer) {
         final var invocation = isLiveGame() ? counters.beginCall("chooseNumber") : null;
         if (!bridged() || values == null || values.isEmpty()) {
-            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseNumber(sa, title, values, relatedPlayer));
+            return stockCall(invocation, "chooseNumber", () -> super.chooseNumber(sa, title, values, relatedPlayer));
         }
         final JsonObject body = envelope(true);
         body.addProperty("title", String.valueOf(title));
@@ -2175,9 +2211,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
                 || session.getChannel().isClosed() || possible == null || possible.isEmpty()))
             throw new RulesCostFeasibility.Unsupported("controlled mode choice requires actual open host domain");
         if (!bridged() || possible == null || possible.isEmpty()) {
-            final var out = super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
-            if (invocation != null) invocation.classify(CallCounter.Ownership.STOCK);
-            return out;
+            return stockCall(invocation, "chooseModeForAbility", () -> super.chooseModeForAbility(sa, possible, min, num, allowRepeat));
         }
         final JsonObject body = envelope(true);
         body.addProperty("min", min);
@@ -2354,7 +2388,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     public CardCollection orderBlockers(final Card attacker, final CardCollection blockers) {
         final var invocation = isLiveGame() ? counters.beginCall("orderBlockers") : null;
         if (!bridged() || blockers == null || blockers.size() < 2) {
-            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.orderBlockers(attacker, blockers));
+            return stockCall(invocation, "orderBlockers", () -> super.orderBlockers(attacker, blockers));
         }
         final JsonObject body = envelope(true);
         body.add("attacker", StateEncoder.encodeCardUnchecked(attacker));
@@ -2939,7 +2973,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
         }
         if (activeRulesPayment != null) return activeRulesPayment.duringMandatoryTrigger(host, wrapperAbility, isMandatory,
                 () -> super.playTrigger(host, wrapperAbility, isMandatory));
-        return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.playTrigger(host, wrapperAbility, isMandatory));
+        return stockCall(invocation, "playTrigger", () -> super.playTrigger(host, wrapperAbility, isMandatory));
     }
     @Override
     public boolean playSaFromPlayEffect(SpellAbility tgtSA) { return stockCall("playSaFromPlayEffect", () -> super.playSaFromPlayEffect(tgtSA)); }
@@ -3226,7 +3260,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
     public boolean playChosenSpellAbility(SpellAbility sa) {
         final var invocation = isLiveGame() ? counters.beginCall("playChosenSpellAbility") : null;
         if (failedExternalAction) throw new RulesCostFeasibility.Unsupported("prior controlled action failed; game cannot continue");
-        if (pendingExternalAbility == null) return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.playChosenSpellAbility(sa));
+        if (pendingExternalAbility == null)
+            return stockCall(invocation, "playChosenSpellAbility", () -> super.playChosenSpellAbility(sa));
         final JsonObject selectedAnswer = pendingExternalAnswer;
         try {
             if (pendingExternalAbility != sa) throw new RulesCostFeasibility.Unsupported("selected/executed ability identity mismatch");
@@ -3492,7 +3527,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             if (paid && invocation != null) invocation.classify(CallCounter.Ownership.RULES);
             return paid;
         }
-        return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect));
+        return stockCall(invocation, "payManaCost", () -> super.payManaCost(toPay, costPartMana, sa, prompt, matrix, effect));
     }
     @Override
     public boolean applyManaToCost(ManaCostBeingPaid toPay, SpellAbility ability, String prompt, ManaConversionMatrix matrix, boolean effect) { return stockCall("applyManaToCost", () -> super.applyManaToCost(toPay, ability, prompt, matrix, effect)); }
@@ -3549,7 +3584,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             Player decider) {
         final var invocation = isLiveGame() ? counters.beginCall("chooseSingleCardForZoneChange") : null;
         if (!bridged() || decider != getPlayer() || fetchList == null || fetchList.isEmpty()) {
-            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
+            return stockCall(invocation, "chooseSingleCardForZoneChange", () -> super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
                     selectPrompt, isOptional, decider));
         }
         final int changeNum = zoneChangeNum(sa);
@@ -3593,7 +3628,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
          * the ceiling before it can happen.
          */
         if (!bridged() || decider != getPlayer() || fetchList == null || fetchList.isEmpty()) {
-            return classifiedResult(invocation, CallCounter.Ownership.STOCK, super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max,
+            return stockCall(invocation, "chooseCardsForZoneChange", () -> super.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max,
                     delayedReveal, selectPrompt, decider));
         }
         if (delayedReveal != null) {

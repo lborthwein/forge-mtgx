@@ -22,6 +22,7 @@ package forge.bench;
  * the game currently being played (games run strictly sequentially in one JVM).
  */
 public final class BenchSession {
+    public static final String HOST_ANSWER_POLICY_VERSION = "host-answer-policy-v1";
     /** Seat behaviour selected from the harness config. */
     public enum Mode {
         /**
@@ -56,6 +57,7 @@ public final class BenchSession {
     private final JsonRpcChannel channel;
     private String gameId = "g0";
     private forge.game.Game liveGame;
+    private boolean requireHostAnswers;
     // Survives controller replacement/elimination and exceptions absorbed by Forge.
     // Only the exact live game may poison its result; search copies must not.
     private String integrityFailure;
@@ -97,6 +99,14 @@ public final class BenchSession {
 
     public BenchSession(final JsonRpcChannel channel) {
         this.channel = channel;
+    }
+
+    public void setRequireHostAnswers(final boolean requireHostAnswers) {
+        this.requireHostAnswers = requireHostAnswers;
+    }
+
+    public boolean requireHostAnswers() {
+        return requireHostAnswers;
     }
 
     /**

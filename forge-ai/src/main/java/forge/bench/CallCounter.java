@@ -17,6 +17,7 @@
  */
 package forge.bench;
 
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -32,6 +33,8 @@ import com.google.gson.JsonObject;
  * because only the second is a bridge defect.
  */
 public final class CallCounter {
+    private static final List<String> HOST_ANSWER_INSTRUMENTS = List.of(
+            "hostAnswer.missingOrDelegated", "hostAnswer.refused", "hostAnswer.stockFallbackBlocked");
     public enum Ownership { HOST, FORCED, RULES, STOCK, UNCLASSIFIED }
     private final Map<String, java.util.EnumMap<Ownership, Integer>> coverage = new TreeMap<>();
     private String controllerMode;
@@ -93,6 +96,16 @@ public final class CallCounter {
      * it distorts {@code totalCalls}.
      */
     private final Map<String, Integer> instruments = new TreeMap<>();
+
+    public CallCounter() {
+        resetInstruments();
+    }
+
+    private void resetInstruments() {
+        for (String name : HOST_ANSWER_INSTRUMENTS) {
+            instruments.put(name, 0);
+        }
+    }
 
     public synchronized void count(final String method) {
         beginCall(method); // Legacy instrumentation does not establish ownership.
@@ -157,6 +170,7 @@ public final class CallCounter {
         delegatedRequested.clear();
         delegatedRefused.clear();
         instruments.clear();
+        resetInstruments();
     }
 
     public synchronized JsonObject toJson() {
