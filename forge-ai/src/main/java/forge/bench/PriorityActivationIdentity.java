@@ -16,7 +16,8 @@ final class PriorityActivationIdentity {
                 || sa.costHasX() || sa.hasParam("Announce") || sa.getOptionalCosts().iterator().hasNext()) {
             out.addProperty("kind","unsupported");return out;
         }
-        int tap=0,sac=0,life=0,discard=0,chosenDiscard=0;
+        int tap=0,sac=0,life=0,discard=0,chosenDiscard=0,sourceCounterAmount=0;
+        String sourceCounter=null;
         for(var part:sa.getPayCosts().getCostParts()) {
             if(part instanceof CostPartMana)continue;
             if(part instanceof CostTap){if(++tap>1){out.addProperty("kind","unsupported");return out;}}
@@ -24,6 +25,17 @@ final class PriorityActivationIdentity {
             else if(RulesCostFeasibility.isSingleSelfDiscard(part)){if(++discard>1){out.addProperty("kind","unsupported");return out;}}
             else if(RulesDiscardCostDomain.supports(part) && chosenDiscard==0)chosenDiscard=((CostDiscard)part).convertAmount();
             else if(part instanceof CostPayLife pay && pay.convertAmount()!=null && life==0 && pay.convertAmount()>0)life=pay.convertAmount();
+            else if(part instanceof CostRemoveCounter remove && sourceCounterAmount==0
+                    && remove.payCostFromSource() && remove.counter!=null && !Boolean.TRUE.equals(remove.oneOrMore)) {
+                // v6 carries a literal cost token, not a value derived from
+                // the current game state. `literalAmount` also evaluates
+                // stable dynamic expressions for feasibility analysis; that
+                // is deliberately broader than this wire identity.
+                Integer amount=remove.convertAmount();
+                if(amount==null || amount<1 || amount>16){out.addProperty("kind","unsupported");return out;}
+                sourceCounterAmount=amount;
+                sourceCounter=remove.counter.getName().toLowerCase(java.util.Locale.ROOT);
+            }
             else {out.addProperty("kind","unsupported");return out;}
         }
         out.addProperty("kind","intrinsic-fixed");out.addProperty("state","Original");
@@ -85,6 +97,24 @@ final class PriorityActivationIdentity {
             }
             out.addProperty("version","priority-activation-identity-v2");
             out.addProperty("kind","intrinsic-hand-discard");out.addProperty("discardSelf",true);
+        }
+        if(sourceCounterAmount>0) {
+            // A source-paid named literal counter is a self-contained resource,
+            // but only on the narrow no-other-nonmana-cost shape. The emitted
+            // counter identity is structural; the host never parses prose.
+            if(tap!=0 || sac!=0 || life!=0 || discard!=0 || chosenDiscard!=0 || modes.size()!=0
+                    || !host.isInZone(forge.game.zone.ZoneType.Battlefield)
+                    || !"Battlefield".equals(sa.getParamOrDefault("ActivationZone","Battlefield"))) {
+                out.addProperty("kind","unsupported");return out;
+            }
+            final String chain;
+            try { chain=sa.toString(); }
+            catch(RuntimeException | StackOverflowError failure) {out.addProperty("kind","unsupported");return out;}
+            if(chain==null || chain.isEmpty()) {out.addProperty("kind","unsupported");return out;}
+            out.addProperty("version","priority-activation-identity-v6");
+            out.addProperty("kind","intrinsic-source-counter");
+            out.addProperty("counter",sourceCounter);out.addProperty("amount",sourceCounterAmount);
+            out.addProperty("text",chain);
         }
         if ("intrinsic-fixed".equals(out.get("kind").getAsString()) && modes.size()==0) {
             // The priority menu's description is SpellAbility.toString(), which
