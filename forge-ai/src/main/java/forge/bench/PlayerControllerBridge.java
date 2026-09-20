@@ -939,7 +939,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
             if (lands != null) {
                 for (Card land : lands) {
                     for (SpellAbility sa : land.getAllPossibleAbilities(p, true, null, true)) {
-                        if (sa.isLandAbility() && sa.canPlay()) {
+                        if (sa.isLandAbility() && sa.canPlayForEnumeration()) {
                             out.add(sa);
                         }
                     }
@@ -955,7 +955,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements forge.
                 if (diag != null) {
                     diag[DIAG_CANDIDATES]++;
                 }
-                if (!sa.canPlay()) {
+                if (!sa.canPlayForEnumeration()) {
                     bump(diag, DIAG_TIMING);
                     continue;
                 }

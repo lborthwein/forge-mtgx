@@ -43,6 +43,7 @@ integrity_root="$integrity_dir/source"
   "$integrity_root/forge-game/src/main/java/forge/game/replacement/ReplacementHandler.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/card/Card.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/spellability/SpellAbility.java" \
+  "$integrity_root/forge-game/src/main/java/forge/game/spellability/Spell.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/staticability/StaticAbilityAlternativeCost.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/cost/CostAdjustment.java" \
   "$integrity_root/forge-game/src/main/java/forge/game/cost/CostPartMana.java" \

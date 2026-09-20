@@ -7538,7 +7538,12 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
             sa.setActivatingPlayer(player);
             // fix things like retrace
             // check only if SA can't be cast normally
-            if (!(readOnly ? sa.canPlayForEnumeration() : sa.canPlay(true)) && (removeUnplayable || !sa.isPossible())) {
+            boolean playable = readOnly ? sa.canPlayForEnumeration() : sa.canPlay(true);
+            // Spell subclasses inherit isPossible() -> canPlay(), so the
+            // read-only result already covers that fallback without running
+            // the execution path a second time.
+            if (!playable && (removeUnplayable || (readOnly && sa instanceof forge.game.spellability.Spell)
+                    || !sa.isPossible())) {
                 toRemove.add(sa);
             }
         }
