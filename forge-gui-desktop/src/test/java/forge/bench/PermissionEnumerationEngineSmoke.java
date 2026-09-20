@@ -352,6 +352,20 @@ public final class PermissionEnumerationEngineSmoke {
         check(ballista.getCounters(forge.game.card.CounterEnumType.P1P1) == 1, "exactly one counter was actually removed");
         check(!game.getStack().isEmpty(), "the paid ability actually reached the stack");
     }
+    /** Parallax Wave: the retained source-counter shape, paid by the existing
+     * rules executor with no card-specific payment path. */
+    private static void parallaxWaveCounterCost() {
+        var game = game(); var player = game.getPlayers().get(0);
+        var wave = card("Parallax Wave", player, ZoneType.Battlefield);
+        var fade = forge.game.card.CounterType.getType("FADE");
+        wave.addCounterInternal(fade, 2, player, false, new forge.game.GameEntityCounterTable(), forge.game.ability.AbilityKey.newMap());
+        var target = card("Grizzly Bears", game.getPlayers().get(1), ZoneType.Battlefield);
+        game.getAction().checkStateEffects(true);
+        var selected = ability(wave, player, "RemoveCounter");
+        executeAction(player, selected, sa -> sa.getTargets().add(target), "source fade counter cost (Parallax Wave)");
+        check(wave.getCounters(fade) == 1, "exactly one fade counter was actually removed");
+        check(!game.getStack().isEmpty(), "Parallax Wave reaches the stack after payment");
+    }
     /** Two consuming parts cannot spend one card: Hall's condition, exactly. */
     private static void sharedResourceRefusal() {
         var game = game(); var player = game.getPlayers().get(0);
@@ -375,6 +389,7 @@ public final class PermissionEnumerationEngineSmoke {
         forcedAndCompetingSacrifice(true);
         jointDiscardHandAndSelfSacrifice();
         nonLoyaltyCounterCost();
+        parallaxWaveCounterCost();
         sharedResourceRefusal();
     }
     /** Card.mayPlay is an ORDERING input to play: mayPlay(Player) returns its
