@@ -180,11 +180,16 @@ public abstract class Spell extends SpellAbility implements java.io.Serializable
 
         // need to be done before so it works with Vivien and Zoetic Cavern
         if (source.isFaceDown() && source.isInZone(ZoneType.Exile)) {
+            if (readOnly && (source.hasMergedCard() || getHostCard().hasMergedCard()))
+                throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: face-up projection requires merged-card execution");
+            if (readOnly && (source.hasPendingFaceupCommands() || getHostCard().hasPendingFaceupCommands()))
+                throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: face-up projection requires face-up command execution");
             if (!source.isLKI() || readOnly) {
                 source = CardCopyService.getLKICopy(source);
             }
 
-            source.forceTurnFaceUp();
+            if (readOnly) source.forceTurnFaceUpForEnumeration();
+            else source.forceTurnFaceUp();
             source.setLKICMC(-1);
             source.setLKICMC(source.getCMC());
             lkicheck = true;
