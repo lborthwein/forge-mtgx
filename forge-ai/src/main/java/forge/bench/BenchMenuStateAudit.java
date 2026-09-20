@@ -23,6 +23,7 @@ final class BenchMenuStateAudit {
     static Map<String, String> capture(Game game) {
         Map<String, String> result = new TreeMap<>();
         int sequence = abilitySequence();
+        long timestamp = game.getTimestamp();
         for (var player : game.getPlayers()) {
             result.put("view/" + player.getId(), StateEncoder.encode(game, player).toString());
             for (var set : AiCardMemory.MemorySet.values())
@@ -34,7 +35,9 @@ final class BenchMenuStateAudit {
             for (var ability : card.getAllSpellAbilities()) captureAbility(result, "ability/" + card.getId() + "/" + ability.getId(), ability);
         }
         if (sequence != abilitySequence()) throw new IllegalStateException("BENCH_INTEGRITY_FAILURE: state inspection initialized ability IDs");
+        if (timestamp != game.getTimestamp()) throw new IllegalStateException("BENCH_INTEGRITY_FAILURE: state inspection advanced game timestamp");
         result.put("abilitySequence", Integer.toString(sequence));
+        result.put("gameTimestamp", Long.toString(timestamp));
         return result;
     }
     private static void captureAbility(Map<String, String> result, String key, SpellAbility sa) {

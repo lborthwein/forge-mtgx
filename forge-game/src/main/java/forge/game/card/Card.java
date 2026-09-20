@@ -867,6 +867,24 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         turnFaceUp(false, null);
     }
 
+    /** Project a face-up LKI host for a menu query, without performing a game
+     * turn-face-up event or taking a new layer timestamp. The caller owns this
+     * detached copy; a physical card must use turnFaceUp instead. */
+    public void forceTurnFaceUpForEnumeration() {
+        if (!isLKI()) throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: face-up projection requires detached LKI");
+        if (!isFaceDown()) return;
+        if (!canBeTurnedFaceUp())
+            throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: face-up projection blocked by replacement effect");
+        if (hasMergedCard() || hasPendingFaceupCommands())
+            throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: face-up projection requires merged-card or face-up command execution");
+        CardStateName state = isFlipped() && isFlipCard() ? CardStateName.Flipped : CardStateName.Original;
+        if (!setState(state, false))
+            throw new IllegalStateException("BENCH_INTEGRITY_UNSUPPORTED: face-up projection has no face-up state");
+        facedown = false;
+        turnedFaceUpThisTurn = true;
+        updateStateForView();
+    }
+
     public boolean turnFaceUp(SpellAbility cause) {
         return turnFaceUp(true, cause);
     }
@@ -3615,6 +3633,9 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
     }
     public final void addFaceupCommand(final GameCommand c) {
         faceupCommandList.add(c);
+    }
+    public final boolean hasPendingFaceupCommands() {
+        return !faceupCommandList.isEmpty();
     }
     public final void addFacedownCommand(final GameCommand c) {
         facedownCommandList.add(c);
@@ -7539,10 +7560,10 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
             // fix things like retrace
             // check only if SA can't be cast normally
             boolean playable = readOnly ? sa.canPlayForEnumeration() : sa.canPlay(true);
-            // Spell subclasses inherit isPossible() -> canPlay(), so the
-            // read-only result already covers that fallback without running
+            // Spell and LandAbility inherit isPossible() -> canPlay(), so the
+            // read-only result already covers their fallback without running
             // the execution path a second time.
-            if (!playable && (removeUnplayable || (readOnly && sa instanceof forge.game.spellability.Spell)
+            if (!playable && (removeUnplayable || (readOnly && (sa instanceof Spell || sa instanceof LandAbility))
                     || !sa.isPossible())) {
                 toRemove.add(sa);
             }

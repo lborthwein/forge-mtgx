@@ -194,11 +194,94 @@ public final class BenchMenuPurityVariantsSmoke {
         effect.setActivatingPlayer(f.player());
         forge.game.ability.AbilityUtils.resolve(effect);
         f.game().getAction().checkStateEffects(true);
+        var direct = new forge.game.spellability.LandAbility(land, land.getState(CardStateName.Original));
+        long timestamp = f.game().getTimestamp();
+        int hiddenId = land.getHiddenId();
         probe(f, sourceName + " face-down exile permission");
         var before = BenchMenuStateAudit.capture(f.game());
-        boolean actual = land.getAllPossibleAbilities(f.player(), true, null, true).stream().anyMatch(a -> a.isLandAbility() && a.canPlay());
+        boolean actual = land.getAllPossibleAbilities(f.player(), true, null, true).stream()
+                .anyMatch(a -> a.isLandAbility() && a.canPlayForEnumeration());
         if (actual != expectedLand) throw new AssertionError("Read-only permission drift " + sourceName);
+        var faceUp = direct.getAlternateHostForEnumeration(land);
+        if (faceUp == null || faceUp == land || !faceUp.isLKI() || faceUp.isFaceDown()
+                || !faceUp.getName().equals("Mountain") || !land.isFaceDown()
+                || land.getHiddenId() != hiddenId || f.game().getTimestamp() != timestamp)
+            throw new AssertionError("Face-up projection changed hidden identity or timestamp " + sourceName);
         BenchMenuStateAudit.assertUnchanged(before, f.game());
+        if (expectedLand) {
+            f.player().setLandsPlayedThisTurn(1);
+            long deniedTimestamp = f.game().getTimestamp();
+            var deniedBefore = BenchMenuStateAudit.capture(f.game());
+            var denied = land.getAllPossibleAbilities(f.player(), false, null, true);
+            if (denied.stream().anyMatch(a -> a.isLandAbility()))
+                throw new AssertionError("Spent land drop still offered a face-down land");
+            BenchMenuStateAudit.assertUnchanged(deniedBefore, f.game());
+            if (f.game().getTimestamp() != deniedTimestamp) throw new AssertionError("Denied read-only land advanced timestamp");
+            probe(f, sourceName + " spent land-drop menu");
+        }
+    }
+    private static void faceUpProjectionScope() {
+        var f = fixture();
+        var hidden = card("Savannah Lions", f.player(), ZoneType.Exile);
+        hidden.turnFaceDown(true);
+        var spell = hidden.getState(CardStateName.Original).getSpellAbilities().stream().findFirst().orElseThrow();
+        var ordinary = card("Savannah Lions", f.player(), ZoneType.Hand);
+        var ordinarySpell = ordinary.getFirstSpellAbility();
+        long timestamp = f.game().getTimestamp();
+        int hiddenId = hidden.getHiddenId();
+        var before = BenchMenuStateAudit.capture(f.game());
+        var prospective = spell.getAlternateHostForEnumeration(hidden);
+        if (prospective == null || prospective == hidden || !prospective.isLKI()
+                || prospective.isFaceDown() || !prospective.getName().equals("Savannah Lions")
+                || ordinarySpell.getAlternateHostForEnumeration(ordinary) != null
+                || !hidden.isFaceDown() || hidden.getHiddenId() != hiddenId
+                || f.game().getTimestamp() != timestamp)
+            throw new AssertionError("Read-only face-up projection escaped exile scope or changed hidden identity");
+        BenchMenuStateAudit.assertUnchanged(before, f.game());
+        var execution = spell.getAlternateHost(hidden);
+        if (execution == null || execution.isFaceDown() || f.game().getTimestamp() != timestamp + 1
+                || !hidden.isFaceDown() || hidden.getHiddenId() != hiddenId)
+            throw new AssertionError("Execution face-up semantics changed");
+        var guarded = card("Savannah Lions", f.player(), ZoneType.Exile);
+        guarded.turnFaceDown(true);
+        guarded.addFaceupCommand(() -> { throw new AssertionError("Read-only query ran face-up command"); });
+        var guardedSpell = guarded.getState(CardStateName.Original).getSpellAbilities().stream().findFirst().orElseThrow();
+        long guardedTimestamp = f.game().getTimestamp();
+        try {
+            guardedSpell.getAlternateHostForEnumeration(guarded);
+            throw new AssertionError("Read-only projection accepted pending face-up command");
+        } catch (IllegalStateException expected) {
+            if (!expected.getMessage().startsWith("BENCH_INTEGRITY_UNSUPPORTED:")) throw expected;
+        }
+        if (!guarded.isFaceDown() || f.game().getTimestamp() != guardedTimestamp)
+            throw new AssertionError("Rejected face-up projection changed original state");
+        var merged = card("Savannah Lions", f.player(), ZoneType.Exile);
+        merged.turnFaceDown(true);
+        merged.setMergedCards(List.of(merged));
+        var mergedSpell = merged.getState(CardStateName.Original).getSpellAbilities().stream().findFirst().orElseThrow();
+        long mergedTimestamp = f.game().getTimestamp();
+        try {
+            mergedSpell.getAlternateHostForEnumeration(merged);
+            throw new AssertionError("Read-only projection accepted merged card");
+        } catch (IllegalStateException expected) {
+            if (!expected.getMessage().startsWith("BENCH_INTEGRITY_UNSUPPORTED:")) throw expected;
+        }
+        if (!merged.isFaceDown() || f.game().getTimestamp() != mergedTimestamp)
+            throw new AssertionError("Rejected merged projection changed original state");
+        var mergedLand = card("Mountain", f.player(), ZoneType.Exile);
+        mergedLand.turnFaceDown(true);
+        mergedLand.setMergedCards(List.of(mergedLand));
+        var landProjection = new forge.game.spellability.LandAbility(mergedLand, mergedLand.getState(CardStateName.Original));
+        long mergedLandTimestamp = f.game().getTimestamp();
+        try {
+            landProjection.getAlternateHostForEnumeration(mergedLand);
+            throw new AssertionError("Read-only land projection accepted merged card");
+        } catch (IllegalStateException expected) {
+            if (!expected.getMessage().startsWith("BENCH_INTEGRITY_UNSUPPORTED:")) throw expected;
+        }
+        if (!mergedLand.isFaceDown() || f.game().getTimestamp() != mergedLandTimestamp)
+            throw new AssertionError("Rejected merged land projection changed original state");
+        System.out.println("PASS detached face-up spell scope and unchanged execution timestamp");
     }
     public static void main(String[] args) {
         try {
@@ -215,7 +298,7 @@ public final class BenchMenuPurityVariantsSmoke {
             prototypeCastingRestriction("Count$CardManaCost", "GE", "6", false);
             prototypeCastingRestriction("Count$CardNumColors", "GE", "1", true);
             prototypeCastingRestriction("Count$CardNumColors", "EQ", "0", false);
-            inactiveOptional(); exile("Thief of Sanity", false); exile("Decadent Dragon", true);
+            inactiveOptional(); exile("Thief of Sanity", false); exile("Decadent Dragon", true); faceUpProjectionScope();
             System.exit(0);
         } catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
     }
