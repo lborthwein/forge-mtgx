@@ -86,6 +86,22 @@ final class PriorityActivationIdentity {
             out.addProperty("version","priority-activation-identity-v2");
             out.addProperty("kind","intrinsic-hand-discard");out.addProperty("discardSelf",true);
         }
+        if ("intrinsic-fixed".equals(out.get("kind").getAsString()) && modes.size()==0) {
+            // The priority menu's description is SpellAbility.toString(), which
+            // includes every ordered subability. The original description above
+            // contains only the root effect and cannot identify a chained one.
+            // Preserve the older specialized versions and their existing text.
+            final String chain;
+            try { chain = sa.toString(); }
+            catch (RuntimeException | StackOverflowError failure) {
+                out.addProperty("kind", "unsupported"); return out;
+            }
+            if (chain == null || chain.isEmpty()) {
+                out.addProperty("kind", "unsupported"); return out;
+            }
+            out.addProperty("version", "priority-activation-identity-v5");
+            out.addProperty("text", chain);
+        }
         return out;
     }
 }
