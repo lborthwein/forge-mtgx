@@ -833,9 +833,9 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
         }
         if (tos.containsKey(AbilityKey.Card)) {
             final Card card = (Card) tos.get(AbilityKey.Card);
-            if (card != null && (card.getController() == player || getGame().getZoneOf(card) == null
-                    || getGame().getZoneOf(card).getZoneType().isKnown())) {
-                buildQuestion.append("\n").append(localizer.getMessage("lblTriggeredby")).append(": ").append(tos.get(AbilityKey.Card));
+            final String sourceLabel = triggerSourceLabel(card);
+            if (sourceLabel != null) {
+                buildQuestion.append("\n").append(localizer.getMessage("lblTriggeredby")).append(": ").append(sourceLabel);
             }
         }
         if (getGui().isLibgdxPort()) {
@@ -848,6 +848,26 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
             return this.getGui().confirm(cardView, buildQuestion.toString().replaceAll("\n", " "));
         }
         return InputConfirm.confirm(this, wrapper, buildQuestion.toString());
+    }
+
+    /**
+     * A trigger may retain a last-known-information card after its current
+     * object has moved into a hidden zone.  The prompt may describe the public
+     * event, but must not look through that current hidden zone or render its
+     * generic "Face-down card" placeholder as though it were the trigger.
+     */
+    static String triggerSourceLabel(final Card card) {
+        if (card == null || card.isFaceDown()) {
+            return null;
+        }
+        if (card.isLKI()) {
+            final Zone lastKnownZone = card.getLastKnownZone();
+            return lastKnownZone != null && lastKnownZone.getZoneType().isKnown()
+                    ? card.getName() : null;
+        }
+        final Zone currentZone = card.getLastKnownZone();
+        return currentZone != null && currentZone.getZoneType().isKnown()
+                ? card.toString() : null;
     }
 
     @Override
