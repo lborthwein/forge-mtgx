@@ -66,7 +66,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -2510,25 +2509,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             return null;
         }
         if (overrideOrder) {
-            int positiveSublethal = 0;
-            boolean anySublethal = false;
+            final Map<String, Integer> lethalByBlocker = new LinkedHashMap<>();
             for (Map.Entry<String, CardView> blocker : blockers.entrySet()) {
-                final int amount = assigned.getOrDefault(blocker.getKey(), 0);
-                if (amount < lethalDamage(blocker.getValue(), deathtouch)) {
-                    anySublethal = true;
-                    if (amount > 0) {
-                        positiveSublethal++;
-                    }
-                }
+                lethalByBlocker.put(blocker.getKey(), lethalDamage(blocker.getValue(), deathtouch));
             }
-            if (assigned.getOrDefault(defenderId, 0) > 0 && anySublethal) {
-                return "the defender cannot receive damage before every blocker has lethal";
-            }
-            // The player may choose any blocker order, but ordinary lethal-before-next
-            // assignment still applies within that chosen order. Put every lethal blocker
-            // first and at most one positive sublethal blocker last.
-            return positiveSublethal <= 1 ? null
-                    : "damage cannot be split sublethally across multiple blockers";
+            return validateModernCombatAllocation(assigned, lethalByBlocker, defenderId);
         }
         boolean earlierSurvives = false;
         for (Map.Entry<String, CardView> blocker : blockers.entrySet()) {
@@ -2542,6 +2527,25 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         if (assigned.getOrDefault(defenderId, 0) > 0 && earlierSurvives) {
             return "the defender cannot receive damage before every blocker has lethal";
+        }
+        return null;
+    }
+
+    /**
+     * Foundations removed combat-damage assignment order. In the modern path,
+     * a controller may divide damage among blockers freely; trample still bars
+     * excess to the defender until every blocker has lethal damage assigned.
+     */
+    static String validateModernCombatAllocation(final Map<String, Integer> assigned,
+                                                 final Map<String, Integer> lethalByBlocker,
+                                                 final String defenderId) {
+        if (assigned.getOrDefault(defenderId, 0) <= 0) {
+            return null;
+        }
+        for (Map.Entry<String, Integer> blocker : lethalByBlocker.entrySet()) {
+            if (assigned.getOrDefault(blocker.getKey(), 0) < blocker.getValue()) {
+                return "the defender cannot receive damage before every blocker has lethal";
+            }
         }
         return null;
     }
