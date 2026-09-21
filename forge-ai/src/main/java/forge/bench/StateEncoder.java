@@ -26,6 +26,7 @@ import com.google.gson.JsonObject;
 
 import forge.ai.ComputerUtilMana;
 import forge.card.MagicColor;
+import forge.card.mana.ManaAtom;
 import forge.game.Game;
 import forge.game.GameEntity;
 import forge.game.ability.ApiType;
@@ -147,11 +148,21 @@ public final class StateEncoder {
     }
 
     private static JsonObject encodeManaPool(final ManaPool pool) {
+        return encodeManaPoolAmounts(type -> pool.getAmountOfColor((byte) type), pool.totalMana());
+    }
+
+    static JsonObject encodeManaPoolAmounts(final java.util.function.IntUnaryOperator amount, final int total) {
         final JsonObject o = new JsonObject();
-        for (byte color : MagicColor.WUBRGC) {
-            o.addProperty(MagicColor.toShortString(color), pool.getAmountOfColor(color));
+        // Mana objects use ManaAtom.COLORLESS (32), while MagicColor's
+        // card-colour COLORLESS is 0. Reading key 0 omitted every {C} from
+        // the six subtotals even though totalMana() still counted it.
+        for (byte color : ManaAtom.MANATYPES) {
+            o.addProperty(MagicColor.toShortString(color), amount.applyAsInt(color));
         }
-        o.addProperty("total", pool.totalMana());
+        // Distinguishes this corrected producer from archived frames where
+        // MagicColor.COLORLESS (0) was used to query ManaAtom.COLORLESS (32).
+        o.addProperty("colorlessEncoding", "mana-atom/1");
+        o.addProperty("total", total);
         return o;
     }
 
