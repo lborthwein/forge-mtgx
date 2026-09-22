@@ -4,6 +4,7 @@ import forge.card.mana.ManaAtom;
 import forge.card.mana.ManaCost;
 import forge.card.mana.ManaCostShard;
 import forge.game.card.Card;
+import forge.game.card.CardPlayOption;
 import forge.game.cost.CostPartMana;
 import forge.game.cost.CostTap;
 import forge.game.cost.CostPayLife;
@@ -51,6 +52,15 @@ public final class HumanManaAffordability {
                 || ability.getHostCard().hasKeyword(Keyword.IMPROVISE)
                 || ability.getHostCard().hasKeyword(Keyword.DELVE)
                 || ability.getHostCard().hasKeyword(Keyword.ASSIST))) return Assessment.UNKNOWN;
+        // A may-play grant can convert what mana pays the cost -- Thief of Sanity's
+        // "mana of any type can be spent to cast it" is applied by CardPlayOption during
+        // payment (PlaySpellAbility). Matching printed pips against printed sources would
+        // then prove a payable spell unpayable and hide the only card worth casting.
+        final CardPlayOption grant = ability.getMayPlayOption();
+        if (grant != null && (grant.isIgnoreManaCostType() || grant.isIgnoreManaCostColor()
+                || grant.isIgnoreSnowSourceManaCostColor())) {
+            return Assessment.UNKNOWN;
+        }
         final CostPartMana part = ability.getPayCosts().getCostMana();
         if (part == null || part.isExiledCreatureCost() || part.isEnchantedCreatureCost()
                 || part.getMaxWaterbend() != null || part.getXMin() > 0) return Assessment.UNKNOWN;
