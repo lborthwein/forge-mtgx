@@ -612,7 +612,13 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
                 if (state == CardStateName.FaceDown) {
                     view.updateHiddenId(game.nextHiddenCardId());
                 }
-                game.fireEvent(new GameEventCardStatsChanged(this)); //ensure stats updated for new characteristics
+                // A last-known-information copy is a throwaway the GUI never shows. Legality
+                // queries build one and turn it face up (Spell#getAlternateHost), so firing
+                // here reports a stat change no player can see -- and a GUI that answers the
+                // event by re-asking what is playable never stops.
+                if (!isLKI()) {
+                    game.fireEvent(new GameEventCardStatsChanged(this)); //ensure stats updated for new characteristics
+                }
             }
         }
         return true;
