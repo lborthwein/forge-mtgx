@@ -247,12 +247,20 @@ public final class LookaheadSearch {
         final boolean[] ok = new boolean[cands.size()];
         Arrays.fill(ok, true);
 
+        // Copies first, all on this thread in a fixed order; then the play-outs (on the pool when threads > 1).
+        final Prepared[][] prep = new Prepared[cands.size()][k];
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < cands.size(); c++) {
+                prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample);
+            }
+        }
         final List<Runnable> tasks = new ArrayList<>();
         for (int w = 0; w < k; w++) {
             for (int c = 0; c < cands.size(); c++) {
                 final int ww = w, cc = c;
                 tasks.add(() -> {
-                    Rollout r = rollout(live, me, cands.get(cc), defSa, mix(decisionSeed, 1000 + ww), cfg.resample, null);
+                    Rollout r = play(prep[cc][ww], null);
+                    prep[cc][ww] = null;
                     synchronized (values) {
                         values[cc][ww] = r.value;
                         if (!r.ok) {
@@ -628,43 +636,98 @@ public final class LookaheadSearch {
         }
     }
 
+    /** A play-out's copy, made on the decision thread; the play-out itself may run on a pool thread. */
+    static final class Prepared {
+        Game g;
+        Player me;
+        List<SpellAbility> first;
+        boolean failed;
+        Throwable error;
+        long copyNanos;
+        /** The copy's scopes (ids, AI cache, RNG), installed on whichever thread plays it out. */
+        Object ids, cache;
+        Random rnd;
+    }
+
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
-        final Rollout r = new Rollout();
+        return play(prepare(live, liveMe, c, defSa, worldSeed, resample), wantFp);
+    }
+
+    /**
+     * Copy the live game for one play-out (and resample the world, and map the candidate into the copy).
+     * Everything that READS the live game happens here, on the decision thread, in a fixed order: many of
+     * Forge's "getters" build lists and views lazily (they write), and when copies were made on pool threads
+     * the order in which workers reached the live game varied with load, so a threaded game could differ from
+     * its replay (A8T audit 39/48, all on the loaded host).
+     */
+    Prepared prepare(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample) {
+        final Prepared p = new Prepared();
         final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
         MyRandom.setThreadRandom(new Random(mix(worldSeed, 1)));
         AiCache.openScope();
-        final Object prevIds2 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
             long a = System.nanoTime();
-            final GameCopier copier;
-            final Game g;
-            final Player me;
-            List<SpellAbility> first = null;
-            // Everything that READS the live game runs one worker at a time: many of Forge's "getters"
-            // build lists and views lazily (they write), so parallel copies of one live game raced and a
-            // K=8 play-out under load could come out different from its replay.
             synchronized (live) {
-                copier = new GameCopier(live, true);
-                g = copier.makeCopy();
-                me = (Player) copier.find(liveMe);
+                final GameCopier copier = new GameCopier(live, true);
+                p.g = copier.makeCopy();
+                p.me = (Player) copier.find(liveMe);
                 if (resample) {
-                    resample(live, liveMe, g, me, new Random(mix(worldSeed, 2)));
+                    resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
                 }
                 MyRandom.setThreadRandom(new Random(mix(worldSeed, 3)));
                 if (!c.pass) {
-                    SpellAbility sa = prepare(g, me, c, defSa, copier);
+                    SpellAbility sa = prepare(p.g, p.me, c, defSa, copier);
                     if (sa == null) {
-                        r.ok = false;
-                        r.value = Double.NEGATIVE_INFINITY;
-                        return r;
+                        p.failed = true;
+                    } else {
+                        p.first = new ArrayList<>();
+                        p.first.add(sa);
                     }
-                    first = new ArrayList<>();
-                    first.add(sa);
                 }
             }
-            r.copyNanos = System.nanoTime() - a;
-            me.dangerouslySetController(new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), first));
+            p.copyNanos = System.nanoTime() - a;
+        } catch (RuntimeException | StackOverflowError e) {
+            p.failed = true;
+            p.error = e;
+        } finally {
+            p.ids = forge.util.IdScope.capture();
+            p.cache = AiCache.captureScope();
+            p.rnd = MyRandom.getThreadRandom();
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+        return p;
+    }
+
+    /** Play a prepared copy out to the horizon, on the calling thread, inside the copy's own scopes. */
+    Rollout play(Prepared p, Boolean wantFp) {
+        final Rollout r = new Rollout();
+        if (p.failed) {
+            r.ok = false;
+            r.value = Double.NEGATIVE_INFINITY;
+            if (p.error != null) {
+                System.err.println("[lookahead] rollout failed: " + p.error);
+                if (FAILURE_TRACES.getAndIncrement() < 20) {
+                    p.error.printStackTrace();
+                }
+            }
+            return r;
+        }
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(p.rnd);
+        AiCache.installScope(p.cache);
+        forge.util.IdScope.install(p.ids);
+        try {
+            final Game g = p.g;
+            final Player me = p.me;
+            r.copyNanos = p.copyNanos;
+            me.dangerouslySetController(new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), p.first));
             for (Player o : g.getPlayers()) {
                 if (o != me) {
                     o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
@@ -693,8 +756,9 @@ public final class LookaheadSearch {
                 e.printStackTrace();
             }
         } finally {
-            AiCache.closeScope();
-            forge.util.IdScope.install(prevIds2);
+            p.g = null;
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
         }
         return r;

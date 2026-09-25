@@ -30,6 +30,21 @@ public class AiCache {
         scope.remove();
     }
 
+    /** This thread's scope (for {@link #installScope} on another thread), or null. */
+    public static Object captureScope() {
+        return scope.get();
+    }
+
+    /** Make {@code captured} (from {@link #captureScope}) this thread's scope; null removes it. */
+    @SuppressWarnings("unchecked")
+    public static void installScope(Object captured) {
+        if (captured == null) {
+            scope.remove();
+        } else {
+            scope.set((Multimap<String, List<Object>>) captured);
+        }
+    }
+
     private static Multimap<String, List<Object>> map() {
         final Multimap<String, List<Object>> m = scope.get();
         return m != null ? m : dataMap;
