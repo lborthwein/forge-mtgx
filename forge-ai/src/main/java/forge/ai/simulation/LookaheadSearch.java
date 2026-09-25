@@ -196,6 +196,7 @@ public final class LookaheadSearch {
     private int horizonOverride = -1, maxStepsOverride = -1;
     private static final int QPROBE = Integer.getInteger("lookahead.qprobe", 0);
     private static final String QPROBE_MODE = System.getProperty("lookahead.qprobeMode", "disagree");
+    private static final boolean DUMP_ROOT = Boolean.getBoolean("lookahead.dumpRoot");
     private int decisionIndex = 0;
     private int departuresTurn = -1;
     private int departuresThisTurn = 0;
@@ -490,6 +491,10 @@ public final class LookaheadSearch {
             }
         }
         o.addProperty("bestStatic", bestStatic);
+        if (DUMP_ROOT) {
+            // The decision's own position (seat view; StateEncoder is read-only), for offline candidate-prior reads.
+            o.add("root", forge.bench.StateEncoder.encode(live, me));
+        }
         final JsonArray ca = new JsonArray();
         for (int c = 0; c < cands.size(); c++) {
             final Cand cd = cands.get(c);
