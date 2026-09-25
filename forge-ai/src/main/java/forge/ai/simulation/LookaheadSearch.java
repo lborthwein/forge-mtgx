@@ -332,6 +332,18 @@ public final class LookaheadSearch {
             outcome = "shadow-would-depart";
         }
 
+        if (Boolean.getBoolean("lookahead.trace")) {
+            // One line per searched decision: every candidate's per-world values, bit-exact, to find where two runs part.
+            StringBuilder tb = new StringBuilder("[ltrace] d=").append(index).append(" T").append(turn).append(' ').append(ph.getPhase())
+                    .append(" best=").append(best).append(" out=").append(outcome);
+            for (int c = 0; c < cands.size(); c++) {
+                tb.append(" | ").append(cands.get(c).label.replace('|', '/')).append(ok[c] ? "" : " FAIL");
+                for (int w = 0; w < k; w++) {
+                    tb.append(' ').append(Double.doubleToLongBits(values[c][w]));
+                }
+            }
+            System.err.println(tb);
+        }
         if (Boolean.getBoolean("lookahead.debug") && best != 0) {
             System.err.println("[lookahead] decision " + index + " T" + turn + " " + ph.getPhase() + " stack=" + live.getStack().size()
                     + " def=" + cands.get(0).label + " best=" + cands.get(best).label + " outcome=" + outcome
