@@ -65,7 +65,7 @@ public class TokenDb implements ITokenDatabase {
         return this.rulesByName.containsKey(rule);
     }
 
-    public void preloadTokens() {
+    public synchronized void preloadTokens() {
         for (CardEdition edition : this.editions) {
             for (Map.Entry<String, Collection<CardEdition.EditionEntry>> inSet : edition.getTokens().asMap().entrySet()) {
                 String name = inSet.getKey();
@@ -77,7 +77,10 @@ public class TokenDb implements ITokenDatabase {
         }
     }
 
-    protected boolean loadTokenFromSet(CardEdition edition, String name) {
+    // synchronized (fork, look-ahead C3c): the token table fills lazily on a token's first use. Play-outs on several
+    // threads raced on it: a reader could see a token with some of its arts missing, and Aggregates.random then drew
+    // fewer numbers from that play-out's stream (a threaded K=8 game could differ from its replay).
+    protected synchronized boolean loadTokenFromSet(CardEdition edition, String name) {
         String fullName = String.format("%s_%s", name, edition.getCode().toLowerCase());
         if (allTokenByName.containsKey(fullName)) {
             return true;
@@ -108,7 +111,7 @@ public class TokenDb implements ITokenDatabase {
     // editions that register the token and pass the filter, or null if none.
     // When preferEraMatchedArt is on and hostDate != null, instead picks the
     // legal edition whose release date is closest to hostDate.
-    public PaperToken getTokenFromEditions(String tokenName, Predicate<CardEdition> editionFilter, Date hostDate) {
+    public synchronized PaperToken getTokenFromEditions(String tokenName, Predicate<CardEdition> editionFilter, Date hostDate) {
         if (editionFilter == null) {
             for (CardEdition edition : this.editions) {
                 if (restrictedTokenEntries.contains(edition.getCode() + "/" + tokenName)) continue;
@@ -164,7 +167,7 @@ public class TokenDb implements ITokenDatabase {
     }
 
     @Override
-    public PaperToken getToken(String tokenName, String edition, int artIndex) {
+    public synchronized PaperToken getToken(String tokenName, String edition, int artIndex) {
         CardEdition realEdition = editions.getEditionByCodeOrThrow(edition);
         String fullName = String.format("%s_%s", tokenName, realEdition.getCode().toLowerCase());
 

@@ -90,11 +90,11 @@ public final class LookaheadBench {
             prefs.setPref(FPref.UI_LANGUAGE, "en-US");
             return null;
         });
-        if (Boolean.getBoolean("lookahead.preloadTokens")) {
-            // Diagnostics: TokenDb fills a HashMultimap lazily on a token's first use; play-outs on several threads
-            // can race on it (a reader sees a token with fewer arts, Aggregates.random draws fewer numbers).
+        if (!"false".equals(System.getProperty("lookahead.preloadTokens"))) {
+            // C3c: fill the token table before any game. TokenDb fills a HashMultimap lazily on a token's first use;
+            // play-outs on several threads raced on it (a reader saw a token with fewer arts and Aggregates.random drew
+            // fewer numbers). TokenDb is also synchronized now; preloading keeps the lock uncontended.
             FModel.getMagicDb().getAllTokens().preloadTokens();
-            System.err.println("[lookahead-bench] tokens preloaded");
         }
 
         final Set<String> done = new HashSet<>();
