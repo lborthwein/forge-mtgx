@@ -80,6 +80,17 @@ public class GameCopier {
         return makeCopy(null, null);
     }
     public Game makeCopy(PhaseType advanceToPhase, Player aiPlayer) {
+        // Every trait and cost cloned for the copy gets its own mutable collections, so the copy can run on
+        // another thread than the original (forge.game.IndependentCopies).
+        forge.game.IndependentCopies.enter();
+        try {
+            return makeCopy0(advanceToPhase, aiPlayer);
+        } finally {
+            forge.game.IndependentCopies.exit();
+        }
+    }
+
+    private Game makeCopy0(PhaseType advanceToPhase, Player aiPlayer) {
         if (origGame.EXPERIMENTAL_RESTORE_SNAPSHOT) {
             // How do we advance to phase when using restores?
             return snapshot.makeCopy();
@@ -358,10 +369,10 @@ public class GameCopier {
         newCard.setCommander(c.isCommander());
         newCard.setType(new CardType(c.getType()));
         for (StaticAbility stAb : c.getStaticAbilities()) {
-            newCard.addStaticAbility(stAb.copy(newCard, true));
+            newCard.addStaticAbility(stAb.copy(newCard, false));
         }
         for (SpellAbility sa : c.getSpellAbilities()) {
-            SpellAbility saCopy = sa.copy(newCard, true);
+            SpellAbility saCopy = sa.copy(newCard, false);
             if (saCopy != null) {
                 newCard.addSpellAbility(saCopy);
             } else {
@@ -400,7 +411,9 @@ public class GameCopier {
             newCard.setDamage(c.getDamage());
             newCard.setDamageReceivedThisTurn(c.getDamageReceivedThisTurn());
 
-            newCard.copyFrom(c);
+            // Independent (non-LKI) trait copies: an LKI copy shares state with the original game's traits,
+            // so play-outs on other threads raced with each other and with the live game.
+            newCard.copyFrom(c, false);
             newCard.updateKeywordsCache();
 
             if (c.isTapped()) {
@@ -446,7 +459,7 @@ public class GameCopier {
 
             newCard.setFlipped(c.isFlipped());
             for (Map.Entry<Long, CardCloneStates> e : c.getCloneStates().entrySet()) {
-                newCard.addCloneState(e.getValue().copy(newCard, true), e.getKey());
+                newCard.addCloneState(e.getValue().copy(newCard, false), e.getKey());
             }
 
             Multiset<CounterType> counters = c.getCounters();

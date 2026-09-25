@@ -60,7 +60,7 @@ public class StaticAbility extends CardTraitBase implements IIdentifiable, Clone
     private Set<StaticAbilityMode> modes;
     private Set<StaticAbilityLayer> layers;
     private CardCollectionView ignoreEffectCards = new CardCollection();
-    private final List<Player> ignoreEffectPlayers = Lists.newArrayList();
+    private List<Player> ignoreEffectPlayers = Lists.newArrayList();
     private int mayPlayTurn = 0;
 
     private SpellAbility payingTrigSA;
@@ -599,6 +599,11 @@ public class StaticAbility extends CardTraitBase implements IIdentifiable, Clone
 
             // reset to force refresh if needed
             clone.payingTrigSA = null;
+            if (forge.game.IndependentCopies.active()) {
+                // clone() shares the ignore lists with the original static ability
+                clone.ignoreEffectPlayers = Lists.newArrayList(ignoreEffectPlayers);
+                clone.ignoreEffectCards = new CardCollection(ignoreEffectCards);
+            }
 
             if (!lki) {
                 clone.mayPlayTurn = 0;

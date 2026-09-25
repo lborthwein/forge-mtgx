@@ -213,10 +213,20 @@ public abstract class CostPart implements Comparable<CostPart>, Cloneable, Seria
     	CostPart clone = null;
         try {
             clone = (CostPart) clone();
+            if (forge.game.IndependentCopies.active()) {
+                clone.detachSharedState();
+            }
         } catch (final CloneNotSupportedException e) {
             System.err.println(e);
         }
         return clone;
+    }
+
+    /**
+     * Give a clone its own mutable payment state (see {@link forge.game.IndependentCopies}); clone() shares it
+     * with the original. Called only while a game is being copied.
+     */
+    protected void detachSharedState() {
     }
 
     @Override

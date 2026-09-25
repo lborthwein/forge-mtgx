@@ -724,6 +724,13 @@ public abstract class CardTraitBase implements GameObject, IHasCardView, IHasSVa
         // dont use setHostCard to not trigger the not copied parts yet
         copy.hostCard = host;
         copy.keyword = this.keyword;
+        if (IndependentCopies.active()) {
+            // clone() shares these maps with the original trait
+            copy.intrinsicChangedTextColors = Maps.newHashMap(intrinsicChangedTextColors);
+            copy.intrinsicChangedTextTypes = Maps.newHashMap(intrinsicChangedTextTypes);
+            copy.changedTextColors = Maps.newHashMap(changedTextColors);
+            copy.changedTextTypes = Maps.newHashMap(changedTextTypes);
+        }
     }
 
     public List<Object> getTriggerRemembered() {

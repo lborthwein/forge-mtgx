@@ -60,6 +60,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class LookaheadSearch {
 
     public static final double TERMINAL = 100000.0;
+    private static final AtomicInteger FAILURE_TRACES = new AtomicInteger();
 
     public static final class Config {
         public int worlds = 1;
@@ -688,6 +689,9 @@ public final class LookaheadSearch {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
             System.err.println("[lookahead] rollout failed: " + e);
+            if (FAILURE_TRACES.getAndIncrement() < 20) {
+                e.printStackTrace();
+            }
         } finally {
             AiCache.closeScope();
             forge.util.IdScope.install(prevIds2);
