@@ -4185,9 +4185,12 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
     }
 
     public void setChangedCardKeywords(Table<Long, Long, KeywordsChange> changedCardKeywords) {
+        setChangedCardKeywords(changedCardKeywords, true);
+    }
+    public void setChangedCardKeywords(Table<Long, Long, KeywordsChange> changedCardKeywords, boolean lki) {
         this.changedCardKeywords.clear();
         for (Table.Cell<Long, Long, KeywordsChange> entry : changedCardKeywords.cellSet()) {
-            this.changedCardKeywords.put(entry.getRowKey(), entry.getColumnKey(), entry.getValue().copy(this, true));
+            this.changedCardKeywords.put(entry.getRowKey(), entry.getColumnKey(), entry.getValue().copy(this, lki));
         }
     }
 
@@ -4959,9 +4962,12 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         return changedCardTraitsByText;
     }
     public final void setChangedCardTraitsByText(Table<Long, Long, CardTraitChanges> changes) {
+        setChangedCardTraitsByText(changes, true);
+    }
+    public final void setChangedCardTraitsByText(Table<Long, Long, CardTraitChanges> changes, boolean lki) {
         changedCardTraitsByText.clear();
         for (Table.Cell<Long, Long, CardTraitChanges> e : changes.cellSet()) {
-            changedCardTraitsByText.put(e.getRowKey(), e.getColumnKey(), e.getValue().copy(this, true));
+            changedCardTraitsByText.put(e.getRowKey(), e.getColumnKey(), e.getValue().copy(this, lki));
         }
     }
     public final void addChangedCardTraitsByText(Collection<SpellAbility> spells,
@@ -5020,9 +5026,12 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
     }
 
     public final void setChangedCardTraits(Table<Long, Long, ICardTraitChanges> changes) {
+        setChangedCardTraits(changes, true);
+    }
+    public final void setChangedCardTraits(Table<Long, Long, ICardTraitChanges> changes, boolean lki) {
         changedCardTraits.clear();
         for (Table.Cell<Long, Long, ICardTraitChanges> e : changes.cellSet()) {
-            changedCardTraits.put(e.getRowKey(), e.getColumnKey(), e.getValue().copy(this, true));
+            changedCardTraits.put(e.getRowKey(), e.getColumnKey(), e.getValue().copy(this, lki));
         }
     }
 
@@ -5185,9 +5194,12 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
     }
 
     public void setChangedCardKeywordsByText(Table<Long, Long, IKeywordsChange> changedCardKeywords) {
+        setChangedCardKeywordsByText(changedCardKeywords, true);
+    }
+    public void setChangedCardKeywordsByText(Table<Long, Long, IKeywordsChange> changedCardKeywords, boolean lki) {
         this.changedCardKeywordsByText.clear();
         for (Table.Cell<Long, Long, IKeywordsChange> entry : changedCardKeywords.cellSet()) {
-            this.changedCardKeywordsByText.put(entry.getRowKey(), entry.getColumnKey(), entry.getValue().copy(this, true));
+            this.changedCardKeywordsByText.put(entry.getRowKey(), entry.getColumnKey(), entry.getValue().copy(this, lki));
         }
     }
 
@@ -8141,13 +8153,22 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
     }
 
     public void copyFrom(Card in) {
+        copyFrom(in, true);
+    }
+
+    /**
+     * @param lki true (Forge's own LKI use): the copied traits may share state with {@code in}'s (same ids, shared
+     *            replacement-object maps). false: every trait is an independent copy, as a separate game needs --
+     *            GameCopier uses false, so a copied game can run on another thread than the original.
+     */
+    public void copyFrom(Card in, boolean lki) {
         // clean is not needed?
         this.changedCardColors.putAll(in.changedCardColors);
         this.changedCardColorsCharacterDefining.putAll(in.changedCardColorsCharacterDefining);
 
-        setChangedCardKeywords(in.getChangedCardKeywords());
+        setChangedCardKeywords(in.getChangedCardKeywords(), lki);
         for (Table.Cell<Long, Long, List<String>> kw : in.hiddenExtrinsicKeywords.cellSet()) {
-            hiddenExtrinsicKeywords.put(kw.getRowKey(), kw.getColumnKey(), kw.getValue());
+            hiddenExtrinsicKeywords.put(kw.getRowKey(), kw.getColumnKey(), lki ? kw.getValue() : Lists.newArrayList(kw.getValue()));
         }
 
         this.changedCardTypes.putAll(in.changedCardTypes);
@@ -8155,13 +8176,13 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         updateTypeCache();
 
         this.changedCardNames.putAll(in.changedCardNames);
-        setChangedCardTraits(in.getChangedCardTraits());
+        setChangedCardTraits(in.getChangedCardTraits(), lki);
 
-        setChangedCardTraitsByText(in.getChangedCardTraitsByText());
-        setChangedCardKeywordsByText(in.getChangedCardKeywordsByText());
+        setChangedCardTraitsByText(in.getChangedCardTraitsByText(), lki);
+        setChangedCardKeywordsByText(in.getChangedCardKeywordsByText(), lki);
 
         for (Map.Entry<CounterType, StaticAbility> e : in.counterTypeKeywordStatic.entrySet()) {
-            this.counterTypeKeywordStatic.put(e.getKey(), e.getValue().copy(this, true));
+            this.counterTypeKeywordStatic.put(e.getKey(), e.getValue().copy(this, lki));
         }
     }
 }
