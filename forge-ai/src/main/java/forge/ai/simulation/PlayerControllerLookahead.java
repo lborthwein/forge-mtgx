@@ -31,6 +31,24 @@ public class PlayerControllerLookahead extends PlayerControllerAi {
         return search.decide(this, def);
     }
 
+    @Override
+    public void declareAttackers(Player attacker, forge.game.combat.Combat combat) {
+        super.declareAttackers(attacker, combat);
+        final LookaheadSearch search = lobby.getSearch();
+        if (search != null && getGame() == lobby.getLiveGame() && search.getConfig().combat && attacker == getPlayer()) {
+            search.decideAttack(this, combat);
+        }
+    }
+
+    @Override
+    public void declareBlockers(Player defender, forge.game.combat.Combat combat) {
+        super.declareBlockers(defender, combat);
+        final LookaheadSearch search = lobby.getSearch();
+        if (search != null && getGame() == lobby.getLiveGame() && search.getConfig().combat) {
+            search.decideBlock(this, defender, combat);
+        }
+    }
+
     public LobbyPlayer getLookaheadLobby() {
         return lobby;
     }
