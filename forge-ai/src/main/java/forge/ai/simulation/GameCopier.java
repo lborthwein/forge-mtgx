@@ -55,6 +55,10 @@ public class GameCopier {
      * or talk to a host. Off by default, which is the copier's original behaviour.
      */
     private final boolean plainAiPlayers;
+    /** C1: copy the original game's stack (spells only; see {@link #stackUnsupported}). Off by default. */
+    private boolean copyStack = false;
+    /** Stack spells of the original game -> their copies (a counterspell's target is a spell). */
+    private final Map<SpellAbility, SpellAbility> stackSaMap = new java.util.IdentityHashMap<>();
 
     public GameCopier(Game origGame) {
         this(origGame, false);
@@ -65,6 +69,136 @@ public class GameCopier {
         this.origGame = origGame;
         if (origGame.EXPERIMENTAL_RESTORE_SNAPSHOT) {
             this.snapshot = new GameSnapshot(origGame);
+        }
+    }
+
+    /** C1: also copy the original game's stack. Callers must first check {@link #stackUnsupported}. */
+    public void setCopyStack(boolean copyStack) {
+        this.copyStack = copyStack;
+    }
+
+    /**
+     * Why a game's stack cannot be copied faithfully by {@link #copyStackFaithfully}, or null if it can.
+     * Supported: spells (in their original state, not cast through a may-play effect) and activated abilities of
+     * cards in a zone, with their targets (cards, players, or entries lower on the stack), announced X, optional
+     * costs, chosen modes and paid objects (mapped by id). Refused: triggered abilities, pending simultaneous
+     * entries, a frozen stack, copies, face-down or non-original-state hosts, and spliced spells.
+     */
+    public static String stackUnsupported(Game g) {
+        final forge.game.zone.MagicStack st = g.getStack();
+        if (st.hasSimultaneousStackEntries()) {
+            return "simultaneous";
+        }
+        if (st.isFrozen()) {
+            return "frozen";
+        }
+        final java.util.Set<SpellAbility> below = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (java.util.Iterator<SpellAbilityStackInstance> it = st.reverseIterator(); it.hasNext(); ) {
+            final SpellAbilityStackInstance si = it.next();
+            final SpellAbility sa = si.getSpellAbility();
+            if (si.isTrigger() || sa.isTrigger() || sa.isWrapper()) {
+                return "trigger";
+            }
+            final boolean spell = si.isSpell() && sa.isSpell();
+            final Card host = sa.getHostCard();
+            if (sa.isCopied() || host.isCopiedSpell() || (spell && host.isToken())) {
+                return "copy";
+            }
+            if (sa.isManaAbility()) {
+                return "mana";
+            }
+            if (host.isFaceDown() || host.getCurrentStateName() != forge.card.CardStateName.Original) {
+                return "state";
+            }
+            if (spell && sa.getMayPlay() != null) {
+                return "mayplay";
+            }
+            if (sa.getSplicedCards() != null && !sa.getSplicedCards().isEmpty()) {
+                return "splice";
+            }
+            if (host.getZone() == null || (spell && host.getZone().getZoneType() != ZoneType.Stack)) {
+                return "zone";
+            }
+            for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                if (!s.usesTargeting()) {
+                    continue;
+                }
+                for (GameObject o : s.getTargets()) {
+                    if (o instanceof SpellAbility && !below.contains(o)) {
+                        return "target";
+                    }
+                    if (!(o instanceof SpellAbility) && !(o instanceof Card) && !(o instanceof Player)) {
+                        return "target";
+                    }
+                }
+            }
+            below.add(sa);
+        }
+        return null;
+    }
+
+    /**
+     * Rebuild the original stack in the copy, bottom first: each spell is its copied card's own ability with the
+     * original's cast choices (X, optional costs, modes) and targets mapped into the copy. Throws if any entry cannot
+     * be rebuilt (callers treat that as a failed copy).
+     */
+    private void copyStackFaithfully(Game newGame) {
+        for (java.util.Iterator<SpellAbilityStackInstance> it = origGame.getStack().reverseIterator(); it.hasNext(); ) {
+            final SpellAbility orig = it.next().getSpellAbility();
+            final Card newHost = (Card) find(orig.getHostCard());
+            final Player activator = (Player) find(orig.getActivatingPlayer());
+            SpellAbility base = findSAInCard(orig, newHost);
+            if (base == null) {
+                // Cast choices can extend the description ("... (without paying its mana cost)", optional costs):
+                // take the card's own ability of the same kind whose description is the longest prefix.
+                for (SpellAbility cardSa : newHost.getAllSpellAbilities()) {
+                    final String d = cardSa.getDescription();
+                    if (cardSa.isSpell() == orig.isSpell() && !d.isEmpty() && orig.getDescription().startsWith(d)
+                            && (base == null || d.length() > base.getDescription().length())) {
+                        base = cardSa;
+                    }
+                }
+            }
+            if (base == null) {
+                throw new IllegalStateException("stack copy: no ability '" + orig.getDescription() + "' on " + newHost);
+            }
+            base.setActivatingPlayer(activator);
+            SpellAbility copy = SpellAbilityChoiceCopier.copyCastChoices(orig, base, activator);
+            if (copy == null) {
+                throw new IllegalStateException("stack copy: modes of " + orig + " not found");
+            }
+            for (SpellAbility sub = copy; sub != null; sub = sub.getSubAbility()) {
+                if (sub.usesTargeting()) {
+                    sub.resetTargets();
+                }
+            }
+            SpellAbilityChoiceCopier.copyTargets(orig, copy, this::findWithStack);
+            copy.setActivatingPlayer(activator);
+            // Paid objects (sacrificed, discarded, tapped...) by id: the copy holds the same cards (an LKI object maps
+            // to its card's current copy). One that is not in the copied game fails the copy.
+            if (!orig.getPaidHash().isEmpty()) {
+                final TreeBasedTable<String, Boolean, forge.game.card.CardCollection> paid = TreeBasedTable.create();
+                for (Table.Cell<String, Boolean, forge.game.card.CardCollection> cell : orig.getPaidHash().cellSet()) {
+                    final forge.game.card.CardCollection mapped = new forge.game.card.CardCollection();
+                    for (Card pc : cell.getValue()) {
+                        final Card m = newGame.findById(pc.getId());
+                        if (m == null) {
+                            throw new IllegalStateException("stack copy: paid " + pc + " of " + orig + " not in the copy");
+                        }
+                        mapped.add(m);
+                    }
+                    paid.put(cell.getRowKey(), cell.getColumnKey(), mapped);
+                }
+                copy.setPaidHash(paid);
+            }
+            if (orig.getHostCard().getCastSA() == orig) {
+                newHost.setCastSA(copy);
+            }
+            newGame.getStack().dangerouslyPushCopy(copy);
+            stackSaMap.put(orig, copy);
+        }
+        if (newGame.getStack().size() != origGame.getStack().size()) {
+            throw new IllegalStateException("stack copy: size " + newGame.getStack().size() + " != " + origGame.getStack().size());
         }
     }
 
@@ -198,6 +332,11 @@ public class GameCopier {
 
         if (GameSimulator.COPY_STACK)
             copyStack(origGame, newGame, gameObjectMap);
+        if (copyStack && !origGame.getStack().isEmpty()) {
+            copyStackFaithfully(newGame);
+            // Spells on the stack can carry statics ("can't be countered"); apply them as the original game had them.
+            newGame.getAction().checkStaticAbilities(false);
+        }
 
         // TODO update thisTurnCast
 
@@ -602,6 +741,18 @@ public class GameCopier {
             throw new RuntimeException("Couldn't map " + o + "/" + System.identityHashCode(o));
         return result;
     }
+    /** {@link #find}, and a spell or ability on the original stack maps to its copy on the copied stack (C1). */
+    public GameObject findWithStack(GameObject o) {
+        if (o instanceof SpellAbility) {
+            final SpellAbility m = stackSaMap.get(o);
+            if (m == null) {
+                throw new RuntimeException("Couldn't map stack entry " + o);
+            }
+            return m;
+        }
+        return find(o);
+    }
+
     public GameObject reverseFind(GameObject o) {
         if (origGame.EXPERIMENTAL_RESTORE_SNAPSHOT) {
             return snapshot.reverseFind(o);

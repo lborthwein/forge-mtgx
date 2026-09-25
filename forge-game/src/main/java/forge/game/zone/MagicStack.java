@@ -1009,6 +1009,16 @@ public class MagicStack /* extends MyObservable */ implements Iterable<SpellAbil
         return stack.descendingIterator();
     }
 
+    /**
+     * Look-ahead game copies only: put a copied spell on top of this stack as it already stood in the original
+     * game. Unlike {@link #add} it runs no cast, copy or becomes-target triggers, records no undo and cast
+     * history and moves no priority: all of that already happened in the original game.
+     */
+    public final void dangerouslyPushCopy(final SpellAbility sp) {
+        stack.addFirst(new SpellAbilityStackInstance(sp));
+        game.updateStackForView();
+    }
+
     public void clear() {
         if (stack.isEmpty()) { return; }
         stack.clear();

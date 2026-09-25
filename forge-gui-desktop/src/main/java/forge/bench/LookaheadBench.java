@@ -137,6 +137,8 @@ public final class LookaheadBench {
                     c.probeMax = la.has("probeMax") ? la.get("probeMax").getAsInt() : 6;
                     c.fidelity = !la.has("fidelity") || la.get("fidelity").getAsBoolean();
                     c.combat = la.has("combat") && la.get("combat").getAsBoolean();
+                    c.stack = la.has("stack") && la.get("stack").getAsBoolean();
+                    c.probeStack = la.has("probeStack") && la.get("probeStack").getAsBoolean();
                     c.margin = la.has("margin") ? la.get("margin").getAsDouble() : 0.0;
                     c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();
