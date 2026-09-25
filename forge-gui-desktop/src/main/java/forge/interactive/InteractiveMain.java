@@ -147,7 +147,8 @@ public final class InteractiveMain {
             // HostedMatch installs this bridge for every local human controller. It
             // drives the normal InputQueue/UI lifecycle; our raw-event subscriber is
             // additional protocol instrumentation, not a substitute for it.
-            game.subscribeToEvents(new FControlGameEventHandler(humanController));
+            game.subscribeToEvents(InteractiveGuiGame.uiEventsExceptEchoes(gui,
+                    new FControlGameEventHandler(humanController)));
             game.subscribeToEvents(gui);
             gui.startReader();
 

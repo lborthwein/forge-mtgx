@@ -81,6 +81,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 /**
@@ -98,6 +99,24 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private final Set<Input> inFlightInputs = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean aborting = new AtomicBoolean();
     private final ExecutorService actions;
+    /**
+     * Forge's model is single-threaded: {@code Card#getAllPossibleAbilities} is not a
+     * read. For an LKI-checked spell (Prototype, bestow, face-down exile, an alternate
+     * face) {@code GameActionUtil.getAlternativeCosts} re-applies every static ability
+     * in the game, freezes and unfreezes the view tracker, and restores. Two bridge
+     * threads doing that at once throw {@code ConcurrentModificationException}
+     * (2026-09-24: Steel Seraph cast while Oracle of Mul Daya was in play).
+     *
+     * <p>This gate is held by the EDT while it enumerates and publishes controls, by the
+     * reader while it claims a request for an action, and by {@link #ask} while it opens
+     * a modal. It is never held while waiting for the browser or for Forge's game
+     * thread. A claimed input is in {@link #inFlightInputs} before the gate is released,
+     * so the publisher skips it while its action runs; once the action stops the input,
+     * the proxy no longer names it.</p>
+     */
+    private final ReentrantLock engineGate = new ReentrantLock();
+    /** True on the thread running this bridge's own control enumeration. */
+    private final ThreadLocal<Boolean> readOnlyQuery = ThreadLocal.withInitial(() -> false);
 
     private volatile Game game;
     private volatile Player human;
@@ -147,7 +166,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     void onEngineEvent(final GameEvent engineEvent) {
-        if (channel.isEnded() || game == null || human == null) {
+        if (channel.isEnded() || game == null || human == null || isReadOnlyQueryEcho()) {
             return;
         }
         try {
@@ -212,6 +231,18 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             return;
         }
 
+        // The claim below and publishCurrentInput's enumeration exclude each
+        // other; see engineGate.
+        engineGate.lock();
+        try {
+            claimActiveRequest(input, pending);
+        } finally {
+            engineGate.unlock();
+        }
+    }
+
+    private void claimActiveRequest(final InteractiveProtocol.InputMessage input,
+                                    final PendingInput pending) {
         final ActiveRequest request = activeRequest.get();
         if (request == null || !request.requestId.equals(input.requestId())) {
             finishInput(input, pending, false, "stale or unknown requestId");
@@ -379,7 +410,56 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         });
     }
 
+    /**
+     * True while this thread is inside the bridge's own control enumeration. Events that
+     * Forge fires from it are the apply-and-restore of an LKI legality check, not game
+     * changes; forwarding them would republish, which enumerates again (a loop).
+     */
+    boolean isReadOnlyQueryEcho() {
+        return readOnlyQuery.get();
+    }
+
+    /**
+     * Forge's UI event handler, minus the events fired inside this bridge's own control
+     * enumeration. Handing those to the handler schedules a republish, which enumerates
+     * again: with Oracle of Mul Daya in play every pass fired four PlayerStatsChanged,
+     * so the EDT enumerated without end while the seat's input was live.
+     */
+    static Object uiEventsExceptEchoes(final InteractiveGuiGame gui,
+                                       final forge.gui.control.FControlGameEventHandler handler) {
+        return new UiEventsExceptEchoes(gui, handler);
+    }
+
+    private static final class UiEventsExceptEchoes {
+        private final InteractiveGuiGame gui;
+        private final forge.gui.control.FControlGameEventHandler handler;
+
+        private UiEventsExceptEchoes(final InteractiveGuiGame gui,
+                                     final forge.gui.control.FControlGameEventHandler handler) {
+            this.gui = gui;
+            this.handler = handler;
+        }
+
+        @Subscribe
+        public void receiveGameEvent(final GameEvent event) {
+            if (!gui.isReadOnlyQueryEcho()) {
+                handler.receiveGameEvent(event);
+            }
+        }
+    }
+
     private void publishCurrentInput() {
+        engineGate.lock();
+        readOnlyQuery.set(true);
+        try {
+            publishCurrentInputGated();
+        } finally {
+            readOnlyQuery.set(false);
+            engineGate.unlock();
+        }
+    }
+
+    private void publishCurrentInputGated() {
         if (channel.isEnded() || modalRequest.get() != null || controller == null || game == null
                 || game.isGameOver()) {
             return;
@@ -1029,21 +1109,36 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (game != null && !game.isGameOver() && !hasControl(controls, "game:concede")) {
             controls.add(control("game:concede", "concede", "Concede game"));
         }
-        final String requestId = nextRequestId();
-        final ModalRequest modal = new ModalRequest(requestId, kind, validator);
-        if (!modalRequest.compareAndSet(null, modal)) {
-            throw unsupported(inputClass, "nested blocking GUI callbacks are unsupported", kind);
-        }
-        activeRequest.set(null);
-        lastInputFingerprint = "";
+        // Opening the modal and publishing an input exclude each other (engineGate), so
+        // the browser never sees an input request published after this modal while the
+        // modal is still waiting (the superseded-refusal stall, 2026-09-24). The id is
+        // taken under the gate too, so request ids reach the wire in order.
+        String requestId = null;
+        ModalRequest modal = null;
+        engineGate.lock();
+        boolean sent = false;
         try {
+            requestId = nextRequestId();
+            modal = new ModalRequest(requestId, kind, validator);
+            if (!modalRequest.compareAndSet(null, modal)) {
+                throw unsupported(inputClass, "nested blocking GUI callbacks are unsupported", kind);
+            }
+            activeRequest.set(null);
+            lastInputFingerprint = "";
             channel.send("request", requestBody(requestId, kind, inputClass, title, message,
                     min, max, cancellable, controls));
-            return modal.answer.join();
+            sent = true;
         } catch (InteractiveProtocol.ProtocolException e) {
-            modalRequest.compareAndSet(modal, null);
             fail("eof", e.getMessage(), requestId, inputClass, kind, e);
             throw new InteractiveAbort(e.getMessage(), e);
+        } finally {
+            if (!sent) {
+                modalRequest.compareAndSet(modal, null);
+            }
+            engineGate.unlock();
+        }
+        try {
+            return modal.answer.join();
         } catch (CompletionException e) {
             if (e.getCause() instanceof GameConceded conceded) {
                 throw conceded;
