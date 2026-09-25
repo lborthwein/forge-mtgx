@@ -4,7 +4,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.LinkedHashSet;
 
-import com.google.common.collect.Maps;
 
 public record CounterCustomType(String keyword) implements CounterType {
     private static Map<String, CounterCustomType> sMap = new java.util.concurrent.ConcurrentHashMap<>();

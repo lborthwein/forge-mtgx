@@ -17,7 +17,6 @@ import forge.ai.simulation.SimulationController;
 import forge.deck.Deck;
 import forge.deck.io.DeckSerializer;
 import forge.game.Game;
-import forge.game.GameEndReason;
 import forge.game.GameOutcome;
 import forge.game.GameRules;
 import forge.game.GameType;
