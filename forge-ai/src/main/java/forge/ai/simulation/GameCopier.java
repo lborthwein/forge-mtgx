@@ -49,8 +49,19 @@ public class GameCopier {
     private BiMap<Card, Card> cardMap = HashBiMap.create();
     private CopiedGameObjectMap gameObjectMap;
     private GameSnapshot snapshot = null;
+    /**
+     * When set, every seat of the copy is a plain Forge AI (the original seat's profile, no
+     * simulation, no look-ahead): the copy is a play-out, and nobody in it may search again
+     * or talk to a host. Off by default, which is the copier's original behaviour.
+     */
+    private final boolean plainAiPlayers;
 
     public GameCopier(Game origGame) {
+        this(origGame, false);
+    }
+
+    public GameCopier(Game origGame, boolean plainAiPlayers) {
+        this.plainAiPlayers = plainAiPlayers;
         this.origGame = origGame;
         if (origGame.EXPERIMENTAL_RESTORE_SNAPSHOT) {
             this.snapshot = new GameSnapshot(origGame);
@@ -210,6 +221,12 @@ public class GameCopier {
     private RegisteredPlayer clonePlayer(RegisteredPlayer p) {
         RegisteredPlayer clone = new RegisteredPlayer(p.getDeck());
         LobbyPlayer lp = p.getPlayer();
+        if (plainAiPlayers) {
+            final LobbyPlayerAi plain = new LobbyPlayerAi(lp.getName(), null);
+            plain.setAiProfile(lp instanceof LobbyPlayerAi ? ((LobbyPlayerAi) lp).getAiProfile() : "Default");
+            clone.setPlayer(plain);
+            return clone;
+        }
         if (!(lp instanceof LobbyPlayerAi)) {
             // TODO should probably also override them if they're normal AI
             lp = new LobbyPlayerAi(p.getPlayer().getName(), Sets.newHashSet(AIOption.USE_FULL_SIMULATION));
@@ -299,6 +316,18 @@ public class GameCopier {
         if (c.isToken() && !c.isImmutable()) {
             Card result = new TokenInfo(c).makeOneToken(newOwner, c.getId());
             new CardCopyService(c).copyCopiableCharacteristics(result, null, null);
+            // copyCopiableCharacteristics clones each ability WITH its current targets, and those
+            // targets are objects of the ORIGINAL game (e.g. a Map token the live AI just chose to
+            // activate at the live Germ). Left in place, resolving that ability in the copy acts on
+            // the original game: an explore in a play-out moved a live library card and put a counter
+            // on the live creature. A copied token's abilities start with no targets.
+            for (SpellAbility sa : result.getAllSpellAbilities()) {
+                for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                    if (s.usesTargeting()) {
+                        s.resetTargets();
+                    }
+                }
+            }
             return result;
         }
         if (USE_FROM_PAPER_CARD && !c.isImmutable() && c.getPaperCard() != null) {

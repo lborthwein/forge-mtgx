@@ -43,7 +43,7 @@ import forge.util.TextUtil;
  */
 public class SpellAbilityStackInstance implements IIdentifiable, IHasCardView {
     private static int maxId = 0;
-    public static int nextId() { return ++maxId; }
+    public static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.STACK_INSTANCE); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
     // At some point I want this functioning more like Target/Target Choices
     // where the SA has an "active"

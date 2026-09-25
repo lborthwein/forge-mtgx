@@ -15,6 +15,26 @@ public class AiCache {
     // stores result + args as vector
     private final static Multimap<String, List<Object>> dataMap = Multimaps.synchronizedMultimap(ArrayListMultimap.create());
 
+    /**
+     * A per-thread scope, inherited by the "Game AI Eval" threads the AI starts. Look-ahead
+     * search opens one per rollout so copied games neither read nor clear the live AI's cache
+     * (a clear() from a copy would otherwise change what the live AI recomputes later).
+     */
+    private final static InheritableThreadLocal<Multimap<String, List<Object>>> scope = new InheritableThreadLocal<>();
+
+    public static void openScope() {
+        scope.set(Multimaps.synchronizedMultimap(ArrayListMultimap.create()));
+    }
+
+    public static void closeScope() {
+        scope.remove();
+    }
+
+    private static Multimap<String, List<Object>> map() {
+        final Multimap<String, List<Object>> m = scope.get();
+        return m != null ? m : dataMap;
+    }
+
     public static boolean identity(Object a, Object b) {
         return a == b;
     }
@@ -24,6 +44,7 @@ public class AiCache {
     // for that you can pass Functions that compare the args
     public static <T> T getCached(String key, Supplier<T> func, List<BiFunction<Object, Object, Boolean>> argsCheck, Object... args) {
         // TODO would like a good strategy to derive default key, but there's no clean way to obtain the method name
+        final Multimap<String, List<Object>> dataMap = map();
         for (List<Object> cached : Lists.newArrayList(dataMap.get(key))) {
             boolean hit = true;
             for (int i = 0; i < args.length; i++) {
@@ -46,7 +67,7 @@ public class AiCache {
 
     // TODO add different scopes + staleness indicator
     public static void clear() {
-        dataMap.clear();
+        map().clear();
     }
 
 }

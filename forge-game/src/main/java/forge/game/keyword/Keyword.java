@@ -292,7 +292,7 @@ public enum Keyword {
         return getKeywordDetails(k).getKey();
     }
 
-    private static final Map<String, Set<Keyword>> cardKeywordSetLookup = new HashMap<>();
+    private static final Map<String, Set<Keyword>> cardKeywordSetLookup = new java.util.concurrent.ConcurrentHashMap<>();
 
     public static Set<Keyword> getKeywordSet(PaperCard card) {
         String name = card.getName();

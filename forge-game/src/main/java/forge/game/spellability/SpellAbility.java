@@ -75,7 +75,7 @@ import forge.game.zone.ZoneType;
  */
 public abstract class SpellAbility extends CardTraitBase implements ISpellAbility, IIdentifiable, Comparable<SpellAbility> {
     private static int maxId = 0;
-    private static int nextId() { return ++maxId; }
+    private static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.SPELL_ABILITY); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
     public static class EmptySa extends SpellAbility {
         public EmptySa(Card sourceCard) { super(sourceCard, Cost.Zero); setActivatingPlayer(sourceCard.getController());}

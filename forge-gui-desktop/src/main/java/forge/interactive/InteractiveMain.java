@@ -127,6 +127,7 @@ public final class InteractiveMain {
 
             final Match match = new Match(rules, registered, "Browser vs Default Forge");
             final Game game = match.createGame();
+            bindLookahead(registered, game, config.seed());
             final Player human = playerAtSeat(game, config.humanSeat());
             if (human == null || !(human.getController() instanceof PlayerControllerHuman humanController)) {
                 throw new IllegalStateException("configured human seat did not create PlayerControllerHuman");
@@ -233,13 +234,60 @@ public final class InteractiveMain {
             validateLoadedDeck(path, deck);
             final LobbyPlayer lobbyPlayer = seat == config.humanSeat()
                     ? GamePlayerUtil.getGuiPlayer()
-                    : GamePlayerUtil.createAiPlayer("Default Forge", seat, 0, null,
-                            config.aiProfile());
+                    : lookaheadSpec() != null
+                            ? lookaheadLobby(config.aiProfile())
+                            : GamePlayerUtil.createAiPlayer("Default Forge", seat, 0, null,
+                                    config.aiProfile());
             final RegisteredPlayer registered = new RegisteredPlayer(deck);
             registered.setPlayer(lobbyPlayer);
             players.add(registered);
         }
         return players;
+    }
+
+    /**
+     * {@code -Dforge.interactive.lookahead=worlds=8,breadth=4,horizon=2,threads=4}: the Forge seat
+     * is Forge AI plus the mtgx look-ahead ({@link forge.ai.simulation.LookaheadSearch}). Unset (the
+     * default, and the live server) keeps the plain Default Forge seat.
+     */
+    private static String lookaheadSpec() {
+        final String v = System.getProperty("forge.interactive.lookahead");
+        return v == null || v.isBlank() ? null : v;
+    }
+
+    private static LobbyPlayer lookaheadLobby(final String aiProfile) {
+        final forge.ai.simulation.LobbyPlayerLookahead lp = new forge.ai.simulation.LobbyPlayerLookahead("Default Forge");
+        lp.setAiProfile(aiProfile);
+        return lp;
+    }
+
+    private static void bindLookahead(final List<RegisteredPlayer> registered, final Game game, final long seed) {
+        final String spec = lookaheadSpec();
+        if (spec == null) {
+            return;
+        }
+        final forge.ai.simulation.LookaheadSearch.Config c = new forge.ai.simulation.LookaheadSearch.Config();
+        for (String kv : spec.split(",")) {
+            final String[] p = kv.split("=", 2);
+            if (p.length != 2) {
+                continue;
+            }
+            switch (p[0].trim()) {
+                case "worlds": c.worlds = Integer.parseInt(p[1].trim()); break;
+                case "breadth": c.breadth = Integer.parseInt(p[1].trim()); break;
+                case "horizon": c.horizonTurns = Integer.parseInt(p[1].trim()); break;
+                case "threads": c.threads = Integer.parseInt(p[1].trim()); break;
+                case "margin": c.margin = Double.parseDouble(p[1].trim()); break;
+                case "maxSteps": c.maxSteps = Integer.parseInt(p[1].trim()); break;
+                default: break;
+            }
+        }
+        for (int i = 0; i < registered.size(); i++) {
+            if (registered.get(i).getPlayer() instanceof forge.ai.simulation.LobbyPlayerLookahead lp) {
+                c.seed = seed * 31 + i;
+                lp.bind(game, new forge.ai.simulation.LookaheadSearch(c));
+            }
+        }
     }
 
     private static void configureHumanPayment(final PlayerControllerHuman controller) {

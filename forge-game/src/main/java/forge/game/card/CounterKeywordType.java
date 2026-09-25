@@ -17,7 +17,7 @@ public record CounterKeywordType(KeywordView keyword) implements CounterType {
     static ImmutableList<String> keywordCounter = ImmutableList.of(
             "Flying", "First Strike", "Double Strike", "Deathtouch", "Decayed", "Exalted", "Haste", "Hexproof",
             "Indestructible", "Lifelink", "Menace", "Reach", "Shadow", "Trample", "Vigilance");
-    private static Map<String, CounterKeywordType> sMap = Maps.newHashMap();
+    private static Map<String, CounterKeywordType> sMap = new java.util.concurrent.ConcurrentHashMap<>();
 
     public static CounterKeywordType get(String s) {
         if (!sMap.containsKey(s)) {
