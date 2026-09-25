@@ -169,6 +169,12 @@ public final class LookaheadBench {
             rules.setWarnAboutAICards(false);
             final Match match = new Match(rules, seats, "mtgx-lookahead");
             MyRandom.setRandom(new Random(seed));
+            // Every process-wide object id (SpellAbility, Trigger, StaticAbility, ...) this game creates comes
+            // from a scope opened for this game alone, so a game is a function of its row and not of the games
+            // this JVM played before it (ids feed hashCode and so iteration order; without this a replay in a
+            // different JVM order diverged in 9 of 47 K=8 games).
+            forge.util.IdScope.open();
+            final Object gameIds = forge.util.IdScope.capture();
             final Game game = match.createGame();
             game.AI_CAN_USE_TIMEOUT = false;
             game.AI_TIMEOUT = aiTimeoutSec;
@@ -187,7 +193,14 @@ public final class LookaheadBench {
             final long cpu0 = os.getProcessCpuTime();
             final long t0 = System.currentTimeMillis();
             String abort = null;
-            final Future<?> f = gameThread.submit(() -> match.startGame(game));
+            final Future<?> f = gameThread.submit(() -> {
+                forge.util.IdScope.install(gameIds);
+                try {
+                    match.startGame(game);
+                } finally {
+                    forge.util.IdScope.install(null);
+                }
+            });
             try {
                 f.get(gameTimeoutSec, TimeUnit.SECONDS);
             } catch (TimeoutException e) {
@@ -199,6 +212,7 @@ public final class LookaheadBench {
                 }
             }
             final long wallMs = System.currentTimeMillis() - t0;
+            forge.util.IdScope.close();
             if (digest.trace != null) {
                 StringBuilder lg = new StringBuilder();
                 java.util.List<forge.game.GameLogEntry> entries = new ArrayList<>(game.getGameLog().getAllEntries());

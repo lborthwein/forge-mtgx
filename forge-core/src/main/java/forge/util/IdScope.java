@@ -35,6 +35,20 @@ public final class IdScope {
         scope.remove();
     }
 
+    /** This thread's scope (for {@link #install} on another thread), or null. */
+    public static Object capture() {
+        return scope.get();
+    }
+
+    /** Make {@code captured} (from {@link #capture}) this thread's scope; null removes it. */
+    public static void install(Object captured) {
+        if (captured == null) {
+            scope.remove();
+        } else {
+            scope.set((AtomicInteger[]) captured);
+        }
+    }
+
     public static boolean isOpen() {
         return scope.get() != null;
     }

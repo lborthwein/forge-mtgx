@@ -392,6 +392,7 @@ public final class LookaheadSearch {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 7)));
         AiCache.openScope();
+        final Object prevIds1 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
             GameCopier copier = new GameCopier(live, true);
@@ -421,7 +422,7 @@ public final class LookaheadSearch {
             return out.subList(0, 1);
         } finally {
             AiCache.closeScope();
-            forge.util.IdScope.close();
+            forge.util.IdScope.install(prevIds1);
             MyRandom.setThreadRandom(prev);
         }
         return out;
@@ -631,28 +632,37 @@ public final class LookaheadSearch {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(worldSeed, 1)));
         AiCache.openScope();
+        final Object prevIds2 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
             long a = System.nanoTime();
-            GameCopier copier = new GameCopier(live, true);
-            Game g = copier.makeCopy();
-            Player me = (Player) copier.find(liveMe);
-            if (resample) {
-                resample(live, liveMe, g, me, new Random(mix(worldSeed, 2)));
+            final GameCopier copier;
+            final Game g;
+            final Player me;
+            List<SpellAbility> first = null;
+            // Everything that READS the live game runs one worker at a time: many of Forge's "getters"
+            // build lists and views lazily (they write), so parallel copies of one live game raced and a
+            // K=8 play-out under load could come out different from its replay.
+            synchronized (live) {
+                copier = new GameCopier(live, true);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+                if (resample) {
+                    resample(live, liveMe, g, me, new Random(mix(worldSeed, 2)));
+                }
+                MyRandom.setThreadRandom(new Random(mix(worldSeed, 3)));
+                if (!c.pass) {
+                    SpellAbility sa = prepare(g, me, c, defSa, copier);
+                    if (sa == null) {
+                        r.ok = false;
+                        r.value = Double.NEGATIVE_INFINITY;
+                        return r;
+                    }
+                    first = new ArrayList<>();
+                    first.add(sa);
+                }
             }
             r.copyNanos = System.nanoTime() - a;
-            MyRandom.setThreadRandom(new Random(mix(worldSeed, 3)));
-            List<SpellAbility> first = null;
-            if (!c.pass) {
-                SpellAbility sa = prepare(g, me, c, defSa, copier);
-                if (sa == null) {
-                    r.ok = false;
-                    r.value = Double.NEGATIVE_INFINITY;
-                    return r;
-                }
-                first = new ArrayList<>();
-                first.add(sa);
-            }
             me.dangerouslySetController(new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), first));
             for (Player o : g.getPlayers()) {
                 if (o != me) {
@@ -680,7 +690,7 @@ public final class LookaheadSearch {
             System.err.println("[lookahead] rollout failed: " + e);
         } finally {
             AiCache.closeScope();
-            forge.util.IdScope.close();
+            forge.util.IdScope.install(prevIds2);
             MyRandom.setThreadRandom(prev);
         }
         return r;
@@ -806,6 +816,7 @@ public final class LookaheadSearch {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 99)));
         AiCache.openScope();
+        final Object prevIds3 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
             JsonArray copyMs = new JsonArray();
@@ -846,7 +857,7 @@ public final class LookaheadSearch {
             p.addProperty("copyProbeError", e.toString());
         } finally {
             AiCache.closeScope();
-            forge.util.IdScope.close();
+            forge.util.IdScope.install(prevIds3);
             MyRandom.setThreadRandom(prev);
         }
 
@@ -863,6 +874,7 @@ public final class LookaheadSearch {
         final Random prev2 = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 98)));
         AiCache.openScope();
+        final Object prevIds4 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
             GameCopier copier = new GameCopier(live, true);
@@ -878,7 +890,7 @@ public final class LookaheadSearch {
             p.addProperty("simAiError", e.toString());
         } finally {
             AiCache.closeScope();
-            forge.util.IdScope.close();
+            forge.util.IdScope.install(prevIds4);
             MyRandom.setThreadRandom(prev2);
         }
 
@@ -904,6 +916,7 @@ public final class LookaheadSearch {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(s, 1)));
         AiCache.openScope();
+        final Object prevIds5 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
             GameCopier copier = new GameCopier(live, true);
@@ -940,7 +953,7 @@ public final class LookaheadSearch {
             r.ok = false;
         } finally {
             AiCache.closeScope();
-            forge.util.IdScope.close();
+            forge.util.IdScope.install(prevIds5);
             MyRandom.setThreadRandom(prev);
         }
         return r;
