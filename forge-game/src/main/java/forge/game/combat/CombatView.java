@@ -23,8 +23,13 @@ public class CombatView extends TrackableObject {
     // Negative IDs avoid tracker registration (only id >= 0 is registered).
     private static int nextId = -2;
 
+    private static int scopedOrNext() {
+        int s = forge.util.IdScope.next(forge.util.IdScope.Kind.COMBAT_VIEW);
+        return s != forge.util.IdScope.NONE ? s : nextId--;
+    }
+
     public CombatView(final Tracker tracker) {
-        super(nextId--, tracker);
+        super(scopedOrNext(), tracker);
         set(TrackableProperty.AttackersWithDefenders, new ConcurrentHashMap<CardView, GameEntityView>());
         set(TrackableProperty.AttackersWithBlockers, new ConcurrentHashMap<CardView, FCollection<CardView>>());
         set(TrackableProperty.BandsWithDefenders, new ConcurrentHashMap<FCollection<CardView>, GameEntityView>());

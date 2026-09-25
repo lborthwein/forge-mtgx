@@ -65,7 +65,7 @@ public class Game {
     private static final TaggedLogger netLog = Logger.tag("NETWORK");
 
     private static int maxId = 0;
-    private static int nextId() { return ++maxId; }
+    private static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.GAME); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
     /** The ID. */
     private int id;

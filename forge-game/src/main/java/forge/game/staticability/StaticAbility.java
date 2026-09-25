@@ -52,7 +52,7 @@ import forge.util.*;
  */
 public class StaticAbility extends CardTraitBase implements IIdentifiable, Cloneable, Comparable<StaticAbility> {
     private static int maxId = 0;
-    private static int nextId() { return ++maxId; }
+    private static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.STATIC); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
     private int id;
 

@@ -7535,13 +7535,18 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         return CardFactory.getCard(pc, owner, owner == null ? null : owner.getGame());
     }
 
-    private static final Map<PaperCard, Card> cp2card = Maps.newHashMap();
+    private static final Map<PaperCard, Card> cp2card = new java.util.concurrent.ConcurrentHashMap<>();
     public static Card getCardForUi(IPaperCard pc) {
         if (pc instanceof PaperCard) {
             Card res = cp2card.get(pc);
             if (res == null) {
-                res = fromPaperCard(pc, null);
-                cp2card.put((PaperCard) pc, res);
+                // A process-wide cache: build it in its own id scope, so WHICH thread (a live game
+                // or a look-ahead copy) happens to ask first never shifts the live id counters.
+                res = forge.util.IdScope.detached(() -> fromPaperCard(pc, null));
+                Card prev = cp2card.putIfAbsent((PaperCard) pc, res);
+                if (prev != null) {
+                    res = prev;
+                }
             }
             return res;
         }

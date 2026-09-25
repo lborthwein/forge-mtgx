@@ -48,7 +48,7 @@ import forge.util.TextUtil;
  */
 public abstract class ReplacementEffect extends TriggerReplacementBase {
     private static int maxId = 0;
-    private static int nextId() { return ++maxId; }
+    private static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.REPLACEMENT); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
     /** The ID. */
     private int id;

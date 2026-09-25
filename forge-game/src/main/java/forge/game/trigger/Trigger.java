@@ -53,7 +53,7 @@ import java.util.*;
  */
 public abstract class Trigger extends TriggerReplacementBase {
     private static int maxId = 0;
-    private static int nextId() { return ++maxId; }
+    private static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.TRIGGER); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
     /**
      * <p>

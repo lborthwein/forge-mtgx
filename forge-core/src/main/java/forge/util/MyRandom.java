@@ -34,6 +34,14 @@ public class MyRandom {
     private static Random random = new SecureRandom();
 
     /**
+     * A per-thread override, inherited by threads the owner starts (Forge's AI starts a
+     * "Game AI Eval" thread per decision). Look-ahead search installs one per rollout so a
+     * copied game draws from its own seeded stream and never advances the live game's.
+     * Null (the default) means the process-wide {@link #random}, Forge's own behaviour.
+     */
+    private static final InheritableThreadLocal<Random> threadOverride = new InheritableThreadLocal<>();
+
+    /**
      * <p>
      * percentTrue.<br>
      * If percent is like 30, then 30% of the time it will be true.
@@ -52,7 +60,21 @@ public class MyRandom {
      * @return the random
      */
     public static Random getRandom() {
-        return MyRandom.random;
+        final Random r = threadOverride.get();
+        return r != null ? r : MyRandom.random;
+    }
+
+    /** Install (or, with null, remove) this thread's override. See {@link #threadOverride}. */
+    public static void setThreadRandom(final Random r) {
+        if (r == null) {
+            threadOverride.remove();
+        } else {
+            threadOverride.set(r);
+        }
+    }
+
+    public static Random getThreadRandom() {
+        return threadOverride.get();
     }
 
     /**
@@ -67,7 +89,7 @@ public class MyRandom {
         int[] groups = new int[numGroups];
 
         for (int i = 0; i < value; i++) {
-            groups[random.nextInt(numGroups)]++;
+            groups[getRandom().nextInt(numGroups)]++;
         }
 
         return groups;

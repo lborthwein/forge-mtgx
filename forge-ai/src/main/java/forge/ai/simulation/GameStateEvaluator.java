@@ -115,6 +115,15 @@ public class GameStateEvaluator {
         return getScoreForGameStateImpl(game, aiPlayer);
     }
 
+    /**
+     * The static evaluation only: no simulated upcoming combat (which copies the game again).
+     * Terminal positions are left to the caller. Used by {@link LookaheadSearch}, whose
+     * play-outs already play the combats out.
+     */
+    public Score getStaticScore(Game game, Player aiPlayer) {
+        return getScoreForGameStateImpl(game, aiPlayer);
+    }
+
     private Score getScoreForGameStateImpl(Game game, Player aiPlayer) {
         // TODO: try and reuse evaluateBoardPosition
         int score = 0;
