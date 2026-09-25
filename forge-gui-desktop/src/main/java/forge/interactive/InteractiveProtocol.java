@@ -8,6 +8,7 @@
  */
 package forge.interactive;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -248,6 +249,12 @@ final class InteractiveProtocol {
 
         void terminal(final String game, final Integer winner, final String reason,
                       final Integer turns) throws ProtocolException {
+            terminal(game, winner, reason, turns, null);
+        }
+
+        /** {@code losses}: each losing seat's GameLossReason (additive, 2026-09-25); null omits it. */
+        void terminal(final String game, final Integer winner, final String reason,
+                      final Integer turns, final JsonArray losses) throws ProtocolException {
             if (!ended.compareAndSet(false, true)) {
                 return;
             }
@@ -261,6 +268,9 @@ final class InteractiveProtocol {
             body.addProperty("reason", reason);
             if (turns != null) {
                 body.addProperty("turns", turns);
+            }
+            if (losses != null) {
+                body.add("losses", losses);
             }
             sendInternal("terminal", body, true);
         }
