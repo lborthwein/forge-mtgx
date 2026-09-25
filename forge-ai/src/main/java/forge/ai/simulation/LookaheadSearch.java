@@ -83,6 +83,10 @@ public final class LookaheadSearch {
         public int probeMax = 6;
         /** Probe: once per game, put the live game on a known stream and compare it with a truth rollout. */
         public boolean fidelity = true;
+        /** C5: base URL of the foundation-model leaf service (null = Forge's static evaluator as the leaf). */
+        public String modelUrl = null;
+        /** C5: per-request timeout; a failed request falls back to the static evaluator for that decision. */
+        public int modelTimeoutMs = 2000;
 
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
@@ -100,6 +104,10 @@ public final class LookaheadSearch {
             o.addProperty("combat", combat);
             o.addProperty("probeMax", probeMax);
             o.addProperty("fidelity", fidelity);
+            if (modelUrl != null) {
+                o.addProperty("modelUrl", modelUrl);
+                o.addProperty("modelTimeoutMs", modelTimeoutMs);
+            }
             return o;
         }
     }
@@ -111,6 +119,9 @@ public final class LookaheadSearch {
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
         public long combatNanos;
+        /** C5 model leaf: requests, leaves scored, decisions that fell back to the static evaluator. */
+        public long modelCalls, modelLeaves, modelFallbacks, modelNanos, modelUnknownCards;
+        public String modelDigest, modelCheckpoint, modelLastError;
         public final JsonArray probes = new JsonArray();
 
         public JsonObject toJson() {
@@ -137,6 +148,18 @@ public final class LookaheadSearch {
             o.addProperty("blockSearched", blockSearched);
             o.addProperty("blockDeparted", blockDeparted);
             o.addProperty("combatMs", combatNanos / 1e6);
+            if (modelCalls > 0 || modelFallbacks > 0) {
+                o.addProperty("modelCalls", modelCalls);
+                o.addProperty("modelLeaves", modelLeaves);
+                o.addProperty("modelFallbacks", modelFallbacks);
+                o.addProperty("modelMs", modelNanos / 1e6);
+                o.addProperty("modelUnknownCards", modelUnknownCards);
+                o.addProperty("modelDigest", modelDigest);
+                o.addProperty("modelCheckpoint", modelCheckpoint);
+                if (modelLastError != null) {
+                    o.addProperty("modelLastError", modelLastError);
+                }
+            }
             if (probes.size() > 0) {
                 o.add("probes", probes);
             }
@@ -174,6 +197,8 @@ public final class LookaheadSearch {
     private final Config cfg;
     private final Stats stats = new Stats();
     private final ExecutorService pool;
+    private final ModelClient model;
+    private JsonObject modelDeck = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
     private int departuresThisTurn = 0;
@@ -196,6 +221,7 @@ public final class LookaheadSearch {
         } else {
             pool = null;
         }
+        model = cfg.modelUrl == null ? null : new ModelClient(cfg.modelUrl, cfg.modelTimeoutMs);
     }
 
     public Config getConfig() {
@@ -256,6 +282,7 @@ public final class LookaheadSearch {
 
         final int k = Math.max(1, cfg.worlds);
         final double[][] values = new double[cands.size()][k];
+        final Rollout[][] outs = new Rollout[cands.size()][k];
         final boolean[] ok = new boolean[cands.size()];
         Arrays.fill(ok, true);
 
@@ -267,6 +294,7 @@ public final class LookaheadSearch {
                     Rollout r = rollout(live, me, cands.get(cc), defSa, mix(decisionSeed, 1000 + ww), cfg.resample, null);
                     synchronized (values) {
                         values[cc][ww] = r.value;
+                        outs[cc][ww] = r;
                         if (!r.ok) {
                             ok[cc] = false;
                         }
@@ -285,6 +313,9 @@ public final class LookaheadSearch {
         runAll(tasks);
         if (check) {
             checkLive("rollouts " + cands.size() + "x" + k + " def=" + cands.get(0).label, before, live, defSa, index);
+        }
+        if (model != null) {
+            modelLeaves(live, me, values, outs, ok, k);
         }
 
         int best = 0; // Forge's own answer is candidate 0
@@ -556,6 +587,10 @@ public final class LookaheadSearch {
         boolean ok = true;
         boolean capped = false;
         double value;
+        /** C5: the seat's ForgeState at a non-terminal horizon (null if terminal or no model). */
+        JsonObject leaf;
+        /** C5: P(seat wins) of a terminal play-out (1, 0, or 0.5 for a draw); NaN if not terminal. */
+        double pTerminal = Double.NaN;
         int steps;
         String fingerprint;
         long copyNanos, rolloutNanos;
@@ -696,6 +731,12 @@ public final class LookaheadSearch {
             r.steps = steps;
             r.capped = !g.isGameOver() && !watch.reached;
             r.value = value(g, me);
+            if (model != null) {
+                r.pTerminal = terminalP(g, me);
+                if (Double.isNaN(r.pTerminal)) {
+                    r.leaf = forge.bench.StateEncoder.encode(g, me);
+                }
+            }
             r.fingerprint = watch.fingerprint;
         } catch (RuntimeException | StackOverflowError e) {
             r.ok = false;
@@ -710,6 +751,105 @@ public final class LookaheadSearch {
             MyRandom.setThreadRandom(prev);
         }
         return r;
+    }
+
+    /** P(me wins) of a finished play-out, in the model's scale; NaN if the play-out did not end the game. */
+    static double terminalP(Game g, Player me) {
+        if (g.isGameOver() || !me.isInGame()) {
+            if (me.hasWon()) {
+                return 1.0;
+            }
+            if (me.hasLost() || !me.isInGame()) {
+                return 0.0;
+            }
+            return 0.5;
+        }
+        for (Player o : me.getOpponents()) {
+            if (o.hasLost()) {
+                return 1.0;
+            }
+        }
+        return Double.NaN;
+    }
+
+    /**
+     * C5: replace the static leaf values of one decision by the served P(win). One request carries every
+     * non-terminal leaf, world-major then candidate-minor (a fixed order, so the service is bit-identical). Terminal
+     * play-outs score 1 / 0 / 0.5. On any failure the decision keeps Forge's static values (all of them, so a
+     * decision never mixes the two scales) and the fallback is counted.
+     */
+    private void modelLeaves(Game live, Player me, double[][] values, Rollout[][] outs, boolean[] ok, int k) {
+        final int n = values.length;
+        final JsonArray leaves = new JsonArray();
+        final List<int[]> at = new ArrayList<>();
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                Rollout r = outs[c][w];
+                if (ok[c] && r != null && r.ok && r.leaf != null) {
+                    leaves.add(r.leaf);
+                    at.add(new int[] {c, w});
+                }
+            }
+        }
+        double[] p = null;
+        if (leaves.size() > 0) {
+            final JsonObject req = new JsonObject();
+            req.addProperty("schema", ModelClient.REQUEST_SCHEMA);
+            req.addProperty("seat", forge.bench.StateEncoder.playerIndex(live, me));
+            req.addProperty("startingSeat", live.getStartingPlayer() == null ? -1
+                    : forge.bench.StateEncoder.playerIndex(live, live.getStartingPlayer()));
+            final JsonArray mull = new JsonArray();
+            for (Player pl : live.getPlayers()) {
+                mull.add(pl.getStats().getMulliganCount());
+            }
+            req.add("mulligans", mull);
+            req.add("deck", deckOf(me));
+            req.add("leaves", leaves);
+            final long t = System.nanoTime();
+            p = model.score(req, leaves.size());
+            stats.modelNanos += System.nanoTime() - t;
+            if (p == null) {
+                stats.modelFallbacks++;
+                stats.modelLastError = model.lastError;
+                System.err.println("[lookahead] model leaf failed, static fallback: " + model.lastError);
+                return;
+            }
+            stats.modelCalls++;
+            stats.modelLeaves += leaves.size();
+            stats.modelDigest = model.digestHex();
+            stats.modelCheckpoint = model.checkpointSha256;
+            stats.modelUnknownCards = model.unknownCards;
+        }
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                Rollout r = outs[c][w];
+                if (ok[c] && r != null && r.ok && !Double.isNaN(r.pTerminal)) {
+                    values[c][w] = r.pTerminal;
+                }
+            }
+        }
+        for (int i = 0; i < at.size(); i++) {
+            values[at.get(i)[0]][at.get(i)[1]] = p[i];
+        }
+    }
+
+    /** The seat's registered main deck as {name: copies} (fixed for the game). */
+    private JsonObject deckOf(Player me) {
+        if (modelDeck == null) {
+            final JsonObject d = new JsonObject();
+            forge.deck.Deck deck = me.getRegisteredPlayer() == null ? null : me.getRegisteredPlayer().getDeck();
+            if (deck != null && deck.has(forge.deck.DeckSection.Main)) {
+                final java.util.TreeMap<String, Integer> byName = new java.util.TreeMap<>();
+                for (Map.Entry<forge.item.PaperCard, Integer> e : deck.get(forge.deck.DeckSection.Main)) {
+                    byName.merge(e.getKey().getName(), e.getValue(), Integer::sum);
+                }
+                for (Map.Entry<String, Integer> e : byName.entrySet()) {
+                    d.addProperty(e.getKey(), e.getValue());
+                }
+            }
+            modelDeck = d;
+        }
+        return modelDeck;
     }
 
     static double value(Game g, Player me) {
