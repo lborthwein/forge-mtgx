@@ -90,6 +90,12 @@ public final class LookaheadBench {
             prefs.setPref(FPref.UI_LANGUAGE, "en-US");
             return null;
         });
+        if (Boolean.getBoolean("lookahead.preloadTokens")) {
+            // Diagnostics: TokenDb fills a HashMultimap lazily on a token's first use; play-outs on several threads
+            // can race on it (a reader sees a token with fewer arts, Aggregates.random draws fewer numbers).
+            FModel.getMagicDb().getAllTokens().preloadTokens();
+            System.err.println("[lookahead-bench] tokens preloaded");
+        }
 
         final Set<String> done = new HashSet<>();
         if (Files.exists(out)) {

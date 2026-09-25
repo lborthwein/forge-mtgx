@@ -282,6 +282,10 @@ public final class LookaheadSearch {
         if (check) {
             checkLive("rollouts " + cands.size() + "x" + k + " def=" + cands.get(0).label, before, live, defSa, index);
         }
+        final String stressSpec = System.getProperty("lookahead.stress");
+        if (stressSpec != null) {
+            stress(stressSpec, index, live, me, cands, defSa, decisionSeed);
+        }
 
         int best = 0; // Forge's own answer is candidate 0
         double[] ev = new double[cands.size()];
@@ -659,6 +663,8 @@ public final class LookaheadSearch {
         /** The copy's scopes (ids, AI cache, RNG), installed on whichever thread plays it out. */
         Object ids, cache;
         Random rnd;
+        /** Diagnostics only (lookahead.stress): one entry per main-loop step, the position and the new log lines. */
+        List<String> stepLog;
     }
 
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
@@ -751,9 +757,20 @@ public final class LookaheadSearch {
             g.subscribeToEvents(watch);
             long b = System.nanoTime();
             int steps = 0;
+            final List<String> sl = p.stepLog;
+            int logSeen = sl == null ? 0 : g.getGameLog().getAllEntries().size();
             while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
                 ph.mainLoopStep();
                 steps++;
+                if (sl != null) {
+                    final List<forge.game.GameLogEntry> all = g.getGameLog().getAllEntries();
+                    final StringBuilder e = new StringBuilder(fingerprint(g)).append("RNG ").append(peekSeed(MyRandom.getRandom())).append("\nLOG");
+                    for (int i = logSeen; i < all.size(); i++) {
+                        e.append(" || ").append(all.get(i).message());
+                    }
+                    logSeen = all.size();
+                    sl.add(e.toString());
+                }
             }
             r.rolloutNanos = System.nanoTime() - b;
             r.steps = steps;
@@ -774,6 +791,83 @@ public final class LookaheadSearch {
             MyRandom.setThreadRandom(prev);
         }
         return r;
+    }
+
+    /** The Random's internal seed without drawing from it (needs --add-opens java.base/java.util=ALL-UNNAMED), or "?". */
+    static String peekSeed(Random r) {
+        try {
+            Field f = Random.class.getDeclaredField("seed");
+            f.setAccessible(true);
+            return Long.toHexString(((java.util.concurrent.atomic.AtomicLong) f.get(r)).get());
+        } catch (Exception | Error e) {
+            return "?";
+        }
+    }
+
+    /**
+     * Diagnostics (-Dlookahead.stress=D:W:C:N:T[:exit]): at searched decision D, play candidate C of world W out N more
+     * times on T threads, each with a per-step log, and report whether every repeat equals the first. A repeat that
+     * differs prints the first differing step of both. With ":exit" the JVM halts afterwards (probe runs only).
+     */
+    private void stress(String spec, int index, Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed) {
+        final String[] f = spec.split(":");
+        if (Integer.parseInt(f[0]) != index) {
+            return;
+        }
+        final int w = Integer.parseInt(f[1]), c = Math.min(Integer.parseInt(f[2]), cands.size() - 1);
+        final int n = Integer.parseInt(f[3]), t = Integer.parseInt(f[4]);
+        final Prepared[] ps = new Prepared[n];
+        for (int i = 0; i < n; i++) {
+            ps[i] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample);
+            ps[i].stepLog = new ArrayList<>();
+        }
+        final double[] vals = new double[n];
+        final String[] names = new String[n];
+        final AtomicInteger tn = new AtomicInteger();
+        final ExecutorService ex = Executors.newFixedThreadPool(t, r -> {
+            Thread th = new Thread(r, "Game-stress-" + tn.incrementAndGet());
+            th.setDaemon(true);
+            return th;
+        });
+        final List<Future<?>> fs = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            final int ii = i;
+            fs.add(ex.submit(() -> {
+                names[ii] = Thread.currentThread().getName();
+                vals[ii] = play(ps[ii], null).value;
+            }));
+        }
+        for (Future<?> fu : fs) {
+            try {
+                fu.get();
+            } catch (Exception e) {
+                System.err.println("[lstress] worker failed: " + e);
+            }
+        }
+        ex.shutdownNow();
+        final List<String> ref = ps[0].stepLog;
+        int odd = 0;
+        for (int i = 0; i < n; i++) {
+            final List<String> x = ps[i].stepLog;
+            int k = 0;
+            while (k < Math.min(ref.size(), x.size()) && ref.get(k).equals(x.get(k))) {
+                k++;
+            }
+            final boolean same = k == ref.size() && k == x.size() && Double.compare(vals[i], vals[0]) == 0;
+            System.err.println("[lstress] d=" + index + " w=" + w + " c=" + c + " run=" + i + " thread=" + names[i] + " value="
+                    + Double.doubleToLongBits(vals[i]) + " steps=" + x.size() + (same ? " SAME" : " DIFF at step " + k));
+            if (!same && odd++ < 3) {
+                for (int j = Math.max(0, k - 1); j <= k; j++) {
+                    System.err.println("[lstress]   ref step " + j + ":\n" + (j < ref.size() ? ref.get(j) : "(end)"));
+                    System.err.println("[lstress]   run step " + j + ":\n" + (j < x.size() ? x.get(j) : "(end)"));
+                }
+            }
+        }
+        System.err.println("[lstress] d=" + index + " summary: " + (n - odd) + "/" + n + " same as run 0");
+        if (f.length > 5 && "exit".equals(f[5])) {
+            System.err.flush();
+            Runtime.getRuntime().halt(0);
+        }
     }
 
     static double value(Game g, Player me) {
