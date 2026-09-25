@@ -427,7 +427,9 @@ public final class LookaheadSearch {
         try {
             for (int c = 0; c < cands.size(); c++) {
                 final JsonArray q = new JsonArray();
-                if (ok[c]) {
+                // "disagree": only the two picks (the used leaf's and the static leaf's), common random numbers
+                final boolean want = !"disagree".equals(QPROBE_MODE) || c == best || c == bestStatic;
+                if (ok[c] && want) {
                     for (int m = 0; m < QPROBE; m++) {
                         Rollout r = rollout(live, me, cands.get(c), defSa, mix(decisionSeed, 900000 + m), true, null);
                         if (!r.ok) {
