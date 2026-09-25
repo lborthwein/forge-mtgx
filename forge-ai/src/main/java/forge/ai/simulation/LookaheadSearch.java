@@ -192,6 +192,10 @@ public final class LookaheadSearch {
      * candidate's static and served leaf values and its leaf ForgeState. Null = off. The search never reads it.
      */
     public java.util.function.Consumer<JsonObject> dumpSink = null;
+    /** Q-probe (dump only): -1 = use cfg; set only around the probe's own full-game rollouts (threads = 1). */
+    private int horizonOverride = -1, maxStepsOverride = -1;
+    private static final int QPROBE = Integer.getInteger("lookahead.qprobe", 0);
+    private static final String QPROBE_MODE = System.getProperty("lookahead.qprobeMode", "disagree");
     private int decisionIndex = 0;
     private int departuresTurn = -1;
     private int departuresThisTurn = 0;
@@ -396,9 +400,63 @@ public final class LookaheadSearch {
             stats.probes.add(p);
         }
         if (dumpSink != null) {
-            dumpSink.accept(dumpDecision(live, me, index, turn, ph, cands, values, outs, ok, k, best, outcome));
+            final JsonObject dd = dumpDecision(live, me, index, turn, ph, cands, values, outs, ok, k, best, outcome);
+            if (QPROBE > 0) {
+                qProbe(dd, live, me, cands, defSa, decisionSeed, ok, best);
+            }
+            dumpSink.accept(dd);
         }
         return answer;
+    }
+
+    /**
+     * Q-probe (dump only): every playable candidate played to the END of the game {@link #QPROBE} times, Forge AI on
+     * both seats after the candidate, each continuation on its own resampled world (seeds disjoint from the search's).
+     * Mode "disagree" probes only decisions where the used leaf and the static leaf pick different candidates; "all"
+     * probes every searched decision. Copies only; the live game is not touched (checked by the replay digest).
+     */
+    private void qProbe(JsonObject dd, Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed, boolean[] ok, int best) {
+        final int bestStatic = dd.get("bestStatic").getAsInt();
+        if ("disagree".equals(QPROBE_MODE) && best == bestStatic) {
+            return;
+        }
+        final long t = System.nanoTime();
+        final JsonArray qs = new JsonArray();
+        horizonOverride = 100000;
+        maxStepsOverride = 40000;
+        try {
+            for (int c = 0; c < cands.size(); c++) {
+                final JsonArray q = new JsonArray();
+                if (ok[c]) {
+                    for (int m = 0; m < QPROBE; m++) {
+                        Rollout r = rollout(live, me, cands.get(c), defSa, mix(decisionSeed, 900000 + m), true, null);
+                        if (!r.ok) {
+                            q.add("fail");
+                        } else {
+                            double p = terminalP2(r);
+                            q.add(Double.isNaN(p) ? null : p);
+                        }
+                    }
+                }
+                qs.add(q);
+            }
+        } finally {
+            horizonOverride = -1;
+            maxStepsOverride = -1;
+        }
+        dd.add("q", qs);
+        dd.addProperty("qMs", (System.nanoTime() - t) / 1e6);
+    }
+
+    /** A finished Q rollout's result for the searching seat: 1 / 0 / 0.5, NaN if it hit the step cap. */
+    private static double terminalP2(Rollout r) {
+        if (r.value >= TERMINAL) {
+            return 1.0;
+        }
+        if (r.value <= -TERMINAL) {
+            return 0.0;
+        }
+        return r.capped ? Double.NaN : 0.5;
     }
 
     /** One searched decision for the diagnostic dump: static and used leaf values per candidate and world. */
@@ -772,11 +830,12 @@ public final class LookaheadSearch {
             }
             final PhaseHandler ph = g.getPhaseHandler();
             givePriority(ph, me);
-            final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, Boolean.TRUE.equals(wantFp) ? me : null);
+            final TurnWatch watch = new TurnWatch(ph.getTurn() + (horizonOverride > 0 ? horizonOverride : cfg.horizonTurns), Boolean.TRUE.equals(wantFp) ? me : null);
             g.subscribeToEvents(watch);
             long b = System.nanoTime();
             int steps = 0;
-            while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
+            final int stepCap = maxStepsOverride > 0 ? maxStepsOverride : cfg.maxSteps;
+            while (!g.isGameOver() && !watch.reached && steps < stepCap) {
                 ph.mainLoopStep();
                 steps++;
             }
