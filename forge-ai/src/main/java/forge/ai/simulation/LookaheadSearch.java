@@ -187,6 +187,11 @@ public final class LookaheadSearch {
     private final ExecutorService pool;
     private final ModelClient model;
     private JsonObject modelDeck = null;
+    /**
+     * Diagnostic dump (foundation-model lane, R-V diagnosis): one JSON object per searched decision with every
+     * candidate's static and served leaf values and its leaf ForgeState. Null = off. The search never reads it.
+     */
+    public java.util.function.Consumer<JsonObject> dumpSink = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
     private int departuresThisTurn = 0;
@@ -390,7 +395,67 @@ public final class LookaheadSearch {
             probeExtras(p, live, me, cands, defSa, decisionSeed, turn);
             stats.probes.add(p);
         }
+        if (dumpSink != null) {
+            dumpSink.accept(dumpDecision(live, me, index, turn, ph, cands, values, outs, ok, k, best, outcome));
+        }
         return answer;
+    }
+
+    /** One searched decision for the diagnostic dump: static and used leaf values per candidate and world. */
+    private JsonObject dumpDecision(Game live, Player me, int index, int turn, PhaseHandler ph, List<Cand> cands,
+            double[][] values, Rollout[][] outs, boolean[] ok, int k, int best, String outcome) {
+        final JsonObject o = new JsonObject();
+        o.addProperty("decision", index);
+        o.addProperty("turn", turn);
+        o.addProperty("phase", String.valueOf(ph.getPhase()));
+        o.addProperty("active", ph.getPlayerTurn() == me);
+        o.addProperty("seat", forge.bench.StateEncoder.playerIndex(live, me));
+        o.addProperty("best", best);
+        o.addProperty("outcome", outcome);
+        // What the static leaf would have chosen from the same play-outs (the RS rule).
+        int bestStatic = 0;
+        final double[] evS = new double[cands.size()];
+        for (int c = 0; c < cands.size(); c++) {
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += outs[c][w] == null ? Double.NEGATIVE_INFINITY : outs[c][w].value;
+            }
+            evS[c] = ok[c] ? s / k : Double.NEGATIVE_INFINITY;
+        }
+        if (ok[0]) {
+            for (int c = 1; c < cands.size(); c++) {
+                if (evS[c] > evS[bestStatic] + (bestStatic == 0 ? cfg.margin : 0)) {
+                    bestStatic = c;
+                }
+            }
+        }
+        o.addProperty("bestStatic", bestStatic);
+        final JsonArray ca = new JsonArray();
+        for (int c = 0; c < cands.size(); c++) {
+            final Cand cd = cands.get(c);
+            final JsonObject co = new JsonObject();
+            co.addProperty("label", cd.label);
+            co.addProperty("key", cd.key());
+            co.addProperty("pass", cd.pass);
+            co.addProperty("land", cd.land);
+            co.addProperty("hostId", cd.hostId);
+            co.addProperty("ok", ok[c]);
+            final JsonArray st = new JsonArray(), used = new JsonArray(), pt = new JsonArray(), lv = new JsonArray();
+            for (int w = 0; w < k; w++) {
+                final Rollout r = outs[c][w];
+                st.add(r == null || !r.ok ? null : r.value);
+                used.add(r == null || !r.ok ? null : values[c][w]);
+                pt.add(r == null || Double.isNaN(r.pTerminal) ? null : r.pTerminal);
+                lv.add(r == null ? null : r.leaf);
+            }
+            co.add("static", st);
+            co.add("used", used);
+            co.add("pTerminal", pt);
+            co.add("leaf", lv);
+            ca.add(co);
+        }
+        o.add("cands", ca);
+        return o;
     }
 
     private void runAll(List<Runnable> tasks) {
@@ -719,7 +784,7 @@ public final class LookaheadSearch {
             r.steps = steps;
             r.capped = !g.isGameOver() && !watch.reached;
             r.value = value(g, me);
-            if (model != null) {
+            if (model != null || dumpSink != null) {
                 r.pTerminal = terminalP(g, me);
                 if (Double.isNaN(r.pTerminal)) {
                     r.leaf = forge.bench.StateEncoder.encode(g, me);

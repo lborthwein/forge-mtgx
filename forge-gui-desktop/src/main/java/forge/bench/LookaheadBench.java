@@ -191,6 +191,23 @@ public final class LookaheadBench {
                 Files.deleteIfExists(digest.trace);
             }
             game.subscribeToEvents(digest);
+            // Diagnostic dump (foundation-model lane): every searched decision of a look-ahead seat, and both
+            // seats' ForgeState + Forge static score at every live turn start. Off unless "dumpDir" is set.
+            final List<String> decLines = java.util.Collections.synchronizedList(new ArrayList<>());
+            final LiveDump liveDump = cfg.has("dumpDir") ? new LiveDump(game) : null;
+            if (liveDump != null) {
+                for (int i = 0; i < 2; i++) {
+                    if (searches.get(i) != null) {
+                        final int si = i;
+                        searches.get(i).dumpSink = o -> {
+                            o.addProperty("game", id);
+                            o.addProperty("seatIdx", si);
+                            decLines.add(o.toString());
+                        };
+                    }
+                }
+                game.subscribeToEvents(liveDump);
+            }
 
             final long cpu0 = os.getProcessCpuTime();
             final long t0 = System.currentTimeMillis();
@@ -280,6 +297,12 @@ public final class LookaheadBench {
                 }
             }
             row.add("search", st);
+            if (liveDump != null) {
+                final Path dd = Path.of(cfg.get("dumpDir").getAsString());
+                Files.createDirectories(dd);
+                Files.writeString(dd.resolve(id + ".dec.jsonl"), decLines.isEmpty() ? "" : String.join("\n", decLines) + "\n", StandardCharsets.UTF_8);
+                Files.writeString(dd.resolve(id + ".live.jsonl"), liveDump.lines.isEmpty() ? "" : String.join("\n", liveDump.lines) + "\n", StandardCharsets.UTF_8);
+            }
             Files.writeString(out, new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(row) + "\n", StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             err.println("[lookahead-bench] " + id + " winner=" + winner + " reason=" + reason + " turns=" + turns
@@ -291,6 +314,34 @@ public final class LookaheadBench {
             }
         }
         System.exit(0);
+    }
+
+    /** Diagnostic: both seats' ForgeState and Forge's static score at every live turn start. */
+    public static final class LiveDump {
+        private final Game game;
+        final List<String> lines = new ArrayList<>();
+
+        LiveDump(Game game) {
+            this.game = game;
+        }
+
+        @Subscribe
+        public void on(GameEventTurnBegan e) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("turn", e.turnNumber());
+            final JsonArray ps = new JsonArray();
+            for (forge.game.player.Player p : game.getPlayers()) {
+                final JsonObject po = new JsonObject();
+                po.addProperty("name", p.getName());
+                po.addProperty("index", StateEncoder.playerIndex(game, p));
+                po.addProperty("active", game.getPhaseHandler().getPlayerTurn() == p);
+                po.addProperty("static", new forge.ai.simulation.GameStateEvaluator().getStaticScore(game, p).value);
+                po.add("state", StateEncoder.encode(game, p));
+                ps.add(po);
+            }
+            o.add("players", ps);
+            lines.add(o.toString());
+        }
     }
 
     /** A replay digest: the position fingerprint at every turn start, plus the final one. */
