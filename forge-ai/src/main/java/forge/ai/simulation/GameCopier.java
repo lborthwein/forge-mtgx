@@ -80,6 +80,17 @@ public class GameCopier {
         return makeCopy(null, null);
     }
     public Game makeCopy(PhaseType advanceToPhase, Player aiPlayer) {
+        // Every trait and cost cloned for the copy gets its own mutable collections, so the copy can run on
+        // another thread than the original (forge.game.IndependentCopies).
+        forge.game.IndependentCopies.enter();
+        try {
+            return makeCopy0(advanceToPhase, aiPlayer);
+        } finally {
+            forge.game.IndependentCopies.exit();
+        }
+    }
+
+    private Game makeCopy0(PhaseType advanceToPhase, Player aiPlayer) {
         if (origGame.EXPERIMENTAL_RESTORE_SNAPSHOT) {
             // How do we advance to phase when using restores?
             return snapshot.makeCopy();

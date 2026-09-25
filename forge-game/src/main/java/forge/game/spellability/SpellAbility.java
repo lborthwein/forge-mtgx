@@ -134,9 +134,9 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
     private TreeBasedTable<String, Boolean, CardCollection> paidLists = TreeBasedTable.create();
     private EnumMap<AbilityKey, Object> triggeringObjects = AbilityKey.newMap();
     private EnumMap<AbilityKey, Object> replacingObjects = AbilityKey.newMap();
-    private final Supplier<List<String>> pipsToReduce = Suppliers.memoize(ArrayList::new);
+    private Supplier<List<String>> pipsToReduce = Suppliers.memoize(ArrayList::new);
     private List<AbilitySub> chosenList = null;
-    private final Supplier<CardCollection> tappedForConvoke = Suppliers.memoize(CardCollection::new);
+    private Supplier<CardCollection> tappedForConvoke = Suppliers.memoize(CardCollection::new);
     private Card sacrificedAsOffering;
     private Card sacrificedAsEmerge;
     private Integer maxWaterbend;
@@ -162,7 +162,7 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
     private CardCollection lastStateBattlefield;
     private CardCollection lastStateGraveyard;
 
-    private final Supplier<CardCollection> rollbackEffects = Suppliers.memoize(CardCollection::new);
+    private Supplier<CardCollection> rollbackEffects = Suppliers.memoize(CardCollection::new);
 
     private CardDamageTable damageMap;
     private CardDamageTable preventMap;
@@ -1281,6 +1281,10 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
                 clone.targetChosen = getTargets().clone();
             }
 
+            if (forge.game.IndependentCopies.active()) {
+                clone.detachSharedState();
+            }
+
             // clear maps for copy, the values will be added later
             clone.additionalAbilities = Maps.newHashMap();
             clone.additionalAbilityLists = Maps.newHashMap();
@@ -1290,6 +1294,41 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
             System.err.println(e);
         }
         return clone;
+    }
+
+    /**
+     * Give a clone its own mutable collections (see {@link forge.game.IndependentCopies}): clone() shares the
+     * paid lists' card collections, the pips / convoke / rollback lists and the last-state lists with the
+     * original. Called only while a game is being copied.
+     */
+    private void detachSharedState() {
+        TreeBasedTable<String, Boolean, CardCollection> paid = TreeBasedTable.create();
+        for (Table.Cell<String, Boolean, CardCollection> e : paidLists.cellSet()) {
+            paid.put(e.getRowKey(), e.getColumnKey(), new CardCollection(e.getValue()));
+        }
+        paidLists = paid;
+        final List<String> pips = new ArrayList<>(pipsToReduce.get());
+        pipsToReduce = Suppliers.memoize(() -> pips);
+        final CardCollection convoke = new CardCollection(tappedForConvoke.get());
+        tappedForConvoke = Suppliers.memoize(() -> convoke);
+        final CardCollection rollback = new CardCollection(rollbackEffects.get());
+        rollbackEffects = Suppliers.memoize(() -> rollback);
+        optionalCosts = EnumSet.copyOf(optionalCosts);
+        if (splicedCards != null) {
+            splicedCards = new CardCollection(splicedCards);
+        }
+        if (chosenList != null) {
+            chosenList = Lists.newArrayList(chosenList);
+        }
+        if (lastStateBattlefield != null) {
+            lastStateBattlefield = new CardCollection(lastStateBattlefield);
+        }
+        if (lastStateGraveyard != null) {
+            lastStateGraveyard = new CardCollection(lastStateGraveyard);
+        }
+        if (loseLifeMap != null) {
+            loseLifeMap = Maps.newHashMap(loseLifeMap);
+        }
     }
 
     public SpellAbility copyWithNoManaCost() {

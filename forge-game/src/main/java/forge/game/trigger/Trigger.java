@@ -558,6 +558,10 @@ public abstract class Trigger extends TriggerReplacementBase {
         final Trigger copy = (Trigger) clone();
 
         copyHelper(copy, newHost, lki || keepTextChanges);
+        if (forge.game.IndependentCopies.active()) {
+            // clone() shares the remembered list with the original trigger
+            copy.triggerRemembered = Lists.newArrayList(triggerRemembered);
+        }
 
         if (spellAbility != null) {
             copy.setOverridingAbility(spellAbility);

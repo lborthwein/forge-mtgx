@@ -39,6 +39,12 @@ public class CostDiscard extends CostPartWithList {
 
     protected List<Card> discardedBefore;
 
+    @Override
+    protected void detachSharedState() {
+        super.detachSharedState();
+        discardedBefore = null;
+    }
+
     private static final long serialVersionUID = 1L;
 
     /**

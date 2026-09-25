@@ -41,7 +41,13 @@ public class CostPutCounter extends CostPartWithList {
     // Put Counter doesn't really have a "Valid" portion of the cost
     private final CounterType counter;
 
-    private final GameEntityCounterTable counterTable = new GameEntityCounterTable();
+    private GameEntityCounterTable counterTable = new GameEntityCounterTable();
+
+    @Override
+    protected void detachSharedState() {
+        super.detachSharedState();
+        counterTable = new GameEntityCounterTable();
+    }
 
     public final CounterType getCounter() {
         return this.counter;

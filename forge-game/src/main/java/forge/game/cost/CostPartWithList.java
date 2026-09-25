@@ -30,8 +30,8 @@ public abstract class CostPartWithList extends CostPart {
      */
     private static final long serialVersionUID = 1L;
     /** The lists: one for LKI, one for the actual cards. */
-    private final CardCollection lkiList = new CardCollection();
-    protected final CardCollection cardList = new CardCollection();
+    private CardCollection lkiList = new CardCollection();
+    protected CardCollection cardList = new CardCollection();
 
     private boolean intrinsic = true;
 
@@ -63,6 +63,15 @@ public abstract class CostPartWithList extends CostPart {
         lkiList.clear();
         cardList.clear();
         table.clear();
+    }
+
+    @Override
+    protected void detachSharedState() {
+        super.detachSharedState();
+        // the lists are cleared after every payment, so a copy taken between payments starts empty
+        lkiList = new CardCollection();
+        cardList = new CardCollection();
+        table = new CardZoneTable();
     }
 
     /**
