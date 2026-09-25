@@ -139,6 +139,8 @@ public final class LookaheadBench {
                     c.margin = la.has("margin") ? la.get("margin").getAsDouble() : 0.0;
                     c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();
+                    c.modelUrl = la.has("modelUrl") ? la.get("modelUrl").getAsString() : null;
+                    c.modelTimeoutMs = la.has("modelTimeoutMs") ? la.get("modelTimeoutMs").getAsInt() : 2000;
                     c.seed = seed * 31 + i;
                     LookaheadSearch s = new LookaheadSearch(c);
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);
