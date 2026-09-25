@@ -323,6 +323,11 @@ public final class LookaheadSearch {
             outcome = "shadow-would-depart";
         }
 
+        if (Boolean.getBoolean("lookahead.debug") && best != 0) {
+            System.err.println("[lookahead] decision " + index + " T" + turn + " " + ph.getPhase() + " stack=" + live.getStack().size()
+                    + " def=" + cands.get(0).label + " best=" + cands.get(best).label + " outcome=" + outcome
+                    + " answer=" + (answer == null ? "pass" : answer.isEmpty() ? "[]" : answer.get(0) + " targets=" + answer.get(0).getAllTargetChoices()));
+        }
         final long dt = System.nanoTime() - t0;
         stats.searchNanos += dt;
         stats.maxSearchNanos = Math.max(stats.maxSearchNanos, dt);
@@ -542,8 +547,45 @@ public final class LookaheadSearch {
         long copyNanos, rolloutNanos;
     }
 
-    /** Plays the first action it was given, then is Forge AI. */
-    static final class ScriptedFirst extends PlayerControllerAi {
+    /**
+     * Forge AI for a play-out, with a loop breaker: after {@link #WINDOW_CAP} actions inside one
+     * priority window (same turn, phase and stack size) it passes. Forge's own guard is 999
+     * iterations of a full-game LKI copy each; a copy in which an AI action keeps failing to go on
+     * the stack (seen: a planeswalker ability whose target is lost in the copy) otherwise spends
+     * minutes in one play-out.
+     */
+    static class RolloutAi extends PlayerControllerAi {
+        static final int WINDOW_CAP = 25;
+        private String window = "";
+        private int actions = 0;
+        int breaks = 0;
+
+        RolloutAi(Game g, Player p, forge.LobbyPlayer lp) {
+            super(g, p, lp);
+        }
+
+        protected List<SpellAbility> capped(List<SpellAbility> chosen) {
+            final Game g = getGame();
+            final String w = g.getPhaseHandler().getTurn() + ":" + g.getPhaseHandler().getPhase() + ":" + g.getStack().size();
+            if (!w.equals(window)) {
+                window = w;
+                actions = 0;
+            }
+            if (chosen != null && ++actions > WINDOW_CAP) {
+                breaks++;
+                return null;
+            }
+            return chosen;
+        }
+
+        @Override
+        public List<SpellAbility> chooseSpellAbilityToPlay() {
+            return capped(super.chooseSpellAbilityToPlay());
+        }
+    }
+
+    /** Plays the first action it was given, then is Forge AI (with the play-out loop breaker). */
+    static final class ScriptedFirst extends RolloutAi {
         private List<SpellAbility> first;
         private boolean used = false;
 
@@ -612,6 +654,11 @@ public final class LookaheadSearch {
                 first.add(sa);
             }
             me.dangerouslySetController(new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), first));
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
             final PhaseHandler ph = g.getPhaseHandler();
             givePriority(ph, me);
             final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, Boolean.TRUE.equals(wantFp) ? me : null);
@@ -873,6 +920,11 @@ public final class LookaheadSearch {
                 first.add(sa);
             }
             me.dangerouslySetController(new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), first));
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
             final PhaseHandler ph = g.getPhaseHandler();
             givePriority(ph, me);
             final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, me);
