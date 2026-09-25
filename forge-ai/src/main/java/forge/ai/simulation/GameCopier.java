@@ -194,6 +194,10 @@ public class GameCopier {
             if (orig.getHostCard().getCastSA() == orig) {
                 newHost.setCastSA(copy);
             }
+            final forge.game.zone.Zone castFrom = orig.getHostCard().getCastFrom();
+            if (castFrom != null && castFrom.getPlayer() != null && newHost.getCastFrom() == null) {
+                newHost.setCastFrom(((Player) find(castFrom.getPlayer())).getZone(castFrom.getZoneType()));
+            }
             newGame.getStack().dangerouslyPushCopy(copy);
             stackSaMap.put(orig, copy);
         }
