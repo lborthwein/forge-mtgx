@@ -77,6 +77,8 @@ public final class LookaheadSearch {
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
+        /** C2: also search attack and block declarations. */
+        public boolean combat = false;
         /** Probe instrumentation on at most this many searched decisions per game. */
         public int probeMax = 6;
         /** Probe: once per game, put the live game on a known stream and compare it with a truth rollout. */
@@ -95,6 +97,7 @@ public final class LookaheadSearch {
             o.addProperty("margin", margin);
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
+            o.addProperty("combat", combat);
             o.addProperty("probeMax", probeMax);
             o.addProperty("fidelity", fidelity);
             return o;
@@ -106,6 +109,8 @@ public final class LookaheadSearch {
         public long decisions, stackSkipped, uncontested, searched, departed, departFallback, loopGuard;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
+        public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
+        public long combatNanos;
         public final JsonArray probes = new JsonArray();
 
         public JsonObject toJson() {
@@ -125,6 +130,13 @@ public final class LookaheadSearch {
             o.addProperty("searchMs", searchNanos / 1e6);
             o.addProperty("maxSearchMs", maxSearchNanos / 1e6);
             o.addProperty("msPerSearch", searched == 0 ? 0 : searchNanos / 1e6 / searched);
+            o.addProperty("attackDecisions", attackDecisions);
+            o.addProperty("attackSearched", attackSearched);
+            o.addProperty("attackDeparted", attackDeparted);
+            o.addProperty("blockDecisions", blockDecisions);
+            o.addProperty("blockSearched", blockSearched);
+            o.addProperty("blockDeparted", blockDeparted);
+            o.addProperty("combatMs", combatNanos / 1e6);
             if (probes.size() > 0) {
                 o.add("probes", probes);
             }
@@ -746,6 +758,357 @@ public final class LookaheadSearch {
         } catch (IllegalAccessException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+
+    // ------------------------------------------------------------------ combat (C2)
+
+    /** An attack plan: attacker card id -> defender (player id, or card id for a planeswalker/battle). */
+    static final class AttackPlan {
+        final String label;
+        final Map<Integer, Integer> attackers = new TreeMap<>();
+        final Map<Integer, Boolean> defenderIsPlayer = new TreeMap<>();
+
+        AttackPlan(String label) {
+            this.label = label;
+        }
+
+        String key() {
+            return attackers.toString() + defenderIsPlayer;
+        }
+
+        static AttackPlan of(String label, forge.game.combat.Combat c) {
+            AttackPlan a = new AttackPlan(label);
+            for (Card at : c.getAttackers()) {
+                forge.game.GameEntity d = c.getDefenderByAttacker(at);
+                if (d instanceof Player pl) {
+                    a.attackers.put(at.getId(), pl.getId());
+                    a.defenderIsPlayer.put(at.getId(), true);
+                } else if (d instanceof Card dc) {
+                    a.attackers.put(at.getId(), dc.getId());
+                    a.defenderIsPlayer.put(at.getId(), false);
+                }
+            }
+            return a;
+        }
+
+        /** Replace the combat's attackers with this plan (objects looked up in the combat's game). */
+        boolean applyTo(Game g, forge.game.combat.Combat c) {
+            c.clearAttackers();
+            for (Map.Entry<Integer, Integer> e : attackers.entrySet()) {
+                Card at = g.findById(e.getKey());
+                forge.game.GameEntity d = defenderIsPlayer.get(e.getKey()) ? g.getPlayer(e.getValue()) : g.findById(e.getValue());
+                if (at == null || d == null) {
+                    return false;
+                }
+                c.addAttacker(at, d);
+            }
+            return true;
+        }
+    }
+
+    /** A block plan: blocker card id -> attacker card ids it blocks. */
+    static final class BlockPlan {
+        final String label;
+        final Map<Integer, List<Integer>> blocks = new TreeMap<>();
+
+        BlockPlan(String label) {
+            this.label = label;
+        }
+
+        String key() {
+            return blocks.toString();
+        }
+
+        static BlockPlan of(String label, forge.game.combat.Combat c, Player defender) {
+            BlockPlan b = new BlockPlan(label);
+            for (Card bl : c.getAllBlockers()) {
+                if (bl.getController() != defender) {
+                    continue;
+                }
+                List<Integer> ats = new ArrayList<>();
+                for (Card at : c.getAttackersBlockedBy(bl)) {
+                    ats.add(at.getId());
+                }
+                b.blocks.put(bl.getId(), ats);
+            }
+            return b;
+        }
+
+        static void clear(forge.game.combat.Combat c, Player defender) {
+            for (Card bl : new ArrayList<>(c.getAllBlockers())) {
+                if (bl.getController() == defender) {
+                    c.undoBlockingAssignment(bl);
+                }
+            }
+        }
+
+        boolean applyTo(Game g, forge.game.combat.Combat c, Player defender) {
+            clear(c, defender);
+            for (Map.Entry<Integer, List<Integer>> e : blocks.entrySet()) {
+                Card bl = g.findById(e.getKey());
+                if (bl == null) {
+                    return false;
+                }
+                for (Integer aid : e.getValue()) {
+                    Card at = g.findById(aid);
+                    if (at == null) {
+                        return false;
+                    }
+                    c.addBlocker(at, bl);
+                }
+            }
+            return true;
+        }
+    }
+
+    /** Play-out Forge AI whose first attack (or block) declaration is scripted. */
+    static final class ScriptedCombat extends RolloutAi {
+        private final AttackPlan attack;
+        private final BlockPlan block;
+        private boolean used = false;
+
+        ScriptedCombat(Game g, Player p, forge.LobbyPlayer lp, AttackPlan attack, BlockPlan block) {
+            super(g, p, lp);
+            this.attack = attack;
+            this.block = block;
+        }
+
+        @Override
+        public void declareAttackers(Player attacker, forge.game.combat.Combat combat) {
+            if (attack != null && !used) {
+                used = true;
+                attack.applyTo(getGame(), combat);
+                return;
+            }
+            super.declareAttackers(attacker, combat);
+        }
+
+        @Override
+        public void declareBlockers(Player defender, forge.game.combat.Combat combat) {
+            if (block != null && !used) {
+                used = true;
+                block.applyTo(getGame(), combat, defender);
+                return;
+            }
+            super.declareBlockers(defender, combat);
+        }
+    }
+
+    private static void setPriorityState(PhaseHandler ph, Player prio, Player first, boolean give) {
+        initFields();
+        try {
+            fPrio.set(ph, prio);
+            fFirst.set(ph, first);
+            fGive.setBoolean(ph, give);
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * One combat play-out: copy the live game, rewind the copy to the end of the step before the declaration
+     * (both players passed), and let it advance into the declaration step, where the searching seat's
+     * controller declares the plan. Everything after that is Forge AI on both seats.
+     */
+    Rollout combatRollout(Game live, Player liveMe, AttackPlan attack, BlockPlan block, long worldSeed, boolean resample) {
+        final Rollout r = new Rollout();
+        final Random prev = MyRandom.getThreadRandom();
+        MyRandom.setThreadRandom(new Random(mix(worldSeed, 1)));
+        AiCache.openScope();
+        final Object prevIds = forge.util.IdScope.capture();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            final Player me;
+            synchronized (live) {
+                GameCopier copier = new GameCopier(live, true);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+                if (resample) {
+                    resample(live, liveMe, g, me, new Random(mix(worldSeed, 2)));
+                }
+            }
+            MyRandom.setThreadRandom(new Random(mix(worldSeed, 3)));
+            final PhaseHandler ph = g.getPhaseHandler();
+            final forge.game.combat.Combat c = ph.getCombat();
+            if (c == null) {
+                r.ok = false;
+                r.value = Double.NEGATIVE_INFINITY;
+                return r;
+            }
+            final Player active = ph.getPlayerTurn();
+            final Player other = g.getNextPlayerAfter(active);
+            if (attack != null) {
+                c.clearAttackers();
+                ph.devModeSet(forge.game.phase.PhaseType.COMBAT_BEGIN, active, false, ph.getTurn());
+            } else {
+                BlockPlan.clear(c, me);
+                ph.devModeSet(forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS, active, false, ph.getTurn());
+            }
+            // both players have passed in the rewound step: the next main-loop step advances into the declaration
+            setPriorityState(ph, other, active, false);
+            me.dangerouslySetController(new ScriptedCombat(g, me, me.getController().getLobbyPlayer(), attack, block));
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
+            final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, null);
+            g.subscribeToEvents(watch);
+            long b = System.nanoTime();
+            int steps = 0;
+            while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
+                ph.mainLoopStep();
+                steps++;
+            }
+            r.rolloutNanos = System.nanoTime() - b;
+            r.steps = steps;
+            r.capped = !g.isGameOver() && !watch.reached;
+            r.value = value(g, me);
+        } catch (RuntimeException | StackOverflowError e) {
+            r.ok = false;
+            r.value = Double.NEGATIVE_INFINITY;
+            System.err.println("[lookahead] combat rollout failed: " + e);
+        } finally {
+            AiCache.closeScope();
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+        return r;
+    }
+
+    /** Pick the best of the candidate plans by EV over K worlds (index 0 = Forge's own, ties to it). */
+    private int bestCombatPlan(Game live, Player me, int n, java.util.function.BiFunction<Integer, Long, Rollout> run, long seed) {
+        final int k = Math.max(1, cfg.worlds);
+        final double[][] values = new double[n][k];
+        final boolean[] ok = new boolean[n];
+        Arrays.fill(ok, true);
+        final List<Runnable> tasks = new ArrayList<>();
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final int ww = w, cc = c;
+                tasks.add(() -> {
+                    Rollout r = run.apply(cc, mix(seed, 1000 + ww));
+                    synchronized (values) {
+                        values[cc][ww] = r.value;
+                        if (!r.ok) {
+                            ok[cc] = false;
+                        }
+                        stats.rollouts++;
+                        stats.steps += r.steps;
+                        if (!r.ok) {
+                            stats.rolloutFailures++;
+                        }
+                    }
+                });
+            }
+        }
+        runAll(tasks);
+        if (!ok[0]) {
+            return 0;
+        }
+        int best = 0;
+        double bestEv = 0;
+        for (int c = 0; c < n; c++) {
+            double s2 = 0;
+            for (int w = 0; w < k; w++) {
+                s2 += values[c][w];
+            }
+            double ev = ok[c] ? s2 / k : Double.NEGATIVE_INFINITY;
+            if (c == 0) {
+                bestEv = ev;
+            } else if (ev > bestEv + cfg.margin) {
+                best = c;
+                bestEv = ev;
+            }
+        }
+        return best;
+    }
+
+    /** Called after Forge AI has declared its attackers into the live combat. */
+    public void decideAttack(PlayerControllerAi ctrl, forge.game.combat.Combat combat) {
+        final Game live = ctrl.getGame();
+        final Player me = ctrl.getPlayer();
+        stats.attackDecisions++;
+        final int index = decisionIndex++;
+        final long t0 = System.nanoTime();
+        final List<AttackPlan> plans = new ArrayList<>();
+        final AttackPlan forge0 = AttackPlan.of("forge", combat);
+        plans.add(forge0);
+        AttackPlan none = new AttackPlan("none");
+        // alpha: every creature that can attack Forge's defender (or the opponent) without an attack cost
+        forge.game.GameEntity def = forge0.attackers.isEmpty() ? null : combat.getDefenderByAttacker(combat.getAttackers().get(0));
+        if (def == null) {
+            for (Player o : me.getOpponents()) {
+                def = o;
+                break;
+            }
+        }
+        AttackPlan alpha = new AttackPlan("alpha");
+        if (def != null) {
+            for (Card cr : me.getCreaturesInPlay()) {
+                if (forge.game.combat.CombatUtil.canAttack(cr, def)
+                        && forge.game.combat.CombatUtil.getAttackCost(live, cr, def) == null) {
+                    alpha.attackers.put(cr.getId(), def instanceof Player ? ((Player) def).getId() : ((Card) def).getId());
+                    alpha.defenderIsPlayer.put(cr.getId(), def instanceof Player);
+                }
+            }
+        }
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        keys.add(forge0.key());
+        for (AttackPlan a : new AttackPlan[] {none, alpha}) {
+            if (keys.add(a.key())) {
+                plans.add(a);
+            }
+        }
+        if (plans.size() < 2 || live.getStack().size() > 0) {
+            return;
+        }
+        stats.attackSearched++;
+        int best = bestCombatPlan(live, me, plans.size(),
+                (c, ws) -> combatRollout(live, me, plans.get(c), null, ws, cfg.resample), mix(cfg.seed, 0xa77aL + index));
+        if (best != 0 && !cfg.shadow) {
+            if (plans.get(best).applyTo(live, combat) && forge.game.combat.CombatUtil.validateAttackers(combat)) {
+                stats.attackDeparted++;
+            } else {
+                forge0.applyTo(live, combat);
+            }
+        }
+        stats.combatNanos += System.nanoTime() - t0;
+    }
+
+    /** Called after Forge AI has declared its blockers into the live combat. */
+    public void decideBlock(PlayerControllerAi ctrl, Player defender, forge.game.combat.Combat combat) {
+        final Game live = ctrl.getGame();
+        final Player me = ctrl.getPlayer();
+        if (defender != me) {
+            return;
+        }
+        stats.blockDecisions++;
+        final int index = decisionIndex++;
+        final long t0 = System.nanoTime();
+        final BlockPlan forge0 = BlockPlan.of("forge", combat, me);
+        final BlockPlan none = new BlockPlan("none");
+        final List<BlockPlan> plans = new ArrayList<>();
+        plans.add(forge0);
+        if (!none.key().equals(forge0.key())) {
+            plans.add(none);
+        }
+        if (plans.size() < 2) {
+            return;
+        }
+        stats.blockSearched++;
+        int best = bestCombatPlan(live, me, plans.size(),
+                (c, ws) -> combatRollout(live, me, null, plans.get(c), ws, cfg.resample), mix(cfg.seed, 0xb10cL + index));
+        if (best != 0 && !cfg.shadow) {
+            if (plans.get(best).applyTo(live, combat, me) && forge.game.combat.CombatUtil.validateBlocks(combat, me) == null) {
+                stats.blockDeparted++;
+            } else {
+                forge0.applyTo(live, combat, me);
+            }
+        }
+        stats.combatNanos += System.nanoTime() - t0;
     }
 
     // ------------------------------------------------------------------ belief
