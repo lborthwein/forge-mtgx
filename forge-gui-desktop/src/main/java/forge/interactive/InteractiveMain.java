@@ -8,6 +8,8 @@
  */
 package forge.interactive;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import forge.LobbyPlayer;
 import forge.StaticData;
 import forge.item.PaperCard;
@@ -19,6 +21,8 @@ import forge.game.GameRules;
 import forge.game.GameType;
 import forge.game.Match;
 import forge.game.player.Player;
+import forge.game.player.PlayerOutcome;
+import forge.game.player.PlayerStatistics;
 import forge.game.player.PlayerController.FullControlFlag;
 import forge.game.player.RegisteredPlayer;
 import forge.gui.GuiBase;
@@ -284,6 +288,10 @@ public final class InteractiveMain {
                 case "margin": c.margin = Double.parseDouble(p[1].trim()); break;
                 case "maxSteps": c.maxSteps = Integer.parseInt(p[1].trim()); break;
                 case "shadow": c.shadow = !"0".equals(p[1].trim()); break;
+                case "combat": c.combat = !"0".equals(p[1].trim()); break;
+                case "stack": c.stack = !"0".equals(p[1].trim()); break;
+                case "modelUrl": c.modelUrl = p[1].trim(); break;
+                case "modelTimeoutMs": c.modelTimeoutMs = Integer.parseInt(p[1].trim()); break;
                 default: break;
             }
         }
@@ -339,8 +347,43 @@ public final class InteractiveMain {
             winner = seat;
         }
         channel.terminal("g1", winner, String.valueOf(outcome.getWinCondition()),
-                outcome.getLastTurnNumber());
+                outcome.getLastTurnNumber(), lossesOf(outcome, registered));
         return true;
+    }
+
+    /**
+     * Each losing seat's {@link forge.game.player.GameLossReason}, in seat order, for the
+     * terminal message (mtgx, 2026-09-25).
+     *
+     * <p>{@code GameEndReason} is the winner's view: {@code AllOpponentsLost} for a
+     * concession, a decking and a life-0 loss alike, so the browser could not tell a
+     * turn-one concession from a real loss. The loser's {@link PlayerOutcome} keeps the
+     * difference. A player with no outcome, or one that won, is not listed.
+     */
+    static JsonArray lossesOf(final Iterable<Map.Entry<RegisteredPlayer, PlayerStatistics>> ratings,
+                              final List<RegisteredPlayer> registered) {
+        final JsonObject[] bySeat = new JsonObject[registered.size()];
+        for (Map.Entry<RegisteredPlayer, PlayerStatistics> rating : ratings) {
+            final int seat = registered.indexOf(rating.getKey());
+            final PlayerOutcome result = rating.getValue() == null ? null : rating.getValue().getOutcome();
+            if (seat < 0 || result == null || result.hasWon()) {
+                continue;
+            }
+            final JsonObject loss = new JsonObject();
+            loss.addProperty("seat", seat);
+            loss.addProperty("reason", result.lossState.name());
+            if (result.loseConditionSpell != null && !result.loseConditionSpell.isEmpty()) {
+                loss.addProperty("spell", result.loseConditionSpell);
+            }
+            bySeat[seat] = loss;
+        }
+        final JsonArray losses = new JsonArray();
+        for (JsonObject loss : bySeat) {
+            if (loss != null) {
+                losses.add(loss);
+            }
+        }
+        return losses;
     }
 
     private static void validateDeckFiles(final List<Path> decks)

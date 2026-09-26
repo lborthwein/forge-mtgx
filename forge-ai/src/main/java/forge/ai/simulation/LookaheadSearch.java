@@ -77,10 +77,20 @@ public final class LookaheadSearch {
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
+        /** C2: also search attack and block declarations. */
+        public boolean combat = false;
+        /** C1: also search priority decisions with a non-empty stack (spells only; see GameCopier.stackUnsupported). */
+        public boolean stack = false;
+        /** C1 fidelity probe: take the probes (and the one live-continuation fidelity check) at stack decisions only. */
+        public boolean probeStack = false;
         /** Probe instrumentation on at most this many searched decisions per game. */
         public int probeMax = 6;
         /** Probe: once per game, put the live game on a known stream and compare it with a truth rollout. */
         public boolean fidelity = true;
+        /** C5: base URL of the foundation-model leaf service (null = Forge's static evaluator as the leaf). */
+        public String modelUrl = null;
+        /** C5: per-request timeout; a failed request falls back to the static evaluator for that decision. */
+        public int modelTimeoutMs = 2000;
 
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
@@ -95,8 +105,19 @@ public final class LookaheadSearch {
             o.addProperty("margin", margin);
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
+            o.addProperty("combat", combat);
+            if (stack) {
+                o.addProperty("stack", true);
+            }
+            if (probeStack) {
+                o.addProperty("probeStack", true);
+            }
             o.addProperty("probeMax", probeMax);
             o.addProperty("fidelity", fidelity);
+            if (modelUrl != null) {
+                o.addProperty("modelUrl", modelUrl);
+                o.addProperty("modelTimeoutMs", modelTimeoutMs);
+            }
             return o;
         }
     }
@@ -106,6 +127,14 @@ public final class LookaheadSearch {
         public long decisions, stackSkipped, uncontested, searched, departed, departFallback, loopGuard;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
+        public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
+        public long combatNanos;
+        /** C1: priority decisions with a non-empty stack; of those, refused (by reason), searched, departed. */
+        public long stackDecisions, stackUnsupported, stackSearched, stackDeparted;
+        public final Map<String, Long> stackWhy = new TreeMap<>();
+        /** C5 model leaf: requests, leaves scored, decisions that fell back to the static evaluator. */
+        public long modelCalls, modelLeaves, modelFallbacks, modelNanos, modelUnknownCards;
+        public String modelDigest, modelCheckpoint, modelLastError;
         public final JsonArray probes = new JsonArray();
 
         public JsonObject toJson() {
@@ -125,6 +154,34 @@ public final class LookaheadSearch {
             o.addProperty("searchMs", searchNanos / 1e6);
             o.addProperty("maxSearchMs", maxSearchNanos / 1e6);
             o.addProperty("msPerSearch", searched == 0 ? 0 : searchNanos / 1e6 / searched);
+            o.addProperty("attackDecisions", attackDecisions);
+            o.addProperty("attackSearched", attackSearched);
+            o.addProperty("attackDeparted", attackDeparted);
+            o.addProperty("blockDecisions", blockDecisions);
+            o.addProperty("blockSearched", blockSearched);
+            o.addProperty("blockDeparted", blockDeparted);
+            o.addProperty("combatMs", combatNanos / 1e6);
+            if (stackDecisions > 0 && (stackSearched > 0 || stackUnsupported > 0)) {
+                o.addProperty("stackDecisions", stackDecisions);
+                o.addProperty("stackUnsupported", stackUnsupported);
+                o.addProperty("stackSearched", stackSearched);
+                o.addProperty("stackDeparted", stackDeparted);
+                JsonObject why = new JsonObject();
+                stackWhy.forEach(why::addProperty);
+                o.add("stackWhy", why);
+            }
+            if (modelCalls > 0 || modelFallbacks > 0) {
+                o.addProperty("modelCalls", modelCalls);
+                o.addProperty("modelLeaves", modelLeaves);
+                o.addProperty("modelFallbacks", modelFallbacks);
+                o.addProperty("modelMs", modelNanos / 1e6);
+                o.addProperty("modelUnknownCards", modelUnknownCards);
+                o.addProperty("modelDigest", modelDigest);
+                o.addProperty("modelCheckpoint", modelCheckpoint);
+                if (modelLastError != null) {
+                    o.addProperty("modelLastError", modelLastError);
+                }
+            }
             if (probes.size() > 0) {
                 o.add("probes", probes);
             }
@@ -162,6 +219,8 @@ public final class LookaheadSearch {
     private final Config cfg;
     private final Stats stats = new Stats();
     private final ExecutorService pool;
+    private final ModelClient model;
+    private JsonObject modelDeck = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
     private int departuresThisTurn = 0;
@@ -184,6 +243,7 @@ public final class LookaheadSearch {
         } else {
             pool = null;
         }
+        model = cfg.modelUrl == null ? null : new ModelClient(cfg.modelUrl, cfg.modelTimeoutMs);
     }
 
     public Config getConfig() {
@@ -213,9 +273,20 @@ public final class LookaheadSearch {
         stats.decisions++;
         final int index = decisionIndex++;
 
-        if (!live.getStack().isEmpty()) {
-            stats.stackSkipped++;
-            return def;
+        final boolean onStack = !live.getStack().isEmpty();
+        if (onStack) {
+            stats.stackDecisions++;
+            if (!cfg.stack) {
+                stats.stackSkipped++;
+                return def;
+            }
+            final String why = GameCopier.stackUnsupported(live);
+            if (why != null) {
+                stats.stackSkipped++;
+                stats.stackUnsupported++;
+                stats.stackWhy.merge(why, 1L, Long::sum);
+                return def;
+            }
         }
         final PhaseHandler ph = live.getPhaseHandler();
         final int turn = ph.getTurn();
@@ -241,9 +312,13 @@ public final class LookaheadSearch {
             return def;
         }
         stats.searched++;
+        if (onStack) {
+            stats.stackSearched++;
+        }
 
         final int k = Math.max(1, cfg.worlds);
         final double[][] values = new double[cands.size()][k];
+        final Rollout[][] outs = new Rollout[cands.size()][k];
         final boolean[] ok = new boolean[cands.size()];
         Arrays.fill(ok, true);
 
@@ -263,6 +338,7 @@ public final class LookaheadSearch {
                     prep[cc][ww] = null;
                     synchronized (values) {
                         values[cc][ww] = r.value;
+                        outs[cc][ww] = r;
                         if (!r.ok) {
                             ok[cc] = false;
                         }
@@ -285,6 +361,9 @@ public final class LookaheadSearch {
         final String stressSpec = System.getProperty("lookahead.stress");
         if (stressSpec != null) {
             stress(stressSpec, index, live, me, cands, defSa, decisionSeed);
+        }
+        if (model != null) {
+            modelLeaves(live, me, values, outs, ok, k);
         }
 
         int best = 0; // Forge's own answer is candidate 0
@@ -327,6 +406,9 @@ public final class LookaheadSearch {
                 } else {
                     answer = mapped;
                     stats.departed++;
+                    if (onStack) {
+                        stats.stackDeparted++;
+                    }
                     departuresThisTurn++;
                     departureCounts.put(key, seen + 1);
                     outcome = "departed";
@@ -357,7 +439,7 @@ public final class LookaheadSearch {
         stats.searchNanos += dt;
         stats.maxSearchNanos = Math.max(stats.maxSearchNanos, dt);
 
-        if (cfg.probe && turn >= 3 && stats.probes.size() < cfg.probeMax) {
+        if (cfg.probe && turn >= 3 && stats.probes.size() < cfg.probeMax && (!cfg.probeStack || onStack)) {
             JsonObject p = new JsonObject();
             p.addProperty("decision", index);
             p.addProperty("turn", turn);
@@ -421,6 +503,7 @@ public final class LookaheadSearch {
         forge.util.IdScope.open();
         try {
             GameCopier copier = new GameCopier(live, true);
+            copier.setCopyStack(cfg.stack);
             Game g = copier.makeCopy();
             Player me = (Player) copier.find(liveMe);
             List<SpellAbility> legal = new SpellAbilityPicker(me).getCandidateSpellsAndAbilities();
@@ -444,6 +527,12 @@ public final class LookaheadSearch {
             }
         } catch (RuntimeException e) {
             // Enumeration failure: search nothing, play Forge's answer.
+            if (cfg.stack && !live.getStack().isEmpty()) {
+                stats.stackWhy.merge("copyfail", 1L, Long::sum);
+                if (Boolean.getBoolean("lookahead.debug")) {
+                    System.err.println("[lookahead] stack copy failed: " + e);
+                }
+            }
             return out.subList(0, 1);
         } finally {
             AiCache.closeScope();
@@ -494,7 +583,7 @@ public final class LookaheadSearch {
                     sub.resetTargets();
                 }
             }
-            SpellAbilityChoiceCopier.copyTargets(defSa, d, copier::find);
+            SpellAbilityChoiceCopier.copyTargets(defSa, d, copier::findWithStack);
             if (!targetsInGame(d, g)) {
                 return null;
             }
@@ -526,6 +615,9 @@ public final class LookaheadSearch {
                     return false;
                 }
                 if (o instanceof Player && ((Player) o).getGame() != g) {
+                    return false;
+                }
+                if (o instanceof SpellAbility && ((SpellAbility) o).getHostCard().getGame() != g) {
                     return false;
                 }
             }
@@ -568,6 +660,10 @@ public final class LookaheadSearch {
         boolean ok = true;
         boolean capped = false;
         double value;
+        /** C5: the seat's ForgeState at a non-terminal horizon (null if terminal or no model). */
+        JsonObject leaf;
+        /** C5: P(seat wins) of a terminal play-out (1, 0, or 0.5 for a draw); NaN if not terminal. */
+        double pTerminal = Double.NaN;
         int steps;
         String fingerprint;
         long copyNanos, rolloutNanos;
@@ -660,6 +756,8 @@ public final class LookaheadSearch {
         boolean failed;
         Throwable error;
         long copyNanos;
+        /** C1: with spells on the stack, the copied player who keeps "first priority" (null otherwise). */
+        Player firstPriority;
         /** The copy's scopes (ids, AI cache, RNG), installed on whichever thread plays it out. */
         Object ids, cache;
         Random rnd;
@@ -690,8 +788,15 @@ public final class LookaheadSearch {
             long a = System.nanoTime();
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyStack(cfg.stack);
                 p.g = copier.makeCopy();
                 p.me = (Player) copier.find(liveMe);
+                if (cfg.stack && !live.getStack().isEmpty()) {
+                    // With spells on the stack, the copy must resolve them as the live game would: the player who acted
+                    // last keeps "first priority", so our pass lets the top spell resolve.
+                    final Player lf = firstPriority(live.getPhaseHandler());
+                    p.firstPriority = lf == null ? null : (Player) copier.find(lf);
+                }
                 if (resample) {
                     resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
                 }
@@ -753,6 +858,9 @@ public final class LookaheadSearch {
             }
             final PhaseHandler ph = g.getPhaseHandler();
             givePriority(ph, me);
+            if (p.firstPriority != null) {
+                setFirstPriority(ph, p.firstPriority);
+            }
             final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, Boolean.TRUE.equals(wantFp) ? me : null);
             g.subscribeToEvents(watch);
             long b = System.nanoTime();
@@ -776,6 +884,12 @@ public final class LookaheadSearch {
             r.steps = steps;
             r.capped = !g.isGameOver() && !watch.reached;
             r.value = value(g, me);
+            if (model != null) {
+                r.pTerminal = terminalP(g, me);
+                if (Double.isNaN(r.pTerminal)) {
+                    r.leaf = forge.bench.StateEncoder.encode(g, me);
+                }
+            }
             r.fingerprint = watch.fingerprint;
         } catch (RuntimeException | StackOverflowError e) {
             r.ok = false;
@@ -870,6 +984,105 @@ public final class LookaheadSearch {
         }
     }
 
+    /** P(me wins) of a finished play-out, in the model's scale; NaN if the play-out did not end the game. */
+    static double terminalP(Game g, Player me) {
+        if (g.isGameOver() || !me.isInGame()) {
+            if (me.hasWon()) {
+                return 1.0;
+            }
+            if (me.hasLost() || !me.isInGame()) {
+                return 0.0;
+            }
+            return 0.5;
+        }
+        for (Player o : me.getOpponents()) {
+            if (o.hasLost()) {
+                return 1.0;
+            }
+        }
+        return Double.NaN;
+    }
+
+    /**
+     * C5: replace the static leaf values of one decision by the served P(win). One request carries every
+     * non-terminal leaf, world-major then candidate-minor (a fixed order, so the service is bit-identical). Terminal
+     * play-outs score 1 / 0 / 0.5. On any failure the decision keeps Forge's static values (all of them, so a
+     * decision never mixes the two scales) and the fallback is counted.
+     */
+    private void modelLeaves(Game live, Player me, double[][] values, Rollout[][] outs, boolean[] ok, int k) {
+        final int n = values.length;
+        final JsonArray leaves = new JsonArray();
+        final List<int[]> at = new ArrayList<>();
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                Rollout r = outs[c][w];
+                if (ok[c] && r != null && r.ok && r.leaf != null) {
+                    leaves.add(r.leaf);
+                    at.add(new int[] {c, w});
+                }
+            }
+        }
+        double[] p = null;
+        if (leaves.size() > 0) {
+            final JsonObject req = new JsonObject();
+            req.addProperty("schema", ModelClient.REQUEST_SCHEMA);
+            req.addProperty("seat", forge.bench.StateEncoder.playerIndex(live, me));
+            req.addProperty("startingSeat", live.getStartingPlayer() == null ? -1
+                    : forge.bench.StateEncoder.playerIndex(live, live.getStartingPlayer()));
+            final JsonArray mull = new JsonArray();
+            for (Player pl : live.getPlayers()) {
+                mull.add(pl.getStats().getMulliganCount());
+            }
+            req.add("mulligans", mull);
+            req.add("deck", deckOf(me));
+            req.add("leaves", leaves);
+            final long t = System.nanoTime();
+            p = model.score(req, leaves.size());
+            stats.modelNanos += System.nanoTime() - t;
+            if (p == null) {
+                stats.modelFallbacks++;
+                stats.modelLastError = model.lastError;
+                System.err.println("[lookahead] model leaf failed, static fallback: " + model.lastError);
+                return;
+            }
+            stats.modelCalls++;
+            stats.modelLeaves += leaves.size();
+            stats.modelDigest = model.digestHex();
+            stats.modelCheckpoint = model.checkpointSha256;
+            stats.modelUnknownCards = model.unknownCards;
+        }
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                Rollout r = outs[c][w];
+                if (ok[c] && r != null && r.ok && !Double.isNaN(r.pTerminal)) {
+                    values[c][w] = r.pTerminal;
+                }
+            }
+        }
+        for (int i = 0; i < at.size(); i++) {
+            values[at.get(i)[0]][at.get(i)[1]] = p[i];
+        }
+    }
+
+    /** The seat's registered main deck as {name: copies} (fixed for the game). */
+    private JsonObject deckOf(Player me) {
+        if (modelDeck == null) {
+            final JsonObject d = new JsonObject();
+            forge.deck.Deck deck = me.getRegisteredPlayer() == null ? null : me.getRegisteredPlayer().getDeck();
+            if (deck != null && deck.has(forge.deck.DeckSection.Main)) {
+                final java.util.TreeMap<String, Integer> byName = new java.util.TreeMap<>();
+                for (Map.Entry<forge.item.PaperCard, Integer> e : deck.get(forge.deck.DeckSection.Main)) {
+                    byName.merge(e.getKey().getName(), e.getValue(), Integer::sum);
+                }
+                for (Map.Entry<String, Integer> e : byName.entrySet()) {
+                    d.addProperty(e.getKey(), e.getValue());
+                }
+            }
+            modelDeck = d;
+        }
+        return modelDeck;
+    }
+
     static double value(Game g, Player me) {
         if (g.isGameOver() || !me.isInGame()) {
             if (me.hasWon()) {
@@ -906,6 +1119,25 @@ public final class LookaheadSearch {
         }
     }
 
+    /** The player who holds "first priority" (acted last) in {@code ph}, i.e. whose turn it is to see the stack resolve. */
+    static Player firstPriority(PhaseHandler ph) {
+        initFields();
+        try {
+            return (Player) fFirst.get(ph);
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    static void setFirstPriority(PhaseHandler ph, Player p) {
+        initFields();
+        try {
+            fFirst.set(ph, p);
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     /** The copy resumes exactly where the live seat stands: it holds priority, it acted first. */
     static void givePriority(PhaseHandler ph, Player p) {
         initFields();
@@ -916,6 +1148,357 @@ public final class LookaheadSearch {
         } catch (IllegalAccessException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+
+    // ------------------------------------------------------------------ combat (C2)
+
+    /** An attack plan: attacker card id -> defender (player id, or card id for a planeswalker/battle). */
+    static final class AttackPlan {
+        final String label;
+        final Map<Integer, Integer> attackers = new TreeMap<>();
+        final Map<Integer, Boolean> defenderIsPlayer = new TreeMap<>();
+
+        AttackPlan(String label) {
+            this.label = label;
+        }
+
+        String key() {
+            return attackers.toString() + defenderIsPlayer;
+        }
+
+        static AttackPlan of(String label, forge.game.combat.Combat c) {
+            AttackPlan a = new AttackPlan(label);
+            for (Card at : c.getAttackers()) {
+                forge.game.GameEntity d = c.getDefenderByAttacker(at);
+                if (d instanceof Player pl) {
+                    a.attackers.put(at.getId(), pl.getId());
+                    a.defenderIsPlayer.put(at.getId(), true);
+                } else if (d instanceof Card dc) {
+                    a.attackers.put(at.getId(), dc.getId());
+                    a.defenderIsPlayer.put(at.getId(), false);
+                }
+            }
+            return a;
+        }
+
+        /** Replace the combat's attackers with this plan (objects looked up in the combat's game). */
+        boolean applyTo(Game g, forge.game.combat.Combat c) {
+            c.clearAttackers();
+            for (Map.Entry<Integer, Integer> e : attackers.entrySet()) {
+                Card at = g.findById(e.getKey());
+                forge.game.GameEntity d = defenderIsPlayer.get(e.getKey()) ? g.getPlayer(e.getValue()) : g.findById(e.getValue());
+                if (at == null || d == null) {
+                    return false;
+                }
+                c.addAttacker(at, d);
+            }
+            return true;
+        }
+    }
+
+    /** A block plan: blocker card id -> attacker card ids it blocks. */
+    static final class BlockPlan {
+        final String label;
+        final Map<Integer, List<Integer>> blocks = new TreeMap<>();
+
+        BlockPlan(String label) {
+            this.label = label;
+        }
+
+        String key() {
+            return blocks.toString();
+        }
+
+        static BlockPlan of(String label, forge.game.combat.Combat c, Player defender) {
+            BlockPlan b = new BlockPlan(label);
+            for (Card bl : c.getAllBlockers()) {
+                if (bl.getController() != defender) {
+                    continue;
+                }
+                List<Integer> ats = new ArrayList<>();
+                for (Card at : c.getAttackersBlockedBy(bl)) {
+                    ats.add(at.getId());
+                }
+                b.blocks.put(bl.getId(), ats);
+            }
+            return b;
+        }
+
+        static void clear(forge.game.combat.Combat c, Player defender) {
+            for (Card bl : new ArrayList<>(c.getAllBlockers())) {
+                if (bl.getController() == defender) {
+                    c.undoBlockingAssignment(bl);
+                }
+            }
+        }
+
+        boolean applyTo(Game g, forge.game.combat.Combat c, Player defender) {
+            clear(c, defender);
+            for (Map.Entry<Integer, List<Integer>> e : blocks.entrySet()) {
+                Card bl = g.findById(e.getKey());
+                if (bl == null) {
+                    return false;
+                }
+                for (Integer aid : e.getValue()) {
+                    Card at = g.findById(aid);
+                    if (at == null) {
+                        return false;
+                    }
+                    c.addBlocker(at, bl);
+                }
+            }
+            return true;
+        }
+    }
+
+    /** Play-out Forge AI whose first attack (or block) declaration is scripted. */
+    static final class ScriptedCombat extends RolloutAi {
+        private final AttackPlan attack;
+        private final BlockPlan block;
+        private boolean used = false;
+
+        ScriptedCombat(Game g, Player p, forge.LobbyPlayer lp, AttackPlan attack, BlockPlan block) {
+            super(g, p, lp);
+            this.attack = attack;
+            this.block = block;
+        }
+
+        @Override
+        public void declareAttackers(Player attacker, forge.game.combat.Combat combat) {
+            if (attack != null && !used) {
+                used = true;
+                attack.applyTo(getGame(), combat);
+                return;
+            }
+            super.declareAttackers(attacker, combat);
+        }
+
+        @Override
+        public void declareBlockers(Player defender, forge.game.combat.Combat combat) {
+            if (block != null && !used) {
+                used = true;
+                block.applyTo(getGame(), combat, defender);
+                return;
+            }
+            super.declareBlockers(defender, combat);
+        }
+    }
+
+    private static void setPriorityState(PhaseHandler ph, Player prio, Player first, boolean give) {
+        initFields();
+        try {
+            fPrio.set(ph, prio);
+            fFirst.set(ph, first);
+            fGive.setBoolean(ph, give);
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * One combat play-out: copy the live game, rewind the copy to the end of the step before the declaration
+     * (both players passed), and let it advance into the declaration step, where the searching seat's
+     * controller declares the plan. Everything after that is Forge AI on both seats.
+     */
+    Rollout combatRollout(Game live, Player liveMe, AttackPlan attack, BlockPlan block, long worldSeed, boolean resample) {
+        final Rollout r = new Rollout();
+        final Random prev = MyRandom.getThreadRandom();
+        MyRandom.setThreadRandom(new Random(mix(worldSeed, 1)));
+        AiCache.openScope();
+        final Object prevIds = forge.util.IdScope.capture();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            final Player me;
+            synchronized (live) {
+                GameCopier copier = new GameCopier(live, true);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+                if (resample) {
+                    resample(live, liveMe, g, me, new Random(mix(worldSeed, 2)));
+                }
+            }
+            MyRandom.setThreadRandom(new Random(mix(worldSeed, 3)));
+            final PhaseHandler ph = g.getPhaseHandler();
+            final forge.game.combat.Combat c = ph.getCombat();
+            if (c == null) {
+                r.ok = false;
+                r.value = Double.NEGATIVE_INFINITY;
+                return r;
+            }
+            final Player active = ph.getPlayerTurn();
+            final Player other = g.getNextPlayerAfter(active);
+            if (attack != null) {
+                c.clearAttackers();
+                ph.devModeSet(forge.game.phase.PhaseType.COMBAT_BEGIN, active, false, ph.getTurn());
+            } else {
+                BlockPlan.clear(c, me);
+                ph.devModeSet(forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS, active, false, ph.getTurn());
+            }
+            // both players have passed in the rewound step: the next main-loop step advances into the declaration
+            setPriorityState(ph, other, active, false);
+            me.dangerouslySetController(new ScriptedCombat(g, me, me.getController().getLobbyPlayer(), attack, block));
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
+            final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, null);
+            g.subscribeToEvents(watch);
+            long b = System.nanoTime();
+            int steps = 0;
+            while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
+                ph.mainLoopStep();
+                steps++;
+            }
+            r.rolloutNanos = System.nanoTime() - b;
+            r.steps = steps;
+            r.capped = !g.isGameOver() && !watch.reached;
+            r.value = value(g, me);
+        } catch (RuntimeException | StackOverflowError e) {
+            r.ok = false;
+            r.value = Double.NEGATIVE_INFINITY;
+            System.err.println("[lookahead] combat rollout failed: " + e);
+        } finally {
+            AiCache.closeScope();
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+        return r;
+    }
+
+    /** Pick the best of the candidate plans by EV over K worlds (index 0 = Forge's own, ties to it). */
+    private int bestCombatPlan(Game live, Player me, int n, java.util.function.BiFunction<Integer, Long, Rollout> run, long seed) {
+        final int k = Math.max(1, cfg.worlds);
+        final double[][] values = new double[n][k];
+        final boolean[] ok = new boolean[n];
+        Arrays.fill(ok, true);
+        final List<Runnable> tasks = new ArrayList<>();
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final int ww = w, cc = c;
+                tasks.add(() -> {
+                    Rollout r = run.apply(cc, mix(seed, 1000 + ww));
+                    synchronized (values) {
+                        values[cc][ww] = r.value;
+                        if (!r.ok) {
+                            ok[cc] = false;
+                        }
+                        stats.rollouts++;
+                        stats.steps += r.steps;
+                        if (!r.ok) {
+                            stats.rolloutFailures++;
+                        }
+                    }
+                });
+            }
+        }
+        runAll(tasks);
+        if (!ok[0]) {
+            return 0;
+        }
+        int best = 0;
+        double bestEv = 0;
+        for (int c = 0; c < n; c++) {
+            double s2 = 0;
+            for (int w = 0; w < k; w++) {
+                s2 += values[c][w];
+            }
+            double ev = ok[c] ? s2 / k : Double.NEGATIVE_INFINITY;
+            if (c == 0) {
+                bestEv = ev;
+            } else if (ev > bestEv + cfg.margin) {
+                best = c;
+                bestEv = ev;
+            }
+        }
+        return best;
+    }
+
+    /** Called after Forge AI has declared its attackers into the live combat. */
+    public void decideAttack(PlayerControllerAi ctrl, forge.game.combat.Combat combat) {
+        final Game live = ctrl.getGame();
+        final Player me = ctrl.getPlayer();
+        stats.attackDecisions++;
+        final int index = decisionIndex++;
+        final long t0 = System.nanoTime();
+        final List<AttackPlan> plans = new ArrayList<>();
+        final AttackPlan forge0 = AttackPlan.of("forge", combat);
+        plans.add(forge0);
+        AttackPlan none = new AttackPlan("none");
+        // alpha: every creature that can attack Forge's defender (or the opponent) without an attack cost
+        forge.game.GameEntity def = forge0.attackers.isEmpty() ? null : combat.getDefenderByAttacker(combat.getAttackers().get(0));
+        if (def == null) {
+            for (Player o : me.getOpponents()) {
+                def = o;
+                break;
+            }
+        }
+        AttackPlan alpha = new AttackPlan("alpha");
+        if (def != null) {
+            for (Card cr : me.getCreaturesInPlay()) {
+                if (forge.game.combat.CombatUtil.canAttack(cr, def)
+                        && forge.game.combat.CombatUtil.getAttackCost(live, cr, def) == null) {
+                    alpha.attackers.put(cr.getId(), def instanceof Player ? ((Player) def).getId() : ((Card) def).getId());
+                    alpha.defenderIsPlayer.put(cr.getId(), def instanceof Player);
+                }
+            }
+        }
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        keys.add(forge0.key());
+        for (AttackPlan a : new AttackPlan[] {none, alpha}) {
+            if (keys.add(a.key())) {
+                plans.add(a);
+            }
+        }
+        if (plans.size() < 2 || live.getStack().size() > 0) {
+            return;
+        }
+        stats.attackSearched++;
+        int best = bestCombatPlan(live, me, plans.size(),
+                (c, ws) -> combatRollout(live, me, plans.get(c), null, ws, cfg.resample), mix(cfg.seed, 0xa77aL + index));
+        if (best != 0 && !cfg.shadow) {
+            if (plans.get(best).applyTo(live, combat) && forge.game.combat.CombatUtil.validateAttackers(combat)) {
+                stats.attackDeparted++;
+            } else {
+                forge0.applyTo(live, combat);
+            }
+        }
+        stats.combatNanos += System.nanoTime() - t0;
+    }
+
+    /** Called after Forge AI has declared its blockers into the live combat. */
+    public void decideBlock(PlayerControllerAi ctrl, Player defender, forge.game.combat.Combat combat) {
+        final Game live = ctrl.getGame();
+        final Player me = ctrl.getPlayer();
+        if (defender != me) {
+            return;
+        }
+        stats.blockDecisions++;
+        final int index = decisionIndex++;
+        final long t0 = System.nanoTime();
+        final BlockPlan forge0 = BlockPlan.of("forge", combat, me);
+        final BlockPlan none = new BlockPlan("none");
+        final List<BlockPlan> plans = new ArrayList<>();
+        plans.add(forge0);
+        if (!none.key().equals(forge0.key())) {
+            plans.add(none);
+        }
+        if (plans.size() < 2) {
+            return;
+        }
+        stats.blockSearched++;
+        int best = bestCombatPlan(live, me, plans.size(),
+                (c, ws) -> combatRollout(live, me, null, plans.get(c), ws, cfg.resample), mix(cfg.seed, 0xb10cL + index));
+        if (best != 0 && !cfg.shadow) {
+            if (plans.get(best).applyTo(live, combat, me) && forge.game.combat.CombatUtil.validateBlocks(combat, me) == null) {
+                stats.blockDeparted++;
+            } else {
+                forge0.applyTo(live, combat, me);
+            }
+        }
+        stats.combatNanos += System.nanoTime() - t0;
     }
 
     // ------------------------------------------------------------------ belief
@@ -1002,6 +1585,7 @@ public final class LookaheadSearch {
             for (int i = 0; i < 3; i++) {
                 long a = System.nanoTime();
                 GameCopier copier = new GameCopier(live, true);
+                copier.setCopyStack(cfg.stack);
                 Game g = copier.makeCopy();
                 copyMs.add((System.nanoTime() - a) / 1e6);
                 Player me = (Player) copier.find(liveMe);
@@ -1094,8 +1678,11 @@ public final class LookaheadSearch {
         forge.util.IdScope.open();
         try {
             GameCopier copier = new GameCopier(live, true);
+            copier.setCopyStack(cfg.stack);
             Game g = copier.makeCopy();
             Player me = (Player) copier.find(liveMe);
+            final Player lf = cfg.stack && !live.getStack().isEmpty() ? firstPriority(live.getPhaseHandler()) : null;
+            final Player firstPriority = lf == null ? null : (Player) copier.find(lf);
             List<SpellAbility> first = null;
             if (!c.pass) {
                 SpellAbility sa = prepare(g, me, c, defSa, copier);
@@ -1114,6 +1701,9 @@ public final class LookaheadSearch {
             }
             final PhaseHandler ph = g.getPhaseHandler();
             givePriority(ph, me);
+            if (firstPriority != null) {
+                setFirstPriority(ph, firstPriority);
+            }
             final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, me);
             g.subscribeToEvents(watch);
             MyRandom.setThreadRandom(new Random(s));
