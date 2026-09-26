@@ -197,6 +197,7 @@ public final class LookaheadSearch {
     private static final int QPROBE = Integer.getInteger("lookahead.qprobe", 0);
     private static final String QPROBE_MODE = System.getProperty("lookahead.qprobeMode", "disagree");
     private static final boolean DUMP_ROOT = Boolean.getBoolean("lookahead.dumpRoot");
+    private static final int EXTRA_WORLDS = Integer.getInteger("lookahead.dumpExtraWorlds", 0);
     private int decisionIndex = 0;
     private int departuresTurn = -1;
     private int departuresThisTurn = 0;
@@ -405,6 +406,9 @@ public final class LookaheadSearch {
             if (QPROBE > 0) {
                 qProbe(dd, live, me, cands, defSa, decisionSeed, ok, best);
             }
+            if (EXTRA_WORLDS > 0) {
+                extraWorlds(dd, live, me, cands, defSa, decisionSeed, ok, k);
+            }
             dumpSink.accept(dd);
         }
         return answer;
@@ -449,6 +453,34 @@ public final class LookaheadSearch {
         }
         dd.add("q", qs);
         dd.addProperty("qMs", (System.nanoTime() - t) / 1e6);
+    }
+
+    /**
+     * Dump only: the play-outs of worlds k .. k+EXTRA_WORLDS-1 for every playable candidate, on the SAME world seeds a
+     * search with more worlds would use (mix(decisionSeed, 1000 + w)), so an offline K=k+EXTRA_WORLDS leaf can be scored
+     * on this decision while the game itself still follows the K=k search. Copies only.
+     */
+    private void extraWorlds(JsonObject dd, Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed, boolean[] ok, int k) {
+        final long t = System.nanoTime();
+        final JsonArray ex = new JsonArray();
+        for (int c = 0; c < cands.size(); c++) {
+            final JsonObject co = new JsonObject();
+            final JsonArray st = new JsonArray(), pt = new JsonArray(), lv = new JsonArray();
+            if (ok[c]) {
+                for (int w = k; w < k + EXTRA_WORLDS; w++) {
+                    Rollout r = rollout(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample, null);
+                    st.add(r.ok ? r.value : null);
+                    pt.add(!r.ok || Double.isNaN(r.pTerminal) ? null : r.pTerminal);
+                    lv.add(r.ok ? r.leaf : null);
+                }
+            }
+            co.add("static", st);
+            co.add("pTerminal", pt);
+            co.add("leaf", lv);
+            ex.add(co);
+        }
+        dd.add("extra", ex);
+        dd.addProperty("extraMs", (System.nanoTime() - t) / 1e6);
     }
 
     /** A finished Q rollout's result for the searching seat: 1 / 0 / 0.5, NaN if it hit the step cap. */
