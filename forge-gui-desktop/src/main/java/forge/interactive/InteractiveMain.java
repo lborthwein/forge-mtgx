@@ -285,6 +285,7 @@ public final class InteractiveMain {
                 case "maxSteps": c.maxSteps = Integer.parseInt(p[1].trim()); break;
                 case "shadow": c.shadow = !"0".equals(p[1].trim()); break;
                 case "combat": c.combat = !"0".equals(p[1].trim()); break;
+                case "stack": c.stack = !"0".equals(p[1].trim()); break;
                 case "modelUrl": c.modelUrl = p[1].trim(); break;
                 case "modelTimeoutMs": c.modelTimeoutMs = Integer.parseInt(p[1].trim()); break;
                 default: break;

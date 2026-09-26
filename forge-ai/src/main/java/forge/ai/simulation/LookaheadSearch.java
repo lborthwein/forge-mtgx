@@ -79,6 +79,10 @@ public final class LookaheadSearch {
         public boolean probe = false;
         /** C2: also search attack and block declarations. */
         public boolean combat = false;
+        /** C1: also search priority decisions with a non-empty stack (spells only; see GameCopier.stackUnsupported). */
+        public boolean stack = false;
+        /** C1 fidelity probe: take the probes (and the one live-continuation fidelity check) at stack decisions only. */
+        public boolean probeStack = false;
         /** Probe instrumentation on at most this many searched decisions per game. */
         public int probeMax = 6;
         /** Probe: once per game, put the live game on a known stream and compare it with a truth rollout. */
@@ -102,6 +106,12 @@ public final class LookaheadSearch {
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
+            if (stack) {
+                o.addProperty("stack", true);
+            }
+            if (probeStack) {
+                o.addProperty("probeStack", true);
+            }
             o.addProperty("probeMax", probeMax);
             o.addProperty("fidelity", fidelity);
             if (modelUrl != null) {
@@ -119,6 +129,9 @@ public final class LookaheadSearch {
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
         public long combatNanos;
+        /** C1: priority decisions with a non-empty stack; of those, refused (by reason), searched, departed. */
+        public long stackDecisions, stackUnsupported, stackSearched, stackDeparted;
+        public final Map<String, Long> stackWhy = new TreeMap<>();
         /** C5 model leaf: requests, leaves scored, decisions that fell back to the static evaluator. */
         public long modelCalls, modelLeaves, modelFallbacks, modelNanos, modelUnknownCards;
         public String modelDigest, modelCheckpoint, modelLastError;
@@ -148,6 +161,15 @@ public final class LookaheadSearch {
             o.addProperty("blockSearched", blockSearched);
             o.addProperty("blockDeparted", blockDeparted);
             o.addProperty("combatMs", combatNanos / 1e6);
+            if (stackDecisions > 0 && (stackSearched > 0 || stackUnsupported > 0)) {
+                o.addProperty("stackDecisions", stackDecisions);
+                o.addProperty("stackUnsupported", stackUnsupported);
+                o.addProperty("stackSearched", stackSearched);
+                o.addProperty("stackDeparted", stackDeparted);
+                JsonObject why = new JsonObject();
+                stackWhy.forEach(why::addProperty);
+                o.add("stackWhy", why);
+            }
             if (modelCalls > 0 || modelFallbacks > 0) {
                 o.addProperty("modelCalls", modelCalls);
                 o.addProperty("modelLeaves", modelLeaves);
@@ -251,9 +273,20 @@ public final class LookaheadSearch {
         stats.decisions++;
         final int index = decisionIndex++;
 
-        if (!live.getStack().isEmpty()) {
-            stats.stackSkipped++;
-            return def;
+        final boolean onStack = !live.getStack().isEmpty();
+        if (onStack) {
+            stats.stackDecisions++;
+            if (!cfg.stack) {
+                stats.stackSkipped++;
+                return def;
+            }
+            final String why = GameCopier.stackUnsupported(live);
+            if (why != null) {
+                stats.stackSkipped++;
+                stats.stackUnsupported++;
+                stats.stackWhy.merge(why, 1L, Long::sum);
+                return def;
+            }
         }
         final PhaseHandler ph = live.getPhaseHandler();
         final int turn = ph.getTurn();
@@ -279,6 +312,9 @@ public final class LookaheadSearch {
             return def;
         }
         stats.searched++;
+        if (onStack) {
+            stats.stackSearched++;
+        }
 
         final int k = Math.max(1, cfg.worlds);
         final double[][] values = new double[cands.size()][k];
@@ -358,6 +394,9 @@ public final class LookaheadSearch {
                 } else {
                     answer = mapped;
                     stats.departed++;
+                    if (onStack) {
+                        stats.stackDeparted++;
+                    }
                     departuresThisTurn++;
                     departureCounts.put(key, seen + 1);
                     outcome = "departed";
@@ -376,7 +415,7 @@ public final class LookaheadSearch {
         stats.searchNanos += dt;
         stats.maxSearchNanos = Math.max(stats.maxSearchNanos, dt);
 
-        if (cfg.probe && turn >= 3 && stats.probes.size() < cfg.probeMax) {
+        if (cfg.probe && turn >= 3 && stats.probes.size() < cfg.probeMax && (!cfg.probeStack || onStack)) {
             JsonObject p = new JsonObject();
             p.addProperty("decision", index);
             p.addProperty("turn", turn);
@@ -440,6 +479,7 @@ public final class LookaheadSearch {
         forge.util.IdScope.open();
         try {
             GameCopier copier = new GameCopier(live, true);
+            copier.setCopyStack(cfg.stack);
             Game g = copier.makeCopy();
             Player me = (Player) copier.find(liveMe);
             List<SpellAbility> legal = new SpellAbilityPicker(me).getCandidateSpellsAndAbilities();
@@ -463,6 +503,12 @@ public final class LookaheadSearch {
             }
         } catch (RuntimeException e) {
             // Enumeration failure: search nothing, play Forge's answer.
+            if (cfg.stack && !live.getStack().isEmpty()) {
+                stats.stackWhy.merge("copyfail", 1L, Long::sum);
+                if (Boolean.getBoolean("lookahead.debug")) {
+                    System.err.println("[lookahead] stack copy failed: " + e);
+                }
+            }
             return out.subList(0, 1);
         } finally {
             AiCache.closeScope();
@@ -513,7 +559,7 @@ public final class LookaheadSearch {
                     sub.resetTargets();
                 }
             }
-            SpellAbilityChoiceCopier.copyTargets(defSa, d, copier::find);
+            SpellAbilityChoiceCopier.copyTargets(defSa, d, copier::findWithStack);
             if (!targetsInGame(d, g)) {
                 return null;
             }
@@ -545,6 +591,9 @@ public final class LookaheadSearch {
                     return false;
                 }
                 if (o instanceof Player && ((Player) o).getGame() != g) {
+                    return false;
+                }
+                if (o instanceof SpellAbility && ((SpellAbility) o).getHostCard().getGame() != g) {
                     return false;
                 }
             }
@@ -691,10 +740,18 @@ public final class LookaheadSearch {
             // Everything that READS the live game runs one worker at a time: many of Forge's "getters"
             // build lists and views lazily (they write), so parallel copies of one live game raced and a
             // K=8 play-out under load could come out different from its replay.
+            Player firstPriority = null;
             synchronized (live) {
                 copier = new GameCopier(live, true);
+                copier.setCopyStack(cfg.stack);
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
+                if (cfg.stack && !live.getStack().isEmpty()) {
+                    // With spells on the stack, the copy must resolve them as the live game would: the player who acted
+                    // last keeps "first priority", so our pass lets the top spell resolve.
+                    final Player lf = firstPriority(live.getPhaseHandler());
+                    firstPriority = lf == null ? null : (Player) copier.find(lf);
+                }
                 if (resample) {
                     resample(live, liveMe, g, me, new Random(mix(worldSeed, 2)));
                 }
@@ -719,6 +776,9 @@ public final class LookaheadSearch {
             }
             final PhaseHandler ph = g.getPhaseHandler();
             givePriority(ph, me);
+            if (firstPriority != null) {
+                setFirstPriority(ph, firstPriority);
+            }
             final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, Boolean.TRUE.equals(wantFp) ? me : null);
             g.subscribeToEvents(watch);
             long b = System.nanoTime();
@@ -884,6 +944,25 @@ public final class LookaheadSearch {
             fFirst.setAccessible(true);
             fGive.setAccessible(true);
         } catch (NoSuchFieldException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** The player who holds "first priority" (acted last) in {@code ph}, i.e. whose turn it is to see the stack resolve. */
+    static Player firstPriority(PhaseHandler ph) {
+        initFields();
+        try {
+            return (Player) fFirst.get(ph);
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    static void setFirstPriority(PhaseHandler ph, Player p) {
+        initFields();
+        try {
+            fFirst.set(ph, p);
+        } catch (IllegalAccessException e) {
             throw new IllegalStateException(e);
         }
     }
@@ -1335,6 +1414,7 @@ public final class LookaheadSearch {
             for (int i = 0; i < 3; i++) {
                 long a = System.nanoTime();
                 GameCopier copier = new GameCopier(live, true);
+                copier.setCopyStack(cfg.stack);
                 Game g = copier.makeCopy();
                 copyMs.add((System.nanoTime() - a) / 1e6);
                 Player me = (Player) copier.find(liveMe);
@@ -1427,8 +1507,11 @@ public final class LookaheadSearch {
         forge.util.IdScope.open();
         try {
             GameCopier copier = new GameCopier(live, true);
+            copier.setCopyStack(cfg.stack);
             Game g = copier.makeCopy();
             Player me = (Player) copier.find(liveMe);
+            final Player lf = cfg.stack && !live.getStack().isEmpty() ? firstPriority(live.getPhaseHandler()) : null;
+            final Player firstPriority = lf == null ? null : (Player) copier.find(lf);
             List<SpellAbility> first = null;
             if (!c.pass) {
                 SpellAbility sa = prepare(g, me, c, defSa, copier);
@@ -1447,6 +1530,9 @@ public final class LookaheadSearch {
             }
             final PhaseHandler ph = g.getPhaseHandler();
             givePriority(ph, me);
+            if (firstPriority != null) {
+                setFirstPriority(ph, firstPriority);
+            }
             final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, me);
             g.subscribeToEvents(watch);
             MyRandom.setThreadRandom(new Random(s));
