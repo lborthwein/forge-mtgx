@@ -223,6 +223,10 @@ public final class InteractiveMain {
             preferences.setPref(FPref.YIELD_AUTO_PASS_RESPECTS_INTERRUPTS, false);
             return null;
         });
+        if (System.getProperty("forge.interactive.lookahead") != null) {
+            // Look-ahead play-outs may run on threads: fill the lazily built token table up front (see TokenDb).
+            FModel.getMagicDb().getAllTokens().preloadTokens();
+        }
     }
 
     private static List<RegisteredPlayer> createPlayers(

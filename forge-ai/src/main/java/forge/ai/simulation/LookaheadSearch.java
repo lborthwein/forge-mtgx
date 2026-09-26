@@ -322,12 +322,20 @@ public final class LookaheadSearch {
         final boolean[] ok = new boolean[cands.size()];
         Arrays.fill(ok, true);
 
+        // Copies first, all on this thread in a fixed order; then the play-outs (on the pool when threads > 1).
+        final Prepared[][] prep = new Prepared[cands.size()][k];
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < cands.size(); c++) {
+                prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample);
+            }
+        }
         final List<Runnable> tasks = new ArrayList<>();
         for (int w = 0; w < k; w++) {
             for (int c = 0; c < cands.size(); c++) {
                 final int ww = w, cc = c;
                 tasks.add(() -> {
-                    Rollout r = rollout(live, me, cands.get(cc), defSa, mix(decisionSeed, 1000 + ww), cfg.resample, null);
+                    Rollout r = play(prep[cc][ww], null);
+                    prep[cc][ww] = null;
                     synchronized (values) {
                         values[cc][ww] = r.value;
                         outs[cc][ww] = r;
@@ -349,6 +357,10 @@ public final class LookaheadSearch {
         runAll(tasks);
         if (check) {
             checkLive("rollouts " + cands.size() + "x" + k + " def=" + cands.get(0).label, before, live, defSa, index);
+        }
+        final String stressSpec = System.getProperty("lookahead.stress");
+        if (stressSpec != null) {
+            stress(stressSpec, index, live, me, cands, defSa, decisionSeed);
         }
         if (model != null) {
             modelLeaves(live, me, values, outs, ok, k);
@@ -406,6 +418,18 @@ public final class LookaheadSearch {
             outcome = "shadow-would-depart";
         }
 
+        if (Boolean.getBoolean("lookahead.trace")) {
+            // One line per searched decision: every candidate's per-world values, bit-exact, to find where two runs part.
+            StringBuilder tb = new StringBuilder("[ltrace] d=").append(index).append(" T").append(turn).append(' ').append(ph.getPhase())
+                    .append(" best=").append(best).append(" out=").append(outcome);
+            for (int c = 0; c < cands.size(); c++) {
+                tb.append(" | ").append(cands.get(c).label.replace('|', '/')).append(ok[c] ? "" : " FAIL");
+                for (int w = 0; w < k; w++) {
+                    tb.append(' ').append(Double.doubleToLongBits(values[c][w]));
+                }
+            }
+            System.err.println(tb);
+        }
         if (Boolean.getBoolean("lookahead.debug") && best != 0) {
             System.err.println("[lookahead] decision " + index + " T" + turn + " " + ph.getPhase() + " stack=" + live.getStack().size()
                     + " def=" + cands.get(0).label + " best=" + cands.get(best).label + " outcome=" + outcome
@@ -724,51 +748,109 @@ public final class LookaheadSearch {
         }
     }
 
+    /** A play-out's copy, made on the decision thread; the play-out itself may run on a pool thread. */
+    static final class Prepared {
+        Game g;
+        Player me;
+        List<SpellAbility> first;
+        boolean failed;
+        Throwable error;
+        long copyNanos;
+        /** C1: with spells on the stack, the copied player who keeps "first priority" (null otherwise). */
+        Player firstPriority;
+        /** The copy's scopes (ids, AI cache, RNG), installed on whichever thread plays it out. */
+        Object ids, cache;
+        Random rnd;
+        /** Diagnostics only (lookahead.stress): one entry per main-loop step, the position and the new log lines. */
+        List<String> stepLog;
+    }
+
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
-        final Rollout r = new Rollout();
+        return play(prepare(live, liveMe, c, defSa, worldSeed, resample), wantFp);
+    }
+
+    /**
+     * Copy the live game for one play-out (and resample the world, and map the candidate into the copy).
+     * Everything that READS the live game happens here, on the decision thread, in a fixed order: many of
+     * Forge's "getters" build lists and views lazily (they write), and when copies were made on pool threads
+     * the order in which workers reached the live game varied with load, so a threaded game could differ from
+     * its replay (A8T audit 39/48, all on the loaded host).
+     */
+    Prepared prepare(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample) {
+        final Prepared p = new Prepared();
         final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
         MyRandom.setThreadRandom(new Random(mix(worldSeed, 1)));
         AiCache.openScope();
-        final Object prevIds2 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
             long a = System.nanoTime();
-            final GameCopier copier;
-            final Game g;
-            final Player me;
-            List<SpellAbility> first = null;
-            // Everything that READS the live game runs one worker at a time: many of Forge's "getters"
-            // build lists and views lazily (they write), so parallel copies of one live game raced and a
-            // K=8 play-out under load could come out different from its replay.
-            Player firstPriority = null;
             synchronized (live) {
-                copier = new GameCopier(live, true);
+                final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyStack(cfg.stack);
-                g = copier.makeCopy();
-                me = (Player) copier.find(liveMe);
+                p.g = copier.makeCopy();
+                p.me = (Player) copier.find(liveMe);
                 if (cfg.stack && !live.getStack().isEmpty()) {
                     // With spells on the stack, the copy must resolve them as the live game would: the player who acted
                     // last keeps "first priority", so our pass lets the top spell resolve.
                     final Player lf = firstPriority(live.getPhaseHandler());
-                    firstPriority = lf == null ? null : (Player) copier.find(lf);
+                    p.firstPriority = lf == null ? null : (Player) copier.find(lf);
                 }
                 if (resample) {
-                    resample(live, liveMe, g, me, new Random(mix(worldSeed, 2)));
+                    resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
                 }
                 MyRandom.setThreadRandom(new Random(mix(worldSeed, 3)));
                 if (!c.pass) {
-                    SpellAbility sa = prepare(g, me, c, defSa, copier);
+                    SpellAbility sa = prepare(p.g, p.me, c, defSa, copier);
                     if (sa == null) {
-                        r.ok = false;
-                        r.value = Double.NEGATIVE_INFINITY;
-                        return r;
+                        p.failed = true;
+                    } else {
+                        p.first = new ArrayList<>();
+                        p.first.add(sa);
                     }
-                    first = new ArrayList<>();
-                    first.add(sa);
                 }
             }
-            r.copyNanos = System.nanoTime() - a;
-            me.dangerouslySetController(new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), first));
+            p.copyNanos = System.nanoTime() - a;
+        } catch (RuntimeException | StackOverflowError e) {
+            p.failed = true;
+            p.error = e;
+        } finally {
+            p.ids = forge.util.IdScope.capture();
+            p.cache = AiCache.captureScope();
+            p.rnd = MyRandom.getThreadRandom();
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+        return p;
+    }
+
+    /** Play a prepared copy out to the horizon, on the calling thread, inside the copy's own scopes. */
+    Rollout play(Prepared p, Boolean wantFp) {
+        final Rollout r = new Rollout();
+        if (p.failed) {
+            r.ok = false;
+            r.value = Double.NEGATIVE_INFINITY;
+            if (p.error != null) {
+                System.err.println("[lookahead] rollout failed: " + p.error);
+                if (FAILURE_TRACES.getAndIncrement() < 20) {
+                    p.error.printStackTrace();
+                }
+            }
+            return r;
+        }
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(p.rnd);
+        AiCache.installScope(p.cache);
+        forge.util.IdScope.install(p.ids);
+        try {
+            final Game g = p.g;
+            final Player me = p.me;
+            r.copyNanos = p.copyNanos;
+            me.dangerouslySetController(new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), p.first));
             for (Player o : g.getPlayers()) {
                 if (o != me) {
                     o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
@@ -776,16 +858,27 @@ public final class LookaheadSearch {
             }
             final PhaseHandler ph = g.getPhaseHandler();
             givePriority(ph, me);
-            if (firstPriority != null) {
-                setFirstPriority(ph, firstPriority);
+            if (p.firstPriority != null) {
+                setFirstPriority(ph, p.firstPriority);
             }
             final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, Boolean.TRUE.equals(wantFp) ? me : null);
             g.subscribeToEvents(watch);
             long b = System.nanoTime();
             int steps = 0;
+            final List<String> sl = p.stepLog;
+            int logSeen = sl == null ? 0 : g.getGameLog().getAllEntries().size();
             while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
                 ph.mainLoopStep();
                 steps++;
+                if (sl != null) {
+                    final List<forge.game.GameLogEntry> all = g.getGameLog().getAllEntries();
+                    final StringBuilder e = new StringBuilder(fingerprint(g)).append("RNG ").append(peekSeed(MyRandom.getRandom())).append("\nLOG");
+                    for (int i = logSeen; i < all.size(); i++) {
+                        e.append(" || ").append(all.get(i).message());
+                    }
+                    logSeen = all.size();
+                    sl.add(e.toString());
+                }
             }
             r.rolloutNanos = System.nanoTime() - b;
             r.steps = steps;
@@ -806,11 +899,89 @@ public final class LookaheadSearch {
                 e.printStackTrace();
             }
         } finally {
-            AiCache.closeScope();
-            forge.util.IdScope.install(prevIds2);
+            p.g = null;
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
         }
         return r;
+    }
+
+    /** The Random's internal seed without drawing from it (needs --add-opens java.base/java.util=ALL-UNNAMED), or "?". */
+    static String peekSeed(Random r) {
+        try {
+            Field f = Random.class.getDeclaredField("seed");
+            f.setAccessible(true);
+            return Long.toHexString(((java.util.concurrent.atomic.AtomicLong) f.get(r)).get());
+        } catch (Exception | Error e) {
+            return "?";
+        }
+    }
+
+    /**
+     * Diagnostics (-Dlookahead.stress=D:W:C:N:T[:exit]): at searched decision D, play candidate C of world W out N more
+     * times on T threads, each with a per-step log, and report whether every repeat equals the first. A repeat that
+     * differs prints the first differing step of both. With ":exit" the JVM halts afterwards (probe runs only).
+     */
+    private void stress(String spec, int index, Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed) {
+        final String[] f = spec.split(":");
+        if (Integer.parseInt(f[0]) != index) {
+            return;
+        }
+        final int w = Integer.parseInt(f[1]), c = Math.min(Integer.parseInt(f[2]), cands.size() - 1);
+        final int n = Integer.parseInt(f[3]), t = Integer.parseInt(f[4]);
+        final Prepared[] ps = new Prepared[n];
+        for (int i = 0; i < n; i++) {
+            ps[i] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample);
+            ps[i].stepLog = new ArrayList<>();
+        }
+        final double[] vals = new double[n];
+        final String[] names = new String[n];
+        final AtomicInteger tn = new AtomicInteger();
+        final ExecutorService ex = Executors.newFixedThreadPool(t, r -> {
+            Thread th = new Thread(r, "Game-stress-" + tn.incrementAndGet());
+            th.setDaemon(true);
+            return th;
+        });
+        final List<Future<?>> fs = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            final int ii = i;
+            fs.add(ex.submit(() -> {
+                names[ii] = Thread.currentThread().getName();
+                vals[ii] = play(ps[ii], null).value;
+            }));
+        }
+        for (Future<?> fu : fs) {
+            try {
+                fu.get();
+            } catch (Exception e) {
+                System.err.println("[lstress] worker failed: " + e);
+            }
+        }
+        ex.shutdownNow();
+        final List<String> ref = ps[0].stepLog;
+        int odd = 0;
+        for (int i = 0; i < n; i++) {
+            final List<String> x = ps[i].stepLog;
+            int k = 0;
+            while (k < Math.min(ref.size(), x.size()) && ref.get(k).equals(x.get(k))) {
+                k++;
+            }
+            final boolean same = k == ref.size() && k == x.size() && Double.compare(vals[i], vals[0]) == 0;
+            System.err.println("[lstress] d=" + index + " w=" + w + " c=" + c + " run=" + i + " thread=" + names[i] + " value="
+                    + Double.doubleToLongBits(vals[i]) + " steps=" + x.size() + (same ? " SAME" : " DIFF at step " + k));
+            if (!same && odd++ < 3) {
+                for (int j = Math.max(0, k - 1); j <= k; j++) {
+                    System.err.println("[lstress]   ref step " + j + ":\n" + (j < ref.size() ? ref.get(j) : "(end)"));
+                    System.err.println("[lstress]   run step " + j + ":\n" + (j < x.size() ? x.get(j) : "(end)"));
+                }
+            }
+        }
+        System.err.println("[lstress] d=" + index + " summary: " + (n - odd) + "/" + n + " same as run 0");
+        if (f.length > 5 && "exit".equals(f[5])) {
+            System.err.flush();
+            Runtime.getRuntime().halt(0);
+        }
     }
 
     /** P(me wins) of a finished play-out, in the model's scale; NaN if the play-out did not end the game. */
