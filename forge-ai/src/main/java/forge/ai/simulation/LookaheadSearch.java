@@ -71,7 +71,29 @@ public final class LookaheadSearch {
         /** Search and record, but always play Forge's own answer. */
         public boolean shadow = false;
         public boolean resample = true;
-        public int threads = 1;
+        /** Play-out worker threads; 0 = auto (min(worlds x breadth, available processors, 8)). Decisions do not depend on it. */
+        public int threads = 0;
+        /**
+         * Identical-position dedup (lane forge-search-speed-0927): the candidates of one world are played in order, and a
+         * play-out that reaches a position (exact {@link PlayoutKeys#stateKey}) an earlier candidate of the same world
+         * passed through takes that candidate's value instead of playing on.
+         */
+        public boolean dedup = false;
+        /** Dedup check: compute the keys and record would-be dedup hits, but play every play-out out and compare values. */
+        public boolean dedupVerify = false;
+        /** Dedup: take state keys only after the first this-many main-loop steps of a play-out (0 = every step). */
+        public int dedupSteps = 0;
+        /**
+         * Reuse across decisions (owner's world filter): worlds whose kept play-out of the move actually played met the
+         * live position carry over (hidden cards and play-out stream); where Forge AI chose there what Forge's answer is
+         * now, within the same turn, the kept play-out's value stands in for candidate 0. Changes decisions (the worlds
+         * are the previous search's survivors, not fresh draws).
+         */
+        public boolean reuse = false;
+        /** Reuse check: also play candidate 0 fresh in every reused world and count decisions the reused values change. */
+        public boolean reuseVerify = false;
+        /** Reuse check: also run the fresh A8S search (fresh worlds) at every decision and count decisions that differ. */
+        public boolean reuseShadowFresh = false;
         /** A departure must beat Forge's answer's EV by more than this. */
         public double margin = 0.0;
         public int maxDeparturesPerTurn = 12;
@@ -110,6 +132,25 @@ public final class LookaheadSearch {
             o.addProperty("shadow", shadow);
             o.addProperty("resample", resample);
             o.addProperty("threads", threads);
+            o.addProperty("threadsEffective", effectiveThreads(this));
+            if (dedup) {
+                o.addProperty("dedup", true);
+            }
+            if (dedupVerify) {
+                o.addProperty("dedupVerify", true);
+            }
+            if (dedupSteps > 0) {
+                o.addProperty("dedupSteps", dedupSteps);
+            }
+            if (reuse) {
+                o.addProperty("reuse", true);
+            }
+            if (reuseVerify) {
+                o.addProperty("reuseVerify", true);
+            }
+            if (reuseShadowFresh) {
+                o.addProperty("reuseShadowFresh", true);
+            }
             o.addProperty("margin", margin);
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
@@ -133,6 +174,15 @@ public final class LookaheadSearch {
         }
     }
 
+    /** Worker threads actually used for a config (0 = auto). */
+    public static int effectiveThreads(Config c) {
+        if (c.threads > 0) {
+            return c.threads;
+        }
+        final int tasks = Math.max(1, c.worlds) * Math.max(1, c.breadth);
+        return Math.max(1, Math.min(Math.min(tasks, Runtime.getRuntime().availableProcessors()), 8));
+    }
+
     /** Per-seat, per-game counters. */
     public static final class Stats {
         public long decisions, stackSkipped, uncontested, searched, departed, departFallback, loopGuard;
@@ -147,6 +197,25 @@ public final class LookaheadSearch {
         public final Map<String, Long> stackWhy = new TreeMap<>();
         /** C5 model leaf: requests, leaves scored, decisions that fell back to the static evaluator. */
         public long modelCalls, modelLeaves, modelFallbacks, modelNanos, modelUnknownCards;
+        /** Latency of every searched priority decision (ms, wall), in order. */
+        public final List<Double> searchMsEach = new ArrayList<>();
+        /** Dedup: play-outs cut short (or, in verify mode, that would have been), main-loop steps saved, value mismatches found by verify, key time. */
+        public long dedupHits, dedupStepsSaved, dedupVerifyMismatch, dedupKeyNanos, dedupKeys;
+        /** Reuse probe: kept worlds checked at the next search, still consistent, whose kept choice equals Forge's answer; steps a reuse could skip. */
+        public long reuseChecked, reuseAlive, reuseSameChoice, reuseHiddenMismatch, reuseHits, reuseStepsSaved;
+        /** Reuse checks: decisions with a carried world; decisions whose choice the reused values changed (vs fresh play-outs
+         * of candidate 0 in the same worlds); reused values that differ from those fresh play-outs; decisions that differ
+         * from the fresh A8S search. */
+        public long reuseDecisionsCarried, reuseDiffSameWorlds, reuseValueDiff, reuseCompared, reuseDiffVsFresh, reuseFreshCompared, freshVsFreshDiff;
+        public final Map<String, Long> dedupHitStep = new TreeMap<>();
+        public final Map<String, Long> reuseAliveBy = new TreeMap<>();
+
+        /** Verify mode: a play-out that would have been cut short, saving {@code remaining} steps. */
+        synchronized void dedupWould(int remaining, int step) {
+            dedupHits++;
+            dedupStepsSaved += remaining;
+            dedupHitStep.merge(step <= 3 ? "s" + step : step <= 10 ? "s4-10" : "s11+", 1L, Long::sum);
+        }
         public String modelDigest, modelCheckpoint, modelLastError;
         public final JsonArray probes = new JsonArray();
 
@@ -178,6 +247,41 @@ public final class LookaheadSearch {
             o.addProperty("blockSearched", blockSearched);
             o.addProperty("blockDeparted", blockDeparted);
             o.addProperty("combatMs", combatNanos / 1e6);
+            final JsonArray each = new JsonArray();
+            for (Double d : searchMsEach) {
+                each.add(Math.round(d * 10) / 10.0);
+            }
+            o.add("searchMsEach", each);
+            if (dedupKeys > 0) {
+                o.addProperty("dedupHits", dedupHits);
+                o.addProperty("dedupStepsSaved", dedupStepsSaved);
+                o.addProperty("dedupVerifyMismatch", dedupVerifyMismatch);
+                o.addProperty("dedupKeys", dedupKeys);
+                o.addProperty("dedupKeyMs", dedupKeyNanos / 1e6);
+            }
+            if (!dedupHitStep.isEmpty()) {
+                JsonObject hs = new JsonObject();
+                dedupHitStep.forEach(hs::addProperty);
+                o.add("dedupHitStep", hs);
+            }
+            if (reuseChecked > 0) {
+                o.addProperty("reuseChecked", reuseChecked);
+                o.addProperty("reuseAlive", reuseAlive);
+                o.addProperty("reuseSameChoice", reuseSameChoice);
+                o.addProperty("reuseHiddenMismatch", reuseHiddenMismatch);
+                o.addProperty("reuseHits", reuseHits);
+                o.addProperty("reuseStepsSaved", reuseStepsSaved);
+                o.addProperty("reuseDecisionsCarried", reuseDecisionsCarried);
+                o.addProperty("reuseCompared", reuseCompared);
+                o.addProperty("reuseDiffSameWorlds", reuseDiffSameWorlds);
+                o.addProperty("reuseValueDiff", reuseValueDiff);
+                o.addProperty("reuseFreshCompared", reuseFreshCompared);
+                o.addProperty("reuseDiffVsFresh", reuseDiffVsFresh);
+                o.addProperty("freshVsFreshDiff", freshVsFreshDiff);
+                JsonObject by = new JsonObject();
+                reuseAliveBy.forEach(by::addProperty);
+                o.add("reuseAliveBy", by);
+            }
             if (stackDecisions > 0 && (stackSearched > 0 || stackUnsupported > 0)) {
                 o.addProperty("stackDecisions", stackDecisions);
                 o.addProperty("stackUnsupported", stackUnsupported);
@@ -253,9 +357,10 @@ public final class LookaheadSearch {
 
     public LookaheadSearch(Config cfg) {
         this.cfg = cfg;
-        if (cfg.threads > 1) {
+        final int nThreads = effectiveThreads(cfg);
+        if (nThreads > 1) {
             final AtomicInteger n = new AtomicInteger();
-            pool = Executors.newFixedThreadPool(cfg.threads, r -> {
+            pool = Executors.newFixedThreadPool(nThreads, r -> {
                 // "Game" prefix: ThreadUtil.isGameThread() must hold so GameAction.invoke runs inline.
                 Thread t = new Thread(r, "Game-lookahead-" + n.incrementAndGet());
                 t.setDaemon(true);
@@ -370,56 +475,19 @@ public final class LookaheadSearch {
         }
 
         final int k = Math.max(1, cfg.worlds);
-        final double[][] values = new double[cands.size()][k];
-        final Rollout[][] outs = new Rollout[cands.size()][k];
-        final boolean[] ok = new boolean[cands.size()];
+        final int n = cands.size();
+        final double[][] values = new double[n][k];
+        final Rollout[][] outs = new Rollout[n][k];
+        final boolean[] ok = new boolean[n];
         Arrays.fill(ok, true);
-
-        // Copies first, all on this thread in a fixed order; then the play-outs (on the pool when threads > 1).
-        final Prepared[][] prep = new Prepared[cands.size()][k];
-        prepare:
-        for (int w = 0; w < k; w++) {
-            for (int c = 0; c < cands.size(); c++) {
-                if (pastDeadline()) {
-                    break prepare;
-                }
-                prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample);
-            }
+        final Carried[] carried = cfg.reuse ? carry(live, me, cands, turn, k) : new Carried[k];
+        final Rollout[] freshDef = cfg.reuseVerify ? new Rollout[k] : null;
+        final int abortedHere = playAll(live, me, cands, defSa, decisionSeed, carried, values, outs, ok, freshDef);
+        if (cfg.dedupVerify) {
+            dedupVerify(outs, n, k);
         }
-        final int[] abortedHere = {0};
-        final List<Runnable> tasks = new ArrayList<>();
-        for (int w = 0; w < k; w++) {
-            for (int c = 0; c < cands.size(); c++) {
-                final int ww = w, cc = c;
-                tasks.add(() -> {
-                    final Prepared pp = prep[cc][ww];
-                    Rollout r = pp == null ? aborted() : play(pp, null);
-                    prep[cc][ww] = null;
-                    synchronized (values) {
-                        if (r.aborted) {
-                            stats.rolloutsAborted++;
-                            abortedHere[0]++;
-                        }
-                        values[cc][ww] = r.value;
-                        outs[cc][ww] = r;
-                        if (!r.ok) {
-                            ok[cc] = false;
-                        }
-                        stats.rollouts++;
-                        stats.steps += r.steps;
-                        if (!r.ok && !r.aborted) {
-                            stats.rolloutFailures++;
-                        }
-                        if (r.capped) {
-                            stats.rolloutCapped++;
-                        }
-                    }
-                });
-            }
-        }
-        runAll(tasks);
         if (check) {
-            checkLive("rollouts " + cands.size() + "x" + k + " def=" + cands.get(0).label, before, live, defSa, index);
+            checkLive("rollouts " + n + "x" + k + " def=" + cands.get(0).label, before, live, defSa, index);
         }
         final String stressSpec = System.getProperty("lookahead.stress");
         if (stressSpec != null) {
@@ -431,10 +499,9 @@ public final class LookaheadSearch {
 
         // Over budget: a play-out was stopped (or never started) by the wall budget, so the search did not finish
         // in time; play Forge AI's own answer.
-        final boolean overBudget = abortedHere[0] > 0;
-        int best = 0; // Forge's own answer is candidate 0
-        double[] ev = new double[cands.size()];
-        for (int c = 0; c < cands.size(); c++) {
+        final boolean overBudget = abortedHere > 0;
+        final double[] ev = new double[n];
+        for (int c = 0; c < n; c++) {
             double s = 0;
             for (int w = 0; w < k; w++) {
                 s += values[c][w];
@@ -444,15 +511,10 @@ public final class LookaheadSearch {
                 stats.candidatesDropped++;
             }
         }
-        if (!ok[0] || overBudget) {
-            // Forge's own answer could not be played out, or the budget ran out: never depart.
-            best = 0;
-        } else {
-            for (int c = 1; c < cands.size(); c++) {
-                if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
-                    best = c;
-                }
-            }
+        // Forge's own answer is candidate 0; if it could not be played out, or the budget ran out, never depart.
+        final int best = overBudget ? 0 : argmax(values, ok, n, k);
+        if (cfg.reuseVerify && !overBudget) {
+            reuseVerify(live, me, cands, defSa, decisionSeed, carried, values, ok, freshDef, best);
         }
 
         List<SpellAbility> answer = def;
@@ -508,6 +570,10 @@ public final class LookaheadSearch {
         final long dt = System.nanoTime() - t0;
         stats.searchNanos += dt;
         stats.maxSearchNanos = Math.max(stats.maxSearchNanos, dt);
+        stats.searchMsEach.add(dt / 1e6);
+        if (cfg.reuse) {
+            keep(outs, "departed".equals(outcome) ? best : 0, turn, k);
+        }
         if (cfg.decisionLog) {
             // One line per searched decision for the interactive host to log (latency tail, caps, departures).
             final JsonObject d = new JsonObject();
@@ -557,6 +623,502 @@ public final class LookaheadSearch {
             stats.probes.add(p);
         }
         return answer;
+    }
+
+    private void record(double[][] values, Rollout[][] outs, boolean[] ok, int cc, int ww, Rollout r) {
+        synchronized (values) {
+            values[cc][ww] = r.value;
+            outs[cc][ww] = r;
+            if (!r.ok) {
+                ok[cc] = false;
+            }
+            stats.rollouts++;
+            stats.steps += r.steps;
+            if (r.aborted) {
+                stats.rolloutsAborted++;
+            } else if (!r.ok) {
+                stats.rolloutFailures++;
+            }
+            if (r.capped) {
+                stats.rolloutCapped++;
+            }
+            stats.dedupKeys += r.keysComputed;
+            stats.dedupKeyNanos += r.keyNanos;
+            if (r.dedupFrom >= 0) {
+                stats.dedupHits++;
+                stats.dedupStepsSaved += r.dedupStepsSaved;
+            }
+            if (r.reused) {
+                stats.reuseHits++;
+                stats.reuseStepsSaved += r.reusedSteps;
+            }
+        }
+    }
+
+    /** The positions one world's earlier candidates passed through: key -> where it leads. */
+    static final class WorldMemo {
+        static final class Entry {
+            final int cand;
+            final Rollout src;
+            /** Main-loop steps from the keyed position to the end of the play-out. */
+            final int remaining;
+
+            Entry(int cand, Rollout src, int remaining) {
+                this.cand = cand;
+                this.src = src;
+                this.remaining = remaining;
+            }
+        }
+
+        final Map<String, Entry> seen = new java.util.HashMap<>();
+
+        /** The entry whose continuation equals this play-out's from step {@code step} on, honouring the step cap. */
+        Entry match(String key, int step, int maxSteps) {
+            final Entry e = seen.get(key);
+            if (e == null || !e.src.ok) {
+                return null;
+            }
+            // The earlier play-out's end must be where this one would end: the horizon or game end within the cap,
+            // or the cap itself at exactly the same step count.
+            if (e.src.capped ? step + e.remaining != maxSteps : step + e.remaining > maxSteps) {
+                return null;
+            }
+            return e;
+        }
+
+        void add(int cand, Rollout r) {
+            if (r.keys == null || !r.ok) {
+                return;
+            }
+            final int total = r.steps + r.dedupStepsSaved;
+            for (int i = 0; i < r.keys.size(); i++) {
+                seen.putIfAbsent(r.keys.get(i), new Entry(cand, r, total - (i + 1)));
+            }
+        }
+    }
+
+    /** Dedup verify mode: every would-be hit's full play-out must equal its source's value bit for bit. */
+    private void dedupVerify(Rollout[][] outs, int n, int k) {
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final Rollout r = outs[c][w];
+                if (r == null || r.wouldDedupFrom < 0) {
+                    continue;
+                }
+                final Rollout src = outs[r.wouldDedupFrom][w];
+                if (src == null || Double.doubleToLongBits(src.value) != Double.doubleToLongBits(r.value)
+                        || !java.util.Objects.equals(src.endKey, r.endKey)) {
+                    stats.dedupVerifyMismatch++;
+                    System.err.println("[lookahead] dedup verify MISMATCH world " + w + " cand " + c + " vs " + r.wouldDedupFrom
+                            + " at step " + r.wouldDedupStep + ": " + r.value + " vs " + (src == null ? "null" : src.value));
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ reuse across decisions (world filter)
+
+    /**
+     * One own-seat priority point (empty stack) of a play-out: what the seat saw (hash of {@link PlayoutKeys#observable}),
+     * what its Forge AI chose there, after how many main-loop steps of the play-out, and the world at that point: the
+     * hidden cards (opponents' hands and libraries, our library, in order) and the play-out's RNG state.
+     */
+    static final class TrajPoint {
+        final long sig;
+        final String choice;
+        final int step;
+        final int[] myLib;
+        final int[][] oppHand, oppLib;
+        final int[] oppIds;
+        final long[] rng;
+
+        TrajPoint(long sig, String choice, int step, int[] myLib, int[] oppIds, int[][] oppHand, int[][] oppLib, long[] rng) {
+            this.sig = sig;
+            this.choice = choice;
+            this.step = step;
+            this.myLib = myLib;
+            this.oppIds = oppIds;
+            this.oppHand = oppHand;
+            this.oppLib = oppLib;
+            this.rng = rng;
+        }
+
+        /** The hidden cards of this point are the live game's hidden cards (as sets): the world can be put into a copy. */
+        boolean sameHidden(Game live, Player liveMe) {
+            if (!sameSet(myLib, ids(liveMe.getCardsIn(ZoneType.Library)))) {
+                return false;
+            }
+            for (int i = 0; i < oppIds.length; i++) {
+                final Player o = live.getPlayer(oppIds[i]);
+                if (o == null) {
+                    return false;
+                }
+                final int[] h = ids(o.getCardsIn(ZoneType.Hand)), l = ids(o.getCardsIn(ZoneType.Library));
+                if (h.length != oppHand[i].length || !sameSet(concat(oppHand[i], oppLib[i]), concat(h, l))) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    static int[] ids(Iterable<Card> cs) {
+        final List<Integer> l = new ArrayList<>();
+        for (Card c : cs) {
+            l.add(c.getId());
+        }
+        final int[] a = new int[l.size()];
+        for (int i = 0; i < a.length; i++) {
+            a[i] = l.get(i);
+        }
+        return a;
+    }
+
+    private static int[] concat(int[] a, int[] b) {
+        final int[] c = Arrays.copyOf(a, a.length + b.length);
+        System.arraycopy(b, 0, c, a.length, b.length);
+        return c;
+    }
+
+    private static boolean sameSet(int[] a, int[] b) {
+        if (a.length != b.length) {
+            return false;
+        }
+        final int[] x = a.clone(), y = b.clone();
+        Arrays.sort(x);
+        Arrays.sort(y);
+        return Arrays.equals(x, y);
+    }
+
+    static long sigHash(String s) {
+        long h = 0xcbf29ce484222325L;
+        for (int i = 0; i < s.length(); i++) {
+            h ^= s.charAt(i);
+            h *= 0x100000001b3L;
+        }
+        return h ^ ((long) s.hashCode() << 32);
+    }
+
+    /** Record the searching seat's priority point in a play-out (called on the play-out thread, before its AI chooses). */
+    static TrajPoint trajPoint(Game g, Player me, String choice, int step, long sig) {
+        final List<Player> opps = new ArrayList<>();
+        for (Player o : me.getOpponents()) {
+            opps.add(o);
+        }
+        final int[] oppIds = new int[opps.size()];
+        final int[][] oh = new int[opps.size()][], ol = new int[opps.size()][];
+        for (int i = 0; i < opps.size(); i++) {
+            oppIds[i] = opps.get(i).getId();
+            oh[i] = ids(opps.get(i).getCardsIn(ZoneType.Hand));
+            ol[i] = ids(opps.get(i).getCardsIn(ZoneType.Library));
+        }
+        final Random r = MyRandom.getRandom();
+        final long[] rng = r instanceof PlayoutKeys.TrackedRandom tr ? tr.snapshot() : null;
+        return new TrajPoint(sig, choice, step, ids(me.getCardsIn(ZoneType.Library)), oppIds, oh, ol, rng);
+    }
+
+    /** Put a carried world's hidden cards into a fresh copy (the ids were checked against the live game). */
+    static boolean transplant(Game g, Player me, TrajPoint tp) {
+        final List<Card> lib = cards(g, tp.myLib);
+        if (lib == null) {
+            return false;
+        }
+        for (int i = 0; i < tp.oppIds.length; i++) {
+            final Player o = g.getPlayer(tp.oppIds[i]);
+            final List<Card> h = cards(g, tp.oppHand[i]), l = cards(g, tp.oppLib[i]);
+            if (o == null || h == null || l == null) {
+                return false;
+            }
+            o.getZone(ZoneType.Hand).setCards(h);
+            o.getZone(ZoneType.Library).setCards(l);
+        }
+        me.getZone(ZoneType.Library).setCards(lib);
+        return true;
+    }
+
+    private static List<Card> cards(Game g, int[] ids) {
+        final List<Card> l = new ArrayList<>(ids.length);
+        for (int id : ids) {
+            final Card c = g.findById(id);
+            if (c == null) {
+                return null;
+            }
+            l.add(c);
+        }
+        return l;
+    }
+
+    /** A world carried into this search: where its kept play-out met reality, and (same horizon, same choice) its value. */
+    static final class Carried {
+        final TrajPoint at;
+        final Rollout reusable;
+
+        Carried(TrajPoint at, Rollout reusable) {
+            this.at = at;
+            this.reusable = reusable;
+        }
+    }
+
+    /** The previous search's play-outs of the move actually played, one per world, and that search's turn. */
+    private Rollout[] kept = null;
+    private int keptTurn = -1;
+
+    /**
+     * The owner's filter: a kept world survives if its play-out of the move actually played reached the live position
+     * (same observable position, same hidden cards as sets); its hidden cards and play-out stream at that point become
+     * this search's world. If Forge AI chose there what Forge's answer is now and the horizon is the same turn, the kept
+     * play-out's value stands in for candidate 0's play-out in that world. Other worlds are drawn fresh (as A8S).
+     */
+    private Carried[] carry(Game live, Player me, List<Cand> cands, int turn, int k) {
+        final Carried[] out = new Carried[k];
+        if (kept == null) {
+            return out;
+        }
+        final long sig = sigHash(PlayoutKeys.observable(live, me));
+        final String defKey = cands.get(0).key();
+        int alive = 0;
+        for (int w = 0; w < Math.min(k, kept.length); w++) {
+            final Rollout kr = kept[w];
+            stats.reuseChecked++;
+            if (kr == null || kr.trajectory == null) {
+                continue;
+            }
+            for (int i = 0; i < kr.trajectory.size(); i++) {
+                final TrajPoint tp = kr.trajectory.get(i);
+                if (tp.sig != sig) {
+                    continue;
+                }
+                if (tp.rng == null || !tp.sameHidden(live, me)) {
+                    stats.reuseHiddenMismatch++;
+                    break;
+                }
+                alive++;
+                stats.reuseAlive++;
+                Rollout reusable = null;
+                if (turn == keptTurn && kr.ok && tp.choice.equals(defKey)) {
+                    stats.reuseSameChoice++;
+                    reusable = new Rollout();
+                    reusable.reused = true;
+                    reusable.value = kr.value;
+                    reusable.capped = kr.capped;
+                    reusable.pTerminal = kr.pTerminal;
+                    reusable.leaf = kr.leaf;
+                    reusable.totalSteps = kr.totalSteps;
+                    reusable.reusedSteps = kr.totalSteps - tp.step;
+                    reusable.trajectory = new ArrayList<>(kr.trajectory.subList(i + 1, kr.trajectory.size()));
+                }
+                out[w] = new Carried(tp, reusable);
+                break;
+            }
+        }
+        stats.reuseAliveBy.merge((turn == keptTurn ? "sameTurn:" : "laterTurn:") + alive, 1L, Long::sum);
+        return out;
+    }
+
+    private void keep(Rollout[][] outs, int played, int turn, int k) {
+        kept = new Rollout[k];
+        for (int w = 0; w < k; w++) {
+            final Rollout r = outs[played][w];
+            kept[w] = r == null || !r.ok ? null : r;
+        }
+        keptTurn = turn;
+    }
+
+    /** The search's choice from its values: the argmax, ties and a failed Forge answer to Forge's answer (index 0). */
+    private int argmax(double[][] values, boolean[] ok, int n, int k) {
+        if (!ok[0]) {
+            return 0;
+        }
+        int best = 0;
+        final double[] ev = new double[n];
+        for (int c = 0; c < n; c++) {
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += values[c][w];
+            }
+            ev[c] = ok[c] ? s / k : Double.NEGATIVE_INFINITY;
+        }
+        for (int c = 1; c < n; c++) {
+            if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
+                best = c;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Every candidate x world play-out of one decision. Copies (and world draws) first, all on this thread in a fixed
+     * order; then the play-outs, on the pool when threads > 1. A carried world uses its kept hidden cards and stream; a
+     * reusable carried world does not play candidate 0 (its kept value stands in) unless {@code freshDef} asks for a
+     * fresh play-out of it too (reuse verify).
+     */
+    private int playAll(Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed, Carried[] carried,
+            double[][] values, Rollout[][] outs, boolean[] ok, Rollout[] freshDef) {
+        final int n = cands.size(), k = values[0].length;
+        final Prepared[][] prep = new Prepared[n][k];
+        final Prepared[] prepFresh = new Prepared[k];
+        boolean any = false;
+        prepare:
+        for (int w = 0; w < k; w++) {
+            final Carried cw = carried[w];
+            any |= cw != null;
+            for (int c = 0; c < n; c++) {
+                if (pastDeadline()) {
+                    break prepare;
+                }
+                if (c == 0 && cw != null && cw.reusable != null) {
+                    outs[0][w] = cw.reusable;
+                    if (freshDef != null) {
+                        prepFresh[w] = prepare(live, me, cands.get(0), defSa, mix(decisionSeed, 1000 + w), cfg.resample, cw.at);
+                    }
+                    continue;
+                }
+                prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample, cw == null ? null : cw.at);
+                prep[c][w].trajectory = cfg.reuse ? new ArrayList<>() : null;
+            }
+        }
+        if (any) {
+            stats.reuseDecisionsCarried++;
+        }
+        final List<Runnable> tasks = new ArrayList<>();
+        final boolean keyed = cfg.dedup || cfg.dedupVerify;
+        for (int w = 0; w < k; w++) {
+            if (keyed) {
+                // One task per world: its candidates in index order, so which play-out may reuse which is fixed.
+                final int ww = w;
+                tasks.add(() -> {
+                    final WorldMemo memo = new WorldMemo();
+                    for (int cc = 0; cc < n; cc++) {
+                        final Rollout r = prep[cc][ww] != null ? play(prep[cc][ww], null, memo, cc)
+                                : outs[cc][ww] != null ? outs[cc][ww] : aborted();
+                        prep[cc][ww] = null;
+                        record(values, outs, ok, cc, ww, r);
+                    }
+                });
+            } else {
+                for (int c = 0; c < n; c++) {
+                    final int ww = w, cc = c;
+                    if (prep[cc][ww] == null) {
+                        // A reused value, or (budget) a play-out that never started.
+                        record(values, outs, ok, cc, ww, outs[cc][ww] != null ? outs[cc][ww] : aborted());
+                        continue;
+                    }
+                    tasks.add(() -> {
+                        Rollout r = play(prep[cc][ww], null);
+                        prep[cc][ww] = null;
+                        record(values, outs, ok, cc, ww, r);
+                    });
+                }
+            }
+            if (prepFresh[w] != null) {
+                final int ww = w;
+                tasks.add(() -> {
+                    freshDef[ww] = play(prepFresh[ww], null);
+                    prepFresh[ww] = null;
+                });
+            }
+        }
+        runAll(tasks);
+        int aborted = 0;
+        for (Rollout[] row : outs) {
+            for (Rollout r : row) {
+                if (r != null && r.aborted) {
+                    aborted++;
+                }
+            }
+        }
+        return aborted;
+    }
+
+    /**
+     * Reuse checks (TRAIN only; they cost extra play-outs). (a) Same worlds: replace every reused value of candidate 0
+     * by its fresh play-out in the same carried world and recompute the choice. (b) Fresh search: run the A8S search
+     * (fresh worlds, nothing carried) and compare its choice. Nothing here changes the decision.
+     */
+    private void reuseVerify(Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed, Carried[] carried,
+            double[][] values, boolean[] ok, Rollout[] freshDef, int best) {
+        final int n = cands.size(), k = values[0].length;
+        boolean anyReused = false;
+        final double[][] v2 = new double[n][];
+        for (int c = 0; c < n; c++) {
+            v2[c] = values[c].clone();
+        }
+        final boolean[] ok2 = ok.clone();
+        for (int w = 0; w < k; w++) {
+            if (freshDef[w] == null) {
+                continue;
+            }
+            anyReused = true;
+            if (Double.doubleToLongBits(freshDef[w].value) != Double.doubleToLongBits(values[0][w])) {
+                stats.reuseValueDiff++;
+            }
+            v2[0][w] = freshDef[w].value;
+            if (!freshDef[w].ok) {
+                ok2[0] = false;
+            }
+        }
+        if (anyReused) {
+            stats.reuseCompared++;
+            if (argmax(v2, ok2, n, k) != best) {
+                stats.reuseDiffSameWorlds++;
+            }
+        }
+        if (cfg.reuseShadowFresh && carried != null) {
+            boolean anyCarried = false;
+            for (Carried c : carried) {
+                anyCarried |= c != null;
+            }
+            if (anyCarried) {
+                final double[][] v3 = new double[n][k];
+                final Rollout[][] o3 = new Rollout[n][k];
+                final boolean[] ok3 = new boolean[n];
+                Arrays.fill(ok3, true);
+                playAllQuiet(live, me, cands, defSa, decisionSeed, v3, o3, ok3);
+                stats.reuseFreshCompared++;
+                final int bestFresh = argmax(v3, ok3, n, k);
+                if (bestFresh != best) {
+                    stats.reuseDiffVsFresh++;
+                }
+                // The noise floor: a second fresh search on other world draws, against the first.
+                final double[][] v4 = new double[n][k];
+                final boolean[] ok4 = new boolean[n];
+                Arrays.fill(ok4, true);
+                playAllQuiet(live, me, cands, defSa, mix(decisionSeed, 0xf2e5L), v4, new Rollout[n][k], ok4);
+                if (argmax(v4, ok4, n, k) != bestFresh) {
+                    stats.freshVsFreshDiff++;
+                }
+            }
+        }
+    }
+
+    /** The A8S play-outs of one decision (fresh worlds), without touching the per-game counters. */
+    private void playAllQuiet(Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed,
+            double[][] values, Rollout[][] outs, boolean[] ok) {
+        final int n = cands.size(), k = values[0].length;
+        final Prepared[][] prep = new Prepared[n][k];
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample, null);
+            }
+        }
+        final List<Runnable> tasks = new ArrayList<>();
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final int ww = w, cc = c;
+                tasks.add(() -> {
+                    final Rollout r = play(prep[cc][ww], null);
+                    prep[cc][ww] = null;
+                    synchronized (values) {
+                        values[cc][ww] = r.value;
+                        outs[cc][ww] = r;
+                        if (!r.ok) {
+                            ok[cc] = false;
+                        }
+                    }
+                });
+            }
+        }
+        runAll(tasks);
     }
 
     private static Rollout aborted() {
@@ -768,6 +1330,22 @@ public final class LookaheadSearch {
         int steps;
         String fingerprint;
         long copyNanos, rolloutNanos;
+        /** Dedup: the state key after every main-loop step (null when keys are off), and the last one. */
+        List<String> keys;
+        String endKey;
+        long keysComputed, keyNanos;
+        /** Dedup: the earlier candidate whose value this play-out took (-1 = played out), and the steps that saved. */
+        int dedupFrom = -1;
+        int dedupStepsSaved;
+        /** Dedup verify: the earlier candidate this play-out would have taken its value from, and at which step. */
+        int wouldDedupFrom = -1;
+        int wouldDedupStep = -1;
+        /** Reuse: the searching seat's priority points (null when reuse is off). */
+        List<TrajPoint> trajectory;
+        /** Reuse: steps of the underlying play-out from its own start; for a reused value, the steps it spared. */
+        int totalSteps;
+        int reusedSteps;
+        boolean reused;
     }
 
     /**
@@ -785,6 +1363,11 @@ public final class LookaheadSearch {
 
         RolloutAi(Game g, Player p, forge.LobbyPlayer lp) {
             super(g, p, lp);
+        }
+
+        /** This controller's own state, for {@link PlayoutKeys#stateKey}. */
+        String loopState() {
+            return " w=" + window + " a=" + actions + " b=" + breaks;
         }
 
         protected List<SpellAbility> capped(List<SpellAbility> chosen) {
@@ -811,10 +1394,22 @@ public final class LookaheadSearch {
     static final class ScriptedFirst extends RolloutAi {
         private List<SpellAbility> first;
         private boolean used = false;
+        /** Reuse probe: where to record this seat's priority points, and the play-out's step counter. */
+        List<TrajPoint> trajectory;
+        int[] stepRef;
 
         ScriptedFirst(Game g, Player p, forge.LobbyPlayer lp, List<SpellAbility> first) {
             super(g, p, lp);
             this.first = first;
+        }
+
+        @Override
+        String loopState() {
+            if (!used) {
+                // Not reached by keys (they are taken after a step, and the first step consumes the scripted action).
+                return super.loopState() + " unused" + System.identityHashCode(this);
+            }
+            return super.loopState() + " used";
         }
 
         @Override
@@ -823,7 +1418,19 @@ public final class LookaheadSearch {
                 used = true;
                 return first;
             }
-            return super.chooseSpellAbilityToPlay();
+            if (trajectory == null) {
+                return super.chooseSpellAbilityToPlay();
+            }
+            if (!getGame().getStack().isEmpty()) {
+                return super.chooseSpellAbilityToPlay();
+            }
+            // The world as it stands before this seat's Forge AI chooses (hidden cards, stream), then the choice.
+            final long sig = sigHash(PlayoutKeys.observable(getGame(), getPlayer()));
+            final TrajPoint pre = trajPoint(getGame(), getPlayer(), null, stepRef[0], sig);
+            final List<SpellAbility> chosen = super.chooseSpellAbilityToPlay();
+            final SpellAbility sa = chosen == null || chosen.isEmpty() ? null : chosen.get(0);
+            trajectory.add(new TrajPoint(sig, new Cand(sa, false).key(), pre.step, pre.myLib, pre.oppIds, pre.oppHand, pre.oppLib, pre.rng));
+            return chosen;
         }
     }
 
@@ -864,10 +1471,12 @@ public final class LookaheadSearch {
         Random rnd;
         /** Diagnostics only (lookahead.stress): one entry per main-loop step, the position and the new log lines. */
         List<String> stepLog;
+        /** Reuse probe: where the searching seat's priority points go (null = off). */
+        List<TrajPoint> trajectory;
     }
 
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
-        return play(prepare(live, liveMe, c, defSa, worldSeed, resample), wantFp);
+        return play(prepare(live, liveMe, c, defSa, worldSeed, resample, null), wantFp);
     }
 
     /**
@@ -877,12 +1486,12 @@ public final class LookaheadSearch {
      * the order in which workers reached the live game varied with load, so a threaded game could differ from
      * its replay (A8T audit 39/48, all on the loaded host).
      */
-    Prepared prepare(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample) {
+    Prepared prepare(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, TrajPoint carried) {
         final Prepared p = new Prepared();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
         final Object prevCache = AiCache.captureScope();
-        MyRandom.setThreadRandom(new Random(mix(worldSeed, 1)));
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 1)));
         AiCache.openScope();
         forge.util.IdScope.open();
         try {
@@ -898,10 +1507,18 @@ public final class LookaheadSearch {
                     final Player lf = firstPriority(live.getPhaseHandler());
                     p.firstPriority = lf == null ? null : (Player) copier.find(lf);
                 }
-                if (resample) {
-                    resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                if (carried != null) {
+                    // A carried world: its hidden cards where its kept play-out had them, its play-out stream from there.
+                    if (!transplant(p.g, p.me, carried)) {
+                        throw new IllegalStateException("carried world does not fit the copy");
+                    }
+                    MyRandom.setThreadRandom(PlayoutKeys.TrackedRandom.ofSnapshot(carried.rng));
+                } else {
+                    if (resample) {
+                        resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                    }
+                    MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
                 }
-                MyRandom.setThreadRandom(new Random(mix(worldSeed, 3)));
                 if (!c.pass) {
                     SpellAbility sa = prepare(p.g, p.me, c, defSa, copier);
                     if (sa == null) {
@@ -929,7 +1546,17 @@ public final class LookaheadSearch {
 
     /** Play a prepared copy out to the horizon, on the calling thread, inside the copy's own scopes. */
     Rollout play(Prepared p, Boolean wantFp) {
+        return play(p, wantFp, null, -1);
+    }
+
+    /**
+     * As {@link #play(Prepared, Boolean)}; with a memo (dedup or dedup verify), a state key is taken after every main-loop
+     * step, and a position an earlier candidate of this world already passed through ends the play-out with that
+     * candidate's value (verify mode: is only recorded).
+     */
+    Rollout play(Prepared p, Boolean wantFp, WorldMemo memo, int cand) {
         final Rollout r = new Rollout();
+        r.trajectory = p.trajectory;
         if (p.failed) {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
@@ -951,7 +1578,11 @@ public final class LookaheadSearch {
             final Game g = p.g;
             final Player me = p.me;
             r.copyNanos = p.copyNanos;
-            me.dangerouslySetController(new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), p.first));
+            final ScriptedFirst sf = new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), p.first);
+            final int[] stepRef = new int[1];
+            sf.trajectory = p.trajectory;
+            sf.stepRef = stepRef;
+            me.dangerouslySetController(sf);
             for (Player o : g.getPlayers()) {
                 if (o != me) {
                     o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
@@ -968,6 +1599,10 @@ public final class LookaheadSearch {
             int steps = 0;
             final List<String> sl = p.stepLog;
             int logSeen = sl == null ? 0 : g.getGameLog().getAllEntries().size();
+            if (memo != null) {
+                r.keys = new ArrayList<>();
+            }
+            WorldMemo.Entry hit = null;
             while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
                 if (pastDeadline()) {
                     r.aborted = true;
@@ -975,6 +1610,27 @@ public final class LookaheadSearch {
                 }
                 ph.mainLoopStep();
                 steps++;
+                stepRef[0] = steps;
+                if (memo != null && (cfg.dedupSteps <= 0 || steps <= cfg.dedupSteps)) {
+                    final long ka = System.nanoTime();
+                    final String key = PlayoutKeys.stateKey(g);
+                    r.keyNanos += System.nanoTime() - ka;
+                    r.keysComputed++;
+                    r.keys.add(key);
+                    if (hit == null && r.wouldDedupFrom < 0) {
+                        final WorldMemo.Entry e = memo.match(key, steps, cfg.maxSteps);
+                        if (e != null) {
+                            if (cfg.dedupVerify) {
+                                r.wouldDedupFrom = e.cand;
+                                r.wouldDedupStep = steps;
+                                stats.dedupWould(e.remaining, steps);
+                            } else {
+                                hit = e;
+                                break;
+                            }
+                        }
+                    }
+                }
                 if (sl != null) {
                     final List<forge.game.GameLogEntry> all = g.getGameLog().getAllEntries();
                     final StringBuilder e = new StringBuilder(fingerprint(g)).append("RNG ").append(peekSeed(MyRandom.getRandom())).append("\nLOG");
@@ -987,20 +1643,41 @@ public final class LookaheadSearch {
             }
             r.rolloutNanos = System.nanoTime() - b;
             r.steps = steps;
+            r.totalSteps = steps + (hit == null ? 0 : hit.remaining);
             if (r.aborted) {
                 r.ok = false;
                 r.value = Double.NEGATIVE_INFINITY;
                 return r;
             }
-            r.capped = !g.isGameOver() && !watch.reached;
-            r.value = value(g, me);
-            if (model != null) {
-                r.pTerminal = terminalP(g, me);
-                if (Double.isNaN(r.pTerminal)) {
-                    r.leaf = forge.bench.StateEncoder.encode(g, me);
+            if (hit != null) {
+                // Same position as an earlier candidate of this world (exact key): its continuation is this one's.
+                final Rollout src = hit.src;
+                r.dedupFrom = hit.cand;
+                r.dedupStepsSaved = hit.remaining;
+                r.capped = src.capped;
+                r.value = src.value;
+                r.pTerminal = src.pTerminal;
+                r.leaf = src.leaf;
+                r.endKey = src.endKey;
+                r.fingerprint = src.fingerprint;
+            } else {
+                r.capped = !g.isGameOver() && !watch.reached;
+                r.value = value(g, me);
+                if (model != null) {
+                    r.pTerminal = terminalP(g, me);
+                    if (Double.isNaN(r.pTerminal)) {
+                        r.leaf = forge.bench.StateEncoder.encode(g, me);
+                    }
+                }
+                r.fingerprint = watch.fingerprint;
+                if (memo != null) {
+                    // The end state's key (verify compares it): the state after the last step, whatever the key window.
+                    r.endKey = cfg.dedupVerify ? PlayoutKeys.stateKey(g) : null;
                 }
             }
-            r.fingerprint = watch.fingerprint;
+            if (memo != null) {
+                memo.add(cand, r);
+            }
         } catch (RuntimeException | StackOverflowError e) {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
@@ -1042,7 +1719,7 @@ public final class LookaheadSearch {
         final int n = Integer.parseInt(f[3]), t = Integer.parseInt(f[4]);
         final Prepared[] ps = new Prepared[n];
         for (int i = 0; i < n; i++) {
-            ps[i] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample);
+            ps[i] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample, null);
             ps[i].stepLog = new ArrayList<>();
         }
         final double[] vals = new double[n];
@@ -1243,6 +1920,16 @@ public final class LookaheadSearch {
         initFields();
         try {
             fFirst.set(ph, p);
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** Whether {@code ph} gives priority on its next main-loop step (read-only; state keys). */
+    static boolean givePriorityFlag(PhaseHandler ph) {
+        initFields();
+        try {
+            return fGive.getBoolean(ph);
         } catch (IllegalAccessException e) {
             throw new IllegalStateException(e);
         }
