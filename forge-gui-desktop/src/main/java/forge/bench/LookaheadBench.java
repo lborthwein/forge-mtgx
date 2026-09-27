@@ -140,6 +140,7 @@ public final class LookaheadBench {
                     c.threads = la.has("threads") ? la.get("threads").getAsInt() : 0;
                     c.dedup = la.has("dedup") && la.get("dedup").getAsBoolean();
                     c.dedupVerify = la.has("dedupVerify") && la.get("dedupVerify").getAsBoolean();
+                    c.dedupSteps = la.has("dedupSteps") ? la.get("dedupSteps").getAsInt() : 0;
                     c.reuse = la.has("reuse") && la.get("reuse").getAsBoolean();
                     c.reuseVerify = la.has("reuseVerify") && la.get("reuseVerify").getAsBoolean();
                     c.reuseShadowFresh = la.has("reuseShadowFresh") && la.get("reuseShadowFresh").getAsBoolean();

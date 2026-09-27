@@ -81,6 +81,8 @@ public final class LookaheadSearch {
         public boolean dedup = false;
         /** Dedup check: compute the keys and record would-be dedup hits, but play every play-out out and compare values. */
         public boolean dedupVerify = false;
+        /** Dedup: take state keys only after the first this-many main-loop steps of a play-out (0 = every step). */
+        public int dedupSteps = 0;
         /**
          * Reuse across decisions (owner's world filter): worlds whose kept play-out of the move actually played met the
          * live position carry over (hidden cards and play-out stream); where Forge AI chose there what Forge's answer is
@@ -136,6 +138,9 @@ public final class LookaheadSearch {
             }
             if (dedupVerify) {
                 o.addProperty("dedupVerify", true);
+            }
+            if (dedupSteps > 0) {
+                o.addProperty("dedupSteps", dedupSteps);
             }
             if (reuse) {
                 o.addProperty("reuse", true);
@@ -201,7 +206,7 @@ public final class LookaheadSearch {
         /** Reuse checks: decisions with a carried world; decisions whose choice the reused values changed (vs fresh play-outs
          * of candidate 0 in the same worlds); reused values that differ from those fresh play-outs; decisions that differ
          * from the fresh A8S search. */
-        public long reuseDecisionsCarried, reuseDiffSameWorlds, reuseValueDiff, reuseCompared, reuseDiffVsFresh, reuseFreshCompared;
+        public long reuseDecisionsCarried, reuseDiffSameWorlds, reuseValueDiff, reuseCompared, reuseDiffVsFresh, reuseFreshCompared, freshVsFreshDiff;
         public final Map<String, Long> dedupHitStep = new TreeMap<>();
         public final Map<String, Long> reuseAliveBy = new TreeMap<>();
 
@@ -272,6 +277,7 @@ public final class LookaheadSearch {
                 o.addProperty("reuseValueDiff", reuseValueDiff);
                 o.addProperty("reuseFreshCompared", reuseFreshCompared);
                 o.addProperty("reuseDiffVsFresh", reuseDiffVsFresh);
+                o.addProperty("freshVsFreshDiff", freshVsFreshDiff);
                 JsonObject by = new JsonObject();
                 reuseAliveBy.forEach(by::addProperty);
                 o.add("reuseAliveBy", by);
@@ -1069,8 +1075,17 @@ public final class LookaheadSearch {
                 Arrays.fill(ok3, true);
                 playAllQuiet(live, me, cands, defSa, decisionSeed, v3, o3, ok3);
                 stats.reuseFreshCompared++;
-                if (argmax(v3, ok3, n, k) != best) {
+                final int bestFresh = argmax(v3, ok3, n, k);
+                if (bestFresh != best) {
                     stats.reuseDiffVsFresh++;
+                }
+                // The noise floor: a second fresh search on other world draws, against the first.
+                final double[][] v4 = new double[n][k];
+                final boolean[] ok4 = new boolean[n];
+                Arrays.fill(ok4, true);
+                playAllQuiet(live, me, cands, defSa, mix(decisionSeed, 0xf2e5L), v4, new Rollout[n][k], ok4);
+                if (argmax(v4, ok4, n, k) != bestFresh) {
+                    stats.freshVsFreshDiff++;
                 }
             }
         }
@@ -1596,7 +1611,7 @@ public final class LookaheadSearch {
                 ph.mainLoopStep();
                 steps++;
                 stepRef[0] = steps;
-                if (memo != null) {
+                if (memo != null && (cfg.dedupSteps <= 0 || steps <= cfg.dedupSteps)) {
                     final long ka = System.nanoTime();
                     final String key = PlayoutKeys.stateKey(g);
                     r.keyNanos += System.nanoTime() - ka;
@@ -1656,7 +1671,8 @@ public final class LookaheadSearch {
                 }
                 r.fingerprint = watch.fingerprint;
                 if (memo != null) {
-                    r.endKey = r.keys.isEmpty() ? null : r.keys.get(r.keys.size() - 1);
+                    // The end state's key (verify compares it): the state after the last step, whatever the key window.
+                    r.endKey = cfg.dedupVerify ? PlayoutKeys.stateKey(g) : null;
                 }
             }
             if (memo != null) {
