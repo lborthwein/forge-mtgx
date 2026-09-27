@@ -58,6 +58,11 @@ public class InputLockUI implements Input {
     private final Runnable showMessageFromEdt = new Runnable() {
         @Override
         public void run() {
+            // The updater checked isActive() on the timer thread; by the time this runs on the EDT another input
+            // (e.g. the human's mulligan confirm) may have been shown. Its buttons must not be reset to "waiting".
+            if (!isActive()) {
+                return;
+            }
             if (controller.mayAutoPass()) {
                 controller.getGui().updateAutoPassPrompt();
             } else {
