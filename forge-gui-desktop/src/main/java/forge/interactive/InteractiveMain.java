@@ -254,9 +254,10 @@ public final class InteractiveMain {
     }
 
     /**
-     * {@code -Dforge.interactive.lookahead=worlds=8,breadth=4,horizon=2,threads=4}: the Forge seat
+     * {@code -Dforge.interactive.lookahead=worlds=8,breadth=4,horizon=2,threads=4,dedup=1}: the Forge seat
      * is Forge AI plus the mtgx look-ahead ({@link forge.ai.simulation.LookaheadSearch}). Unset (the
-     * default, and the live server) keeps the plain Default Forge seat.
+     * default, and the live server) keeps the plain Default Forge seat. {@code threads} defaults to auto
+     * (min(worlds x breadth, processors, 8)); decisions do not depend on it.
      */
     private static String lookaheadSpec() {
         final String v = System.getProperty("forge.interactive.lookahead");
@@ -285,6 +286,8 @@ public final class InteractiveMain {
                 case "breadth": c.breadth = Integer.parseInt(p[1].trim()); break;
                 case "horizon": c.horizonTurns = Integer.parseInt(p[1].trim()); break;
                 case "threads": c.threads = Integer.parseInt(p[1].trim()); break;
+                case "dedup": c.dedup = !"0".equals(p[1].trim()); break;
+                case "reuse": c.reuse = !"0".equals(p[1].trim()); break;
                 case "margin": c.margin = Double.parseDouble(p[1].trim()); break;
                 case "maxSteps": c.maxSteps = Integer.parseInt(p[1].trim()); break;
                 case "shadow": c.shadow = !"0".equals(p[1].trim()); break;

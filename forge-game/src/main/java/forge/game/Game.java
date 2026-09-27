@@ -556,6 +556,11 @@ public class Game {
         this.hiddenCardIdCounter = from.hiddenCardIdCounter;
     }
 
+    /** Read-only: the fresh-card-id counters (look-ahead state keys). */
+    public int[] peekCardIdCounters() {
+        return new int[] {cardIdCounter, hiddenCardIdCounter};
+    }
+
     public final GameOutcome getOutcome() {
         return outcome;
     }

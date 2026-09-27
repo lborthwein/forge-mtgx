@@ -137,7 +137,12 @@ public final class LookaheadBench {
                     c.worlds = la.has("worlds") ? la.get("worlds").getAsInt() : 1;
                     c.breadth = la.has("breadth") ? la.get("breadth").getAsInt() : 4;
                     c.horizonTurns = la.has("horizonTurns") ? la.get("horizonTurns").getAsInt() : 2;
-                    c.threads = la.has("threads") ? la.get("threads").getAsInt() : 1;
+                    c.threads = la.has("threads") ? la.get("threads").getAsInt() : 0;
+                    c.dedup = la.has("dedup") && la.get("dedup").getAsBoolean();
+                    c.dedupVerify = la.has("dedupVerify") && la.get("dedupVerify").getAsBoolean();
+                    c.reuse = la.has("reuse") && la.get("reuse").getAsBoolean();
+                    c.reuseVerify = la.has("reuseVerify") && la.get("reuseVerify").getAsBoolean();
+                    c.reuseShadowFresh = la.has("reuseShadowFresh") && la.get("reuseShadowFresh").getAsBoolean();
                     c.shadow = la.has("shadow") && la.get("shadow").getAsBoolean();
                     c.probe = la.has("probe") && la.get("probe").getAsBoolean();
                     c.probeMax = la.has("probeMax") ? la.get("probeMax").getAsInt() : 6;

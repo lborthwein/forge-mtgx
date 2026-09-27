@@ -138,6 +138,15 @@ public class AiController {
         return memory;
     }
 
+    /** Read-only: this controller's own per-game state, for the look-ahead's play-out state keys. */
+    public String lookaheadStateKey() {
+        return "agg" + lastAttackAggression + " le" + useLivingEnd + " to" + timeoutReached
+                + " sk" + (skipped == null ? "-" : String.valueOf(skipped.size()))
+                + " pc" + (predictedCombat == null ? "-" : String.valueOf(predictedCombat.getAttackers().size()))
+                + " pn" + (predictedCombatNextTurn == null ? "-" : String.valueOf(predictedCombatNextTurn.getAttackers().size()))
+                + " sim" + simMode;
+    }
+
     public Combat getPredictedCombat() {
         if (predictedCombat == null) {
             AiAttackController aiAtk = new AiAttackController(player);
