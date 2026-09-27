@@ -150,6 +150,8 @@ public final class LookaheadBench {
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();
                     c.modelUrl = la.has("modelUrl") ? la.get("modelUrl").getAsString() : null;
                     c.modelTimeoutMs = la.has("modelTimeoutMs") ? la.get("modelTimeoutMs").getAsInt() : 2000;
+                    c.budgetMs = la.has("budgetMs") ? la.get("budgetMs").getAsLong() : 0L;
+                    c.decisionLog = la.has("decisionLog") && la.get("decisionLog").getAsBoolean();
                     c.seed = seed * 31 + i;
                     LookaheadSearch s = new LookaheadSearch(c);
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);

@@ -256,7 +256,9 @@ public final class InteractiveMain {
     /**
      * {@code -Dforge.interactive.lookahead=worlds=8,breadth=4,horizon=2,threads=4}: the Forge seat
      * is Forge AI plus the mtgx look-ahead ({@link forge.ai.simulation.LookaheadSearch}). Unset (the
-     * default, and the live server) keeps the plain Default Forge seat.
+     * default, and the classic opponent) keeps the plain Default Forge seat. {@code budgetMs=8000}
+     * caps each searched decision's wall time (over it, Forge's own answer is played) and
+     * {@code log=1} writes one {@code [lookahead-decision]} JSON line per searched decision to stderr.
      */
     private static String lookaheadSpec() {
         final String v = System.getProperty("forge.interactive.lookahead");
@@ -292,6 +294,8 @@ public final class InteractiveMain {
                 case "stack": c.stack = !"0".equals(p[1].trim()); break;
                 case "modelUrl": c.modelUrl = p[1].trim(); break;
                 case "modelTimeoutMs": c.modelTimeoutMs = Integer.parseInt(p[1].trim()); break;
+                case "budgetMs": c.budgetMs = Long.parseLong(p[1].trim()); break;
+                case "log": c.decisionLog = !"0".equals(p[1].trim()); break;
                 default: break;
             }
         }
