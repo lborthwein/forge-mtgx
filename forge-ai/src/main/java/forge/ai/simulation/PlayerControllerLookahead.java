@@ -23,11 +23,13 @@ public class PlayerControllerLookahead extends PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        final long t0 = System.nanoTime();
         final List<SpellAbility> def = super.chooseSpellAbilityToPlay();
         final LookaheadSearch search = lobby.getSearch();
         if (search == null || getGame() != lobby.getLiveGame()) {
             return def;
         }
+        search.noteForgeNanos(System.nanoTime() - t0);
         return search.decide(this, def);
     }
 
