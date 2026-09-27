@@ -299,9 +299,10 @@ public final class InteractiveMain {
             }
 
             final CompletableFuture<Void> gameFinished = new CompletableFuture<>();
+            final Runnable frameHook = frameHook(config.frame(), game);
             game.getAction().invoke(() -> {
                 try {
-                    match.startGame(game);
+                    match.startGame(game, frameHook);
                     gameFinished.complete(null);
                 } catch (InteractiveGuiGame.GameConceded conceded) {
                     gameFinished.complete(null);
@@ -346,6 +347,32 @@ public final class InteractiveMain {
             }
         }
         return completedNormally;
+    }
+
+    /**
+     * A test host's frame (see {@link InteractiveProtocol#readConfig}): installed through Forge's
+     * startGameHook, which runs after turn 1's untap and before priority is first offered (the
+     * seam every GUI puzzle and the bench's from-frame use). The install runs inline on the game
+     * thread; the thread is named as a game thread for the call, as the bench does, so that
+     * GameState.applyToGame never hands it to another thread. Null when there is no frame.
+     */
+    private static Runnable frameHook(final String frame, final Game game) {
+        if (frame == null) {
+            return null;
+        }
+        return () -> {
+            final forge.game.GameState state = new forge.game.GameState();
+            state.parse(java.util.Arrays.asList(frame.split("\\R")));
+            final Thread self = Thread.currentThread();
+            final String was = self.getName();
+            self.setName("Game-frame-install");
+            try {
+                state.applyToGame(game);
+            } finally {
+                self.setName(was);
+            }
+            System.err.println("[forge.interactive] table frame installed");
+        };
     }
 
     /** Every seat of a table: a browser seat is human (named, if the config names it), the rest Forge. */

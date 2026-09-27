@@ -80,6 +80,21 @@ public class InteractiveTableTest extends AITest {
     }
 
     @Test
+    public void aFrameIsATestHostTableOptionOnly() throws Exception {
+        final String table = ",\"humanSeats\":[0,1],\"frame\":\"turn=3\\nactiveplayer=p0\"";
+        expectThrows(InteractiveProtocol.ProtocolException.class, () -> InteractiveProtocol.readConfig(config(table)));
+        System.setProperty("forge.interactive.allowFrame", "true");
+        try {
+            assertEquals(InteractiveProtocol.readConfig(config(table)).frame(), "turn=3\nactiveplayer=p0");
+            expectThrows(InteractiveProtocol.ProtocolException.class,
+                    () -> InteractiveProtocol.readConfig(config(",\"frame\":\"turn=3\"")));
+        } finally {
+            System.clearProperty("forge.interactive.allowFrame");
+        }
+        assertNull(InteractiveProtocol.readConfig(config(",\"humanSeats\":[0,1]")).frame());
+    }
+
+    @Test
     public void theDemuxRoutesEachLineToItsSeatAndEndsBoth() throws Exception {
         final String zero = "{\"seat\":0,\"n\":1}";
         final String one = "{\"seat\":1,\"n\":2}";

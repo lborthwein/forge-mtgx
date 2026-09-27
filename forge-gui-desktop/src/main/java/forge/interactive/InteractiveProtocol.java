@@ -38,7 +38,8 @@ final class InteractiveProtocol {
      * game's number in the caller's match (1 when not part of one).
      */
     record Config(String session, int humanSeat, List<Path> decks, long seed, String aiProfile,
-                  int startingChooser, int gameNumber, List<Integer> humanSeats, List<String> names) {
+                  int startingChooser, int gameNumber, List<Integer> humanSeats, List<String> names,
+                  String frame) {
         Config {
             decks = List.copyOf(decks);
             humanSeats = humanSeats == null ? List.of(humanSeat) : List.copyOf(humanSeats);
@@ -47,7 +48,7 @@ final class InteractiveProtocol {
 
         Config(final String session, final int humanSeat, final List<Path> decks, final long seed,
                final String aiProfile, final int startingChooser, final int gameNumber) {
-            this(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber, null, null);
+            this(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber, null, null, null);
         }
 
         /**
@@ -193,8 +194,26 @@ final class InteractiveProtocol {
                 names.add(name);
             }
         }
+        // Optional, TEST HOSTS ONLY: a Forge GameState text (dev-mode/puzzle format) installed
+        // at the start of a TABLE's first turn, so a rules case can be shown from an exact
+        // position. Refused unless this JVM was started with -Dforge.interactive.allowFrame=true,
+        // which no production launch passes.
+        String frame = null;
+        if (json.has("frame") && !json.get("frame").isJsonNull()) {
+            if (!Boolean.getBoolean("forge.interactive.allowFrame")) {
+                throw new ProtocolException("invalid_config", "frame is not allowed on this host");
+            }
+            if (!json.get("frame").isJsonPrimitive() || !json.getAsJsonPrimitive("frame").isString()
+                    || json.get("frame").getAsString().isBlank() || json.get("frame").getAsString().length() > 65536) {
+                throw new ProtocolException("invalid_config", "frame must be a non-blank GameState text up to 64 KiB");
+            }
+            if (humanSeats == null || humanSeats.size() < 2) {
+                throw new ProtocolException("invalid_config", "frame is a table (humanSeats) option");
+            }
+            frame = json.get("frame").getAsString();
+        }
         return new Config(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber,
-                humanSeats, names);
+                humanSeats, names, frame);
     }
 
     static String bestEffortSession(final String line) {
