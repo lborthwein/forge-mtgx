@@ -12,9 +12,9 @@ import forge.player.PlayerControllerHuman;
  * InputLockUI's delayed "waiting for actions" update checks that the lock is still the active input on the timer
  * thread, then runs on the EDT. If the human's next input (e.g. the mulligan confirm) was shown in between, the stale
  * update must not reset that input's buttons (seen in the interactive bridge: "InputConfirmMulligan exposed no human
- * controls" at the opening mulligan when the AI's mulligan took more than 500 ms).
+ * controls" at the opening mulligan when the AI's mulligan took more than 500 ms). Extends AITest for the Localizer.
  */
-public class InputLockUIStaleUpdateTest {
+public class InputLockUIStaleUpdateTest extends forge.ai.AITest {
 
     private static Runnable edtUpdate(InputLockUI lock) throws Exception {
         Field f = InputLockUI.class.getDeclaredField("showMessageFromEdt");
