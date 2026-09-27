@@ -111,6 +111,14 @@ public final class LookaheadSearch {
         public String modelUrl = null;
         /** C5: per-request timeout; a failed request falls back to the static evaluator for that decision. */
         public int modelTimeoutMs = 2000;
+        /**
+         * Wall-clock budget per searched decision, in ms (0 = none, the default: reads and gates are
+         * unchanged). When a search runs past it, its play-outs stop at their next main-loop step and the
+         * seat plays Forge AI's own answer ("capped"). Timing-dependent by design (interactive play only).
+         */
+        public long budgetMs = 0L;
+        /** Interactive play: one JSON line per searched decision on stderr ({@code [lookahead-decision] {...}}). */
+        public boolean decisionLog = false;
 
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
@@ -150,6 +158,9 @@ public final class LookaheadSearch {
             }
             o.addProperty("probeMax", probeMax);
             o.addProperty("fidelity", fidelity);
+            if (budgetMs > 0) {
+                o.addProperty("budgetMs", budgetMs);
+            }
             if (modelUrl != null) {
                 o.addProperty("modelUrl", modelUrl);
                 o.addProperty("modelTimeoutMs", modelTimeoutMs);
@@ -174,6 +185,8 @@ public final class LookaheadSearch {
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
         public long combatNanos;
+        /** Wall budget: searched decisions that ran past it (and played Forge's answer); play-outs stopped by it. */
+        public long capped, rolloutsAborted;
         /** C1: priority decisions with a non-empty stack; of those, refused (by reason), searched, departed. */
         public long stackDecisions, stackUnsupported, stackSearched, stackDeparted;
         public final Map<String, Long> stackWhy = new TreeMap<>();
@@ -218,6 +231,10 @@ public final class LookaheadSearch {
             o.addProperty("searchMs", searchNanos / 1e6);
             o.addProperty("maxSearchMs", maxSearchNanos / 1e6);
             o.addProperty("msPerSearch", searched == 0 ? 0 : searchNanos / 1e6 / searched);
+            if (capped > 0 || rolloutsAborted > 0) {
+                o.addProperty("capped", capped);
+                o.addProperty("rolloutsAborted", rolloutsAborted);
+            }
             o.addProperty("attackDecisions", attackDecisions);
             o.addProperty("attackSearched", attackSearched);
             o.addProperty("attackDeparted", attackDeparted);
@@ -324,6 +341,10 @@ public final class LookaheadSearch {
     private int departuresThisTurn = 0;
     private final Map<String, Integer> departureCounts = new TreeMap<>();
     private boolean fidelityArmed = true;
+    /** The current searched decision's wall deadline (System.nanoTime), 0 = none. Read by play-outs on any thread. */
+    private volatile long deadline = 0L;
+    /** Forge AI's own time for the current decision (set by the controller before {@link #decide}), for the decision log. */
+    private long forgeNanos = -1L;
 
     /** Fidelity probe: the live game's fingerprint at the watched turn, compared with a truth rollout. */
     private FidelityWatch liveWatch = null;
@@ -351,6 +372,16 @@ public final class LookaheadSearch {
 
     public Stats getStats() {
         return stats;
+    }
+
+    /** The controller's measured time for Forge AI's own answer to the decision about to be searched (log only). */
+    public void noteForgeNanos(long nanos) {
+        forgeNanos = nanos;
+    }
+
+    private boolean pastDeadline() {
+        final long d = deadline;
+        return d != 0L && System.nanoTime() - d > 0;
     }
 
     public void shutdown() {
@@ -396,6 +427,28 @@ public final class LookaheadSearch {
         }
 
         final long t0 = System.nanoTime();
+        deadline = cfg.budgetMs > 0 ? t0 + cfg.budgetMs * 1_000_000L : 0L;
+        try {
+            return decideSearched(ctrl, def, live, me, index, onStack, ph, turn, t0);
+        } catch (RuntimeException e) {
+            if (cfg.budgetMs <= 0) {
+                throw e;
+            }
+            // Interactive play (budgeted): a failed search must not end the player's game; play Forge's answer.
+            stats.departFallback++;
+            System.err.println("[lookahead] search failed at decision " + index + ", playing Forge's answer: " + e);
+            if (FAILURE_TRACES.getAndIncrement() < 20) {
+                e.printStackTrace();
+            }
+            return def;
+        } finally {
+            deadline = 0L;
+            forgeNanos = -1L;
+        }
+    }
+
+    private List<SpellAbility> decideSearched(PlayerControllerAi ctrl, List<SpellAbility> def, Game live, Player me, int index,
+                                              boolean onStack, PhaseHandler ph, int turn, long t0) {
         final long decisionSeed = mix(cfg.seed, 0x5eedL + index);
         final SpellAbility defSa = def == null || def.isEmpty() ? null : def.get(0);
 
@@ -423,7 +476,7 @@ public final class LookaheadSearch {
         Arrays.fill(ok, true);
         final Carried[] carried = cfg.reuse ? carry(live, me, cands, turn, k) : new Carried[k];
         final Rollout[] freshDef = cfg.reuseVerify ? new Rollout[k] : null;
-        playAll(live, me, cands, defSa, decisionSeed, carried, values, outs, ok, freshDef);
+        final int abortedHere = playAll(live, me, cands, defSa, decisionSeed, carried, values, outs, ok, freshDef);
         if (cfg.dedupVerify) {
             dedupVerify(outs, n, k);
         }
@@ -438,6 +491,9 @@ public final class LookaheadSearch {
             modelLeaves(live, me, values, outs, ok, k);
         }
 
+        // Over budget: a play-out was stopped (or never started) by the wall budget, so the search did not finish
+        // in time; play Forge AI's own answer.
+        final boolean overBudget = abortedHere > 0;
         final double[] ev = new double[n];
         for (int c = 0; c < n; c++) {
             double s = 0;
@@ -449,9 +505,9 @@ public final class LookaheadSearch {
                 stats.candidatesDropped++;
             }
         }
-        // Forge's own answer is candidate 0; if it could not be played out, never depart on a comparison without it.
-        final int best = argmax(values, ok, n, k);
-        if (cfg.reuseVerify) {
+        // Forge's own answer is candidate 0; if it could not be played out, or the budget ran out, never depart.
+        final int best = overBudget ? 0 : argmax(values, ok, n, k);
+        if (cfg.reuseVerify && !overBudget) {
             reuseVerify(live, me, cands, defSa, decisionSeed, carried, values, ok, freshDef, best);
         }
 
@@ -483,6 +539,10 @@ public final class LookaheadSearch {
         } else if (best != 0) {
             outcome = "shadow-would-depart";
         }
+        if (overBudget) {
+            stats.capped++;
+            outcome = "capped";
+        }
 
         if (Boolean.getBoolean("lookahead.trace")) {
             // One line per searched decision: every candidate's per-world values, bit-exact, to find where two runs part.
@@ -507,6 +567,27 @@ public final class LookaheadSearch {
         stats.searchMsEach.add(dt / 1e6);
         if (cfg.reuse) {
             keep(outs, "departed".equals(outcome) ? best : 0, turn, k);
+        }
+        if (cfg.decisionLog) {
+            // One line per searched decision for the interactive host to log (latency tail, caps, departures).
+            final JsonObject d = new JsonObject();
+            d.addProperty("decision", index);
+            d.addProperty("turn", turn);
+            d.addProperty("phase", String.valueOf(ph.getPhase()));
+            d.addProperty("stack", live.getStack().size());
+            d.addProperty("candidates", cands.size());
+            d.addProperty("worlds", k);
+            d.addProperty("searchMs", Math.round(dt / 1e5) / 10.0);
+            if (forgeNanos >= 0) {
+                d.addProperty("forgeMs", Math.round(forgeNanos / 1e5) / 10.0);
+            }
+            d.addProperty("capped", overBudget);
+            d.addProperty("outcome", outcome);
+            d.addProperty("departed", "departed".equals(outcome));
+            d.addProperty("searched", stats.searched);
+            d.addProperty("departedTotal", stats.departed);
+            d.addProperty("cappedTotal", stats.capped);
+            System.err.println("[lookahead-decision] " + d);
         }
 
         if (cfg.probe && turn >= 3 && stats.probes.size() < cfg.probeMax && (!cfg.probeStack || onStack)) {
@@ -547,7 +628,9 @@ public final class LookaheadSearch {
             }
             stats.rollouts++;
             stats.steps += r.steps;
-            if (!r.ok) {
+            if (r.aborted) {
+                stats.rolloutsAborted++;
+            } else if (!r.ok) {
                 stats.rolloutFailures++;
             }
             if (r.capped) {
@@ -863,16 +946,20 @@ public final class LookaheadSearch {
      * reusable carried world does not play candidate 0 (its kept value stands in) unless {@code freshDef} asks for a
      * fresh play-out of it too (reuse verify).
      */
-    private void playAll(Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed, Carried[] carried,
+    private int playAll(Game live, Player me, List<Cand> cands, SpellAbility defSa, long decisionSeed, Carried[] carried,
             double[][] values, Rollout[][] outs, boolean[] ok, Rollout[] freshDef) {
         final int n = cands.size(), k = values[0].length;
         final Prepared[][] prep = new Prepared[n][k];
         final Prepared[] prepFresh = new Prepared[k];
         boolean any = false;
+        prepare:
         for (int w = 0; w < k; w++) {
             final Carried cw = carried[w];
             any |= cw != null;
             for (int c = 0; c < n; c++) {
+                if (pastDeadline()) {
+                    break prepare;
+                }
                 if (c == 0 && cw != null && cw.reusable != null) {
                     outs[0][w] = cw.reusable;
                     if (freshDef != null) {
@@ -896,7 +983,8 @@ public final class LookaheadSearch {
                 tasks.add(() -> {
                     final WorldMemo memo = new WorldMemo();
                     for (int cc = 0; cc < n; cc++) {
-                        final Rollout r = prep[cc][ww] == null ? outs[cc][ww] : play(prep[cc][ww], null, memo, cc);
+                        final Rollout r = prep[cc][ww] != null ? play(prep[cc][ww], null, memo, cc)
+                                : outs[cc][ww] != null ? outs[cc][ww] : aborted();
                         prep[cc][ww] = null;
                         record(values, outs, ok, cc, ww, r);
                     }
@@ -905,7 +993,8 @@ public final class LookaheadSearch {
                 for (int c = 0; c < n; c++) {
                     final int ww = w, cc = c;
                     if (prep[cc][ww] == null) {
-                        record(values, outs, ok, cc, ww, outs[cc][ww]);
+                        // A reused value, or (budget) a play-out that never started.
+                        record(values, outs, ok, cc, ww, outs[cc][ww] != null ? outs[cc][ww] : aborted());
                         continue;
                     }
                     tasks.add(() -> {
@@ -924,6 +1013,15 @@ public final class LookaheadSearch {
             }
         }
         runAll(tasks);
+        int aborted = 0;
+        for (Rollout[] row : outs) {
+            for (Rollout r : row) {
+                if (r != null && r.aborted) {
+                    aborted++;
+                }
+            }
+        }
+        return aborted;
     }
 
     /**
@@ -1006,6 +1104,14 @@ public final class LookaheadSearch {
             }
         }
         runAll(tasks);
+    }
+
+    private static Rollout aborted() {
+        final Rollout r = new Rollout();
+        r.ok = false;
+        r.aborted = true;
+        r.value = Double.NEGATIVE_INFINITY;
+        return r;
     }
 
     private void runAll(List<Runnable> tasks) {
@@ -1199,6 +1305,8 @@ public final class LookaheadSearch {
     static final class Rollout {
         boolean ok = true;
         boolean capped = false;
+        /** Stopped by the decision's wall budget (never started, or stopped between main-loop steps). */
+        boolean aborted = false;
         double value;
         /** C5: the seat's ForgeState at a non-terminal horizon (null if terminal or no model). */
         JsonObject leaf;
@@ -1481,6 +1589,10 @@ public final class LookaheadSearch {
             }
             WorldMemo.Entry hit = null;
             while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
+                if (pastDeadline()) {
+                    r.aborted = true;
+                    break;
+                }
                 ph.mainLoopStep();
                 steps++;
                 stepRef[0] = steps;
@@ -1517,6 +1629,11 @@ public final class LookaheadSearch {
             r.rolloutNanos = System.nanoTime() - b;
             r.steps = steps;
             r.totalSteps = steps + (hit == null ? 0 : hit.remaining);
+            if (r.aborted) {
+                r.ok = false;
+                r.value = Double.NEGATIVE_INFINITY;
+                return r;
+            }
             if (hit != null) {
                 // Same position as an earlier candidate of this world (exact key): its continuation is this one's.
                 final Rollout src = hit.src;
