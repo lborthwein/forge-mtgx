@@ -192,7 +192,21 @@ public class ChooseCardAi extends SpellAbilityAi {
         Card choice = null;
         if (logic.isEmpty()) {
             // Base Logic is choose "best"
-            choice = ComputerUtilCard.getBestAI(destroyableIfDestroying(ai, sa, options));
+            final AiFixes.Mode fixes = AiFixes.mode(ai);
+            if (fixes == AiFixes.Mode.OFF) {
+                choice = ComputerUtilCard.getBestAI(options);
+            } else {
+                // aiFixes0928 (fork #23): a choice that feeds a Destroy picks among the destroyable opponent cards.
+                final Iterable<Card> destroyable = destroyableIfDestroying(ai, sa, options);
+                final Card upstream = ComputerUtilCard.getBestAI(options);
+                if (destroyable != options && Iterables.size(destroyable) < Iterables.size(options)) {
+                    final Card fixed = ComputerUtilCard.getBestAI(destroyable);
+                    AiFixes.record(ai, AiFixes.Kind.CHOOSE_DESTROY, fixed != upstream);
+                    choice = fixes == AiFixes.Mode.ON ? fixed : upstream;
+                } else {
+                    choice = upstream;
+                }
+            }
         } else if ("WorstCard".equals(logic)) {
             choice = ComputerUtilCard.getWorstAI(options);
         } else if ("OwnCard".equals(logic)) {

@@ -136,6 +136,7 @@ public final class InteractiveMain {
 
             final Match match = new Match(rules, registered, "Browser vs Default Forge");
             final Game game = match.createGame();
+            bindAiFixes(registered);
             bindLookahead(registered, game, config.seed());
             final Player human = playerAtSeat(game, config.humanSeat());
             if (human == null || !(human.getController() instanceof PlayerControllerHuman humanController)) {
@@ -260,6 +261,7 @@ public final class InteractiveMain {
             }
             final Match match = new Match(rules, registered, "Browser table");
             final Game game = match.createGame();
+            bindAiFixes(registered);
             bindLookahead(registered, game, config.seed());
 
             final List<PlayerControllerHuman> controllers = new ArrayList<>();
@@ -459,6 +461,8 @@ public final class InteractiveMain {
      * Belief (lane belief-sampling-0928): {@code belief=human,beliefUrl=...,beliefCheckpointSha256=...,beliefCube=<file>,
      * beliefCubeSha256=...} (or {@code belief=uniform}; {@code beliefShadow=1}, {@code beliefBasics=8},
      * {@code beliefTimeoutMs=2000}) re-draws the opponent's hidden cards from the hand belief.
+     * {@code aiFixes0928=on} (lane yardstick-0928; off by default) turns on the mtgx Forge AI fixes of 2026-09-28
+     * ({@link forge.ai.AiFixes}) for the look-ahead seat's own Forge AI (and its play-out copies of that seat).
      */
     private static String lookaheadSpec() {
         final String v = System.getProperty("forge.interactive.lookahead");
@@ -471,12 +475,29 @@ public final class InteractiveMain {
         return lp;
     }
 
+    /**
+     * {@code -Dforge.interactive.aiFixes0928=on|shadow|off} (lane yardstick-0928): the mtgx Forge AI fixes of 2026-09-28
+     * ({@link forge.ai.AiFixes}) for every plain Forge AI seat (the classic opponent). Unset = off = upstream Forge AI.
+     * A look-ahead seat takes {@code aiFixes0928=on} in the look-ahead spec instead (see {@link #bindLookahead}).
+     */
+    private static void bindAiFixes(final List<RegisteredPlayer> registered) {
+        final String v = System.getProperty("forge.interactive.aiFixes0928");
+        final forge.ai.AiFixes.Mode mode = forge.ai.AiFixes.Mode.parse(v);
+        for (RegisteredPlayer rp : registered) {
+            if (rp.getPlayer() instanceof forge.ai.LobbyPlayerAi lp
+                    && !(lp instanceof forge.ai.simulation.LobbyPlayerLookahead)) {
+                lp.setAiFixes0928(mode);
+            }
+        }
+    }
+
     private static void bindLookahead(final List<RegisteredPlayer> registered, final Game game, final long seed) {
         final String spec = lookaheadSpec();
         if (spec == null) {
             return;
         }
         final forge.ai.simulation.LookaheadSearch.Config c = new forge.ai.simulation.LookaheadSearch.Config();
+        forge.ai.AiFixes.Mode aiFixes = forge.ai.AiFixes.Mode.OFF;
         for (String kv : spec.split(",")) {
             final String[] p = kv.split("=", 2);
             if (p.length != 2) {
@@ -513,11 +534,13 @@ public final class InteractiveMain {
                 case "beliefCube": c.beliefCube = p[1].trim(); break;
                 case "beliefCubeSha256": c.beliefCubeSha256 = p[1].trim(); break;
                 case "beliefBasics": c.beliefBasics = Integer.parseInt(p[1].trim()); break;
+                case "aiFixes0928": aiFixes = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 default: break;
             }
         }
         for (int i = 0; i < registered.size(); i++) {
             if (registered.get(i).getPlayer() instanceof forge.ai.simulation.LobbyPlayerLookahead lp) {
+                lp.setAiFixes0928(aiFixes);
                 c.seed = seed * 31 + i;
                 lp.bind(game, new forge.ai.simulation.LookaheadSearch(c));
             }
