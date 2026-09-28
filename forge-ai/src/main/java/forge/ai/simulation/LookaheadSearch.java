@@ -96,6 +96,13 @@ public final class LookaheadSearch {
         public boolean reuseShadowFresh = false;
         /** A departure must beat Forge's answer's EV by more than this. */
         public double margin = 0.0;
+        /**
+         * Departure confidence (lane forge-ai-misplays-0928; 0 = off, the default: decisions unchanged). A candidate may
+         * replace Forge's answer only if its mean paired difference to Forge's answer over the K worlds (common random
+         * numbers) exceeds departZ standard errors of that difference. Keeps the prior (Forge's answer) when the
+         * play-outs cannot tell the candidates apart -- one divergent or terminal world must not decide.
+         */
+        public double departZ = 0.0;
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
@@ -152,6 +159,9 @@ public final class LookaheadSearch {
                 o.addProperty("reuseShadowFresh", true);
             }
             o.addProperty("margin", margin);
+            if (departZ > 0) {
+                o.addProperty("departZ", departZ);
+            }
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
@@ -186,6 +196,8 @@ public final class LookaheadSearch {
     /** Per-seat, per-game counters. */
     public static final class Stats {
         public long decisions, stackSkipped, uncontested, searched, departed, departFallback, loopGuard;
+        /** departZ: candidates (with a finished play-out in every world) set aside for lack of confidence. */
+        public long departGated;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
@@ -228,6 +240,9 @@ public final class LookaheadSearch {
             o.addProperty("departed", departed);
             o.addProperty("departFallback", departFallback);
             o.addProperty("loopGuard", loopGuard);
+            if (departGated > 0) {
+                o.addProperty("departGated", departGated);
+            }
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
             o.addProperty("rolloutCapped", rolloutCapped);
@@ -335,6 +350,28 @@ public final class LookaheadSearch {
         private static String trim(String s) {
             return s.length() > 60 ? s.substring(0, 60) : s;
         }
+    }
+
+    /** Diagnostics: one "[lookahead-explain]" JSON line per searched decision (candidates, choices, per-world values). */
+    private static final boolean EXPLAIN = Boolean.getBoolean("lookahead.explain");
+    /** EXPLAIN only: the current decision's candidates' choices as prepared in world 0. */
+    private String[] explainChoices;
+
+    /** EXPLAIN only: an ability's targets (and its sub-abilities'), as Forge AI chose them. */
+    static String describeChoices(List<SpellAbility> first) {
+        if (first == null || first.isEmpty() || first.get(0) == null) {
+            return "";
+        }
+        final StringBuilder sb = new StringBuilder();
+        for (SpellAbility s = first.get(0); s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting()) {
+                sb.append(sb.length() == 0 ? "" : " / ").append(s.getTargets());
+            }
+        }
+        if (first.get(0).isKicked()) {
+            sb.append(" kicked");
+        }
+        return sb.toString();
     }
 
     private final Config cfg;
@@ -480,6 +517,7 @@ public final class LookaheadSearch {
         final Rollout[][] outs = new Rollout[n][k];
         final boolean[] ok = new boolean[n];
         Arrays.fill(ok, true);
+        explainChoices = EXPLAIN ? new String[n] : null;
         final Carried[] carried = cfg.reuse ? carry(live, me, cands, turn, k) : new Carried[k];
         final Rollout[] freshDef = cfg.reuseVerify ? new Rollout[k] : null;
         final int abortedHere = playAll(live, me, cands, defSa, decisionSeed, carried, values, outs, ok, freshDef);
@@ -561,6 +599,39 @@ public final class LookaheadSearch {
                 }
             }
             System.err.println(tb);
+        }
+        if (EXPLAIN) {
+            // Diagnostics (lane forge-ai-misplays-0928): every candidate, the choices it was played out with (targets as
+            // Forge AI chose them in world 0), its per-world values and EV, the paired difference to Forge's answer.
+            final JsonObject x = new JsonObject();
+            x.addProperty("decision", index);
+            x.addProperty("turn", turn);
+            x.addProperty("phase", String.valueOf(ph.getPhase()));
+            x.addProperty("active", ph.getPlayerTurn() == me);
+            x.addProperty("stack", live.getStack().size());
+            x.addProperty("best", best);
+            x.addProperty("outcome", outcome);
+            final JsonArray ca = new JsonArray();
+            for (int c = 0; c < n; c++) {
+                final JsonObject co = new JsonObject();
+                co.addProperty("label", cands.get(c).label);
+                co.addProperty("choices", explainChoices != null && explainChoices[c] != null ? explainChoices[c] : "");
+                co.addProperty("ok", ok[c]);
+                co.addProperty("ev", ok[c] ? ev[c] : null);
+                final JsonArray vs = new JsonArray();
+                final JsonArray ds = new JsonArray();
+                for (int w = 0; w < k; w++) {
+                    vs.add(values[c][w]);
+                    ds.add(values[c][w] - values[0][w]);
+                }
+                co.add("values", vs);
+                if (c > 0) {
+                    co.add("diffVsForge", ds);
+                }
+                ca.add(co);
+            }
+            x.add("candidates", ca);
+            System.err.println("[lookahead-explain] " + x);
         }
         if (Boolean.getBoolean("lookahead.debug") && best != 0) {
             System.err.println("[lookahead] decision " + index + " T" + turn + " " + ph.getPhase() + " stack=" + live.getStack().size()
@@ -939,11 +1010,42 @@ public final class LookaheadSearch {
             ev[c] = ok[c] ? s / k : Double.NEGATIVE_INFINITY;
         }
         for (int c = 1; c < n; c++) {
+            if (cfg.departZ > 0 && ok[c] && !confident(values, c, k, cfg.departZ)) {
+                stats.departGated++;
+                continue;
+            }
             if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
                 best = c;
             }
         }
         return best;
+    }
+
+    /**
+     * Departure confidence: the mean over worlds of (candidate - Forge's answer) is positive and exceeds z standard
+     * errors of that paired difference (sample standard deviation / sqrt(k)). With one world there is no error
+     * estimate, so only a strictly positive difference counts; identical differences in every world (zero spread) count
+     * when positive.
+     */
+    static boolean confident(double[][] values, int c, int k, double z) {
+        double sum = 0;
+        for (int w = 0; w < k; w++) {
+            sum += values[c][w] - values[0][w];
+        }
+        final double mean = sum / k;
+        if (!(mean > 0)) {
+            return false;
+        }
+        if (k < 2) {
+            return true;
+        }
+        double ss = 0;
+        for (int w = 0; w < k; w++) {
+            final double d = values[c][w] - values[0][w] - mean;
+            ss += d * d;
+        }
+        final double se = Math.sqrt(ss / (k - 1)) / Math.sqrt(k);
+        return mean > z * se;
     }
 
     /**
@@ -975,6 +1077,9 @@ public final class LookaheadSearch {
                 }
                 prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample, cw == null ? null : cw.at);
                 prep[c][w].trajectory = cfg.reuse ? new ArrayList<>() : null;
+                if (EXPLAIN && w == 0) {
+                    explainChoices[c] = describeChoices(prep[c][w].first);
+                }
             }
         }
         if (any) {
