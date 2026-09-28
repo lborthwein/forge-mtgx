@@ -51,6 +51,22 @@ public class PlayerControllerLookahead extends PlayerControllerAi {
         }
     }
 
+    /**
+     * Tutor ranking (lane tutor-ranking-0928): Forge AI picks first, exactly as without the option; the search may then
+     * replace the pick ({@link LookaheadSearch#decideTutor}). Only in the live game the lobby player was bound to.
+     */
+    @Override
+    public forge.game.card.Card chooseSingleCardForZoneChange(forge.game.zone.ZoneType destination, List<forge.game.zone.ZoneType> origin,
+            SpellAbility sa, forge.game.card.CardCollection fetchList, forge.game.player.DelayedReveal delayedReveal, String selectPrompt,
+            boolean isOptional, Player decider) {
+        final forge.game.card.Card def = super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider);
+        final LookaheadSearch search = lobby.getSearch();
+        if (search == null || getGame() != lobby.getLiveGame() || !search.getConfig().tutorOn()) {
+            return def;
+        }
+        return search.decideTutor(this, destination, origin, sa, fetchList, def, decider);
+    }
+
     public LobbyPlayer getLookaheadLobby() {
         return lobby;
     }
