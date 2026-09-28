@@ -1070,7 +1070,233 @@ public final class LookaheadSearch {
             probeExtras(p, live, me, cands, defSa, decisionSeed, turn);
             stats.probes.add(p);
         }
+        if (leafGateSink != null) {
+            leafGateSink.accept(leafGate(live, me, index, turn, ph, cands, values, ok, k, best, outcome, overBudget, decisionSeed, defSa));
+        }
         return answer;
+    }
+
+    // ------------------------------------------------------------------ leaf-gate dump (lane leafvalue-0928)
+
+    /**
+     * Leaf-gate dump (lane leafvalue-0928, offline ranking gate for a learned leaf at longer horizons). Null = off; the
+     * search never reads it. Per searched decision: every candidate played out on the world seeds a K-world search uses
+     * (mix(decisionSeed, 1000 + w), w &lt; lookahead.lgWorlds) with snapshots (static score, terminal result, the seat's
+     * ForgeState) at each horizon of lookahead.lgHorizons; plus lookahead.lgQ full-game continuations per candidate
+     * from the TRUE position (hands as they are, libraries reshuffled except known tops; Forge AI on both seats; seeds
+     * mix(decisionSeed, 900000 + m), common to all candidates) as the offline target. Copies only.
+     */
+    public java.util.function.Consumer<JsonObject> leafGateSink = null;
+    private static final String LG_HORIZONS = System.getProperty("lookahead.lgHorizons", "2,4,6");
+    private static final int LG_WORLDS = Integer.getInteger("lookahead.lgWorlds", 8);
+    private static final int LG_Q = Integer.getInteger("lookahead.lgQ", 8);
+    private static final int LG_Q_TURNS = Integer.getInteger("lookahead.lgQTurns", 80);
+    private static final int LG_Q_MAX_STEPS = Integer.getInteger("lookahead.lgQMaxSteps", 40000);
+    /** Set only while the leaf-gate dump prepares its true-position copies (decision thread). */
+    private boolean lgTruth = false;
+
+    private JsonObject leafGate(Game live, Player me, int index, int turn, PhaseHandler ph, List<Cand> cands, double[][] values,
+            boolean[] ok, int k, int best, String outcome, boolean overBudget, long decisionSeed, SpellAbility defSa) {
+        final long t = System.nanoTime();
+        final String[] hp = LG_HORIZONS.split(",");
+        final int[] hs = new int[hp.length];
+        for (int i = 0; i < hp.length; i++) {
+            hs[i] = Integer.parseInt(hp[i].trim());
+        }
+        Arrays.sort(hs);
+        final int n = cands.size();
+        final JsonObject o = new JsonObject();
+        o.addProperty("schema", "leafgate/1");
+        o.addProperty("decision", index);
+        o.addProperty("turn", turn);
+        o.addProperty("phase", String.valueOf(ph.getPhase()));
+        o.addProperty("active", ph.getPlayerTurn() == me);
+        o.addProperty("stack", live.getStack().size());
+        o.addProperty("seat", forge.bench.StateEncoder.playerIndex(live, me));
+        o.addProperty("k", k);
+        o.addProperty("horizonTurns", cfg.horizonTurns);
+        o.addProperty("margin", cfg.margin);
+        o.addProperty("best", best);
+        o.addProperty("outcome", outcome);
+        o.addProperty("overBudget", overBudget);
+        final JsonArray hsj = new JsonArray();
+        for (int h : hs) {
+            hsj.add(h);
+        }
+        o.add("horizons", hsj);
+        o.addProperty("lgWorlds", LG_WORLDS);
+        // The C5 service request's common fields as the model leaf would send them (seat, startingSeat, mulligans,
+        // deck); offline scoring adds the leaves.
+        o.add("modelRequest", forgeRequest(live, me));
+        int h2Checked = 0, h2Mismatch = 0;
+        final JsonArray ca = new JsonArray();
+        for (int c = 0; c < n; c++) {
+            final Cand cd = cands.get(c);
+            final JsonObject co = new JsonObject();
+            co.addProperty("label", cd.label);
+            co.addProperty("key", cd.key());
+            co.addProperty("pass", cd.pass);
+            co.addProperty("land", cd.land);
+            co.addProperty("ok", ok[c]);
+            final JsonArray sv = new JsonArray();
+            for (int w = 0; w < k; w++) {
+                sv.add(ok[c] && !Double.isInfinite(values[c][w]) ? values[c][w] : null);
+            }
+            co.add("searchValues", sv);
+            final JsonArray worlds = new JsonArray();
+            for (int w = 0; w < LG_WORLDS; w++) {
+                final JsonArray st = playStages(prepare(live, me, cd, defSa, mix(decisionSeed, 1000 + w), cfg.resample, null), hs,
+                        cfg.maxSteps);
+                worlds.add(st);
+                // The search's own play-out of (c, w) must be this play-out's stage at the search horizon.
+                if (w < k && ok[c] && st != null) {
+                    for (com.google.gson.JsonElement e : st) {
+                        final JsonObject so = e.getAsJsonObject();
+                        if (so.has("h") && so.get("h").getAsInt() == cfg.horizonTurns && so.has("static")) {
+                            h2Checked++;
+                            if (Double.doubleToLongBits(so.get("static").getAsDouble()) != Double.doubleToLongBits(values[c][w])) {
+                                h2Mismatch++;
+                            }
+                        }
+                    }
+                }
+            }
+            co.add("worlds", worlds);
+            ca.add(co);
+        }
+        o.add("cands", ca);
+        o.addProperty("h2Checked", h2Checked);
+        o.addProperty("h2Mismatch", h2Mismatch);
+        final long tq = System.nanoTime();
+        final JsonArray qs = new JsonArray();
+        final int[] qh = {LG_Q_TURNS};
+        for (int c = 0; c < n; c++) {
+            final JsonArray q = new JsonArray();
+            for (int m = 0; m < LG_Q; m++) {
+                lgTruth = true;
+                final Prepared p;
+                try {
+                    p = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 900000 + m), false, null);
+                } finally {
+                    lgTruth = false;
+                }
+                final JsonArray st = playStages(p, qh, LG_Q_MAX_STEPS);
+                if (st == null || st.size() == 0) {
+                    q.add("fail");
+                } else {
+                    final JsonObject so = st.get(0).getAsJsonObject();
+                    q.add(so.has("pT") ? so.get("pT") : null);
+                }
+            }
+            qs.add(q);
+        }
+        o.add("q", qs);
+        o.addProperty("lgLeafMs", (tq - t) / 1e6);
+        o.addProperty("lgQMs", (System.nanoTime() - tq) / 1e6);
+        return o;
+    }
+
+    /**
+     * Leaf-gate dump: play a prepared copy through each horizon in turn (ascending), snapshotting at each: the static
+     * score, the terminal result (pT, when the game is over) or the seat's ForgeState, the turn and step count. The
+     * search's own play-out stops at the first snapshot the same way ({@link #play}). Null if the copy failed; an
+     * exception ends the list with an "error" entry.
+     */
+    private JsonArray playStages(Prepared p, int[] hs, int stepCap) {
+        if (p.failed) {
+            return null;
+        }
+        final JsonArray out = new JsonArray();
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(p.rnd);
+        AiCache.installScope(p.cache);
+        forge.util.IdScope.install(p.ids);
+        try {
+            final Game g = p.g;
+            final Player me = p.me;
+            final ScriptedFirst sf = new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), p.first);
+            final int[] stepRef = new int[1];
+            sf.trajectory = p.trajectory;
+            sf.stepRef = stepRef;
+            me.dangerouslySetController(sf);
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
+            final PhaseHandler ph = g.getPhaseHandler();
+            givePriority(ph, me);
+            if (p.firstPriority != null) {
+                setFirstPriority(ph, p.firstPriority);
+            }
+            final int start = ph.getTurn();
+            final TurnWatch[] watches = new TurnWatch[hs.length];
+            for (int i = 0; i < hs.length; i++) {
+                watches[i] = new TurnWatch(start + hs[i], null);
+                g.subscribeToEvents(watches[i]);
+            }
+            int steps = 0;
+            for (int i = 0; i < hs.length; i++) {
+                while (!g.isGameOver() && !watches[i].reached && steps < stepCap) {
+                    ph.mainLoopStep();
+                    steps++;
+                    stepRef[0] = steps;
+                }
+                final JsonObject s = new JsonObject();
+                s.addProperty("h", hs[i]);
+                s.addProperty("turn", ph.getTurn());
+                s.addProperty("steps", steps);
+                s.addProperty("capped", !g.isGameOver() && !watches[i].reached);
+                s.addProperty("static", value(g, me));
+                final double pT = terminalP(g, me);
+                if (Double.isNaN(pT)) {
+                    s.add("leaf", forge.bench.StateEncoder.encode(g, me));
+                } else {
+                    s.addProperty("pT", pT);
+                }
+                out.add(s);
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            final JsonObject s = new JsonObject();
+            s.addProperty("error", String.valueOf(e));
+            out.add(s);
+        } finally {
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+        return out;
+    }
+
+    /**
+     * Leaf-gate target world: the TRUE hidden cards stay (hands), only the future is re-drawn -- every library keeps
+     * the tops the searching seat can see and has the rest shuffled. Used only for the offline target (hidden truth as
+     * a target, never inside the search).
+     */
+    static void shuffleLibrariesOnly(Game live, Player liveMe, Game g, Player me, Random rng) {
+        final PlayerView myView = liveMe.getView();
+        for (Player opp : me.getOpponents()) {
+            final Player liveOpp = (Player) live.getPlayer(opp.getId());
+            final List<Card> lib = new ArrayList<>(opp.getCardsIn(ZoneType.Library));
+            final List<Card> liveLib = liveOpp == null ? Collections.emptyList() : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library));
+            int known = 0;
+            for (Card lc : liveLib) {
+                if (lc.getView().canBeShownTo(myView)) {
+                    known++;
+                } else {
+                    break;
+                }
+            }
+            known = Math.min(known, lib.size());
+            final List<Card> rest = new ArrayList<>(lib.subList(known, lib.size()));
+            Collections.shuffle(rest, rng);
+            final List<Card> newLib = new ArrayList<>(lib.subList(0, known));
+            newLib.addAll(rest);
+            opp.getZone(ZoneType.Library).setCards(newLib);
+        }
+        shuffleOwnLibrary(liveMe, me, rng);
     }
 
     private void record(double[][] values, Rollout[][] outs, boolean[] ok, int cc, int ww, Rollout r) {
@@ -2316,6 +2542,9 @@ public final class LookaheadSearch {
                         } else {
                             resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
                         }
+                    } else if (lgTruth) {
+                        // Leaf-gate dump target only (never during a search): true hands, reshuffled futures.
+                        shuffleLibrariesOnly(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
                     }
                     MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
                 }
