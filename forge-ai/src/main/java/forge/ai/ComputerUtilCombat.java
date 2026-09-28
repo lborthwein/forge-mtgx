@@ -304,6 +304,12 @@ public class ComputerUtilCombat {
             for (final Card attacker : attackers) {
                 final List<Card> blockers = combat.getBlockers(attacker);
 
+                if (blockers.size() == 0 && combat.isBlocked(attacker) && !attacker.hasKeyword(Keyword.TRAMPLE)
+                        && !StaticAbilityAssignCombatDamageAsUnblocked.assignCombatDamageAsUnblocked(attacker)) {
+                    // Blocked, and every blocker has left combat: it deals no combat damage (CR 509.1h, 506.4) unless it
+                    // has trample, which assigns all its damage to the player (CR 702.19e) -- counted as unblocked below.
+                    continue;
+                }
                 if (blockers.size() == 0
                         || StaticAbilityAssignCombatDamageAsUnblocked.assignCombatDamageAsUnblocked(attacker)) {
                     unblocked.add(attacker);

@@ -141,6 +141,38 @@ public class ChooseCardAi extends SpellAbilityAi {
         return checkApiLogic(ai, sa);
     }
 
+    /**
+     * When the ability goes on to destroy what is chosen (e.g. Chaos Defiler: "choose a nonland permanent that player
+     * controls. Destroy one of them"), choosing an opponent's card that cannot be destroyed (indestructible) makes the
+     * whole effect do nothing. If every option is an opponent's and some can be destroyed, choose among those.
+     */
+    static Iterable<Card> destroyableIfDestroying(final Player ai, final SpellAbility sa, final Iterable<Card> options) {
+        if (!chainDestroys(sa.getRootAbility())) {
+            return options;
+        }
+        final CardCollection all = new CardCollection(options);
+        if (all.isEmpty() || !IterableUtil.all(all, c -> c.getController().isOpponentOf(ai))) {
+            return options;
+        }
+        final CardCollection destroyable = CardLists.filter(all, Card::canBeDestroyed);
+        return destroyable.isEmpty() ? options : destroyable;
+    }
+
+    /** True if this ability, its sub-abilities or its additional abilities (e.g. a RepeatEach body) include a Destroy. */
+    private static boolean chainDestroys(final SpellAbility root) {
+        for (SpellAbility s = root; s != null; s = s.getSubAbility()) {
+            if (s.getApi() == forge.game.ability.ApiType.Destroy) {
+                return true;
+            }
+            for (SpellAbility add : s.getAdditionalAbilities().values()) {
+                if (add != s && chainDestroys(add)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /* (non-Javadoc)
      * @see forge.card.ability.SpellAbilityAi#chooseSingleCard(forge.card.spellability.SpellAbility, java.util.List, boolean)
      */
@@ -160,7 +192,7 @@ public class ChooseCardAi extends SpellAbilityAi {
         Card choice = null;
         if (logic.isEmpty()) {
             // Base Logic is choose "best"
-            choice = ComputerUtilCard.getBestAI(options);
+            choice = ComputerUtilCard.getBestAI(destroyableIfDestroying(ai, sa, options));
         } else if ("WorstCard".equals(logic)) {
             choice = ComputerUtilCard.getWorstAI(options);
         } else if ("OwnCard".equals(logic)) {

@@ -60,7 +60,9 @@ import java.util.concurrent.TimeoutException;
  * <p>Config: {@code {"aiTimeoutSec":600, "gameTimeoutSec":1800, "simMaxDepth":4,
  * "simMaxSimulations":1000, "lookahead":{worlds,breadth,horizonTurns,threads,shadow,probe,margin,
  * priorExtra,priorUrl,priorShadow,priorTimeoutMs,priorCheckpointSha256 (read HX),
- * tutorRank,tutorUrl,tutorShadow,tutorLands,tutorTimeoutMs,tutorCheckpointSha256 (tutor ranking)},
+ * tutorRank,tutorUrl,tutorShadow,tutorLands,tutorTimeoutMs,tutorCheckpointSha256 (tutor ranking),
+ * belief,beliefShadow,beliefUrl,beliefTimeoutMs,beliefCheckpointSha256,beliefCube,beliefCubeSha256,beliefBasics
+ * (lane belief-sampling-0928)},
  * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim", ...]}]}}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
@@ -86,6 +88,19 @@ public final class LookaheadBench {
         c.tutorLands = la.has("tutorLands") && la.get("tutorLands").getAsBoolean();
         c.tutorTimeoutMs = la.has("tutorTimeoutMs") ? la.get("tutorTimeoutMs").getAsInt() : 2000;
         c.tutorCheckpointSha256 = la.has("tutorCheckpointSha256") ? la.get("tutorCheckpointSha256").getAsString() : null;
+    }
+
+    /** Belief keys: belief (off | human | uniform), beliefShadow, beliefUrl, beliefTimeoutMs (2000),
+     * beliefCheckpointSha256, beliefCube, beliefCubeSha256, beliefBasics (8). */
+    static void applyBelief(JsonObject la, LookaheadSearch.Config c) {
+        c.belief = la.has("belief") ? la.get("belief").getAsString() : "off";
+        c.beliefShadow = la.has("beliefShadow") && la.get("beliefShadow").getAsBoolean();
+        c.beliefUrl = la.has("beliefUrl") ? la.get("beliefUrl").getAsString() : null;
+        c.beliefTimeoutMs = la.has("beliefTimeoutMs") ? la.get("beliefTimeoutMs").getAsInt() : 2000;
+        c.beliefCheckpointSha256 = la.has("beliefCheckpointSha256") ? la.get("beliefCheckpointSha256").getAsString() : null;
+        c.beliefCube = la.has("beliefCube") ? la.get("beliefCube").getAsString() : null;
+        c.beliefCubeSha256 = la.has("beliefCubeSha256") ? la.get("beliefCubeSha256").getAsString() : null;
+        c.beliefBasics = la.has("beliefBasics") ? la.get("beliefBasics").getAsInt() : 8;
     }
 
     public static void main(String[] args) throws Exception {
@@ -141,6 +156,22 @@ public final class LookaheadBench {
             prefs.setPref(FPref.UI_LANGUAGE, "en-US");
             return null;
         });
+        {
+            // Belief: the cube pin (and, for belief=human, the service's checkpoint pin) is checked once, after the card
+            // database loads and before any game; a failure refuses the run (exit 4).
+            final LookaheadSearch.Config bc = new LookaheadSearch.Config();
+            applyBelief(la, bc);
+            if (bc.beliefOn()) {
+                try {
+                    final forge.ai.simulation.BeliefSampler.Cube cube = LookaheadSearch.checkBelief(bc);
+                    err.println("[lookahead-bench] belief " + bc.belief + (bc.beliefShadow ? " (shadow)" : "") + " cube "
+                            + cube.sha256 + " names " + cube.names.size() + " unresolved " + cube.unresolved);
+                } catch (IllegalStateException e) {
+                    err.println("[lookahead-bench] refusing: " + e.getMessage());
+                    System.exit(4);
+                }
+            }
+        }
         if (!"false".equals(System.getProperty("lookahead.preloadTokens"))) {
             // C3c: fill the token table before any game. TokenDb fills a HashMultimap lazily on a token's first use;
             // play-outs on several threads raced on it (a reader saw a token with fewer arts and Aggregates.random drew
@@ -203,6 +234,7 @@ public final class LookaheadBench {
                     c.stack = la.has("stack") && la.get("stack").getAsBoolean();
                     c.probeStack = la.has("probeStack") && la.get("probeStack").getAsBoolean();
                     c.margin = la.has("margin") ? la.get("margin").getAsDouble() : 0.0;
+                    c.departZ = la.has("departZ") ? la.get("departZ").getAsDouble() : 0.0;
                     c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();
                     c.modelUrl = la.has("modelUrl") ? la.get("modelUrl").getAsString() : null;
@@ -211,6 +243,7 @@ public final class LookaheadBench {
                     c.decisionLog = la.has("decisionLog") && la.get("decisionLog").getAsBoolean();
                     applyPrior(la, c);
                     applyTutor(la, c);
+                    applyBelief(la, c);
                     c.seed = seed * 31 + i;
                     LookaheadSearch s = new LookaheadSearch(c);
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);
@@ -261,6 +294,34 @@ public final class LookaheadBench {
                 Files.deleteIfExists(digest.trace);
             }
             game.subscribeToEvents(digest);
+            // Frame probe (lane forge-ai-misplays-0928): a game may start from a mid-game position in Forge's own
+            // GameState text (as BenchMain's from-frame), installed at the start of turn 1, and stop once a turn past
+            // "maxTurn" begins -- to replay one reported decision under the search's trace ("-Dlookahead.explain=true").
+            final String framePath = spec.has("frame") ? spec.get("frame").getAsString() : null;
+            final int maxTurn = spec.has("maxTurn") ? spec.get("maxTurn").getAsInt() : 0;
+            Runnable frameHook = null;
+            if (framePath != null) {
+                final String frameText = Files.readString(Path.of(framePath));
+                frameHook = () -> {
+                    final forge.game.GameState gs = new forge.game.GameState();
+                    gs.parse(java.util.Arrays.asList(frameText.split("\\R")));
+                    gs.applyToGame(game);
+                    final forge.game.GameState back = new forge.game.GameState();
+                    back.initFromGame(game);
+                    err.println("[lookahead-bench] frame " + framePath + " installed:\n" + back);
+                };
+            }
+            if (maxTurn > 0) {
+                game.subscribeToEvents(new Object() {
+                    @Subscribe
+                    public void on(GameEventTurnBegan e) {
+                        if (e.turnNumber() > maxTurn && !game.isGameOver()) {
+                            game.setGameOver(forge.game.GameEndReason.Draw);
+                        }
+                    }
+                });
+            }
+            final Runnable startHook = frameHook;
 
             final long cpu0 = os.getProcessCpuTime();
             final long t0 = System.currentTimeMillis();
@@ -268,7 +329,11 @@ public final class LookaheadBench {
             final Future<?> f = gameThread.submit(() -> {
                 forge.util.IdScope.install(gameIds);
                 try {
-                    match.startGame(game);
+                    if (startHook != null) {
+                        match.startGame(game, startHook);
+                    } else {
+                        match.startGame(game);
+                    }
                 } finally {
                     forge.util.IdScope.install(null);
                 }

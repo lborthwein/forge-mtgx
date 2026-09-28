@@ -456,6 +456,9 @@ public final class InteractiveMain {
      * Read HX: {@code priorExtra=2,priorUrl=http://127.0.0.1:5732,priorCheckpointSha256=...} (and optionally
      * {@code priorShadow=1}, {@code priorTimeoutMs=2000}) adds the policy prior's top-n candidates; the pin is checked
      * when the seat is bound (a mismatch throws).
+     * Belief (lane belief-sampling-0928): {@code belief=human,beliefUrl=...,beliefCheckpointSha256=...,beliefCube=<file>,
+     * beliefCubeSha256=...} (or {@code belief=uniform}; {@code beliefShadow=1}, {@code beliefBasics=8},
+     * {@code beliefTimeoutMs=2000}) re-draws the opponent's hidden cards from the hand belief.
      */
     private static String lookaheadSpec() {
         final String v = System.getProperty("forge.interactive.lookahead");
@@ -487,6 +490,7 @@ public final class InteractiveMain {
                 case "dedup": c.dedup = !"0".equals(p[1].trim()); break;
                 case "reuse": c.reuse = !"0".equals(p[1].trim()); break;
                 case "margin": c.margin = Double.parseDouble(p[1].trim()); break;
+                case "departZ": c.departZ = Double.parseDouble(p[1].trim()); break;
                 case "maxSteps": c.maxSteps = Integer.parseInt(p[1].trim()); break;
                 case "shadow": c.shadow = !"0".equals(p[1].trim()); break;
                 case "combat": c.combat = !"0".equals(p[1].trim()); break;
@@ -500,6 +504,14 @@ public final class InteractiveMain {
                 case "priorShadow": c.priorShadow = !"0".equals(p[1].trim()); break;
                 case "priorTimeoutMs": c.priorTimeoutMs = Integer.parseInt(p[1].trim()); break;
                 case "priorCheckpointSha256": c.priorCheckpointSha256 = p[1].trim(); break;
+                case "belief": c.belief = p[1].trim(); break;
+                case "beliefShadow": c.beliefShadow = !"0".equals(p[1].trim()); break;
+                case "beliefUrl": c.beliefUrl = p[1].trim(); break;
+                case "beliefTimeoutMs": c.beliefTimeoutMs = Integer.parseInt(p[1].trim()); break;
+                case "beliefCheckpointSha256": c.beliefCheckpointSha256 = p[1].trim(); break;
+                case "beliefCube": c.beliefCube = p[1].trim(); break;
+                case "beliefCubeSha256": c.beliefCubeSha256 = p[1].trim(); break;
+                case "beliefBasics": c.beliefBasics = Integer.parseInt(p[1].trim()); break;
                 default: break;
             }
         }

@@ -97,6 +97,13 @@ public final class LookaheadSearch {
         public boolean reuseShadowFresh = false;
         /** A departure must beat Forge's answer's EV by more than this. */
         public double margin = 0.0;
+        /**
+         * Departure confidence (lane forge-ai-misplays-0928; 0 = off, the default: decisions unchanged). A candidate may
+         * replace Forge's answer only if its mean paired difference to Forge's answer over the K worlds (common random
+         * numbers) exceeds departZ standard errors of that difference. Keeps the prior (Forge's answer) when the
+         * play-outs cannot tell the candidates apart -- one divergent or terminal world must not decide.
+         */
+        public double departZ = 0.0;
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
@@ -168,6 +175,36 @@ public final class LookaheadSearch {
             return tutorRank > 0 || tutorShadow;
         }
 
+        /**
+         * Belief (lane belief-sampling-0928): how a world re-draws the opponent's hidden hand and library.
+         * "off" (the default) = {@link #resample}: the opponent's registered deck remainder, reshuffled, config JSON
+         * unchanged. "human" = hand drawn from the human-trained hand model ({@link #beliefUrl}) over an
+         * observation-only pool (the cube minus our deck minus every opponent card we can see, plus
+         * {@link #beliefBasics} copies of each basic), library uniform over the rest of the pool; a failed call samples
+         * that decision uniformly over the same pool (counted). "uniform" = the same pool, every weight 1.
+         */
+        public String belief = "off";
+        /** Belief shadow (do-no-harm gate): compute the belief and build its worlds in throwaway copies, play the default worlds. */
+        public boolean beliefShadow = false;
+        public String beliefUrl = null;
+        public int beliefTimeoutMs = 2000;
+        public String beliefCheckpointSha256 = null;
+        /** The cube list file ({"cards":[{"name","tags"}]}) and its sha256 pin. */
+        public String beliefCube = null;
+        public String beliefCubeSha256 = null;
+        /** Copies of each basic land type in the pool. */
+        public int beliefBasics = 8;
+
+        /** A belief is computed at searched decisions (acting or shadow). */
+        public boolean beliefOn() {
+            return !"off".equals(belief) || beliefShadow;
+        }
+
+        /** The belief whose weights come from the service. */
+        public boolean beliefHuman() {
+            return "human".equals(belief);
+        }
+
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
             o.addProperty("worlds", worlds);
@@ -198,6 +235,9 @@ public final class LookaheadSearch {
                 o.addProperty("reuseShadowFresh", true);
             }
             o.addProperty("margin", margin);
+            if (departZ > 0) {
+                o.addProperty("departZ", departZ);
+            }
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
@@ -231,6 +271,16 @@ public final class LookaheadSearch {
                 o.addProperty("tutorTimeoutMs", tutorTimeoutMs);
                 o.addProperty("tutorCheckpointSha256", tutorCheckpointSha256);
             }
+            if (beliefOn()) {
+                o.addProperty("belief", belief);
+                o.addProperty("beliefShadow", beliefShadow);
+                o.addProperty("beliefUrl", beliefUrl);
+                o.addProperty("beliefTimeoutMs", beliefTimeoutMs);
+                o.addProperty("beliefCheckpointSha256", beliefCheckpointSha256);
+                o.addProperty("beliefCube", beliefCube);
+                o.addProperty("beliefCubeSha256", beliefCubeSha256);
+                o.addProperty("beliefBasics", beliefBasics);
+            }
             return o;
         }
     }
@@ -247,6 +297,8 @@ public final class LookaheadSearch {
     /** Per-seat, per-game counters. */
     public static final class Stats {
         public long decisions, stackSkipped, uncontested, searched, departed, departFallback, loopGuard;
+        /** departZ: candidates (with a finished play-out in every world) set aside for lack of confidence. */
+        public long departGated;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
@@ -308,6 +360,18 @@ public final class LookaheadSearch {
         public final Map<String, Long> tutorWhy = new TreeMap<>();
         /** One entry per searched (or refused) choice: source, destination, names, Forge's pick, ranked, EVs, choice. */
         public final JsonArray tutorDecisions = new JsonArray();
+        /**
+         * Belief (reported only when the option is on): searched decisions with a belief; skipped (nothing hidden, not
+         * two players); service calls, failures (= uniform fallbacks), call time; worlds drawn from a belief (acting or
+         * shadow), cards created for them and the time; hidden-count mismatches (a world fell back to the default
+         * re-draw); the pool's mean slot count; the running digest of the served weights; one coverage entry per belief
+         * decision.
+         */
+        public boolean beliefOn;
+        public long beliefDecisions, beliefSkipped, beliefCalls, beliefFailures, beliefNanos, beliefMaxNanos;
+        public long beliefWorlds, beliefCards, beliefCreateNanos, beliefMismatch, beliefPoolSlots, beliefUnknownCards;
+        public String beliefDigest, beliefCheckpoint, beliefLastError;
+        public final JsonArray beliefCoverage = new JsonArray();
 
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
@@ -318,6 +382,9 @@ public final class LookaheadSearch {
             o.addProperty("departed", departed);
             o.addProperty("departFallback", departFallback);
             o.addProperty("loopGuard", loopGuard);
+            if (departGated > 0) {
+                o.addProperty("departGated", departGated);
+            }
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
             o.addProperty("rolloutCapped", rolloutCapped);
@@ -445,6 +512,26 @@ public final class LookaheadSearch {
                 }
                 o.add("tutorDecisions", tutorDecisions);
             }
+            if (beliefOn) {
+                o.addProperty("beliefDecisions", beliefDecisions);
+                o.addProperty("beliefSkipped", beliefSkipped);
+                o.addProperty("beliefCalls", beliefCalls);
+                o.addProperty("beliefFailures", beliefFailures);
+                o.addProperty("beliefMs", beliefNanos / 1e6);
+                o.addProperty("beliefMaxMs", beliefMaxNanos / 1e6);
+                o.addProperty("beliefWorlds", beliefWorlds);
+                o.addProperty("beliefCards", beliefCards);
+                o.addProperty("beliefCreateMs", beliefCreateNanos / 1e6);
+                o.addProperty("beliefMismatch", beliefMismatch);
+                o.addProperty("beliefPoolSlotsMean", beliefDecisions == 0 ? 0.0 : (double) beliefPoolSlots / beliefDecisions);
+                o.addProperty("beliefUnknownCards", beliefUnknownCards);
+                o.addProperty("beliefDigest", beliefDigest);
+                o.addProperty("beliefCheckpointSha256", beliefCheckpoint);
+                if (beliefLastError != null) {
+                    o.addProperty("beliefLastError", beliefLastError);
+                }
+                o.add("beliefCoverage", beliefCoverage);
+            }
             return o;
         }
     }
@@ -490,6 +577,28 @@ public final class LookaheadSearch {
         }
     }
 
+    /** Diagnostics: one "[lookahead-explain]" JSON line per searched decision (candidates, choices, per-world values). */
+    private static final boolean EXPLAIN = Boolean.getBoolean("lookahead.explain");
+    /** EXPLAIN only: the current decision's candidates' choices as prepared in world 0. */
+    private String[] explainChoices;
+
+    /** EXPLAIN only: an ability's targets (and its sub-abilities'), as Forge AI chose them. */
+    static String describeChoices(List<SpellAbility> first) {
+        if (first == null || first.isEmpty() || first.get(0) == null) {
+            return "";
+        }
+        final StringBuilder sb = new StringBuilder();
+        for (SpellAbility s = first.get(0); s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting()) {
+                sb.append(sb.length() == 0 ? "" : " / ").append(s.getTargets());
+            }
+        }
+        if (first.get(0).isKicked()) {
+            sb.append(" kicked");
+        }
+        return sb.toString();
+    }
+
     private final Config cfg;
     private final Stats stats = new Stats();
     private final ExecutorService pool;
@@ -498,6 +607,12 @@ public final class LookaheadSearch {
     private final TutorRankClient tutor;
     /** Tutor ranking: its own decision counter (the priority search's seeds do not move when it is on). */
     private int tutorIndex = 0;
+    private final BeliefClient beliefClient;
+    private final BeliefSampler.Cube beliefCube;
+    /** The current searched decision's belief (acting mode), read by {@link #prepare} on the decision thread. */
+    private BeliefSampler.Dist decisionBelief = null;
+    /** The last searched decision's belief (acting or shadow); tests read it. */
+    BeliefSampler.Dist lastBelief = null;
     /** The candidate list played out at the last searched decision (B plus any HX extras); tests read it. */
     List<Cand> lastCandidates = null;
     private JsonObject modelDeck = null;
@@ -550,6 +665,36 @@ public final class LookaheadSearch {
         } else {
             tutor = null;
         }
+        if (cfg.beliefOn()) {
+            if (!"off".equals(cfg.belief) && !"human".equals(cfg.belief) && !"uniform".equals(cfg.belief)) {
+                throw new IllegalStateException("belief must be off, human or uniform: " + cfg.belief);
+            }
+            if (cfg.reuse) {
+                // A carried world keeps live card ids; a belief world holds cards the live game does not have.
+                throw new IllegalStateException("belief does not combine with reuse (carried worlds hold live card ids)");
+            }
+            if (cfg.beliefShadow && "off".equals(cfg.belief)) {
+                throw new IllegalStateException("beliefShadow needs belief=human or uniform (the belief to build and discard)");
+            }
+            beliefCube = checkBelief(cfg);
+            beliefClient = cfg.beliefHuman() ? new BeliefClient(cfg.beliefUrl, cfg.beliefTimeoutMs) : null;
+            stats.beliefOn = true;
+        } else {
+            beliefCube = null;
+            beliefClient = null;
+        }
+    }
+
+    /**
+     * Belief: load the pinned cube file (resolving every name up front) and, for belief=human, check the service's
+     * checkpoint pin (once per JVM and service). Throws {@link IllegalStateException}; a runner calls it at start.
+     */
+    public static BeliefSampler.Cube checkBelief(Config c) {
+        final BeliefSampler.Cube cube = BeliefSampler.loadCube(c.beliefCube, c.beliefCubeSha256, c.beliefBasics);
+        if (c.beliefHuman()) {
+            BeliefClient.checkHealth(c.beliefUrl, c.beliefCheckpointSha256, c.beliefTimeoutMs);
+        }
+        return cube;
     }
 
     /** Tutor ranking: check the ranker's {@code /v1/health} checkpoint against the pin (once per JVM and service). */
@@ -658,7 +803,8 @@ public final class LookaheadSearch {
         final PriorView pv = prior != null && !onStack && ph.getPlayerTurn() == me && ph.getPhase() != null && ph.getPhase().isMain()
                 ? new PriorView() : null;
         // Candidates, enumerated in a copy so the live game is never touched by enumeration.
-        final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv);
+        final JsonObject[] beliefRoot = beliefCube != null && beliefClient != null ? new JsonObject[1] : null;
+        final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv, beliefRoot);
         if (check) {
             checkLive("enumerate", before, live, defSa, index);
         }
@@ -690,9 +836,22 @@ public final class LookaheadSearch {
         final Rollout[][] outs = new Rollout[n][k];
         final boolean[] ok = new boolean[n];
         Arrays.fill(ok, true);
+        explainChoices = EXPLAIN ? new String[n] : null;
         final Carried[] carried = cfg.reuse ? carry(live, me, cands, turn, k) : new Carried[k];
         final Rollout[] freshDef = cfg.reuseVerify ? new Rollout[k] : null;
-        final int abortedHere = playAll(live, me, cands, defSa, decisionSeed, carried, values, outs, ok, freshDef);
+        final BeliefSampler.Dist bd = beliefCube == null ? null
+                : belief(live, me, beliefRoot == null ? null : beliefRoot[0], index, turn, onStack);
+        lastBelief = bd;
+        if (bd != null && cfg.beliefShadow) {
+            shadowBeliefWorlds(live, me, bd, decisionSeed, k);
+        }
+        decisionBelief = cfg.beliefShadow ? null : bd;
+        final int abortedHere;
+        try {
+            abortedHere = playAll(live, me, cands, defSa, decisionSeed, carried, values, outs, ok, freshDef);
+        } finally {
+            decisionBelief = null;
+        }
         if (cfg.dedupVerify) {
             dedupVerify(outs, n, k);
         }
@@ -783,6 +942,39 @@ public final class LookaheadSearch {
                 }
             }
             System.err.println(tb);
+        }
+        if (EXPLAIN) {
+            // Diagnostics (lane forge-ai-misplays-0928): every candidate, the choices it was played out with (targets as
+            // Forge AI chose them in world 0), its per-world values and EV, the paired difference to Forge's answer.
+            final JsonObject x = new JsonObject();
+            x.addProperty("decision", index);
+            x.addProperty("turn", turn);
+            x.addProperty("phase", String.valueOf(ph.getPhase()));
+            x.addProperty("active", ph.getPlayerTurn() == me);
+            x.addProperty("stack", live.getStack().size());
+            x.addProperty("best", best);
+            x.addProperty("outcome", outcome);
+            final JsonArray ca = new JsonArray();
+            for (int c = 0; c < n; c++) {
+                final JsonObject co = new JsonObject();
+                co.addProperty("label", cands.get(c).label);
+                co.addProperty("choices", explainChoices != null && explainChoices[c] != null ? explainChoices[c] : "");
+                co.addProperty("ok", ok[c]);
+                co.addProperty("ev", ok[c] ? ev[c] : null);
+                final JsonArray vs = new JsonArray();
+                final JsonArray ds = new JsonArray();
+                for (int w = 0; w < k; w++) {
+                    vs.add(values[c][w]);
+                    ds.add(values[c][w] - values[0][w]);
+                }
+                co.add("values", vs);
+                if (c > 0) {
+                    co.add("diffVsForge", ds);
+                }
+                ca.add(co);
+            }
+            x.add("candidates", ca);
+            System.err.println("[lookahead-explain] " + x);
         }
         if (Boolean.getBoolean("lookahead.debug") && best != 0) {
             System.err.println("[lookahead] decision " + index + " T" + turn + " " + ph.getPhase() + " stack=" + live.getStack().size()
@@ -1161,11 +1353,42 @@ public final class LookaheadSearch {
             ev[c] = ok[c] ? s / k : Double.NEGATIVE_INFINITY;
         }
         for (int c = 1; c < n; c++) {
+            if (cfg.departZ > 0 && ok[c] && !confident(values, c, k, cfg.departZ)) {
+                stats.departGated++;
+                continue;
+            }
             if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
                 best = c;
             }
         }
         return best;
+    }
+
+    /**
+     * Departure confidence: the mean over worlds of (candidate - Forge's answer) is positive and exceeds z standard
+     * errors of that paired difference (sample standard deviation / sqrt(k)). With one world there is no error
+     * estimate, so only a strictly positive difference counts; identical differences in every world (zero spread) count
+     * when positive.
+     */
+    static boolean confident(double[][] values, int c, int k, double z) {
+        double sum = 0;
+        for (int w = 0; w < k; w++) {
+            sum += values[c][w] - values[0][w];
+        }
+        final double mean = sum / k;
+        if (!(mean > 0)) {
+            return false;
+        }
+        if (k < 2) {
+            return true;
+        }
+        double ss = 0;
+        for (int w = 0; w < k; w++) {
+            final double d = values[c][w] - values[0][w] - mean;
+            ss += d * d;
+        }
+        final double se = Math.sqrt(ss / (k - 1)) / Math.sqrt(k);
+        return mean > z * se;
     }
 
     /**
@@ -1197,6 +1420,9 @@ public final class LookaheadSearch {
                 }
                 prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample, cw == null ? null : cw.at);
                 prep[c][w].trajectory = cfg.reuse ? new ArrayList<>() : null;
+                if (EXPLAIN && w == 0) {
+                    explainChoices[c] = describeChoices(prep[c][w].first);
+                }
             }
         }
         if (any) {
@@ -1387,7 +1613,8 @@ public final class LookaheadSearch {
      *           otherwise, after B is fixed exactly as in the base, the rest of Forge's list and the root state are put
      *           into it from the same copy (nothing of B depends on it; a failure there leaves B unchanged).
      */
-    private List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv) {
+    private List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv,
+                                 JsonObject[] beliefRoot) {
         final List<Cand> out = new ArrayList<>();
         out.add(new Cand(defSa, true));
         if (defSa != null) {
@@ -1424,6 +1651,14 @@ public final class LookaheadSearch {
             }
             if (pv != null) {
                 priorView(pv, g, me, legal, seen);
+            }
+            if (beliefRoot != null) {
+                // Belief: the seat's ForgeState, from this copy (encoding reads lazily built views; never the live game).
+                try {
+                    beliefRoot[0] = forge.bench.StateEncoder.encode(g, me);
+                } catch (RuntimeException e) {
+                    beliefRoot[0] = null;
+                }
             }
         } catch (RuntimeException e) {
             // Enumeration failure: search nothing, play Forge's answer.
@@ -1902,7 +2137,12 @@ public final class LookaheadSearch {
                     MyRandom.setThreadRandom(PlayoutKeys.TrackedRandom.ofSnapshot(carried.rng));
                 } else {
                     if (resample) {
-                        resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                        final BeliefSampler.Dist bd = decisionBelief;
+                        if (bd != null) {
+                            resampleBelief(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)), bd);
+                        } else {
+                            resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                        }
                     }
                     MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
                 }
@@ -2933,7 +3173,7 @@ public final class LookaheadSearch {
         }
         if (ok[0]) {
             for (int c = 1; c < n; c++) {
-                if (!ok[c]) {
+                if (!ok[c] || (cfg.departZ > 0 && !confident(values, c, k, cfg.departZ))) {
                     continue;
                 }
                 if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
@@ -3272,7 +3512,12 @@ public final class LookaheadSearch {
             opp.getZone(ZoneType.Hand).setCards(newHand);
             opp.getZone(ZoneType.Library).setCards(newLib);
         }
-        // Our own library: keep the known top (scry/reveal), shuffle the rest.
+        shuffleOwnLibrary(liveMe, me, rng);
+    }
+
+    /** Our own library: keep the known top (scry/reveal), shuffle the rest. */
+    static void shuffleOwnLibrary(Player liveMe, Player me, Random rng) {
+        final PlayerView myView = liveMe.getView();
         List<Card> myLib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         List<Card> liveMyLib = new ArrayList<>(liveMe.getCardsIn(ZoneType.Library));
         int known = 0;
@@ -3288,6 +3533,269 @@ public final class LookaheadSearch {
         List<Card> nl = new ArrayList<>(myLib.subList(0, known));
         nl.addAll(rest);
         me.getZone(ZoneType.Library).setCards(nl);
+    }
+
+
+    // ------------------------------------------------------------------ belief (lane belief-sampling-0928)
+
+    /** The opponent's hidden hand cards / known library top, as the seat sees them in the live game. */
+    private static int[] hiddenCounts(Game live, Player liveOpp, PlayerView myView) {
+        int keep = 0;
+        final List<Card> hand = new ArrayList<>(liveOpp.getCardsIn(ZoneType.Hand));
+        for (Card c : hand) {
+            if (c.getView().canBeShownTo(myView)) {
+                keep++;
+            }
+        }
+        final List<Card> lib = new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library));
+        int top = 0;
+        for (Card c : lib) {
+            if (c.getView().canBeShownTo(myView)) {
+                top++;
+            } else {
+                break;
+            }
+        }
+        return new int[] {hand.size() - keep, lib.size() - top};
+    }
+
+    /**
+     * The decision's belief over the opponent's hidden cards, or null (belief skipped: not a two-player game, or
+     * nothing hidden). Pool = cube names (file order) minus our registered deck minus every non-token card the
+     * opponent owns that the seat can see, plus the basics. belief=human asks the service (one call); a failure
+     * samples uniformly over the same pool.
+     */
+    private BeliefSampler.Dist belief(Game live, Player liveMe, JsonObject root, int index, int turn, boolean onStack) {
+        final long t0 = System.nanoTime();
+        final List<Player> opps = new ArrayList<>(liveMe.getOpponents());
+        if (opps.size() != 1) {
+            stats.beliefSkipped++;
+            return null;
+        }
+        final Player liveOpp = opps.get(0);
+        final PlayerView myView = liveMe.getView();
+        final int[] hid = hiddenCounts(live, liveOpp, myView);
+        if (hid[0] == 0 && hid[1] == 0) {
+            stats.beliefSkipped++;
+            return null;
+        }
+        final Set<String> known = new HashSet<>(deckOf(liveMe).keySet());
+        int openMana = 0;
+        for (Card c : live.getCardsInGame()) {
+            if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
+                    && c.getView().canBeShownTo(myView)) {
+                known.add(c.getPaperCard().getName());
+            }
+        }
+        for (Card c : liveOpp.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isLand() && !c.isTapped()) {
+                openMana++;
+            }
+        }
+        final List<String> pool = new ArrayList<>();
+        for (String name : beliefCube.names) {
+            if (!known.contains(name)) {
+                pool.add(name);
+            }
+        }
+        pool.addAll(Arrays.asList(BeliefSampler.BASICS));
+        final double[] ones = new double[pool.size()];
+        Arrays.fill(ones, 1.0);
+        double[] w = ones;
+        boolean fallback = false;
+        String error = null;
+        if (beliefClient != null) {
+            final JsonObject req = forgeRequest(live, liveMe);
+            req.addProperty("schema", BeliefClient.REQUEST_SCHEMA);
+            req.addProperty("target", forge.bench.StateEncoder.playerIndex(live, liveOpp));
+            req.addProperty("n", hid[0]);
+            req.addProperty("openMana", openMana);
+            final JsonArray pj = new JsonArray();
+            for (String n : pool) {
+                pj.add(n);
+            }
+            req.add("pool", pj);
+            if (root == null) {
+                error = "no root state";
+            } else {
+                req.add("root", root);
+                final long c0 = System.nanoTime();
+                final double[] lw = beliefClient.logWeights(req, pool.size());
+                final long dt = System.nanoTime() - c0;
+                stats.beliefCalls++;
+                stats.beliefNanos += dt;
+                stats.beliefMaxNanos = Math.max(stats.beliefMaxNanos, dt);
+                if (lw == null) {
+                    error = beliefClient.lastError;
+                } else {
+                    w = BeliefSampler.weights(lw);
+                    stats.beliefDigest = beliefClient.digestHex();
+                    stats.beliefCheckpoint = beliefClient.checkpointSha256;
+                    stats.beliefUnknownCards = beliefClient.unknownCards;
+                }
+            }
+            if (error != null) {
+                fallback = true;
+                stats.beliefFailures++;
+                stats.beliefLastError = error;
+                System.err.println("[lookahead] belief call failed at decision " + index + ", sampling uniformly: " + error);
+            }
+        }
+        final BeliefSampler.Dist bd = new BeliefSampler.Dist(pool, w, cfg.beliefBasics, hid[0], hid[1]);
+        bd.uniform = beliefClient == null || fallback;
+        bd.fallback = fallback;
+        bd.oppId = liveOpp.getId();
+        stats.beliefDecisions++;
+        stats.beliefPoolSlots += bd.slots();
+        // Coverage: how far the belief moves hand mass from uniform, and onto what.
+        if (stats.beliefCoverage.size() < 400) {
+            final JsonObject e = new JsonObject();
+            e.addProperty("d", index);
+            e.addProperty("turn", turn);
+            e.addProperty("oppActive", live.getPhaseHandler().getPlayerTurn() == liveOpp);
+            e.addProperty("stack", onStack);
+            e.addProperty("n", hid[0]);
+            e.addProperty("slots", bd.slots());
+            e.addProperty("open", openMana);
+            if (hid[0] > 0) {
+                final double[] pm = bd.marginals();
+                final double pu = (double) hid[0] / bd.slots();
+                double tvd = 0;
+                for (double x : pm) {
+                    tvd += Math.abs(x - pu);
+                }
+                e.addProperty("tvd", Math.round(tvd / 2 / hid[0] * 1e4) / 1e4);
+                for (String tag : new String[] {"counter", "removal", "creature", "land"}) {
+                    double eu = 0;
+                    for (int i = 0; i < bd.slots(); i++) {
+                        final Set<String> t = beliefCube.tags.get(bd.slotName[i]);
+                        if (t != null && t.contains(tag)) {
+                            eu += pu;
+                        }
+                    }
+                    final JsonArray a = new JsonArray();
+                    a.add(Math.round(BeliefSampler.expectedTagged(bd, pm, beliefCube, tag) * 1e4) / 1e4);
+                    a.add(Math.round(eu * 1e4) / 1e4);
+                    e.add(tag, a);
+                }
+                e.add("top", BeliefSampler.top(bd, pm, 3));
+            }
+            if (fallback) {
+                e.addProperty("fallback", true);
+            }
+            e.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
+            stats.beliefCoverage.add(e);
+        }
+        return bd;
+    }
+
+    /**
+     * Belief re-draw of one world (in a copy): the opponent's hidden hand from the belief, the hidden library uniform
+     * over the pool slots left (known cards stay where they are), then our own library as {@link #resample}. The
+     * opponent's hidden cards in the copy are replaced by new cards of the drawn names.
+     */
+    void resampleBelief(Game live, Player liveMe, Game g, Player me, Random rng, BeliefSampler.Dist bd) {
+        final PlayerView myView = liveMe.getView();
+        for (Player opp : me.getOpponents()) {
+            if (opp.getId() != bd.oppId) {
+                continue;
+            }
+            final Player liveOpp = (Player) live.getPlayer(opp.getId());
+            final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
+            final List<Card> keep = new ArrayList<>();
+            for (Card c : hand) {
+                Card lc = live.findById(c.getId());
+                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                    keep.add(c);
+                }
+            }
+            final List<Card> libKnownTop = new ArrayList<>();
+            final List<Card> liveLib = liveOpp == null ? Collections.emptyList() : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library));
+            for (Card lc : liveLib) {
+                if (lc.getView().canBeShownTo(myView)) {
+                    Card cc = g.findById(lc.getId());
+                    if (cc != null) {
+                        libKnownTop.add(cc);
+                        continue;
+                    }
+                }
+                break;
+            }
+            final int need = hand.size() - keep.size();
+            final int libNeed = opp.getCardsIn(ZoneType.Library).size() - libKnownTop.size();
+            if (need != bd.n || libNeed != bd.libHidden) {
+                // The copy does not show what the decision saw: keep the default re-draw for this world.
+                synchronized (stats) {
+                    stats.beliefMismatch++;
+                }
+                resample(live, liveMe, g, me, rng);
+                return;
+            }
+            final int[] handSlots = bd.sampleHand(rng);
+            final List<Integer> libSlots = bd.library(handSlots, rng);
+            final List<Integer> hs = new ArrayList<>();
+            for (int i : handSlots) {
+                hs.add(i);
+            }
+            Collections.shuffle(hs, rng);
+            final long c0 = System.nanoTime();
+            final List<Card> newHand = new ArrayList<>(keep);
+            for (int i : hs) {
+                newHand.add(beliefCard(bd.slotName[i], opp, g));
+            }
+            final List<Card> newLib = new ArrayList<>(libKnownTop);
+            for (int i : libSlots) {
+                newLib.add(beliefCard(bd.slotName[i], opp, g));
+            }
+            opp.getZone(ZoneType.Hand).setCards(newHand);
+            opp.getZone(ZoneType.Library).setCards(newLib);
+            synchronized (stats) {
+                stats.beliefWorlds++;
+                stats.beliefCards += hs.size() + libSlots.size();
+                stats.beliefCreateNanos += System.nanoTime() - c0;
+            }
+        }
+        shuffleOwnLibrary(liveMe, me, rng);
+    }
+
+    private Card beliefCard(String name, Player owner, Game g) {
+        final forge.item.PaperCard pc = beliefCube.paper.get(name);
+        if (pc == null) {
+            throw new IllegalStateException("belief: no paper card for " + name);
+        }
+        return forge.game.card.CardFactory.getCard(pc, owner, g);
+    }
+
+    /**
+     * Belief shadow (do-no-harm gate): build every world of the decision with the belief, in throwaway copies inside
+     * the play-out scopes (ids, AI cache, thread random), and discard them. The search then plays the default worlds.
+     */
+    private void shadowBeliefWorlds(Game live, Player liveMe, BeliefSampler.Dist bd, long decisionSeed, int k) {
+        for (int w = 0; w < k; w++) {
+            final long ws = mix(decisionSeed, 1000 + w);
+            final Random prev = MyRandom.getThreadRandom();
+            final Object prevIds = forge.util.IdScope.capture();
+            final Object prevCache = AiCache.captureScope();
+            MyRandom.setThreadRandom(new Random(mix(ws, 11)));
+            AiCache.openScope();
+            forge.util.IdScope.open();
+            try {
+                synchronized (live) {
+                    final GameCopier copier = new GameCopier(live, true);
+                    copier.setCopyStack(cfg.stack);
+                    final Game g = copier.makeCopy();
+                    resampleBelief(live, liveMe, g, (Player) copier.find(liveMe), new Random(mix(ws, 12)), bd);
+                }
+            } catch (RuntimeException e) {
+                synchronized (stats) {
+                    stats.beliefLastError = "shadow: " + e;
+                }
+            } finally {
+                forge.util.IdScope.install(prevIds);
+                AiCache.installScope(prevCache);
+                MyRandom.setThreadRandom(prev);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ probe
