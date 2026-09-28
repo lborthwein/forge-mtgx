@@ -453,6 +453,9 @@ public final class InteractiveMain {
      * auto (min(worlds x breadth, processors, 8)); decisions do not depend on it. {@code budgetMs=8000}
      * caps each searched decision's wall time (over it, Forge's own answer is played) and
      * {@code log=1} writes one {@code [lookahead-decision]} JSON line per searched decision to stderr.
+     * Read HX: {@code priorExtra=2,priorUrl=http://127.0.0.1:5732,priorCheckpointSha256=...} (and optionally
+     * {@code priorShadow=1}, {@code priorTimeoutMs=2000}) adds the policy prior's top-n candidates; the pin is checked
+     * when the seat is bound (a mismatch throws).
      */
     private static String lookaheadSpec() {
         final String v = System.getProperty("forge.interactive.lookahead");
@@ -492,6 +495,11 @@ public final class InteractiveMain {
                 case "modelTimeoutMs": c.modelTimeoutMs = Integer.parseInt(p[1].trim()); break;
                 case "budgetMs": c.budgetMs = Long.parseLong(p[1].trim()); break;
                 case "log": c.decisionLog = !"0".equals(p[1].trim()); break;
+                case "priorExtra": c.priorExtra = Integer.parseInt(p[1].trim()); break;
+                case "priorUrl": c.priorUrl = p[1].trim(); break;
+                case "priorShadow": c.priorShadow = !"0".equals(p[1].trim()); break;
+                case "priorTimeoutMs": c.priorTimeoutMs = Integer.parseInt(p[1].trim()); break;
+                case "priorCheckpointSha256": c.priorCheckpointSha256 = p[1].trim(); break;
                 default: break;
             }
         }
