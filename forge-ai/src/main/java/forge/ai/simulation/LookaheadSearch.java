@@ -10,6 +10,7 @@ import forge.ai.PlayerControllerAi;
 import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
+import forge.game.card.CardCollectionView;
 import forge.game.card.CounterType;
 import forge.game.event.GameEventTurnBegan;
 import forge.game.phase.PhaseHandler;
@@ -157,6 +158,61 @@ public final class LookaheadSearch {
             return priorExtra > 0 || priorShadow;
         }
 
+        /**
+         * Tutor ranking (lane tutor-ranking-0928; 0 = off, the default: no call, nothing searched, the config JSON
+         * unchanged). At a single-card library search of the searching seat in the live game (a choice made during
+         * resolution: Demonic Tutor, Tinker, Vampiric Tutor, Wishclaw, a fetchland...), the tutor ranker
+         * ({@link #tutorUrl}) scores the distinct names Forge offers; Forge AI's own pick plus the top-{@code tutorRank}
+         * other names by score are each played out from a copy of the position with the search's resolution replayed
+         * and that card forced; the best by expected value is taken (ties and failures to Forge AI's pick).
+         */
+        public int tutorRank = 0;
+        /** Tutor ranking: base URL of the ranker service (mtgx tools/ml/tutorrank/serve_tutor.py). */
+        public String tutorUrl = null;
+        /** Tutor ranking shadow: rank and play out, never change the pick. */
+        public boolean tutorShadow = false;
+        /** Tutor ranking: also searches whose every option is a land (fetchlands, Golos, Expedition Map). */
+        public boolean tutorLands = false;
+        /** Tutor ranking: per-request timeout; a failed or late call keeps Forge AI's pick and is counted. */
+        public int tutorTimeoutMs = 2000;
+        /** Tutor ranking: the checkpoint the service must serve (GET /v1/health checkpointSha256), checked once per JVM. */
+        public String tutorCheckpointSha256 = null;
+
+        /** Tutor ranking is on (a ranker call and play-outs at qualifying searches, acting or shadow). */
+        public boolean tutorOn() {
+            return tutorRank > 0 || tutorShadow;
+        }
+
+        /**
+         * Belief (lane belief-sampling-0928): how a world re-draws the opponent's hidden hand and library.
+         * "off" (the default) = {@link #resample}: the opponent's registered deck remainder, reshuffled, config JSON
+         * unchanged. "human" = hand drawn from the human-trained hand model ({@link #beliefUrl}) over an
+         * observation-only pool (the cube minus our deck minus every opponent card we can see, plus
+         * {@link #beliefBasics} copies of each basic), library uniform over the rest of the pool; a failed call samples
+         * that decision uniformly over the same pool (counted). "uniform" = the same pool, every weight 1.
+         */
+        public String belief = "off";
+        /** Belief shadow (do-no-harm gate): compute the belief and build its worlds in throwaway copies, play the default worlds. */
+        public boolean beliefShadow = false;
+        public String beliefUrl = null;
+        public int beliefTimeoutMs = 2000;
+        public String beliefCheckpointSha256 = null;
+        /** The cube list file ({"cards":[{"name","tags"}]}) and its sha256 pin. */
+        public String beliefCube = null;
+        public String beliefCubeSha256 = null;
+        /** Copies of each basic land type in the pool. */
+        public int beliefBasics = 8;
+
+        /** A belief is computed at searched decisions (acting or shadow). */
+        public boolean beliefOn() {
+            return !"off".equals(belief) || beliefShadow;
+        }
+
+        /** The belief whose weights come from the service. */
+        public boolean beliefHuman() {
+            return "human".equals(belief);
+        }
+
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
             o.addProperty("worlds", worlds);
@@ -217,6 +273,24 @@ public final class LookaheadSearch {
                 o.addProperty("priorUrl", priorUrl);
                 o.addProperty("priorTimeoutMs", priorTimeoutMs);
                 o.addProperty("priorCheckpointSha256", priorCheckpointSha256);
+            }
+            if (tutorOn()) {
+                o.addProperty("tutorRank", tutorRank);
+                o.addProperty("tutorShadow", tutorShadow);
+                o.addProperty("tutorLands", tutorLands);
+                o.addProperty("tutorUrl", tutorUrl);
+                o.addProperty("tutorTimeoutMs", tutorTimeoutMs);
+                o.addProperty("tutorCheckpointSha256", tutorCheckpointSha256);
+            }
+            if (beliefOn()) {
+                o.addProperty("belief", belief);
+                o.addProperty("beliefShadow", beliefShadow);
+                o.addProperty("beliefUrl", beliefUrl);
+                o.addProperty("beliefTimeoutMs", beliefTimeoutMs);
+                o.addProperty("beliefCheckpointSha256", beliefCheckpointSha256);
+                o.addProperty("beliefCube", beliefCube);
+                o.addProperty("beliefCubeSha256", beliefCubeSha256);
+                o.addProperty("beliefBasics", beliefBasics);
             }
             return o;
         }
@@ -284,6 +358,33 @@ public final class LookaheadSearch {
         public String priorDigest, priorCheckpoint, priorLastError;
         /** One entry per qualifying decision: B size, full list size, extras (would-be in shadow) with p, choice, ms. */
         public final JsonArray priorDecisions = new JsonArray();
+        /**
+         * Tutor ranking (reported only when the option is on). Library-search choices of this seat in the live game
+         * (seen); of those: land-only searches left to Forge (tutorLands off), one distinct name, Forge declined an
+         * optional search, not searchable (by reason); ranker calls and failures; searched; searched choices whose
+         * pick differs from Forge AI's (departed, or would in shadow); the ranker's top name equals Forge AI's pick;
+         * play-outs and failed play-outs (a forced pick the copy could not make counts as failed).
+         */
+        public boolean tutorOn;
+        public long tutorSeen, tutorLandOnly, tutorSingle, tutorForgeNone, tutorUnsupported, tutorCalls, tutorFailures, tutorNanos;
+        public long tutorSearched, tutorDeparted, tutorShadowWouldDepart, tutorTop1IsForge, tutorRollouts, tutorRolloutFailures, tutorForcedMissed;
+        public long tutorUnknownCards;
+        public String tutorDigest, tutorCheckpoint, tutorLastError;
+        public final Map<String, Long> tutorWhy = new TreeMap<>();
+        /** One entry per searched (or refused) choice: source, destination, names, Forge's pick, ranked, EVs, choice. */
+        public final JsonArray tutorDecisions = new JsonArray();
+        /**
+         * Belief (reported only when the option is on): searched decisions with a belief; skipped (nothing hidden, not
+         * two players); service calls, failures (= uniform fallbacks), call time; worlds drawn from a belief (acting or
+         * shadow), cards created for them and the time; hidden-count mismatches (a world fell back to the default
+         * re-draw); the pool's mean slot count; the running digest of the served weights; one coverage entry per belief
+         * decision.
+         */
+        public boolean beliefOn;
+        public long beliefDecisions, beliefSkipped, beliefCalls, beliefFailures, beliefNanos, beliefMaxNanos;
+        public long beliefWorlds, beliefCards, beliefCreateNanos, beliefMismatch, beliefPoolSlots, beliefUnknownCards;
+        public String beliefDigest, beliefCheckpoint, beliefLastError;
+        public final JsonArray beliefCoverage = new JsonArray();
 
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
@@ -401,6 +502,53 @@ public final class LookaheadSearch {
                 }
                 o.add("priorDecisions", priorDecisions);
             }
+            if (tutorOn) {
+                o.addProperty("tutorSeen", tutorSeen);
+                o.addProperty("tutorLandOnly", tutorLandOnly);
+                o.addProperty("tutorSingle", tutorSingle);
+                o.addProperty("tutorForgeNone", tutorForgeNone);
+                o.addProperty("tutorUnsupported", tutorUnsupported);
+                JsonObject why = new JsonObject();
+                tutorWhy.forEach(why::addProperty);
+                o.add("tutorWhy", why);
+                o.addProperty("tutorCalls", tutorCalls);
+                o.addProperty("tutorFailures", tutorFailures);
+                o.addProperty("tutorMs", tutorNanos / 1e6);
+                o.addProperty("tutorSearched", tutorSearched);
+                o.addProperty("tutorDeparted", tutorDeparted);
+                o.addProperty("tutorShadowWouldDepart", tutorShadowWouldDepart);
+                o.addProperty("tutorTop1IsForge", tutorTop1IsForge);
+                o.addProperty("tutorRollouts", tutorRollouts);
+                o.addProperty("tutorRolloutFailures", tutorRolloutFailures);
+                o.addProperty("tutorForcedMissed", tutorForcedMissed);
+                o.addProperty("tutorUnknownCards", tutorUnknownCards);
+                o.addProperty("tutorDigest", tutorDigest);
+                o.addProperty("tutorCheckpointSha256", tutorCheckpoint);
+                if (tutorLastError != null) {
+                    o.addProperty("tutorLastError", tutorLastError);
+                }
+                o.add("tutorDecisions", tutorDecisions);
+            }
+            if (beliefOn) {
+                o.addProperty("beliefDecisions", beliefDecisions);
+                o.addProperty("beliefSkipped", beliefSkipped);
+                o.addProperty("beliefCalls", beliefCalls);
+                o.addProperty("beliefFailures", beliefFailures);
+                o.addProperty("beliefMs", beliefNanos / 1e6);
+                o.addProperty("beliefMaxMs", beliefMaxNanos / 1e6);
+                o.addProperty("beliefWorlds", beliefWorlds);
+                o.addProperty("beliefCards", beliefCards);
+                o.addProperty("beliefCreateMs", beliefCreateNanos / 1e6);
+                o.addProperty("beliefMismatch", beliefMismatch);
+                o.addProperty("beliefPoolSlotsMean", beliefDecisions == 0 ? 0.0 : (double) beliefPoolSlots / beliefDecisions);
+                o.addProperty("beliefUnknownCards", beliefUnknownCards);
+                o.addProperty("beliefDigest", beliefDigest);
+                o.addProperty("beliefCheckpointSha256", beliefCheckpoint);
+                if (beliefLastError != null) {
+                    o.addProperty("beliefLastError", beliefLastError);
+                }
+                o.add("beliefCoverage", beliefCoverage);
+            }
             return o;
         }
     }
@@ -487,6 +635,15 @@ public final class LookaheadSearch {
     private final ExecutorService pool;
     private final ModelClient model;
     private final PriorClient prior;
+    private final TutorRankClient tutor;
+    /** Tutor ranking: its own decision counter (the priority search's seeds do not move when it is on). */
+    private int tutorIndex = 0;
+    private final BeliefClient beliefClient;
+    private final BeliefSampler.Cube beliefCube;
+    /** The current searched decision's belief (acting mode), read by {@link #prepare} on the decision thread. */
+    private BeliefSampler.Dist decisionBelief = null;
+    /** The last searched decision's belief (acting or shadow); tests read it. */
+    BeliefSampler.Dist lastBelief = null;
     /** The candidate list played out at the last searched decision (B plus any HX extras); tests read it. */
     List<Cand> lastCandidates = null;
     private JsonObject modelDeck = null;
@@ -529,6 +686,51 @@ public final class LookaheadSearch {
         } else {
             prior = null;
         }
+        if (cfg.tutorOn()) {
+            if (cfg.tutorRank < 1) {
+                throw new IllegalStateException("tutorShadow needs tutorRank >= 1 (how many ranked names are played out)");
+            }
+            checkTutorService(cfg);
+            tutor = new TutorRankClient(cfg.tutorUrl, cfg.tutorTimeoutMs);
+            stats.tutorOn = true;
+        } else {
+            tutor = null;
+        }
+        if (cfg.beliefOn()) {
+            if (!"off".equals(cfg.belief) && !"human".equals(cfg.belief) && !"uniform".equals(cfg.belief)) {
+                throw new IllegalStateException("belief must be off, human or uniform: " + cfg.belief);
+            }
+            if (cfg.reuse) {
+                // A carried world keeps live card ids; a belief world holds cards the live game does not have.
+                throw new IllegalStateException("belief does not combine with reuse (carried worlds hold live card ids)");
+            }
+            if (cfg.beliefShadow && "off".equals(cfg.belief)) {
+                throw new IllegalStateException("beliefShadow needs belief=human or uniform (the belief to build and discard)");
+            }
+            beliefCube = checkBelief(cfg);
+            beliefClient = cfg.beliefHuman() ? new BeliefClient(cfg.beliefUrl, cfg.beliefTimeoutMs) : null;
+            stats.beliefOn = true;
+        } else {
+            beliefCube = null;
+            beliefClient = null;
+        }
+    }
+
+    /**
+     * Belief: load the pinned cube file (resolving every name up front) and, for belief=human, check the service's
+     * checkpoint pin (once per JVM and service). Throws {@link IllegalStateException}; a runner calls it at start.
+     */
+    public static BeliefSampler.Cube checkBelief(Config c) {
+        final BeliefSampler.Cube cube = BeliefSampler.loadCube(c.beliefCube, c.beliefCubeSha256, c.beliefBasics);
+        if (c.beliefHuman()) {
+            BeliefClient.checkHealth(c.beliefUrl, c.beliefCheckpointSha256, c.beliefTimeoutMs);
+        }
+        return cube;
+    }
+
+    /** Tutor ranking: check the ranker's {@code /v1/health} checkpoint against the pin (once per JVM and service). */
+    public static String checkTutorService(Config c) {
+        return TutorRankClient.checkHealth(c.tutorUrl, c.tutorCheckpointSha256, c.tutorTimeoutMs);
     }
 
     /**
@@ -632,7 +834,8 @@ public final class LookaheadSearch {
         final PriorView pv = prior != null && !onStack && ph.getPlayerTurn() == me && ph.getPhase() != null && ph.getPhase().isMain()
                 ? new PriorView() : null;
         // Candidates, enumerated in a copy so the live game is never touched by enumeration.
-        final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv);
+        final JsonObject[] beliefRoot = beliefCube != null && beliefClient != null ? new JsonObject[1] : null;
+        final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv, beliefRoot);
         if (check) {
             checkLive("enumerate", before, live, defSa, index);
         }
@@ -667,7 +870,19 @@ public final class LookaheadSearch {
         explainChoices = EXPLAIN ? new String[n] : null;
         final Carried[] carried = cfg.reuse ? carry(live, me, cands, turn, k) : new Carried[k];
         final Rollout[] freshDef = cfg.reuseVerify ? new Rollout[k] : null;
-        final int abortedHere = playAll(live, me, cands, defSa, decisionSeed, carried, values, outs, ok, freshDef);
+        final BeliefSampler.Dist bd = beliefCube == null ? null
+                : belief(live, me, beliefRoot == null ? null : beliefRoot[0], index, turn, onStack);
+        lastBelief = bd;
+        if (bd != null && cfg.beliefShadow) {
+            shadowBeliefWorlds(live, me, bd, decisionSeed, k);
+        }
+        decisionBelief = cfg.beliefShadow ? null : bd;
+        final int abortedHere;
+        try {
+            abortedHere = playAll(live, me, cands, defSa, decisionSeed, carried, values, outs, ok, freshDef);
+        } finally {
+            decisionBelief = null;
+        }
         if (cfg.dedupVerify) {
             dedupVerify(outs, n, k);
         }
@@ -1433,6 +1648,11 @@ public final class LookaheadSearch {
      *           into it from the same copy (nothing of B depends on it; a failure there leaves B unchanged).
      */
     List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv) {
+        return enumerate(live, liveMe, defSa, decisionSeed, pv, null);
+    }
+
+    List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv,
+                         JsonObject[] beliefRoot) {
         final List<Cand> out = new ArrayList<>();
         out.add(new Cand(defSa, true));
         if (defSa != null) {
@@ -1469,6 +1689,14 @@ public final class LookaheadSearch {
             }
             if (pv != null) {
                 priorView(pv, g, me, legal, seen);
+            }
+            if (beliefRoot != null) {
+                // Belief: the seat's ForgeState, from this copy (encoding reads lazily built views; never the live game).
+                try {
+                    beliefRoot[0] = forge.bench.StateEncoder.encode(g, me);
+                } catch (RuntimeException e) {
+                    beliefRoot[0] = null;
+                }
             }
             if (cfg.targetVariants > 0) {
                 final int before = out.size();
@@ -2036,6 +2264,10 @@ public final class LookaheadSearch {
         List<String> stepLog;
         /** Reuse probe: where the searching seat's priority points go (null = off). */
         List<TrajPoint> trajectory;
+        /** Tutor ranking: the card id the replayed search must take (-1 = not a tutor play-out). */
+        int forcedId = -1;
+        /** Tutor ranking: a triggered search's ability rebuilt in the copy (null = the search is on the copy's stack). */
+        SpellAbility trigSa;
     }
 
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
@@ -2078,7 +2310,12 @@ public final class LookaheadSearch {
                     MyRandom.setThreadRandom(PlayoutKeys.TrackedRandom.ofSnapshot(carried.rng));
                 } else {
                     if (resample) {
-                        resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                        final BeliefSampler.Dist bd = decisionBelief;
+                        if (bd != null) {
+                            resampleBelief(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)), bd);
+                        } else {
+                            resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                        }
                     }
                     MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
                 }
@@ -2867,6 +3104,540 @@ public final class LookaheadSearch {
         stats.combatNanos += System.nanoTime() - t0;
     }
 
+    // ------------------------------------------------------------------ tutor ranking (lane tutor-ranking-0928)
+
+    /** Tutor ranking: the last searched choice's candidates (Forge AI's pick first) and per-candidate play-out ok (tests). */
+    List<String> lastTutorCandidates = null;
+    boolean[] lastTutorOk = null;
+    double[] lastTutorEv = null;
+
+    /** Play-out Forge AI whose first single-card library search takes the card with a given id (if offered). */
+    static final class ScriptedTutor extends RolloutAi {
+        private final int forcedId;
+        boolean tried = false;
+        boolean used = false;
+
+        ScriptedTutor(Game g, Player p, forge.LobbyPlayer lp, int forcedId) {
+            super(g, p, lp);
+            this.forcedId = forcedId;
+        }
+
+        @Override
+        public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList,
+                forge.game.player.DelayedReveal delayedReveal, String selectPrompt, boolean isOptional, Player decider) {
+            if (!tried) {
+                tried = true;
+                for (Card c : fetchList) {
+                    if (c.getId() == forcedId) {
+                        used = true;
+                        return c;
+                    }
+                }
+            }
+            return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider);
+        }
+    }
+
+    /**
+     * A single-card library search of this seat, asked while the live game resolves {@code sa} (Forge AI already chose
+     * {@code def}). Forge AI's pick and the top-{@code tutorRank} other names by the ranker's score are each played out
+     * over K worlds from a copy of the position in which the search's resolution is replayed with that card forced; the
+     * best by expected value is returned (ties, failures and unsupported positions: Forge AI's pick). Never throws.
+     */
+    public Card decideTutor(PlayerControllerAi ctrl, ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+            CardCollection fetchList, Card def, Player decider) {
+        if (tutor == null) {
+            return def;
+        }
+        final Game live = ctrl.getGame();
+        final Player me = ctrl.getPlayer();
+        if (decider != me || sa == null || origin == null || origin.size() != 1 || origin.get(0) != ZoneType.Library
+                || fetchList == null || fetchList.isEmpty()) {
+            return def;
+        }
+        final CardCollectionView myLib = me.getCardsIn(ZoneType.Library);
+        for (Card c : fetchList) {
+            if (!myLib.contains(c)) {
+                return def;
+            }
+        }
+        final long t0 = System.nanoTime();
+        stats.tutorSeen++;
+        final int index = tutorIndex++;
+        final JsonObject entry = new JsonObject();
+        try {
+            return decideTutor0(live, me, destination, sa, fetchList, def, index, entry);
+        } catch (RuntimeException | StackOverflowError e) {
+            stats.tutorUnsupported++;
+            stats.tutorWhy.merge("error", 1L, Long::sum);
+            stats.tutorLastError = String.valueOf(e);
+            entry.addProperty("outcome", "error");
+            entry.addProperty("error", String.valueOf(e));
+            System.err.println("[lookahead] tutor search failed at choice " + index + ", keeping Forge's pick: " + e);
+            if (FAILURE_TRACES.getAndIncrement() < 20) {
+                e.printStackTrace();
+            }
+            return def;
+        } finally {
+            final long dt = System.nanoTime() - t0;
+            stats.tutorNanos += dt;
+            if (entry.size() > 0) {
+                entry.addProperty("ms", Math.round(dt / 1e4) / 100.0);
+                stats.tutorDecisions.add(entry);
+            }
+        }
+    }
+
+    private Card decideTutor0(Game live, Player me, ZoneType destination, SpellAbility sa, CardCollection fetchList, Card def,
+            int index, JsonObject entry) {
+        // Distinct names in card-id order; a name's representative is its lowest id.
+        final List<Card> sorted = new ArrayList<>(fetchList);
+        sorted.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+        final Map<String, Card> rep = new java.util.LinkedHashMap<>();
+        boolean landsOnly = true;
+        for (Card c : sorted) {
+            rep.putIfAbsent(c.getName(), c);
+            landsOnly &= c.isLand();
+        }
+        final PhaseHandler ph = live.getPhaseHandler();
+        final String dest = destName(destination, sa);
+        entry.addProperty("i", index);
+        entry.addProperty("turn", ph.getTurn());
+        entry.addProperty("phase", String.valueOf(ph.getPhase()));
+        entry.addProperty("active", ph.getPlayerTurn() == me);
+        entry.addProperty("src", sa.getHostCard().getName());
+        entry.addProperty("dest", dest);
+        entry.addProperty("names", rep.size());
+        entry.addProperty("landsOnly", landsOnly);
+        entry.addProperty("forge", def == null ? null : def.getName());
+        if (landsOnly && !cfg.tutorLands) {
+            stats.tutorLandOnly++;
+            entry.addProperty("outcome", "landsOnly");
+            return def;
+        }
+        if (rep.size() < 2) {
+            stats.tutorSingle++;
+            entry.addProperty("outcome", "single");
+            return def;
+        }
+        if (def == null || !rep.containsKey(def.getName())) {
+            stats.tutorForgeNone++;
+            entry.addProperty("outcome", "forgeNone");
+            return def;
+        }
+        String why = GameCopier.stackUnsupported(live, true);
+        if (why == null) {
+            final SpellAbility top = live.getStack().isEmpty() ? null : live.getStack().peekAbility();
+            if (!live.getStack().isResolving() || top == null) {
+                why = "notResolving";
+            } else if (sa.getRootAbility() != sa) {
+                // Effects before the search in the same ability would be replayed with it.
+                why = "subAbility";
+            } else if (top != sa) {
+                if (top instanceof forge.game.trigger.WrappedAbility wa && wa.getWrappedAbility() == sa) {
+                    final forge.game.trigger.Trigger t = wa.getTrigger();
+                    final int ti = t == null ? -1 : triggerIndex(wa.getHostCard(), t);
+                    if (t == null || t.isStatic() || ti < 0) {
+                        why = "triggerForm";
+                    }
+                } else {
+                    why = "notTop";
+                }
+            }
+        }
+        if (why != null) {
+            stats.tutorUnsupported++;
+            stats.tutorWhy.merge(why, 1L, Long::sum);
+            entry.addProperty("outcome", "unsupported:" + why);
+            return def;
+        }
+
+        // The ranker: one call over every distinct name.
+        final List<String> names = new ArrayList<>(rep.keySet());
+        final JsonObject req = tutorRequest(live, me, sa, dest, names);
+        final double[] sc = tutor.rank(req, names.size());
+        stats.tutorCalls++;
+        if (sc == null) {
+            stats.tutorFailures++;
+            stats.tutorLastError = tutor.lastError;
+            entry.addProperty("outcome", "rankFailed");
+            entry.addProperty("error", tutor.lastError);
+            System.err.println("[lookahead] tutor ranker failed at choice " + index + ", keeping Forge's pick: " + tutor.lastError);
+            return def;
+        }
+        stats.tutorDigest = tutor.digestHex();
+        stats.tutorCheckpoint = tutor.checkpointSha256;
+        stats.tutorUnknownCards = tutor.unknownCards;
+        final Integer[] order = new Integer[names.size()];
+        for (int i = 0; i < order.length; i++) {
+            order[i] = i;
+        }
+        Arrays.sort(order, (x, y) -> {
+            final int c = Double.compare(sc[y], sc[x]);
+            return c != 0 ? c : Integer.compare(x, y);
+        });
+        final String forgeName = def.getName();
+        if (names.get(order[0]).equals(forgeName)) {
+            stats.tutorTop1IsForge++;
+        }
+        final List<String> cands = new ArrayList<>();
+        cands.add(forgeName);
+        final JsonArray ranked = new JsonArray();
+        for (Integer o : order) {
+            final String nm = names.get(o);
+            if (ranked.size() < Math.max(cfg.tutorRank, 5)) {
+                final JsonObject r = new JsonObject();
+                r.addProperty("name", nm);
+                r.addProperty("score", Math.round(sc[o] * 1e4) / 1e4);
+                ranked.add(r);
+            }
+            if (!nm.equals(forgeName) && cands.size() < 1 + cfg.tutorRank) {
+                cands.add(nm);
+            }
+        }
+        entry.add("ranked", ranked);
+        final int forgeRank = Arrays.asList(order).indexOf(names.indexOf(forgeName));
+        entry.addProperty("forgeRank", forgeRank);
+        final JsonArray cj = new JsonArray();
+        cands.forEach(cj::add);
+        entry.add("cands", cj);
+
+        // Play-outs: every candidate x world, copies made here in a fixed order, then played (pool if threads > 1).
+        stats.tutorSearched++;
+        final int k = Math.max(1, cfg.worlds);
+        final int n = cands.size();
+        final long seed = mix(cfg.seed, 0x7a70000L + index);
+        final Prepared[][] prep = new Prepared[n][k];
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                prep[c][w] = prepareTutor(live, me, rep.get(cands.get(c)).getId(), mix(seed, 1000 + w), sa);
+            }
+        }
+        final double[][] values = new double[n][k];
+        final boolean[] ok = new boolean[n];
+        Arrays.fill(ok, true);
+        final List<Runnable> tasks = new ArrayList<>();
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final int ww = w, cc = c;
+                tasks.add(() -> {
+                    final Rollout r = playTutor(prep[cc][ww]);
+                    prep[cc][ww] = null;
+                    synchronized (values) {
+                        values[cc][ww] = r.value;
+                        if (!r.ok) {
+                            ok[cc] = false;
+                            stats.tutorRolloutFailures++;
+                        }
+                        stats.tutorRollouts++;
+                    }
+                });
+            }
+        }
+        runAll(tasks);
+        final double[] ev = new double[n];
+        int best = 0;
+        for (int c = 0; c < n; c++) {
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += values[c][w];
+            }
+            ev[c] = ok[c] ? s / k : Double.NEGATIVE_INFINITY;
+        }
+        if (ok[0]) {
+            for (int c = 1; c < n; c++) {
+                if (!ok[c] || (cfg.departZ > 0 && !confident(values, c, k, cfg.departZ))) {
+                    continue;
+                }
+                if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
+                    best = c;
+                }
+            }
+        }
+        lastTutorCandidates = cands;
+        lastTutorOk = ok.clone();
+        lastTutorEv = ev.clone();
+        final JsonArray evj = new JsonArray();
+        for (int c = 0; c < n; c++) {
+            evj.add(ok[c] ? Math.round(ev[c] * 100) / 100.0 : null);
+        }
+        entry.add("ev", evj);
+        entry.addProperty("best", best);
+        if (best == 0) {
+            entry.addProperty("outcome", "kept");
+            return def;
+        }
+        if (cfg.tutorShadow) {
+            stats.tutorShadowWouldDepart++;
+            entry.addProperty("outcome", "shadow-would-depart");
+            return def;
+        }
+        stats.tutorDeparted++;
+        entry.addProperty("outcome", "departed");
+        return rep.get(cands.get(best));
+    }
+
+    /** The trigger's position among its host's triggers (-1 if absent). */
+    static int triggerIndex(Card host, forge.game.trigger.Trigger t) {
+        int i = 0;
+        for (forge.game.trigger.Trigger x : host.getTriggers()) {
+            if (x == t) {
+                return i;
+            }
+            i++;
+        }
+        return -1;
+    }
+
+    /** The resolving trigger's ability, built in the copy from the copied host's trigger at the same position. */
+    static SpellAbility rebuildTrigger(Game g, Player me, forge.game.trigger.WrappedAbility liveWrap) {
+        final forge.game.trigger.Trigger lt = liveWrap.getTrigger();
+        final int idx = triggerIndex(liveWrap.getHostCard(), lt);
+        final Card host = g.findById(liveWrap.getHostCard().getId());
+        if (host == null || idx < 0) {
+            throw new IllegalStateException("tutor copy: trigger host " + liveWrap.getHostCard() + " missing");
+        }
+        forge.game.trigger.Trigger t = null;
+        int i = 0;
+        for (forge.game.trigger.Trigger x : host.getTriggers()) {
+            if (i++ == idx) {
+                t = x;
+                break;
+            }
+        }
+        if (t == null || t.getMode() != lt.getMode() || !java.util.Objects.equals(t.getParam("Execute"), lt.getParam("Execute"))) {
+            throw new IllegalStateException("tutor copy: trigger " + idx + " of " + host + " does not match");
+        }
+        SpellAbility sa = t.getOverridingAbility();
+        if (sa == null) {
+            sa = forge.game.ability.AbilityFactory.getAbility(host, t.getParam("Execute"));
+            sa.setActivatingPlayer(me);
+            if (t.isIntrinsic()) {
+                sa.setIntrinsic(true);
+                sa.changeText();
+            }
+        } else {
+            sa = sa.copy(host, me, false, true);
+        }
+        sa.setTrigger(t);
+        sa.setActivatingPlayer(me);
+        return sa;
+    }
+
+    private static String destName(ZoneType destination, SpellAbility sa) {
+        if (destination == ZoneType.Hand) {
+            return "hand";
+        }
+        if (destination == ZoneType.Battlefield) {
+            return "battlefield";
+        }
+        if (destination == ZoneType.Graveyard) {
+            return "graveyard";
+        }
+        if (destination == ZoneType.Library) {
+            return "0".equals(sa.getParamOrDefault("LibraryPosition", "0")) ? "top" : "library";
+        }
+        return String.valueOf(destination).toLowerCase();
+    }
+
+    /** The ranker request: the search's source, destination, the distinct names, the deck and a small state. */
+    private JsonObject tutorRequest(Game live, Player me, SpellAbility sa, String dest, List<String> names) {
+        final JsonObject r = new JsonObject();
+        r.addProperty("schema", TutorRankClient.SCHEMA);
+        r.addProperty("tutor", sa.getHostCard().getName());
+        r.add("cls", com.google.gson.JsonNull.INSTANCE);
+        r.addProperty("dest", dest);
+        final JsonArray cj = new JsonArray();
+        names.forEach(cj::add);
+        r.add("candidates", cj);
+        r.add("deck", deckOf(me));
+        final JsonObject st = new JsonObject();
+        final PhaseHandler ph = live.getPhaseHandler();
+        final boolean onPlay = live.getStartingPlayer() == me;
+        // 17Lands counts each player's own turns; Forge counts both.
+        st.addProperty("turn", onPlay ? (ph.getTurn() + 1) / 2 : ph.getTurn() / 2);
+        st.addProperty("globalTurn", ph.getTurn());
+        st.addProperty("onPlay", onPlay);
+        st.addProperty("active", ph.getPlayerTurn() == me);
+        st.add("hand", namesOf(me.getCardsIn(ZoneType.Hand)));
+        final JsonArray lands = new JsonArray(), creatures = new JsonArray(), other = new JsonArray();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            (c.isLand() ? lands : c.isCreature() ? creatures : other).add(c.getName());
+        }
+        st.add("lands", lands);
+        st.add("creatures", creatures);
+        st.add("noncreatures", other);
+        Player opp = null;
+        for (Player o : me.getOpponents()) {
+            opp = o;
+            break;
+        }
+        if (opp != null) {
+            int ol = 0;
+            final JsonArray oc = new JsonArray(), on = new JsonArray();
+            for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
+                if (c.isLand()) {
+                    ol++;
+                } else if (c.isCreature()) {
+                    oc.add(c.getName());
+                } else {
+                    on.add(c.getName());
+                }
+            }
+            st.addProperty("oppLands", ol);
+            st.add("oppCreatures", oc);
+            st.add("oppNoncreatures", on);
+            st.addProperty("oppHand", opp.getCardsIn(ZoneType.Hand).size());
+            st.addProperty("oppLife", opp.getLife());
+        }
+        st.addProperty("life", me.getLife());
+        final TreeMap<String, Integer> lib = new TreeMap<>();
+        for (Card c : me.getCardsIn(ZoneType.Library)) {
+            lib.merge(c.getName(), 1, Integer::sum);
+        }
+        final JsonObject lj = new JsonObject();
+        lib.forEach(lj::addProperty);
+        st.add("library", lj);
+        r.add("state", st);
+        return r;
+    }
+
+    private static JsonArray namesOf(Iterable<Card> cs) {
+        final JsonArray a = new JsonArray();
+        for (Card c : cs) {
+            a.add(c.getName());
+        }
+        return a;
+    }
+
+    /**
+     * One tutor play-out's copy: the live position with its whole stack (the searching ability on top, not yet
+     * resolved in the copy), the world resampled, and the card to force.
+     */
+    Prepared prepareTutor(Game live, Player liveMe, int forcedId, long worldSeed, SpellAbility searching) {
+        final Prepared p = new Prepared();
+        p.forcedId = forcedId;
+        final SpellAbility liveTop = live.getStack().peekAbility();
+        final forge.game.trigger.WrappedAbility liveWrap = liveTop instanceof forge.game.trigger.WrappedAbility w ? w : null;
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 1)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final long a = System.nanoTime();
+            synchronized (live) {
+                final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyStack(true);
+                copier.setSkipResolvingTrigger(true); // (only acts on a resolving top trigger and on gone paid tokens)
+                p.g = copier.makeCopy();
+                p.me = (Player) copier.find(liveMe);
+                if (liveWrap != null) {
+                    // The resolving trigger is rebuilt in the copy as Forge builds it (TriggerHandler.runSingleTriggerInternal).
+                    p.trigSa = rebuildTrigger(p.g, p.me, liveWrap);
+                }
+                if (cfg.resample) {
+                    resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                }
+                MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
+            }
+            if ((liveWrap == null && p.g.getStack().isEmpty()) || p.g.findById(forcedId) == null) {
+                throw new IllegalStateException("tutor copy: empty stack or card " + forcedId + " missing");
+            }
+            p.copyNanos = System.nanoTime() - a;
+        } catch (RuntimeException | StackOverflowError e) {
+            p.failed = true;
+            p.error = e;
+        } finally {
+            p.ids = forge.util.IdScope.capture();
+            p.cache = AiCache.captureScope();
+            p.rnd = MyRandom.getThreadRandom();
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+        return p;
+    }
+
+    /** Resolve the copy's top (the search, with the forced card), then Forge AI on both seats to the horizon. */
+    Rollout playTutor(Prepared p) {
+        final Rollout r = new Rollout();
+        if (p.failed) {
+            r.ok = false;
+            r.value = Double.NEGATIVE_INFINITY;
+            if (p.error != null) {
+                System.err.println("[lookahead] tutor copy failed: " + p.error);
+                if (FAILURE_TRACES.getAndIncrement() < 20) {
+                    p.error.printStackTrace();
+                }
+            }
+            return r;
+        }
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(p.rnd);
+        AiCache.installScope(p.cache);
+        forge.util.IdScope.install(p.ids);
+        try {
+            final Game g = p.g;
+            final Player me = p.me;
+            final ScriptedTutor st = new ScriptedTutor(g, me, me.getController().getLobbyPlayer(), p.forcedId);
+            me.dangerouslySetController(st);
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
+            final PhaseHandler ph = g.getPhaseHandler();
+            final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, null);
+            g.subscribeToEvents(watch);
+            final long b = System.nanoTime();
+            // Both players had passed in the live game: the search's ability resolves now (as mainLoopStep would).
+            if (p.trigSa != null) {
+                // A triggered search: resolve its ability as WrappedAbility.resolve does (the optional "you may" was
+                // already accepted in the live game), then what MagicStack.finishResolving does for the priority.
+                me.getController().playSpellAbilityNoStack(p.trigSa, false);
+                g.getAction().checkStaticAbilities();
+                ph.resetPriority();
+                ph.onStackResolved();
+            } else {
+                g.getStack().resolveStack();
+            }
+            if (!st.used) {
+                synchronized (stats) {
+                    stats.tutorForcedMissed++;
+                }
+                r.ok = false;
+                r.value = Double.NEGATIVE_INFINITY;
+                return r;
+            }
+            int steps = 0;
+            while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
+                ph.mainLoopStep();
+                steps++;
+            }
+            r.rolloutNanos = System.nanoTime() - b;
+            r.steps = steps;
+            r.capped = !g.isGameOver() && !watch.reached;
+            r.value = value(g, me);
+        } catch (RuntimeException | StackOverflowError e) {
+            r.ok = false;
+            r.value = Double.NEGATIVE_INFINITY;
+            System.err.println("[lookahead] tutor rollout failed: " + e);
+            if (FAILURE_TRACES.getAndIncrement() < 20) {
+                e.printStackTrace();
+            }
+        } finally {
+            p.g = null;
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+        return r;
+    }
+
     // ------------------------------------------------------------------ belief
 
     /**
@@ -2914,7 +3685,12 @@ public final class LookaheadSearch {
             opp.getZone(ZoneType.Hand).setCards(newHand);
             opp.getZone(ZoneType.Library).setCards(newLib);
         }
-        // Our own library: keep the known top (scry/reveal), shuffle the rest.
+        shuffleOwnLibrary(liveMe, me, rng);
+    }
+
+    /** Our own library: keep the known top (scry/reveal), shuffle the rest. */
+    static void shuffleOwnLibrary(Player liveMe, Player me, Random rng) {
+        final PlayerView myView = liveMe.getView();
         List<Card> myLib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         List<Card> liveMyLib = new ArrayList<>(liveMe.getCardsIn(ZoneType.Library));
         int known = 0;
@@ -2930,6 +3706,269 @@ public final class LookaheadSearch {
         List<Card> nl = new ArrayList<>(myLib.subList(0, known));
         nl.addAll(rest);
         me.getZone(ZoneType.Library).setCards(nl);
+    }
+
+
+    // ------------------------------------------------------------------ belief (lane belief-sampling-0928)
+
+    /** The opponent's hidden hand cards / known library top, as the seat sees them in the live game. */
+    private static int[] hiddenCounts(Game live, Player liveOpp, PlayerView myView) {
+        int keep = 0;
+        final List<Card> hand = new ArrayList<>(liveOpp.getCardsIn(ZoneType.Hand));
+        for (Card c : hand) {
+            if (c.getView().canBeShownTo(myView)) {
+                keep++;
+            }
+        }
+        final List<Card> lib = new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library));
+        int top = 0;
+        for (Card c : lib) {
+            if (c.getView().canBeShownTo(myView)) {
+                top++;
+            } else {
+                break;
+            }
+        }
+        return new int[] {hand.size() - keep, lib.size() - top};
+    }
+
+    /**
+     * The decision's belief over the opponent's hidden cards, or null (belief skipped: not a two-player game, or
+     * nothing hidden). Pool = cube names (file order) minus our registered deck minus every non-token card the
+     * opponent owns that the seat can see, plus the basics. belief=human asks the service (one call); a failure
+     * samples uniformly over the same pool.
+     */
+    private BeliefSampler.Dist belief(Game live, Player liveMe, JsonObject root, int index, int turn, boolean onStack) {
+        final long t0 = System.nanoTime();
+        final List<Player> opps = new ArrayList<>(liveMe.getOpponents());
+        if (opps.size() != 1) {
+            stats.beliefSkipped++;
+            return null;
+        }
+        final Player liveOpp = opps.get(0);
+        final PlayerView myView = liveMe.getView();
+        final int[] hid = hiddenCounts(live, liveOpp, myView);
+        if (hid[0] == 0 && hid[1] == 0) {
+            stats.beliefSkipped++;
+            return null;
+        }
+        final Set<String> known = new HashSet<>(deckOf(liveMe).keySet());
+        int openMana = 0;
+        for (Card c : live.getCardsInGame()) {
+            if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
+                    && c.getView().canBeShownTo(myView)) {
+                known.add(c.getPaperCard().getName());
+            }
+        }
+        for (Card c : liveOpp.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isLand() && !c.isTapped()) {
+                openMana++;
+            }
+        }
+        final List<String> pool = new ArrayList<>();
+        for (String name : beliefCube.names) {
+            if (!known.contains(name)) {
+                pool.add(name);
+            }
+        }
+        pool.addAll(Arrays.asList(BeliefSampler.BASICS));
+        final double[] ones = new double[pool.size()];
+        Arrays.fill(ones, 1.0);
+        double[] w = ones;
+        boolean fallback = false;
+        String error = null;
+        if (beliefClient != null) {
+            final JsonObject req = forgeRequest(live, liveMe);
+            req.addProperty("schema", BeliefClient.REQUEST_SCHEMA);
+            req.addProperty("target", forge.bench.StateEncoder.playerIndex(live, liveOpp));
+            req.addProperty("n", hid[0]);
+            req.addProperty("openMana", openMana);
+            final JsonArray pj = new JsonArray();
+            for (String n : pool) {
+                pj.add(n);
+            }
+            req.add("pool", pj);
+            if (root == null) {
+                error = "no root state";
+            } else {
+                req.add("root", root);
+                final long c0 = System.nanoTime();
+                final double[] lw = beliefClient.logWeights(req, pool.size());
+                final long dt = System.nanoTime() - c0;
+                stats.beliefCalls++;
+                stats.beliefNanos += dt;
+                stats.beliefMaxNanos = Math.max(stats.beliefMaxNanos, dt);
+                if (lw == null) {
+                    error = beliefClient.lastError;
+                } else {
+                    w = BeliefSampler.weights(lw);
+                    stats.beliefDigest = beliefClient.digestHex();
+                    stats.beliefCheckpoint = beliefClient.checkpointSha256;
+                    stats.beliefUnknownCards = beliefClient.unknownCards;
+                }
+            }
+            if (error != null) {
+                fallback = true;
+                stats.beliefFailures++;
+                stats.beliefLastError = error;
+                System.err.println("[lookahead] belief call failed at decision " + index + ", sampling uniformly: " + error);
+            }
+        }
+        final BeliefSampler.Dist bd = new BeliefSampler.Dist(pool, w, cfg.beliefBasics, hid[0], hid[1]);
+        bd.uniform = beliefClient == null || fallback;
+        bd.fallback = fallback;
+        bd.oppId = liveOpp.getId();
+        stats.beliefDecisions++;
+        stats.beliefPoolSlots += bd.slots();
+        // Coverage: how far the belief moves hand mass from uniform, and onto what.
+        if (stats.beliefCoverage.size() < 400) {
+            final JsonObject e = new JsonObject();
+            e.addProperty("d", index);
+            e.addProperty("turn", turn);
+            e.addProperty("oppActive", live.getPhaseHandler().getPlayerTurn() == liveOpp);
+            e.addProperty("stack", onStack);
+            e.addProperty("n", hid[0]);
+            e.addProperty("slots", bd.slots());
+            e.addProperty("open", openMana);
+            if (hid[0] > 0) {
+                final double[] pm = bd.marginals();
+                final double pu = (double) hid[0] / bd.slots();
+                double tvd = 0;
+                for (double x : pm) {
+                    tvd += Math.abs(x - pu);
+                }
+                e.addProperty("tvd", Math.round(tvd / 2 / hid[0] * 1e4) / 1e4);
+                for (String tag : new String[] {"counter", "removal", "creature", "land"}) {
+                    double eu = 0;
+                    for (int i = 0; i < bd.slots(); i++) {
+                        final Set<String> t = beliefCube.tags.get(bd.slotName[i]);
+                        if (t != null && t.contains(tag)) {
+                            eu += pu;
+                        }
+                    }
+                    final JsonArray a = new JsonArray();
+                    a.add(Math.round(BeliefSampler.expectedTagged(bd, pm, beliefCube, tag) * 1e4) / 1e4);
+                    a.add(Math.round(eu * 1e4) / 1e4);
+                    e.add(tag, a);
+                }
+                e.add("top", BeliefSampler.top(bd, pm, 3));
+            }
+            if (fallback) {
+                e.addProperty("fallback", true);
+            }
+            e.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
+            stats.beliefCoverage.add(e);
+        }
+        return bd;
+    }
+
+    /**
+     * Belief re-draw of one world (in a copy): the opponent's hidden hand from the belief, the hidden library uniform
+     * over the pool slots left (known cards stay where they are), then our own library as {@link #resample}. The
+     * opponent's hidden cards in the copy are replaced by new cards of the drawn names.
+     */
+    void resampleBelief(Game live, Player liveMe, Game g, Player me, Random rng, BeliefSampler.Dist bd) {
+        final PlayerView myView = liveMe.getView();
+        for (Player opp : me.getOpponents()) {
+            if (opp.getId() != bd.oppId) {
+                continue;
+            }
+            final Player liveOpp = (Player) live.getPlayer(opp.getId());
+            final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
+            final List<Card> keep = new ArrayList<>();
+            for (Card c : hand) {
+                Card lc = live.findById(c.getId());
+                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                    keep.add(c);
+                }
+            }
+            final List<Card> libKnownTop = new ArrayList<>();
+            final List<Card> liveLib = liveOpp == null ? Collections.emptyList() : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library));
+            for (Card lc : liveLib) {
+                if (lc.getView().canBeShownTo(myView)) {
+                    Card cc = g.findById(lc.getId());
+                    if (cc != null) {
+                        libKnownTop.add(cc);
+                        continue;
+                    }
+                }
+                break;
+            }
+            final int need = hand.size() - keep.size();
+            final int libNeed = opp.getCardsIn(ZoneType.Library).size() - libKnownTop.size();
+            if (need != bd.n || libNeed != bd.libHidden) {
+                // The copy does not show what the decision saw: keep the default re-draw for this world.
+                synchronized (stats) {
+                    stats.beliefMismatch++;
+                }
+                resample(live, liveMe, g, me, rng);
+                return;
+            }
+            final int[] handSlots = bd.sampleHand(rng);
+            final List<Integer> libSlots = bd.library(handSlots, rng);
+            final List<Integer> hs = new ArrayList<>();
+            for (int i : handSlots) {
+                hs.add(i);
+            }
+            Collections.shuffle(hs, rng);
+            final long c0 = System.nanoTime();
+            final List<Card> newHand = new ArrayList<>(keep);
+            for (int i : hs) {
+                newHand.add(beliefCard(bd.slotName[i], opp, g));
+            }
+            final List<Card> newLib = new ArrayList<>(libKnownTop);
+            for (int i : libSlots) {
+                newLib.add(beliefCard(bd.slotName[i], opp, g));
+            }
+            opp.getZone(ZoneType.Hand).setCards(newHand);
+            opp.getZone(ZoneType.Library).setCards(newLib);
+            synchronized (stats) {
+                stats.beliefWorlds++;
+                stats.beliefCards += hs.size() + libSlots.size();
+                stats.beliefCreateNanos += System.nanoTime() - c0;
+            }
+        }
+        shuffleOwnLibrary(liveMe, me, rng);
+    }
+
+    private Card beliefCard(String name, Player owner, Game g) {
+        final forge.item.PaperCard pc = beliefCube.paper.get(name);
+        if (pc == null) {
+            throw new IllegalStateException("belief: no paper card for " + name);
+        }
+        return forge.game.card.CardFactory.getCard(pc, owner, g);
+    }
+
+    /**
+     * Belief shadow (do-no-harm gate): build every world of the decision with the belief, in throwaway copies inside
+     * the play-out scopes (ids, AI cache, thread random), and discard them. The search then plays the default worlds.
+     */
+    private void shadowBeliefWorlds(Game live, Player liveMe, BeliefSampler.Dist bd, long decisionSeed, int k) {
+        for (int w = 0; w < k; w++) {
+            final long ws = mix(decisionSeed, 1000 + w);
+            final Random prev = MyRandom.getThreadRandom();
+            final Object prevIds = forge.util.IdScope.capture();
+            final Object prevCache = AiCache.captureScope();
+            MyRandom.setThreadRandom(new Random(mix(ws, 11)));
+            AiCache.openScope();
+            forge.util.IdScope.open();
+            try {
+                synchronized (live) {
+                    final GameCopier copier = new GameCopier(live, true);
+                    copier.setCopyStack(cfg.stack);
+                    final Game g = copier.makeCopy();
+                    resampleBelief(live, liveMe, g, (Player) copier.find(liveMe), new Random(mix(ws, 12)), bd);
+                }
+            } catch (RuntimeException e) {
+                synchronized (stats) {
+                    stats.beliefLastError = "shadow: " + e;
+                }
+            } finally {
+                forge.util.IdScope.install(prevIds);
+                AiCache.installScope(prevCache);
+                MyRandom.setThreadRandom(prev);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ probe
