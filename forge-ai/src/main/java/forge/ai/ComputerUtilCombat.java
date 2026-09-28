@@ -295,6 +295,22 @@ public class ComputerUtilCombat {
      * @return a int.
      */
     public static int lifeThatWouldRemain(final Player ai, final Combat combat) {
+        // The player whose life is predicted is the deciding AI in every caller but DamageAiBase and MustBlockAi,
+        // which name the decider themselves.
+        return lifeThatWouldRemain(ai, combat, ai, AiFixes.mode(ai));
+    }
+
+    /** {@link #lifeThatWouldRemain(Player, Combat)} for a prediction made by {@code decider} (its aiFixes0928 mode). */
+    public static int lifeThatWouldRemain(final Player ai, final Combat combat, final Player decider) {
+        return lifeThatWouldRemain(ai, combat, decider, AiFixes.mode(decider));
+    }
+
+    /**
+     * @param fixes aiFixes0928 ({@link AiFixes}): ON counts a blocked non-trampler whose blockers all left combat as
+     *              dealing no damage (fork #24); OFF and SHADOW count it as unblocked (upstream). ON and SHADOW record
+     *              the spot for {@code decider}.
+     */
+    public static int lifeThatWouldRemain(final Player ai, final Combat combat, final Player decider, final AiFixes.Mode fixes) {
         int damage = 0;
 
         if (ai.canLoseLife()) {
@@ -304,11 +320,16 @@ public class ComputerUtilCombat {
             for (final Card attacker : attackers) {
                 final List<Card> blockers = combat.getBlockers(attacker);
 
-                if (blockers.size() == 0 && combat.isBlocked(attacker) && !attacker.hasKeyword(Keyword.TRAMPLE)
+                if (fixes != AiFixes.Mode.OFF && blockers.size() == 0 && combat.isBlocked(attacker)
+                        && !attacker.hasKeyword(Keyword.TRAMPLE)
                         && !StaticAbilityAssignCombatDamageAsUnblocked.assignCombatDamageAsUnblocked(attacker)) {
-                    // Blocked, and every blocker has left combat: it deals no combat damage (CR 509.1h, 506.4) unless it
-                    // has trample, which assigns all its damage to the player (CR 702.19e) -- counted as unblocked below.
-                    continue;
+                    // aiFixes0928 (fork #24). Blocked, and every blocker has left combat: it deals no combat damage
+                    // (CR 509.1h, 506.4) unless it has trample, which assigns all its damage to the player
+                    // (CR 702.19e) -- counted as unblocked below. Upstream counts it as unblocked.
+                    AiFixes.record(decider, AiFixes.Kind.BLOCKER_LEFT, true);
+                    if (fixes == AiFixes.Mode.ON) {
+                        continue;
+                    }
                 }
                 if (blockers.size() == 0
                         || StaticAbilityAssignCombatDamageAsUnblocked.assignCombatDamageAsUnblocked(attacker)) {

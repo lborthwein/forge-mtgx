@@ -1,5 +1,6 @@
 package forge.ai.ability;
 
+import forge.ai.AiFixes;
 import forge.ai.ComputerUtil;
 import forge.ai.ComputerUtilCombat;
 import forge.ai.SpellAbilityAi;
@@ -98,14 +99,21 @@ public abstract class DamageAiBase extends SpellAbilityAi {
             return false;
         }
 
-        // Lethal together with the combat damage still to come: once blockers are declared, burn that takes the
-        // defending player's predicted remaining life to 0 goes to the face (owner-friend report 2026-09-28T02-19-05:
-        // 9 life, a trampler whose blocker had left combat, kicked Burst Lightning for 4 -- the AI shot a creature).
-        final forge.game.combat.Combat combat = game.getCombat();
-        if (combat != null && game.getPhaseHandler().is(PhaseType.COMBAT_DECLARE_BLOCKERS)
-                && combat.isPlayerAttacked(enemy) && !enemy.cantLoseForZeroOrLessLife()
-                && ComputerUtilCombat.lifeThatWouldRemain(enemy, combat) - restDamage <= 0) {
-            return true;
+        // aiFixes0928 (fork #24). Lethal together with the combat damage still to come: once blockers are declared,
+        // burn that takes the defending player's predicted remaining life to 0 goes to the face (owner-friend report
+        // 2026-09-28T02-19-05: 9 life, a trampler whose blocker had left combat, kicked Burst Lightning for 4 -- the
+        // AI shot a creature). Upstream (option off) never counts the combat damage still to come.
+        final AiFixes.Mode fixes = AiFixes.mode(comp);
+        if (fixes != AiFixes.Mode.OFF) {
+            final forge.game.combat.Combat combat = game.getCombat();
+            if (combat != null && game.getPhaseHandler().is(PhaseType.COMBAT_DECLARE_BLOCKERS)
+                    && combat.isPlayerAttacked(enemy) && !enemy.cantLoseForZeroOrLessLife()
+                    && ComputerUtilCombat.lifeThatWouldRemain(enemy, combat, comp, AiFixes.Mode.ON) - restDamage <= 0) {
+                AiFixes.record(comp, AiFixes.Kind.BURN_FACE, enemy.getLife() - restDamage >= 5);
+                if (fixes == AiFixes.Mode.ON) {
+                    return true;
+                }
+            }
         }
 
         if ((enemy.getLife() - restDamage) < 5) {

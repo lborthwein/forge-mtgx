@@ -93,7 +93,7 @@ public class MustBlockAi extends SpellAbilityAi {
                     Player defender = combat.getDefenderPlayerByAttacker(source);
                     if (defender != null && combat.getAttackingPlayer().equals(ai)
                             && defender.canLoseLife() && !defender.cantLoseForZeroOrLessLife()
-                            && ComputerUtilCombat.lifeThatWouldRemain(defender, combat) <= 0) {
+                            && ComputerUtilCombat.lifeThatWouldRemain(defender, combat, ai) <= 0) {
                         return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
                     }
                 }
