@@ -666,6 +666,35 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
     }
 
+    /**
+     * Whether Forge's cast/activation restrictions let {@code player} put {@code ability} on the
+     * stack now. {@code SpellAbility.canPlay} (and so {@code Card.getAllPossibleAbilities}) does
+     * not consult CantBeCast / CantBeActivated statics (Teferi, Time Raveler; Linvala, Keeper of
+     * Silence; Grafdigger's Cage): {@code PlaySpellAbility.playAbility} checks
+     * {@code checkRestrictions} only after the card has moved to the stack, and a refusal there
+     * rolls the cast back without a word. Ask Forge's same check up front, the way the AI does
+     * ({@code AiController.canPlaySa}): a spell is judged as an LKI copy standing on the stack,
+     * cast from its current zone. Lands and mana abilities do not take that path and pass.
+     * The throwaway copy draws its ids from a detached scope so the live counters never move.
+     */
+    static boolean passesCastRestrictions(final Player player, final SpellAbility ability) {
+        if (ability.isLandAbility() || ability.isManaAbility()
+                || !(ability.isSpell() || ability.isActivatedAbility())) {
+            return true;
+        }
+        return forge.util.IdScope.detached(() -> {
+            final Card real = ability.getHostCard();
+            Card host = real;
+            if (ability.isSpell()) {
+                host = forge.game.card.CardCopyService.getLKICopy(real);
+                host.setLKICMC(-1);
+                host.setLastKnownZone(player.getGame().getStackZone());
+                host.setCastFrom(real.getZone());
+            }
+            return ability.checkRestrictions(host, player);
+        });
+    }
+
     private JsonArray buildStatefulControls(final Input input, final String kind,
                                             final Map<String, ControlBinding> bindings) {
         final JsonArray controls = new JsonArray();
@@ -691,9 +720,14 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             final boolean londonCard = input instanceof InputLondonMulligan london
                     && london.canSelectCard(card);
             if (input instanceof InputLondonMulligan && !londonCard) return true;
-            final var priorityAbilities = input instanceof InputPassPriority
+            final var possibleAbilities = input instanceof InputPassPriority
                     ? card.getAllPossibleAbilities(human, true) : null;
-            // InputPassPriority.getActivateAction computes this same list.
+            // getAllPossibleAbilities leaves CantBeCast/CantBeActivated statics to the cast
+            // itself; drop what Forge would refuse there (Teferi, Time Raveler at instant speed).
+            final var priorityAbilities = possibleAbilities == null ? null : possibleAbilities.stream()
+                    .filter(a -> passesCastRestrictions(human, a)).toList();
+            if (possibleAbilities != null && !possibleAbilities.isEmpty() && priorityAbilities.isEmpty()) return true;
+            // InputPassPriority.getActivateAction computes the unfiltered list.
             // Reuse it without caching across changes in Forge's game state.
             final String activate = priorityAbilities == null ? input.getActivateAction(card)
                     : priorityAbilities.isEmpty() ? null
