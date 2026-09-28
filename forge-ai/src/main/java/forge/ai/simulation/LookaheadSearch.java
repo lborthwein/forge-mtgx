@@ -3117,7 +3117,7 @@ public final class LookaheadSearch {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyStack(true);
-                copier.setSkipResolvingTrigger(liveWrap != null);
+                copier.setSkipResolvingTrigger(true); // (only acts on a resolving top trigger and on gone paid tokens)
                 p.g = copier.makeCopy();
                 p.me = (Player) copier.find(liveMe);
                 if (liveWrap != null) {

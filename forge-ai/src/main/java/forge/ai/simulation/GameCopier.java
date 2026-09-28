@@ -77,7 +77,10 @@ public class GameCopier {
         this.copyStack = copyStack;
     }
 
-    /** Tutor ranking: a resolving triggered ability on top of the original stack is left out of the copy. */
+    /**
+     * Tutor ranking: a resolving triggered ability on top of the original stack is left out of the copy, and a paid
+     * token that has ceased to exist is left out of a copied ability's paid list instead of failing the copy.
+     */
     private boolean skipResolvingTrigger = false;
 
     public void setSkipResolvingTrigger(boolean skip) {
@@ -209,6 +212,11 @@ public class GameCopier {
                     final forge.game.card.CardCollection mapped = new forge.game.card.CardCollection();
                     for (Card pc : cell.getValue()) {
                         final Card m = newGame.findById(pc.getId());
+                        if (m == null && skipResolvingTrigger && pc.isToken()) {
+                            // Tutor ranking: a sacrificed token has ceased to exist; the replayed resolution does not
+                            // need it (the copy's paid list simply lacks it).
+                            continue;
+                        }
                         if (m == null) {
                             throw new IllegalStateException("stack copy: paid " + pc + " of " + orig + " not in the copy");
                         }

@@ -346,6 +346,40 @@ public class LookaheadTutorRankTest extends SimulationTest {
         }
     }
 
+    @Test
+    public void tinkerSacrificingATokenIsSearched() throws Exception {
+        try (Stub stub = new Stub()) {
+            Game game = initAndCreateGame();
+            Player a = game.getPlayers().get(0);
+            game.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
+            for (String n : new String[] {"Sol Ring", "Wurmcoil Engine", "Myr Battlesphere", "Island"}) {
+                addCardToZone(n, a, ZoneType.Library);
+            }
+            for (int i = 0; i < 3; i++) {
+                addCard("Island", a);
+            }
+            addToken("c_a_treasure_sac", a);
+            addCardToZone("Tinker", a, ZoneType.Hand);
+            for (int i = 0; i < 10; i++) {
+                addCardToZone("Mountain", game.getPlayers().get(1), ZoneType.Library);
+            }
+            game.getAction().checkStateEffects(true);
+            LookaheadSearch s = new LookaheadSearch(tutor(stub, 2, false));
+            PlayerControllerLookahead ctrl = bind(game, s);
+            Card tinker = a.getCardsIn(ZoneType.Hand).getFirst();
+            SpellAbility sa = tinker.getFirstSpellAbility();
+            sa.setActivatingPlayer(a);
+            AssertJUnit.assertTrue(ctrl.playChosenSpellAbility(sa));
+            game.getStack().resolveStack();
+            s.shutdown();
+            AssertJUnit.assertEquals(1, s.getStats().tutorSearched);
+            for (boolean ok : s.lastTutorOk) {
+                AssertJUnit.assertTrue("a copy with the sacrificed token gone still replays the search", ok);
+            }
+            AssertJUnit.assertEquals(0, s.getStats().tutorRolloutFailures);
+        }
+    }
+
     @Test(expectedExceptions = IllegalStateException.class)
     public void pinMismatchRefuses() throws Exception {
         try (Stub stub = new Stub()) {
