@@ -415,8 +415,8 @@ public class GameCopier {
             final LobbyPlayerAi plain = new LobbyPlayerAi(lp.getName(), null);
             plain.setAiProfile(lp instanceof LobbyPlayerAi ? ((LobbyPlayerAi) lp).getAiProfile() : "Default");
             if (lp instanceof LobbyPlayerAi) {
-                // Each player's aiFixes0928 mode carries into the copy (no counters: copies are never counted).
-                plain.setAiFixes0928(((LobbyPlayerAi) lp).getAiFixes0928());
+                // Each player's aiFixes0928 mode carries into the copy; its spots count as copy spots (forge.ai.AiFixes).
+                forge.ai.AiFixes.inherit((LobbyPlayerAi) lp, plain);
             }
             clone.setPlayer(plain);
             return clone;

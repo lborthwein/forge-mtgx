@@ -20,8 +20,9 @@ import forge.game.player.Player;
  * <li>{@link Kind#BLOCKER_LEFT} (fork #24, ComputerUtilCombat.lifeThatWouldRemain): a blocked attacker whose blockers
  * all left combat deals no damage unless it has trample.</li>
  * </ul>
- * {@link Mode#SHADOW} decides exactly as {@link Mode#OFF} and counts, in the live game only, the spots where a fix
- * would have fired ({@link Counters}); {@link Mode#ON} applies the fixes and counts the same spots.
+ * {@link Mode#SHADOW} decides exactly as {@link Mode#OFF} and counts the spots where a fix would have fired, in the live
+ * game and (separately) in the player's look-ahead play-outs ({@link Counters}); {@link Mode#ON} applies the fixes and
+ * counts the same spots. Counting never changes a decision.
  */
 public final class AiFixes {
     private AiFixes() {
@@ -58,11 +59,15 @@ public final class AiFixes {
         BLOCKER_LEFT
     }
 
-    /** Per-player counts over one live game. */
+    /**
+     * Per-player counts over one live game: spots in the live game itself, and spots inside that player's look-ahead
+     * play-outs (copies of the game whose lobby players inherit the counters), which can change a searched decision.
+     */
     public static final class Counters {
         final int[] fired = new int[Kind.values().length];
         final int[] changed = new int[Kind.values().length];
-        /** Only this game's events are counted (not look-ahead copies that share the lobby player). */
+        final int[] copyFired = new int[Kind.values().length];
+        /** The live game: its spots count as live, any other game's (a play-out copy) as copy spots. */
         Game game;
 
         public int fired(Kind k) {
@@ -73,6 +78,10 @@ public final class AiFixes {
             return changed[k.ordinal()];
         }
 
+        public int copyFired(Kind k) {
+            return copyFired[k.ordinal()];
+        }
+
         public JsonObject toJson(Mode mode) {
             JsonObject o = new JsonObject();
             o.addProperty("mode", mode.key());
@@ -81,6 +90,9 @@ public final class AiFixes {
             o.addProperty("burnFaceFired", fired(Kind.BURN_FACE));
             o.addProperty("burnFaceChanged", changed(Kind.BURN_FACE));
             o.addProperty("blockerLeftFired", fired(Kind.BLOCKER_LEFT));
+            o.addProperty("copyChooseDestroyFired", copyFired(Kind.CHOOSE_DESTROY));
+            o.addProperty("copyBurnFaceFired", copyFired(Kind.BURN_FACE));
+            o.addProperty("copyBlockerLeftFired", copyFired(Kind.BLOCKER_LEFT));
             return o;
         }
     }
@@ -98,22 +110,32 @@ public final class AiFixes {
         return mode(p) == Mode.ON;
     }
 
-    /** Record a spot where a fix fires (ON) or would have fired (SHADOW), in the counted live game only. */
+    /** Record a spot where a fix fires (ON) or would have fired (SHADOW): live-game spots, or play-out copy spots. */
     public static void record(final Player p, final Kind kind, final boolean changed) {
         final LobbyPlayer lp = p.getLobbyPlayer();
         if (!(lp instanceof LobbyPlayerAi)) {
             return;
         }
         final Counters c = ((LobbyPlayerAi) lp).getAiFixesCounters();
-        if (c == null || c.game != p.getGame()) {
+        if (c == null) {
             return;
         }
         synchronized (c) {
+            if (c.game != p.getGame()) {
+                c.copyFired[kind.ordinal()]++;
+                return;
+            }
             c.fired[kind.ordinal()]++;
             if (changed) {
                 c.changed[kind.ordinal()]++;
             }
         }
+    }
+
+    /** A copy's lobby player takes the original's mode and counters (look-ahead play-outs; see GameCopier). */
+    public static void inherit(final LobbyPlayerAi from, final LobbyPlayerAi to) {
+        to.setAiFixes0928(from.getAiFixes0928());
+        to.setAiFixesCounters(from.getAiFixesCounters());
     }
 
     /** Start counting this lobby player's fix spots in {@code game} (a bench run's live game). */
