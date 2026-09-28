@@ -311,6 +311,21 @@ public final class LookaheadBench {
                 Files.deleteIfExists(digest.trace);
             }
             game.subscribeToEvents(digest);
+            // Leaf-gate dump (lane leafvalue-0928): per searched decision of a look-ahead seat, multi-horizon leaves on
+            // the K-world seeds and true-position full-game continuations. Off unless "leafGateDir" is set.
+            final List<String> lgLines = java.util.Collections.synchronizedList(new ArrayList<>());
+            if (cfg.has("leafGateDir")) {
+                for (int i = 0; i < 2; i++) {
+                    if (searches.get(i) != null) {
+                        final int si = i;
+                        searches.get(i).leafGateSink = o -> {
+                            o.addProperty("game", id);
+                            o.addProperty("seatIdx", si);
+                            lgLines.add(o.toString());
+                        };
+                    }
+                }
+            }
             // Frame probe (lane forge-ai-misplays-0928): a game may start from a mid-game position in Forge's own
             // GameState text (as BenchMain's from-frame), installed at the start of turn 1, and stop once a turn past
             // "maxTurn" begins -- to replay one reported decision under the search's trace ("-Dlookahead.explain=true").
@@ -432,6 +447,17 @@ public final class LookaheadBench {
                 }
             }
             row.add("search", st);
+            if (cfg.has("leafGateDir")) {
+                final Path dd = Path.of(cfg.get("leafGateDir").getAsString());
+                Files.createDirectories(dd);
+                try (java.io.Writer w = new java.io.OutputStreamWriter(new java.util.zip.GZIPOutputStream(
+                        Files.newOutputStream(dd.resolve(id + ".lg.jsonl.gz"))), StandardCharsets.UTF_8)) {
+                    for (String line : lgLines) {
+                        w.write(line);
+                        w.write('\n');
+                    }
+                }
+            }
             if (fixCounters[0] != null || fixCounters[1] != null) {
                 // Only when a seat's option is not off: off rows keep their schema.
                 final JsonArray fx = new JsonArray();
