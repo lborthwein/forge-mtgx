@@ -179,6 +179,7 @@ public final class LookaheadBench {
                     c.stack = la.has("stack") && la.get("stack").getAsBoolean();
                     c.probeStack = la.has("probeStack") && la.get("probeStack").getAsBoolean();
                     c.margin = la.has("margin") ? la.get("margin").getAsDouble() : 0.0;
+                    c.departZ = la.has("departZ") ? la.get("departZ").getAsDouble() : 0.0;
                     c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();
                     c.modelUrl = la.has("modelUrl") ? la.get("modelUrl").getAsString() : null;
@@ -236,6 +237,34 @@ public final class LookaheadBench {
                 Files.deleteIfExists(digest.trace);
             }
             game.subscribeToEvents(digest);
+            // Frame probe (lane forge-ai-misplays-0928): a game may start from a mid-game position in Forge's own
+            // GameState text (as BenchMain's from-frame), installed at the start of turn 1, and stop once a turn past
+            // "maxTurn" begins -- to replay one reported decision under the search's trace ("-Dlookahead.explain=true").
+            final String framePath = spec.has("frame") ? spec.get("frame").getAsString() : null;
+            final int maxTurn = spec.has("maxTurn") ? spec.get("maxTurn").getAsInt() : 0;
+            Runnable frameHook = null;
+            if (framePath != null) {
+                final String frameText = Files.readString(Path.of(framePath));
+                frameHook = () -> {
+                    final forge.game.GameState gs = new forge.game.GameState();
+                    gs.parse(java.util.Arrays.asList(frameText.split("\\R")));
+                    gs.applyToGame(game);
+                    final forge.game.GameState back = new forge.game.GameState();
+                    back.initFromGame(game);
+                    err.println("[lookahead-bench] frame " + framePath + " installed:\n" + back);
+                };
+            }
+            if (maxTurn > 0) {
+                game.subscribeToEvents(new Object() {
+                    @Subscribe
+                    public void on(GameEventTurnBegan e) {
+                        if (e.turnNumber() > maxTurn && !game.isGameOver()) {
+                            game.setGameOver(forge.game.GameEndReason.Draw);
+                        }
+                    }
+                });
+            }
+            final Runnable startHook = frameHook;
 
             final long cpu0 = os.getProcessCpuTime();
             final long t0 = System.currentTimeMillis();
@@ -243,7 +272,11 @@ public final class LookaheadBench {
             final Future<?> f = gameThread.submit(() -> {
                 forge.util.IdScope.install(gameIds);
                 try {
-                    match.startGame(game);
+                    if (startHook != null) {
+                        match.startGame(game, startHook);
+                    } else {
+                        match.startGame(game);
+                    }
                 } finally {
                     forge.util.IdScope.install(null);
                 }

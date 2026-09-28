@@ -487,6 +487,7 @@ public final class InteractiveMain {
                 case "dedup": c.dedup = !"0".equals(p[1].trim()); break;
                 case "reuse": c.reuse = !"0".equals(p[1].trim()); break;
                 case "margin": c.margin = Double.parseDouble(p[1].trim()); break;
+                case "departZ": c.departZ = Double.parseDouble(p[1].trim()); break;
                 case "maxSteps": c.maxSteps = Integer.parseInt(p[1].trim()); break;
                 case "shadow": c.shadow = !"0".equals(p[1].trim()); break;
                 case "combat": c.combat = !"0".equals(p[1].trim()); break;
