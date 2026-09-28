@@ -91,6 +91,11 @@ public final class InteractiveMain {
             return;
         }
 
+        if (config.isTable()) {
+            System.exit(runTable(config, input, protocolOut) ? 0 : 1);
+            return;
+        }
+
         final InteractiveProtocol.Channel channel =
                 new InteractiveProtocol.Channel(input, protocolOut, config.session());
         try {
@@ -206,6 +211,194 @@ public final class InteractiveMain {
         // This executable owns exactly one game, so terminate only after the final wire
         // message has been flushed and the interactive GUI has been closed.
         System.exit(completedNormally ? 0 : 1);
+    }
+
+    /**
+     * A TABLE (mtgx, 2026-09-27): every configured human seat is a browser, all in this one
+     * game. Each seat is a {@link PlayerControllerHuman} with its own {@link InteractiveGuiGame}
+     * on its own tagged channel, so each browser receives only its own information set and only
+     * its own prompts. Forge's own network play seats several human controllers in one game the
+     * same way (a GUI per remote player); nothing in the rules engine changes.
+     *
+     * <p>The one-seat path above is untouched: a config without {@code humanSeats} never gets here.</p>
+     */
+    private static boolean runTable(final InteractiveProtocol.Config config, final BufferedReader input,
+                                    final PrintStream protocolOut) {
+        final InteractiveProtocol.SeatDemux demux = new InteractiveProtocol.SeatDemux(input, config.humanSeats());
+        final List<InteractiveProtocol.Channel> channels =
+                InteractiveProtocol.Channel.table(demux, protocolOut, config.session(), config.humanSeats());
+        try {
+            for (InteractiveProtocol.Channel channel : channels) {
+                channel.hello(forgeCommit(), nonBlankVersion(), config.aiProfile(), channel.seat(), config.seed());
+            }
+        } catch (InteractiveProtocol.ProtocolException e) {
+            channels.get(0).fatal(e.code(), e.getMessage(), null, "hello", null);
+            return false;
+        }
+
+        final InteractiveGuiGame.Table table = new InteractiveGuiGame.Table();
+        final List<InteractiveGuiGame> guis = new ArrayList<>();
+        boolean completedNormally = false;
+        try {
+            System.setProperty("java.util.Arrays.useLegacyMergeSort", "true");
+            System.setProperty("sun.java2d.d3d", "false");
+            final InteractiveGuiDesktop desktop = new InteractiveGuiDesktop();
+            GuiBase.setInterface(desktop);
+            initializeForge();
+            MyRandom.setRandom(new Random(config.seed()));
+
+            final List<RegisteredPlayer> registered = createTablePlayers(config);
+            final GameRules rules = new GameRules(GameType.Constructed);
+            rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
+            rules.setGamesPerMatch(1);
+            rules.setAISideboardingEnabled(false);
+            rules.setSideboardForAI(false);
+            rules.setAllowCheatShuffle(false);
+            rules.setWarnAboutAICards(false);
+            if (config.startingChooser() >= 0) {
+                rules.setStartingChooser(registered.get(config.startingChooser()), config.gameNumber() == 1);
+            }
+            final Match match = new Match(rules, registered, "Browser table");
+            final Game game = match.createGame();
+            bindLookahead(registered, game, config.seed());
+
+            final List<PlayerControllerHuman> controllers = new ArrayList<>();
+            for (InteractiveProtocol.Channel channel : channels) {
+                final int seat = channel.seat();
+                final Player human = playerAtSeat(game, seat);
+                if (human == null || !(human.getController() instanceof PlayerControllerHuman humanController)) {
+                    throw new IllegalStateException("table seat " + seat + " did not create PlayerControllerHuman");
+                }
+                configureHumanPayment(humanController);
+                final InteractiveGuiGame gui = new InteractiveGuiGame(channel, seat, table);
+                gui.bind(game, human, humanController);
+                humanController.setGui(gui);
+                guis.add(gui);
+                controllers.add(humanController);
+            }
+            desktop.bindTable(guis);
+            for (int i = 0; i < guis.size(); i++) {
+                final InteractiveGuiGame gui = guis.get(i);
+                final PlayerControllerHuman humanController = controllers.get(i);
+                final Player human = gui.player();
+                gui.setGameView(null);
+                gui.setGameView(game.getView());
+                gui.setOriginalGameController(human.getView(), humanController);
+                gui.openView(new TrackableCollection<>(human.getView()));
+            }
+            for (Player player : game.getPlayers()) {
+                player.updateOpponentsForView();
+            }
+            for (int i = 0; i < guis.size(); i++) {
+                game.subscribeToEvents(InteractiveGuiGame.uiEventsExceptEchoes(guis.get(i),
+                        new FControlGameEventHandler(controllers.get(i))));
+                game.subscribeToEvents(guis.get(i));
+            }
+            for (InteractiveGuiGame gui : guis) {
+                gui.startReader();
+            }
+
+            final CompletableFuture<Void> gameFinished = new CompletableFuture<>();
+            final Runnable frameHook = frameHook(config.frame(), game);
+            game.getAction().invoke(() -> {
+                try {
+                    match.startGame(game, frameHook);
+                    gameFinished.complete(null);
+                } catch (InteractiveGuiGame.GameConceded conceded) {
+                    gameFinished.complete(null);
+                } catch (InteractiveGuiGame.InteractiveAbort aborted) {
+                    gameFinished.complete(null);
+                } catch (Throwable failure) {
+                    guis.get(0).engineFailure(failure);
+                    gameFinished.completeExceptionally(failure);
+                }
+            });
+            try {
+                gameFinished.join();
+            } catch (CompletionException ignored) {
+                // engineFailure already emitted the table's fatal.
+            }
+
+            if (guis.stream().noneMatch(InteractiveGuiGame::hasFailed)) {
+                for (InteractiveGuiGame gui : guis) {
+                    gui.emitFinalState();
+                }
+                if (guis.stream().noneMatch(InteractiveGuiGame::hasFailed)) {
+                    completedNormally = true;
+                    for (InteractiveProtocol.Channel channel : channels) {
+                        completedNormally &= emitTerminal(channel, game, registered);
+                    }
+                }
+            }
+        } catch (InteractiveProtocol.ProtocolException failure) {
+            channels.get(0).fatal(failure.code(), failure.getMessage(), null, "InteractiveMain", null);
+        } catch (Throwable failure) {
+            if (!guis.isEmpty()) {
+                guis.get(0).engineFailure(failure);
+            } else {
+                channels.get(0).fatal("engine", "Forge initialization failed: " + failure,
+                        null, "InteractiveMain", null);
+                failure.printStackTrace(System.err);
+            }
+        } finally {
+            table.close();
+            for (InteractiveGuiGame gui : guis) {
+                gui.close();
+            }
+        }
+        return completedNormally;
+    }
+
+    /**
+     * A test host's frame (see {@link InteractiveProtocol#readConfig}): installed through Forge's
+     * startGameHook, which runs after turn 1's untap and before priority is first offered (the
+     * seam every GUI puzzle and the bench's from-frame use). The install runs inline on the game
+     * thread; the thread is named as a game thread for the call, as the bench does, so that
+     * GameState.applyToGame never hands it to another thread. Null when there is no frame.
+     */
+    private static Runnable frameHook(final String frame, final Game game) {
+        if (frame == null) {
+            return null;
+        }
+        return () -> {
+            final forge.game.GameState state = new forge.game.GameState();
+            state.parse(java.util.Arrays.asList(frame.split("\\R")));
+            final Thread self = Thread.currentThread();
+            final String was = self.getName();
+            self.setName("Game-frame-install");
+            try {
+                state.applyToGame(game);
+            } finally {
+                self.setName(was);
+            }
+            System.err.println("[forge.interactive] table frame installed");
+        };
+    }
+
+    /** Every seat of a table: a browser seat is human (named, if the config names it), the rest Forge. */
+    private static List<RegisteredPlayer> createTablePlayers(
+            final InteractiveProtocol.Config config) throws InteractiveProtocol.ProtocolException {
+        final List<RegisteredPlayer> players = new ArrayList<>(2);
+        for (int seat = 0; seat < 2; seat++) {
+            final Path path = config.decks().get(seat);
+            final Deck deck = DeckSerializer.fromFile(path.toFile());
+            if (deck == null) {
+                throw new InteractiveProtocol.ProtocolException("invalid_config",
+                        "could not parse deck: " + path);
+            }
+            validateLoadedDeck(path, deck);
+            final String name = config.names().size() == 2 ? config.names().get(seat) : "Player " + (seat + 1);
+            final LobbyPlayer lobbyPlayer = config.humanSeats().contains(seat)
+                    // A separate LobbyPlayerHuman per seat: the shared GUI player is one identity.
+                    ? GamePlayerUtil.getGuiPlayer(name, 0, 0, false)
+                    : lookaheadSpec() != null
+                            ? lookaheadLobby(config.aiProfile())
+                            : GamePlayerUtil.createAiPlayer("Default Forge", seat, 0, null, config.aiProfile());
+            final RegisteredPlayer registered = new RegisteredPlayer(deck);
+            registered.setPlayer(lobbyPlayer);
+            players.add(registered);
+        }
+        return players;
     }
 
     private static void initializeForge() {

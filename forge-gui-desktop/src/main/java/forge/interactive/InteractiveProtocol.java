@@ -38,11 +38,31 @@ final class InteractiveProtocol {
      * game's number in the caller's match (1 when not part of one).
      */
     record Config(String session, int humanSeat, List<Path> decks, long seed, String aiProfile,
-                  int startingChooser, int gameNumber) {
+                  int startingChooser, int gameNumber, List<Integer> humanSeats, List<String> names,
+                  String frame) {
         Config {
             decks = List.copyOf(decks);
+            humanSeats = humanSeats == null ? List.of(humanSeat) : List.copyOf(humanSeats);
+            names = names == null ? List.of() : List.copyOf(names);
+        }
+
+        Config(final String session, final int humanSeat, final List<Path> decks, final long seed,
+               final String aiProfile, final int startingChooser, final int gameNumber) {
+            this(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber, null, null, null);
+        }
+
+        /**
+         * A TABLE (mtgx, 2026-09-27): more than one browser seat in this one game. Each seat
+         * gets its own tagged channel ({@code "to"} on the way out, {@code "seat"} on the way
+         * in) and its own sequence; nothing about the one-seat wire changes.
+         */
+        boolean isTable() {
+            return humanSeats.size() > 1;
         }
     }
+
+    /** The fixed requestId of a table seat's concession while it has no request of its own. */
+    static final String SEAT_CONCEDE_REQUEST = "seat-concede";
 
     record InputMessage(String requestId, String inputId, String kind, JsonObject action,
                         JsonObject original) {
@@ -132,7 +152,68 @@ final class InteractiveProtocol {
                 throw new ProtocolException("invalid_config", "gameNumber must be 1..99");
             }
         }
-        return new Config(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber);
+        // Optional (mtgx tables, 2026-09-27): every seat a browser plays. Absent is exactly
+        // [humanSeat], the one-seat game this protocol has always been.
+        List<Integer> humanSeats = null;
+        if (json.has("humanSeats") && !json.get("humanSeats").isJsonNull()) {
+            if (!json.get("humanSeats").isJsonArray()) {
+                throw new ProtocolException("invalid_config", "humanSeats must be an array");
+            }
+            final List<Integer> seats = new ArrayList<>();
+            for (JsonElement value : json.getAsJsonArray("humanSeats")) {
+                if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()
+                        || (value.getAsDouble() != 0 && value.getAsDouble() != 1)) {
+                    throw new ProtocolException("invalid_config", "humanSeats entries must be 0 or 1");
+                }
+                final int seat = value.getAsInt();
+                if (seats.contains(seat)) {
+                    throw new ProtocolException("invalid_config", "humanSeats must not repeat a seat");
+                }
+                seats.add(seat);
+            }
+            if (seats.isEmpty() || seats.get(0) != humanSeat) {
+                throw new ProtocolException("invalid_config", "humanSeats must start with humanSeat");
+            }
+            humanSeats = seats;
+        }
+        List<String> names = null;
+        if (json.has("names") && !json.get("names").isJsonNull()) {
+            if (!json.get("names").isJsonArray() || json.getAsJsonArray("names").size() != 2) {
+                throw new ProtocolException("invalid_config", "names must contain exactly two display names");
+            }
+            names = new ArrayList<>(2);
+            for (JsonElement value : json.getAsJsonArray("names")) {
+                if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
+                    throw new ProtocolException("invalid_config", "each name must be a string");
+                }
+                final String name = value.getAsString().trim();
+                if (name.isEmpty() || name.length() > 40 || !name.matches("[\\p{L}\\p{N} ._'-]+")) {
+                    throw new ProtocolException("invalid_config",
+                            "each name must be 1..40 letters, digits, spaces or ._'-");
+                }
+                names.add(name);
+            }
+        }
+        // Optional, TEST HOSTS ONLY: a Forge GameState text (dev-mode/puzzle format) installed
+        // at the start of a TABLE's first turn, so a rules case can be shown from an exact
+        // position. Refused unless this JVM was started with -Dforge.interactive.allowFrame=true,
+        // which no production launch passes.
+        String frame = null;
+        if (json.has("frame") && !json.get("frame").isJsonNull()) {
+            if (!Boolean.getBoolean("forge.interactive.allowFrame")) {
+                throw new ProtocolException("invalid_config", "frame is not allowed on this host");
+            }
+            if (!json.get("frame").isJsonPrimitive() || !json.getAsJsonPrimitive("frame").isString()
+                    || json.get("frame").getAsString().isBlank() || json.get("frame").getAsString().length() > 65536) {
+                throw new ProtocolException("invalid_config", "frame must be a non-blank GameState text up to 64 KiB");
+            }
+            if (humanSeats == null || humanSeats.size() < 2) {
+                throw new ProtocolException("invalid_config", "frame is a table (humanSeats) option");
+            }
+            frame = json.get("frame").getAsString();
+        }
+        return new Config(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber,
+                humanSeats, names, frame);
     }
 
     static String bestEffortSession(final String line) {
@@ -167,17 +248,53 @@ final class InteractiveProtocol {
         }
     }
 
+    /** Where a channel's input lines come from: stdin itself, or one seat's queue of a table. */
+    interface LineSource {
+        /** The next line, or null at end of input. */
+        String readLine() throws IOException;
+    }
+
     static final class Channel {
-        private final BufferedReader input;
+        private final LineSource input;
         private final PrintStream output;
         private final String session;
         private final AtomicLong sequence = new AtomicLong();
         private final AtomicBoolean ended = new AtomicBoolean();
+        /** A table seat's number, or null for the one-seat wire (no tag, exactly as before). */
+        private final Integer seat;
+        /** Every seat channel of a table, this one included; empty for a one-seat channel. */
+        private final List<Channel> table;
 
         Channel(final BufferedReader input, final PrintStream output, final String session) {
+            this(Objects.requireNonNull(input)::readLine, output, session, null, List.of());
+        }
+
+        private Channel(final LineSource input, final PrintStream output, final String session,
+                        final Integer seat, final List<Channel> table) {
             this.input = Objects.requireNonNull(input);
             this.output = Objects.requireNonNull(output);
             this.session = Objects.requireNonNull(session);
+            this.seat = seat;
+            this.table = table;
+        }
+
+        /**
+         * One channel per table seat over a single stdin/stdout. Outgoing messages carry
+         * {@code "to": seat} and each seat has its own sequence; incoming lines are routed by
+         * their {@code "seat"} field ({@link SeatDemux}). A fatal on any seat is sent to every
+         * seat, because a table has one game.
+         */
+        static List<Channel> table(final SeatDemux demux, final PrintStream output, final String session,
+                                   final List<Integer> seats) {
+            final List<Channel> channels = new java.util.concurrent.CopyOnWriteArrayList<>();
+            for (int seat : seats) {
+                channels.add(new Channel(demux.source(seat), output, session, seat, channels));
+            }
+            return List.copyOf(channels);
+        }
+
+        Integer seat() {
+            return seat;
         }
 
         String session() {
@@ -224,6 +341,16 @@ final class InteractiveProtocol {
 
         void fatal(final String code, final String message, final String requestId,
                    final String method, final String kind) {
+            fatalOne(code, message, requestId, method, kind);
+            for (Channel sibling : table) {
+                if (sibling != this) {
+                    sibling.fatalOne(code, message, null, method, null);
+                }
+            }
+        }
+
+        private void fatalOne(final String code, final String message, final String requestId,
+                              final String method, final String kind) {
             if (!ended.compareAndSet(false, true)) {
                 return;
             }
@@ -284,6 +411,15 @@ final class InteractiveProtocol {
             requireExactString(json, "protocol", VERSION, "protocol_mismatch");
             requireExactString(json, "session", session, "protocol_mismatch");
             requireExactString(json, "type", "input", "protocol_mismatch");
+            if (seat != null) {
+                if (!json.has("seat") || !json.get("seat").isJsonPrimitive()
+                        || !json.getAsJsonPrimitive("seat").isNumber()
+                        || json.get("seat").getAsDouble() != seat) {
+                    throw new ProtocolException("protocol_mismatch", "table input must carry seat " + seat);
+                }
+            } else if (json.has("seat")) {
+                throw new ProtocolException("protocol_mismatch", "one-seat input must not carry seat");
+            }
             if (json.has("seq")) {
                 throw new ProtocolException("protocol_mismatch", "input messages must not carry seq");
             }
@@ -314,6 +450,9 @@ final class InteractiveProtocol {
                 message.addProperty("protocol", VERSION);
                 message.addProperty("session", session);
                 message.addProperty("seq", sequence.incrementAndGet());
+                if (seat != null) {
+                    message.addProperty("to", seat);
+                }
                 message.addProperty("type", type);
                 if (body != null) {
                     for (Map.Entry<String, JsonElement> entry : body.entrySet()) {
@@ -330,6 +469,88 @@ final class InteractiveProtocol {
                     throw new ProtocolException("eof", "stdout closed while writing protocol message");
                 }
                 return message;
+            }
+        }
+    }
+
+    /**
+     * Routes a table's stdin to its seats: one reader thread, one queue per seat, by the line's
+     * {@code "seat"}. A line naming no configured seat goes to the first seat, whose channel
+     * then refuses it as a protocol mismatch (a fatal for the table), so a bad line is never
+     * silently dropped. End of input reaches every seat.
+     */
+    static final class SeatDemux {
+        private static final String EOF = new String("<eof>");
+        private final BufferedReader input;
+        private final Map<Integer, java.util.concurrent.BlockingQueue<String>> queues =
+                new java.util.LinkedHashMap<>();
+        private volatile Thread reader;
+
+        SeatDemux(final BufferedReader input, final List<Integer> seats) {
+            this.input = Objects.requireNonNull(input);
+            for (int seat : seats) {
+                queues.put(seat, new java.util.concurrent.LinkedBlockingQueue<>());
+            }
+        }
+
+        LineSource source(final int seat) {
+            final java.util.concurrent.BlockingQueue<String> queue = queues.get(seat);
+            return () -> {
+                start();
+                final String line;
+                try {
+                    line = queue.take();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("interrupted while awaiting seat " + seat + " input", e);
+                }
+                if (line == EOF) {
+                    queue.add(EOF);
+                    return null;
+                }
+                return line;
+            };
+        }
+
+        synchronized void start() {
+            if (reader != null) {
+                return;
+            }
+            reader = new Thread(this::pump, "Forge Interactive Table Demux");
+            reader.setDaemon(true);
+            reader.start();
+        }
+
+        static Integer seatOf(final String line) {
+            try {
+                final JsonElement parsed = JsonParser.parseString(line);
+                if (parsed.isJsonObject() && parsed.getAsJsonObject().has("seat")
+                        && parsed.getAsJsonObject().get("seat").isJsonPrimitive()
+                        && parsed.getAsJsonObject().getAsJsonPrimitive("seat").isNumber()) {
+                    final double seat = parsed.getAsJsonObject().get("seat").getAsDouble();
+                    return seat == Math.rint(seat) ? (int) seat : null;
+                }
+            } catch (RuntimeException ignored) {
+                // Unroutable: the first seat's channel refuses it.
+            }
+            return null;
+        }
+
+        private void pump() {
+            try {
+                String line;
+                while ((line = input.readLine()) != null) {
+                    final Integer seat = seatOf(line);
+                    final java.util.concurrent.BlockingQueue<String> queue =
+                            seat != null && queues.containsKey(seat) ? queues.get(seat)
+                                    : queues.values().iterator().next();
+                    queue.add(line);
+                }
+            } catch (IOException ignored) {
+                // End of input, as far as the seats are concerned.
+            }
+            for (java.util.concurrent.BlockingQueue<String> queue : queues.values()) {
+                queue.add(EOF);
             }
         }
     }

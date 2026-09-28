@@ -27,6 +27,8 @@ import java.util.Objects;
  */
 final class InteractiveGuiDesktop extends GuiDesktop {
     private volatile InteractiveGuiGame gameGui;
+    /** A table's seats (mtgx, 2026-09-27), in seat order; empty for a one-seat game. */
+    private final List<InteractiveGuiGame> tableSeats = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     void bind(final InteractiveGuiGame gui) {
         if (gameGui != null && gameGui != gui) {
@@ -35,12 +37,50 @@ final class InteractiveGuiDesktop extends GuiDesktop {
         gameGui = Objects.requireNonNull(gui);
     }
 
+    /** A table: every seat's GUI. The global chooser goes to the seat the choice belongs to. */
+    void bindTable(final List<InteractiveGuiGame> seats) {
+        if (gameGui != null || !tableSeats.isEmpty() || seats.isEmpty()) {
+            throw new IllegalStateException("interactive desktop may bind only one game");
+        }
+        tableSeats.addAll(seats);
+    }
+
     private InteractiveGuiGame gui() {
+        if (!tableSeats.isEmpty()) {
+            return tableGui();
+        }
         final InteractiveGuiGame value = gameGui;
         if (value == null) {
             throw new IllegalStateException("global GUI choice requested before interactive game binding");
         }
         return value;
+    }
+
+    /**
+     * Whose global choice this is, at a table: the seat whose action lane is running it (a
+     * cost paid while that seat's click executes), else the player Forge is giving priority
+     * to (a cost is paid by the player who has priority), else the active player.
+     */
+    private InteractiveGuiGame tableGui() {
+        final InteractiveGuiGame owner = InteractiveGuiGame.onCurrentThread();
+        if (owner != null && tableSeats.contains(owner)) {
+            return owner;
+        }
+        final InteractiveGuiGame first = tableSeats.get(0);
+        final forge.game.player.Player seatPlayer = first.player();
+        final forge.game.Game game = seatPlayer == null ? null : seatPlayer.getGame();
+        if (game != null) {
+            final forge.game.phase.PhaseHandler phases = game.getPhaseHandler();
+            for (forge.game.player.Player wanted : java.util.Arrays.asList(
+                    phases.getPriorityPlayer(), phases.getPlayerTurn())) {
+                for (InteractiveGuiGame seat : tableSeats) {
+                    if (wanted != null && seat.player() == wanted) {
+                        return seat;
+                    }
+                }
+            }
+        }
+        return first;
     }
 
     @Override

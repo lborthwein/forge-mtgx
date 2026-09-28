@@ -132,12 +132,29 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private volatile String lastInputFingerprint = "";
     private final ThreadLocal<Set<Integer>> explicitlyOfferedCards =
             ThreadLocal.withInitial(Collections::emptySet);
+    /** The table this seat sits at (two browser seats, one game), or null for a one-seat game. */
+    private final Table table;
+    /** The table seat whose action lane is running on this thread; see {@link #onCurrentThread}. */
+    private static final ThreadLocal<InteractiveGuiGame> ACTION_OWNER = new ThreadLocal<>();
 
     InteractiveGuiGame(final InteractiveProtocol.Channel channel, final int humanSeat) {
+        this(channel, humanSeat, null);
+    }
+
+    InteractiveGuiGame(final InteractiveProtocol.Channel channel, final int humanSeat, final Table table) {
         this.channel = Objects.requireNonNull(channel);
         this.humanSeat = humanSeat;
+        this.table = table;
+        if (table != null) {
+            table.seats.add(this);
+        }
         final ThreadFactory factory = runnable -> {
-            final Thread thread = new Thread(runnable, "Game Interactive Human Input");
+            final Runnable owned = table == null ? runnable : () -> {
+                ACTION_OWNER.set(this);
+                runnable.run();
+            };
+            final Thread thread = new Thread(owned, "Game Interactive Human Input"
+                    + (table == null ? "" : " seat " + humanSeat));
             thread.setDaemon(true);
             return thread;
         };
@@ -154,6 +171,134 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         this.game = Objects.requireNonNull(game);
         this.human = Objects.requireNonNull(human);
         this.controller = Objects.requireNonNull(controller);
+    }
+
+    int seat() {
+        return humanSeat;
+    }
+
+    Player player() {
+        return human;
+    }
+
+    /** The table seat whose action lane runs on the calling thread, or null. */
+    static InteractiveGuiGame onCurrentThread() {
+        return ACTION_OWNER.get();
+    }
+
+    /**
+     * Two browser seats in one game (mtgx, 2026-09-27). Shared by the seats' GUIs so that a
+     * seat can concede while the other seat is the one Forge waits on, and so that the end of
+     * the game (or a failure) releases every seat, not only the one it happened on.
+     */
+    static final class Table {
+        final List<InteractiveGuiGame> seats = new java.util.concurrent.CopyOnWriteArrayList<>();
+        private final Set<InteractiveGuiGame> pendingConcede = ConcurrentHashMap.newKeySet();
+        private final java.util.concurrent.ScheduledExecutorService concedes =
+                Executors.newSingleThreadScheduledExecutor(runnable -> {
+                    final Thread thread = new Thread(runnable, "Forge Interactive Table Concede");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+
+        /** Queue a look at pending concessions on the table's own thread. Never blocks the caller. */
+        void tryRunPendingConcedes() {
+            if (!pendingConcede.isEmpty()) {
+                concedes.execute(this::runPendingConcedes);
+            }
+        }
+
+        /**
+         * Run queued concessions, but only at a safe point: every seat's engine gate is held (no
+         * action can be claimed meanwhile), no seat's action is executing, and some seat has a
+         * live request or modal, i.e. Forge's game thread is parked on a human input. A
+         * concession is a real Forge game action; running it while the game thread resolves
+         * something would be two threads in Forge's single-threaded model. Otherwise it is
+         * retried shortly, and the next published request (the next park) looks again.
+         */
+        private void runPendingConcedes() {
+            if (pendingConcede.isEmpty()) {
+                return;
+            }
+            final List<ReentrantLock> held = new ArrayList<>();
+            try {
+                for (InteractiveGuiGame seat : seats) {
+                    if (!seat.engineGate.tryLock(200, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                        retryLater();
+                        return;
+                    }
+                    held.add(seat.engineGate);
+                }
+                boolean parked = false;
+                for (InteractiveGuiGame seat : seats) {
+                    if (seat.game != null && seat.game.isGameOver()) {
+                        pendingConcede.clear();
+                        return;
+                    }
+                    if (!seat.inFlightInputs.isEmpty()) {
+                        retryLater();
+                        return;
+                    }
+                    parked |= seat.activeRequest.get() != null || seat.modalRequest.get() != null;
+                }
+                if (!parked) {
+                    retryLater();
+                    return;
+                }
+                for (InteractiveGuiGame seat : seats) {
+                    if (pendingConcede.remove(seat)) {
+                        seat.concedeNow();
+                    }
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                for (int i = held.size() - 1; i >= 0; i--) {
+                    held.get(i).unlock();
+                }
+            }
+        }
+
+        private void retryLater() {
+            if (!concedes.isShutdown()) {
+                concedes.schedule(this::runPendingConcedes, 250, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+        }
+
+        void close() {
+            concedes.shutdownNow();
+        }
+    }
+
+    private void concedeNow() {
+        try {
+            if (game != null && !game.isGameOver()) {
+                controller.concede();
+            }
+        } catch (Throwable failure) {
+            fail("engine", "concede failed: " + safeThrowable(failure), null,
+                    "dispatch:seat-concede", "concede", failure);
+        }
+    }
+
+    /**
+     * A table seat's concession while Forge is not waiting on it (it has no request to attach
+     * the ordinary {@code game:concede} control to). Accepted at once, run at the next safe
+     * point ({@link Table#tryRunPendingConcedes}).
+     */
+    private void acceptSeatConcede(final InteractiveProtocol.InputMessage input, final PendingInput pending) {
+        if (!"concede".equals(input.kind()) || !"concede".equals(string(input.action(), "type"))
+                || !"game:concede".equals(string(input.action(), "controlId"))) {
+            finishInput(input, pending, false, "a seat concession must be the game:concede control");
+            return;
+        }
+        if (game == null || game.isGameOver()) {
+            finishInput(input, pending, false, "the game is already over");
+            return;
+        }
+        finishInput(input, pending, true, null);
+        table.pendingConcede.add(this);
+        table.tryRunPendingConcedes();
     }
 
     void startReader() {
@@ -222,6 +367,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     }
                 });
             }
+            return;
+        }
+
+        if (table != null && InteractiveProtocol.SEAT_CONCEDE_REQUEST.equals(input.requestId())) {
+            acceptSeatConcede(input, pending);
             return;
         }
 
@@ -505,6 +655,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             final ActiveRequest request = new ActiveRequest(requestId, kind, input, bindings);
             activeRequest.set(request);
             channel.send("request", body);
+            if (table != null) {
+                table.tryRunPendingConcedes();
+            }
         } catch (InteractiveAbort ignored) {
             // The fatal message was already emitted.
         } catch (Throwable failure) {
@@ -1128,6 +1281,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             channel.send("request", requestBody(requestId, kind, inputClass, title, message,
                     min, max, cancellable, controls));
             sent = true;
+            if (table != null) {
+                table.tryRunPendingConcedes();
+            }
         } catch (InteractiveProtocol.ProtocolException e) {
             fail("eof", e.getMessage(), requestId, inputClass, kind, e);
             throw new InteractiveAbort(e.getMessage(), e);
@@ -1321,6 +1477,14 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             currentController.macros().cancelCurrentMacro();
             currentController.getInputQueue().onGameOver(true);
         }
+        if (table != null) {
+            // One game: the other seats stop waiting too (their channels already carry the fatal).
+            for (InteractiveGuiGame seat : table.seats) {
+                if (seat != this) {
+                    seat.releaseForTableEnd(message);
+                }
+            }
+        }
         final Game currentGame = game;
         if (currentGame != null && !currentGame.isGameOver()) {
             try {
@@ -1331,6 +1495,20 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
         }
         actions.shutdownNow();
+    }
+
+    /** A table seat's share of another seat's failure: stop waiting for this browser. */
+    private void releaseForTableEnd(final String message) {
+        aborting.set(true);
+        final ModalRequest modal = modalRequest.getAndSet(null);
+        if (modal != null) {
+            modal.answer.completeExceptionally(new InteractiveAbort(message));
+        }
+        final PlayerControllerHuman currentController = controller;
+        if (currentController != null) {
+            currentController.macros().cancelCurrentMacro();
+            currentController.getInputQueue().onGameOver(true);
+        }
     }
 
     @Override
@@ -1465,6 +1643,14 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (event instanceof GameEventGameOutcome && controller != null) {
             controller.macros().cancelCurrentMacro();
             controller.getInputQueue().onGameOver(true);
+            if (table != null) {
+                // The other seat's concession ended the game while Forge's game thread waits in
+                // THIS seat's modal: unwind it the way a concession inside the modal does.
+                final ModalRequest modal = modalRequest.getAndSet(null);
+                if (modal != null) {
+                    modal.answer.completeExceptionally(new GameConceded());
+                }
+            }
         }
         onEngineEvent(event);
         if (event instanceof GameEventGameFinished) {
