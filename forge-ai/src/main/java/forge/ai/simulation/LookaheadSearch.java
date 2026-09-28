@@ -4,8 +4,10 @@ import com.google.common.eventbus.Subscribe;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import forge.ai.AiCache;
+import forge.ai.AiController;
 import forge.ai.AiPlayDecision;
 import forge.ai.ComputerUtilAbility;
+import forge.ai.ComputerUtilCost;
 import forge.ai.PlayerControllerAi;
 import forge.game.Game;
 import forge.game.card.Card;
@@ -17,6 +19,7 @@ import forge.game.phase.PhaseHandler;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
 import forge.game.spellability.SpellAbility;
+import forge.game.staticability.StaticAbilityMustTarget;
 import forge.game.zone.ZoneType;
 import forge.util.MyRandom;
 
@@ -66,6 +69,12 @@ public final class LookaheadSearch {
     static final boolean FAIL_WHY = Boolean.getBoolean("lookahead.failWhy");
     /** The reason the last static candidate preparation on this thread returned null (diagnostics). */
     private static final ThreadLocal<String> PREP_WHY = new ThreadLocal<>();
+    /** candprep diagnostics: one "[lookahead-force]" JSON line per targeted candidate the enumeration checks. */
+    static final boolean FORCE_LOG = Boolean.getBoolean("lookahead.forceLog");
+    /** candprep: the last static candidate preparation on this thread used forced targets. */
+    private static final ThreadLocal<Boolean> PREP_FORCED = new ThreadLocal<>();
+    /** candprep: the last static candidate preparation on this thread was refused by Forge AI ("decision|api|spec state"). */
+    private static final ThreadLocal<String> PREP_REFUSAL = new ThreadLocal<>();
 
     public static final class Config {
         public int worlds = 1;
@@ -108,6 +117,24 @@ public final class LookaheadSearch {
          * play-outs cannot tell the candidates apart -- one divergent or terminal world must not decide.
          */
         public double departZ = 0.0;
+        /**
+         * candprep (lane candprep-0928; "off" = the default: candidates unchanged). A non-default candidate that needs
+         * targets and that Forge AI's canPlaySa refuses (CantPlayAi) in a copy is otherwise dropped unscored. "on": play
+         * it with forced targets -- the targets Forge AI itself picks when the ability is mandatory (doTrigger with
+         * mandatory=true, per targeting sub-ability), computed once per decision in the enumeration copy and kept only
+         * if legal (target number valid, canTarget, must-target restriction, restrictions/timing/stack/cost as in the
+         * simulation picker's candidate check); the same targets are applied in every world and live. "shadow": the
+         * forced targets are computed and counted, never used. Only the AI's willingness check is loosened.
+         */
+        public String forceRefused = "off";
+
+        public boolean forceOn() {
+            return "on".equals(forceRefused);
+        }
+
+        public boolean forceComputed() {
+            return "on".equals(forceRefused) || "shadow".equals(forceRefused);
+        }
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
@@ -242,6 +269,9 @@ public final class LookaheadSearch {
             if (departZ > 0) {
                 o.addProperty("departZ", departZ);
             }
+            if (forceComputed()) {
+                o.addProperty("forceRefused", forceRefused);
+            }
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
@@ -314,6 +344,16 @@ public final class LookaheadSearch {
         public final Map<String, Long> stackWhy = new TreeMap<>();
         /** Diagnostics (-Dlookahead.failWhy=true): why play-outs failed (candidate preparation refusals by step, exceptions by class). */
         public final Map<String, Long> rolloutFailWhy = new TreeMap<>();
+        /**
+         * candprep (reported only when forceRefused is on or shadow). Enumeration: targeted non-default candidates checked,
+         * of those Forge AI refused there (CantPlayAi), forced targets found (legal); forceWhy counts by
+         * "forced|api", "nospec:reason|api", "refused:decision|api" (other refusals, never forced), "acceptedSpec|api".
+         * Play-outs: prepared with forced targets; refused by Forge AI in the copy, by "decision|api|spec state".
+         * Live: departures played with forced targets.
+         */
+        public long forceTargeted, forceRefusedEnum, forceSpecs, forcePrepared, forceLive;
+        public final Map<String, Long> forceWhy = new TreeMap<>();
+        public final Map<String, Long> forcePrepWhy = new TreeMap<>();
         /** C5 model leaf: requests, leaves scored, decisions that fell back to the static evaluator. */
         public long modelCalls, modelLeaves, modelFallbacks, modelNanos, modelUnknownCards;
         /** Latency of every searched priority decision (ms, wall), in order. */
@@ -397,6 +437,19 @@ public final class LookaheadSearch {
                 final JsonObject fw = new JsonObject();
                 rolloutFailWhy.forEach(fw::addProperty);
                 o.add("rolloutFailWhy", fw);
+            }
+            if (forceTargeted > 0 || forcePrepared > 0 || forceLive > 0 || !forcePrepWhy.isEmpty()) {
+                o.addProperty("forceTargeted", forceTargeted);
+                o.addProperty("forceRefusedEnum", forceRefusedEnum);
+                o.addProperty("forceSpecs", forceSpecs);
+                o.addProperty("forcePrepared", forcePrepared);
+                o.addProperty("forceLive", forceLive);
+                final JsonObject fw = new JsonObject();
+                forceWhy.forEach(fw::addProperty);
+                o.add("forceWhy", fw);
+                final JsonObject pw = new JsonObject();
+                forcePrepWhy.forEach(pw::addProperty);
+                o.add("forcePrepWhy", pw);
             }
             o.addProperty("rolloutCapped", rolloutCapped);
             o.addProperty("candidatesDropped", candidatesDropped);
@@ -586,6 +639,11 @@ public final class LookaheadSearch {
         private static String trim(String s) {
             return s.length() > 60 ? s.substring(0, 60) : s;
         }
+
+        /** candprep: forced targets (see {@link LookaheadSearch#forceSpecOf}), used only if Forge AI refuses; null = none. */
+        String force;
+        /** candprep shadow: the forced targets that "on" would attach (diagnostics only; never used). */
+        String forceShadow;
     }
 
     /** Diagnostics: one "[lookahead-explain]" JSON line per searched decision (candidates, choices, per-world values). */
@@ -1059,6 +1117,14 @@ public final class LookaheadSearch {
             }
             stats.rollouts++;
             stats.steps += r.steps;
+            if (cfg.forceComputed()) {
+                if (r.forced) {
+                    stats.forcePrepared++;
+                }
+                if (r.refusal != null) {
+                    stats.forcePrepWhy.merge(r.refusal, 1L, Long::sum);
+                }
+            }
             if (r.aborted) {
                 stats.rolloutsAborted++;
             } else if (!r.ok) {
@@ -1674,6 +1740,13 @@ public final class LookaheadSearch {
                     beliefRoot[0] = null;
                 }
             }
+            if (cfg.forceComputed()) {
+                // candprep: last in this copy (nothing above reads what it touches), under its own RNG.
+                forceSpecs(g, me, out, decisionSeed);
+                if (pv != null) {
+                    forceSpecs(g, me, pv.tail, decisionSeed);
+                }
+            }
         } catch (RuntimeException e) {
             // Enumeration failure: search nothing, play Forge's answer.
             if (cfg.stack && !live.getStack().isEmpty()) {
@@ -1892,14 +1965,266 @@ public final class LookaheadSearch {
         }
         AiPlayDecision dec = ((PlayerControllerAi) me.getController()).getAi().canPlaySa(sa);
         if (dec != AiPlayDecision.WillPlay && needsTargets(sa)) {
-            PREP_WHY.set("aiRefused:" + dec);
-            return null;
+            if (c.force == null || dec != AiPlayDecision.CantPlayAi) {
+                PREP_WHY.set("aiRefused:" + dec);
+                PREP_REFUSAL.set(dec + "|" + forceApiKey(sa) + "|"
+                        + (c.force != null ? "spec" : c.forceShadow != null ? "shadowSpec" : "nospec"));
+                return null;
+            }
+            // candprep: Forge AI will not play it; play it with the forced targets if they are legal here.
+            if (!applyForce(sa, c.force, g, me)) {
+                PREP_WHY.set("force:apply");
+                PREP_REFUSAL.set(dec + "|" + forceApiKey(sa) + "|applyFailed");
+                return null;
+            }
+            PREP_FORCED.set(Boolean.TRUE);
         }
         if (!targetsInGame(sa, g)) {
             PREP_WHY.set("targets");
             return null;
         }
         return sa;
+    }
+
+    // ------------------------------------------------------------------ candprep (forced targets)
+
+    /**
+     * candprep: in the enumeration copy, for every non-default, non-pass, non-land candidate that needs targets, the
+     * forced targets (Forge AI's mandatory choice, kept only if legal). Computed where Forge AI refuses the candidate in
+     * this copy (CantPlayAi) and where it accepts it (a play-out copy or the live game may still refuse: Forge AI's
+     * checks are partly random). Attached to the candidate only when the option is "on"; used only on a CantPlayAi
+     * refusal. Runs under its own RNG; the copy is discarded afterwards.
+     */
+    private void forceSpecs(Game g, Player me, List<Cand> cands, long decisionSeed) {
+        final Random prev = MyRandom.getThreadRandom();
+        MyRandom.setThreadRandom(new Random(mix(decisionSeed, 13)));
+        try {
+            for (Cand c : cands) {
+                if (c.pass || c.land || c.isDefault || c.force != null || c.forceShadow != null) {
+                    continue;
+                }
+                String api = "?";
+                String dec = "?";
+                String spec = null;
+                final String[] why = new String[1];
+                boolean counted = false;
+                try {
+                    final SpellAbility sa = locate(g, me, c);
+                    if (sa == null) {
+                        continue;
+                    }
+                    sa.setActivatingPlayer(me);
+                    resetAllTargets(sa);
+                    if (!needsTargets(sa)) {
+                        continue;
+                    }
+                    api = forceApiKey(sa);
+                    stats.forceTargeted++;
+                    counted = true;
+                    final AiPlayDecision d = ((PlayerControllerAi) me.getController()).getAi().canPlaySa(sa);
+                    dec = String.valueOf(d);
+                    if (d != AiPlayDecision.WillPlay && d != AiPlayDecision.CantPlayAi && needsTargets(sa)) {
+                        stats.forceWhy.merge("refused:" + d + "|" + api, 1L, Long::sum);
+                        forceLog(c, api, dec, null, "otherRefusal");
+                        continue;
+                    }
+                    final boolean refused = d == AiPlayDecision.CantPlayAi && needsTargets(sa);
+                    if (refused) {
+                        stats.forceRefusedEnum++;
+                    }
+                    spec = forcedTargets(g, me, sa, why);
+                    if (spec == null) {
+                        stats.forceWhy.merge("nospec:" + why[0] + "|" + api, 1L, Long::sum);
+                    } else {
+                        stats.forceSpecs++;
+                        stats.forceWhy.merge((refused ? "forced|" : "acceptedSpec|") + api, 1L, Long::sum);
+                        if (cfg.forceOn()) {
+                            c.force = spec;
+                        } else {
+                            c.forceShadow = spec;
+                        }
+                    }
+                    if (refused || FORCE_LOG) {
+                        forceLog(c, api, dec, spec, spec == null ? why[0] : refused ? "forced" : "accepted");
+                    }
+                } catch (RuntimeException e) {
+                    if (counted) {
+                        stats.forceWhy.merge("nospec:error:" + e.getClass().getSimpleName() + "|" + api, 1L, Long::sum);
+                    }
+                    forceLog(c, api, dec, null, "error:" + e);
+                }
+            }
+        } finally {
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    private static void forceLog(Cand c, String api, String dec, String spec, String what) {
+        if (!FORCE_LOG) {
+            return;
+        }
+        final JsonObject o = new JsonObject();
+        o.addProperty("cand", c.label);
+        o.addProperty("kind", c.kind);
+        o.addProperty("api", api);
+        o.addProperty("dec", dec);
+        o.addProperty("spec", spec);
+        o.addProperty("what", what);
+        System.err.println("[lookahead-force] " + o);
+    }
+
+    /** The ability's API; with "&gt;subApi" when the first target slot short of targets is a sub-ability's. */
+    static String forceApiKey(SpellAbility sa) {
+        final String top = String.valueOf(sa.getApi());
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting() && !s.isTargetNumberValid()) {
+                return s == sa ? top : top + ">" + s.getApi();
+            }
+        }
+        return top;
+    }
+
+    static void resetAllTargets(SpellAbility sa) {
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting()) {
+                s.resetTargets();
+            }
+        }
+    }
+
+    /**
+     * candprep: Forge AI's targets for the ability as if it were mandatory (the choice Forge makes when it must play it),
+     * then each sub-ability's target slot still short of targets the same way; the spec if every slot is legal, else null
+     * with the reason in {@code why[0]}.
+     */
+    static String forcedTargets(Game g, Player me, SpellAbility sa, String[] why) {
+        final AiController ai = ((PlayerControllerAi) me.getController()).getAi();
+        resetAllTargets(sa);
+        ai.doTrigger(sa, true); // its answer is not used: legality is checked below
+        for (SpellAbility s = sa.getSubAbility(); s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting() && !s.isTargetNumberValid()) {
+                s.resetTargets();
+                ai.doTrigger(s, true);
+            }
+        }
+        return forceSpecOf(g, me, sa, why);
+    }
+
+    /**
+     * The forced-target spec of an ability whose targets are set: "i:API:ref,ref;" per targeting (sub-)ability i of the
+     * chain (ref "P&lt;player index&gt;" or "C&lt;card id&gt;"), or null (reason in {@code why[0]}) unless every slot is legal.
+     */
+    static String forceSpecOf(Game g, Player me, SpellAbility sa, String[] why) {
+        final StringBuilder b = new StringBuilder();
+        int i = 0;
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility(), i++) {
+            if (!s.usesTargeting()) {
+                continue;
+            }
+            if (s.isDividedAsYouChoose()) {
+                why[0] = "divided";
+                return null;
+            }
+            if (!s.isTargetNumberValid()) {
+                why[0] = "targetNumber";
+                return null;
+            }
+            b.append(i).append(':').append(s.getApi()).append(':');
+            boolean first = true;
+            for (forge.game.GameObject o : s.getTargets()) {
+                final String r = forceRef(g, o);
+                if (r == null) {
+                    why[0] = "targetKind";
+                    return null;
+                }
+                if (!s.canTarget(o)) {
+                    why[0] = "canTarget";
+                    return null;
+                }
+                if (!first) {
+                    b.append(',');
+                }
+                b.append(r);
+                first = false;
+            }
+            b.append(';');
+        }
+        if (b.length() == 0) {
+            why[0] = "noSlot";
+            return null;
+        }
+        if (!StaticAbilityMustTarget.meetsMustTargetRestriction(sa)) {
+            why[0] = "mustTarget";
+            return null;
+        }
+        if (!legalToForce(sa, me)) {
+            why[0] = "illegal";
+            return null;
+        }
+        return b.toString();
+    }
+
+    static String forceRef(Game g, forge.game.GameObject o) {
+        if (o instanceof Player) {
+            final int i = g.getPlayers().indexOf(o);
+            return i < 0 ? null : "P" + i;
+        }
+        if (o instanceof Card) {
+            return ((Card) o).getGame() == g ? "C" + ((Card) o).getId() : null;
+        }
+        return null;
+    }
+
+    /** The simulation picker's legality check of a candidate (restrictions, stack, timing, cost), targets set. */
+    static boolean legalToForce(SpellAbility sa, Player me) {
+        return sa.checkRestrictions(sa.getHostCard(), me) && sa.isLegalAfterStack() && sa.canPlay()
+                && ComputerUtilCost.canPayCost(sa, me, sa.isTrigger());
+    }
+
+    /** Put the forced targets {@code spec} into the ability in game {@code g}; false unless every slot is legal there. */
+    static boolean applyForce(SpellAbility sa, String spec, Game g, Player me) {
+        resetAllTargets(sa);
+        for (String part : spec.split(";")) {
+            if (part.isEmpty()) {
+                continue;
+            }
+            final String[] f = part.split(":", 3);
+            SpellAbility s = sa;
+            for (int j = Integer.parseInt(f[0]); j > 0 && s != null; j--) {
+                s = s.getSubAbility();
+            }
+            if (s == null || !s.usesTargeting() || !String.valueOf(s.getApi()).equals(f[1])) {
+                resetAllTargets(sa);
+                return false;
+            }
+            if (f.length > 2 && !f[2].isEmpty()) {
+                for (String r : f[2].split(",")) {
+                    forge.game.GameObject o = null;
+                    if (r.startsWith("P")) {
+                        final int k = Integer.parseInt(r.substring(1));
+                        o = k >= 0 && k < g.getPlayers().size() ? g.getPlayers().get(k) : null;
+                    } else if (r.startsWith("C")) {
+                        o = g.findById(Integer.parseInt(r.substring(1)));
+                    }
+                    if (o == null || !s.canTarget(o)) {
+                        resetAllTargets(sa);
+                        return false;
+                    }
+                    s.getTargets().add(o);
+                }
+            }
+        }
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting() && (!s.isTargetNumberValid() || s.isDividedAsYouChoose())) {
+                resetAllTargets(sa);
+                return false;
+            }
+        }
+        if (!StaticAbilityMustTarget.meetsMustTargetRestriction(sa) || !legalToForce(sa, me)) {
+            resetAllTargets(sa);
+            return false;
+        }
+        return true;
     }
 
     /** Every chosen target of the ability (and its sub-abilities) lives in game {@code g}. */
@@ -1944,7 +2269,11 @@ public final class LookaheadSearch {
         if (!c.land) {
             AiPlayDecision dec = ctrl.getAi().canPlaySa(sa);
             if (dec != AiPlayDecision.WillPlay && needsTargets(sa)) {
-                return null;
+                // candprep: a refused candidate is played live with the forced targets its play-outs used.
+                if (c.force == null || dec != AiPlayDecision.CantPlayAi || !applyForce(sa, c.force, live, me)) {
+                    return null;
+                }
+                stats.forceLive++;
             }
         }
         List<SpellAbility> l = new ArrayList<>();
@@ -1956,6 +2285,9 @@ public final class LookaheadSearch {
 
     static final class Rollout {
         boolean ok = true;
+        /** candprep: the candidate was prepared with forced targets; or Forge AI refused it ("decision|api|spec state"). */
+        boolean forced;
+        String refusal;
         /** Diagnostics: why the play-out failed. */
         String failWhy;
         boolean capped = false;
@@ -2104,6 +2436,9 @@ public final class LookaheadSearch {
         Throwable error;
         /** Diagnostics: why preparation failed. */
         String failWhy;
+        /** candprep: prepared with forced targets; or Forge AI's refusal ("decision|api|spec state"). */
+        boolean forced;
+        String refusal;
         long copyNanos;
         /** C1: with spells on the stack, the copied player who keeps "first priority" (null otherwise). */
         Player firstPriority;
@@ -2171,7 +2506,11 @@ public final class LookaheadSearch {
                 }
                 if (!c.pass) {
                     PREP_WHY.remove();
+                    PREP_FORCED.remove();
+                    PREP_REFUSAL.remove();
                     SpellAbility sa = prepare(p.g, p.me, c, defSa, copier);
+                    p.forced = PREP_FORCED.get() != null;
+                    p.refusal = PREP_REFUSAL.get();
                     if (sa == null) {
                         p.failWhy = "prep:" + (PREP_WHY.get() == null ? "?" : PREP_WHY.get()) + (c.isDefault ? ":default" : c.land ? ":land" : "");
                         p.failed = true;
@@ -2209,6 +2548,8 @@ public final class LookaheadSearch {
     Rollout play(Prepared p, Boolean wantFp, WorldMemo memo, int cand) {
         final Rollout r = new Rollout();
         r.trajectory = p.trajectory;
+        r.forced = p.forced;
+        r.refusal = p.refusal;
         if (p.failed) {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
