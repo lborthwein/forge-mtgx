@@ -235,6 +235,7 @@ public final class LookaheadBench {
                     c.probeStack = la.has("probeStack") && la.get("probeStack").getAsBoolean();
                     c.margin = la.has("margin") ? la.get("margin").getAsDouble() : 0.0;
                     c.departZ = la.has("departZ") ? la.get("departZ").getAsDouble() : 0.0;
+                    c.targetVariants = la.has("targetVariants") ? la.get("targetVariants").getAsInt() : 0;
                     c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();
                     c.modelUrl = la.has("modelUrl") ? la.get("modelUrl").getAsString() : null;

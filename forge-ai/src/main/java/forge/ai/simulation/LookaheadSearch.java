@@ -104,6 +104,14 @@ public final class LookaheadSearch {
          * play-outs cannot tell the candidates apart -- one divergent or terminal world must not decide.
          */
         public double departZ = 0.0;
+        /**
+         * Target variants (lane forge-ai-misplays-0928; 0 = off, the default: candidates unchanged). Up to this many
+         * extra candidates per decision: a single-target spell or ability among the candidates played with a target
+         * other than the one Forge AI would choose (or with none, when "up to one"), so the play-outs, not Forge AI's
+         * targeting heuristic, decide e.g. burn to the face vs a creature. Taken in candidate order (Forge's answer
+         * first); per ability: opponents, opponents' cards, "no target", own player, own cards, in game order.
+         */
+        public int targetVariants = 0;
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
@@ -235,6 +243,9 @@ public final class LookaheadSearch {
                 o.addProperty("reuseShadowFresh", true);
             }
             o.addProperty("margin", margin);
+            if (targetVariants > 0) {
+                o.addProperty("targetVariants", targetVariants);
+            }
             if (departZ > 0) {
                 o.addProperty("departZ", departZ);
             }
@@ -299,6 +310,8 @@ public final class LookaheadSearch {
         public long decisions, stackSkipped, uncontested, searched, departed, departFallback, loopGuard;
         /** departZ: candidates (with a finished play-out in every world) set aside for lack of confidence. */
         public long departGated;
+        /** targetVariants: variant candidates offered; departures to a variant. */
+        public long targetVariantCands, targetVariantDepartures;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
@@ -384,6 +397,10 @@ public final class LookaheadSearch {
             o.addProperty("loopGuard", loopGuard);
             if (departGated > 0) {
                 o.addProperty("departGated", departGated);
+            }
+            if (targetVariantCands > 0) {
+                o.addProperty("targetVariantCands", targetVariantCands);
+                o.addProperty("targetVariantDepartures", targetVariantDepartures);
             }
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
@@ -546,6 +563,19 @@ public final class LookaheadSearch {
         final String label;
         /** The prior service's candidate kind: pass | land | cast (a spell) | activate (an activated ability) | other. */
         final String kind;
+        /** Target variant: the first single-target slot's target ("P<player index>", "C<card id>", "N" = none); null = Forge AI's. */
+        final String tgt;
+
+        private Cand(Cand base, String tgt, String tgtLabel) {
+            this.pass = false;
+            this.hostId = base.hostId;
+            this.desc = base.desc;
+            this.land = false;
+            this.isDefault = false;
+            this.label = base.label + " -> " + tgtLabel;
+            this.kind = base.kind;
+            this.tgt = tgt;
+        }
 
         Cand(SpellAbility sa, boolean isDefault) {
             this.pass = sa == null;
@@ -555,6 +585,7 @@ public final class LookaheadSearch {
             this.isDefault = isDefault;
             this.label = sa == null ? "pass" : (sa.getHostCard().getName() + " :: " + trim(sa.toString()));
             this.kind = sa == null ? "pass" : land ? "land" : sa.isSpell() ? "cast" : sa.isActivatedAbility() ? "activate" : "other";
+            this.tgt = null;
         }
 
         /** The prior request's candidate: {id, kind, fid} (fid = the host card's id, absent for pass). */
@@ -569,7 +600,7 @@ public final class LookaheadSearch {
         }
 
         String key() {
-            return pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc;
+            return pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc + (tgt == null ? "" : "|T:" + tgt);
         }
 
         private static String trim(String s) {
@@ -903,6 +934,9 @@ public final class LookaheadSearch {
                 } else {
                     answer = mapped;
                     stats.departed++;
+                    if (chosen.tgt != null) {
+                        stats.targetVariantDepartures++;
+                    }
                     if (onStack) {
                         stats.stackDeparted++;
                     }
@@ -1613,8 +1647,12 @@ public final class LookaheadSearch {
      *           otherwise, after B is fixed exactly as in the base, the rest of Forge's list and the root state are put
      *           into it from the same copy (nothing of B depends on it; a failure there leaves B unchanged).
      */
-    private List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv,
-                                 JsonObject[] beliefRoot) {
+    List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv) {
+        return enumerate(live, liveMe, defSa, decisionSeed, pv, null);
+    }
+
+    List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv,
+                         JsonObject[] beliefRoot) {
         final List<Cand> out = new ArrayList<>();
         out.add(new Cand(defSa, true));
         if (defSa != null) {
@@ -1659,6 +1697,11 @@ public final class LookaheadSearch {
                 } catch (RuntimeException e) {
                     beliefRoot[0] = null;
                 }
+            }
+            if (cfg.targetVariants > 0) {
+                final int before = out.size();
+                targetVariants(g, me, out, defSa, seen, cfg.targetVariants);
+                stats.targetVariantCands += out.size() - before;
             }
         } catch (RuntimeException e) {
             // Enumeration failure: search nothing, play Forge's answer.
@@ -1874,13 +1917,139 @@ public final class LookaheadSearch {
             }
         }
         AiPlayDecision dec = ((PlayerControllerAi) me.getController()).getAi().canPlaySa(sa);
-        if (dec != AiPlayDecision.WillPlay && needsTargets(sa)) {
+        if (c.tgt != null) {
+            if (!applyTarget(sa, c.tgt, g)) {
+                return null;
+            }
+        } else if (dec != AiPlayDecision.WillPlay && needsTargets(sa)) {
             return null;
         }
         if (!targetsInGame(sa, g)) {
             return null;
         }
         return sa;
+    }
+
+    /** The first targeting (sub-)ability whose target slot takes exactly one target at most; null if none. */
+    static SpellAbility singleTargetSlot(SpellAbility sa) {
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting()) {
+                return s.getMaxTargets() == 1 ? s : null;
+            }
+        }
+        return null;
+    }
+
+    /** Target reference of a game object: "P<player index>" or "C<card id>". */
+    static String targetRef(Game g, forge.game.GameObject o) {
+        if (o instanceof Player) {
+            return "P" + g.getPlayers().indexOf(o);
+        }
+        if (o instanceof Card) {
+            return "C" + ((Card) o).getId();
+        }
+        return null;
+    }
+
+    /** Put target {@code ref} into the ability's single-target slot in game {@code g}; false if it is not legal there. */
+    static boolean applyTarget(SpellAbility sa, String ref, Game g) {
+        final SpellAbility slot = singleTargetSlot(sa);
+        if (slot == null) {
+            return false;
+        }
+        slot.resetTargets();
+        if ("N".equals(ref)) {
+            return slot.getMinTargets() == 0;
+        }
+        forge.game.GameObject o = null;
+        if (ref.startsWith("P")) {
+            final int i = Integer.parseInt(ref.substring(1));
+            o = i >= 0 && i < g.getPlayers().size() ? g.getPlayers().get(i) : null;
+        } else if (ref.startsWith("C")) {
+            o = g.findById(Integer.parseInt(ref.substring(1)));
+        }
+        if (o == null || !slot.canTarget(o)) {
+            return false;
+        }
+        slot.getTargets().add(o);
+        return true;
+    }
+
+    /**
+     * Target variants: for each non-pass, non-land candidate (in order) with a single-target slot, the other legal
+     * targets than Forge AI's own choice (known for Forge's answer; asked of Forge AI in the enumeration copy for the
+     * others), ordered opponents, opponents' cards, none (if allowed), own player, own cards; at most {@code max} in all.
+     */
+    private static void targetVariants(Game g, Player me, List<Cand> out, SpellAbility defSa, Set<String> seen, int max) {
+        final List<Cand> base = new ArrayList<>(out);
+        int added = 0;
+        for (Cand c : base) {
+            if (added >= max) {
+                return;
+            }
+            if (c.pass || c.land) {
+                continue;
+            }
+            final SpellAbility sa = locate(g, me, c);
+            if (sa == null) {
+                continue;
+            }
+            sa.setActivatingPlayer(me);
+            String chosen = null;
+            if (c.isDefault && defSa != null) {
+                final SpellAbility live = singleTargetSlot(defSa);
+                if (live == null) {
+                    continue;
+                }
+                chosen = live.getTargets().isEmpty() ? "N" : targetRef(defSa.getHostCard().getGame(), live.getTargets().get(0));
+            } else {
+                for (SpellAbility sub = sa; sub != null; sub = sub.getSubAbility()) {
+                    if (sub.usesTargeting()) {
+                        sub.resetTargets();
+                    }
+                }
+                ((PlayerControllerAi) me.getController()).getAi().canPlaySa(sa);
+            }
+            final SpellAbility slot = singleTargetSlot(sa);
+            if (slot == null) {
+                continue;
+            }
+            if (chosen == null) {
+                chosen = slot.getTargets().isEmpty() ? "N" : targetRef(g, slot.getTargets().get(0));
+            }
+            slot.resetTargets();
+            final List<forge.game.GameEntity> all = slot.getTargetRestrictions().getAllCandidates(slot);
+            final List<String[]> refs = new ArrayList<>();
+            for (int pass = 0; pass < 5; pass++) {
+                if (pass == 2) {
+                    if (slot.getMinTargets() == 0) {
+                        refs.add(new String[] {"N", "no target"});
+                    }
+                    continue;
+                }
+                for (forge.game.GameEntity e : all) {
+                    final boolean opp = e instanceof Player ? ((Player) e).isOpponentOf(me) : ((Card) e).getController().isOpponentOf(me);
+                    final boolean player = e instanceof Player;
+                    final int bucket = opp ? (player ? 0 : 1) : (player ? 3 : 4);
+                    if (bucket == pass) {
+                        refs.add(new String[] {targetRef(g, e), e instanceof Card ? ((Card) e).getName() + " (" + ((Card) e).getId() + ")" : ((Player) e).getName()});
+                    }
+                }
+            }
+            for (String[] r : refs) {
+                if (added >= max) {
+                    return;
+                }
+                if (r[0] == null || r[0].equals(chosen)) {
+                    continue;
+                }
+                final Cand v = new Cand(c, r[0], r[1]);
+                if (seen.add(v.key())) {
+                    out.add(v);
+                    added++;
+                }
+            }
+        }
     }
 
     /** Every chosen target of the ability (and its sub-abilities) lives in game {@code g}. */
@@ -1913,7 +2082,7 @@ public final class LookaheadSearch {
         return false;
     }
 
-    private List<SpellAbility> mapToLive(PlayerControllerAi ctrl, Game live, Player me, Cand c) {
+    List<SpellAbility> mapToLive(PlayerControllerAi ctrl, Game live, Player me, Cand c) {
         if (c.pass) {
             return null;
         }
@@ -1924,7 +2093,11 @@ public final class LookaheadSearch {
         sa.setActivatingPlayer(me);
         if (!c.land) {
             AiPlayDecision dec = ctrl.getAi().canPlaySa(sa);
-            if (dec != AiPlayDecision.WillPlay && needsTargets(sa)) {
+            if (c.tgt != null) {
+                if (!applyTarget(sa, c.tgt, live)) {
+                    return null;
+                }
+            } else if (dec != AiPlayDecision.WillPlay && needsTargets(sa)) {
                 return null;
             }
         }
