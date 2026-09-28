@@ -1,6 +1,8 @@
 package forge.ai.ability;
 
 import forge.ai.AITest;
+import forge.ai.AiFixes;
+import forge.ai.LobbyPlayerAi;
 import forge.ai.AiPlayDecision;
 import forge.ai.ComputerUtilCombat;
 import forge.ai.PlayerControllerAi;
@@ -22,6 +24,9 @@ import org.testng.annotations.Test;
  * Walking Ballista, then removed Ballista's last counter to ping Oona's Prowler. With its blocker gone, the trampler
  * assigns all 5 to the player (CR 702.19e), so a kicked Burst Lightning (4) to the face was lethal; Forge AI shot Urza.
  * Forge's burn-to-face check (DamageAiBase.shouldTgtP) never counted the combat damage still to come.
+ *
+ * <p>Both fixes are behind the per-player option aiFixes0928 of the deciding AI (lane yardstick-0928): ON for the AI
+ * here; the {@code optionOff...} tests pin the upstream choices with it off (the default).
  */
 public class BurnLethalCombatAiTest extends AITest {
 
@@ -29,10 +34,19 @@ public class BurnLethalCombatAiTest extends AITest {
     private Card adventurer, prowler, ballista, urza, burst;
     private Combat combat;
 
+    private AiFixes.Counters counters;
+
     private Game setup(String attackerName) {
+        return setup(attackerName, AiFixes.Mode.ON);
+    }
+
+    private Game setup(String attackerName, AiFixes.Mode mode) {
         Game game = initAndCreateGame();
         ai = game.getPlayers().get(1);
         opp = game.getPlayers().get(0);
+        final LobbyPlayerAi lobby = (LobbyPlayerAi) ai.getLobbyPlayer();
+        lobby.setAiFixes0928(mode);
+        counters = AiFixes.count(lobby, game);
         opp.setLife(9, null);
         urza = addCard("Urza, Lord High Artificer", opp);
         ballista = addCard("Walking Ballista", opp);
@@ -85,7 +99,7 @@ public class BurnLethalCombatAiTest extends AITest {
         blockerDies(game);
         AssertJUnit.assertTrue(combat.isBlocked(adventurer));
         // 5 trample + 3 flying = 8 still to come
-        AssertJUnit.assertEquals(1, ComputerUtilCombat.lifeThatWouldRemain(opp, combat));
+        AssertJUnit.assertEquals(1, ComputerUtilCombat.lifeThatWouldRemain(opp, combat, ai));
     }
 
     @Test
@@ -93,7 +107,7 @@ public class BurnLethalCombatAiTest extends AITest {
         Game game = setup("Craw Wurm");
         blockerDies(game);
         // the blocked Craw Wurm deals no combat damage; only Oona's Prowler's 3
-        AssertJUnit.assertEquals(6, ComputerUtilCombat.lifeThatWouldRemain(opp, combat));
+        AssertJUnit.assertEquals(6, ComputerUtilCombat.lifeThatWouldRemain(opp, combat, ai));
     }
 
     @Test
@@ -123,5 +137,46 @@ public class BurnLethalCombatAiTest extends AITest {
         AssertJUnit.assertEquals(5, opp.getLife());
         playUntilPhase(game, PhaseType.COMBAT_END);
         AssertJUnit.assertTrue("the player is dead after combat damage", opp.getLife() <= 0 || game.isGameOver());
+    }
+
+    @Test
+    public void optionOffCountsTheBlockedNonTramplerAsUnblocked() {
+        Game game = setup("Craw Wurm", AiFixes.Mode.OFF);
+        blockerDies(game);
+        // upstream: the blocked Craw Wurm (6) with no blocker left is counted as unblocked: 9 - 6 - 3 = 0
+        AssertJUnit.assertEquals(0, ComputerUtilCombat.lifeThatWouldRemain(opp, combat, ai));
+        AssertJUnit.assertEquals(0, counters.fired(AiFixes.Kind.BLOCKER_LEFT));
+    }
+
+    @Test
+    public void optionOnIsTheDecidersNotTheSubjects() {
+        // The prediction follows the deciding AI's option, not the attacked player's.
+        Game game = setup("Craw Wurm", AiFixes.Mode.OFF);
+        ((LobbyPlayerAi) opp.getLobbyPlayer()).setAiFixes0928(AiFixes.Mode.ON);
+        blockerDies(game);
+        AssertJUnit.assertEquals(0, ComputerUtilCombat.lifeThatWouldRemain(opp, combat, ai));
+        AssertJUnit.assertEquals(6, ComputerUtilCombat.lifeThatWouldRemain(opp, combat, opp));
+    }
+
+    @Test
+    public void optionOffBurnShootsTheCreatureAsUpstream() {
+        Game game = setup("Caves of Chaos Adventurer", AiFixes.Mode.OFF);
+        blockerDies(game);
+        SpellAbility sa = burstSa();
+        ((PlayerControllerAi) ai.getController()).getAi().canPlaySa(sa);
+        AssertJUnit.assertNotSame("upstream: burn does not go to the face (9 - 4 >= 5)", opp,
+                sa.getTargets().getFirstTargetedPlayer());
+        AssertJUnit.assertEquals(0, counters.fired(AiFixes.Kind.BURN_FACE));
+    }
+
+    @Test
+    public void shadowBurnDecidesAsOffAndCountsTheSpot() {
+        Game game = setup("Caves of Chaos Adventurer", AiFixes.Mode.SHADOW);
+        blockerDies(game);
+        SpellAbility sa = burstSa();
+        ((PlayerControllerAi) ai.getController()).getAi().canPlaySa(sa);
+        AssertJUnit.assertNotSame(opp, sa.getTargets().getFirstTargetedPlayer());
+        AssertJUnit.assertTrue("the lethal-with-combat spot is counted", counters.fired(AiFixes.Kind.BURN_FACE) >= 1);
+        AssertJUnit.assertTrue(counters.changed(AiFixes.Kind.BURN_FACE) >= 1);
     }
 }

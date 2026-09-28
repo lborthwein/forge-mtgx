@@ -9,6 +9,7 @@ import com.google.gson.JsonParser;
 import forge.GuiDesktop;
 import forge.LobbyPlayer;
 import forge.ai.AIOption;
+import forge.ai.AiFixes;
 import forge.ai.LobbyPlayerAi;
 import forge.ai.simulation.LobbyPlayerLookahead;
 import forge.ai.simulation.LookaheadSearch;
@@ -62,7 +63,8 @@ import java.util.concurrent.TimeoutException;
  * priorExtra,priorUrl,priorShadow,priorTimeoutMs,priorCheckpointSha256 (read HX),
  * tutorRank,tutorUrl,tutorShadow,tutorLands,tutorTimeoutMs,tutorCheckpointSha256 (tutor ranking),
  * belief,beliefShadow,beliefUrl,beliefTimeoutMs,beliefCheckpointSha256,beliefCube,beliefCubeSha256,beliefBasics
- * (lane belief-sampling-0928)},
+ * (lane belief-sampling-0928), aiFixes0928 (off|shadow|on, lane yardstick-0928: the look-ahead seats' own Forge AI)},
+ * "defaultAiFixes0928": off|shadow|on (the "default"/"sim" seats; off unless a predeclared read says otherwise),
  * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim", ...]}]}}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
@@ -119,6 +121,11 @@ public final class LookaheadBench {
             SimSearchBudget.setBudget(cfg.get("simMaxSimulations").getAsInt());
         }
         final JsonObject la = cfg.has("lookahead") ? cfg.getAsJsonObject("lookahead") : new JsonObject();
+        // aiFixes0928 (lane yardstick-0928): the mtgx Forge AI fixes of 2026-09-28 (forge.ai.AiFixes), per seat kind.
+        // Off (upstream Forge AI) unless set; shadow decides as off and counts the spots where a fix would fire.
+        final AiFixes.Mode laFixes = AiFixes.Mode.parse(la.has("aiFixes0928") ? la.get("aiFixes0928").getAsString() : null);
+        final AiFixes.Mode defaultFixes = AiFixes.Mode.parse(
+                cfg.has("defaultAiFixes0928") ? cfg.get("defaultAiFixes0928").getAsString() : null);
         {
             // HX: the policy-prior pin is checked once at JVM start; a missing pin, an unreachable service or another
             // checkpoint refuses the whole run (exit 4) before any game.
@@ -248,6 +255,7 @@ public final class LookaheadBench {
                     LookaheadSearch s = new LookaheadSearch(c);
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);
                     l.setAiProfile("Default");
+                    l.setAiFixes0928(laFixes);
                     searches.add(s);
                     laLobbies.add(l);
                     lp = l;
@@ -255,6 +263,7 @@ public final class LookaheadBench {
                     final Set<AIOption> options = "sim".equals(mode) ? Sets.newHashSet(AIOption.USE_FULL_SIMULATION) : null;
                     LobbyPlayerAi l = new LobbyPlayerAi(name, options);
                     l.setAiProfile("Default");
+                    l.setAiFixes0928(defaultFixes);
                     searches.add(null);
                     laLobbies.add(null);
                     lp = l;
@@ -283,6 +292,13 @@ public final class LookaheadBench {
             final Game game = match.createGame();
             game.AI_CAN_USE_TIMEOUT = false;
             game.AI_TIMEOUT = aiTimeoutSec;
+            final AiFixes.Counters[] fixCounters = new AiFixes.Counters[2];
+            for (int i = 0; i < 2; i++) {
+                final LobbyPlayerAi l = (LobbyPlayerAi) seats.get(i).getPlayer();
+                if (l.getAiFixes0928() != AiFixes.Mode.OFF) {
+                    fixCounters[i] = AiFixes.count(l, game);
+                }
+            }
             for (int i = 0; i < 2; i++) {
                 if (laLobbies.get(i) != null) {
                     laLobbies.get(i).bind(game, searches.get(i));
@@ -415,6 +431,15 @@ public final class LookaheadBench {
                 }
             }
             row.add("search", st);
+            if (fixCounters[0] != null || fixCounters[1] != null) {
+                // Only when a seat's option is not off: off rows keep their schema.
+                final JsonArray fx = new JsonArray();
+                for (int i = 0; i < 2; i++) {
+                    fx.add(fixCounters[i] == null ? null
+                            : fixCounters[i].toJson(((LobbyPlayerAi) seats.get(i).getPlayer()).getAiFixes0928()));
+                }
+                row.add("aiFixes0928", fx);
+            }
             Files.writeString(out, new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(row) + "\n", StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             err.println("[lookahead-bench] " + id + " winner=" + winner + " reason=" + reason + " turns=" + turns

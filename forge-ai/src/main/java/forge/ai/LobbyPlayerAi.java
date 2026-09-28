@@ -14,6 +14,9 @@ public class LobbyPlayerAi extends LobbyPlayer implements IGameEntitiesFactory {
     private String aiProfile = "";
     private boolean rotateProfileEachGame;
     private AIOption option;
+    /** mtgx Forge AI fixes of 2026-09-28 ({@link AiFixes}); OFF (upstream Forge AI) by default. */
+    private AiFixes.Mode aiFixes0928 = AiFixes.Mode.OFF;
+    private AiFixes.Counters aiFixesCounters;
 
     public LobbyPlayerAi(String name, Set<AIOption> options) {
         super(name);
@@ -28,6 +31,22 @@ public class LobbyPlayerAi extends LobbyPlayer implements IGameEntitiesFactory {
     }
     public String getAiProfile() {
         return aiProfile;
+    }
+
+    public AiFixes.Mode getAiFixes0928() {
+        return aiFixes0928;
+    }
+
+    public void setAiFixes0928(AiFixes.Mode mode) {
+        this.aiFixes0928 = mode == null ? AiFixes.Mode.OFF : mode;
+    }
+
+    public AiFixes.Counters getAiFixesCounters() {
+        return aiFixesCounters;
+    }
+
+    void setAiFixesCounters(AiFixes.Counters counters) {
+        this.aiFixesCounters = counters;
     }
 
     public void setRotateProfileEachGame(boolean rotateProfileEachGame) {

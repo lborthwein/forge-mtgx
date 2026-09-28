@@ -414,6 +414,10 @@ public class GameCopier {
         if (plainAiPlayers) {
             final LobbyPlayerAi plain = new LobbyPlayerAi(lp.getName(), null);
             plain.setAiProfile(lp instanceof LobbyPlayerAi ? ((LobbyPlayerAi) lp).getAiProfile() : "Default");
+            if (lp instanceof LobbyPlayerAi) {
+                // Each player's aiFixes0928 mode carries into the copy (no counters: copies are never counted).
+                plain.setAiFixes0928(((LobbyPlayerAi) lp).getAiFixes0928());
+            }
             clone.setPlayer(plain);
             return clone;
         }
