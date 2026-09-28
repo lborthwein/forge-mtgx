@@ -10,6 +10,7 @@ import forge.ai.PlayerControllerAi;
 import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
+import forge.game.card.CardCollectionView;
 import forge.game.card.CounterType;
 import forge.game.event.GameEventTurnBegan;
 import forge.game.phase.PhaseHandler;
@@ -142,6 +143,31 @@ public final class LookaheadSearch {
             return priorExtra > 0 || priorShadow;
         }
 
+        /**
+         * Tutor ranking (lane tutor-ranking-0928; 0 = off, the default: no call, nothing searched, the config JSON
+         * unchanged). At a single-card library search of the searching seat in the live game (a choice made during
+         * resolution: Demonic Tutor, Tinker, Vampiric Tutor, Wishclaw, a fetchland...), the tutor ranker
+         * ({@link #tutorUrl}) scores the distinct names Forge offers; Forge AI's own pick plus the top-{@code tutorRank}
+         * other names by score are each played out from a copy of the position with the search's resolution replayed
+         * and that card forced; the best by expected value is taken (ties and failures to Forge AI's pick).
+         */
+        public int tutorRank = 0;
+        /** Tutor ranking: base URL of the ranker service (mtgx tools/ml/tutorrank/serve_tutor.py). */
+        public String tutorUrl = null;
+        /** Tutor ranking shadow: rank and play out, never change the pick. */
+        public boolean tutorShadow = false;
+        /** Tutor ranking: also searches whose every option is a land (fetchlands, Golos, Expedition Map). */
+        public boolean tutorLands = false;
+        /** Tutor ranking: per-request timeout; a failed or late call keeps Forge AI's pick and is counted. */
+        public int tutorTimeoutMs = 2000;
+        /** Tutor ranking: the checkpoint the service must serve (GET /v1/health checkpointSha256), checked once per JVM. */
+        public String tutorCheckpointSha256 = null;
+
+        /** Tutor ranking is on (a ranker call and play-outs at qualifying searches, acting or shadow). */
+        public boolean tutorOn() {
+            return tutorRank > 0 || tutorShadow;
+        }
+
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
             o.addProperty("worlds", worlds);
@@ -196,6 +222,14 @@ public final class LookaheadSearch {
                 o.addProperty("priorUrl", priorUrl);
                 o.addProperty("priorTimeoutMs", priorTimeoutMs);
                 o.addProperty("priorCheckpointSha256", priorCheckpointSha256);
+            }
+            if (tutorOn()) {
+                o.addProperty("tutorRank", tutorRank);
+                o.addProperty("tutorShadow", tutorShadow);
+                o.addProperty("tutorLands", tutorLands);
+                o.addProperty("tutorUrl", tutorUrl);
+                o.addProperty("tutorTimeoutMs", tutorTimeoutMs);
+                o.addProperty("tutorCheckpointSha256", tutorCheckpointSha256);
             }
             return o;
         }
@@ -259,6 +293,21 @@ public final class LookaheadSearch {
         public String priorDigest, priorCheckpoint, priorLastError;
         /** One entry per qualifying decision: B size, full list size, extras (would-be in shadow) with p, choice, ms. */
         public final JsonArray priorDecisions = new JsonArray();
+        /**
+         * Tutor ranking (reported only when the option is on). Library-search choices of this seat in the live game
+         * (seen); of those: land-only searches left to Forge (tutorLands off), one distinct name, Forge declined an
+         * optional search, not searchable (by reason); ranker calls and failures; searched; searched choices whose
+         * pick differs from Forge AI's (departed, or would in shadow); the ranker's top name equals Forge AI's pick;
+         * play-outs and failed play-outs (a forced pick the copy could not make counts as failed).
+         */
+        public boolean tutorOn;
+        public long tutorSeen, tutorLandOnly, tutorSingle, tutorForgeNone, tutorUnsupported, tutorCalls, tutorFailures, tutorNanos;
+        public long tutorSearched, tutorDeparted, tutorShadowWouldDepart, tutorTop1IsForge, tutorRollouts, tutorRolloutFailures, tutorForcedMissed;
+        public long tutorUnknownCards;
+        public String tutorDigest, tutorCheckpoint, tutorLastError;
+        public final Map<String, Long> tutorWhy = new TreeMap<>();
+        /** One entry per searched (or refused) choice: source, destination, names, Forge's pick, ranked, EVs, choice. */
+        public final JsonArray tutorDecisions = new JsonArray();
 
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
@@ -369,6 +418,33 @@ public final class LookaheadSearch {
                 }
                 o.add("priorDecisions", priorDecisions);
             }
+            if (tutorOn) {
+                o.addProperty("tutorSeen", tutorSeen);
+                o.addProperty("tutorLandOnly", tutorLandOnly);
+                o.addProperty("tutorSingle", tutorSingle);
+                o.addProperty("tutorForgeNone", tutorForgeNone);
+                o.addProperty("tutorUnsupported", tutorUnsupported);
+                JsonObject why = new JsonObject();
+                tutorWhy.forEach(why::addProperty);
+                o.add("tutorWhy", why);
+                o.addProperty("tutorCalls", tutorCalls);
+                o.addProperty("tutorFailures", tutorFailures);
+                o.addProperty("tutorMs", tutorNanos / 1e6);
+                o.addProperty("tutorSearched", tutorSearched);
+                o.addProperty("tutorDeparted", tutorDeparted);
+                o.addProperty("tutorShadowWouldDepart", tutorShadowWouldDepart);
+                o.addProperty("tutorTop1IsForge", tutorTop1IsForge);
+                o.addProperty("tutorRollouts", tutorRollouts);
+                o.addProperty("tutorRolloutFailures", tutorRolloutFailures);
+                o.addProperty("tutorForcedMissed", tutorForcedMissed);
+                o.addProperty("tutorUnknownCards", tutorUnknownCards);
+                o.addProperty("tutorDigest", tutorDigest);
+                o.addProperty("tutorCheckpointSha256", tutorCheckpoint);
+                if (tutorLastError != null) {
+                    o.addProperty("tutorLastError", tutorLastError);
+                }
+                o.add("tutorDecisions", tutorDecisions);
+            }
             return o;
         }
     }
@@ -419,6 +495,9 @@ public final class LookaheadSearch {
     private final ExecutorService pool;
     private final ModelClient model;
     private final PriorClient prior;
+    private final TutorRankClient tutor;
+    /** Tutor ranking: its own decision counter (the priority search's seeds do not move when it is on). */
+    private int tutorIndex = 0;
     /** The candidate list played out at the last searched decision (B plus any HX extras); tests read it. */
     List<Cand> lastCandidates = null;
     private JsonObject modelDeck = null;
@@ -461,6 +540,21 @@ public final class LookaheadSearch {
         } else {
             prior = null;
         }
+        if (cfg.tutorOn()) {
+            if (cfg.tutorRank < 1) {
+                throw new IllegalStateException("tutorShadow needs tutorRank >= 1 (how many ranked names are played out)");
+            }
+            checkTutorService(cfg);
+            tutor = new TutorRankClient(cfg.tutorUrl, cfg.tutorTimeoutMs);
+            stats.tutorOn = true;
+        } else {
+            tutor = null;
+        }
+    }
+
+    /** Tutor ranking: check the ranker's {@code /v1/health} checkpoint against the pin (once per JVM and service). */
+    public static String checkTutorService(Config c) {
+        return TutorRankClient.checkHealth(c.tutorUrl, c.tutorCheckpointSha256, c.tutorTimeoutMs);
     }
 
     /**
@@ -1762,6 +1856,10 @@ public final class LookaheadSearch {
         List<String> stepLog;
         /** Reuse probe: where the searching seat's priority points go (null = off). */
         List<TrajPoint> trajectory;
+        /** Tutor ranking: the card id the replayed search must take (-1 = not a tutor play-out). */
+        int forcedId = -1;
+        /** Tutor ranking: a triggered search's ability rebuilt in the copy (null = the search is on the copy's stack). */
+        SpellAbility trigSa;
     }
 
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
@@ -2591,6 +2689,540 @@ public final class LookaheadSearch {
             }
         }
         stats.combatNanos += System.nanoTime() - t0;
+    }
+
+    // ------------------------------------------------------------------ tutor ranking (lane tutor-ranking-0928)
+
+    /** Tutor ranking: the last searched choice's candidates (Forge AI's pick first) and per-candidate play-out ok (tests). */
+    List<String> lastTutorCandidates = null;
+    boolean[] lastTutorOk = null;
+    double[] lastTutorEv = null;
+
+    /** Play-out Forge AI whose first single-card library search takes the card with a given id (if offered). */
+    static final class ScriptedTutor extends RolloutAi {
+        private final int forcedId;
+        boolean tried = false;
+        boolean used = false;
+
+        ScriptedTutor(Game g, Player p, forge.LobbyPlayer lp, int forcedId) {
+            super(g, p, lp);
+            this.forcedId = forcedId;
+        }
+
+        @Override
+        public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList,
+                forge.game.player.DelayedReveal delayedReveal, String selectPrompt, boolean isOptional, Player decider) {
+            if (!tried) {
+                tried = true;
+                for (Card c : fetchList) {
+                    if (c.getId() == forcedId) {
+                        used = true;
+                        return c;
+                    }
+                }
+            }
+            return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider);
+        }
+    }
+
+    /**
+     * A single-card library search of this seat, asked while the live game resolves {@code sa} (Forge AI already chose
+     * {@code def}). Forge AI's pick and the top-{@code tutorRank} other names by the ranker's score are each played out
+     * over K worlds from a copy of the position in which the search's resolution is replayed with that card forced; the
+     * best by expected value is returned (ties, failures and unsupported positions: Forge AI's pick). Never throws.
+     */
+    public Card decideTutor(PlayerControllerAi ctrl, ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+            CardCollection fetchList, Card def, Player decider) {
+        if (tutor == null) {
+            return def;
+        }
+        final Game live = ctrl.getGame();
+        final Player me = ctrl.getPlayer();
+        if (decider != me || sa == null || origin == null || origin.size() != 1 || origin.get(0) != ZoneType.Library
+                || fetchList == null || fetchList.isEmpty()) {
+            return def;
+        }
+        final CardCollectionView myLib = me.getCardsIn(ZoneType.Library);
+        for (Card c : fetchList) {
+            if (!myLib.contains(c)) {
+                return def;
+            }
+        }
+        final long t0 = System.nanoTime();
+        stats.tutorSeen++;
+        final int index = tutorIndex++;
+        final JsonObject entry = new JsonObject();
+        try {
+            return decideTutor0(live, me, destination, sa, fetchList, def, index, entry);
+        } catch (RuntimeException | StackOverflowError e) {
+            stats.tutorUnsupported++;
+            stats.tutorWhy.merge("error", 1L, Long::sum);
+            stats.tutorLastError = String.valueOf(e);
+            entry.addProperty("outcome", "error");
+            entry.addProperty("error", String.valueOf(e));
+            System.err.println("[lookahead] tutor search failed at choice " + index + ", keeping Forge's pick: " + e);
+            if (FAILURE_TRACES.getAndIncrement() < 20) {
+                e.printStackTrace();
+            }
+            return def;
+        } finally {
+            final long dt = System.nanoTime() - t0;
+            stats.tutorNanos += dt;
+            if (entry.size() > 0) {
+                entry.addProperty("ms", Math.round(dt / 1e4) / 100.0);
+                stats.tutorDecisions.add(entry);
+            }
+        }
+    }
+
+    private Card decideTutor0(Game live, Player me, ZoneType destination, SpellAbility sa, CardCollection fetchList, Card def,
+            int index, JsonObject entry) {
+        // Distinct names in card-id order; a name's representative is its lowest id.
+        final List<Card> sorted = new ArrayList<>(fetchList);
+        sorted.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+        final Map<String, Card> rep = new java.util.LinkedHashMap<>();
+        boolean landsOnly = true;
+        for (Card c : sorted) {
+            rep.putIfAbsent(c.getName(), c);
+            landsOnly &= c.isLand();
+        }
+        final PhaseHandler ph = live.getPhaseHandler();
+        final String dest = destName(destination, sa);
+        entry.addProperty("i", index);
+        entry.addProperty("turn", ph.getTurn());
+        entry.addProperty("phase", String.valueOf(ph.getPhase()));
+        entry.addProperty("active", ph.getPlayerTurn() == me);
+        entry.addProperty("src", sa.getHostCard().getName());
+        entry.addProperty("dest", dest);
+        entry.addProperty("names", rep.size());
+        entry.addProperty("landsOnly", landsOnly);
+        entry.addProperty("forge", def == null ? null : def.getName());
+        if (landsOnly && !cfg.tutorLands) {
+            stats.tutorLandOnly++;
+            entry.addProperty("outcome", "landsOnly");
+            return def;
+        }
+        if (rep.size() < 2) {
+            stats.tutorSingle++;
+            entry.addProperty("outcome", "single");
+            return def;
+        }
+        if (def == null || !rep.containsKey(def.getName())) {
+            stats.tutorForgeNone++;
+            entry.addProperty("outcome", "forgeNone");
+            return def;
+        }
+        String why = GameCopier.stackUnsupported(live, true);
+        if (why == null) {
+            final SpellAbility top = live.getStack().isEmpty() ? null : live.getStack().peekAbility();
+            if (!live.getStack().isResolving() || top == null) {
+                why = "notResolving";
+            } else if (sa.getRootAbility() != sa) {
+                // Effects before the search in the same ability would be replayed with it.
+                why = "subAbility";
+            } else if (top != sa) {
+                if (top instanceof forge.game.trigger.WrappedAbility wa && wa.getWrappedAbility() == sa) {
+                    final forge.game.trigger.Trigger t = wa.getTrigger();
+                    final int ti = t == null ? -1 : triggerIndex(wa.getHostCard(), t);
+                    if (t == null || t.isStatic() || ti < 0) {
+                        why = "triggerForm";
+                    }
+                } else {
+                    why = "notTop";
+                }
+            }
+        }
+        if (why != null) {
+            stats.tutorUnsupported++;
+            stats.tutorWhy.merge(why, 1L, Long::sum);
+            entry.addProperty("outcome", "unsupported:" + why);
+            return def;
+        }
+
+        // The ranker: one call over every distinct name.
+        final List<String> names = new ArrayList<>(rep.keySet());
+        final JsonObject req = tutorRequest(live, me, sa, dest, names);
+        final double[] sc = tutor.rank(req, names.size());
+        stats.tutorCalls++;
+        if (sc == null) {
+            stats.tutorFailures++;
+            stats.tutorLastError = tutor.lastError;
+            entry.addProperty("outcome", "rankFailed");
+            entry.addProperty("error", tutor.lastError);
+            System.err.println("[lookahead] tutor ranker failed at choice " + index + ", keeping Forge's pick: " + tutor.lastError);
+            return def;
+        }
+        stats.tutorDigest = tutor.digestHex();
+        stats.tutorCheckpoint = tutor.checkpointSha256;
+        stats.tutorUnknownCards = tutor.unknownCards;
+        final Integer[] order = new Integer[names.size()];
+        for (int i = 0; i < order.length; i++) {
+            order[i] = i;
+        }
+        Arrays.sort(order, (x, y) -> {
+            final int c = Double.compare(sc[y], sc[x]);
+            return c != 0 ? c : Integer.compare(x, y);
+        });
+        final String forgeName = def.getName();
+        if (names.get(order[0]).equals(forgeName)) {
+            stats.tutorTop1IsForge++;
+        }
+        final List<String> cands = new ArrayList<>();
+        cands.add(forgeName);
+        final JsonArray ranked = new JsonArray();
+        for (Integer o : order) {
+            final String nm = names.get(o);
+            if (ranked.size() < Math.max(cfg.tutorRank, 5)) {
+                final JsonObject r = new JsonObject();
+                r.addProperty("name", nm);
+                r.addProperty("score", Math.round(sc[o] * 1e4) / 1e4);
+                ranked.add(r);
+            }
+            if (!nm.equals(forgeName) && cands.size() < 1 + cfg.tutorRank) {
+                cands.add(nm);
+            }
+        }
+        entry.add("ranked", ranked);
+        final int forgeRank = Arrays.asList(order).indexOf(names.indexOf(forgeName));
+        entry.addProperty("forgeRank", forgeRank);
+        final JsonArray cj = new JsonArray();
+        cands.forEach(cj::add);
+        entry.add("cands", cj);
+
+        // Play-outs: every candidate x world, copies made here in a fixed order, then played (pool if threads > 1).
+        stats.tutorSearched++;
+        final int k = Math.max(1, cfg.worlds);
+        final int n = cands.size();
+        final long seed = mix(cfg.seed, 0x7a70000L + index);
+        final Prepared[][] prep = new Prepared[n][k];
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                prep[c][w] = prepareTutor(live, me, rep.get(cands.get(c)).getId(), mix(seed, 1000 + w), sa);
+            }
+        }
+        final double[][] values = new double[n][k];
+        final boolean[] ok = new boolean[n];
+        Arrays.fill(ok, true);
+        final List<Runnable> tasks = new ArrayList<>();
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final int ww = w, cc = c;
+                tasks.add(() -> {
+                    final Rollout r = playTutor(prep[cc][ww]);
+                    prep[cc][ww] = null;
+                    synchronized (values) {
+                        values[cc][ww] = r.value;
+                        if (!r.ok) {
+                            ok[cc] = false;
+                            stats.tutorRolloutFailures++;
+                        }
+                        stats.tutorRollouts++;
+                    }
+                });
+            }
+        }
+        runAll(tasks);
+        final double[] ev = new double[n];
+        int best = 0;
+        for (int c = 0; c < n; c++) {
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += values[c][w];
+            }
+            ev[c] = ok[c] ? s / k : Double.NEGATIVE_INFINITY;
+        }
+        if (ok[0]) {
+            for (int c = 1; c < n; c++) {
+                if (!ok[c]) {
+                    continue;
+                }
+                if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
+                    best = c;
+                }
+            }
+        }
+        lastTutorCandidates = cands;
+        lastTutorOk = ok.clone();
+        lastTutorEv = ev.clone();
+        final JsonArray evj = new JsonArray();
+        for (int c = 0; c < n; c++) {
+            evj.add(ok[c] ? Math.round(ev[c] * 100) / 100.0 : null);
+        }
+        entry.add("ev", evj);
+        entry.addProperty("best", best);
+        if (best == 0) {
+            entry.addProperty("outcome", "kept");
+            return def;
+        }
+        if (cfg.tutorShadow) {
+            stats.tutorShadowWouldDepart++;
+            entry.addProperty("outcome", "shadow-would-depart");
+            return def;
+        }
+        stats.tutorDeparted++;
+        entry.addProperty("outcome", "departed");
+        return rep.get(cands.get(best));
+    }
+
+    /** The trigger's position among its host's triggers (-1 if absent). */
+    static int triggerIndex(Card host, forge.game.trigger.Trigger t) {
+        int i = 0;
+        for (forge.game.trigger.Trigger x : host.getTriggers()) {
+            if (x == t) {
+                return i;
+            }
+            i++;
+        }
+        return -1;
+    }
+
+    /** The resolving trigger's ability, built in the copy from the copied host's trigger at the same position. */
+    static SpellAbility rebuildTrigger(Game g, Player me, forge.game.trigger.WrappedAbility liveWrap) {
+        final forge.game.trigger.Trigger lt = liveWrap.getTrigger();
+        final int idx = triggerIndex(liveWrap.getHostCard(), lt);
+        final Card host = g.findById(liveWrap.getHostCard().getId());
+        if (host == null || idx < 0) {
+            throw new IllegalStateException("tutor copy: trigger host " + liveWrap.getHostCard() + " missing");
+        }
+        forge.game.trigger.Trigger t = null;
+        int i = 0;
+        for (forge.game.trigger.Trigger x : host.getTriggers()) {
+            if (i++ == idx) {
+                t = x;
+                break;
+            }
+        }
+        if (t == null || t.getMode() != lt.getMode() || !java.util.Objects.equals(t.getParam("Execute"), lt.getParam("Execute"))) {
+            throw new IllegalStateException("tutor copy: trigger " + idx + " of " + host + " does not match");
+        }
+        SpellAbility sa = t.getOverridingAbility();
+        if (sa == null) {
+            sa = forge.game.ability.AbilityFactory.getAbility(host, t.getParam("Execute"));
+            sa.setActivatingPlayer(me);
+            if (t.isIntrinsic()) {
+                sa.setIntrinsic(true);
+                sa.changeText();
+            }
+        } else {
+            sa = sa.copy(host, me, false, true);
+        }
+        sa.setTrigger(t);
+        sa.setActivatingPlayer(me);
+        return sa;
+    }
+
+    private static String destName(ZoneType destination, SpellAbility sa) {
+        if (destination == ZoneType.Hand) {
+            return "hand";
+        }
+        if (destination == ZoneType.Battlefield) {
+            return "battlefield";
+        }
+        if (destination == ZoneType.Graveyard) {
+            return "graveyard";
+        }
+        if (destination == ZoneType.Library) {
+            return "0".equals(sa.getParamOrDefault("LibraryPosition", "0")) ? "top" : "library";
+        }
+        return String.valueOf(destination).toLowerCase();
+    }
+
+    /** The ranker request: the search's source, destination, the distinct names, the deck and a small state. */
+    private JsonObject tutorRequest(Game live, Player me, SpellAbility sa, String dest, List<String> names) {
+        final JsonObject r = new JsonObject();
+        r.addProperty("schema", TutorRankClient.SCHEMA);
+        r.addProperty("tutor", sa.getHostCard().getName());
+        r.add("cls", com.google.gson.JsonNull.INSTANCE);
+        r.addProperty("dest", dest);
+        final JsonArray cj = new JsonArray();
+        names.forEach(cj::add);
+        r.add("candidates", cj);
+        r.add("deck", deckOf(me));
+        final JsonObject st = new JsonObject();
+        final PhaseHandler ph = live.getPhaseHandler();
+        final boolean onPlay = live.getStartingPlayer() == me;
+        // 17Lands counts each player's own turns; Forge counts both.
+        st.addProperty("turn", onPlay ? (ph.getTurn() + 1) / 2 : ph.getTurn() / 2);
+        st.addProperty("globalTurn", ph.getTurn());
+        st.addProperty("onPlay", onPlay);
+        st.addProperty("active", ph.getPlayerTurn() == me);
+        st.add("hand", namesOf(me.getCardsIn(ZoneType.Hand)));
+        final JsonArray lands = new JsonArray(), creatures = new JsonArray(), other = new JsonArray();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            (c.isLand() ? lands : c.isCreature() ? creatures : other).add(c.getName());
+        }
+        st.add("lands", lands);
+        st.add("creatures", creatures);
+        st.add("noncreatures", other);
+        Player opp = null;
+        for (Player o : me.getOpponents()) {
+            opp = o;
+            break;
+        }
+        if (opp != null) {
+            int ol = 0;
+            final JsonArray oc = new JsonArray(), on = new JsonArray();
+            for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
+                if (c.isLand()) {
+                    ol++;
+                } else if (c.isCreature()) {
+                    oc.add(c.getName());
+                } else {
+                    on.add(c.getName());
+                }
+            }
+            st.addProperty("oppLands", ol);
+            st.add("oppCreatures", oc);
+            st.add("oppNoncreatures", on);
+            st.addProperty("oppHand", opp.getCardsIn(ZoneType.Hand).size());
+            st.addProperty("oppLife", opp.getLife());
+        }
+        st.addProperty("life", me.getLife());
+        final TreeMap<String, Integer> lib = new TreeMap<>();
+        for (Card c : me.getCardsIn(ZoneType.Library)) {
+            lib.merge(c.getName(), 1, Integer::sum);
+        }
+        final JsonObject lj = new JsonObject();
+        lib.forEach(lj::addProperty);
+        st.add("library", lj);
+        r.add("state", st);
+        return r;
+    }
+
+    private static JsonArray namesOf(Iterable<Card> cs) {
+        final JsonArray a = new JsonArray();
+        for (Card c : cs) {
+            a.add(c.getName());
+        }
+        return a;
+    }
+
+    /**
+     * One tutor play-out's copy: the live position with its whole stack (the searching ability on top, not yet
+     * resolved in the copy), the world resampled, and the card to force.
+     */
+    Prepared prepareTutor(Game live, Player liveMe, int forcedId, long worldSeed, SpellAbility searching) {
+        final Prepared p = new Prepared();
+        p.forcedId = forcedId;
+        final SpellAbility liveTop = live.getStack().peekAbility();
+        final forge.game.trigger.WrappedAbility liveWrap = liveTop instanceof forge.game.trigger.WrappedAbility w ? w : null;
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 1)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final long a = System.nanoTime();
+            synchronized (live) {
+                final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyStack(true);
+                copier.setSkipResolvingTrigger(liveWrap != null);
+                p.g = copier.makeCopy();
+                p.me = (Player) copier.find(liveMe);
+                if (liveWrap != null) {
+                    // The resolving trigger is rebuilt in the copy as Forge builds it (TriggerHandler.runSingleTriggerInternal).
+                    p.trigSa = rebuildTrigger(p.g, p.me, liveWrap);
+                }
+                if (cfg.resample) {
+                    resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                }
+                MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
+            }
+            if ((liveWrap == null && p.g.getStack().isEmpty()) || p.g.findById(forcedId) == null) {
+                throw new IllegalStateException("tutor copy: empty stack or card " + forcedId + " missing");
+            }
+            p.copyNanos = System.nanoTime() - a;
+        } catch (RuntimeException | StackOverflowError e) {
+            p.failed = true;
+            p.error = e;
+        } finally {
+            p.ids = forge.util.IdScope.capture();
+            p.cache = AiCache.captureScope();
+            p.rnd = MyRandom.getThreadRandom();
+            forge.util.IdScope.install(prevIds);
+            AiCache.installScope(prevCache);
+            MyRandom.setThreadRandom(prev);
+        }
+        return p;
+    }
+
+    /** Resolve the copy's top (the search, with the forced card), then Forge AI on both seats to the horizon. */
+    Rollout playTutor(Prepared p) {
+        final Rollout r = new Rollout();
+        if (p.failed) {
+            r.ok = false;
+            r.value = Double.NEGATIVE_INFINITY;
+            if (p.error != null) {
+                System.err.println("[lookahead] tutor copy failed: " + p.error);
+                if (FAILURE_TRACES.getAndIncrement() < 20) {
+                    p.error.printStackTrace();
+                }
+            }
+            return r;
+        }
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(p.rnd);
+        AiCache.installScope(p.cache);
+        forge.util.IdScope.install(p.ids);
+        try {
+            final Game g = p.g;
+            final Player me = p.me;
+            final ScriptedTutor st = new ScriptedTutor(g, me, me.getController().getLobbyPlayer(), p.forcedId);
+            me.dangerouslySetController(st);
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
+            final PhaseHandler ph = g.getPhaseHandler();
+            final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, null);
+            g.subscribeToEvents(watch);
+            final long b = System.nanoTime();
+            // Both players had passed in the live game: the search's ability resolves now (as mainLoopStep would).
+            if (p.trigSa != null) {
+                // A triggered search: resolve its ability as WrappedAbility.resolve does (the optional "you may" was
+                // already accepted in the live game), then what MagicStack.finishResolving does for the priority.
+                me.getController().playSpellAbilityNoStack(p.trigSa, false);
+                g.getAction().checkStaticAbilities();
+                ph.resetPriority();
+                ph.onStackResolved();
+            } else {
+                g.getStack().resolveStack();
+            }
+            if (!st.used) {
+                synchronized (stats) {
+                    stats.tutorForcedMissed++;
+                }
+                r.ok = false;
+                r.value = Double.NEGATIVE_INFINITY;
+                return r;
+            }
+            int steps = 0;
+            while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
+                ph.mainLoopStep();
+                steps++;
+            }
+            r.rolloutNanos = System.nanoTime() - b;
+            r.steps = steps;
+            r.capped = !g.isGameOver() && !watch.reached;
+            r.value = value(g, me);
+        } catch (RuntimeException | StackOverflowError e) {
+            r.ok = false;
+            r.value = Double.NEGATIVE_INFINITY;
+            System.err.println("[lookahead] tutor rollout failed: " + e);
+            if (FAILURE_TRACES.getAndIncrement() < 20) {
+                e.printStackTrace();
+            }
+        } finally {
+            p.g = null;
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+        return r;
     }
 
     // ------------------------------------------------------------------ belief

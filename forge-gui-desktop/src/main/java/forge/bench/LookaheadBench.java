@@ -59,7 +59,8 @@ import java.util.concurrent.TimeoutException;
  *
  * <p>Config: {@code {"aiTimeoutSec":600, "gameTimeoutSec":1800, "simMaxDepth":4,
  * "simMaxSimulations":1000, "lookahead":{worlds,breadth,horizonTurns,threads,shadow,probe,margin,
- * priorExtra,priorUrl,priorShadow,priorTimeoutMs,priorCheckpointSha256 (read HX)},
+ * priorExtra,priorUrl,priorShadow,priorTimeoutMs,priorCheckpointSha256 (read HX),
+ * tutorRank,tutorUrl,tutorShadow,tutorLands,tutorTimeoutMs,tutorCheckpointSha256 (tutor ranking)},
  * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim", ...]}]}}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
@@ -75,6 +76,16 @@ public final class LookaheadBench {
         c.priorShadow = la.has("priorShadow") && la.get("priorShadow").getAsBoolean();
         c.priorTimeoutMs = la.has("priorTimeoutMs") ? la.get("priorTimeoutMs").getAsInt() : 2000;
         c.priorCheckpointSha256 = la.has("priorCheckpointSha256") ? la.get("priorCheckpointSha256").getAsString() : null;
+    }
+
+    /** Tutor-ranking keys: tutorRank (0 = off), tutorUrl, tutorShadow, tutorLands, tutorTimeoutMs (2000), tutorCheckpointSha256. */
+    static void applyTutor(JsonObject la, LookaheadSearch.Config c) {
+        c.tutorRank = la.has("tutorRank") ? la.get("tutorRank").getAsInt() : 0;
+        c.tutorUrl = la.has("tutorUrl") ? la.get("tutorUrl").getAsString() : null;
+        c.tutorShadow = la.has("tutorShadow") && la.get("tutorShadow").getAsBoolean();
+        c.tutorLands = la.has("tutorLands") && la.get("tutorLands").getAsBoolean();
+        c.tutorTimeoutMs = la.has("tutorTimeoutMs") ? la.get("tutorTimeoutMs").getAsInt() : 2000;
+        c.tutorCheckpointSha256 = la.has("tutorCheckpointSha256") ? la.get("tutorCheckpointSha256").getAsString() : null;
     }
 
     public static void main(String[] args) throws Exception {
@@ -104,6 +115,19 @@ public final class LookaheadBench {
                         throw new IllegalStateException("priorShadow needs priorExtra >= 1");
                     }
                     err.println("[lookahead-bench] prior service " + pc.priorUrl + " checkpoint " + LookaheadSearch.checkPriorService(pc));
+                } catch (IllegalStateException e) {
+                    err.println("[lookahead-bench] refusing: " + e.getMessage());
+                    System.exit(4);
+                }
+            }
+            // Tutor ranking: the same refusal for the ranker's pin.
+            applyTutor(la, pc);
+            if (pc.tutorOn()) {
+                try {
+                    if (pc.tutorRank < 1) {
+                        throw new IllegalStateException("tutorShadow needs tutorRank >= 1");
+                    }
+                    err.println("[lookahead-bench] tutor ranker " + pc.tutorUrl + " checkpoint " + LookaheadSearch.checkTutorService(pc));
                 } catch (IllegalStateException e) {
                     err.println("[lookahead-bench] refusing: " + e.getMessage());
                     System.exit(4);
@@ -186,6 +210,7 @@ public final class LookaheadBench {
                     c.budgetMs = la.has("budgetMs") ? la.get("budgetMs").getAsLong() : 0L;
                     c.decisionLog = la.has("decisionLog") && la.get("decisionLog").getAsBoolean();
                     applyPrior(la, c);
+                    applyTutor(la, c);
                     c.seed = seed * 31 + i;
                     LookaheadSearch s = new LookaheadSearch(c);
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);

@@ -77,6 +77,13 @@ public class GameCopier {
         this.copyStack = copyStack;
     }
 
+    /** Tutor ranking: a resolving triggered ability on top of the original stack is left out of the copy. */
+    private boolean skipResolvingTrigger = false;
+
+    public void setSkipResolvingTrigger(boolean skip) {
+        this.skipResolvingTrigger = skip;
+    }
+
     /**
      * Why a game's stack cannot be copied faithfully by {@link #copyStackFaithfully}, or null if it can.
      * Supported: spells (in their original state, not cast through a may-play effect) and activated abilities of
@@ -85,18 +92,32 @@ public class GameCopier {
      * entries, a frozen stack, copies, face-down or non-original-state hosts, and spliced spells.
      */
     public static String stackUnsupported(Game g) {
+        return stackUnsupported(g, false);
+    }
+
+    /**
+     * As {@link #stackUnsupported(Game)}; with {@code resolvingTop}, a stack frozen only because its top entry is in
+     * the middle of resolving (a choice made during resolution, lane tutor-ranking-0928) is accepted: the copy gets the
+     * whole stack unfrozen, the resolving entry on top and not yet resolved, so a play-out can resolve it again.
+     */
+    public static String stackUnsupported(Game g, boolean resolvingTop) {
         final forge.game.zone.MagicStack st = g.getStack();
         if (st.hasSimultaneousStackEntries()) {
             return "simultaneous";
         }
-        if (st.isFrozen()) {
+        if (st.isFrozen() && !(resolvingTop && st.isResolving())) {
             return "frozen";
         }
         final java.util.Set<SpellAbility> below = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        final SpellAbility top = st.isEmpty() ? null : st.peekAbility();
         for (java.util.Iterator<SpellAbilityStackInstance> it = st.reverseIterator(); it.hasNext(); ) {
             final SpellAbilityStackInstance si = it.next();
             final SpellAbility sa = si.getSpellAbility();
             if (si.isTrigger() || sa.isTrigger() || sa.isWrapper()) {
+                if (resolvingTop && st.isResolving() && sa == top && sa.isWrapper()) {
+                    // The resolving trigger is not copied: the caller rebuilds its ability in the copy (setSkipResolvingTrigger).
+                    continue;
+                }
                 return "trigger";
             }
             final boolean spell = si.isSpell() && sa.isSpell();
@@ -143,8 +164,14 @@ public class GameCopier {
      * be rebuilt (callers treat that as a failed copy).
      */
     private void copyStackFaithfully(Game newGame) {
+        final SpellAbility origTop = origGame.getStack().peekAbility();
+        int skipped = 0;
         for (java.util.Iterator<SpellAbilityStackInstance> it = origGame.getStack().reverseIterator(); it.hasNext(); ) {
             final SpellAbility orig = it.next().getSpellAbility();
+            if (skipResolvingTrigger && orig == origTop && orig.isWrapper() && origGame.getStack().isResolving()) {
+                skipped++;
+                continue;
+            }
             final Card newHost = (Card) find(orig.getHostCard());
             final Player activator = (Player) find(orig.getActivatingPlayer());
             SpellAbility base = findSAInCard(orig, newHost);
@@ -201,7 +228,7 @@ public class GameCopier {
             newGame.getStack().dangerouslyPushCopy(copy);
             stackSaMap.put(orig, copy);
         }
-        if (newGame.getStack().size() != origGame.getStack().size()) {
+        if (newGame.getStack().size() != origGame.getStack().size() - skipped) {
             throw new IllegalStateException("stack copy: size " + newGame.getStack().size() + " != " + origGame.getStack().size());
         }
     }
@@ -336,7 +363,8 @@ public class GameCopier {
 
         if (GameSimulator.COPY_STACK)
             copyStack(origGame, newGame, gameObjectMap);
-        if (copyStack && !origGame.getStack().isEmpty()) {
+        if (copyStack && !origGame.getStack().isEmpty() && !(skipResolvingTrigger && origGame.getStack().size() == 1
+                && origGame.getStack().peekAbility().isWrapper() && origGame.getStack().isResolving())) {
             copyStackFaithfully(newGame);
             // Spells on the stack can carry statics ("can't be countered"); apply them as the original game had them.
             newGame.getAction().checkStaticAbilities(false);
