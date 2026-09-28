@@ -98,6 +98,16 @@ public abstract class DamageAiBase extends SpellAbilityAi {
             return false;
         }
 
+        // Lethal together with the combat damage still to come: once blockers are declared, burn that takes the
+        // defending player's predicted remaining life to 0 goes to the face (owner-friend report 2026-09-28T02-19-05:
+        // 9 life, a trampler whose blocker had left combat, kicked Burst Lightning for 4 -- the AI shot a creature).
+        final forge.game.combat.Combat combat = game.getCombat();
+        if (combat != null && game.getPhaseHandler().is(PhaseType.COMBAT_DECLARE_BLOCKERS)
+                && combat.isPlayerAttacked(enemy) && !enemy.cantLoseForZeroOrLessLife()
+                && ComputerUtilCombat.lifeThatWouldRemain(enemy, combat) - restDamage <= 0) {
+            return true;
+        }
+
         if ((enemy.getLife() - restDamage) < 5) {
             // drop the human to less than 5 life
             return true;
