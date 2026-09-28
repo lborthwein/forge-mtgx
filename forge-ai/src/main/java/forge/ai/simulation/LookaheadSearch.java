@@ -1125,6 +1125,9 @@ public final class LookaheadSearch {
         }
         o.add("horizons", hsj);
         o.addProperty("lgWorlds", LG_WORLDS);
+        // The C5 service request's common fields as the model leaf would send them (seat, startingSeat, mulligans,
+        // deck); offline scoring adds the leaves.
+        o.add("modelRequest", forgeRequest(live, me));
         int h2Checked = 0, h2Mismatch = 0;
         final JsonArray ca = new JsonArray();
         for (int c = 0; c < n; c++) {
