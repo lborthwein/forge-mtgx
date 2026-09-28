@@ -61,6 +61,10 @@ public final class LookaheadSearch {
 
     public static final double TERMINAL = 100000.0;
     private static final AtomicInteger FAILURE_TRACES = new AtomicInteger();
+    /** Diagnostics only: record why play-outs failed ({@link Stats#rolloutFailWhy}); never changes a decision. */
+    static final boolean FAIL_WHY = Boolean.getBoolean("lookahead.failWhy");
+    /** The reason the last static candidate preparation on this thread returned null (diagnostics). */
+    private static final ThreadLocal<String> PREP_WHY = new ThreadLocal<>();
 
     public static final class Config {
         public int worlds = 1;
@@ -262,6 +266,8 @@ public final class LookaheadSearch {
         /** C1: priority decisions with a non-empty stack; of those, refused (by reason), searched, departed. */
         public long stackDecisions, stackUnsupported, stackSearched, stackDeparted;
         public final Map<String, Long> stackWhy = new TreeMap<>();
+        /** Diagnostics (-Dlookahead.failWhy=true): why play-outs failed (candidate preparation refusals by step, exceptions by class). */
+        public final Map<String, Long> rolloutFailWhy = new TreeMap<>();
         /** C5 model leaf: requests, leaves scored, decisions that fell back to the static evaluator. */
         public long modelCalls, modelLeaves, modelFallbacks, modelNanos, modelUnknownCards;
         /** Latency of every searched priority decision (ms, wall), in order. */
@@ -323,6 +329,11 @@ public final class LookaheadSearch {
             o.addProperty("loopGuard", loopGuard);
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
+            if (FAIL_WHY) {
+                final JsonObject fw = new JsonObject();
+                rolloutFailWhy.forEach(fw::addProperty);
+                o.add("rolloutFailWhy", fw);
+            }
             o.addProperty("rolloutCapped", rolloutCapped);
             o.addProperty("candidatesDropped", candidatesDropped);
             o.addProperty("steps", steps);
@@ -887,6 +898,9 @@ public final class LookaheadSearch {
                 stats.rolloutsAborted++;
             } else if (!r.ok) {
                 stats.rolloutFailures++;
+                if (FAIL_WHY) {
+                    stats.rolloutFailWhy.merge(r.failWhy == null ? "?" : r.failWhy, 1L, Long::sum);
+                }
             }
             if (r.capped) {
                 stats.rolloutCapped++;
@@ -1646,6 +1660,7 @@ public final class LookaheadSearch {
     private static SpellAbility prepare(Game g, Player me, Cand c, SpellAbility defSa, GameCopier copier) {
         SpellAbility sa = locate(g, me, c);
         if (sa == null) {
+            PREP_WHY.set("locate");
             return null;
         }
         sa.setActivatingPlayer(me);
@@ -1655,6 +1670,7 @@ public final class LookaheadSearch {
         if (c.isDefault && defSa != null) {
             SpellAbility d = SpellAbilityChoiceCopier.copyCastChoices(defSa, sa, me);
             if (d == null) {
+                PREP_WHY.set("copyChoices");
                 return null;
             }
             // Never carry a target over unmapped: start clean, then map Forge's live choices in.
@@ -1665,6 +1681,7 @@ public final class LookaheadSearch {
             }
             SpellAbilityChoiceCopier.copyTargets(defSa, d, copier::findWithStack);
             if (!targetsInGame(d, g)) {
+                PREP_WHY.set("defaultTargets");
                 return null;
             }
             return d;
@@ -1676,9 +1693,11 @@ public final class LookaheadSearch {
         }
         AiPlayDecision dec = ((PlayerControllerAi) me.getController()).getAi().canPlaySa(sa);
         if (dec != AiPlayDecision.WillPlay && needsTargets(sa)) {
+            PREP_WHY.set("aiRefused:" + dec);
             return null;
         }
         if (!targetsInGame(sa, g)) {
+            PREP_WHY.set("targets");
             return null;
         }
         return sa;
@@ -1738,6 +1757,8 @@ public final class LookaheadSearch {
 
     static final class Rollout {
         boolean ok = true;
+        /** Diagnostics: why the play-out failed. */
+        String failWhy;
         boolean capped = false;
         /** Stopped by the decision's wall budget (never started, or stopped between main-loop steps). */
         boolean aborted = false;
@@ -1882,6 +1903,8 @@ public final class LookaheadSearch {
         List<SpellAbility> first;
         boolean failed;
         Throwable error;
+        /** Diagnostics: why preparation failed. */
+        String failWhy;
         long copyNanos;
         /** C1: with spells on the stack, the copied player who keeps "first priority" (null otherwise). */
         Player firstPriority;
@@ -1944,8 +1967,10 @@ public final class LookaheadSearch {
                     MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
                 }
                 if (!c.pass) {
+                    PREP_WHY.remove();
                     SpellAbility sa = prepare(p.g, p.me, c, defSa, copier);
                     if (sa == null) {
+                        p.failWhy = "prep:" + (PREP_WHY.get() == null ? "?" : PREP_WHY.get()) + (c.isDefault ? ":default" : c.land ? ":land" : "");
                         p.failed = true;
                     } else {
                         p.first = new ArrayList<>();
@@ -1984,6 +2009,7 @@ public final class LookaheadSearch {
         if (p.failed) {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
+            r.failWhy = p.error != null ? "copy:" + p.error.getClass().getSimpleName() : p.failWhy;
             if (p.error != null) {
                 System.err.println("[lookahead] rollout failed: " + p.error);
                 if (FAILURE_TRACES.getAndIncrement() < 20) {
@@ -2105,6 +2131,7 @@ public final class LookaheadSearch {
         } catch (RuntimeException | StackOverflowError e) {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
+            r.failWhy = "playout:" + e.getClass().getSimpleName();
             System.err.println("[lookahead] rollout failed: " + e);
             if (FAILURE_TRACES.getAndIncrement() < 20) {
                 e.printStackTrace();
