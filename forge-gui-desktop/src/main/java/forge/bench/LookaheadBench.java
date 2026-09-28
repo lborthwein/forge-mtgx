@@ -59,7 +59,9 @@ import java.util.concurrent.TimeoutException;
  *
  * <p>Config: {@code {"aiTimeoutSec":600, "gameTimeoutSec":1800, "simMaxDepth":4,
  * "simMaxSimulations":1000, "lookahead":{worlds,breadth,horizonTurns,threads,shadow,probe,margin,
- * priorExtra,priorUrl,priorShadow,priorTimeoutMs,priorCheckpointSha256 (read HX)},
+ * priorExtra,priorUrl,priorShadow,priorTimeoutMs,priorCheckpointSha256 (read HX),
+ * belief,beliefShadow,beliefUrl,beliefTimeoutMs,beliefCheckpointSha256,beliefCube,beliefCubeSha256,beliefBasics
+ * (lane belief-sampling-0928)},
  * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim", ...]}]}}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
@@ -75,6 +77,19 @@ public final class LookaheadBench {
         c.priorShadow = la.has("priorShadow") && la.get("priorShadow").getAsBoolean();
         c.priorTimeoutMs = la.has("priorTimeoutMs") ? la.get("priorTimeoutMs").getAsInt() : 2000;
         c.priorCheckpointSha256 = la.has("priorCheckpointSha256") ? la.get("priorCheckpointSha256").getAsString() : null;
+    }
+
+    /** Belief keys: belief (off | human | uniform), beliefShadow, beliefUrl, beliefTimeoutMs (2000),
+     * beliefCheckpointSha256, beliefCube, beliefCubeSha256, beliefBasics (8). */
+    static void applyBelief(JsonObject la, LookaheadSearch.Config c) {
+        c.belief = la.has("belief") ? la.get("belief").getAsString() : "off";
+        c.beliefShadow = la.has("beliefShadow") && la.get("beliefShadow").getAsBoolean();
+        c.beliefUrl = la.has("beliefUrl") ? la.get("beliefUrl").getAsString() : null;
+        c.beliefTimeoutMs = la.has("beliefTimeoutMs") ? la.get("beliefTimeoutMs").getAsInt() : 2000;
+        c.beliefCheckpointSha256 = la.has("beliefCheckpointSha256") ? la.get("beliefCheckpointSha256").getAsString() : null;
+        c.beliefCube = la.has("beliefCube") ? la.get("beliefCube").getAsString() : null;
+        c.beliefCubeSha256 = la.has("beliefCubeSha256") ? la.get("beliefCubeSha256").getAsString() : null;
+        c.beliefBasics = la.has("beliefBasics") ? la.get("beliefBasics").getAsInt() : 8;
     }
 
     public static void main(String[] args) throws Exception {
@@ -117,6 +132,22 @@ public final class LookaheadBench {
             prefs.setPref(FPref.UI_LANGUAGE, "en-US");
             return null;
         });
+        {
+            // Belief: the cube pin (and, for belief=human, the service's checkpoint pin) is checked once, after the card
+            // database loads and before any game; a failure refuses the run (exit 4).
+            final LookaheadSearch.Config bc = new LookaheadSearch.Config();
+            applyBelief(la, bc);
+            if (bc.beliefOn()) {
+                try {
+                    final forge.ai.simulation.BeliefSampler.Cube cube = LookaheadSearch.checkBelief(bc);
+                    err.println("[lookahead-bench] belief " + bc.belief + (bc.beliefShadow ? " (shadow)" : "") + " cube "
+                            + cube.sha256 + " names " + cube.names.size() + " unresolved " + cube.unresolved);
+                } catch (IllegalStateException e) {
+                    err.println("[lookahead-bench] refusing: " + e.getMessage());
+                    System.exit(4);
+                }
+            }
+        }
         if (!"false".equals(System.getProperty("lookahead.preloadTokens"))) {
             // C3c: fill the token table before any game. TokenDb fills a HashMultimap lazily on a token's first use;
             // play-outs on several threads raced on it (a reader saw a token with fewer arts and Aggregates.random drew
@@ -187,6 +218,7 @@ public final class LookaheadBench {
                     c.budgetMs = la.has("budgetMs") ? la.get("budgetMs").getAsLong() : 0L;
                     c.decisionLog = la.has("decisionLog") && la.get("decisionLog").getAsBoolean();
                     applyPrior(la, c);
+                    applyBelief(la, c);
                     c.seed = seed * 31 + i;
                     LookaheadSearch s = new LookaheadSearch(c);
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);
