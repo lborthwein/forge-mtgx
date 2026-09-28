@@ -62,7 +62,7 @@ import java.util.concurrent.TimeoutException;
  * priorExtra,priorUrl,priorShadow,priorTimeoutMs,priorCheckpointSha256 (read HX),
  * tutorRank,tutorUrl,tutorShadow,tutorLands,tutorTimeoutMs,tutorCheckpointSha256 (tutor ranking),
  * belief,beliefShadow,beliefUrl,beliefTimeoutMs,beliefCheckpointSha256,beliefCube,beliefCubeSha256,beliefBasics
- * (lane belief-sampling-0928)},
+ * (lane belief-sampling-0928), forceRefused off|shadow|on (lane candprep-0928)},
  * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim", ...]}]}}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
@@ -236,6 +236,10 @@ public final class LookaheadBench {
                     c.margin = la.has("margin") ? la.get("margin").getAsDouble() : 0.0;
                     c.departZ = la.has("departZ") ? la.get("departZ").getAsDouble() : 0.0;
                     c.targetVariants = la.has("targetVariants") ? la.get("targetVariants").getAsInt() : 0;
+                    c.forceRefused = la.has("forceRefused") ? la.get("forceRefused").getAsString() : "off";
+                    if (!java.util.Set.of("off", "shadow", "on").contains(c.forceRefused)) {
+                        throw new IllegalArgumentException("forceRefused must be off, shadow or on: " + c.forceRefused);
+                    }
                     c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();
                     c.modelUrl = la.has("modelUrl") ? la.get("modelUrl").getAsString() : null;
