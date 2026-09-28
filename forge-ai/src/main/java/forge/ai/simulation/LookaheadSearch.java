@@ -236,6 +236,8 @@ public final class LookaheadSearch {
         public long decisions, stackSkipped, uncontested, searched, departed, departFallback, loopGuard;
         /** departZ: candidates (with a finished play-out in every world) set aside for lack of confidence. */
         public long departGated;
+        /** targetVariants: variant candidates offered; departures to a variant. */
+        public long targetVariantCands, targetVariantDepartures;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
@@ -294,6 +296,10 @@ public final class LookaheadSearch {
             o.addProperty("loopGuard", loopGuard);
             if (departGated > 0) {
                 o.addProperty("departGated", departGated);
+            }
+            if (targetVariantCands > 0) {
+                o.addProperty("targetVariantCands", targetVariantCands);
+                o.addProperty("targetVariantDepartures", targetVariantDepartures);
             }
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
@@ -713,6 +719,9 @@ public final class LookaheadSearch {
                 } else {
                     answer = mapped;
                     stats.departed++;
+                    if (chosen.tgt != null) {
+                        stats.targetVariantDepartures++;
+                    }
                     if (onStack) {
                         stats.stackDeparted++;
                     }
@@ -1462,7 +1471,9 @@ public final class LookaheadSearch {
                 priorView(pv, g, me, legal, seen);
             }
             if (cfg.targetVariants > 0) {
+                final int before = out.size();
                 targetVariants(g, me, out, defSa, seen, cfg.targetVariants);
+                stats.targetVariantCands += out.size() - before;
             }
         } catch (RuntimeException e) {
             // Enumeration failure: search nothing, play Forge's answer.
