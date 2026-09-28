@@ -58,13 +58,23 @@ import java.util.concurrent.TimeoutException;
  * a JVM that dies loses at most the game in flight, and a restart skips every id already there.
  *
  * <p>Config: {@code {"aiTimeoutSec":600, "gameTimeoutSec":1800, "simMaxDepth":4,
- * "simMaxSimulations":1000, "lookahead":{worlds,breadth,horizonTurns,threads,shadow,probe,margin},
+ * "simMaxSimulations":1000, "lookahead":{worlds,breadth,horizonTurns,threads,shadow,probe,margin,
+ * priorExtra,priorUrl,priorShadow,priorTimeoutMs,priorCheckpointSha256 (read HX)},
  * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim", ...]}]}}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
  */
 public final class LookaheadBench {
     private LookaheadBench() {
+    }
+
+    /** HX keys: priorExtra (0 = off), priorUrl, priorShadow, priorTimeoutMs (2000), priorCheckpointSha256. */
+    static void applyPrior(JsonObject la, LookaheadSearch.Config c) {
+        c.priorExtra = la.has("priorExtra") ? la.get("priorExtra").getAsInt() : 0;
+        c.priorUrl = la.has("priorUrl") ? la.get("priorUrl").getAsString() : null;
+        c.priorShadow = la.has("priorShadow") && la.get("priorShadow").getAsBoolean();
+        c.priorTimeoutMs = la.has("priorTimeoutMs") ? la.get("priorTimeoutMs").getAsInt() : 2000;
+        c.priorCheckpointSha256 = la.has("priorCheckpointSha256") ? la.get("priorCheckpointSha256").getAsString() : null;
     }
 
     public static void main(String[] args) throws Exception {
@@ -83,6 +93,23 @@ public final class LookaheadBench {
             SimSearchBudget.setBudget(cfg.get("simMaxSimulations").getAsInt());
         }
         final JsonObject la = cfg.has("lookahead") ? cfg.getAsJsonObject("lookahead") : new JsonObject();
+        {
+            // HX: the policy-prior pin is checked once at JVM start; a missing pin, an unreachable service or another
+            // checkpoint refuses the whole run (exit 4) before any game.
+            final LookaheadSearch.Config pc = new LookaheadSearch.Config();
+            applyPrior(la, pc);
+            if (pc.priorOn()) {
+                try {
+                    if (pc.priorExtra < 1) {
+                        throw new IllegalStateException("priorShadow needs priorExtra >= 1");
+                    }
+                    err.println("[lookahead-bench] prior service " + pc.priorUrl + " checkpoint " + LookaheadSearch.checkPriorService(pc));
+                } catch (IllegalStateException e) {
+                    err.println("[lookahead-bench] refusing: " + e.getMessage());
+                    System.exit(4);
+                }
+            }
+        }
 
         GuiBase.setInterface(new GuiDesktop());
         FModel.initialize(null, prefs -> {
@@ -158,6 +185,7 @@ public final class LookaheadBench {
                     c.modelTimeoutMs = la.has("modelTimeoutMs") ? la.get("modelTimeoutMs").getAsInt() : 2000;
                     c.budgetMs = la.has("budgetMs") ? la.get("budgetMs").getAsLong() : 0L;
                     c.decisionLog = la.has("decisionLog") && la.get("decisionLog").getAsBoolean();
+                    applyPrior(la, c);
                     c.seed = seed * 31 + i;
                     LookaheadSearch s = new LookaheadSearch(c);
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);

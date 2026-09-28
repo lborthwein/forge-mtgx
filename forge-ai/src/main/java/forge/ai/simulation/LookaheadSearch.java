@@ -121,6 +121,26 @@ public final class LookaheadSearch {
         public long budgetMs = 0L;
         /** Interactive play: one JSON line per searched decision on stderr ({@code [lookahead-decision] {...}}). */
         public boolean decisionLog = false;
+        /**
+         * Read HX (human-likely extras): at a searched decision where the seat is the active player, in a main phase,
+         * with an empty stack, ask the 17Lands policy prior ({@link #priorUrl}) about Forge's FULL candidate list and add
+         * its top-n candidates (by served p) that are not already in the breadth-B set. 0 (the default) = off: no call,
+         * nothing added, the config JSON unchanged.
+         */
+        public int priorExtra = 0;
+        /** HX: base URL of the policy-prior service (mtgx serve.py). */
+        public String priorUrl = null;
+        /** HX shadow: make the prior call and log which extras would be added, but never add them. */
+        public boolean priorShadow = false;
+        /** HX: per-request timeout; a failed or late call keeps Forge's B set for that decision and is counted. */
+        public int priorTimeoutMs = 2000;
+        /** HX: the checkpoint the service must serve (GET /v1/health checkpointSha256), checked once per JVM. */
+        public String priorCheckpointSha256 = null;
+
+        /** HX is on (a prior call at qualifying decisions, added or shadow). */
+        public boolean priorOn() {
+            return priorExtra > 0 || priorShadow;
+        }
 
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
@@ -170,6 +190,13 @@ public final class LookaheadSearch {
                 o.addProperty("modelUrl", modelUrl);
                 o.addProperty("modelTimeoutMs", modelTimeoutMs);
             }
+            if (priorOn()) {
+                o.addProperty("priorExtra", priorExtra);
+                o.addProperty("priorShadow", priorShadow);
+                o.addProperty("priorUrl", priorUrl);
+                o.addProperty("priorTimeoutMs", priorTimeoutMs);
+                o.addProperty("priorCheckpointSha256", priorCheckpointSha256);
+            }
             return o;
         }
     }
@@ -218,6 +245,20 @@ public final class LookaheadSearch {
         }
         public String modelDigest, modelCheckpoint, modelLastError;
         public final JsonArray probes = new JsonArray();
+        /**
+         * HX prior (reported only when the option is on). Searched decisions that qualified (active, main phase, empty
+         * stack) or did not; qualifying ones with no candidate outside B (no call); requests made; of those, failed
+         * (voids the game in a read); call wall time; decisions that got extras, extras added; decisions whose search
+         * choice was an extra, and of those the ones actually played; shadow: decisions / extras that would have been
+         * added.
+         */
+        public boolean priorOn;
+        public long priorQualifying, priorNotQualifying, priorNoRoom, priorCalls, priorFailures, priorNanos, priorMaxNanos;
+        public long decisionsWithExtras, extrasAdded, extraBest, departuresToExtra, shadowDecisionsWithExtras, shadowExtras;
+        public long priorUnknownCards;
+        public String priorDigest, priorCheckpoint, priorLastError;
+        /** One entry per qualifying decision: B size, full list size, extras (would-be in shadow) with p, choice, ms. */
+        public final JsonArray priorDecisions = new JsonArray();
 
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
@@ -306,6 +347,28 @@ public final class LookaheadSearch {
             if (probes.size() > 0) {
                 o.add("probes", probes);
             }
+            if (priorOn) {
+                o.addProperty("priorQualifying", priorQualifying);
+                o.addProperty("priorNotQualifying", priorNotQualifying);
+                o.addProperty("priorNoRoom", priorNoRoom);
+                o.addProperty("priorCalls", priorCalls);
+                o.addProperty("priorFailures", priorFailures);
+                o.addProperty("priorMs", priorNanos / 1e6);
+                o.addProperty("priorMaxMs", priorMaxNanos / 1e6);
+                o.addProperty("decisionsWithExtras", decisionsWithExtras);
+                o.addProperty("extrasAdded", extrasAdded);
+                o.addProperty("extraBest", extraBest);
+                o.addProperty("departuresToExtra", departuresToExtra);
+                o.addProperty("shadowDecisionsWithExtras", shadowDecisionsWithExtras);
+                o.addProperty("shadowExtras", shadowExtras);
+                o.addProperty("priorUnknownCards", priorUnknownCards);
+                o.addProperty("priorDigest", priorDigest);
+                o.addProperty("priorCheckpointSha256", priorCheckpoint);
+                if (priorLastError != null) {
+                    o.addProperty("priorLastError", priorLastError);
+                }
+                o.add("priorDecisions", priorDecisions);
+            }
             return o;
         }
     }
@@ -318,6 +381,8 @@ public final class LookaheadSearch {
         final boolean land;
         final boolean isDefault;
         final String label;
+        /** The prior service's candidate kind: pass | land | cast (a spell) | activate (an activated ability) | other. */
+        final String kind;
 
         Cand(SpellAbility sa, boolean isDefault) {
             this.pass = sa == null;
@@ -326,6 +391,18 @@ public final class LookaheadSearch {
             this.land = sa != null && sa.isLandAbility();
             this.isDefault = isDefault;
             this.label = sa == null ? "pass" : (sa.getHostCard().getName() + " :: " + trim(sa.toString()));
+            this.kind = sa == null ? "pass" : land ? "land" : sa.isSpell() ? "cast" : sa.isActivatedAbility() ? "activate" : "other";
+        }
+
+        /** The prior request's candidate: {id, kind, fid} (fid = the host card's id, absent for pass). */
+        JsonObject toPriorJson(int id) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("id", id);
+            o.addProperty("kind", kind);
+            if (!pass) {
+                o.addProperty("fid", hostId);
+            }
+            return o;
         }
 
         String key() {
@@ -341,6 +418,9 @@ public final class LookaheadSearch {
     private final Stats stats = new Stats();
     private final ExecutorService pool;
     private final ModelClient model;
+    private final PriorClient prior;
+    /** The candidate list played out at the last searched decision (B plus any HX extras); tests read it. */
+    List<Cand> lastCandidates = null;
     private JsonObject modelDeck = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
@@ -370,6 +450,26 @@ public final class LookaheadSearch {
             pool = null;
         }
         model = cfg.modelUrl == null ? null : new ModelClient(cfg.modelUrl, cfg.modelTimeoutMs);
+        if (cfg.priorOn()) {
+            if (cfg.priorExtra < 1) {
+                throw new IllegalStateException("priorShadow needs priorExtra >= 1 (how many extras would be added)");
+            }
+            // The pin: refuse to search against any checkpoint but the configured one (once per JVM and service).
+            checkPriorService(cfg);
+            prior = new PriorClient(cfg.priorUrl, cfg.priorTimeoutMs);
+            stats.priorOn = true;
+        } else {
+            prior = null;
+        }
+    }
+
+    /**
+     * HX: check the prior service's {@code /v1/health} checkpoint against {@link Config#priorCheckpointSha256} (once
+     * per JVM and service). Throws {@link IllegalStateException} on a missing pin, an unreachable service or a
+     * mismatch; a runner calls it at start and exits non-zero.
+     */
+    public static String checkPriorService(Config c) {
+        return PriorClient.checkHealth(c.priorUrl, c.priorCheckpointSha256, c.priorTimeoutMs);
     }
 
     public Config getConfig() {
@@ -460,12 +560,15 @@ public final class LookaheadSearch {
 
         final boolean check = Boolean.getBoolean("lookahead.checkLive");
         final String before = check ? liveProbe(live, defSa) : null;
+        // HX: the prior applies where the seat is the active player, in a main phase, with an empty stack.
+        final PriorView pv = prior != null && !onStack && ph.getPlayerTurn() == me && ph.getPhase() != null && ph.getPhase().isMain()
+                ? new PriorView() : null;
         // Candidates, enumerated in a copy so the live game is never touched by enumeration.
-        final List<Cand> cands = enumerate(live, me, defSa, decisionSeed);
+        final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv);
         if (check) {
             checkLive("enumerate", before, live, defSa, index);
         }
-        if (cands.size() < 2) {
+        if (base.size() < 2) {
             stats.uncontested++;
             return def;
         }
@@ -473,6 +576,19 @@ public final class LookaheadSearch {
         if (onStack) {
             stats.stackSearched++;
         }
+        final int bSize = base.size();
+        JsonObject priorEntry = null;
+        List<Cand> withExtras = base;
+        if (prior != null) {
+            if (pv == null) {
+                stats.priorNotQualifying++;
+            } else {
+                priorEntry = new JsonObject();
+                withExtras = addPriorExtras(live, me, base, pv, priorEntry, index, turn, ph);
+            }
+        }
+        final List<Cand> cands = withExtras;
+        lastCandidates = cands;
 
         final int k = Math.max(1, cfg.worlds);
         final int n = cands.size();
@@ -548,6 +664,18 @@ public final class LookaheadSearch {
         if (overBudget) {
             stats.capped++;
             outcome = "capped";
+        }
+        if (priorEntry != null) {
+            final boolean extra = best >= bSize;
+            priorEntry.addProperty("best", best);
+            priorEntry.addProperty("chosenExtra", extra);
+            priorEntry.addProperty("outcome", outcome);
+            if (extra) {
+                stats.extraBest++;
+                if ("departed".equals(outcome)) {
+                    stats.departuresToExtra++;
+                }
+            }
         }
 
         if (Boolean.getBoolean("lookahead.trace")) {
@@ -1151,7 +1279,21 @@ public final class LookaheadSearch {
 
     // ------------------------------------------------------------------ candidates
 
-    private List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed) {
+    /** HX: what the enumeration copy gives the prior call beside the B set (filled only at qualifying decisions). */
+    static final class PriorView {
+        /** Forge's full candidate list past B, in Forge's order (saEvaluator sort, deduplicated by {@link Cand#key()}). */
+        final List<Cand> tail = new ArrayList<>();
+        /** The decision's ForgeState ({@link forge.bench.StateEncoder#encode}) of the searching seat; null if it failed. */
+        JsonObject root;
+        String error;
+    }
+
+    /**
+     * @param pv null = the base enumeration (Forge's answer, pass, then the next legal candidates up to breadth B);
+     *           otherwise, after B is fixed exactly as in the base, the rest of Forge's list and the root state are put
+     *           into it from the same copy (nothing of B depends on it; a failure there leaves B unchanged).
+     */
+    private List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv) {
         final List<Cand> out = new ArrayList<>();
         out.add(new Cand(defSa, true));
         if (defSa != null) {
@@ -1186,6 +1328,9 @@ public final class LookaheadSearch {
                     out.add(c);
                 }
             }
+            if (pv != null) {
+                priorView(pv, g, me, legal, seen);
+            }
         } catch (RuntimeException e) {
             // Enumeration failure: search nothing, play Forge's answer.
             if (cfg.stack && !live.getStack().isEmpty()) {
@@ -1200,6 +1345,150 @@ public final class LookaheadSearch {
             forge.util.IdScope.install(prevIds1);
             MyRandom.setThreadRandom(prev);
         }
+        return out;
+    }
+
+    /**
+     * HX: the rest of Forge's list past B (the same sorted legal list, deduplicated by key against B and itself) and
+     * the root state, from the enumeration copy, after B is fixed. Never throws: a failure is recorded in {@code pv}
+     * and the decision keeps B.
+     */
+    private static void priorView(PriorView pv, Game g, Player me, List<SpellAbility> legal, Set<String> seenB) {
+        final Set<String> seen = new HashSet<>(seenB);
+        try {
+            for (SpellAbility sa : legal) {
+                Cand c = new Cand(sa, false);
+                if (seen.add(c.key())) {
+                    pv.tail.add(c);
+                }
+            }
+        } catch (RuntimeException e) {
+            pv.tail.clear();
+            pv.error = "tail: " + e;
+            return;
+        }
+        if (pv.tail.isEmpty()) {
+            return;
+        }
+        try {
+            pv.root = forge.bench.StateEncoder.encode(g, me);
+        } catch (RuntimeException e) {
+            pv.root = null;
+            pv.error = "encode: " + e;
+        }
+    }
+
+    /**
+     * HX: one prior call over Forge's full list L = B + tail; B plus the top-{@code priorExtra} tail candidates by p
+     * (null p never; ties to Forge's order), appended in Forge's order. In shadow mode, or on any failure, B itself.
+     */
+    private List<Cand> addPriorExtras(Game live, Player me, List<Cand> b, PriorView pv, JsonObject entry, int index, int turn,
+            PhaseHandler ph) {
+        stats.priorQualifying++;
+        entry.addProperty("decision", index);
+        entry.addProperty("turn", turn);
+        entry.addProperty("phase", String.valueOf(ph.getPhase()));
+        entry.addProperty("b", b.size());
+        entry.addProperty("l", b.size() + pv.tail.size());
+        stats.priorDecisions.add(entry);
+        if (pv.tail.isEmpty() && pv.error == null) {
+            // Nothing outside B: no extra is possible, no call.
+            stats.priorNoRoom++;
+            entry.addProperty("call", false);
+            return b;
+        }
+        final List<Cand> all = new ArrayList<>(b);
+        all.addAll(pv.tail);
+        Double[] p = null;
+        String error = pv.error;
+        if (error == null) {
+            final JsonObject req = forgeRequest(live, me);
+            req.add("leaves", new JsonArray());
+            req.add("root", pv.root);
+            final JsonArray cj = new JsonArray();
+            for (int i = 0; i < all.size(); i++) {
+                cj.add(all.get(i).toPriorJson(i));
+            }
+            req.add("candidates", cj);
+            final long t = System.nanoTime();
+            p = prior.prior(req, all.size());
+            final long dt = System.nanoTime() - t;
+            stats.priorCalls++;
+            stats.priorNanos += dt;
+            stats.priorMaxNanos = Math.max(stats.priorMaxNanos, dt);
+            entry.addProperty("ms", Math.round(dt / 1e4) / 100.0);
+            if (p == null) {
+                error = prior.lastError;
+            }
+        }
+        entry.addProperty("call", error == null);
+        if (error != null) {
+            stats.priorFailures++;
+            stats.priorLastError = error;
+            entry.addProperty("error", error);
+            System.err.println("[lookahead] prior call failed at decision " + index + ", keeping Forge's B set: " + error);
+            return b;
+        }
+        stats.priorDigest = prior.digestHex();
+        stats.priorCheckpoint = prior.checkpointSha256;
+        stats.priorUnknownCards = prior.unknownCards;
+        final int[] pick = selectExtras(p, b.size(), cfg.priorExtra);
+        final JsonArray ex = new JsonArray();
+        for (int i : pick) {
+            final JsonObject e = new JsonObject();
+            e.addProperty("i", i);
+            e.addProperty("kind", all.get(i).kind);
+            e.addProperty("label", all.get(i).label);
+            e.addProperty("p", p[i]);
+            ex.add(e);
+        }
+        final JsonArray pB = new JsonArray();
+        for (int i = 0; i < b.size(); i++) {
+            pB.add(p[i]);
+        }
+        entry.add("pB", pB);
+        if (cfg.priorShadow) {
+            entry.add("wouldAdd", ex);
+            if (pick.length > 0) {
+                stats.shadowDecisionsWithExtras++;
+                stats.shadowExtras += pick.length;
+            }
+            return b;
+        }
+        entry.add("extras", ex);
+        if (pick.length == 0) {
+            return b;
+        }
+        stats.decisionsWithExtras++;
+        stats.extrasAdded += pick.length;
+        final List<Cand> out = new ArrayList<>(b);
+        for (int i : pick) {
+            out.add(all.get(i));
+        }
+        return out;
+    }
+
+    /**
+     * HX selection: the indices {@code >= bSize} with non-null p, the top {@code n} by p (ties to the lower index, Forge's
+     * order), returned in ascending index order.
+     */
+    static int[] selectExtras(Double[] p, int bSize, int n) {
+        final List<Integer> idx = new ArrayList<>();
+        for (int i = bSize; i < p.length; i++) {
+            if (p[i] != null && !p[i].isNaN()) {
+                idx.add(i);
+            }
+        }
+        idx.sort((x, y) -> {
+            final int c = Double.compare(p[y], p[x]);
+            return c != 0 ? c : Integer.compare(x, y);
+        });
+        final int m = Math.max(0, Math.min(n, idx.size()));
+        final int[] out = new int[m];
+        for (int j = 0; j < m; j++) {
+            out[j] = idx.get(j);
+        }
+        Arrays.sort(out);
         return out;
     }
 
@@ -1811,17 +2100,7 @@ public final class LookaheadSearch {
         }
         double[] p = null;
         if (leaves.size() > 0) {
-            final JsonObject req = new JsonObject();
-            req.addProperty("schema", ModelClient.REQUEST_SCHEMA);
-            req.addProperty("seat", forge.bench.StateEncoder.playerIndex(live, me));
-            req.addProperty("startingSeat", live.getStartingPlayer() == null ? -1
-                    : forge.bench.StateEncoder.playerIndex(live, live.getStartingPlayer()));
-            final JsonArray mull = new JsonArray();
-            for (Player pl : live.getPlayers()) {
-                mull.add(pl.getStats().getMulliganCount());
-            }
-            req.add("mulligans", mull);
-            req.add("deck", deckOf(me));
+            final JsonObject req = forgeRequest(live, me);
             req.add("leaves", leaves);
             final long t = System.nanoTime();
             p = model.score(req, leaves.size());
@@ -1849,6 +2128,22 @@ public final class LookaheadSearch {
         for (int i = 0; i < at.size(); i++) {
             values[at.get(i)[0]][at.get(i)[1]] = p[i];
         }
+    }
+
+    /** The service request's common fields (C5 leaves and the HX prior): schema, seat, startingSeat, mulligans, deck. */
+    private JsonObject forgeRequest(Game live, Player me) {
+        final JsonObject req = new JsonObject();
+        req.addProperty("schema", ModelClient.REQUEST_SCHEMA);
+        req.addProperty("seat", forge.bench.StateEncoder.playerIndex(live, me));
+        req.addProperty("startingSeat", live.getStartingPlayer() == null ? -1
+                : forge.bench.StateEncoder.playerIndex(live, live.getStartingPlayer()));
+        final JsonArray mull = new JsonArray();
+        for (Player pl : live.getPlayers()) {
+            mull.add(pl.getStats().getMulliganCount());
+        }
+        req.add("mulligans", mull);
+        req.add("deck", deckOf(me));
+        return req;
     }
 
     /** The seat's registered main deck as {name: copies} (fixed for the game). */
