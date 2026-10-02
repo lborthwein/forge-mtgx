@@ -65,7 +65,8 @@ import java.util.concurrent.TimeoutException;
  * Config: LookaheadBench's ({@code aiTimeoutSec}, {@code gameTimeoutSec}, {@code games[{id,seed,decks,seats}]});
  * every seat must be "default". One JSON line per game: winner, reason, turns, startingSeat, and three digests:
  * {@code digest} (LookaheadBench's: the fingerprint at every turn start plus the final one), {@code phaseDigest}
- * (at every phase) and {@code logDigest} (the whole game log text; {@code -Dparity.logDir=<dir>} also writes it).
+ * (at every phase) and {@code logDigest} (the whole game log text except the wall-clock match duration;
+ * {@code -Dparity.logDir=<dir>} also writes the text).
  */
 public final class UpstreamParityBench {
     private UpstreamParityBench() {
@@ -226,9 +227,12 @@ public final class UpstreamParityBench {
         final MessageDigest md = MessageDigest.getInstance("SHA-256");
         final StringBuilder text = new StringBuilder();
         for (GameLogEntry le : entries) {
+            text.append(le.type()).append(" | ").append(le).append('\n');
+            if (le.toString().contains("Match Duration")) {
+                continue; // wall-clock seconds: not part of the game
+            }
             md.update(le.toString().getBytes(StandardCharsets.UTF_8));
             md.update((byte) '\n');
-            text.append(le.type()).append(" | ").append(le).append('\n');
         }
         final String dir = System.getProperty("parity.logDir");
         if (dir != null) {
