@@ -100,6 +100,12 @@ public class AiController {
     private boolean useLivingEnd;
     private List<SpellAbility> skipped;
     private volatile boolean timeoutReached;
+    /**
+     * mtgx L2 policy pilot (lane l2-fork-1001, {@code forge.ai.simulation.PolicyPilot}): while set, the priority choice
+     * ({@link #chooseSpellAbilityToPlay()}) never considers a spell ability this predicate accepts (a vetoed hand cast).
+     * Null (the default, and always outside a policy seat's re-ask) = upstream Forge AI, byte for byte.
+     */
+    private java.util.function.Predicate<SpellAbility> policyVeto = null;
 
     public AiController(final Player computerPlayer, final Game game0) {
         player = computerPlayer;
@@ -116,6 +122,18 @@ public class AiController {
     }
     public void setUseSimulation(AIOption mode) {
         simMode = mode;
+    }
+
+    /** mtgx L2 policy pilot: set (non-null) only around one re-asked priority choice; see {@link #policyVeto}. */
+    public void setPolicyVeto(java.util.function.Predicate<SpellAbility> veto) {
+        policyVeto = veto;
+    }
+
+    private List<SpellAbility> policyFilter(List<SpellAbility> l) {
+        if (policyVeto != null && l != null) {
+            l.removeIf(policyVeto);
+        }
+        return l;
     }
 
     public int getAttackAggression() {
@@ -1383,7 +1401,7 @@ public class AiController {
         );
         if (!playBeforeLand.isEmpty()) {
             SpellAbility wantToPlayBeforeLand = chooseSpellAbilityToPlayFromList(
-                    ComputerUtilAbility.getSpellAbilities(playBeforeLand, player), false
+                    policyFilter(ComputerUtilAbility.getSpellAbilities(playBeforeLand, player)), false
             );
             if (wantToPlayBeforeLand != null) {
                 return singleSpellAbilityList(wantToPlayBeforeLand);
@@ -1565,10 +1583,10 @@ public class AiController {
         }
 
         if (!game.getStack().isEmpty()) {
-            SpellAbility counter = chooseCounterSpell(getPlayableCounters(cards));
+            SpellAbility counter = chooseCounterSpell(policyFilter(getPlayableCounters(cards)));
             if (counter != null) return counter;
 
-            SpellAbility counterETB = chooseSpellAbilityToPlayFromList(getPossibleETBCounters(), false);
+            SpellAbility counterETB = chooseSpellAbilityToPlayFromList(policyFilter(getPossibleETBCounters()), false);
             if (counterETB != null)
                 return counterETB;
         }
@@ -1582,6 +1600,7 @@ public class AiController {
             // TODO allow when experimental profile?
             return spellAbility.isLandAbility() || (spellAbility.getHostCard() != null && ComputerUtilCard.isCardRemAIDeck(spellAbility.getHostCard()));
         });
+        policyFilter(saList);
         //removed skipped SA
         skipped = saList.stream().filter(SpellAbility::isSkip).collect(Collectors.toList());
         if (!skipped.isEmpty())
