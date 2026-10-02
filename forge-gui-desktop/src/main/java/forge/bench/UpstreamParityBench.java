@@ -71,8 +71,18 @@ public final class UpstreamParityBench {
     private UpstreamParityBench() {
     }
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) {
         final PrintStream err = new PrintStream(new FileOutputStream(FileDescriptor.err), true, StandardCharsets.UTF_8);
+        try {
+            run(args, err);
+        } catch (Throwable t) {
+            // Forge's GUI threads are not daemons: without an explicit exit a failed run would hang
+            t.printStackTrace(err);
+            System.exit(5);
+        }
+    }
+
+    static void run(String[] args, PrintStream err) throws Exception {
         System.setOut(err);
         System.setProperty("java.util.Arrays.useLegacyMergeSort", "true");
         final JsonObject cfg = JsonParser.parseString(Files.readString(Path.of(args[0]))).getAsJsonObject();
