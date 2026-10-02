@@ -69,12 +69,23 @@ public class TokenDb implements ITokenDatabase {
         for (CardEdition edition : this.editions) {
             for (Map.Entry<String, Collection<CardEdition.EditionEntry>> inSet : edition.getTokens().asMap().entrySet()) {
                 String name = inSet.getKey();
+                if (!hasTokenRules(name)) {
+                    // fork: an edition lists a token with no token script (Forge 2.0.15: "gingerbrute" in Reality
+                    // Fracture Commander). Lazy loading only fails if that token is ever asked for; preloading skips it.
+                    System.err.println("TokenDb.preloadTokens: skipping " + edition.getCode() + " token '" + name + "' (no token script)");
+                    continue;
+                }
                 String fullName = String.format("%s_%s", name, edition.getCode().toLowerCase());
                 for (CardEdition.EditionEntry t : inSet.getValue()) {
                     allTokenByName.put(fullName, addTokenInSet(edition, name, t));
                 }
             }
         }
+    }
+
+    /** Whether {@link #addTokenInSet} can build this token name (its rules, or the Endure spirit hotfix). */
+    private boolean hasTokenRules(String name) {
+        return rulesByName.containsKey(name) || "w_2_2_spirit".equals(name) || "w_3_3_spirit".equals(name);
     }
 
     // synchronized (fork, look-ahead C3c): the token table fills lazily on a token's first use. Play-outs on several
