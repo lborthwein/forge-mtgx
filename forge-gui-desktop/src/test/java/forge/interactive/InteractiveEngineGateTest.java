@@ -219,7 +219,9 @@ public class InteractiveEngineGateTest extends AITest {
     /**
      * Casting Steel Seraph while the EDT keeps republishing the same input. Each cast is offered the
      * Prototype choice and cancelled, so the input stays live and the cycle repeats. The republish
-     * hammer stands in for the event traffic that schedules publishes in a real game. Before the fix
+     * hammer stands in for the event traffic that schedules publishes in a real game. (Since
+     * bridge-race-1002 only presentation callbacks such as setHighlighted schedule a publish, so the
+     * hammer uses one; a state notification such as updateLives no longer enumerates.) Before the fix
      * the action thread and the EDT enumerated at once and one of them threw.
      */
     @Test(timeOut = 900000)
@@ -228,7 +230,7 @@ public class InteractiveEngineGateTest extends AITest {
             final AtomicBoolean stop = new AtomicBoolean();
             final Thread hammer = new Thread(() -> {
                 while (!stop.get() && !harness.gui.hasFailed()) {
-                    harness.gui.updateLives(List.of());
+                    harness.gui.setHighlighted(List.of(), false);
                     try {
                         Thread.sleep(1); // about the event rate of the reported game
                     } catch (InterruptedException e) {

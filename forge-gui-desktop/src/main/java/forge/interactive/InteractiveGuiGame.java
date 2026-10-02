@@ -111,7 +111,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * a modal. It is never held while waiting for the browser or for Forge's game
      * thread. A claimed input is in {@link #inFlightInputs} before the gate is released,
      * so the publisher skips it while its action runs; once the action stops the input,
-     * the proxy no longer names it.</p>
+     * the proxy no longer names it. The action's input leaves {@link #inFlightInputs} on
+     * the EDT, in the same task that publishes what follows it ({@link #settleAction}).</p>
      */
     private final ReentrantLock engineGate = new ReentrantLock();
     /** True on the thread running this bridge's own control enumeration. */
@@ -124,6 +125,19 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private volatile String promptMessage = "";
     private volatile Input presentedInput;
     private volatile CardView promptCard;
+    /** The card Forge named as the subject of {@link #promptMessage} (its showPromptMessage card). */
+    private volatile CardView promptSubject;
+    /**
+     * Set when Forge presents, or re-presents, what a request is built from: the prompt, the
+     * buttons, the selectable and highlighted cards. Cleared when a request is built. A publish
+     * that is not settling an action enumerates controls only while it is set; see
+     * {@link #publishCurrentInputGated}.
+     */
+    private final AtomicBoolean presentationDirty = new AtomicBoolean();
+    /** How many times controls were enumerated for a request (tests). */
+    private final AtomicLong controlEnumerations = new AtomicLong();
+    /** The card the text being sanitized on this thread is about; see {@link #sanitizeText}. */
+    private final ThreadLocal<CardView> textSubject = new ThreadLocal<>();
     private volatile String okLabel = "OK";
     private volatile String cancelLabel = "Cancel";
     private volatile boolean okEnabled;
@@ -174,6 +188,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     int seat() {
         return humanSeat;
+    }
+
+    /** How many times this seat enumerated controls for a request (tests). */
+    long controlEnumerations() {
+        return controlEnumerations.get();
     }
 
     Player player() {
@@ -405,7 +424,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             activeRequest.compareAndSet(request, null);
             lastInputFingerprint = "";
             finishInput(input, pending, false, "request no longer matches Forge's current input");
-            scheduleInputPublish();
+            schedulePresentedInputPublish();
             return;
         }
         final JsonObject action = input.action();
@@ -459,15 +478,14 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                             "request no longer matches Forge's current input");
                     activeRequest.compareAndSet(request, null);
                     lastInputFingerprint = "";
-                    inFlightInputs.remove(request.input);
-                    scheduleInputPublish();
+                    settleAction(request.input, null);
                     return;
                 }
                 result = binding.handler.apply(action);
             } catch (GameConceded conceded) {
                 finishInput(input, pending, false, "game was conceded during a nested request");
                 activeRequest.compareAndSet(request, null);
-                inFlightInputs.remove(request.input);
+                settleAction(request.input, null);
                 return;
             } catch (Throwable failure) {
                 pending.result.completeExceptionally(failure);
@@ -480,11 +498,43 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             if (result.accepted) {
                 activeRequest.compareAndSet(request, null);
                 lastInputFingerprint = "";
+                settleAction(request.input, null);
             } else {
-                request.claimed.set(false);
+                settleAction(request.input, request);
             }
-            inFlightInputs.remove(request.input);
-            scheduleInputPublish();
+        });
+    }
+
+    /**
+     * An action on {@code input} has returned; publish what the browser decides next, once.
+     *
+     * <p>The action ran Forge on this seat's action lane, and Forge finishes some of its work
+     * on the EDT afterwards: {@code InputPayMana.onStateChanged} queues {@code updateMessage}
+     * (the new "Pay Mana Cost" prompt), {@code stop()} queues {@code setFinished}, and the
+     * InputProxy queues the next input's {@code showMessageInitial}. This task is queued after
+     * all of them, so it runs once they have run. It is also the only place an action's input
+     * leaves {@link #inFlightInputs}: no other publish can see the input as idle between the
+     * action's return and this task.</p>
+     *
+     * <p>Before 2026-10-02 the lane released the input itself and then scheduled a debounced EDT
+     * publish. A publish scheduled during the action (by {@code updateButtons} or Forge's event
+     * handler) could run in the window between the two, before {@code updateMessage}. It built a
+     * request from the new controls and the old prompt: "Pay Mana Cost: {4}{R}" after the black
+     * mana just spent had paid one of the four. The EDT replaced it about 1 ms later with
+     * {3}{R}, with no input in between. A replay of one seed and one input stream then saw a
+     * different request stream in 2-3 of 20 games, and the pilot's later choices could follow
+     * the stale request (lane bridge-race-1002).</p>
+     *
+     * @param rejected the request whose action Forge refused, so it can be claimed again only
+     *                 now; null after an accepted or abandoned action
+     */
+    private void settleAction(final Input input, final ActiveRequest rejected) {
+        FThreads.invokeInEdtLater(() -> {
+            inFlightInputs.remove(input);
+            if (rejected != null) {
+                rejected.claimed.set(false);
+            }
+            publishCurrentInput(input);
         });
     }
 
@@ -547,6 +597,18 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
     }
 
+    /**
+     * Forge presented (or re-presented) the human's input: publish it from the EDT once Forge's
+     * presentation task has finished. Only presentation callbacks, a modal's end and a refused
+     * stale claim call this; Forge's state notifications (zones, cards, lives, phase, stack ...)
+     * do not. They fire while the game thread runs or while an action runs, and neither is a
+     * point at which the browser has a decision to make.
+     */
+    private void schedulePresentedInputPublish() {
+        presentationDirty.set(true);
+        scheduleInputPublish();
+    }
+
     private void scheduleInputPublish() {
         if (channel.isEnded()) {
             return;
@@ -554,7 +616,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final long generation = publishGeneration.incrementAndGet();
         FThreads.invokeInEdtLater(() -> {
             if (generation == publishGeneration.get()) {
-                publishCurrentInput();
+                publishCurrentInput(null);
             }
         });
     }
@@ -597,18 +659,31 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
     }
 
-    private void publishCurrentInput() {
+    /** @param settled the input whose action {@link #settleAction} just settled, or null */
+    private void publishCurrentInput(final Input settled) {
         engineGate.lock();
         readOnlyQuery.set(true);
+        textSubject.set(promptSubject);
         try {
-            publishCurrentInputGated();
+            publishCurrentInputGated(settled);
         } finally {
+            textSubject.remove();
             readOnlyQuery.set(false);
             engineGate.unlock();
         }
     }
 
-    private void publishCurrentInputGated() {
+    /**
+     * Publish Forge's current input, only at a point where the browser has a decision to make:
+     * the input is presented, no action on it is running, and Forge's game thread is parked on
+     * it. A published request is therefore never replaced before the browser answers it.
+     *
+     * <p>Controls are enumerated once per such point: right after the action that preceded it
+     * settles ({@code settled} is that input), or else when Forge has presented something new
+     * ({@link #presentationDirty}). Enumeration is not a pure read of Forge's model
+     * ({@link #engineGate}); a count that varied with EDT timing would vary the game too.</p>
+     */
+    private void publishCurrentInputGated(final Input settled) {
         if (channel.isEnded() || modalRequest.get() != null || controller == null || game == null
                 || game.isGameOver()) {
             return;
@@ -627,10 +702,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (input != presentedInput) {
             return;
         }
+        // Clear before enumerating: a presentation that lands while this runs publishes again.
+        if (!presentationDirty.getAndSet(false) && input != settled) {
+            return;
+        }
 
         try {
             final String kind = kindFor(input);
             final LinkedHashMap<String, ControlBinding> bindings = new LinkedHashMap<>();
+            controlEnumerations.incrementAndGet();
             final JsonArray controls = buildStatefulControls(input, kind, bindings);
             if (bindings.values().stream().allMatch(binding -> "concede".equals(binding.type))) {
                 throw unsupported("publishCurrentInput",
@@ -1340,7 +1420,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         } finally {
             modalRequest.compareAndSet(modal, null);
             lastInputFingerprint = "";
-            scheduleInputPublish();
+            schedulePresentedInputPublish();
         }
     }
 
@@ -1408,8 +1488,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private void emitState(final String reason) {
         // These callbacks run during mutations as well as on the EDT. Forge's
         // model is not a concurrent snapshot collection. Full views belong at
-        // presented human requests and after match.startGame completes.
-        scheduleInputPublish();
+        // presented human requests and after match.startGame completes. They do
+        // not publish either: see schedulePresentedInputPublish.
     }
 
     void emitFinalState() {
@@ -1439,20 +1519,30 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         return null;
     }
 
+    /**
+     * Redact hidden card names from Forge's text for this seat ({@link InteractiveText}). When the
+     * text is about a card ({@link #textSubject}: the presented prompt's card, or the card a
+     * confirmation names) and this seat may identify that card, its own name written bare is kept.
+     */
     private String sanitizeText(final String text) {
         String result = Objects.requireNonNullElse(text, "");
         if (game == null || human == null) {
             return result;
         }
         final Set<Integer> authorized = explicitlyOfferedCards.get();
+        final CardView subject = textSubject.get();
         final List<InteractiveText.CardLabel> labels = new ArrayList<>();
+        final List<String> subjectNames = new ArrayList<>(1);
         game.forEachCardInGame(card -> {
-            labels.add(new InteractiveText.CardLabel(card.getId(), card.getName(),
-                    authorized.contains(card.getId())
-                    || InteractiveState.mayReceiveIdentity(card.getView(), human.getView())));
+            final boolean visible = authorized.contains(card.getId())
+                    || InteractiveState.mayReceiveIdentity(card.getView(), human.getView());
+            labels.add(new InteractiveText.CardLabel(card.getId(), card.getName(), visible));
+            if (visible && subject != null && card.getId() == subject.getId()) {
+                subjectNames.add(card.getName());
+            }
             return true;
         });
-        return InteractiveText.sanitize(result, labels);
+        return InteractiveText.sanitize(result, labels, subjectNames);
     }
 
     private static String inputClassName(final Input input) {
@@ -1727,12 +1817,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public void setGameView(final forge.game.GameView gameView) {
         super.setGameView(gameView);
-        scheduleInputPublish();
     }
 
     @Override
     protected void updateCurrentPlayer(final PlayerView player) {
-        scheduleInputPublish();
     }
 
     @Override
@@ -1757,7 +1845,6 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public void showCombat() {
         emitState("combat");
-        scheduleInputPublish();
     }
 
     @Override
@@ -1771,8 +1858,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                                   final CardView card) {
         promptMessage = Objects.requireNonNullElse(message, "");
         promptCard = card;
+        promptSubject = card;
         presentedInput = controller == null ? null : controller.getInputProxy().getInput();
-        scheduleInputPublish();
+        schedulePresentedInputPublish();
     }
 
     @Override
@@ -1783,13 +1871,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         cancelLabel = Objects.requireNonNullElse(label2, "Cancel");
         okEnabled = enable1;
         cancelEnabled = enable2;
-        scheduleInputPublish();
+        schedulePresentedInputPublish();
     }
 
     @Override
     public void flashIncorrectAction() {
         emitNotice("warning", "Forge rejected that action", "incorrect-action");
-        scheduleInputPublish();
     }
 
     @Override
@@ -1800,19 +1887,16 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public void updatePhase(final boolean saveState) {
         emitState("phase");
-        scheduleInputPublish();
     }
 
     @Override
     public void updateTurn(final PlayerView player) {
         emitState("turn");
-        scheduleInputPublish();
     }
 
     @Override
     public void updatePlayerControl() {
         emitState("player-control");
-        scheduleInputPublish();
     }
 
     @Override
@@ -1828,31 +1912,26 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public void showManaPool(final PlayerView player) {
         emitState("mana-pool-visible");
-        scheduleInputPublish();
     }
 
     @Override
     public void hideManaPool(final PlayerView player) {
         emitState("mana-pool-hidden");
-        scheduleInputPublish();
     }
 
     @Override
     public void updateStack() {
         emitState("stack");
-        scheduleInputPublish();
     }
 
     @Override
     public void updateZones(final Iterable<PlayerZoneUpdate> zones) {
         emitState("zones");
-        scheduleInputPublish();
     }
 
     @Override
     public void updateCards(final Iterable<CardView> cards) {
         emitState("cards");
-        scheduleInputPublish();
     }
 
     @Override
@@ -1863,55 +1942,51 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public void updateManaPool(final Iterable<PlayerView> players) {
         emitState("mana-pool");
-        scheduleInputPublish();
     }
 
     @Override
     public void updateLives(final Iterable<PlayerView> players) {
         emitState("lives");
-        scheduleInputPublish();
     }
 
     @Override
     public void updateShards(final Iterable<PlayerView> players) {
         emitState("shards");
-        scheduleInputPublish();
     }
 
     @Override
     public void setPanelSelection(final CardView hostCard) {
         promptCard = hostCard;
-        scheduleInputPublish();
     }
 
     @Override
     public void setHighlighted(final Iterable<GameEntityView> entities, final boolean highlighted) {
         super.setHighlighted(entities, highlighted);
-        scheduleInputPublish();
+        schedulePresentedInputPublish();
     }
 
     @Override
     public void setSelectables(final Iterable<CardView> cards, final int min, final int max) {
         super.setSelectables(cards, min, max);
-        scheduleInputPublish();
+        schedulePresentedInputPublish();
     }
 
     @Override
     public void clearSelectables() {
         super.clearSelectables();
-        scheduleInputPublish();
+        schedulePresentedInputPublish();
     }
 
     @Override
     public void setWeaklySelectable(final Iterable<CardView> cards) {
         super.setWeaklySelectable(cards);
-        scheduleInputPublish();
+        schedulePresentedInputPublish();
     }
 
     @Override
     public void clearWeaklySelectable() {
         super.clearWeaklySelectable();
-        scheduleInputPublish();
+        schedulePresentedInputPublish();
     }
 
     /** False only for a play effect, whose printed cost is not what will be paid. */
@@ -2254,7 +2329,14 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final String no = options != null && options.size() > 1 ? options.get(1) : "No";
         final String message = (card == null ? "" : InteractiveState.safeCardLabel(card, human.getView())
                 + "\n") + question;
-        return askConfirm("Forge", message, yes, no, "modal:confirm");
+        // The question is about this card: its own name written bare is not another card's.
+        final CardView previous = textSubject.get();
+        textSubject.set(card);
+        try {
+            return askConfirm("Forge", message, yes, no, "modal:confirm");
+        } finally {
+            textSubject.set(previous);
+        }
     }
 
     @Override
@@ -2438,7 +2520,6 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public void setCard(final CardView card) {
         promptCard = card;
-        scheduleInputPublish();
     }
 
     @Override
