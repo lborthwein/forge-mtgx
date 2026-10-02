@@ -295,7 +295,8 @@ public class MagicStack /* extends MyObservable */ implements Iterable<SpellAbil
 
         recordUndoableActions(sp, activator);
 
-        if (sp.isManaAbility()) { // Mana Abilities go straight through
+        // Mana Abilities go straight through
+        if (sp.isManaAbility()) {
             // this can matter, if e.g. Vhal, Candlekeep Researcher toughness changes from tapping
             game.getAction().checkStaticAbilities();
 
@@ -507,6 +508,12 @@ public class MagicStack /* extends MyObservable */ implements Iterable<SpellAbil
             runParams.put(AbilityKey.SourceSA, sp);
             runParams.put(AbilityKey.Targets, distinctObjects);
             runParams.put(AbilityKey.Cause, sp.getHostCard());
+            for (SpellAbility saWalk = sp; saWalk != null; saWalk = saWalk.getSubAbility()) {
+                if (saWalk.usesTargeting() && saWalk.getTargetRestrictions().isRandomTarget() && !saWalk.getTargets().isEmpty()) {
+                    runParams.put(AbilityKey.Random, true);
+                    break;
+                }
+            }
             game.getTriggerHandler().runTrigger(TriggerType.BecomesTargetOnce, runParams, false);
         }
 
