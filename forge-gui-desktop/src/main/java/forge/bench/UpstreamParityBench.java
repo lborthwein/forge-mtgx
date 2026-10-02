@@ -65,7 +65,7 @@ import java.util.concurrent.TimeoutException;
  * Config: LookaheadBench's ({@code aiTimeoutSec}, {@code gameTimeoutSec}, {@code games[{id,seed,decks,seats}]});
  * every seat must be "default". One JSON line per game: winner, reason, turns, startingSeat, and three digests:
  * {@code digest} (LookaheadBench's: the fingerprint at every turn start plus the final one), {@code phaseDigest}
- * (at every phase) and {@code logDigest} (the whole game log text).
+ * (at every phase) and {@code logDigest} (the whole game log text; {@code -Dparity.logDir=<dir>} also writes it).
  */
 public final class UpstreamParityBench {
     private UpstreamParityBench() {
@@ -209,7 +209,7 @@ public final class UpstreamParityBench {
             row.addProperty("wallMs", wallMs);
             row.addProperty("digest", digest.hex());
             row.addProperty("phaseDigest", digest.phaseHex());
-            row.addProperty("logDigest", logDigest(game));
+            row.addProperty("logDigest", logDigest(game, id));
             Files.writeString(out, row + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             err.println("[parity-bench] " + id + " winner=" + winner + " reason=" + reason + " turns=" + turns + " wall=" + wallMs + "ms");
             if ("timeout".equals(abort)) {
@@ -220,13 +220,19 @@ public final class UpstreamParityBench {
         System.exit(0);
     }
 
-    static String logDigest(Game game) throws Exception {
+    static String logDigest(Game game, String id) throws Exception {
         final List<GameLogEntry> entries = new ArrayList<>(game.getGameLog().getAllEntries());
         Collections.reverse(entries);
         final MessageDigest md = MessageDigest.getInstance("SHA-256");
+        final StringBuilder text = new StringBuilder();
         for (GameLogEntry le : entries) {
             md.update(le.toString().getBytes(StandardCharsets.UTF_8));
             md.update((byte) '\n');
+            text.append(le.type()).append(" | ").append(le).append('\n');
+        }
+        final String dir = System.getProperty("parity.logDir");
+        if (dir != null) {
+            Files.writeString(Path.of(dir, id + ".log.txt"), text.toString(), StandardCharsets.UTF_8);
         }
         return hex(md.digest());
     }
