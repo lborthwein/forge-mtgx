@@ -6,7 +6,6 @@ import forge.ai.ComputerUtil;
 import forge.ai.PlayerControllerAi;
 import forge.ai.simulation.GameStateEvaluator.Score;
 import forge.game.Game;
-import forge.game.GameActionUtil;
 import forge.game.card.Card;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
@@ -46,7 +45,7 @@ public class GameSimulator {
         copier = new GameCopier(origGame);
         simGame = copier.makeCopy(advanceToPhase, origAiPlayer);
 
-        aiPlayer = (Player) copier.find(origAiPlayer);
+        aiPlayer = copier.find(origAiPlayer);
         eval = new GameStateEvaluator();
 
         origLines = new ArrayList<>();
@@ -143,8 +142,9 @@ public class GameSimulator {
             return sa;
         }
         Card origHostCard = sa.getHostCard();
-        Card hostCard = (Card) copier.find(origHostCard);
+        Card hostCard = copier.find(origHostCard);
         String desc = sa.getDescription();
+        // TODO tests fail if this isn't checked first
         FCollectionView<SpellAbility> candidates = hostCard.getSpellAbilities();
 
         // An alternative-cost SA's description is the basic spell's description with a
@@ -153,16 +153,20 @@ public class GameSimulator {
         // full mana cost the alternative cost exists to avoid. Gush ("return two
         // Islands" vs {4}{U}) span 1,618 unpayable attempts and 30 GB of game copies
         // that way. Every EXACT match, alternative costs included, has to be exhausted
-        // before the prefix fallback is allowed a vote.
+        // before the prefix fallback is allowed a vote. (Upstream 2.0.15 #11654 widened the
+        // second candidate set from the alternative costs to getAllPossibleAbilities.)
         SpellAbility result = saMatcher(candidates, desc, true);
+        Iterable<SpellAbility> allPossible = null;
         if (result == null) {
-            result = saMatcherOverAltCosts(candidates, desc, true);
+            // could try and reimplement this so a quick match doesn't require building the rest first
+            allPossible = hostCard.getAllPossibleAbilities(aiPlayer, true);
+            result = saMatcher(allPossible, desc, true);
         }
         if (result == null) {
             result = saMatcher(candidates, desc, false);
         }
         if (result == null) {
-            result = saMatcherOverAltCosts(candidates, desc, false);
+            result = saMatcher(allPossible, desc, false);
         }
 
         if (result != null) {
@@ -170,16 +174,6 @@ public class GameSimulator {
         }
 
         return result;
-    }
-
-    private SpellAbility saMatcherOverAltCosts(Iterable<SpellAbility> candidates, String desc, boolean exact) {
-        for (SpellAbility cSa : candidates) {
-            SpellAbility result = saMatcher(GameActionUtil.getAlternativeCosts(cSa, aiPlayer, true), desc, exact);
-            if (result != null) {
-                return result;
-            }
-        }
-        return null;
     }
 
     /**

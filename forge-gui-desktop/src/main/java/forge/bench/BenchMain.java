@@ -378,7 +378,9 @@ public final class BenchMain {
 
             final long t0 = System.currentTimeMillis();
             final Game game = match.createGame();
-            game.AI_CAN_USE_TIMEOUT = aiCanUseTimeout;
+            // upstream 2.0.15 removed Game.AI_CAN_USE_TIMEOUT (#11861): the forced-attacker tasks are now always
+            // bounded by AI_TIMEOUT; -Dforge.bench.sequentialAi=true runs them unbounded on the game thread.
+            // aiCanUseTimeout stays a config/hello field only.
             game.AI_TIMEOUT = aiTimeoutSec;
             // Everything the bridge answers is keyed to THIS game object; copies made by
             // the simulation search must fall through to Forge's AI (see BenchSession).

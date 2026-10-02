@@ -120,7 +120,7 @@ public class PolicyPilotTest extends AITest {
         final Game game = new Game(players, rules, match);
         game.setAge(GameStage.Play);
         game.EXPERIMENTAL_RESTORE_SNAPSHOT = false;
-        game.AI_CAN_USE_TIMEOUT = false;
+        // (upstream 2.0.15 removed Game.AI_CAN_USE_TIMEOUT)
         game.AI_TIMEOUT = 600;
         return game;
     }

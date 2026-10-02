@@ -40,7 +40,7 @@ public class AmassEffect extends TokenEffectBase {
         sb.append(Lang.nounWithNumeral(amount, "+1/+1 counter"));
 
         // TODO fix reminder after CR
-        sb.append("on an Army you control. If you don't control one, create a 0/0 black " + type + " Army creature token first.)");
+        sb.append(" on an Army you control. If you don't control one, create a 0/0 black " + type + " Army creature token first.)");
 
         return sb.toString();
     }
@@ -64,7 +64,9 @@ public class AmassEffect extends TokenEffectBase {
             StringBuilder sb = new StringBuilder("b_0_0_");
             sb.append(sa.getOriginalParam("Type").toLowerCase()).append("_army");
 
-            final Card result = TokenInfo.getProtoType(sb.toString(), sa, amasser, false);
+            Card result = TokenInfo.getProtoType(sb.toString(), sa, amasser, false);
+            if (result == null) //Custom Amass type.
+                result = TokenInfo.getProtoType("b_0_0_army", sa, amasser, false);
             // need to alter the token to add the Type from the Parameter
             result.setCreatureTypes(Lists.newArrayList(type, "Army"));
             result.setName(type + " Army Token");

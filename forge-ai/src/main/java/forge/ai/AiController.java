@@ -69,13 +69,10 @@ import io.sentry.Breadcrumb;
 import io.sentry.Sentry;
 
 import java.util.*;
-import java.util.concurrent.FutureTask;
+import java.util.concurrent.*;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import static forge.ai.ComputerUtilMana.getAvailableManaEstimate;
 import static java.lang.Math.max;
@@ -99,7 +96,6 @@ public class AiController {
     private int lastAttackAggression;
     private boolean useLivingEnd;
     private List<SpellAbility> skipped;
-    private volatile boolean timeoutReached;
     /**
      * mtgx L2 policy pilot (lane l2-fork-1001, {@code forge.ai.simulation.PolicyPilot}): while set, the priority choice
      * ({@link #chooseSpellAbilityToPlay()}) never considers a spell ability this predicate accepts (a vetoed hand cast).
@@ -156,9 +152,12 @@ public class AiController {
         return memory;
     }
 
-    /** Read-only: this controller's own per-game state, for the look-ahead's play-out state keys. */
+    /**
+     * Read-only: this controller's own per-game state, for the look-ahead's play-out state keys.
+     * Upstream 2.0.15 removed the {@code timeoutReached} flag (#11861); the key keeps its old shape with "tofalse".
+     */
     public String lookaheadStateKey() {
-        return "agg" + lastAttackAggression + " le" + useLivingEnd + " to" + timeoutReached
+        return "agg" + lastAttackAggression + " le" + useLivingEnd + " to" + false
                 + " sk" + (skipped == null ? "-" : String.valueOf(skipped.size()))
                 + " pc" + (predictedCombat == null ? "-" : String.valueOf(predictedCombat.getAttackers().size()))
                 + " pn" + (predictedCombatNextTurn == null ? "-" : String.valueOf(predictedCombatNextTurn.getAttackers().size()))
@@ -840,34 +839,32 @@ public class AiController {
 
     private AiPlayDecision canPlayAndPayFor(final SpellAbility sa) {
         final Card host = sa.getHostCard();
-        Card altHost = host;
 
         if (sa instanceof Spell sp) {
-            altHost = sp.canPlayFromHost();
+            Card altHost = sp.canPlayFromHost();
             if (altHost == null) {
                 return AiPlayDecision.CantPlaySa;
+            }
+            // state needs to be switched here so API checks evaluate the right face
+            if (host != altHost) {
+                sa.setHostCard(altHost);
             }
             altHost.setCastSA(sa);
         } else if (!sa.canPlay()) {
             return AiPlayDecision.CantPlaySa;
         }
 
-        // state needs to be switched here so API checks evaluate the right face
-        if (host != altHost) {
-            sa.setHostCard(altHost);
+        try {
+            return canPlayAndPayForFace(sa);
+        } finally {
+            // in addition to engine some AI api can also switch host
+            if (sa.getHostCard() != host) {
+                sa.setHostCard(host);
+            }
+            if (sa.isSpell()) {
+                host.setCastSA(null);
+            }
         }
-
-        AiPlayDecision decision = canPlayAndPayForFace(sa);
-
-        if (host != altHost) {
-            sa.setHostCard(host);
-        }
-
-        if (sa.isSpell()) {
-            altHost.setCastSA(null);
-        }
-
-        return decision;
     }
 
     // This is for playing spells regularly (no Cascade/Ripple etc.)
@@ -994,7 +991,7 @@ public class AiController {
 
     private AiPlayDecision saSideEffects(final Card card, final SpellAbility sa) {
         if (usesHybridSimulation()) {
-            return OnePlaySafetyChecker.isAcceptable(player, sa) ? AiPlayDecision.WillPlay : AiPlayDecision.CurseEffects;
+            return OnePlaySafetyChecker.isAcceptable(player, sa) ? AiPlayDecision.WillPlay : AiPlayDecision.HybridSimRejected;
         }
 
         if ((!sa.isSpell() && !sa.isLandAbility()) || usesFullSimulation()) {
@@ -1630,21 +1627,17 @@ public class AiController {
             Sentry.captureMessage(ex.getMessage() + "\nAssertionError [verifyTransitivity]: " + assertex);
         }
 
-        // in case of infinite loop reset below would not be reached
-        timeoutReached = false;
-
         FutureTask<SpellAbility> future = new FutureTask<>(() -> {
             //avoid ComputerUtil.aiLifeInDanger in loops as it slows down a lot.. call this outside loops will generally be fast...
             boolean isLifeInDanger = useLivingEnd && ComputerUtil.aiLifeInDanger(player, true, 0);
             for (final SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(all, player)) {
+                if (Thread.currentThread().isInterrupted()) {
+                    break;
+                }
+
                 // Don't add Counterspells to the "normal" playcard lookups
                 if (skipCounter && sa.getApi() == ApiType.Counter) {
                     continue;
-                }
-
-                if (timeoutReached || Thread.currentThread().isInterrupted()) {
-                    timeoutReached = false;
-                    break;
                 }
 
                 if (sa.getHostCard().hasKeyword(Keyword.STORM)
@@ -1717,8 +1710,8 @@ public class AiController {
 
             return null;
         });
-
         Thread t = new Thread(future, "Game AI Eval");
+        t.setDaemon(true);
         t.start();
         try {
             return future.get(game.getAITimeout(), TimeUnit.SECONDS);
@@ -1736,10 +1729,9 @@ public class AiController {
             }
             // ask the eval thread to exit at the next SpellAbility check first: a brutal
             // Thread.stop() mid-evaluation can leave partially mutated shared state behind
-            timeoutReached = true;
             future.cancel(true);
             try {
-                t.join(500);
+                t.join(2000); //2 seconds wait
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
             }

@@ -54,9 +54,9 @@ import java.util.concurrent.CompletionException;
 
 /** One-config, one-game process entry point for a browser human versus Default Forge. */
 public final class InteractiveMain {
-    /** The upstream engine tree this integration source is pinned to. */
+    /** The upstream engine tree this integration source is pinned to: Card-Forge release forge-2.0.15 (sync 1002). */
     private static final String PINNED_FORGE_COMMIT =
-            "3544576919d55f1deb6fe8391a3c2ff446c30c0c";
+            "4ec5f1a2c32fa90ecb983a72b9eb47aa5c5d7676";
 
     private InteractiveMain() {
     }

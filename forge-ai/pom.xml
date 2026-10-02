@@ -6,7 +6,7 @@
     <parent>
         <artifactId>forge</artifactId>
         <groupId>forge</groupId>
-        <version>${revision}</version>
+        <version>2.0.15</version>
     </parent>
 
     <artifactId>forge-ai</artifactId>
@@ -29,11 +29,11 @@
             <version>3.6.1</version>
         </dependency>
         <!-- mtgx benchmark bridge (forge.bench): newline-delimited JSON over stdio.
-             No JSON library existed in the build before this. -->
+             Same version as upstream forge-gui (2.0.15), so the desktop jar bundles upstream's gson. -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
-            <version>2.10.1</version>
+            <version>2.13.2</version>
         </dependency>
     </dependencies>
 
