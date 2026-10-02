@@ -118,6 +118,17 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
     private IGuiGame gui;
 
     private final YieldController yieldController = new YieldController(this);
+    /** The ability whose targets {@link TargetSelection} is choosing right now, or null (mtgx, 2026-10-02). */
+    private volatile SpellAbility targetingAbility;
+
+    /** The ability whose targets are being chosen right now, or null. Read by a GUI to describe the target prompt. */
+    public SpellAbility getTargetingAbility() {
+        return targetingAbility;
+    }
+
+    void setTargetingAbility(final SpellAbility ability) {
+        targetingAbility = ability;
+    }
 
     protected final InputQueue inputQueue;
     protected final InputProxy inputProxy;
