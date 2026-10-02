@@ -381,6 +381,34 @@ public class InteractivePublishTest extends AITest {
             final String first = message(target).split("\n")[0];
             assertEquals(first, "Lightning Bolt (" + bolt[0].getId() + ") - Lightning Bolt deals 3 damage to any target.");
             assertFalse(message(target).contains("Face-down card"), message(target));
+
+            h.answer(target, "selectPlayer", "player:0");
+            final JsonObject payment = nextRequest(h);
+            assertEquals(payment.get("kind").getAsString(), "mana", payment.toString());
+            assertFalse(message(payment).contains("Face-down card"), message(payment));
+        }
+    }
+
+    /**
+     * The other reported prompt: a creature spell's payment prompt starts with its stack
+     * description, "Squee, Goblin Nabob - Creature 1 / 1", the name bare. A second Squee in the
+     * library made it "Face-down card - Creature 1 / 1".
+     */
+    @Test(timeOut = 900000)
+    public void theSeatsOwnCreatureSpellIsNamedInItsPaymentPrompt() throws Exception {
+        final Card[] squee = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            addCards("Mountain", 3, seat);
+            squee[0] = addCardToZone("Squee, Goblin Nabob", seat, ZoneType.Hand);
+            addCardToZone("Squee, Goblin Nabob", seat, ZoneType.Library);
+            addCard("Plains", foe);
+        })) {
+            final JsonObject priority = nextRequest(h);
+            h.answer(priority, "selectCard", "card:" + squee[0].getId());
+            final JsonObject payment = nextRequest(h);
+            assertEquals(payment.get("kind").getAsString(), "mana", payment.toString());
+            assertTrue(message(payment).startsWith("Squee, Goblin Nabob - Creature 1 / 1"), message(payment));
+            assertFalse(message(payment).contains("Face-down card"), message(payment));
         }
     }
 
