@@ -55,7 +55,6 @@ import forge.item.PaperCard;
 import forge.localinstance.skin.FSkinProp;
 import forge.player.PlayerControllerHuman;
 import forge.player.PlayerZoneUpdate;
-import forge.player.PlayerZoneUpdates;
 import forge.trackable.TrackableCollection;
 import forge.util.FSerializableFunction;
 import forge.util.ITriggerEvent;
@@ -949,7 +948,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 controls.add(control(id, type, sanitizeText(okLabel)));
                 bindings.put(id, new ControlBinding(type, action -> {
                     if (priority) {
-                        controller.passPriority();
+                        // upstream 2.0.15 removed PlayerControllerHuman.passPriority() (#11816); same semantics:
+                        // OK on the current input only while it is still the pass-priority prompt
+                        if (controller.getInputProxy().getInput() instanceof InputPassPriority) {
+                            controller.selectButtonOk();
+                        }
                     } else {
                         controller.selectButtonOk();
                     }
@@ -1738,27 +1741,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     @Override
-    public PlayerZoneUpdates openZones(final PlayerView owner,
-                                       final Collection<ZoneType> zones,
-                                       final Map<PlayerView, Object> players,
-                                       final boolean backupLastZones) {
-        final PlayerZoneUpdates opened = new PlayerZoneUpdates();
-        final Collection<PlayerView> owners = players == null || players.isEmpty()
-                ? (owner == null ? Collections.emptyList() : List.of(owner))
-                : players.keySet();
-        for (PlayerView player : owners) {
-            for (ZoneType zone : zones) {
-                opened.add(new PlayerZoneUpdate(player, zone));
-            }
-        }
+    public void openZones(final PlayerView owner,
+                          final Collection<ZoneType> zones,
+                          final Map<PlayerView, Object> players) {
+        // upstream 2.0.15 (#12023) moved zone display decisions to the client: no zone handles are returned and
+        // restoreOldZones/tempShowZones/hideZones are gone; the bridge only republishes its state
         emitState("open-zones");
-        return opened;
-    }
-
-    @Override
-    public void restoreOldZones(final PlayerView playerView,
-                                final PlayerZoneUpdates playerZoneUpdates) {
-        emitState("restore-zones");
     }
 
     @Override
@@ -1852,20 +1840,6 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public void updateStack() {
         emitState("stack");
-        scheduleInputPublish();
-    }
-
-    @Override
-    public Iterable<PlayerZoneUpdate> tempShowZones(final PlayerView owner,
-                                                    final Iterable<PlayerZoneUpdate> zones) {
-        emitState("temporary-zones-visible");
-        scheduleInputPublish();
-        return zones;
-    }
-
-    @Override
-    public void hideZones(final PlayerView owner, final Iterable<PlayerZoneUpdate> zones) {
-        emitState("temporary-zones-hidden");
         scheduleInputPublish();
     }
 

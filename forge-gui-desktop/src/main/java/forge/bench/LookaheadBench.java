@@ -337,7 +337,7 @@ public final class LookaheadBench {
             forge.util.IdScope.open();
             final Object gameIds = forge.util.IdScope.capture();
             final Game game = match.createGame();
-            game.AI_CAN_USE_TIMEOUT = false;
+            // (upstream 2.0.15 removed Game.AI_CAN_USE_TIMEOUT; AI_TIMEOUT now bounds the forced-attacker tasks too)
             game.AI_TIMEOUT = aiTimeoutSec;
             final AiFixes.Counters[] fixCounters = new AiFixes.Counters[2];
             for (int i = 0; i < 2; i++) {
