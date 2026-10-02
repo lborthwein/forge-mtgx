@@ -257,13 +257,25 @@ public class PolicyPilotTest extends AITest {
         final String other = forgeLand.equals("Forest") ? "Island" : "Forest";
         final Mock mock = new Mock();
         mock.game = game;
-        mock.p = (k, n) -> "land".equals(k) ? (n.equals(other) ? 0.8 : 0.2) : null;
+        // A spell rated highest as "land" (the model rates every hand card) is never played as a land.
+        addCardToZone("Grizzly Bears", a, ZoneType.Hand);
+        mock.p = (k, n) -> "land".equals(k) ? (n.equals("Grizzly Bears") ? 0.99 : n.equals(other) ? 0.8 : 0.2) : null;
         final PolicyPilot pilot = new PolicyPilot(config(), mock);
         pilot.bind(game, a);
         final List<SpellAbility> ans = pilot.decide(ctrl, def);
         AssertJUnit.assertTrue(ans.get(0).isLandAbility());
         AssertJUnit.assertEquals(other, ans.get(0).getHostCard().getName());
         AssertJUnit.assertEquals(1, pilot.getStats().landSwap);
+        AssertJUnit.assertEquals(1, pilot.getStats().landConsults);
+
+        // Forge's land rated best: kept, nothing checked further.
+        final Mock agree = new Mock();
+        agree.game = game;
+        agree.p = (k, n) -> "land".equals(k) ? (n.equals(forgeLand) ? 0.9 : 0.1) : null;
+        final PolicyPilot p2 = new PolicyPilot(config(), agree);
+        p2.bind(game, a);
+        AssertJUnit.assertSame(def, p2.decide(ctrl, def));
+        AssertJUnit.assertEquals(1, p2.getStats().landAgree);
     }
 
     @Test

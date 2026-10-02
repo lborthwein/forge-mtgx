@@ -126,7 +126,7 @@ public final class PolicyPilot {
         // agreements: the policy's pick was Forge AI's answer
         public long forceAgree, landAgree, reactAgree;
         // Forge AI refused to target (or a live check failed) a forced cast / land
-        public long forceRefused, reactRefused, landRefused;
+        public long forceRefused, reactRefused;
         // a policy candidate with p >= threshold was not castable at that priority (copy check)
         public long notCastable;
         public long copyFailures, stackUnsupported, encodeFailures;
@@ -183,7 +183,6 @@ public final class PolicyPilot {
             final JsonObject rf = new JsonObject();
             rf.addProperty("force", forceRefused);
             rf.addProperty("react", reactRefused);
-            rf.addProperty("land", landRefused);
             o.add("refused", rf);
             o.addProperty("notCastable", notCastable);
             o.addProperty("copyFailures", copyFailures);
@@ -466,46 +465,41 @@ public final class PolicyPilot {
         if (forgeLand.getZone() == null || !forgeLand.isInZone(ZoneType.Hand)) {
             return def;
         }
-        Card best = null;
-        double bestP = -1;
+        // Candidates: other hand cards the policy rates above Forge's land (any rating if Forge's land has none), best
+        // first (ties: hand order); the first with a land ability playable now (read-only checks) is the swap.
         final Double fp = landP(forgeLand.getId());
-        if (fp != null) {
-            best = forgeLand;
-            bestP = fp;
-        }
-        boolean any = false;
+        final List<Card> cands = new ArrayList<>();
         for (Card c : me.getCardsIn(ZoneType.Hand)) {
             final Double p = landP(c.getId());
-            if (p == null || c == forgeLand) {
-                continue;
-            }
-            any = true;
-            if (p > bestP) {
-                best = c;
-                bestP = p;
+            if (c != forgeLand && p != null && (fp == null || p > fp)) {
+                cands.add(c);
             }
         }
-        if (!any) {
-            return def;
-        }
-        stats.landConsults++;
-        if (best == null || best == forgeLand) {
-            stats.landAgree++;
-            return def;
-        }
-        // Legality on the live game (read-only checks): a land ability of the chosen card that can be played now.
+        cands.sort((x, y) -> Double.compare(landP(y.getId()), landP(x.getId())));
+        Card best = null;
         SpellAbility play = null;
-        for (SpellAbility sa : best.getAllPossibleAbilities(me, true)) {
-            if (sa.isLandAbility()) {
-                sa.setActivatingPlayer(me);
-                if (sa.canPlay()) {
-                    play = sa;
-                    break;
+        for (Card c : cands) {
+            for (SpellAbility sa : c.getAllPossibleAbilities(me, true)) {
+                if (sa.isLandAbility()) {
+                    sa.setActivatingPlayer(me);
+                    if (sa.canPlay()) {
+                        play = sa;
+                        break;
+                    }
                 }
             }
+            if (play != null) {
+                best = c;
+                break;
+            }
         }
-        if (play == null) {
-            stats.landRefused++;
+        if (fp != null || best != null) {
+            stats.landConsults++;
+        }
+        if (best == null) {
+            if (fp != null) {
+                stats.landAgree++;
+            }
             return def;
         }
         if (cfg.shadow) {
