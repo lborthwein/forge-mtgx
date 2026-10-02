@@ -12,7 +12,9 @@ import forge.ai.AIOption;
 import forge.ai.AiFixes;
 import forge.ai.LobbyPlayerAi;
 import forge.ai.simulation.LobbyPlayerLookahead;
+import forge.ai.simulation.LobbyPlayerPolicy;
 import forge.ai.simulation.LookaheadSearch;
+import forge.ai.simulation.PolicyPilot;
 import forge.ai.simulation.SimSearchBudget;
 import forge.ai.simulation.SimulationController;
 import forge.deck.Deck;
@@ -64,8 +66,10 @@ import java.util.concurrent.TimeoutException;
  * tutorRank,tutorUrl,tutorShadow,tutorLands,tutorTimeoutMs,tutorCheckpointSha256 (tutor ranking),
  * belief,beliefShadow,beliefUrl,beliefTimeoutMs,beliefCheckpointSha256,beliefCube,beliefCubeSha256,beliefBasics
  * (lane belief-sampling-0928), aiFixes0928 (off|shadow|on, lane yardstick-0928: the look-ahead seats' own Forge AI)},
- * "defaultAiFixes0928": off|shadow|on (the "default"/"sim" seats; off unless a predeclared read says otherwise),
- * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim", ...]}]}}.
+ * "defaultAiFixes0928": off|shadow|on (the "default"/"sim"/"policy" seats; off unless a predeclared read says otherwise),
+ * "policy":{url,checkpointSha256,timeoutMs,cast,land,react,shadow,threshold,maxForcesPerTurn,log} (lane l2-fork-1001:
+ * the "policy" seats, Forge AI plus policy P1 with no search; see {@link PolicyPilot}),
+ * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim"|"policy", ...]}]}}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
  */
@@ -142,6 +146,11 @@ public final class LookaheadBench {
                     System.exit(4);
                 }
             }
+            // L2 step 2 is wired, not built: refuse it before any game.
+            if (la.has("policyRollouts") && la.get("policyRollouts").getAsBoolean()) {
+                err.println("[lookahead-bench] refusing: policyRollouts (L2 step 2) is not built");
+                System.exit(4);
+            }
             // Tutor ranking: the same refusal for the ranker's pin.
             applyTutor(la, pc);
             if (pc.tutorOn()) {
@@ -150,6 +159,28 @@ public final class LookaheadBench {
                         throw new IllegalStateException("tutorShadow needs tutorRank >= 1");
                     }
                     err.println("[lookahead-bench] tutor ranker " + pc.tutorUrl + " checkpoint " + LookaheadSearch.checkTutorService(pc));
+                } catch (IllegalStateException e) {
+                    err.println("[lookahead-bench] refusing: " + e.getMessage());
+                    System.exit(4);
+                }
+            }
+        }
+
+        // L2 policy seats (lane l2-fork-1001): the pin is checked once at JVM start; a "policy" seat without a "policy"
+        // config, a missing pin, an unreachable service or another checkpoint refuses the whole run (exit 4).
+        final JsonObject policyJson = cfg.has("policy") ? cfg.getAsJsonObject("policy") : null;
+        {
+            boolean anyPolicy = false;
+            for (JsonElement ge : cfg.getAsJsonArray("games")) {
+                for (JsonElement m : ge.getAsJsonObject().getAsJsonArray("seats")) {
+                    anyPolicy |= "policy".equals(m.getAsString());
+                }
+            }
+            if (anyPolicy) {
+                try {
+                    final PolicyPilot.Config pc = PolicyPilot.Config.fromJson(policyJson);
+                    err.println("[lookahead-bench] policy service " + pc.url + " checkpoint "
+                            + forge.ai.simulation.PolicyClient.checkHealth(pc.url, pc.checkpointSha256, pc.timeoutMs));
                 } catch (IllegalStateException e) {
                     err.println("[lookahead-bench] refusing: " + e.getMessage());
                     System.exit(4);
@@ -216,6 +247,7 @@ public final class LookaheadBench {
             final List<RegisteredPlayer> seats = new ArrayList<>();
             final List<LookaheadSearch> searches = new ArrayList<>();
             final List<LobbyPlayerLookahead> laLobbies = new ArrayList<>();
+            final List<PolicyPilot> pilots = new ArrayList<>();
             for (int i = 0; i < 2; i++) {
                 final Deck deck = DeckSerializer.fromFile(new File(decks.get(i).getAsString()));
                 final String mode = seatModes.get(i).getAsString();
@@ -259,6 +291,19 @@ public final class LookaheadBench {
                     l.setAiFixes0928(laFixes);
                     searches.add(s);
                     laLobbies.add(l);
+                    pilots.add(null);
+                    lp = l;
+                } else if ("policy".equals(mode)) {
+                    // Forge Default (aiFixes0928 as the default seats) plus policy P1, no search.
+                    final PolicyPilot.Config pc = PolicyPilot.Config.fromJson(policyJson);
+                    pc.seed = seed * 31 + i;
+                    final PolicyPilot pilot = PolicyPilot.create(pc);
+                    final LobbyPlayerPolicy l = new LobbyPlayerPolicy(name);
+                    l.setAiProfile("Default");
+                    l.setAiFixes0928(defaultFixes);
+                    searches.add(null);
+                    laLobbies.add(null);
+                    pilots.add(pilot);
                     lp = l;
                 } else {
                     final Set<AIOption> options = "sim".equals(mode) ? Sets.newHashSet(AIOption.USE_FULL_SIMULATION) : null;
@@ -267,6 +312,7 @@ public final class LookaheadBench {
                     l.setAiFixes0928(defaultFixes);
                     searches.add(null);
                     laLobbies.add(null);
+                    pilots.add(null);
                     lp = l;
                 }
                 final RegisteredPlayer rp = new RegisteredPlayer(deck);
@@ -303,6 +349,16 @@ public final class LookaheadBench {
             for (int i = 0; i < 2; i++) {
                 if (laLobbies.get(i) != null) {
                     laLobbies.get(i).bind(game, searches.get(i));
+                }
+                if (pilots.get(i) != null) {
+                    final LobbyPlayerPolicy l = (LobbyPlayerPolicy) seats.get(i).getPlayer();
+                    forge.game.player.Player me = null;
+                    for (forge.game.player.Player p : game.getPlayers()) {
+                        if (p.getLobbyPlayer() == l) {
+                            me = p;
+                        }
+                    }
+                    l.bind(game, me, pilots.get(i));
                 }
             }
             final Digest digest = new Digest(game);
@@ -432,6 +488,21 @@ public final class LookaheadBench {
                 }
             }
             row.add("search", st);
+            if (pilots.get(0) != null || pilots.get(1) != null) {
+                // Only when a seat is a policy seat: other rows keep their schema.
+                final JsonArray po = new JsonArray();
+                for (int i = 0; i < 2; i++) {
+                    final PolicyPilot pp = pilots.get(i);
+                    if (pp == null) {
+                        po.add((JsonElement) null);
+                    } else {
+                        final JsonObject so = pp.getStats().toJson();
+                        so.add("config", pp.getConfig().toJson());
+                        po.add(so);
+                    }
+                }
+                row.add("policy", po);
+            }
             if (fixCounters[0] != null || fixCounters[1] != null) {
                 // Only when a seat's option is not off: off rows keep their schema.
                 final JsonArray fx = new JsonArray();

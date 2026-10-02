@@ -213,6 +213,13 @@ public final class LookaheadSearch {
             return "human".equals(belief);
         }
 
+        /**
+         * L2 step 2 (lane l2-fork-1001; false = off, the default, config JSON unchanged): our seat's play-outs piloted by
+         * policy P1 ({@link PolicyRolloutAi}). Wired but not built: a search with it set refuses to start until step 2
+         * has an L2 PASS and its own predeclaration.
+         */
+        public boolean policyRollouts = false;
+
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
             o.addProperty("worlds", worlds);
@@ -661,6 +668,9 @@ public final class LookaheadSearch {
     private FidelityWatch liveWatch = null;
 
     public LookaheadSearch(Config cfg) {
+        if (cfg.policyRollouts) {
+            throw new IllegalStateException("policyRollouts (L2 step 2) is not built: it needs an L2 PASS and its own predeclaration");
+        }
         this.cfg = cfg;
         final int nThreads = effectiveThreads(cfg);
         if (nThreads > 1) {
