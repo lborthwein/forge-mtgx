@@ -138,6 +138,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private final AtomicLong controlEnumerations = new AtomicLong();
     /** The card the text being sanitized on this thread is about; see {@link #sanitizeText}. */
     private final ThreadLocal<CardView> textSubject = new ThreadLocal<>();
+    /** Decision facts (`request.context`) for the request being built on this thread, or null. */
+    private final ThreadLocal<JsonObject> requestContext = new ThreadLocal<>();
     private volatile String okLabel = "OK";
     private volatile String cancelLabel = "Cancel";
     private volatile boolean okEnabled;
@@ -726,11 +728,18 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             lastInputFingerprint = fingerprint;
 
             final String requestId = nextRequestId();
-            final JsonObject body = requestBody(requestId, kind,
-                    inputClassName(input), "Forge", cleanPrompt,
-                    input instanceof InputLondonMulligan london ? london.getCardsToReturn() : getSelectionMin(),
-                    input instanceof InputLondonMulligan london ? london.getCardsToReturn() : getSelectionMax(),
-                    !(input instanceof InputLondonMulligan) && cancelEnabled, controls);
+            final SpellAbility targeting = input instanceof InputSelectTargets ? controller.getTargetingAbility() : null;
+            final JsonObject body;
+            requestContext.set(targeting == null ? null : targetContext(targeting, controlTargets(controls)));
+            try {
+                body = requestBody(requestId, kind,
+                        inputClassName(input), "Forge", cleanPrompt,
+                        input instanceof InputLondonMulligan london ? london.getCardsToReturn() : getSelectionMin(),
+                        input instanceof InputLondonMulligan london ? london.getCardsToReturn() : getSelectionMax(),
+                        !(input instanceof InputLondonMulligan) && cancelEnabled, controls);
+            } finally {
+                requestContext.remove();
+            }
             final ActiveRequest request = new ActiveRequest(requestId, kind, input, bindings);
             activeRequest.set(request);
             channel.send("request", body);
@@ -1366,6 +1375,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         prompt.addProperty("cancellable", cancellable);
         body.add("prompt", prompt);
         body.add("controls", controls);
+        final JsonObject context = requestContext.get();
+        if (context != null) {
+            body.add("context", context);
+        }
         return body;
     }
 
@@ -1542,7 +1555,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
             return true;
         });
-        return InteractiveText.sanitize(result, labels, subjectNames);
+        // Forge's raw target descriptors ("Select target Card.inZoneStack") are said in words.
+        return InteractiveTargetText.render(InteractiveText.sanitize(result, labels, subjectNames));
     }
 
     private static String inputClassName(final Input input) {
@@ -2630,8 +2644,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (min == 0) {
             controls.add(control("choices:cancel", "cancel", "None"));
         }
-        final JsonObject answer = ask("choice", inputClass, title, message, min, max,
-                min == 0, controls, action -> validateChoices(action, byId.keySet(), min, max));
+        final SpellAbility targeting = targetingChoice(message, options);
+        final JsonObject answer;
+        requestContext.set(targeting == null ? null : targetContext(targeting, itemTargets(byId)));
+        try {
+            answer = ask("choice", inputClass, title, message, min, max,
+                    min == 0, controls, action -> validateChoices(action, byId.keySet(), min, max));
+        } finally {
+            requestContext.remove();
+        }
         if ("cancel".equals(string(answer, "type"))) {
             return Collections.emptyList();
         }
@@ -2641,6 +2662,143 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             result.add(byId.get(id));
         }
         return result;
+    }
+
+    /**
+     * The ability whose targets this list choice picks, or null. Forge asks for a spell or ability
+     * target on the stack (or in a mixed zone list) with a plain list dialog
+     * ({@code TargetSelection.chooseCardFromStack / chooseCardFromList}): its message is the target
+     * prompt and its items are the candidates, "[FINISH TARGETING]" and section headings.
+     */
+    private SpellAbility targetingChoice(final String message, final List<?> options) {
+        final SpellAbility targeting = controller == null ? null : controller.getTargetingAbility();
+        if (targeting == null || targeting.getTargetRestrictions() == null || targeting.getHostCard() == null) {
+            return null;
+        }
+        final String prompt = forge.util.TextUtil.fastReplace(targeting.getTargetRestrictions().getVTSelection(),
+                "CARDNAME", targeting.getHostCard().toString());
+        if (!Objects.equals(prompt, message)) {
+            return null;
+        }
+        for (Object option : options) {
+            if (!(option instanceof forge.game.spellability.StackItemView || option instanceof CardView
+                    || option instanceof String)) {
+                return null;
+            }
+        }
+        return targeting;
+    }
+
+    /**
+     * {@code request.context} for a target choice. Scalars: {@code target} (true),
+     * {@code targetMin}/{@code targetMax}/{@code targetChosen} (this ability's counts so far),
+     * {@code targetRequired} (another target is needed before the ability can go on: an answer
+     * of none cancels it), and {@code targetSourceCardId} / {@code targetSourceName} when this seat
+     * may see the source.
+     * Per option, {@code targetOption}: who controls each candidate ({@code controllerSeat}),
+     * which seat a player candidate is ({@code playerSeat}), and the list items that are not
+     * candidates ({@code finishTargeting}, {@code heading}). Public facts only: a target is on the
+     * stack or the battlefield, or a player.
+     */
+    private JsonObject targetContext(final SpellAbility ability, final JsonObject perOption) {
+        final JsonObject context = new JsonObject();
+        context.addProperty("target", true);
+        final int min = ability.getMinTargets();
+        final int chosen = ability.getTargets().size();
+        context.addProperty("targetMin", min);
+        context.addProperty("targetMax", ability.getMaxTargets());
+        context.addProperty("targetChosen", chosen);
+        context.addProperty("targetRequired", chosen < min);
+        final Card host = ability.getHostCard();
+        if (host != null && InteractiveState.mayReceiveIdentity(host.getView(), human.getView())) {
+            context.addProperty("targetSourceCardId", host.getId());
+            // Mid-cast the spell is in no zone the view lists, so its name travels here.
+            context.addProperty("targetSourceName", host.getName());
+        }
+        if (perOption.size() > 0) {
+            context.add("targetOption", perOption);
+        }
+        return context;
+    }
+
+    /** Per-control target facts of an InputSelectTargets request. */
+    private JsonObject controlTargets(final JsonArray controls) {
+        final JsonObject facts = new JsonObject();
+        for (JsonElement element : controls) {
+            final JsonObject control = element.getAsJsonObject();
+            final String id = string(control, "controlId");
+            final String type = string(control, "type");
+            final JsonObject fact = new JsonObject();
+            if ("selectCard".equals(type) && control.has("cardId")) {
+                final Card card = game.findById(control.get("cardId").getAsInt());
+                final int seat = card == null ? -1 : seatOf(card.getController());
+                if (seat < 0) {
+                    continue;
+                }
+                fact.addProperty("controllerSeat", seat);
+            } else if ("selectPlayer".equals(type) && control.has("player")) {
+                fact.addProperty("playerSeat", control.get("player").getAsInt());
+            } else {
+                continue;
+            }
+            facts.add(id, fact);
+        }
+        return facts;
+    }
+
+    /** Per-item target facts of a list target choice. */
+    private <T> JsonObject itemTargets(final Map<String, T> byId) {
+        final JsonObject facts = new JsonObject();
+        for (Map.Entry<String, T> entry : byId.entrySet()) {
+            final Object option = entry.getValue();
+            final JsonObject fact = new JsonObject();
+            if (option instanceof forge.game.spellability.StackItemView item) {
+                // Who put it on the stack, as recorded then. Not si.getActivatingPlayer(): that reads the
+                // ability live, and Card.getAllPossibleAbilities (any seat's control enumeration) sets the
+                // activating player of every ability it lists, a spell on the stack included when the
+                // stack holds the card's own ability object (seen with test frames' putonstack).
+                final int seat = seatOf(item.getActivatingPlayer());
+                if (seat < 0) {
+                    continue;
+                }
+                fact.addProperty("controllerSeat", seat);
+                fact.addProperty("stackItem", item.getId());
+            } else if (option instanceof CardView card) {
+                final Card real = game.findById(card.getId());
+                final int seat = real == null ? -1 : seatOf(real.getController());
+                if (seat < 0) {
+                    continue;
+                }
+                fact.addProperty("controllerSeat", seat);
+            } else if ("[FINISH TARGETING]".equals(option)) {
+                fact.addProperty("finishTargeting", true);
+            } else if (option instanceof String text && text.startsWith("--") && text.endsWith("--")) {
+                fact.addProperty("heading", true);
+            } else {
+                continue;
+            }
+            facts.add(entry.getKey(), fact);
+        }
+        return facts;
+    }
+
+    /** The seat index (registered order, as {@code controllerSeat} in the view) of a player, or -1. */
+    private int seatOf(final Player player) {
+        return player == null ? -1 : seatOf(player.getView());
+    }
+
+    private int seatOf(final PlayerView player) {
+        if (player == null) {
+            return -1;
+        }
+        int seat = 0;
+        for (Player registered : game.getRegisteredPlayers()) {
+            if (registered.getId() == player.getId()) {
+                return seat;
+            }
+            seat++;
+        }
+        return -1;
     }
 
     private String validateChoices(final JsonObject action, final Set<String> known,

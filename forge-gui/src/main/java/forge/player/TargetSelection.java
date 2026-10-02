@@ -67,7 +67,22 @@ public class TargetSelection {
         return ability.isTrigger() || getTgt().getMandatory();
     }
 
+    /**
+     * mtgx (2026-10-02): the ability is published as the controller's {@link PlayerControllerHuman#getTargetingAbility}
+     * while its targets are chosen, so a GUI can say what is being targeted (a browser seat's target prompt) without
+     * parsing Forge's prompt text. Restored on the way out; nested choices keep their own.
+     */
     public final boolean chooseTargets(Integer numTargets, Collection<Integer> divisionValues, Predicate<GameObject> filter, boolean optional, boolean canFilterMustTarget) {
+        final SpellAbility previous = controller.getTargetingAbility();
+        controller.setTargetingAbility(ability);
+        try {
+            return chooseTargetsInner(numTargets, divisionValues, filter, optional, canFilterMustTarget);
+        } finally {
+            controller.setTargetingAbility(previous);
+        }
+    }
+
+    private boolean chooseTargetsInner(Integer numTargets, Collection<Integer> divisionValues, Predicate<GameObject> filter, boolean optional, boolean canFilterMustTarget) {
         if (!ability.usesTargeting()) {
             throw new RuntimeException("TargetSelection.chooseTargets called for ability that does not target - " + ability);
         }
@@ -182,7 +197,7 @@ public class TargetSelection {
             choiceResult = this.chooseCardFromList(validTargets, true, mandatory);
         }
         // some inputs choose cards one-by-one and need to be called again
-        return choiceResult && chooseTargets(numTargets, divisionValues, filter, optional, canFilterMustTarget);
+        return choiceResult && chooseTargetsInner(numTargets, divisionValues, filter, optional, canFilterMustTarget);
     }
 
     private boolean chooseCardFromList(final List<Card> choices, final boolean targeted, final boolean mandatory) {
