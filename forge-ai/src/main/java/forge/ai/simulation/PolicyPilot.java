@@ -671,7 +671,8 @@ public final class PolicyPilot {
     private JsonObject encodeRoot(Game g, Player me) {
         try {
             return inCopy(g, me, false, forge.bench.StateEncoder::encode);
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | StackOverflowError e) {
+            // GameCopier is not total (token mapping, LKI); a failed copy keeps Forge AI's answer.
             stats.encodeFailures++;
             event("T" + turn + " encodeFail " + e);
             return null;
@@ -708,7 +709,7 @@ public final class PolicyPilot {
                 }
                 return null;
             });
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | StackOverflowError e) {
             stats.copyFailures++;
             event("T" + turn + " copyFail " + e);
             return null;
