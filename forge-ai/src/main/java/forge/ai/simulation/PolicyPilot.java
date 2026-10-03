@@ -44,7 +44,10 @@ import forge.util.MyRandom;
  * opponent object is on top of the stack, or at their end step with an empty stack, the service's {@code react} head
  * (context: the opponent's casts this turn so far) picks the castable hand card with the highest p &ge; threshold, which
  * is cast (a counter targets the top stack object when Forge AI declines to choose). Forge AI's own proposals to cast
- * a hand card on their turn are vetoed when its react p is known and below the threshold.</li>
+ * a hand card on their turn are vetoed when its react p is known and below the threshold, unless {@code reactVeto} is
+ * off (lane l2-nor1-1002, 2026-10-03): then the pilot only adds react casts on their turn and Forge AI's own
+ * proposals stand. The react head is trained on turn-level labels (a card cast during the opponent's turn) and sees
+ * neither the stack nor the window, so its probability cannot judge whether one particular response is worth it.</li>
  * </ul>
  * Forge AI keeps targets, modes, X, payments, activated abilities, combat, mulligans, tutors and every choice inside a
  * resolving effect. Every state the service sees, and every castability check, comes from a {@link GameCopier} copy
@@ -78,6 +81,9 @@ public final class PolicyPilot {
         public boolean cast = true;
         public boolean land = true;
         public boolean react = true;
+        /** Opponent's turn: veto Forge AI's own hand-spell proposals with a known react p below the threshold (D1, the
+         *  default). Off: the pilot only adds react casts there (placebo: no reactVeto draws either). */
+        public boolean reactVeto = true;
         /** Compute, call and count, but always play Forge AI's answer. */
         public boolean shadow = false;
         public double threshold = 0.5;
@@ -100,6 +106,7 @@ public final class PolicyPilot {
             c.cast = !o.has("cast") || o.get("cast").getAsBoolean();
             c.land = !o.has("land") || o.get("land").getAsBoolean();
             c.react = !o.has("react") || o.get("react").getAsBoolean();
+            c.reactVeto = !o.has("reactVeto") || o.get("reactVeto").getAsBoolean();
             c.shadow = o.has("shadow") && o.get("shadow").getAsBoolean();
             c.threshold = o.has("threshold") ? o.get("threshold").getAsDouble() : 0.5;
             c.maxForcesPerTurn = o.has("maxForcesPerTurn") ? o.get("maxForcesPerTurn").getAsInt() : 8;
@@ -116,6 +123,9 @@ public final class PolicyPilot {
             o.addProperty("cast", cast);
             o.addProperty("land", land);
             o.addProperty("react", react);
+            if (!reactVeto) {
+                o.addProperty("reactVeto", false);   // echoed only when off: default rows are unchanged
+            }
             o.addProperty("shadow", shadow);
             o.addProperty("threshold", threshold);
             o.addProperty("maxForcesPerTurn", maxForcesPerTurn);
@@ -500,7 +510,7 @@ public final class PolicyPilot {
             trigger = null;
         }
         final SpellAbility d = first(def);
-        final boolean dHand = d != null && handSpell(d, me);
+        final boolean dHand = cfg.reactVeto && d != null && handSpell(d, me);
         if (trigger != null && forcesThisTurn < cfg.maxForcesPerTurn) {
             final Random r = placeboRng(4);
             final List<Integer> want = shuffledHand(me, r, false, -1);
@@ -615,7 +625,7 @@ public final class PolicyPilot {
             trigger = null;
         }
         final SpellAbility d = first(def);
-        final boolean dHand = d != null && handSpell(d, me);
+        final boolean dHand = cfg.reactVeto && d != null && handSpell(d, me);   // a reactVeto candidate
         if (trigger == null && !dHand) {
             return def;
         }
