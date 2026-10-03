@@ -67,8 +67,9 @@ import java.util.concurrent.TimeoutException;
  * belief,beliefShadow,beliefUrl,beliefTimeoutMs,beliefCheckpointSha256,beliefCube,beliefCubeSha256,beliefBasics
  * (lane belief-sampling-0928), aiFixes0928 (off|shadow|on, lane yardstick-0928: the look-ahead seats' own Forge AI)},
  * "defaultAiFixes0928": off|shadow|on (the "default"/"sim"/"policy" seats; off unless a predeclared read says otherwise),
- * "policy":{url,checkpointSha256,timeoutMs,cast,land,react,shadow,threshold,maxForcesPerTurn,log} (lane l2-fork-1001:
- * the "policy" seats, Forge AI plus policy P1 with no search; see {@link PolicyPilot}),
+ * "policy":{url,checkpointSha256,timeoutMs,cast,land,react,shadow,threshold,maxForcesPerTurn,log,placebo} (lane
+ * l2-fork-1001: the "policy" seats, Forge AI plus policy P1 with no search; "placebo":{veto,force,land,react,reactVeto,
+ * seed} = the matched placebo arm instead of P1, no service, lane l2-nor1-1002; see {@link PolicyPilot}),
  * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim"|"policy", ...]}]}}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
@@ -179,8 +180,13 @@ public final class LookaheadBench {
             if (anyPolicy) {
                 try {
                     final PolicyPilot.Config pc = PolicyPilot.Config.fromJson(policyJson);
-                    err.println("[lookahead-bench] policy service " + pc.url + " checkpoint "
-                            + forge.ai.simulation.PolicyClient.checkHealth(pc.url, pc.checkpointSha256, pc.timeoutMs));
+                    if (pc.placebo != null) {
+                        // matched placebo arm PB (lane l2-nor1-1002): no service, nothing to check
+                        err.println("[lookahead-bench] policy placebo " + pc.placebo.toJson());
+                    } else {
+                        err.println("[lookahead-bench] policy service " + pc.url + " checkpoint "
+                                + forge.ai.simulation.PolicyClient.checkHealth(pc.url, pc.checkpointSha256, pc.timeoutMs));
+                    }
                 } catch (IllegalStateException e) {
                     err.println("[lookahead-bench] refusing: " + e.getMessage());
                     System.exit(4);

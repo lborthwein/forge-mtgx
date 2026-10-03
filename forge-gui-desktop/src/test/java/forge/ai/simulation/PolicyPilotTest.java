@@ -525,4 +525,58 @@ public class PolicyPilotTest extends AITest {
             // ok
         }
     }
+
+    /** Matched placebo (arm PB, lane l2-nor1-1002): no service, random same-class changes at fixed rates, reproducible. */
+    @Test
+    public void placeboChangesAtItsRatesWithoutAServiceAndReplaysExactly() {
+        final String forge = play(new LobbyPlayerAi("p0", null), null);
+
+        // Rates 0: the placebo is consulted, calls nothing, changes nothing.
+        final PolicyPilot.Config zc = config();
+        zc.url = null;
+        zc.placebo = new PolicyPilot.Placebo();
+        final PolicyPilot pZero = PolicyPilot.create(zc);
+        final LobbyPlayerPolicy lZero = new LobbyPlayerPolicy("p0");
+        AssertJUnit.assertEquals(forge, play(lZero, g -> lZero.bind(g, g.getPlayers().get(0), pZero)));
+        final PolicyPilot.Stats z = pZero.getStats();
+        AssertJUnit.assertTrue(z.decisions > 0);
+        AssertJUnit.assertEquals(0, z.changed());
+        AssertJUnit.assertEquals(0, z.planCalls + z.reactCalls);
+        AssertJUnit.assertTrue("opportunities are counted: " + z.toJson(), z.vetoConsults + z.forceConsults + z.landConsults
+                + z.reactConsults + z.reactVetoConsults > 0);
+        AssertJUnit.assertEquals("placebo", z.checkpoint);
+
+        // Rates 1: changes play, legally and reproducibly (two runs, same fingerprints, same placebo digest).
+        final String[] on = new String[2];
+        final PolicyPilot.Stats[] ons = new PolicyPilot.Stats[2];
+        for (int r = 0; r < 2; r++) {
+            final PolicyPilot.Config pc = config();
+            pc.url = null;
+            pc.placebo = new PolicyPilot.Placebo();
+            pc.placebo.veto = pc.placebo.force = pc.placebo.land = pc.placebo.react = pc.placebo.reactVeto = 1.0;
+            pc.placebo.seed = 20261002L;
+            final PolicyPilot pOn = PolicyPilot.create(pc);
+            final LobbyPlayerPolicy lOn = new LobbyPlayerPolicy("p0");
+            on[r] = play(lOn, g -> lOn.bind(g, g.getPlayers().get(0), pOn));
+            ons[r] = pOn.getStats();
+        }
+        System.err.println("[policy-test] placebo stats " + ons[0].toJson());
+        AssertJUnit.assertEquals(on[0], on[1]);
+        AssertJUnit.assertNotNull(ons[0].digest);
+        AssertJUnit.assertEquals(ons[0].digest, ons[1].digest);
+        AssertJUnit.assertEquals(ons[0].events, ons[1].events);
+        AssertJUnit.assertTrue("placebo changes decisions", ons[0].changed() > 0);
+        AssertJUnit.assertFalse("and so the game", forge.equals(on[0]));
+        final PolicyPilot.Config back = PolicyPilot.Config.fromJson(config().toJson());
+        AssertJUnit.assertNull("no placebo block = policy P1", back.placebo);
+        final com.google.gson.JsonObject pj = new com.google.gson.JsonObject();
+        pj.addProperty("force", 0.25);
+        pj.addProperty("seed", 7);
+        final com.google.gson.JsonObject cj = config().toJson();
+        cj.add("placebo", pj);
+        final PolicyPilot.Config pcfg = PolicyPilot.Config.fromJson(cj);
+        AssertJUnit.assertEquals(0.25, pcfg.placebo.force, 0.0);
+        AssertJUnit.assertEquals(0.0, pcfg.placebo.veto, 0.0);
+        AssertJUnit.assertEquals("PB", pcfg.toJson().get("decode").getAsString());
+    }
 }
