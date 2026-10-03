@@ -339,6 +339,78 @@ public class PolicyPilotTest extends AITest {
         AssertJUnit.assertEquals(0, pilot.getStats().reactCast);
     }
 
+    /** reactVeto off (lane l2-nor1-1002, 2026-10-03): Forge AI's own response on their turn stands. */
+    @Test
+    public void reactVetoOffKeepsForgesOwnCounter() {
+        final Game game = game();
+        final Player a = game.getPlayers().get(0);
+        final Player b = game.getPlayers().get(1);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, b);
+        addCard("Island", a);
+        addCard("Island", a);
+        final Card counter = addCardToZone("Counterspell", a, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        final SpellAbility theirSa = putOnStack(game, addCardToZone("Grizzly Bears", b, ZoneType.Hand), b);
+        final SpellAbility cs = counter.getFirstSpellAbility();
+        cs.setActivatingPlayer(a);
+        cs.getTargets().add(theirSa);
+        final Mock mock = new Mock();
+        mock.game = game;
+        mock.p = (k, n) -> "react".equals(k) ? 0.1 : null;
+        final PolicyPilot.Config c = config();
+        c.reactVeto = false;
+        final PolicyPilot pilot = new PolicyPilot(c, mock);
+        pilot.bind(game, a);
+        final List<SpellAbility> ans = pilot.decide((PlayerControllerAi) a.getController(), one(cs));
+        AssertJUnit.assertNotNull(ans);
+        AssertJUnit.assertSame("Forge AI's own counter is played", cs, ans.get(0));
+        final PolicyPilot.Stats st = pilot.getStats();
+        AssertJUnit.assertEquals(0, st.reactVeto);
+        AssertJUnit.assertEquals(0, st.reactVetoConsults);
+        AssertJUnit.assertEquals(0, st.reactCast);
+        AssertJUnit.assertEquals("the react head is still asked at their stack object", 1, st.reactCalls);
+    }
+
+    /** reactVeto off: the react head still adds its own casts on their turn. */
+    @Test
+    public void reactVetoOffStillReactCasts() {
+        final Game game = game();
+        final Player a = game.getPlayers().get(0);
+        final Player b = game.getPlayers().get(1);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, b);
+        addCard("Island", a);
+        addCard("Island", a);
+        final Card counter = addCardToZone("Counterspell", a, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        final SpellAbility theirSa = putOnStack(game, addCardToZone("Grizzly Bears", b, ZoneType.Hand), b);
+        final Mock mock = new Mock();
+        mock.game = game;
+        mock.p = (k, n) -> "react".equals(k) ? (n.equals("Counterspell") ? 0.9 : 0.05) : null;
+        final PolicyPilot.Config c = config();
+        c.reactVeto = false;
+        final PolicyPilot pilot = new PolicyPilot(c, mock);
+        pilot.bind(game, a);
+        final List<SpellAbility> ans = pilot.decide((PlayerControllerAi) a.getController(), null);
+        AssertJUnit.assertNotNull(ans);
+        AssertJUnit.assertSame(counter, ans.get(0).getHostCard());
+        AssertJUnit.assertSame(theirSa, ans.get(0).getTargets().getFirstTargetedSpell());
+        AssertJUnit.assertEquals(1, pilot.getStats().reactCast);
+    }
+
+    /** The flag defaults on (D1 as before) and is echoed in the row config only when off. */
+    @Test
+    public void reactVetoFlagDefaultsOnAndIsEchoedOnlyWhenOff() {
+        AssertJUnit.assertTrue(new PolicyPilot.Config().reactVeto);
+        AssertJUnit.assertTrue(PolicyPilot.Config.fromJson(config().toJson()).reactVeto);
+        AssertJUnit.assertFalse(config().toJson().has("reactVeto"));
+        final JsonObject j = config().toJson();
+        j.addProperty("reactVeto", false);
+        final PolicyPilot.Config off = PolicyPilot.Config.fromJson(j);
+        AssertJUnit.assertFalse(off.reactVeto);
+        AssertJUnit.assertFalse(off.toJson().get("reactVeto").getAsBoolean());
+        AssertJUnit.assertEquals("D1", off.toJson().get("decode").getAsString());
+    }
+
     @Test
     public void serviceFailureFallsBackToForgeAndIsCountedOncePerTurn() {
         final Game game = game();
@@ -578,5 +650,50 @@ public class PolicyPilotTest extends AITest {
         AssertJUnit.assertEquals(0.25, pcfg.placebo.force, 0.0);
         AssertJUnit.assertEquals(0.0, pcfg.placebo.veto, 0.0);
         AssertJUnit.assertEquals("PB", pcfg.toJson().get("decode").getAsString());
+    }
+
+    /**
+     * reactVeto off over several turns: with no own-turn class and no react pick at or above the threshold the pilot
+     * calls the react head and plays exactly as Forge AI; the placebo with every rate 1 draws no reactVeto.
+     */
+    @Test
+    public void reactVetoOffWithNoReactPickPlaysAsForge() {
+        final String forge = play(new LobbyPlayerAi("p0", null), null);
+        final PolicyPilot.Stats[] st = new PolicyPilot.Stats[2];
+        final String[] fp = new String[2];
+        for (int v = 0; v < 2; v++) {
+            final Mock m = new Mock();
+            m.p = (k, n) -> "react".equals(k) ? 0.05 : null;
+            final PolicyPilot.Config c = config();
+            c.cast = c.land = false;
+            c.reactVeto = v == 0;
+            final PolicyPilot p = new PolicyPilot(c, m);
+            final LobbyPlayerPolicy l = new LobbyPlayerPolicy("p0");
+            fp[v] = play(l, g -> {
+                m.game = g;
+                l.bind(g, g.getPlayers().get(0), p);
+            });
+            st[v] = p.getStats();
+        }
+        System.err.println("[policy-test] reactVeto on " + st[0].toJson() + " off " + st[1].toJson());
+        AssertJUnit.assertEquals("reactVeto off, no pick: Forge AI's game", forge, fp[1]);
+        AssertJUnit.assertEquals(0, st[1].changed());
+        AssertJUnit.assertEquals(0, st[1].reactVetoConsults);
+        AssertJUnit.assertTrue("the react head was asked", st[1].reactCalls > 0);
+        AssertJUnit.assertTrue("the same opinions with reactVeto on veto Forge's responses: " + st[0].toJson(),
+                st[0].reactVeto > 0);
+
+        final PolicyPilot.Config pc = config();
+        pc.url = null;
+        pc.reactVeto = false;
+        pc.placebo = new PolicyPilot.Placebo();
+        pc.placebo.veto = pc.placebo.force = pc.placebo.land = pc.placebo.react = pc.placebo.reactVeto = 1.0;
+        pc.placebo.seed = 20261002L;
+        final PolicyPilot pb = PolicyPilot.create(pc);
+        final LobbyPlayerPolicy lpb = new LobbyPlayerPolicy("p0");
+        play(lpb, g -> lpb.bind(g, g.getPlayers().get(0), pb));
+        AssertJUnit.assertEquals(0, pb.getStats().reactVeto);
+        AssertJUnit.assertEquals(0, pb.getStats().reactVetoConsults);
+        AssertJUnit.assertTrue(pb.getStats().changed() > 0);
     }
 }
