@@ -56,6 +56,17 @@ import forge.util.MyRandom;
  *
  * <p>Shadow: every call and check is made and counted as "would", Forge AI's answer is always played (a would-force
  * is only seen where Forge AI itself passes, since the veto's re-ask is not made).
+ *
+ * <p>Placebo (lane l2-nor1-1002; the L2 read's matched placebo arm PB, heuristic-training-contract §6 "stratified
+ * non-heuristic candidate"): no service. At the same decision points and with the same mechanics, each class changes
+ * Forge AI's answer with a fixed probability ({@code placebo} rates, frozen from P1's TRAIN reach) to a uniformly
+ * random non-Forge candidate of that class: veto = Forge's own hand spell is excluded and Forge AI asked again; force =
+ * a random castable sorcery-speed hand card when Forge AI passes in a main phase; land = a random other hand land
+ * playable now; react = a random castable hand card at an opponent stack object / their end step; reactVeto = Forge's
+ * own hand spell on their turn is excluded. The draws come from a private stream seeded by the game's pilot seed and
+ * the decision index (never the live game's random stream), so a placebo game replays exactly. {@code consults} count
+ * the opportunities (a class decision point with at least one candidate), before the draw. {@code policyDigest} is a
+ * SHA-256 over the placebo's draws and choices.
  */
 public final class PolicyPilot {
 
@@ -75,6 +86,8 @@ public final class PolicyPilot {
         public boolean log = false;
         /** Seeds the copies' private random streams (never the live game's). */
         public long seed = 0L;
+        /** Matched placebo (arm PB): per-class change probabilities; null = the policy P1 (lane l2-nor1-1002). */
+        public Placebo placebo = null;
 
         public static Config fromJson(JsonObject o) {
             final Config c = new Config();
@@ -91,6 +104,7 @@ public final class PolicyPilot {
             c.threshold = o.has("threshold") ? o.get("threshold").getAsDouble() : 0.5;
             c.maxForcesPerTurn = o.has("maxForcesPerTurn") ? o.get("maxForcesPerTurn").getAsInt() : 8;
             c.log = o.has("log") && o.get("log").getAsBoolean();
+            c.placebo = o.has("placebo") && !o.get("placebo").isJsonNull() ? Placebo.fromJson(o.getAsJsonObject("placebo")) : null;
             return c;
         }
 
@@ -105,7 +119,38 @@ public final class PolicyPilot {
             o.addProperty("shadow", shadow);
             o.addProperty("threshold", threshold);
             o.addProperty("maxForcesPerTurn", maxForcesPerTurn);
-            o.addProperty("decode", "D1");
+            o.addProperty("decode", placebo == null ? "D1" : "PB");
+            o.addProperty("seed", seed);
+            if (placebo != null) {
+                o.add("placebo", placebo.toJson());
+            }
+            return o;
+        }
+    }
+
+    /** Placebo rates: P(change | an opportunity of the class). */
+    public static final class Placebo {
+        public double veto, force, land, react, reactVeto;
+        public long seed = 0L;
+
+        public static Placebo fromJson(JsonObject o) {
+            final Placebo p = new Placebo();
+            p.veto = o.has("veto") ? o.get("veto").getAsDouble() : 0.0;
+            p.force = o.has("force") ? o.get("force").getAsDouble() : 0.0;
+            p.land = o.has("land") ? o.get("land").getAsDouble() : 0.0;
+            p.react = o.has("react") ? o.get("react").getAsDouble() : 0.0;
+            p.reactVeto = o.has("reactVeto") ? o.get("reactVeto").getAsDouble() : 0.0;
+            p.seed = o.has("seed") ? o.get("seed").getAsLong() : 0L;
+            return p;
+        }
+
+        public JsonObject toJson() {
+            final JsonObject o = new JsonObject();
+            o.addProperty("veto", veto);
+            o.addProperty("force", force);
+            o.addProperty("land", land);
+            o.addProperty("react", react);
+            o.addProperty("reactVeto", reactVeto);
             o.addProperty("seed", seed);
             return o;
         }
@@ -231,6 +276,9 @@ public final class PolicyPilot {
 
     /** The bench / interactive constructor: checks the pin (once per JVM and URL) and builds the HTTP client. */
     public static PolicyPilot create(Config cfg) {
+        if (cfg.placebo != null) {
+            return new PolicyPilot(cfg, null);   // the placebo calls no service
+        }
         PolicyClient.checkHealth(cfg.url, cfg.checkpointSha256, cfg.timeoutMs);
         return new PolicyPilot(cfg, new PolicyClient(cfg.url, cfg.timeoutMs));
     }
@@ -246,6 +294,11 @@ public final class PolicyPilot {
     }
 
     public Stats getStats() {
+        if (client == null) {
+            stats.digest = placeboDigestHex();
+            stats.checkpoint = "placebo";
+            return stats;
+        }
         stats.digest = client.digestHex();
         stats.checkpoint = client.checkpointSha256;
         stats.unknownCards = client.unknownCards;
@@ -284,10 +337,214 @@ public final class PolicyPilot {
         }
         if (ph.getPlayerTurn() == me) {
             stats.ownTurn++;
-            return ownTurn(ctrl, g, me, ph, def);
+            return cfg.placebo != null ? placeboOwnTurn(ctrl, g, me, ph, def) : ownTurn(ctrl, g, me, ph, def);
         }
         stats.oppTurn++;
-        return oppTurn(ctrl, g, me, ph, def);
+        return cfg.placebo != null ? placeboOppTurn(ctrl, g, me, ph, def) : oppTurn(ctrl, g, me, ph, def);
+    }
+
+    // ------------------------------------------------------------------ the matched placebo (arm PB)
+
+    private java.security.MessageDigest placeboDigest;
+
+    /** One private draw per (decision, class): reproducible, independent of the live game's random stream. */
+    private Random placeboRng(int cls) {
+        return new Random(LookaheadSearch.mix(cfg.placebo.seed ^ cfg.seed, stats.decisions * 8L + cls));
+    }
+
+    private void placeboNote(String s) {
+        try {
+            if (placeboDigest == null) {
+                placeboDigest = java.security.MessageDigest.getInstance("SHA-256");
+            }
+            placeboDigest.update((s + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private String placeboDigestHex() {
+        if (placeboDigest == null) {
+            return null;
+        }
+        try {
+            final byte[] h = ((java.security.MessageDigest) placeboDigest.clone()).digest();
+            final StringBuilder b = new StringBuilder();
+            for (byte x : h) {
+                b.append(String.format("%02x", x));
+            }
+            return b.toString();
+        } catch (CloneNotSupportedException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** Hand cards (live hand order), not forced this turn, lands excluded or only lands, in a placebo-random order. */
+    private List<Integer> shuffledHand(Player me, Random r, boolean lands, int exclude) {
+        final List<Integer> out = new ArrayList<>();
+        for (Card c : me.getCardsIn(ZoneType.Hand)) {
+            if (c.getId() != exclude && !forced.contains(c.getId()) && c.isLand() == lands) {
+                out.add(c.getId());
+            }
+        }
+        Collections.shuffle(out, r);
+        return out;
+    }
+
+    private List<SpellAbility> placeboOwnTurn(PlayerControllerAi ctrl, Game g, Player me, PhaseHandler ph, List<SpellAbility> def) {
+        if (!(cfg.cast || cfg.land) || !g.getStack().isEmpty()) {
+            return def;
+        }
+        final boolean main = ph.getPhase() != null && ph.getPhase().isMain();
+        final SpellAbility d = first(def);
+        if (d != null && d.isLandAbility()) {
+            return cfg.land ? placeboLand(g, me, def, d) : def;
+        }
+        List<SpellAbility> answer = def;
+        if (cfg.cast && d != null && handSpell(d, me)) {
+            stats.vetoConsults++;
+            final Random r = placeboRng(1);
+            if (r.nextDouble() < cfg.placebo.veto) {
+                final int vid = d.getHostCard().getId();
+                answer = reask(ctrl, me, c -> c.getId() == vid);
+                placeboNote("T" + turn + " veto " + d.getHostCard().getName() + " -> " + label(answer));
+                if (!same(answer, def)) {
+                    stats.veto++;
+                    event("T" + turn + " pbVeto " + d.getHostCard().getName() + " -> " + label(answer));
+                }
+            }
+        }
+        if (cfg.cast && first(answer) == null && main && forcesThisTurn < cfg.maxForcesPerTurn) {
+            final Random r = placeboRng(2);
+            final List<Integer> want = shuffledHand(me, r, false, -1);
+            if (!want.isEmpty()) {
+                stats.forceConsults++;
+                if (r.nextDouble() < cfg.placebo.force) {
+                    final LookaheadSearch.Cand pick = firstCastable(g, me, want, true);
+                    if (pick != null) {
+                        forced.add(pick.hostId);
+                        forcesThisTurn++;
+                        final List<SpellAbility> m = mapForce(ctrl, g, me, pick, false);
+                        placeboNote("T" + turn + " force " + pick.label + (m == null ? " refused" : ""));
+                        if (m == null) {
+                            stats.forceRefused++;
+                            event("T" + turn + " pbForceRefused " + pick.label);
+                        } else {
+                            stats.force++;
+                            event("T" + turn + " pbForce " + pick.label);
+                            return m;
+                        }
+                    }
+                }
+            }
+        }
+        return answer;
+    }
+
+    private List<SpellAbility> placeboLand(Game g, Player me, List<SpellAbility> def, SpellAbility d) {
+        final Card forgeLand = d.getHostCard();
+        if (forgeLand.getZone() == null || !forgeLand.isInZone(ZoneType.Hand)) {
+            return def;
+        }
+        final Random r = placeboRng(3);
+        Card best = null;
+        SpellAbility play = null;
+        boolean any = false;
+        final double u = r.nextDouble();
+        for (int fid : shuffledHand(me, r, true, forgeLand.getId())) {
+            final Card c = g.findById(fid);
+            if (c == null) {
+                continue;
+            }
+            for (SpellAbility sa : c.getAllPossibleAbilities(me, true)) {
+                if (sa.isLandAbility()) {
+                    sa.setActivatingPlayer(me);
+                    if (sa.canPlay()) {
+                        play = sa;
+                        break;
+                    }
+                }
+            }
+            if (play != null) {
+                any = true;
+                best = c;
+                break;
+            }
+        }
+        if (!any) {
+            return def;
+        }
+        stats.landConsults++;
+        if (u >= cfg.placebo.land) {
+            return def;
+        }
+        stats.landSwap++;
+        placeboNote("T" + turn + " land " + best.getName() + " over " + forgeLand.getName());
+        event("T" + turn + " pbLand " + best.getName() + " over " + forgeLand.getName());
+        final List<SpellAbility> l = new ArrayList<>();
+        l.add(play);
+        return l;
+    }
+
+    private List<SpellAbility> placeboOppTurn(PlayerControllerAi ctrl, Game g, Player me, PhaseHandler ph, List<SpellAbility> def) {
+        if (!cfg.react) {
+            return def;
+        }
+        final boolean stackEmpty = g.getStack().isEmpty();
+        final String trigger;
+        if (!stackEmpty && g.getStack().peekAbility() != null && g.getStack().peekAbility().getActivatingPlayer() != me) {
+            trigger = "stack";
+        } else if (stackEmpty && ph.is(PhaseType.END_OF_TURN)) {
+            trigger = "end";
+        } else {
+            trigger = null;
+        }
+        final SpellAbility d = first(def);
+        final boolean dHand = d != null && handSpell(d, me);
+        if (trigger != null && forcesThisTurn < cfg.maxForcesPerTurn) {
+            final Random r = placeboRng(4);
+            final List<Integer> want = shuffledHand(me, r, false, -1);
+            if (!want.isEmpty()) {
+                stats.reactConsults++;
+                if (r.nextDouble() < cfg.placebo.react) {
+                    final LookaheadSearch.Cand pick = firstCastable(g, me, want, false);
+                    if (pick != null) {
+                        if (d != null && d.isSpell() && d.getHostCard().getId() == pick.hostId) {
+                            stats.reactAgree++;
+                            placeboNote("T" + turn + " reactAgree " + pick.label);
+                            return def;
+                        }
+                        forced.add(pick.hostId);
+                        forcesThisTurn++;
+                        final List<SpellAbility> m = mapForce(ctrl, g, me, pick, "stack".equals(trigger));
+                        placeboNote("T" + turn + " react(" + trigger + ") " + pick.label + (m == null ? " refused" : ""));
+                        if (m == null) {
+                            stats.reactRefused++;
+                            event("T" + turn + " pbReactRefused " + pick.label);
+                        } else {
+                            stats.reactCast++;
+                            event("T" + turn + " pbReact(" + trigger + ") " + pick.label + " over " + label(def));
+                            return m;
+                        }
+                    }
+                }
+            }
+        }
+        if (dHand) {
+            stats.reactVetoConsults++;
+            final Random r = placeboRng(5);
+            if (r.nextDouble() < cfg.placebo.reactVeto) {
+                final int vid = d.getHostCard().getId();
+                final List<SpellAbility> answer = reask(ctrl, me, c -> c.getId() == vid);
+                placeboNote("T" + turn + " reactVeto " + d.getHostCard().getName() + " -> " + label(answer));
+                if (!same(answer, def)) {
+                    stats.reactVeto++;
+                    event("T" + turn + " pbReactVeto " + d.getHostCard().getName() + " -> " + label(answer));
+                }
+                return answer;
+            }
+        }
+        return def;
     }
 
     private List<SpellAbility> ownTurn(PlayerControllerAi ctrl, Game g, Player me, PhaseHandler ph, List<SpellAbility> def) {
