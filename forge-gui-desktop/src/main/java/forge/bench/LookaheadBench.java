@@ -70,12 +70,55 @@ import java.util.concurrent.TimeoutException;
  * "policy":{url,checkpointSha256,timeoutMs,cast,land,react,shadow,threshold,maxForcesPerTurn,log,placebo} (lane
  * l2-fork-1001: the "policy" seats, Forge AI plus policy P1 with no search; "placebo":{veto,force,land,react,reactVeto,
  * seed} = the matched placebo arm instead of P1, no service, lane l2-nor1-1002; see {@link PolicyPilot}),
- * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim"|"policy", ...]}]}}.
+ * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim"|"policy", ...],
+ * "aiProfiles":[p0,p1]}]}}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
+ *
+ * <p>"aiProfiles" (lane pf1-1003, optional per game): the Forge AI profile of each seat, one of the shipped
+ * {@code res/ai/*.ai} files (Default, Reckless, Cautious, Experimental at 2.0.15), used as shipped. Absent = "Default"
+ * on both seats, which is the behaviour before the option. It applies to every seat kind; a look-ahead seat's
+ * play-out copies inherit it ({@link forge.ai.simulation.GameCopier} copies each player's profile). An unknown profile
+ * name refuses the whole run (exit 4) before any game, because Forge would otherwise silently fall back to the
+ * built-in property defaults. A row carries "aiProfiles" (the profile each seat's lobby player held at game end) only
+ * when its game set the key, so rows without it keep their schema.
  */
 public final class LookaheadBench {
     private LookaheadBench() {
+    }
+
+    /** The profile a seat uses when its game names none: Forge's own default, as before the option. */
+    static final String DEFAULT_AI_PROFILE = "Default";
+
+    /**
+     * The two seats' AI profiles of one game spec: "aiProfiles" if present (exactly two names, each one of
+     * {@code available}), else "Default" for both.
+     *
+     * @throws IllegalStateException if the key is malformed or names a profile that is not shipped
+     */
+    static String[] seatProfiles(JsonObject spec, List<String> available) {
+        final String[] out = {DEFAULT_AI_PROFILE, DEFAULT_AI_PROFILE};
+        if (!spec.has("aiProfiles")) {
+            return out;
+        }
+        final String id = spec.has("id") ? spec.get("id").getAsString() : "?";
+        final JsonElement e = spec.get("aiProfiles");
+        if (!e.isJsonArray() || e.getAsJsonArray().size() != 2) {
+            throw new IllegalStateException("game " + id + ": aiProfiles must be an array of two profile names");
+        }
+        for (int i = 0; i < 2; i++) {
+            final JsonElement p = e.getAsJsonArray().get(i);
+            if (p == null || p.isJsonNull() || !p.isJsonPrimitive()) {
+                throw new IllegalStateException("game " + id + ": aiProfiles[" + i + "] is not a name");
+            }
+            final String name = p.getAsString();
+            if (!available.contains(name)) {
+                throw new IllegalStateException("game " + id + ": AI profile '" + name + "' is not shipped (available "
+                        + available + ")");
+            }
+            out[i] = name;
+        }
+        return out;
     }
 
     /** HX keys: priorExtra (0 = off), priorUrl, priorShadow, priorTimeoutMs (2000), priorCheckpointSha256. */
@@ -216,6 +259,26 @@ public final class LookaheadBench {
                 }
             }
         }
+        // aiProfiles (lane pf1-1003): every game's profile names are checked once, after the profiles load and
+        // before any game; a malformed key or a profile that is not shipped refuses the run (exit 4).
+        final List<String> availableProfiles = forge.ai.AiProfileUtil.getAvailableProfiles();
+        {
+            final Set<String> named = new java.util.TreeSet<>();
+            try {
+                for (JsonElement ge : cfg.getAsJsonArray("games")) {
+                    final JsonObject spec = ge.getAsJsonObject();
+                    if (spec.has("aiProfiles")) {
+                        java.util.Collections.addAll(named, seatProfiles(spec, availableProfiles));
+                    }
+                }
+            } catch (IllegalStateException e) {
+                err.println("[lookahead-bench] refusing: " + e.getMessage());
+                System.exit(4);
+            }
+            if (!named.isEmpty()) {
+                err.println("[lookahead-bench] aiProfiles " + named + " (shipped " + availableProfiles + ")");
+            }
+        }
         if (!"false".equals(System.getProperty("lookahead.preloadTokens"))) {
             // C3c: fill the token table before any game. TokenDb fills a HashMultimap lazily on a token's first use;
             // play-outs on several threads raced on it (a reader saw a token with fewer arts and Aggregates.random drew
@@ -249,6 +312,7 @@ public final class LookaheadBench {
             final long seed = spec.get("seed").getAsLong();
             final JsonArray decks = spec.getAsJsonArray("decks");
             final JsonArray seatModes = spec.getAsJsonArray("seats");
+            final String[] profiles = seatProfiles(spec, availableProfiles); // "Default" x2 unless the game names them
 
             final List<RegisteredPlayer> seats = new ArrayList<>();
             final List<LookaheadSearch> searches = new ArrayList<>();
@@ -293,7 +357,7 @@ public final class LookaheadBench {
                     c.seed = seed * 31 + i;
                     LookaheadSearch s = new LookaheadSearch(c);
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);
-                    l.setAiProfile("Default");
+                    l.setAiProfile(profiles[i]);
                     l.setAiFixes0928(laFixes);
                     searches.add(s);
                     laLobbies.add(l);
@@ -305,7 +369,7 @@ public final class LookaheadBench {
                     pc.seed = seed * 31 + i;
                     final PolicyPilot pilot = PolicyPilot.create(pc);
                     final LobbyPlayerPolicy l = new LobbyPlayerPolicy(name);
-                    l.setAiProfile("Default");
+                    l.setAiProfile(profiles[i]);
                     l.setAiFixes0928(defaultFixes);
                     searches.add(null);
                     laLobbies.add(null);
@@ -314,7 +378,7 @@ public final class LookaheadBench {
                 } else {
                     final Set<AIOption> options = "sim".equals(mode) ? Sets.newHashSet(AIOption.USE_FULL_SIMULATION) : null;
                     LobbyPlayerAi l = new LobbyPlayerAi(name, options);
-                    l.setAiProfile("Default");
+                    l.setAiProfile(profiles[i]);
                     l.setAiFixes0928(defaultFixes);
                     searches.add(null);
                     laLobbies.add(null);
@@ -494,6 +558,15 @@ public final class LookaheadBench {
                 }
             }
             row.add("search", st);
+            if (spec.has("aiProfiles")) {
+                // Only when the game set the key: other rows keep their schema. Read back from each seat's lobby player,
+                // so a row shows the profile that seat actually held.
+                final JsonArray ap = new JsonArray();
+                for (int i = 0; i < 2; i++) {
+                    ap.add(((LobbyPlayerAi) seats.get(i).getPlayer()).getAiProfile());
+                }
+                row.add("aiProfiles", ap);
+            }
             if (pilots.get(0) != null || pilots.get(1) != null) {
                 // Only when a seat is a policy seat: other rows keep their schema.
                 final JsonArray po = new JsonArray();
