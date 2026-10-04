@@ -2227,9 +2227,10 @@ public final class LookaheadSearch {
     /**
      * zeroX guard: true for a spell (any type) with {X} in its mana cost whose largest X payable now is 0
      * ({@link forge.ai.ComputerUtilMana#determineLeftoverMana}) and that Forge's own AI would not cast now
-     * ({@code canPlaySa} is not WillPlay) -- e.g. Pest Infestation (X X G) with two mana: destroy up to 0 targets, create
-     * 0 tokens. A zero-X spell Forge's AI does cast (a deliberate X = 0, e.g. Chalice of the Void) is not flagged. Runs in
-     * the enumeration copy only (the AI check may set X on that copy's ability).
+     * ({@code canPlaySa} is not WillPlay) and that has no target slot at X = 0 -- e.g. Pest Infestation (X X G) with two
+     * mana: destroy up to 0 targets, create 0 tokens. Not flagged: a zero-X spell Forge's AI does cast (a deliberate
+     * X = 0, e.g. Chalice of the Void), and one that still targets at X = 0 (Unexpectedly Absent). Runs in the
+     * enumeration copy only (the checks set X on that copy's ability).
      */
     static boolean zeroXSpell(SpellAbility sa, Player me) {
         if (sa == null || !sa.isSpell() || sa.isLandAbility() || !sa.costHasManaX()) {
@@ -2238,6 +2239,14 @@ public final class LookaheadSearch {
         sa.setActivatingPlayer(me);
         if (forge.ai.ComputerUtilMana.determineLeftoverMana(sa, me, false) > 0) {
             return false;
+        }
+        // At X = 0 the spell must have no target slot left (Pest Infestation: "up to X targets"). A spell that still
+        // targets at X = 0 has an effect (Unexpectedly Absent puts its target on top of the library) and is left alone.
+        sa.setXManaCostPaid(0);
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting() && s.getMaxTargets() > 0) {
+                return false;
+            }
         }
         return ((PlayerControllerAi) me.getController()).getAi().canPlaySa(sa) != AiPlayDecision.WillPlay;
     }

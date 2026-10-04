@@ -96,6 +96,14 @@ public class LookaheadZeroXTest extends SimulationTest {
         addCardToZone("Grizzly Bears", a1, ZoneType.Hand);
         AssertJUnit.assertFalse("no X in the cost", LookaheadSearch.zeroXSpell(castOf(a1, "Grizzly Bears"), a1));
         AssertJUnit.assertFalse(LookaheadSearch.zeroXSpell(null, a1));
+        Game ua = board(0);
+        Player au = ua.getPlayers().get(0);
+        addCard("Plains", au);
+        addCard("Plains", au);
+        addCard("Grizzly Bears", ua.getPlayers().get(1));
+        addCardToZone("Unexpectedly Absent", au, ZoneType.Hand);
+        AssertJUnit.assertFalse("X = 0 still targets: Unexpectedly Absent is left alone",
+                LookaheadSearch.zeroXSpell(castOf(au, "Unexpectedly Absent"), au));
     }
 
     @Test
