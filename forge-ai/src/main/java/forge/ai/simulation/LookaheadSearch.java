@@ -2236,19 +2236,21 @@ public final class LookaheadSearch {
         if (sa == null || !sa.isSpell() || sa.isLandAbility() || !sa.costHasManaX()) {
             return false;
         }
-        sa.setActivatingPlayer(me);
-        if (forge.ai.ComputerUtilMana.determineLeftoverMana(sa, me, false) > 0) {
+        // Work on a copy: X and the AI check's choices are written onto the ability, and an enumeration copy's
+        // ability is not guaranteed to be private to the copy (a shadow replay diverged when the original was used).
+        final SpellAbility x = sa.copy(me);
+        if (forge.ai.ComputerUtilMana.determineLeftoverMana(x, me, false) > 0) {
             return false;
         }
         // At X = 0 the spell must have no target slot left (Pest Infestation: "up to X targets"). A spell that still
         // targets at X = 0 has an effect (Unexpectedly Absent puts its target on top of the library) and is left alone.
-        sa.setXManaCostPaid(0);
-        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+        x.setXManaCostPaid(0);
+        for (SpellAbility s = x; s != null; s = s.getSubAbility()) {
             if (s.usesTargeting() && s.getMaxTargets() > 0) {
                 return false;
             }
         }
-        return ((PlayerControllerAi) me.getController()).getAi().canPlaySa(sa) != AiPlayDecision.WillPlay;
+        return ((PlayerControllerAi) me.getController()).getAi().canPlaySa(x) != AiPlayDecision.WillPlay;
     }
 
     /**
