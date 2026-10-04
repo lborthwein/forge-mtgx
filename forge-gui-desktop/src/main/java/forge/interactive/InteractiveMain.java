@@ -513,6 +513,7 @@ public final class InteractiveMain {
                 case "margin": c.margin = Double.parseDouble(p[1].trim()); break;
                 case "departZ": c.departZ = Double.parseDouble(p[1].trim()); break;
                 case "targetVariants": c.targetVariants = Integer.parseInt(p[1].trim()); break;
+                case "deadEtb": c.deadEtb = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "maxSteps": c.maxSteps = Integer.parseInt(p[1].trim()); break;
                 case "shadow": c.shadow = !"0".equals(p[1].trim()); break;
                 case "combat": c.combat = !"0".equals(p[1].trim()); break;

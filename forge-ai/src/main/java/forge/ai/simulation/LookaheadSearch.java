@@ -4,6 +4,7 @@ import com.google.common.eventbus.Subscribe;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import forge.ai.AiCache;
+import forge.ai.AiFixes;
 import forge.ai.AiPlayDecision;
 import forge.ai.ComputerUtilAbility;
 import forge.ai.PlayerControllerAi;
@@ -11,12 +12,15 @@ import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
 import forge.game.card.CardCollectionView;
+import forge.game.card.CardState;
 import forge.game.card.CounterType;
 import forge.game.event.GameEventTurnBegan;
 import forge.game.phase.PhaseHandler;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
 import forge.game.spellability.SpellAbility;
+import forge.game.trigger.Trigger;
+import forge.game.trigger.TriggerType;
 import forge.game.zone.ZoneType;
 import forge.util.MyRandom;
 
@@ -112,6 +116,17 @@ public final class LookaheadSearch {
          * first); per ability: opponents, opponents' cards, "no target", own player, own cards, in game order.
          */
         public int targetVariants = 0;
+        /**
+         * Dead-ETB guard (lane misplay-portablehole-1003; off|shadow|on in the aiFixes0928 style, OFF by default:
+         * candidates and decisions unchanged). A non-creature permanent spell whose every enters-the-battlefield trigger
+         * needs a target and has no legal one now ({@link #deadEtbPermanent}; Portable Hole against a board with no
+         * opponent's nonland permanent of mana value 2 or less) is not a departure candidate: the static evaluator
+         * scores any such permanent at 50 + 30 * MV against 5 for the card in hand, a constant gain in every world that
+         * the departZ gate cannot tell from a real one. ON drops it from the candidates (its breadth slot goes to the
+         * next legal candidate, as for a duplicate); SHADOW keeps every candidate and decision and counts the
+         * decisions where it would have dropped one, and the departures to one. Forge's own answer is never dropped.
+         */
+        public AiFixes.Mode deadEtb = AiFixes.Mode.OFF;
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
@@ -256,6 +271,9 @@ public final class LookaheadSearch {
             if (departZ > 0) {
                 o.addProperty("departZ", departZ);
             }
+            if (deadEtb != AiFixes.Mode.OFF) {
+                o.addProperty("deadEtb", deadEtb.key());
+            }
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
@@ -319,6 +337,13 @@ public final class LookaheadSearch {
         public long departGated;
         /** targetVariants: variant candidates offered; departures to a variant. */
         public long targetVariantCands, targetVariantDepartures;
+        /**
+         * deadEtb guard (null = off): the mode; dead-ETB candidates met in enumeration (Forge's answer excluded), decisions
+         * with at least one, of those dropped (ON), searched decisions whose best candidate was one (SHADOW: departures the
+         * guard would have stopped), and decisions where Forge's own answer was one (never dropped).
+         */
+        public String deadEtbMode;
+        public long deadEtbCands, deadEtbDecisions, deadEtbDropped, deadEtbShadowBest, deadEtbForge;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
@@ -408,6 +433,16 @@ public final class LookaheadSearch {
             if (targetVariantCands > 0) {
                 o.addProperty("targetVariantCands", targetVariantCands);
                 o.addProperty("targetVariantDepartures", targetVariantDepartures);
+            }
+            if (deadEtbMode != null) {
+                final JsonObject d = new JsonObject();
+                d.addProperty("mode", deadEtbMode);
+                d.addProperty("cands", deadEtbCands);
+                d.addProperty("decisions", deadEtbDecisions);
+                d.addProperty("dropped", deadEtbDropped);
+                d.addProperty("shadowBest", deadEtbShadowBest);
+                d.addProperty("forgeAnswer", deadEtbForge);
+                o.add("deadEtb", d);
             }
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
@@ -653,6 +688,8 @@ public final class LookaheadSearch {
     BeliefSampler.Dist lastBelief = null;
     /** The candidate list played out at the last searched decision (B plus any HX extras); tests read it. */
     List<Cand> lastCandidates = null;
+    /** deadEtb SHADOW: keys of the last enumeration's dead-ETB candidates (kept in the list); tests read it. */
+    final Set<String> deadEtbKeys = new HashSet<>();
     private JsonObject modelDeck = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
@@ -685,6 +722,9 @@ public final class LookaheadSearch {
             pool = null;
         }
         model = cfg.modelUrl == null ? null : new ModelClient(cfg.modelUrl, cfg.modelTimeoutMs);
+        if (cfg.deadEtb != AiFixes.Mode.OFF) {
+            stats.deadEtbMode = cfg.deadEtb.key();
+        }
         if (cfg.priorOn()) {
             if (cfg.priorExtra < 1) {
                 throw new IllegalStateException("priorShadow needs priorExtra >= 1 (how many extras would be added)");
@@ -923,6 +963,9 @@ public final class LookaheadSearch {
         }
         // Forge's own answer is candidate 0; if it could not be played out, or the budget ran out, never depart.
         final int best = overBudget ? 0 : argmax(values, ok, n, k);
+        if (cfg.deadEtb == AiFixes.Mode.SHADOW && best != 0 && deadEtbKeys.contains(cands.get(best).key())) {
+            stats.deadEtbShadowBest++;
+        }
         if (cfg.reuseVerify && !overBudget) {
             reuseVerify(live, me, cands, defSa, decisionSeed, carried, values, ok, freshDef, best);
         }
@@ -1005,6 +1048,9 @@ public final class LookaheadSearch {
                 co.addProperty("choices", explainChoices != null && explainChoices[c] != null ? explainChoices[c] : "");
                 co.addProperty("ok", ok[c]);
                 co.addProperty("ev", ok[c] ? ev[c] : null);
+                if (cfg.deadEtb == AiFixes.Mode.SHADOW && deadEtbKeys.contains(cands.get(c).key())) {
+                    co.addProperty("deadEtb", true);
+                }
                 final JsonArray vs = new JsonArray();
                 final JsonArray ds = new JsonArray();
                 for (int w = 0; w < k; w++) {
@@ -1688,14 +1734,40 @@ public final class LookaheadSearch {
             for (Cand c : out) {
                 seen.add(c.key());
             }
+            final boolean guard = cfg.deadEtb != AiFixes.Mode.OFF;
+            int deadHere = 0;
+            if (guard) {
+                deadEtbKeys.clear();
+                if (defSa != null) {
+                    final SpellAbility d = locate(g, me, out.get(0));
+                    if (d != null && deadEtbPermanent(d, me)) {
+                        stats.deadEtbForge++;
+                    }
+                }
+            }
             for (SpellAbility sa : legal) {
                 if (out.size() >= cfg.breadth) {
                     break;
                 }
                 Cand c = new Cand(sa, false);
+                if (guard && !seen.contains(c.key()) && deadEtbPermanent(sa, me)) {
+                    deadHere++;
+                    stats.deadEtbCands++;
+                    if (cfg.deadEtb == AiFixes.Mode.ON) {
+                        // Dropped like a duplicate: the next legal candidate takes its breadth slot, and the prior
+                        // tail and target variants below never see it.
+                        seen.add(c.key());
+                        stats.deadEtbDropped++;
+                        continue;
+                    }
+                    deadEtbKeys.add(c.key());
+                }
                 if (seen.add(c.key())) {
                     out.add(c);
                 }
+            }
+            if (deadHere > 0) {
+                stats.deadEtbDecisions++;
             }
             if (pv != null) {
                 priorView(pv, g, me, legal, seen);
@@ -2090,6 +2162,60 @@ public final class LookaheadSearch {
             }
         }
         return false;
+    }
+
+    /**
+     * deadEtb guard: true for a spell that would put a non-creature permanent onto the battlefield whose enters-the-
+     * battlefield triggers (ChangesZone to the battlefield, ValidCard Card.Self) all need at least one target and have
+     * no legal target now, so the card would do nothing on entering (Portable Hole, Oblivion Ring, Banishing Light ...
+     * with nothing to exile). A card with no such trigger, any trigger this check cannot read (kicker-only, another
+     * ValidCard, a condition that is not met), or any trigger with a legal target or no targeting is not dead.
+     * Creatures are left to the search: their body is scored as a creature, not at the flat permanent value.
+     * Reads only (the trigger's ability is copied before its targets are counted).
+     */
+    static boolean deadEtbPermanent(SpellAbility sa, Player me) {
+        if (sa == null || !sa.isSpell() || sa.isLandAbility()) {
+            return false;
+        }
+        final Card host = sa.getHostCard();
+        if (host == null) {
+            return false;
+        }
+        final CardState state = sa.getCardState() != null ? sa.getCardState() : host.getCurrentState();
+        if (!state.getType().isPermanent() || state.getType().isCreature() || state.getType().isLand()) {
+            return false;
+        }
+        final Game game = me.getGame();
+        int dead = 0;
+        for (final Trigger tr : state.getTriggers()) {
+            if (tr.getMode() != TriggerType.ChangesZone || !ZoneType.Battlefield.toString().equals(tr.getParam("Destination"))) {
+                continue;
+            }
+            final String valid = tr.getParam("ValidCard");
+            if (valid == null || !valid.contains("Self")) {
+                continue;
+            }
+            if (!"Card.Self".equals(valid) || tr.hasParam("Origin") && !"Any".equals(tr.getParam("Origin"))
+                    && !"Hand".equals(tr.getParam("Origin")) && !"Stack".equals(tr.getParam("Origin"))) {
+                return false;
+            }
+            if (!tr.requirementsCheck(game)) {
+                return false;
+            }
+            final SpellAbility ex = tr.ensureAbility();
+            if (ex == null) {
+                return false;
+            }
+            final SpellAbility exSA = ex.copy(me);
+            if (!exSA.usesTargeting() || exSA.getMinTargets() < 1) {
+                return false;
+            }
+            if (exSA.getTargetRestrictions().getNumCandidates(exSA) >= exSA.getMinTargets()) {
+                return false;
+            }
+            dead++;
+        }
+        return dead > 0;
     }
 
     List<SpellAbility> mapToLive(PlayerControllerAi ctrl, Game live, Player me, Cand c) {
