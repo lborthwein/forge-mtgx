@@ -127,6 +127,16 @@ public final class LookaheadSearch {
          * decisions where it would have dropped one, and the departures to one. Forge's own answer is never dropped.
          */
         public AiFixes.Mode deadEtb = AiFixes.Mode.OFF;
+        /**
+         * Zero-X guard (lane misplay-portablehole-1003, owner report 2026-10-04T06:10Z; off|shadow|on, OFF by default:
+         * candidates and decisions unchanged). A spell with {X} in its mana cost whose largest payable X is 0 now and that
+         * Forge's own AI would not cast ({@link #zeroXSpell}; Pest Infestation with two mana) is not a departure
+         * candidate. Casting it does nothing but spend mana and a card; the search preferred it because the spent mana
+         * changes Forge AI's own follow-up in the play-outs (Thraben Inspector + Clue, the token scored at the flat 50,
+         * instead of Reclamation Sage). ON drops it as deadEtb drops a dead-ETB permanent; SHADOW counts; Forge's own
+         * answer is never dropped.
+         */
+        public AiFixes.Mode zeroX = AiFixes.Mode.OFF;
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
@@ -274,6 +284,9 @@ public final class LookaheadSearch {
             if (deadEtb != AiFixes.Mode.OFF) {
                 o.addProperty("deadEtb", deadEtb.key());
             }
+            if (zeroX != AiFixes.Mode.OFF) {
+                o.addProperty("zeroX", zeroX.key());
+            }
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
@@ -344,6 +357,9 @@ public final class LookaheadSearch {
          */
         public String deadEtbMode;
         public long deadEtbCands, deadEtbDecisions, deadEtbDropped, deadEtbShadowBest, deadEtbForge;
+        /** zeroX guard (null = off): the same counters as deadEtb, for zero-X spells. */
+        public String zeroXMode;
+        public long zeroXCands, zeroXDecisions, zeroXDropped, zeroXShadowBest, zeroXForge;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
@@ -443,6 +459,16 @@ public final class LookaheadSearch {
                 d.addProperty("shadowBest", deadEtbShadowBest);
                 d.addProperty("forgeAnswer", deadEtbForge);
                 o.add("deadEtb", d);
+            }
+            if (zeroXMode != null) {
+                final JsonObject d = new JsonObject();
+                d.addProperty("mode", zeroXMode);
+                d.addProperty("cands", zeroXCands);
+                d.addProperty("decisions", zeroXDecisions);
+                d.addProperty("dropped", zeroXDropped);
+                d.addProperty("shadowBest", zeroXShadowBest);
+                d.addProperty("forgeAnswer", zeroXForge);
+                o.add("zeroX", d);
             }
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
@@ -690,6 +716,8 @@ public final class LookaheadSearch {
     List<Cand> lastCandidates = null;
     /** deadEtb SHADOW: keys of the last enumeration's dead-ETB candidates (kept in the list); tests read it. */
     final Set<String> deadEtbKeys = new HashSet<>();
+    /** zeroX SHADOW: keys of the last enumeration's zero-X candidates (kept in the list); tests read it. */
+    final Set<String> zeroXKeys = new HashSet<>();
     private JsonObject modelDeck = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
@@ -724,6 +752,9 @@ public final class LookaheadSearch {
         model = cfg.modelUrl == null ? null : new ModelClient(cfg.modelUrl, cfg.modelTimeoutMs);
         if (cfg.deadEtb != AiFixes.Mode.OFF) {
             stats.deadEtbMode = cfg.deadEtb.key();
+        }
+        if (cfg.zeroX != AiFixes.Mode.OFF) {
+            stats.zeroXMode = cfg.zeroX.key();
         }
         if (cfg.priorOn()) {
             if (cfg.priorExtra < 1) {
@@ -966,6 +997,9 @@ public final class LookaheadSearch {
         if (cfg.deadEtb == AiFixes.Mode.SHADOW && best != 0 && deadEtbKeys.contains(cands.get(best).key())) {
             stats.deadEtbShadowBest++;
         }
+        if (cfg.zeroX == AiFixes.Mode.SHADOW && best != 0 && zeroXKeys.contains(cands.get(best).key())) {
+            stats.zeroXShadowBest++;
+        }
         if (cfg.reuseVerify && !overBudget) {
             reuseVerify(live, me, cands, defSa, decisionSeed, carried, values, ok, freshDef, best);
         }
@@ -1050,6 +1084,9 @@ public final class LookaheadSearch {
                 co.addProperty("ev", ok[c] ? ev[c] : null);
                 if (cfg.deadEtb == AiFixes.Mode.SHADOW && deadEtbKeys.contains(cands.get(c).key())) {
                     co.addProperty("deadEtb", true);
+                }
+                if (cfg.zeroX == AiFixes.Mode.SHADOW && zeroXKeys.contains(cands.get(c).key())) {
+                    co.addProperty("zeroX", true);
                 }
                 final JsonArray vs = new JsonArray();
                 final JsonArray ds = new JsonArray();
@@ -1735,7 +1772,17 @@ public final class LookaheadSearch {
                 seen.add(c.key());
             }
             final boolean guard = cfg.deadEtb != AiFixes.Mode.OFF;
-            int deadHere = 0;
+            final boolean zguard = cfg.zeroX != AiFixes.Mode.OFF;
+            int deadHere = 0, zeroHere = 0;
+            if (zguard) {
+                zeroXKeys.clear();
+                if (defSa != null) {
+                    final SpellAbility d = locate(g, me, out.get(0));
+                    if (d != null && zeroXSpell(d, me)) {
+                        stats.zeroXForge++;
+                    }
+                }
+            }
             if (guard) {
                 deadEtbKeys.clear();
                 if (defSa != null) {
@@ -1762,12 +1809,25 @@ public final class LookaheadSearch {
                     }
                     deadEtbKeys.add(c.key());
                 }
+                if (zguard && !seen.contains(c.key()) && zeroXSpell(sa, me)) {
+                    zeroHere++;
+                    stats.zeroXCands++;
+                    if (cfg.zeroX == AiFixes.Mode.ON) {
+                        seen.add(c.key());
+                        stats.zeroXDropped++;
+                        continue;
+                    }
+                    zeroXKeys.add(c.key());
+                }
                 if (seen.add(c.key())) {
                     out.add(c);
                 }
             }
             if (deadHere > 0) {
                 stats.deadEtbDecisions++;
+            }
+            if (zeroHere > 0) {
+                stats.zeroXDecisions++;
             }
             if (pv != null) {
                 priorView(pv, g, me, legal, seen);
@@ -2162,6 +2222,35 @@ public final class LookaheadSearch {
             }
         }
         return false;
+    }
+
+    /**
+     * zeroX guard: true for a spell (any type) with {X} in its mana cost whose largest X payable now is 0
+     * ({@link forge.ai.ComputerUtilMana#determineLeftoverMana}) and that Forge's own AI would not cast now
+     * ({@code canPlaySa} is not WillPlay) and that has no target slot at X = 0 -- e.g. Pest Infestation (X X G) with two
+     * mana: destroy up to 0 targets, create 0 tokens. Not flagged: a zero-X spell Forge's AI does cast (a deliberate
+     * X = 0, e.g. Chalice of the Void), and one that still targets at X = 0 (Unexpectedly Absent). Runs in the
+     * enumeration copy only (the checks set X on that copy's ability).
+     */
+    static boolean zeroXSpell(SpellAbility sa, Player me) {
+        if (sa == null || !sa.isSpell() || sa.isLandAbility() || !sa.costHasManaX()) {
+            return false;
+        }
+        // Work on a copy: X and the AI check's choices are written onto the ability, and an enumeration copy's
+        // ability is not guaranteed to be private to the copy (a shadow replay diverged when the original was used).
+        final SpellAbility x = sa.copy(me);
+        if (forge.ai.ComputerUtilMana.determineLeftoverMana(x, me, false) > 0) {
+            return false;
+        }
+        // At X = 0 the spell must have no target slot left (Pest Infestation: "up to X targets"). A spell that still
+        // targets at X = 0 has an effect (Unexpectedly Absent puts its target on top of the library) and is left alone.
+        x.setXManaCostPaid(0);
+        for (SpellAbility s = x; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting() && s.getMaxTargets() > 0) {
+                return false;
+            }
+        }
+        return ((PlayerControllerAi) me.getController()).getAi().canPlaySa(x) != AiPlayDecision.WillPlay;
     }
 
     /**
