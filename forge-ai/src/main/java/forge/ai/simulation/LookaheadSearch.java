@@ -137,6 +137,18 @@ public final class LookaheadSearch {
          * answer is never dropped.
          */
         public AiFixes.Mode zeroX = AiFixes.Mode.OFF;
+        /**
+         * Crew no-op guard (lane misplays-1005, owner report 2026-10-05T05:15Z; off|shadow|on, OFF by default: candidates
+         * and decisions unchanged). A Crew activation of a Vehicle at a step where the Vehicle can no longer attack or
+         * block this turn ({@link #crewNoop}: its own turn at or after declare attackers, the opponent's turn at or after
+         * declare blockers, no extra combat pending, no crew/tap trigger in play) is not a departure candidate. It does
+         * nothing until it ends at cleanup, yet the play-outs scored it: Smuggler's Copter crewed twice in the owner's
+         * second main phase, carried by a few worlds where the opponent seat's Forge AI aimed Dack Fayden at the crewed
+         * creature instead of Esika's Chariot, or where the extra action changed the play-out's random path (median
+         * paired difference 0). ON drops it as deadEtb drops a dead-ETB permanent; SHADOW counts; Forge's own answer is
+         * never dropped.
+         */
+        public AiFixes.Mode crewNoop = AiFixes.Mode.OFF;
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
@@ -287,6 +299,9 @@ public final class LookaheadSearch {
             if (zeroX != AiFixes.Mode.OFF) {
                 o.addProperty("zeroX", zeroX.key());
             }
+            if (crewNoop != AiFixes.Mode.OFF) {
+                o.addProperty("crewNoop", crewNoop.key());
+            }
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
@@ -360,6 +375,9 @@ public final class LookaheadSearch {
         /** zeroX guard (null = off): the same counters as deadEtb, for zero-X spells. */
         public String zeroXMode;
         public long zeroXCands, zeroXDecisions, zeroXDropped, zeroXShadowBest, zeroXForge;
+        /** crewNoop guard (null = off): the same counters as deadEtb, for Crew activations that cannot matter this turn. */
+        public String crewNoopMode;
+        public long crewNoopCands, crewNoopDecisions, crewNoopDropped, crewNoopShadowBest, crewNoopForge;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
@@ -473,6 +491,16 @@ public final class LookaheadSearch {
                 d.addProperty("shadowBest", zeroXShadowBest);
                 d.addProperty("forgeAnswer", zeroXForge);
                 o.add("zeroX", d);
+            }
+            if (crewNoopMode != null) {
+                JsonObject d = new JsonObject();
+                d.addProperty("mode", crewNoopMode);
+                d.addProperty("cands", crewNoopCands);
+                d.addProperty("decisions", crewNoopDecisions);
+                d.addProperty("dropped", crewNoopDropped);
+                d.addProperty("shadowBest", crewNoopShadowBest);
+                d.addProperty("forgeAnswer", crewNoopForge);
+                o.add("crewNoop", d);
             }
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
@@ -757,6 +785,8 @@ public final class LookaheadSearch {
     final Set<String> deadEtbKeys = new HashSet<>();
     /** zeroX SHADOW: keys of the last enumeration's zero-X candidates (kept in the list); tests read it. */
     final Set<String> zeroXKeys = new HashSet<>();
+    /** crewNoop SHADOW: keys of the last enumeration's no-op Crew candidates (kept in the list); tests read it. */
+    final Set<String> crewNoopKeys = new HashSet<>();
     private JsonObject modelDeck = null;
     private int decisionIndex = 0;
     private int departuresTurn = -1;
@@ -794,6 +824,9 @@ public final class LookaheadSearch {
         }
         if (cfg.zeroX != AiFixes.Mode.OFF) {
             stats.zeroXMode = cfg.zeroX.key();
+        }
+        if (cfg.crewNoop != AiFixes.Mode.OFF) {
+            stats.crewNoopMode = cfg.crewNoop.key();
         }
         if (cfg.priorOn()) {
             if (cfg.priorExtra < 1) {
@@ -1043,6 +1076,9 @@ public final class LookaheadSearch {
         if (cfg.zeroX == AiFixes.Mode.SHADOW && best != 0 && zeroXKeys.contains(cands.get(best).key())) {
             stats.zeroXShadowBest++;
         }
+        if (cfg.crewNoop == AiFixes.Mode.SHADOW && best != 0 && crewNoopKeys.contains(cands.get(best).key())) {
+            stats.crewNoopShadowBest++;
+        }
         if (cfg.reuseVerify && !overBudget) {
             reuseVerify(live, me, cands, defSa, decisionSeed, carried, values, ok, freshDef, best);
         }
@@ -1130,6 +1166,9 @@ public final class LookaheadSearch {
                 }
                 if (cfg.zeroX == AiFixes.Mode.SHADOW && zeroXKeys.contains(cands.get(c).key())) {
                     co.addProperty("zeroX", true);
+                }
+                if (cfg.crewNoop == AiFixes.Mode.SHADOW && crewNoopKeys.contains(cands.get(c).key())) {
+                    co.addProperty("crewNoop", true);
                 }
                 final JsonArray vs = new JsonArray();
                 final JsonArray ds = new JsonArray();
@@ -1950,7 +1989,17 @@ public final class LookaheadSearch {
             }
             final boolean guard = cfg.deadEtb != AiFixes.Mode.OFF;
             final boolean zguard = cfg.zeroX != AiFixes.Mode.OFF;
-            int deadHere = 0, zeroHere = 0;
+            final boolean cguard = cfg.crewNoop != AiFixes.Mode.OFF;
+            int deadHere = 0, zeroHere = 0, crewHere = 0;
+            if (cguard) {
+                crewNoopKeys.clear();
+                if (defSa != null) {
+                    final SpellAbility d = locate(g, me, out.get(0));
+                    if (d != null && crewNoop(d, me)) {
+                        stats.crewNoopForge++;
+                    }
+                }
+            }
             if (zguard) {
                 zeroXKeys.clear();
                 if (defSa != null) {
@@ -1996,6 +2045,16 @@ public final class LookaheadSearch {
                     }
                     zeroXKeys.add(c.key());
                 }
+                if (cguard && !seen.contains(c.key()) && crewNoop(sa, me)) {
+                    crewHere++;
+                    stats.crewNoopCands++;
+                    if (cfg.crewNoop == AiFixes.Mode.ON) {
+                        seen.add(c.key());
+                        stats.crewNoopDropped++;
+                        continue;
+                    }
+                    crewNoopKeys.add(c.key());
+                }
                 if (seen.add(c.key())) {
                     out.add(c);
                 }
@@ -2005,6 +2064,9 @@ public final class LookaheadSearch {
             }
             if (zeroHere > 0) {
                 stats.zeroXDecisions++;
+            }
+            if (crewHere > 0) {
+                stats.crewNoopDecisions++;
             }
             if (pv != null) {
                 priorView(pv, g, me, legal, seen);
@@ -2423,6 +2485,62 @@ public final class LookaheadSearch {
             }
         }
         return false;
+    }
+
+    /**
+     * crewNoop guard: true for a Crew activation of a Vehicle that can no longer attack or block this turn, so crewing it
+     * does nothing before the effect ends at cleanup: on its controller's own turn at or after the declare-attackers step,
+     * on another player's turn at or after the declare-blockers step. Not flagged (left to the search): any extra phase
+     * pending this turn (another combat may follow), and any trigger in play that watches crewing or tapping (Crewed,
+     * BecomesCrewed, Taps), since those make the activation itself do something. Reads only.
+     */
+    static boolean crewNoop(SpellAbility sa, Player me) {
+        if (sa == null || !sa.isCrew()) {
+            return false;
+        }
+        final Card host = sa.getHostCard();
+        if (host == null || !host.getType().hasSubtype("Vehicle")) {
+            return false;
+        }
+        final Game game = me.getGame();
+        final PhaseHandler ph = game.getPhaseHandler();
+        final forge.game.phase.PhaseType phase = ph.getPhase();
+        if (phase == null || extraPhasePending(ph)) {
+            return false;
+        }
+        final boolean own = ph.isPlayerTurn(host.getController());
+        final forge.game.phase.PhaseType last = own ? forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS
+                : forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS;
+        if (phase.isBefore(last)) {
+            return false;
+        }
+        for (Card c : game.getCardsIn(ZoneType.Battlefield)) {
+            for (Trigger t : c.getTriggers()) {
+                final TriggerType m = t.getMode();
+                if (m == TriggerType.Crewed || m == TriggerType.BecomesCrewed || m == TriggerType.Taps) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static Field fExtraPhases;
+
+    /** True when PhaseHandler has an extra phase queued this turn (an extra combat may follow); unknown = true. */
+    static boolean extraPhasePending(PhaseHandler ph) {
+        try {
+            synchronized (LookaheadSearch.class) {
+                if (fExtraPhases == null) {
+                    fExtraPhases = PhaseHandler.class.getDeclaredField("extraPhases");
+                    fExtraPhases.setAccessible(true);
+                }
+            }
+            final Object m = fExtraPhases.get(ph);
+            return !(m instanceof Map) || !((Map<?, ?>) m).isEmpty();
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return true;
+        }
     }
 
     /**
