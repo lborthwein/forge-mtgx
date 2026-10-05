@@ -149,6 +149,18 @@ public final class LookaheadSearch {
          * never dropped.
          */
         public AiFixes.Mode crewNoop = AiFixes.Mode.OFF;
+        /**
+         * Until-end-of-turn copy fidelity (lane misplays-1005; off|shadow|on, OFF by default: copies and decisions
+         * unchanged). The copier did not carry the live game's pending "until end of turn" / "until end of combat"
+         * commands, so a copy made after a live Crew (or pump, or animation) kept the change for good: a crewed Vehicle
+         * stayed an artifact creature through the whole play-out. With reuse, a world whose candidate-0 value came from
+         * the previous search's kept play-out (where the change ended at cleanup) was compared against fresh copies
+         * (where it never ends), a constant offset in every world: decision 86 of session 486d4d1b departed to a second
+         * Crew at a flat +61 (Esika's Chariot scored as a 4/4 creature, 231, instead of 170). ON carries every command
+         * {@link GameCopier#setCopyUntilEot} can remap (cards, players, game, primitives); SHADOW only counts, per
+         * searched decision, the live commands pending and how many would be carried.
+         */
+        public AiFixes.Mode copyEot = AiFixes.Mode.OFF;
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
@@ -302,6 +314,9 @@ public final class LookaheadSearch {
             if (crewNoop != AiFixes.Mode.OFF) {
                 o.addProperty("crewNoop", crewNoop.key());
             }
+            if (copyEot != AiFixes.Mode.OFF) {
+                o.addProperty("copyEot", copyEot.key());
+            }
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
@@ -378,6 +393,9 @@ public final class LookaheadSearch {
         /** crewNoop guard (null = off): the same counters as deadEtb, for Crew activations that cannot matter this turn. */
         public String crewNoopMode;
         public long crewNoopCands, crewNoopDecisions, crewNoopDropped, crewNoopShadowBest, crewNoopForge;
+        /** copyEot (null = off): searched decisions with live until commands pending, those commands, how many remap. */
+        public String copyEotMode;
+        public long copyEotDecisions, copyEotCommands, copyEotRemappable, copyEotDepartures;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
@@ -501,6 +519,15 @@ public final class LookaheadSearch {
                 d.addProperty("shadowBest", crewNoopShadowBest);
                 d.addProperty("forgeAnswer", crewNoopForge);
                 o.add("crewNoop", d);
+            }
+            if (copyEotMode != null) {
+                JsonObject d = new JsonObject();
+                d.addProperty("mode", copyEotMode);
+                d.addProperty("decisions", copyEotDecisions);
+                d.addProperty("commands", copyEotCommands);
+                d.addProperty("remappable", copyEotRemappable);
+                d.addProperty("departures", copyEotDepartures);
+                o.add("copyEot", d);
             }
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
@@ -828,6 +855,9 @@ public final class LookaheadSearch {
         if (cfg.crewNoop != AiFixes.Mode.OFF) {
             stats.crewNoopMode = cfg.crewNoop.key();
         }
+        if (cfg.copyEot != AiFixes.Mode.OFF) {
+            stats.copyEotMode = cfg.copyEot.key();
+        }
         if (cfg.priorOn()) {
             if (cfg.priorExtra < 1) {
                 throw new IllegalStateException("priorShadow needs priorExtra >= 1 (how many extras would be added)");
@@ -1078,6 +1108,20 @@ public final class LookaheadSearch {
         }
         if (cfg.crewNoop == AiFixes.Mode.SHADOW && best != 0 && crewNoopKeys.contains(cands.get(best).key())) {
             stats.crewNoopShadowBest++;
+        }
+        if (cfg.copyEot != AiFixes.Mode.OFF) {
+            final int[] u;
+            synchronized (live) {
+                u = GameCopier.untilCounts(live);
+            }
+            if (u[0] > 0) {
+                stats.copyEotDecisions++;
+                stats.copyEotCommands += u[0];
+                stats.copyEotRemappable += u[1];
+                if (best != 0) {
+                    stats.copyEotDepartures++;
+                }
+            }
         }
         if (cfg.reuseVerify && !overBudget) {
             reuseVerify(live, me, cands, defSa, decisionSeed, carried, values, ok, freshDef, best);
@@ -1973,7 +2017,7 @@ public final class LookaheadSearch {
         final Object prevIds1 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
-            GameCopier copier = new GameCopier(live, true);
+            GameCopier copier = copierOf(live);
             copier.setCopyStack(cfg.stack);
             Game g = copier.makeCopy();
             Player me = (Player) copier.find(liveMe);
@@ -2836,7 +2880,7 @@ public final class LookaheadSearch {
         try {
             long a = System.nanoTime();
             synchronized (live) {
-                final GameCopier copier = new GameCopier(live, true);
+                final GameCopier copier = copierOf(live);
                 copier.setCopyStack(cfg.stack);
                 p.g = copier.makeCopy();
                 p.me = (Player) copier.find(liveMe);
@@ -2886,6 +2930,15 @@ public final class LookaheadSearch {
             MyRandom.setThreadRandom(prev);
         }
         return p;
+    }
+
+    /** A copier of the live game for this search: carries until-EOT commands when copyEot is ON (lane misplays-1005). */
+    GameCopier copierOf(Game live) {
+        final GameCopier c = new GameCopier(live, true);
+        if (cfg.copyEot == AiFixes.Mode.ON) {
+            c.setCopyUntilEot(true);
+        }
+        return c;
     }
 
     /** Play a prepared copy out to the horizon, on the calling thread, inside the copy's own scopes. */
@@ -3459,7 +3512,7 @@ public final class LookaheadSearch {
             final Game g;
             final Player me;
             synchronized (live) {
-                GameCopier copier = new GameCopier(live, true);
+                GameCopier copier = copierOf(live);
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
                 if (resample) {
@@ -4072,7 +4125,7 @@ public final class LookaheadSearch {
         try {
             final long a = System.nanoTime();
             synchronized (live) {
-                final GameCopier copier = new GameCopier(live, true);
+                final GameCopier copier = copierOf(live);
                 copier.setCopyStack(true);
                 copier.setSkipResolvingTrigger(true); // (only acts on a resolving top trigger and on gone paid tokens)
                 p.g = copier.makeCopy();
@@ -4498,7 +4551,7 @@ public final class LookaheadSearch {
             forge.util.IdScope.open();
             try {
                 synchronized (live) {
-                    final GameCopier copier = new GameCopier(live, true);
+                    final GameCopier copier = copierOf(live);
                     copier.setCopyStack(cfg.stack);
                     final Game g = copier.makeCopy();
                     resampleBelief(live, liveMe, g, (Player) copier.find(liveMe), new Random(mix(ws, 12)), bd);
@@ -4533,7 +4586,7 @@ public final class LookaheadSearch {
             int liveScore = ev.getStaticScore(live, liveMe).value;
             for (int i = 0; i < 3; i++) {
                 long a = System.nanoTime();
-                GameCopier copier = new GameCopier(live, true);
+                GameCopier copier = copierOf(live);
                 copier.setCopyStack(cfg.stack);
                 Game g = copier.makeCopy();
                 copyMs.add((System.nanoTime() - a) / 1e6);
@@ -4549,7 +4602,7 @@ public final class LookaheadSearch {
             p.addProperty("copyStaticScoreSame", scoreSame);
             // Resampling cost.
             long a = System.nanoTime();
-            GameCopier copier = new GameCopier(live, true);
+            GameCopier copier = copierOf(live);
             Game g = copier.makeCopy();
             long b = System.nanoTime();
             resample(live, liveMe, g, (Player) copier.find(liveMe), new Random(1));
@@ -4584,7 +4637,7 @@ public final class LookaheadSearch {
         final Object prevIds4 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
-            GameCopier copier = new GameCopier(live, true);
+            GameCopier copier = copierOf(live);
             Game g = copier.makeCopy();
             Player me = (Player) copier.find(liveMe);
             long sims0 = SimSearchBudget.getLifetimeSimulations();
@@ -4626,7 +4679,7 @@ public final class LookaheadSearch {
         final Object prevIds5 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
         try {
-            GameCopier copier = new GameCopier(live, true);
+            GameCopier copier = copierOf(live);
             copier.setCopyStack(cfg.stack);
             Game g = copier.makeCopy();
             Player me = (Player) copier.find(liveMe);

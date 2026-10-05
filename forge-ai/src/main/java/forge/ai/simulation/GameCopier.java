@@ -1,6 +1,7 @@
 package forge.ai.simulation;
 
 import com.google.common.collect.*;
+import forge.GameCommand;
 import forge.LobbyPlayer;
 import forge.ai.AIOption;
 import forge.ai.LobbyPlayerAi;
@@ -57,6 +58,13 @@ public class GameCopier {
     private final boolean plainAiPlayers;
     /** C1: copy the original game's stack (spells only; see {@link #stackUnsupported}). Off by default. */
     private boolean copyStack = false;
+    /**
+     * Lane misplays-1005: carry the original game's pending "until end of turn" / "until end of combat" commands into the
+     * copy (see {@link #copyUntil}). Off by default, which is the copier's original behaviour: the copy keeps every
+     * temporary change (a crewed Vehicle, a pump) for good, because the command that would end it is not copied.
+     */
+    private boolean copyUntilEot = false;
+    private int untilCopied = 0, untilRefused = 0;
     /** Stack spells of the original game -> their copies (a counterspell's target is a spell). */
     private final Map<SpellAbility, SpellAbility> stackSaMap = new java.util.IdentityHashMap<>();
 
@@ -75,6 +83,20 @@ public class GameCopier {
     /** C1: also copy the original game's stack. Callers must first check {@link #stackUnsupported}. */
     public void setCopyStack(boolean copyStack) {
         this.copyStack = copyStack;
+    }
+
+    /** Lane misplays-1005: also carry the pending until-end-of-turn / until-end-of-combat commands (off by default). */
+    public void setCopyUntilEot(boolean on) {
+        this.copyUntilEot = on;
+    }
+
+    /** Commands carried into the last copy, and commands left out because they could not be remapped. */
+    public int getUntilCopied() {
+        return untilCopied;
+    }
+
+    public int getUntilRefused() {
+        return untilRefused;
     }
 
     /**
@@ -381,11 +403,198 @@ public class GameCopier {
 
         // TODO update thisTurnCast
 
+        if (copyUntilEot) {
+            untilCopied = 0;
+            untilRefused = 0;
+            copyUntil(origGame.getEndOfTurn(), newGame.getEndOfTurn(), newGame);
+            copyUntil(origGame.getEndOfCombat(), newGame.getEndOfCombat(), newGame);
+        }
+
         if (advanceToPhase != null) {
             newGame.getPhaseHandler().devAdvanceToPhase(advanceToPhase, () -> GameSimulator.resolveStack(newGame, aiPlayer.getWeakestOpponent()));
         }
 
         return newGame;
+    }
+
+    // ------------------------------------------------------------ until-end-of-turn commands (lane misplays-1005)
+
+    private static java.lang.reflect.Field fUntil;
+    private static Object theUnsafe;
+    private static java.lang.reflect.Method allocateInstance;
+    private static final Object REFUSE = new Object();
+
+    @SuppressWarnings("unchecked")
+    static List<GameCommand> untilList(forge.game.phase.Phase ph) throws ReflectiveOperationException {
+        synchronized (GameCopier.class) {
+            if (fUntil == null) {
+                final java.lang.reflect.Field f = forge.game.phase.Phase.class.getDeclaredField("until");
+                f.setAccessible(true);
+                fUntil = f;
+            }
+        }
+        return (List<GameCommand>) fUntil.get(ph);
+    }
+
+    private static Object allocate(Class<?> k) throws ReflectiveOperationException {
+        synchronized (GameCopier.class) {
+            if (allocateInstance == null) {
+                final Class<?> u = Class.forName("sun.misc.Unsafe");
+                final java.lang.reflect.Field f = u.getDeclaredField("theUnsafe");
+                f.setAccessible(true);
+                theUnsafe = f.get(null);
+                allocateInstance = u.getMethod("allocateInstance", Class.class);
+            }
+        }
+        return allocateInstance.invoke(theUnsafe, k);
+    }
+
+    /**
+     * The until-end-of-turn and until-end-of-combat commands pending in a game: {total, remappable}. A command is
+     * remappable when it is an ordinary (not hidden/lambda) class whose captured state is only cards, players, the game,
+     * primitives, strings, enums, lists of those, and stateless effect objects (an anonymous class's outer instance) --
+     * e.g. Crew/animate (AnimateEffectBase: card, timestamp, game) and pump (PumpEffect: cards, timestamp, keywords, game).
+     */
+    public static int[] untilCounts(Game g) {
+        int total = 0, ok = 0;
+        for (forge.game.phase.Phase ph : new forge.game.phase.Phase[] {g.getEndOfTurn(), g.getEndOfCombat()}) {
+            try {
+                for (GameCommand c : untilList(ph)) {
+                    total++;
+                    if (remappableClass(c)) {
+                        ok++;
+                    }
+                }
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                // unknown: count nothing
+            }
+        }
+        return new int[] {total, ok};
+    }
+
+    private static boolean remappableClass(Object cmd) {
+        final Class<?> k = cmd.getClass();
+        if (k.isHidden() || k.isSynthetic() || k.getName().contains("$$Lambda")) {
+            return false;
+        }
+        try {
+            for (Class<?> c = k; c != null && c != Object.class; c = c.getSuperclass()) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                        continue;
+                    }
+                    f.setAccessible(true);
+                    if (!shapeOk(f.get(cmd))) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    private static boolean shapeOk(Object v) {
+        if (v == null || v instanceof String || v instanceof Number || v instanceof Boolean || v instanceof Character
+                || v instanceof Enum || v instanceof Card || v instanceof Player || v instanceof Game
+                || v instanceof forge.game.ability.SpellAbilityEffect) {
+            return true;
+        }
+        if (v instanceof List) {
+            for (Object o : (List<?>) v) {
+                if (o != null && !(o instanceof String || o instanceof Number || o instanceof Enum || o instanceof Card || o instanceof Player)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Carry the original phase's pending "until" commands into the copy's phase: each command is re-instantiated (same
+     * class, no constructor) with its captured cards, players and game mapped into the copy, so at the copy's cleanup
+     * (end of combat) the copy ends the temporary change exactly as the original game will. A command that captures
+     * anything else (a spell ability, a map, a lambda) is left out and counted; the copy then keeps that change, as before.
+     */
+    private void copyUntil(forge.game.phase.Phase from, forge.game.phase.Phase to, Game newGame) {
+        final List<GameCommand> src;
+        try {
+            src = new ArrayList<>(untilList(from));
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return;
+        }
+        for (GameCommand cmd : src) {
+            final GameCommand m = remapCommand(cmd, newGame);
+            if (m != null) {
+                to.addUntil(m);
+                untilCopied++;
+            } else {
+                untilRefused++;
+            }
+        }
+    }
+
+    private GameCommand remapCommand(GameCommand cmd, Game newGame) {
+        if (!remappableClass(cmd)) {
+            return null;
+        }
+        try {
+            final Class<?> k = cmd.getClass();
+            final Object copy = allocate(k);
+            for (Class<?> c = k; c != null && c != Object.class; c = c.getSuperclass()) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                        continue;
+                    }
+                    f.setAccessible(true);
+                    final Object v = mapValue(f.get(cmd), newGame);
+                    if (v == REFUSE) {
+                        return null;
+                    }
+                    f.set(copy, v);
+                }
+            }
+            return (GameCommand) copy;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private Object mapValue(Object v, Game newGame) {
+        if (v == null || v instanceof String || v instanceof Number || v instanceof Boolean || v instanceof Character
+                || v instanceof Enum || v instanceof forge.game.ability.SpellAbilityEffect) {
+            return v;
+        }
+        if (v instanceof Card) {
+            Card m = cardMap.get(v);
+            if (m == null && ((Card) v).getGame() == origGame) {
+                // A card object the command captured before a zone change (a resolved pump's host on the stack): the
+                // copy keeps original ids, so its current object is the same id in the copy.
+                m = newGame.findById(((Card) v).getId());
+            }
+            return m == null ? REFUSE : m;
+        }
+        if (v instanceof Player) {
+            final Player m = playerMap.get(v);
+            return m == null ? REFUSE : m;
+        }
+        if (v instanceof Game) {
+            return v == origGame ? newGame : REFUSE;
+        }
+        if (v instanceof List) {
+            final List<Object> out = new ArrayList<>();
+            for (Object o : (List<?>) v) {
+                final Object m = mapValue(o, newGame);
+                if (m == REFUSE) {
+                    return REFUSE;
+                }
+                out.add(m);
+            }
+            return out;
+        }
+        return REFUSE;
     }
 
     private static void copyStack(Game origGame, Game newGame, IEntityMap map) {
