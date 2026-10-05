@@ -130,6 +130,9 @@ public final class RlSimBench {
         int probeReps = 5;
         int maxSteps = 200000;
         boolean memProbe = false;
+        /** Environment action cap: after this many non-pass priority actions by one player in one turn, the policy
+         *  passes (0 = off). Random play finds free repeatable activations (pumps) that otherwise never end. */
+        int maxActionsPerTurn = 0;
         String out = null;
     }
 
@@ -159,6 +162,7 @@ public final class RlSimBench {
         if (o.has("maxSteps")) c.maxSteps = o.get("maxSteps").getAsInt();
         if (o.has("memProbe")) c.memProbe = o.get("memProbe").getAsBoolean();
         if (o.has("out")) c.out = o.get("out").getAsString();
+        if (o.has("maxActionsPerTurn")) c.maxActionsPerTurn = o.get("maxActionsPerTurn").getAsInt();
         return c;
     }
 
@@ -237,7 +241,8 @@ public final class RlSimBench {
 
     /** Per-game counters of the in-process policy. */
     static final class GameStats {
-        long asks, delegated, policyNanos, serNanos, ioNanos, askBytes, encodeLess;
+        long asks, delegated, policyNanos, serNanos, ioNanos, askBytes, encodeLess, capHits;
+        final Map<Player, int[]> turnActs = new IdentityHashMap<>();   // player -> {turn, non-pass actions this turn}
         final Map<String, Integer> byKind = new TreeMap<>();
         long askHash = 1125899906842597L;   // rolling hash of (kind, menu size, answer), for continuation identity
 
@@ -297,7 +302,21 @@ public final class RlSimBench {
                 }
             }
             final long t = System.nanoTime();
-            final JsonObject ans = "first".equals(mode) ? first(kind, body) : random(rng(game), kind, body);
+            JsonObject ans = "first".equals(mode) ? first(kind, body) : random(rng(game), kind, body);
+            if (cfg.maxActionsPerTurn > 0 && "priority".equals(kind) && ans != null && ans.has("choice")
+                    && ans.get("choice").getAsInt() > 0) {
+                final int turn = game.getPhaseHandler().getTurn();
+                final int[] ta = s.turnActs.computeIfAbsent(player, k -> new int[] {turn, 0});
+                if (ta[0] != turn) {
+                    ta[0] = turn;
+                    ta[1] = 0;
+                }
+                if (++ta[1] > cfg.maxActionsPerTurn) {
+                    ans = new JsonObject();
+                    ans.addProperty("choice", 0);
+                    s.capHits++;
+                }
+            }
             s.policyNanos += System.nanoTime() - t;
             s.note(kind, menuSize(body), ans);
             if (ans == null) {
@@ -996,6 +1015,7 @@ public final class RlSimBench {
                 row.addProperty("asks", s.asks);
                 row.addProperty("delegatedAsks", s.delegated);
                 row.addProperty("policyMs", s.policyNanos / 1e6);
+                row.addProperty("capHits", s.capHits);
                 if (cfg.serialize || cfg.socket != null) {
                     row.addProperty("serMs", s.serNanos / 1e6);
                     row.addProperty("ioMs", s.ioNanos / 1e6);
