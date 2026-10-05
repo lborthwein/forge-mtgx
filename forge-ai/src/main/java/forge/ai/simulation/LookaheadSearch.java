@@ -1111,8 +1111,19 @@ public final class LookaheadSearch {
         if (stressSpec != null) {
             stress(stressSpec, index, live, me, cands, defSa, decisionSeed);
         }
+        // Label dump with a learned leaf (EI cycle 2): keep the static per-world values beside the leaf's.
+        double[][] staticValues = null;
+        boolean leafFallback = false;
         if (model != null) {
+            if (labelSink != null) {
+                staticValues = new double[n][];
+                for (int c = 0; c < n; c++) {
+                    staticValues[c] = values[c].clone();
+                }
+            }
+            final long fb = stats.modelFallbacks;
             modelLeaves(live, me, values, outs, ok, k);
+            leafFallback = stats.modelFallbacks != fb;
         }
 
         // Over budget: a play-out was stopped (or never started) by the wall budget, so the search did not finish
@@ -1275,7 +1286,7 @@ public final class LookaheadSearch {
         }
         if (labelSink != null) {
             emitLabel(live, me, def, index, turn, ph, cands, bSize, values, ok, k, best, outcome, overBudget, abortedHere, dt,
-                    labelRoot == null ? null : labelRoot[0]);
+                    labelRoot == null ? null : labelRoot[0], staticValues, leafFallback);
         }
 
         if (cfg.probe && turn >= 3 && stats.probes.size() < cfg.probeMax && (!cfg.probeStack || onStack)) {
@@ -1314,10 +1325,16 @@ public final class LookaheadSearch {
      */
     private void emitLabel(Game live, Player me, List<SpellAbility> def, int index, int turn, PhaseHandler ph, List<Cand> cands,
             int bSize, double[][] values, boolean[] ok, int k, int best, String outcome, boolean overBudget, int aborted, long dt,
-            JsonObject root) {
+            JsonObject root, double[][] staticValues, boolean leafFallback) {
         try {
             final JsonObject o = new JsonObject();
             o.addProperty("schema", LABEL_SCHEMA);
+            if (model != null) {
+                // EI cycle 2: v = the learned leaf's per-world values (a terminal play-out 1 / 0 / 0.5), vs = Forge's
+                // static values of the same play-outs; leafFallback = the service failed and v is static here too.
+                o.addProperty("leaf", "model");
+                o.addProperty("leafFallback", leafFallback);
+            }
             o.addProperty("decision", index);
             o.addProperty("turn", turn);
             o.addProperty("phase", String.valueOf(ph.getPhase()));
@@ -1372,6 +1389,18 @@ public final class LookaheadSearch {
                     }
                 }
                 co.add("v", vs);
+                if (staticValues != null) {
+                    final JsonArray ss = new JsonArray();
+                    for (int w = 0; w < k; w++) {
+                        final double v = staticValues[c][w];
+                        if (Double.isFinite(v)) {
+                            ss.add(v);
+                        } else {
+                            ss.add(com.google.gson.JsonNull.INSTANCE);
+                        }
+                    }
+                    co.add("vs", ss);
+                }
                 if (cfg.deadEtb == AiFixes.Mode.SHADOW && deadEtbKeys.contains(cd.key())) {
                     co.addProperty("deadEtb", true);
                 }
@@ -1553,6 +1582,36 @@ public final class LookaheadSearch {
             rankerDeck = d;
         }
         return rankerDeck;
+    }
+
+    /**
+     * EI turn-start dump (cycle 2): the seat's ForgeState taken in a fresh GameCopier copy of {@code g}, in its own id
+     * scope, AI-cache scope and random stream (seeded by {@code seed}), so the game it is called on is never encoded
+     * or advanced. Null if the copy or the encoding throws.
+     */
+    public static JsonObject encodeInCopy(Game g, Player p, long seed) {
+        final Random prev = MyRandom.getThreadRandom();
+        MyRandom.setThreadRandom(new Random(seed));
+        AiCache.openScope();
+        final Object prevIds = forge.util.IdScope.capture();
+        forge.util.IdScope.open();
+        try {
+            final Game c;
+            final Player cp;
+            synchronized (g) {
+                final GameCopier copier = new GameCopier(g, true);
+                copier.setCopyStack(false);
+                c = copier.makeCopy();
+                cp = (Player) copier.find(p);
+            }
+            return forge.bench.StateEncoder.encode(c, cp);
+        } catch (RuntimeException | StackOverflowError e) {
+            return null;
+        } finally {
+            AiCache.closeScope();
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
     }
 
     /** Label dump: the target refs ("P<i>" / "C<id>", {@link #targetRef}) of an ability chain, in sub-ability order. */

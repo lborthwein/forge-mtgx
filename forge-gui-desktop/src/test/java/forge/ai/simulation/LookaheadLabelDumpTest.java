@@ -141,6 +141,20 @@ public class LookaheadLabelDumpTest extends SimulationTest {
     }
 
     @Test
+    public void encodeInCopyLeavesTheGameUntouched() {
+        Game g = board();
+        Player a = g.getPlayers().get(0);
+        String before = LookaheadSearch.fingerprint(g);
+        JsonObject st = LookaheadSearch.encodeInCopy(g, a, 42L);
+        AssertJUnit.assertEquals(before, LookaheadSearch.fingerprint(g));
+        AssertJUnit.assertNotNull(st);
+        AssertJUnit.assertEquals(0, st.get("seat").getAsInt());
+        AssertJUnit.assertEquals(3, st.getAsJsonArray("players").get(0).getAsJsonObject().getAsJsonArray("hand").size());
+        AssertJUnit.assertEquals(0, st.getAsJsonArray("players").get(1).getAsJsonObject().getAsJsonArray("hand").size());
+        AssertJUnit.assertEquals(st.toString(), LookaheadSearch.encodeInCopy(g, a, 42L).toString());
+    }
+
+    @Test
     public void targetRefsOfAChain() {
         Game g = board();
         Player b = g.getPlayers().get(1);
