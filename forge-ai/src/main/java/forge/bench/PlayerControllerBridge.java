@@ -172,8 +172,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * below for why the arming and the reading are two steps.
      */
     private JsonObject ask(final String method, final String kind, final JsonObject body) {
+        return ask(method, kind, body, null);
+    }
+
+    /** As above; {@code menuObjects} reach an in-process answerer only (see BenchSession.LocalAnswerer). */
+    private JsonObject ask(final String method, final String kind, final JsonObject body, final Object menuObjects) {
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
-        final JsonObject ans = local != null ? local.answer(getGame(), getPlayer(), kind, body)
+        final JsonObject ans = local != null ? local.answer(getGame(), getPlayer(), method, kind, body, menuObjects)
                 : session.getChannel().ask(kind, body);
         if (ans == null || (ans.has("delegate") && ans.get("delegate").getAsBoolean())) {
             counters.delegateRequested(method);
@@ -259,7 +264,27 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * training row, and a lost training row must not be a lost game.
      */
     private void echo(final Echo e, final JsonObject answer) {
-        if (e == null || answer == null || session.getChannel().isClosed()) {
+        echo(e, answer, null);
+    }
+
+    /**
+     * As above, with the raw decision for an in-process answerer (RL record mode, lane rl-r0-b1-1005). The local
+     * hook runs before the closed-channel return; with no local answerer this is the method above to the byte.
+     */
+    private void echo(final Echo e, final JsonObject answer, final Object decision) {
+        if (e == null || answer == null) {
+            return;
+        }
+        final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
+        if (local != null) {
+            try {
+                local.onEcho(getGame(), getPlayer(), e.method, e.kind, answer, decision);
+            } catch (RuntimeException ex) {
+                counters.instrument("echo.local.failed." + e.kind);
+                JsonRpcChannel.logErr("local echo failed for " + e.method + " (" + e.kind + ")", ex);
+            }
+        }
+        if (session.getChannel().isClosed()) {
             return;
         }
         try {
@@ -517,6 +542,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
     private void refuse(final String method, final String why) {
         counters.delegateRefused(method, why);
+        final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
+        if (local != null) {
+            local.onRefused(getGame(), getPlayer(), method, why);
+        }
     }
 
     private static Integer optInt(final JsonObject o, final String key) {
@@ -617,11 +646,11 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         body.add("menu", items);
         body.add("manaAbilities", manaAbilityChannel());
-        final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body);
+        final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body, menu);
         if (ans == null) {
             final Echo e = takeEcho();
             final List<SpellAbility> out = super.chooseSpellAbilityToPlay();
-            echo(e, echoPriority(menu, out));
+            echo(e, echoPriority(menu, out), out);
             return out;
         }
         final Integer choice = optInt(ans, "choice");
@@ -1256,7 +1285,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.add("legalPairsTyped", legalPairsTyped);
         addAttackRequirements(body, combat, possible, defenders);
 
-        final JsonObject ans = ask("declareAttackers", "attackers", body);
+        final JsonObject ans = ask("declareAttackers", "attackers", body,
+                new Object[] {possible, defenders, combat});
         if (ans == null) {
             final Echo e = takeEcho();
             super.declareAttackers(attacker, combat);
@@ -1446,7 +1476,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         body.add("legalPairs", legalPairs);
 
-        final JsonObject ans = ask("declareBlockers", "blockers", body);
+        final JsonObject ans = ask("declareBlockers", "blockers", body,
+                new Object[] {possible, attackers, combat});
         if (ans == null) {
             final Echo e = takeEcho();
             super.declareBlockers(defender, combat);
@@ -1669,7 +1700,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask(method, "cardsChoice", body);
+        final JsonObject ans = ask(method, "cardsChoice", body, pool);
         if (ans == null) {
             return null;
         }
@@ -1746,12 +1777,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             body.addProperty("divideRemaining", currentAbility.getStillToDivide());
         }
 
-        final JsonObject ans = ask("chooseTargetsFor", "targets", body);
+        final JsonObject ans = ask("chooseTargetsFor", "targets", body,
+                new Object[] {currentAbility, candidates, stack});
         if (ans == null) {
             final Echo e = takeEcho();
             final boolean out = super.chooseTargetsFor(currentAbility);
             // The chosen targets are on the ability, not in the return value.
-            echo(e, echoTargets(currentAbility, out));
+            echo(e, echoTargets(currentAbility, out), currentAbility);
             return out;
         }
         if (!ans.has("choices") || !ans.get("choices").isJsonArray()) {

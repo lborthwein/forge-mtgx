@@ -61,6 +61,42 @@ public final class BenchSession {
     public interface LocalAnswerer {
         com.google.gson.JsonObject answer(forge.game.Game game, forge.game.player.Player player, String kind,
                 com.google.gson.JsonObject body);
+
+        /**
+         * RL seat (lane rl-r0-b1-1005; default = the 4-argument form, so existing answerers are unchanged): the same
+         * ask with the controller method that raised it ({@code tuckCardsViaMulligan} and
+         * {@code chooseCardsToDiscardToMaximumHandSize} share the kind {@code cardsChoice}).
+         */
+        default com.google.gson.JsonObject answer(forge.game.Game game, forge.game.player.Player player,
+                String method, String kind, com.google.gson.JsonObject body) {
+            return answer(game, player, kind, body);
+        }
+
+        /**
+         * What the bridge calls. {@code menuObjects} are the Forge objects behind the ask's menu, in menu order
+         * (priority: the {@code List<SpellAbility>}; targets: {@code Object[]{SpellAbility, List<GameEntity>,
+         * List<SpellAbilityStackInstance>}}; attackers / blockers: {@code Object[]{CardCollection legal, List
+         * defenders-or-attackers, Combat}}; cardsChoice: the pool), or null. In-process only; never on any wire.
+         * Default = the 5-argument form.
+         */
+        default com.google.gson.JsonObject answer(forge.game.Game game, forge.game.player.Player player,
+                String method, String kind, com.google.gson.JsonObject body, Object menuObjects) {
+            return answer(game, player, method, kind, body);
+        }
+
+        /**
+         * Called where the bridge publishes a delegated echo (this answerer delegated, Forge decided), before the
+         * closed-channel return: Forge's answer in the ask's own answer shape, plus the raw decision where the
+         * bridge has one (priority: the returned {@code List<SpellAbility>}, whose targets Forge's AI has already
+         * set; targets: the targeted ability). Default: nothing.
+         */
+        default void onEcho(forge.game.Game game, forge.game.player.Player player, String method, String kind,
+                com.google.gson.JsonObject forgeAnswer, Object forgeDecision) {
+        }
+
+        /** Called when the bridge refuses an answer (Forge decides instead). Default: nothing. */
+        default void onRefused(forge.game.Game game, forge.game.player.Player player, String method, String why) {
+        }
     }
 
     private LocalAnswerer localAnswerer = null;
