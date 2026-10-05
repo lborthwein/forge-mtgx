@@ -154,7 +154,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final JsonObject o = new JsonObject();
         o.addProperty("game", session.getGameId());
         o.addProperty("seat", seat);
-        if (withState) {
+        if (withState && session.isEncodeState()) {
             try {
                 o.add("state", StateEncoder.encode(getGame(), getPlayer()));
             } catch (RuntimeException e) {
@@ -172,7 +172,9 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * below for why the arming and the reading are two steps.
      */
     private JsonObject ask(final String method, final String kind, final JsonObject body) {
-        final JsonObject ans = session.getChannel().ask(kind, body);
+        final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
+        final JsonObject ans = local != null ? local.answer(getGame(), getPlayer(), kind, body)
+                : session.getChannel().ask(kind, body);
         if (ans == null || (ans.has("delegate") && ans.get("delegate").getAsBoolean())) {
             counters.delegateRequested(method);
             final Integer id = optInt(ans, "id");

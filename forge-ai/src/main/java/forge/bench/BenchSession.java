@@ -50,6 +50,38 @@ public final class BenchSession {
 
     private final JsonRpcChannel channel;
     private String gameId = "g0";
+
+    /**
+     * RL-simulator probe (lane rl-sim-forge-1005; OFF by default: null, and every ask goes over the channel exactly
+     * as before). When set, a bridged seat's asks are answered IN-PROCESS by this answerer instead of the stdio host,
+     * so a whole game can be driven by an external-policy stand-in (uniform random, first legal) without a host
+     * process. The body is the ask exactly as the host would receive it; a null answer or {@code {"delegate":true}}
+     * hands the decision to Forge AI, as on the wire.
+     */
+    public interface LocalAnswerer {
+        com.google.gson.JsonObject answer(forge.game.Game game, forge.game.player.Player player, String kind,
+                com.google.gson.JsonObject body);
+    }
+
+    private LocalAnswerer localAnswerer = null;
+    /** RL-simulator probe: false skips the per-ask seat-visible state encoding (default true: unchanged). */
+    private boolean encodeState = true;
+
+    public LocalAnswerer getLocalAnswerer() {
+        return localAnswerer;
+    }
+
+    public void setLocalAnswerer(final LocalAnswerer answerer) {
+        this.localAnswerer = answerer;
+    }
+
+    public boolean isEncodeState() {
+        return encodeState;
+    }
+
+    public void setEncodeState(final boolean encodeState) {
+        this.encodeState = encodeState;
+    }
     private forge.game.Game liveGame;
 
     /*
