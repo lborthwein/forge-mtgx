@@ -245,6 +245,30 @@ public final class LookaheadSearch {
          */
         public boolean policyRollouts = false;
 
+        /**
+         * EI ranker seat (lane ei-1004; null = off, the default: the config JSON is unchanged). No play-outs: at every
+         * priority decision with at least two candidates in the enumeration's B set (Forge's answer, pass, the next legal
+         * candidates; exactly the search's), the ranker service ({@link RankerClient}) gets the seat's ForgeState, the
+         * decision context and the candidates with the targets each would be played with (Forge AI's choices in the
+         * search's world-0 copy), and its argmax is played; Forge AI keeps every other choice. A failed call plays
+         * Forge's answer and is counted.
+         */
+        public String rankerUrl = null;
+        public String rankerCheckpointSha256 = null;
+        public int rankerTimeoutMs = 2000;
+        /** Ranker shadow (do-no-harm gate): call and count, always play Forge's answer. */
+        public boolean rankerShadow = false;
+        /**
+         * EI matched placebo (gate-3 arm PZ; 0 = off): no service; at each such decision, with this probability, a
+         * uniformly random non-Forge candidate of B (draws from a private stream of the seat seed and decision index).
+         */
+        public double placeboRate = 0.0;
+
+        /** The seat ranks instead of searching (ranker or placebo). */
+        public boolean rankerOn() {
+            return rankerUrl != null || placeboRate > 0;
+        }
+
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
             o.addProperty("worlds", worlds);
@@ -329,6 +353,15 @@ public final class LookaheadSearch {
                 o.addProperty("beliefCube", beliefCube);
                 o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 o.addProperty("beliefBasics", beliefBasics);
+            }
+            if (rankerOn()) {
+                final JsonObject r = new JsonObject();
+                r.addProperty("url", rankerUrl);
+                r.addProperty("checkpointSha256", rankerCheckpointSha256);
+                r.addProperty("timeoutMs", rankerTimeoutMs);
+                r.addProperty("shadow", rankerShadow);
+                r.addProperty("placeboRate", placeboRate);
+                o.add("ranker", r);
             }
             return o;
         }
@@ -432,6 +465,16 @@ public final class LookaheadSearch {
         public boolean labelsOn;
         public long labels, labelFailures, labelRootFailures;
         public String labelLastError;
+        /**
+         * EI ranker seat (reported only when it is on): ranked decisions (>= 2 candidates), service calls, failures
+         * (Forge's answer played), call time, decisions whose pick was not Forge's answer (would-depart, also in
+         * shadow), placebo draws that changed the pick, the running digest of the service's answers.
+         */
+        public boolean rankerOn;
+        public long rankerDecisions, rankerCalls, rankerFailures, rankerNanos, rankerMaxNanos, rankerNonDefault, placeboDraws;
+        public long rankerUnknownCards, rankerPrepFailures;
+        public String rankerDigest, rankerLastError;
+        public final Map<String, Long> rankerDepartKinds = new TreeMap<>();
         public boolean beliefOn;
         public long beliefDecisions, beliefSkipped, beliefCalls, beliefFailures, beliefNanos, beliefMaxNanos;
         public long beliefWorlds, beliefCards, beliefCreateNanos, beliefMismatch, beliefPoolSlots, beliefUnknownCards;
@@ -632,6 +675,26 @@ public final class LookaheadSearch {
                 }
                 o.add("labels", l);
             }
+            if (rankerOn) {
+                final JsonObject r = new JsonObject();
+                r.addProperty("decisions", rankerDecisions);
+                r.addProperty("calls", rankerCalls);
+                r.addProperty("failures", rankerFailures);
+                r.addProperty("ms", rankerNanos / 1e6);
+                r.addProperty("maxMs", rankerMaxNanos / 1e6);
+                r.addProperty("nonDefault", rankerNonDefault);
+                r.addProperty("placeboDraws", placeboDraws);
+                r.addProperty("prepFailures", rankerPrepFailures);
+                r.addProperty("unknownCards", rankerUnknownCards);
+                r.addProperty("digest", rankerDigest);
+                final JsonObject dk = new JsonObject();
+                rankerDepartKinds.forEach(dk::addProperty);
+                r.add("departKinds", dk);
+                if (rankerLastError != null) {
+                    r.addProperty("lastError", rankerLastError);
+                }
+                o.add("ranker", r);
+            }
             return o;
         }
     }
@@ -747,6 +810,9 @@ public final class LookaheadSearch {
     private int tutorIndex = 0;
     private final BeliefClient beliefClient;
     private final BeliefSampler.Cube beliefCube;
+    /** EI ranker seat: the service client (null for the placebo or when off) and the seat's registered forty. */
+    private final RankerClient ranker;
+    private JsonObject rankerDeck = null;
     /** The current searched decision's belief (acting mode), read by {@link #prepare} on the decision thread. */
     private BeliefSampler.Dist decisionBelief = null;
     /** The last searched decision's belief (acting or shadow); tests read it. */
@@ -772,6 +838,11 @@ public final class LookaheadSearch {
     private FidelityWatch liveWatch = null;
 
     public LookaheadSearch(Config cfg) {
+        this(cfg, null);
+    }
+
+    /** Tests: {@code testRanker} stands in for the ranker service client (no health check). */
+    LookaheadSearch(Config cfg, RankerClient testRanker) {
         if (cfg.policyRollouts) {
             throw new IllegalStateException("policyRollouts (L2 step 2) is not built: it needs an L2 PASS and its own predeclaration");
         }
@@ -815,6 +886,25 @@ public final class LookaheadSearch {
             stats.tutorOn = true;
         } else {
             tutor = null;
+        }
+        if (cfg.rankerOn()) {
+            if (cfg.rankerUrl != null && cfg.placeboRate > 0) {
+                throw new IllegalStateException("ranker: a seat is the ranker or its placebo, not both");
+            }
+            if (cfg.placeboRate < 0 || cfg.placeboRate > 1) {
+                throw new IllegalStateException("ranker: placeboRate must be in [0, 1]");
+            }
+            if (cfg.rankerUrl != null && testRanker != null) {
+                ranker = testRanker;
+            } else if (cfg.rankerUrl != null) {
+                RankerClient.checkHealth(cfg.rankerUrl, cfg.rankerCheckpointSha256, cfg.rankerTimeoutMs);
+                ranker = new RankerClient(cfg.rankerUrl, cfg.rankerTimeoutMs);
+            } else {
+                ranker = null;
+            }
+            stats.rankerOn = true;
+        } else {
+            ranker = null;
         }
         if (cfg.beliefOn()) {
             if (!"off".equals(cfg.belief) && !"human".equals(cfg.belief) && !"uniform".equals(cfg.belief)) {
@@ -956,7 +1046,7 @@ public final class LookaheadSearch {
         // Candidates, enumerated in a copy so the live game is never touched by enumeration.
         final JsonObject[] beliefRoot = beliefCube != null && beliefClient != null ? new JsonObject[1] : null;
         // Label dump: the root ForgeState comes from the same enumeration copy (never the live game).
-        final JsonObject[] labelRoot = labelSink != null ? new JsonObject[1] : null;
+        final JsonObject[] labelRoot = labelSink != null || ranker != null ? new JsonObject[1] : null;
         final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv, beliefRoot, labelRoot);
         if (check) {
             checkLive("enumerate", before, live, defSa, index);
@@ -968,6 +1058,10 @@ public final class LookaheadSearch {
         stats.searched++;
         if (onStack) {
             stats.stackSearched++;
+        }
+        if (cfg.rankerOn()) {
+            return decideRanked(ctrl, def, live, me, index, ph, turn, t0, base, decisionSeed, defSa,
+                    labelRoot == null ? null : labelRoot[0]);
         }
         final int bSize = base.size();
         JsonObject priorEntry = null;
@@ -1302,6 +1396,163 @@ public final class LookaheadSearch {
             stats.labelFailures++;
             stats.labelLastError = String.valueOf(e);
         }
+    }
+
+    /**
+     * EI ranker seat (Config#rankerUrl / #placeboRate): rank the enumeration's B set without play-outs and play the
+     * pick. The departure bookkeeping (per-turn cap, the same-action loop guard, mapping into the live game) is the
+     * search's own.
+     */
+    private List<SpellAbility> decideRanked(PlayerControllerAi ctrl, List<SpellAbility> def, Game live, Player me, int index,
+            PhaseHandler ph, int turn, long t0, List<Cand> cands, long decisionSeed, SpellAbility defSa, JsonObject root) {
+        stats.rankerDecisions++;
+        final int n = cands.size();
+        int pick = 0;
+        if (cfg.placeboRate > 0) {
+            final Random pr = new Random(mix(cfg.seed, 0x9a1aceb0L + index));
+            if (pr.nextDouble() < cfg.placeboRate) {
+                pick = 1 + pr.nextInt(n - 1);
+                stats.placeboDraws++;
+            }
+        } else {
+            final JsonObject req = root == null ? null : rankRequest(live, me, ph, turn, cands, decisionSeed, defSa, root);
+            if (req == null) {
+                stats.rankerFailures++;
+                stats.rankerLastError = root == null ? "root: " + labelRootError : "request";
+            } else {
+                final long a = System.nanoTime();
+                final double[] p = ranker.rank(req, n);
+                final long dt = System.nanoTime() - a;
+                stats.rankerCalls++;
+                stats.rankerNanos += dt;
+                stats.rankerMaxNanos = Math.max(stats.rankerMaxNanos, dt);
+                if (p == null) {
+                    stats.rankerFailures++;
+                    stats.rankerLastError = ranker.lastError;
+                    System.err.println("[ranker] call failed at decision " + index + ", playing Forge's answer: " + ranker.lastError);
+                } else {
+                    for (int c = 1; c < n; c++) {
+                        if (p[c] > p[pick]) {   // ties to the lower index: Forge's answer first
+                            pick = c;
+                        }
+                    }
+                }
+                stats.rankerDigest = ranker.digestHex();
+                stats.rankerUnknownCards = ranker.unknownCards;
+            }
+        }
+        List<SpellAbility> answer = def;
+        String outcome = "kept";
+        if (pick != 0) {
+            stats.rankerNonDefault++;
+            if (cfg.rankerShadow) {
+                outcome = "shadow-would-depart";
+            } else {
+                final Cand chosen = cands.get(pick);
+                final String key = chosen.key() + "@" + ph.getPhase() + "#" + live.getStack().size();
+                final int seen = departureCounts.getOrDefault(key, 0);
+                if (departuresThisTurn >= cfg.maxDeparturesPerTurn || seen >= 2) {
+                    stats.loopGuard++;
+                    outcome = "loop-guard";
+                } else {
+                    final List<SpellAbility> mapped = mapToLive(ctrl, live, me, chosen);
+                    if (mapped == null && !chosen.pass) {
+                        stats.departFallback++;
+                        outcome = "map-failed";
+                    } else {
+                        answer = mapped;
+                        stats.departed++;
+                        stats.rankerDepartKinds.merge(chosen.kind, 1L, Long::sum);
+                        departuresThisTurn++;
+                        departureCounts.put(key, seen + 1);
+                        outcome = "departed";
+                    }
+                }
+            }
+        }
+        final long dt = System.nanoTime() - t0;
+        stats.searchNanos += dt;
+        stats.maxSearchNanos = Math.max(stats.maxSearchNanos, dt);
+        stats.searchMsEach.add(dt / 1e6);
+        if (cfg.decisionLog) {
+            final JsonObject d = new JsonObject();
+            d.addProperty("decision", index);
+            d.addProperty("turn", turn);
+            d.addProperty("phase", String.valueOf(ph.getPhase()));
+            d.addProperty("candidates", n);
+            d.addProperty("pick", pick);
+            d.addProperty("outcome", outcome);
+            d.addProperty("ms", Math.round(dt / 1e5) / 10.0);
+            System.err.println("[ranker-decision] " + d);
+        }
+        return answer;
+    }
+
+    /**
+     * EI ranker request (schema {@link RankerClient#REQUEST_SCHEMA}): the decision as the label dump records it -- each
+     * candidate prepared in the search's world-0 copy (the same seed and re-draw as a K-world search's world 0) for the
+     * targets Forge AI would play it with; null if a preparation throws.
+     */
+    private JsonObject rankRequest(Game live, Player me, PhaseHandler ph, int turn, List<Cand> cands, long decisionSeed,
+            SpellAbility defSa, JsonObject root) {
+        try {
+            final JsonObject req = new JsonObject();
+            req.addProperty("schema", RankerClient.REQUEST_SCHEMA);
+            req.addProperty("seat", forge.bench.StateEncoder.playerIndex(live, me));
+            req.addProperty("startingSeat", live.getStartingPlayer() == null ? -1
+                    : forge.bench.StateEncoder.playerIndex(live, live.getStartingPlayer()));
+            final JsonArray mull = new JsonArray();
+            for (Player pl : live.getRegisteredPlayers()) {
+                mull.add(pl.getStats().getMulliganCount());
+            }
+            req.add("mulligans", mull);
+            req.add("deck", rankerDeckOf(me));
+            final JsonObject d = new JsonObject();
+            d.addProperty("phase", String.valueOf(ph.getPhase()));
+            d.addProperty("stack", live.getStack().size());
+            d.addProperty("active", ph.getPlayerTurn() == me);
+            d.addProperty("turn", turn);
+            d.addProperty("bSize", cands.size());
+            req.add("decision", d);
+            req.add("root", root);
+            final JsonArray ca = new JsonArray();
+            for (Cand cd : cands) {
+                final Prepared p = prepare(live, me, cd, defSa, mix(decisionSeed, 1000), cfg.resample, null);
+                final JsonArray tg = p.failed ? new JsonArray() : targetRefs(p.g, p.first);
+                if (p.failed && !cd.pass) {
+                    stats.rankerPrepFailures++;
+                }
+                p.g = null;
+                final JsonObject co = new JsonObject();
+                co.addProperty("kind", cd.kind);
+                co.addProperty("hostId", cd.hostId);
+                co.addProperty("label", cd.label);
+                co.add("targets", tg);
+                co.addProperty("isDefault", cd.isDefault);
+                ca.add(co);
+            }
+            req.add("cands", ca);
+            return req;
+        } catch (RuntimeException | StackOverflowError e) {
+            return null;
+        }
+    }
+
+    /** The seat's registered main deck, {name: copies} (PolicyPilot's deckOf), once per seat. */
+    private JsonObject rankerDeckOf(Player me) {
+        if (rankerDeck == null) {
+            final JsonObject d = new JsonObject();
+            final forge.deck.Deck dk = me.getRegisteredPlayer() == null ? null : me.getRegisteredPlayer().getDeck();
+            if (dk != null && dk.has(forge.deck.DeckSection.Main)) {
+                final TreeMap<String, Integer> byName = new TreeMap<>();
+                for (Map.Entry<forge.item.PaperCard, Integer> e : dk.get(forge.deck.DeckSection.Main)) {
+                    byName.merge(e.getKey().getName(), e.getValue(), Integer::sum);
+                }
+                byName.forEach(d::addProperty);
+            }
+            rankerDeck = d;
+        }
+        return rankerDeck;
     }
 
     /** Label dump: the target refs ("P<i>" / "C<id>", {@link #targetRef}) of an ability chain, in sub-ability order. */

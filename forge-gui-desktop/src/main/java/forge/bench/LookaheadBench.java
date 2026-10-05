@@ -158,6 +158,31 @@ public final class LookaheadBench {
         c.beliefBasics = la.has("beliefBasics") ? la.get("beliefBasics").getAsInt() : 8;
     }
 
+    /**
+     * EI ranker seat config (lane ei-1004) from the "ranker" block: url, checkpointSha256, timeoutMs (2000), shadow,
+     * placeboRate (0; > 0 = the matched placebo, no service), breadth (4), decisionLog. The enumeration is the search's
+     * (worlds 1 for the world-0 preparation seed, re-draw on, deadEtb/zeroX off, no budget, one thread).
+     */
+    static LookaheadSearch.Config rankerConfig(JsonObject r, long seed) {
+        final LookaheadSearch.Config c = new LookaheadSearch.Config();
+        c.worlds = 1;
+        c.breadth = r.has("breadth") ? r.get("breadth").getAsInt() : 4;
+        c.threads = 1;
+        c.resample = true;
+        c.rankerUrl = r.has("url") && !r.get("url").isJsonNull() ? r.get("url").getAsString() : null;
+        c.rankerCheckpointSha256 = r.has("checkpointSha256") && !r.get("checkpointSha256").isJsonNull()
+                ? r.get("checkpointSha256").getAsString() : null;
+        c.rankerTimeoutMs = r.has("timeoutMs") ? r.get("timeoutMs").getAsInt() : 2000;
+        c.rankerShadow = r.has("shadow") && r.get("shadow").getAsBoolean();
+        c.placeboRate = r.has("placeboRate") ? r.get("placeboRate").getAsDouble() : 0.0;
+        c.decisionLog = r.has("decisionLog") && r.get("decisionLog").getAsBoolean();
+        c.seed = seed;
+        if (c.rankerUrl == null && !(c.placeboRate > 0)) {
+            throw new IllegalStateException("the ranker block needs url (the ranker) or placeboRate > 0 (its placebo)");
+        }
+        return c;
+    }
+
     public static void main(String[] args) throws Exception {
         final PrintStream err = new PrintStream(new FileOutputStream(FileDescriptor.err), true, StandardCharsets.UTF_8);
         System.setOut(err); // Forge chatter goes to stderr; results go to the file
@@ -234,6 +259,35 @@ public final class LookaheadBench {
                     } else {
                         err.println("[lookahead-bench] policy service " + pc.url + " checkpoint "
                                 + forge.ai.simulation.PolicyClient.checkHealth(pc.url, pc.checkpointSha256, pc.timeoutMs));
+                    }
+                } catch (IllegalStateException e) {
+                    err.println("[lookahead-bench] refusing: " + e.getMessage());
+                    System.exit(4);
+                }
+            }
+        }
+
+        // EI ranker seats (lane ei-1004): the "ranker" block is required and its pin is checked once at JVM start; a
+        // missing block, an unreachable service or another checkpoint refuses the whole run (exit 4).
+        final JsonObject rankerJson = cfg.has("ranker") ? cfg.getAsJsonObject("ranker") : null;
+        {
+            boolean anyRanker = false;
+            for (JsonElement ge : cfg.getAsJsonArray("games")) {
+                for (JsonElement m : ge.getAsJsonObject().getAsJsonArray("seats")) {
+                    anyRanker |= "ranker".equals(m.getAsString());
+                }
+            }
+            if (anyRanker) {
+                try {
+                    if (rankerJson == null) {
+                        throw new IllegalStateException("a ranker seat needs the \"ranker\" block");
+                    }
+                    final LookaheadSearch.Config rc = rankerConfig(rankerJson, 0L);
+                    if (rc.rankerUrl != null) {
+                        err.println("[lookahead-bench] ranker service " + rc.rankerUrl + " checkpoint "
+                                + forge.ai.simulation.RankerClient.checkHealth(rc.rankerUrl, rc.rankerCheckpointSha256, rc.rankerTimeoutMs));
+                    } else {
+                        err.println("[lookahead-bench] ranker placebo rate " + rc.placeboRate);
                     }
                 } catch (IllegalStateException e) {
                     err.println("[lookahead-bench] refusing: " + e.getMessage());
@@ -371,6 +425,17 @@ public final class LookaheadBench {
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);
                     l.setAiProfile(profiles[i]);
                     l.setAiFixes0928(laFixes);
+                    searches.add(s);
+                    laLobbies.add(l);
+                    pilots.add(null);
+                    lp = l;
+                } else if ("ranker".equals(mode)) {
+                    // EI ranker seat (lane ei-1004): Forge AI (aiFixes0928 as the default seats) whose priority answers
+                    // the ranker may replace; no play-outs.
+                    final LookaheadSearch s = new LookaheadSearch(rankerConfig(rankerJson, seed * 31 + i));
+                    final LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);
+                    l.setAiProfile(profiles[i]);
+                    l.setAiFixes0928(defaultFixes);
                     searches.add(s);
                     laLobbies.add(l);
                     pilots.add(null);
