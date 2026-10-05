@@ -704,6 +704,19 @@ public final class RlSimBench {
             }
             o.add("copyMs", ms);
             o.addProperty("fingerprintSame", fpSame);
+            // Forge's other copy path (EXPERIMENTAL_RESTORE_SNAPSHOT's GameSnapshot), timed beside it; never played
+            final JsonArray sms = new JsonArray();
+            int snapSame = 0;
+            for (int r = 0; r < cfg.probeReps; r++) {
+                final long a = System.nanoTime();
+                final Game c = inScopes(gseed * 37 + r, () -> new forge.game.GameSnapshot(g).makeCopy());
+                sms.add((System.nanoTime() - a) / 1e6);
+                if (c != null && liveFp.equals(fingerprint(c))) {
+                    snapSame++;
+                }
+            }
+            o.add("snapMs", sms);
+            o.addProperty("snapFingerprintSame", snapSame);
             costs.add(o);
         }
 
