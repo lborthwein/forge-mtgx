@@ -805,6 +805,7 @@ public final class RlSimBench {
                 o.add("fps", toArray(fps));
             } catch (Throwable e) {
                 o.addProperty("error", e.toString());
+                o.add("stack", forgeFrames(e));
             } finally {
                 session.setLiveGame(liveWas);
                 if (c != null) {
@@ -874,6 +875,22 @@ public final class RlSimBench {
             }
             return o;
         }
+    }
+
+    /** The first frames of a throwable, skipping JDK frames, plus the frames of its cause chain's root. */
+    static JsonArray forgeFrames(final Throwable e) {
+        final JsonArray a = new JsonArray();
+        Throwable t = e;
+        while (t.getCause() != null && t.getCause() != t) t = t.getCause();
+        if (t != e) a.add("root cause: " + t);
+        int n = 0;
+        for (StackTraceElement f : t.getStackTrace()) {
+            final String c = f.getClassName();
+            if (c.startsWith("java.") || c.startsWith("jdk.") || c.startsWith("sun.")) continue;
+            a.add(f.toString());
+            if (++n >= 14) break;
+        }
+        return a;
     }
 
     static JsonArray toArray(final List<String> l) {
@@ -982,10 +999,7 @@ public final class RlSimBench {
         } catch (Throwable e) {
             abort = "crash";
             row.addProperty("error", e.toString());
-            final StackTraceElement[] st = e.getStackTrace();
-            final JsonArray top = new JsonArray();
-            for (int k = 0; k < Math.min(6, st.length); k++) top.add(st[k].toString());
-            row.add("stack", top);
+            row.add("stack", forgeFrames(e));
         } finally {
             RUNNING.remove(Thread.currentThread());
             if (game != null && !game.isGameOver()) {
