@@ -72,7 +72,8 @@ import java.util.concurrent.TimeoutException;
  * (off|shadow|on, lane misplays-1005: no departure to a Crew activation of a Vehicle that can no longer attack or block
  * this turn; see LookaheadSearch.Config#crewNoop), copyEot
  * (off|shadow|on, lane misplays-1005: copies carry the live game's pending until-end-of-turn commands; see
- * LookaheadSearch.Config#copyEot)},
+ * LookaheadSearch.Config#copyEot), departMedian (off|shadow|on, lane misplays-1005: a departure also needs a positive
+ * median paired difference; see LookaheadSearch.Config#departMedian)},
  * "defaultAiFixes0928": off|shadow|on (the "default"/"sim"/"policy" seats; off unless a predeclared read says otherwise),
  * "policy":{url,checkpointSha256,timeoutMs,cast,land,react,shadow,threshold,maxForcesPerTurn,log,placebo} (lane
  * l2-fork-1001: the "policy" seats, Forge AI plus policy P1 with no search; "placebo":{veto,force,land,react,reactVeto,
@@ -363,6 +364,7 @@ public final class LookaheadBench {
                     c.zeroX = AiFixes.Mode.parse(la.has("zeroX") ? la.get("zeroX").getAsString() : null);
                     c.crewNoop = AiFixes.Mode.parse(la.has("crewNoop") ? la.get("crewNoop").getAsString() : null);
                     c.copyEot = AiFixes.Mode.parse(la.has("copyEot") ? la.get("copyEot").getAsString() : null);
+                    c.departMedian = AiFixes.Mode.parse(la.has("departMedian") ? la.get("departMedian").getAsString() : null);
                     c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();
                     c.modelUrl = la.has("modelUrl") ? la.get("modelUrl").getAsString() : null;

@@ -517,6 +517,7 @@ public final class InteractiveMain {
                 case "zeroX": c.zeroX = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "crewNoop": c.crewNoop = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "copyEot": c.copyEot = forge.ai.AiFixes.Mode.parse(p[1]); break;
+                case "departMedian": c.departMedian = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "maxSteps": c.maxSteps = Integer.parseInt(p[1].trim()); break;
                 case "shadow": c.shadow = !"0".equals(p[1].trim()); break;
                 case "combat": c.combat = !"0".equals(p[1].trim()); break;
