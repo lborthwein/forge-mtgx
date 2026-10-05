@@ -97,6 +97,10 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     /** Optional observer of sent frames (goldens, visibility tests). */
     public FrameListener listener;
 
+    /** Diagnosis switch (-Drlseat.recordBare=true): recorder seats delegate before building any candidate or
+     *  observation, isolating the bridge's BRIDGE-mode work in a do-no-harm bisect. Off by default. */
+    static final boolean RECORD_BARE = Boolean.getBoolean("rlseat.recordBare");
+
     public interface FrameListener {
         void onFrame(Game game, Player seat, RlWire.Decide frame, RlCandidates.Menu menu, RlFeaturizer.Obs obs,
                 short[] steps, JsonObject answer);
@@ -228,6 +232,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
         if (!RlSchema.isPhaseA(family)) {
             return null; // Phase B and the mechanical kinds: Forge decides (forge_decided by method)
+        }
+        if (RECORD_BARE && roles[seat] == Role.RECORD) {
+            return null; // diagnosis only: the bridge's own BRIDGE-mode work, none of the seat's
         }
         final RlCandidates.Menu m = RlCandidates.build(g, player, method, kind, body, objs);
         if (m == null || m.unposable != null) {
