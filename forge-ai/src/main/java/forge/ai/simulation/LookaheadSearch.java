@@ -428,6 +428,10 @@ public final class LookaheadSearch {
          * re-draw); the pool's mean slot count; the running digest of the served weights; one coverage entry per belief
          * decision.
          */
+        /** Label dump (reported only when it is on): lines emitted, emissions that failed, roots that failed to encode. */
+        public boolean labelsOn;
+        public long labels, labelFailures, labelRootFailures;
+        public String labelLastError;
         public boolean beliefOn;
         public long beliefDecisions, beliefSkipped, beliefCalls, beliefFailures, beliefNanos, beliefMaxNanos;
         public long beliefWorlds, beliefCards, beliefCreateNanos, beliefMismatch, beliefPoolSlots, beliefUnknownCards;
@@ -617,6 +621,17 @@ public final class LookaheadSearch {
                 }
                 o.add("beliefCoverage", beliefCoverage);
             }
+            if (labelsOn) {
+                final JsonObject l = new JsonObject();
+                l.addProperty("schema", LABEL_SCHEMA);
+                l.addProperty("lines", labels);
+                l.addProperty("failures", labelFailures);
+                l.addProperty("rootFailures", labelRootFailures);
+                if (labelLastError != null) {
+                    l.addProperty("lastError", labelLastError);
+                }
+                o.add("labels", l);
+            }
             return o;
         }
     }
@@ -680,6 +695,30 @@ public final class LookaheadSearch {
     private static final boolean EXPLAIN = Boolean.getBoolean("lookahead.explain");
     /** EXPLAIN only: the current decision's candidates' choices as prepared in world 0. */
     private String[] explainChoices;
+
+    /** Schema of one label line ({@link #setLabelSink}). */
+    public static final String LABEL_SCHEMA = "mtgx-ei-label/1";
+    /**
+     * Label dump (lane ei-1004, expert iteration; null = off, the default: nothing is computed and the row schema is
+     * unchanged). One JSON object per searched decision: the candidate set in search order (candidate 0 is Forge AI's
+     * own answer), every candidate's per-world play-out value, the targets each candidate was played out with (world 0),
+     * the deadEtb/zeroX shadow flags, the search's choice and outcome, and the seat's ForgeState
+     * ({@link forge.bench.StateEncoder#encode}) taken in the enumeration copy. The search never reads what it writes and
+     * the live game is never encoded, so a game with the dump on plays exactly as with it off.
+     */
+    private java.util.function.Consumer<JsonObject> labelSink = null;
+    /** Label dump only: the current decision's candidates' choices and target refs as prepared in world 0. */
+    private String[] labelChoices;
+    private JsonArray[] labelTargets;
+    /** Label dump only: distinct legal candidates of the enumeration past the breadth-B set. */
+    private int labelTail = -1;
+    private String labelRootError = null;
+
+    /** Turn the label dump on ({@code sink} receives one object per searched decision, on the game thread). */
+    public void setLabelSink(java.util.function.Consumer<JsonObject> sink) {
+        labelSink = sink;
+        stats.labelsOn = sink != null;
+    }
 
     /** EXPLAIN only: an ability's targets (and its sub-abilities'), as Forge AI chose them. */
     static String describeChoices(List<SpellAbility> first) {
@@ -916,7 +955,9 @@ public final class LookaheadSearch {
                 ? new PriorView() : null;
         // Candidates, enumerated in a copy so the live game is never touched by enumeration.
         final JsonObject[] beliefRoot = beliefCube != null && beliefClient != null ? new JsonObject[1] : null;
-        final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv, beliefRoot);
+        // Label dump: the root ForgeState comes from the same enumeration copy (never the live game).
+        final JsonObject[] labelRoot = labelSink != null ? new JsonObject[1] : null;
+        final List<Cand> base = enumerate(live, me, defSa, decisionSeed, pv, beliefRoot, labelRoot);
         if (check) {
             checkLive("enumerate", before, live, defSa, index);
         }
@@ -949,6 +990,8 @@ public final class LookaheadSearch {
         final boolean[] ok = new boolean[n];
         Arrays.fill(ok, true);
         explainChoices = EXPLAIN ? new String[n] : null;
+        labelChoices = labelSink != null ? new String[n] : null;
+        labelTargets = labelSink != null ? new JsonArray[n] : null;
         final Carried[] carried = cfg.reuse ? carry(live, me, cands, turn, k) : new Carried[k];
         final Rollout[] freshDef = cfg.reuseVerify ? new Rollout[k] : null;
         final BeliefSampler.Dist bd = beliefCube == null ? null
@@ -1136,6 +1179,10 @@ public final class LookaheadSearch {
             d.addProperty("cappedTotal", stats.capped);
             System.err.println("[lookahead-decision] " + d);
         }
+        if (labelSink != null) {
+            emitLabel(live, me, def, index, turn, ph, cands, bSize, values, ok, k, best, outcome, overBudget, abortedHere, dt,
+                    labelRoot == null ? null : labelRoot[0]);
+        }
 
         if (cfg.probe && turn >= 3 && stats.probes.size() < cfg.probeMax && (!cfg.probeStack || onStack)) {
             JsonObject p = new JsonObject();
@@ -1164,6 +1211,116 @@ public final class LookaheadSearch {
             stats.probes.add(p);
         }
         return answer;
+    }
+
+    /**
+     * Label dump: one searched decision as a JSON object for the sink. Reads only the search's own arrays, the
+     * enumeration copy's root state, Forge AI's answer and turn/phase/stack/mulligan counters of the live game. Never
+     * throws into the game: a failure is counted and the decision stands.
+     */
+    private void emitLabel(Game live, Player me, List<SpellAbility> def, int index, int turn, PhaseHandler ph, List<Cand> cands,
+            int bSize, double[][] values, boolean[] ok, int k, int best, String outcome, boolean overBudget, int aborted, long dt,
+            JsonObject root) {
+        try {
+            final JsonObject o = new JsonObject();
+            o.addProperty("schema", LABEL_SCHEMA);
+            o.addProperty("decision", index);
+            o.addProperty("turn", turn);
+            o.addProperty("phase", String.valueOf(ph.getPhase()));
+            o.addProperty("active", ph.getPlayerTurn() == me);
+            o.addProperty("stack", live.getStack().size());
+            o.addProperty("seat", forge.bench.StateEncoder.playerIndex(live, me));
+            final JsonArray mull = new JsonArray();
+            for (Player pl : live.getRegisteredPlayers()) {
+                mull.add(pl.getStats().getMulliganCount());
+            }
+            o.add("mulligans", mull);
+            o.addProperty("worlds", k);
+            o.addProperty("bSize", bSize);
+            o.addProperty("tail", labelTail);
+            o.addProperty("best", best);
+            o.addProperty("outcome", outcome);
+            o.addProperty("capped", overBudget);
+            o.addProperty("aborted", aborted);
+            o.addProperty("searchMs", Math.round(dt / 1e5) / 10.0);
+            if (forgeNanos >= 0) {
+                o.addProperty("forgeMs", Math.round(forgeNanos / 1e5) / 10.0);
+            }
+            final JsonArray ca = new JsonArray();
+            for (int c = 0; c < cands.size(); c++) {
+                final Cand cd = cands.get(c);
+                final JsonObject co = new JsonObject();
+                co.addProperty("key", cd.key());
+                co.addProperty("label", cd.label);
+                co.addProperty("kind", cd.kind);
+                co.addProperty("hostId", cd.hostId);
+                co.addProperty("isDefault", cd.isDefault);
+                if (cd.tgt != null) {
+                    co.addProperty("tgt", cd.tgt);
+                }
+                JsonArray tg = labelTargets[c];
+                String ch = labelChoices[c];
+                if (tg == null && c == 0 && def != null && !def.isEmpty()) {
+                    // A reused world 0 never prepared Forge's answer: its targets are the live answer's own.
+                    tg = targetRefs(live, def);
+                    ch = describeChoices(def);
+                }
+                co.addProperty("choices", ch == null ? "" : ch);
+                co.add("targets", tg == null ? new JsonArray() : tg);
+                co.addProperty("ok", ok[c]);
+                final JsonArray vs = new JsonArray();
+                for (int w = 0; w < k; w++) {
+                    final double v = values[c][w];
+                    if (Double.isFinite(v)) {
+                        vs.add(v);
+                    } else {
+                        vs.add(com.google.gson.JsonNull.INSTANCE);
+                    }
+                }
+                co.add("v", vs);
+                if (cfg.deadEtb == AiFixes.Mode.SHADOW && deadEtbKeys.contains(cd.key())) {
+                    co.addProperty("deadEtb", true);
+                }
+                if (cfg.zeroX == AiFixes.Mode.SHADOW && zeroXKeys.contains(cd.key())) {
+                    co.addProperty("zeroX", true);
+                }
+                ca.add(co);
+            }
+            o.add("cands", ca);
+            if (root == null) {
+                stats.labelRootFailures++;
+                o.add("root", com.google.gson.JsonNull.INSTANCE);
+                if (labelRootError != null) {
+                    o.addProperty("rootError", labelRootError);
+                }
+            } else {
+                o.add("root", root);
+            }
+            labelSink.accept(o);
+            stats.labels++;
+        } catch (RuntimeException e) {
+            stats.labelFailures++;
+            stats.labelLastError = String.valueOf(e);
+        }
+    }
+
+    /** Label dump: the target refs ("P<i>" / "C<id>", {@link #targetRef}) of an ability chain, in sub-ability order. */
+    static JsonArray targetRefs(Game g, List<SpellAbility> first) {
+        final JsonArray a = new JsonArray();
+        if (g == null || first == null || first.isEmpty() || first.get(0) == null) {
+            return a;
+        }
+        for (SpellAbility s = first.get(0); s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting()) {
+                for (forge.game.GameObject t : s.getTargets()) {
+                    final String r = targetRef(g, t);
+                    if (r != null) {
+                        a.add(r);
+                    }
+                }
+            }
+        }
+        return a;
     }
 
     private void record(double[][] values, Rollout[][] outs, boolean[] ok, int cc, int ww, Rollout r) {
@@ -1550,6 +1707,16 @@ public final class LookaheadSearch {
                 if (EXPLAIN && w == 0) {
                     explainChoices[c] = describeChoices(prep[c][w].first);
                 }
+                if (labelTargets != null && w == 0) {
+                    // Label dump: what this candidate is played out with (Forge AI's choices in world 0's copy).
+                    try {
+                        labelChoices[c] = describeChoices(prep[c][w].first);
+                        labelTargets[c] = targetRefs(prep[c][w].g, prep[c][w].first);
+                    } catch (RuntimeException e) {
+                        labelChoices[c] = "?";
+                        labelTargets[c] = null;
+                    }
+                }
             }
         }
         if (any) {
@@ -1746,6 +1913,16 @@ public final class LookaheadSearch {
 
     List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv,
                          JsonObject[] beliefRoot) {
+        return enumerate(live, liveMe, defSa, decisionSeed, pv, beliefRoot, null);
+    }
+
+    /**
+     * @param labelRoot label dump (null = off): after B is fixed, the seat's ForgeState from this copy goes into
+     *                  {@code labelRoot[0]} (null if encoding fails), and {@link #labelTail} counts the distinct legal
+     *                  candidates past B. Nothing of B depends on it.
+     */
+    List<Cand> enumerate(Game live, Player liveMe, SpellAbility defSa, long decisionSeed, PriorView pv,
+                         JsonObject[] beliefRoot, JsonObject[] labelRoot) {
         final List<Cand> out = new ArrayList<>();
         out.add(new Cand(defSa, true));
         if (defSa != null) {
@@ -1838,6 +2015,30 @@ public final class LookaheadSearch {
                     beliefRoot[0] = forge.bench.StateEncoder.encode(g, me);
                 } catch (RuntimeException e) {
                     beliefRoot[0] = null;
+                }
+            }
+            if (labelRoot != null) {
+                // Label dump: the tail count and the seat's ForgeState, from this copy, after B is fixed.
+                // Never throws: a failure here must not reach the catch below, which would make the decision uncontested.
+                labelTail = -1;
+                try {
+                    final Set<String> tailSeen = new HashSet<>(seen);
+                    int tail = 0;
+                    for (SpellAbility sa : legal) {
+                        if (tailSeen.add(new Cand(sa, false).key())) {
+                            tail++;
+                        }
+                    }
+                    labelTail = tail;
+                } catch (RuntimeException | StackOverflowError e) {
+                    labelTail = -1;
+                }
+                labelRootError = null;
+                try {
+                    labelRoot[0] = forge.bench.StateEncoder.encode(g, me);
+                } catch (RuntimeException | StackOverflowError e) {
+                    labelRoot[0] = null;
+                    labelRootError = String.valueOf(e);
                 }
             }
             if (cfg.targetVariants > 0) {
