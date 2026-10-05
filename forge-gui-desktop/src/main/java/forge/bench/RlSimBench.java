@@ -207,13 +207,12 @@ public final class RlSimBench {
         int w = -1;
         if (!go.isDraw()) {
             final LobbyPlayer wlp = go.getWinningLobbyPlayer();
-            for (int i = 0; i < g.getPlayers().size(); i++) {
-                if (g.getPlayers().get(i).getLobbyPlayer() == wlp) {
-                    w = i;
-                }
-            }
+            w = wlp instanceof LobbyPlayerBridge ? ((LobbyPlayerBridge) wlp).getSeat() : -2;   // the registered seat
         }
-        return "W" + w + " " + go.getWinCondition() + " T" + go.getLastTurnNumber();
+        final Player sp = g.getStartingPlayer();
+        final int s0 = sp != null && sp.getLobbyPlayer() instanceof LobbyPlayerBridge
+                ? ((LobbyPlayerBridge) sp.getLobbyPlayer()).getSeat() : -1;
+        return "W" + w + " " + go.getWinCondition() + " T" + go.getLastTurnNumber() + " S" + s0;
     }
 
     static String sha16(final List<String> parts) {
