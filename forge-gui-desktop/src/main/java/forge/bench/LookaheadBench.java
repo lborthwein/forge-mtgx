@@ -68,7 +68,9 @@ import java.util.concurrent.TimeoutException;
  * (lane belief-sampling-0928), aiFixes0928 (off|shadow|on, lane yardstick-0928: the look-ahead seats' own Forge AI),
  * deadEtb (off|shadow|on, lane misplay-portablehole-1003: no departure to a non-creature permanent whose ETB has no
  * legal target; see LookaheadSearch.Config#deadEtb), zeroX (off|shadow|on, the same lane: no departure to an X spell
- * whose largest payable X is 0 and that Forge's AI would not cast; see LookaheadSearch.Config#zeroX)},
+ * whose largest payable X is 0 and that Forge's AI would not cast; see LookaheadSearch.Config#zeroX), crewNoop
+ * (off|shadow|on, lane misplays-1005: no departure to a Crew activation of a Vehicle that can no longer attack or block
+ * this turn; see LookaheadSearch.Config#crewNoop)},
  * "defaultAiFixes0928": off|shadow|on (the "default"/"sim"/"policy" seats; off unless a predeclared read says otherwise),
  * "policy":{url,checkpointSha256,timeoutMs,cast,land,react,shadow,threshold,maxForcesPerTurn,log,placebo} (lane
  * l2-fork-1001: the "policy" seats, Forge AI plus policy P1 with no search; "placebo":{veto,force,land,react,reactVeto,
@@ -350,6 +352,7 @@ public final class LookaheadBench {
                     c.targetVariants = la.has("targetVariants") ? la.get("targetVariants").getAsInt() : 0;
                     c.deadEtb = AiFixes.Mode.parse(la.has("deadEtb") ? la.get("deadEtb").getAsString() : null);
                     c.zeroX = AiFixes.Mode.parse(la.has("zeroX") ? la.get("zeroX").getAsString() : null);
+                    c.crewNoop = AiFixes.Mode.parse(la.has("crewNoop") ? la.get("crewNoop").getAsString() : null);
                     c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();
                     c.modelUrl = la.has("modelUrl") ? la.get("modelUrl").getAsString() : null;
