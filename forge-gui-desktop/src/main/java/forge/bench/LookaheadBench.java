@@ -74,7 +74,9 @@ import java.util.concurrent.TimeoutException;
  * l2-fork-1001: the "policy" seats, Forge AI plus policy P1 with no search; "placebo":{veto,force,land,react,reactVeto,
  * seed} = the matched placebo arm instead of P1, no service, lane l2-nor1-1002; see {@link PolicyPilot}),
  * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim"|"policy", ...],
- * "aiProfiles":[p0,p1]}]}}.
+ * "aiProfiles":[p0,p1]}]}, "labelDir": dir (lane ei-1004, optional: every searched decision of each look-ahead seat as
+ * one {@code mtgx-ei-label/1} line in {@code <dir>/<id>.ei.jsonl.gz}, and a "labels" entry in the row; see
+ * LookaheadSearch#setLabelSink)}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
  *
@@ -289,6 +291,11 @@ public final class LookaheadBench {
             FModel.getMagicDb().getAllTokens().preloadTokens();
         }
 
+        final Path labelDir = cfg.has("labelDir") ? Path.of(cfg.get("labelDir").getAsString()) : null;
+        if (labelDir != null) {
+            Files.createDirectories(labelDir);
+        }
+
         final Set<String> done = new HashSet<>();
         if (Files.exists(out)) {
             for (String line : Files.readAllLines(out)) {
@@ -442,6 +449,21 @@ public final class LookaheadBench {
                 Files.deleteIfExists(digest.trace);
             }
             game.subscribeToEvents(digest);
+            // Label dump (lane ei-1004): every searched decision of each look-ahead seat, one line each, written to
+            // <labelDir>/<id>.ei.jsonl.gz when the game ends (before its row). Off unless "labelDir" is set.
+            final List<String> labelLines = labelDir == null ? null : java.util.Collections.synchronizedList(new ArrayList<>());
+            if (labelLines != null) {
+                for (int i = 0; i < 2; i++) {
+                    if (searches.get(i) != null) {
+                        final int si = i;
+                        searches.get(i).setLabelSink(o -> {
+                            o.addProperty("game", id);
+                            o.addProperty("seatIdx", si);
+                            labelLines.add(o.toString());
+                        });
+                    }
+                }
+            }
             // Frame probe (lane forge-ai-misplays-0928): a game may start from a mid-game position in Forge's own
             // GameState text (as BenchMain's from-frame), installed at the start of turn 1, and stop once a turn past
             // "maxTurn" begins -- to replay one reported decision under the search's trace ("-Dlookahead.explain=true").
@@ -587,6 +609,10 @@ public final class LookaheadBench {
                 }
                 row.add("policy", po);
             }
+            if (labelLines != null) {
+                // Only when "labelDir" is set: other rows keep their schema. The file is complete before the row exists.
+                row.add("labels", writeLabels(labelDir, id, labelLines));
+            }
             if (fixCounters[0] != null || fixCounters[1] != null) {
                 // Only when a seat's option is not off: off rows keep their schema.
                 final JsonArray fx = new JsonArray();
@@ -607,6 +633,38 @@ public final class LookaheadBench {
             }
         }
         System.exit(0);
+    }
+
+    /**
+     * Label dump (lane ei-1004): write one game's label lines to {@code <dir>/<id>.ei.jsonl.gz} (via a temp file and an
+     * atomic move, so a file that exists is complete) and return the row's {@code labels} entry: file name, lines,
+     * sha256 of the UNcompressed text (the audit compares it), and compressed bytes.
+     */
+    static JsonObject writeLabels(Path dir, String id, List<String> lines) throws Exception {
+        final StringBuilder sb = new StringBuilder();
+        synchronized (lines) {
+            for (String l : lines) {
+                sb.append(l).append('\n');
+            }
+        }
+        final byte[] text = sb.toString().getBytes(StandardCharsets.UTF_8);
+        final MessageDigest md = MessageDigest.getInstance("SHA-256");
+        final StringBuilder hex = new StringBuilder();
+        for (byte b : md.digest(text)) {
+            hex.append(String.format("%02x", b));
+        }
+        final Path f = dir.resolve(id + ".ei.jsonl.gz");
+        final Path tmp = dir.resolve(id + ".ei.jsonl.gz.tmp");
+        try (java.util.zip.GZIPOutputStream gz = new java.util.zip.GZIPOutputStream(Files.newOutputStream(tmp))) {
+            gz.write(text);
+        }
+        Files.move(tmp, f, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        final JsonObject o = new JsonObject();
+        o.addProperty("file", f.getFileName().toString());
+        o.addProperty("lines", lines.size());
+        o.addProperty("sha256", hex.toString());
+        o.addProperty("bytes", Files.size(f));
+        return o;
     }
 
     /** A replay digest: the position fingerprint at every turn start, plus the final one. */
