@@ -534,6 +534,11 @@ public final class LookaheadBench {
                             o.addProperty("turn", e.turnNumber());
                             o.addProperty("active", StateEncoder.playerIndex(game, game.getPhaseHandler().getPlayerTurn()));
                             o.addProperty("seat", i);
+                            final JsonArray mull = new JsonArray();
+                            for (forge.game.player.Player pl : ps) {
+                                mull.add(pl.getStats().getMulliganCount());
+                            }
+                            o.add("mulligans", mull);
                             final JsonObject st = LookaheadSearch.encodeInCopy(game, ps.get(i),
                                     seed * 1_000_003L + 2L * e.turnNumber() + i);
                             o.add("state", st == null ? com.google.gson.JsonNull.INSTANCE : st);
