@@ -133,6 +133,8 @@ public final class RlSimBench {
         /** Environment action cap: after this many non-pass priority actions by one player in one turn, the policy
          *  passes (0 = off). Random play finds free repeatable activations (pumps) that otherwise never end. */
         int maxActionsPerTurn = 0;
+        /** Copies carry pending until-end-of-turn / end-of-combat commands (GameCopier.setCopyUntilEot; default off). */
+        boolean copyEot = false;
         String out = null;
     }
 
@@ -163,6 +165,7 @@ public final class RlSimBench {
         if (o.has("memProbe")) c.memProbe = o.get("memProbe").getAsBoolean();
         if (o.has("out")) c.out = o.get("out").getAsString();
         if (o.has("maxActionsPerTurn")) c.maxActionsPerTurn = o.get("maxActionsPerTurn").getAsInt();
+        if (o.has("copyEot")) c.copyEot = o.get("copyEot").getAsBoolean();
         return c;
     }
 
@@ -714,7 +717,11 @@ public final class RlSimBench {
             final String liveFp = fingerprint(g);
             for (int r = 0; r < cfg.probeReps; r++) {
                 final long a = System.nanoTime();
-                final Game c = inScopes(gseed * 31 + r, () -> new GameCopier(g).makeCopy());
+                final Game c = inScopes(gseed * 31 + r, () -> {
+                    final GameCopier gcp = new GameCopier(g);
+                    gcp.setCopyUntilEot(cfg.copyEot);
+                    return gcp.makeCopy();
+                });
                 ms.add((System.nanoTime() - a) / 1e6);
                 if (c != null && liveFp.equals(fingerprint(c))) {
                     fpSame++;
@@ -771,6 +778,7 @@ public final class RlSimBench {
             try {
                 final long a = System.nanoTime();
                 final GameCopier gc = new GameCopier(g);
+                gc.setCopyUntilEot(cfg.copyEot);
                 c = gc.makeCopy();
                 final Player cp = (Player) gc.find(p);
                 final PhaseHandler lph = g.getPhaseHandler();
