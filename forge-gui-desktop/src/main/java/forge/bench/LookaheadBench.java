@@ -81,7 +81,8 @@ import java.util.concurrent.TimeoutException;
  * "games":[{"id":..,"seed":..,"decks":[a,b],"seats":["lookahead"|"default"|"sim"|"policy", ...],
  * "aiProfiles":[p0,p1]}]}, "labelDir": dir (lane ei-1004, optional: every searched decision of each look-ahead seat as
  * one {@code mtgx-ei-label/1} line in {@code <dir>/<id>.ei.jsonl.gz}, and a "labels" entry in the row; see
- * LookaheadSearch#setLabelSink)}.
+ * LookaheadSearch#setLabelSink), "turnDump": true (lane ei-1004 cycle 2, with labelDir: both seats' ForgeState at every
+ * live turn start, taken in copies, in {@code <dir>/<id>.turns.jsonl.gz} and a "turnDump" entry in the row)}.
  * A seat's look-ahead seed is the game seed mixed with the seat index, so a game is a pure
  * function of its row.
  *
@@ -525,6 +526,35 @@ public final class LookaheadBench {
             // Label dump (lane ei-1004): every searched decision of each look-ahead seat, one line each, written to
             // <labelDir>/<id>.ei.jsonl.gz when the game ends (before its row). Off unless "labelDir" is set.
             final List<String> labelLines = labelDir == null ? null : java.util.Collections.synchronizedList(new ArrayList<>());
+            // EI cycle 2 turn-start dump ("turnDump": true, needs labelDir): both seats' ForgeState at every live turn
+            // start, each taken in a fresh copy (LookaheadSearch.encodeInCopy), to <labelDir>/<id>.turns.jsonl.gz.
+            final List<String> turnLines = labelDir != null && cfg.has("turnDump") && cfg.get("turnDump").getAsBoolean()
+                    ? java.util.Collections.synchronizedList(new ArrayList<>()) : null;
+            if (turnLines != null) {
+                game.subscribeToEvents(new Object() {
+                    @Subscribe
+                    public void on(GameEventTurnBegan e) {
+                        final List<forge.game.player.Player> ps = game.getRegisteredPlayers();
+                        for (int i = 0; i < ps.size(); i++) {
+                            final JsonObject o = new JsonObject();
+                            o.addProperty("schema", "mtgx-ei-turn/1");
+                            o.addProperty("game", id);
+                            o.addProperty("turn", e.turnNumber());
+                            o.addProperty("active", StateEncoder.playerIndex(game, game.getPhaseHandler().getPlayerTurn()));
+                            o.addProperty("seat", i);
+                            final JsonArray mull = new JsonArray();
+                            for (forge.game.player.Player pl : ps) {
+                                mull.add(pl.getStats().getMulliganCount());
+                            }
+                            o.add("mulligans", mull);
+                            final JsonObject st = LookaheadSearch.encodeInCopy(game, ps.get(i),
+                                    seed * 1_000_003L + 2L * e.turnNumber() + i);
+                            o.add("state", st == null ? com.google.gson.JsonNull.INSTANCE : st);
+                            turnLines.add(o.toString());
+                        }
+                    }
+                });
+            }
             if (labelLines != null) {
                 for (int i = 0; i < 2; i++) {
                     if (searches.get(i) != null) {
@@ -686,6 +716,9 @@ public final class LookaheadBench {
                 // Only when "labelDir" is set: other rows keep their schema. The file is complete before the row exists.
                 row.add("labels", writeLabels(labelDir, id, labelLines));
             }
+            if (turnLines != null) {
+                row.add("turnDump", writeLabels(labelDir, id + ".turns", turnLines));
+            }
             if (fixCounters[0] != null || fixCounters[1] != null) {
                 // Only when a seat's option is not off: off rows keep their schema.
                 final JsonArray fx = new JsonArray();
@@ -726,8 +759,9 @@ public final class LookaheadBench {
         for (byte b : md.digest(text)) {
             hex.append(String.format("%02x", b));
         }
-        final Path f = dir.resolve(id + ".ei.jsonl.gz");
-        final Path tmp = dir.resolve(id + ".ei.jsonl.gz.tmp");
+        final String base = id.endsWith(".turns") ? id + ".jsonl.gz" : id + ".ei.jsonl.gz";
+        final Path f = dir.resolve(base);
+        final Path tmp = dir.resolve(base + ".tmp");
         try (java.util.zip.GZIPOutputStream gz = new java.util.zip.GZIPOutputStream(Files.newOutputStream(tmp))) {
             gz.write(text);
         }
