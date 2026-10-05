@@ -161,6 +161,16 @@ public final class LookaheadSearch {
          * searched decision, the live commands pending and how many would be carried.
          */
         public AiFixes.Mode copyEot = AiFixes.Mode.OFF;
+        /**
+         * Median departure gate (lane misplays-1005; off|shadow|on, OFF by default: decisions unchanged). A candidate may
+         * replace Forge's answer only if the LOWER MEDIAN of its paired differences to Forge's answer over the K worlds is
+         * above zero, i.e. it is strictly better in more than half the worlds -- on top of departZ. The departZ test assumes roughly
+         * normal differences; a no-op or near-no-op whose play-outs are mostly identical to Forge's line, with a few worlds
+         * where the opponent seat's Forge AI took a different path, gives zeros plus a few large values and passes it
+         * (session 486d4d1b: Manamorphose [-10,575,-10,136,483,-10,-10,-10], Crew [249,0,0,249,0,0,0,178]). A statistical
+         * rule over the same play-outs, not a game rule. SHADOW decides as OFF and counts the decisions ON would change.
+         */
+        public AiFixes.Mode departMedian = AiFixes.Mode.OFF;
         public int maxDeparturesPerTurn = 12;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
@@ -317,6 +327,9 @@ public final class LookaheadSearch {
             if (copyEot != AiFixes.Mode.OFF) {
                 o.addProperty("copyEot", copyEot.key());
             }
+            if (departMedian != AiFixes.Mode.OFF) {
+                o.addProperty("departMedian", departMedian.key());
+            }
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
@@ -396,6 +409,9 @@ public final class LookaheadSearch {
         /** copyEot (null = off): searched decisions with live until commands pending, those commands, how many remap. */
         public String copyEotMode;
         public long copyEotDecisions, copyEotCommands, copyEotRemappable, copyEotDepartures;
+        /** departMedian (null = off): candidates the median gate set aside; decisions where it changed (ON) or would change (SHADOW) the choice. */
+        public String departMedianMode;
+        public long departMedianGated, departMedianChanged;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
@@ -528,6 +544,13 @@ public final class LookaheadSearch {
                 d.addProperty("remappable", copyEotRemappable);
                 d.addProperty("departures", copyEotDepartures);
                 o.add("copyEot", d);
+            }
+            if (departMedianMode != null) {
+                JsonObject d = new JsonObject();
+                d.addProperty("mode", departMedianMode);
+                d.addProperty("gated", departMedianGated);
+                d.addProperty("changed", departMedianChanged);
+                o.add("departMedian", d);
             }
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
@@ -858,6 +881,9 @@ public final class LookaheadSearch {
         if (cfg.copyEot != AiFixes.Mode.OFF) {
             stats.copyEotMode = cfg.copyEot.key();
         }
+        if (cfg.departMedian != AiFixes.Mode.OFF) {
+            stats.departMedianMode = cfg.departMedian.key();
+        }
         if (cfg.priorOn()) {
             if (cfg.priorExtra < 1) {
                 throw new IllegalStateException("priorShadow needs priorExtra >= 1 (how many extras would be added)");
@@ -1099,7 +1125,17 @@ public final class LookaheadSearch {
             }
         }
         // Forge's own answer is candidate 0; if it could not be played out, or the budget ran out, never depart.
-        final int best = overBudget ? 0 : argmax(values, ok, n, k);
+        final int plainBest = overBudget ? 0 : argmax(values, ok, n, k);
+        int best = plainBest;
+        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget) {
+            final int medBest = argmaxMedian(values, ok, n, k);
+            if (medBest != plainBest) {
+                stats.departMedianChanged++;
+                if (cfg.departMedian == AiFixes.Mode.ON) {
+                    best = medBest;
+                }
+            }
+        }
         if (cfg.deadEtb == AiFixes.Mode.SHADOW && best != 0 && deadEtbKeys.contains(cands.get(best).key())) {
             stats.deadEtbShadowBest++;
         }
@@ -1706,7 +1742,7 @@ public final class LookaheadSearch {
     }
 
     /** The search's choice from its values: the argmax, ties and a failed Forge answer to Forge's answer (index 0). */
-    private int argmax(double[][] values, boolean[] ok, int n, int k) {
+    int argmax(double[][] values, boolean[] ok, int n, int k) {
         if (!ok[0]) {
             return 0;
         }
@@ -1737,6 +1773,52 @@ public final class LookaheadSearch {
      * estimate, so only a strictly positive difference counts; identical differences in every world (zero spread) count
      * when positive.
      */
+    /**
+     * As {@link #argmax}, with the median gate: a candidate is eligible only if its lower median paired difference to
+     * Forge's answer is above zero, i.e. it is strictly better in more than half the worlds (and it passes departZ). Counts the candidates the gate alone sets aside.
+     */
+    int argmaxMedian(double[][] values, boolean[] ok, int n, int k) {
+        if (!ok[0]) {
+            return 0;
+        }
+        int best = 0;
+        final double[] ev = new double[n];
+        for (int c = 0; c < n; c++) {
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += values[c][w];
+            }
+            ev[c] = ok[c] ? s / k : Double.NEGATIVE_INFINITY;
+        }
+        for (int c = 1; c < n; c++) {
+            if (cfg.departZ > 0 && ok[c] && !confident(values, c, k, cfg.departZ)) {
+                continue;
+            }
+            if (ok[c] && !(medianDiff(values, c, k) > 0)) {
+                stats.departMedianGated++;
+                continue;
+            }
+            if (ev[c] > ev[best] + (best == 0 ? cfg.margin : 0)) {
+                best = c;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * The lower median over worlds of candidate c's paired difference to candidate 0 (Forge's answer): the
+     * ceil(k/2)-th smallest. It is above zero exactly when the candidate is strictly better in more than half the worlds
+     * (with k = 8: in at least 5), so ties at zero -- worlds where the play-outs did not differ -- never count for it.
+     */
+    static double medianDiff(double[][] values, int c, int k) {
+        final double[] d = new double[k];
+        for (int w = 0; w < k; w++) {
+            d[w] = values[c][w] - values[0][w];
+        }
+        Arrays.sort(d);
+        return d[(k - 1) / 2];
+    }
+
     static boolean confident(double[][] values, int c, int k, double z) {
         double sum = 0;
         for (int w = 0; w < k; w++) {
