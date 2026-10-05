@@ -47,7 +47,11 @@ public class LookaheadDepartMedianTest {
     public void medianDiff() {
         AssertJUnit.assertEquals(-10.0, LookaheadSearch.medianDiff(two(-10, 575, -10, 136, 483, -10, -10, -10), 1, 8), 1e-9);
         AssertJUnit.assertEquals(0.0, LookaheadSearch.medianDiff(two(249, 0, 0, 249, 0, 0, 0, 178), 1, 8), 1e-9);
-        AssertJUnit.assertEquals(96.5, LookaheadSearch.medianDiff(two(101, 92, 101, 2, 234, 88, 144, -1), 1, 8), 1e-9);
+        AssertJUnit.assertEquals(92.0, LookaheadSearch.medianDiff(two(101, 92, 101, 2, 234, 88, 144, -1), 1, 8), 1e-9);
+        // ties at zero never count for the departure: 4 of 8 better is not more than half
+        AssertJUnit.assertEquals(0.0, LookaheadSearch.medianDiff(two(0, 117, 0, 4, 428, 0, -10, 478), 1, 8), 1e-9);
+        AssertJUnit.assertEquals(4.0, LookaheadSearch.medianDiff(two(0, 117, 5, 4, 428, 0, -10, 478), 1, 8), 1e-9);
+        AssertJUnit.assertEquals(3.0, LookaheadSearch.medianDiff(two(-1, 3, 7), 1, 3), 1e-9);
         AssertJUnit.assertEquals(5.0, LookaheadSearch.medianDiff(two(5), 1, 1), 1e-9);
     }
 
@@ -59,6 +63,8 @@ public class LookaheadDepartMedianTest {
             double[][] mana = two(-10, 575, -10, 136, 483, -10, -10, -10);
             AssertJUnit.assertEquals("departZ alone departs (z ~ 1.76)", 1, s.argmax(mana, ok, 2, 8));
             AssertJUnit.assertEquals("the median gate keeps Forge's pass", 0, s.argmaxMedian(mana, ok, 2, 8));
+            double[][] mana62 = two(0, 117, 0, 4, 428, 0, -10, 478);
+            AssertJUnit.assertEquals("copyEot on, d62: 4 of 8 worlds better is not a majority", 0, s.argmaxMedian(mana62, ok, 2, 8));
             double[][] crew = two(249, 0, 0, 249, 0, 0, 0, 178);
             AssertJUnit.assertEquals(1, s.argmax(crew, ok, 2, 8));
             AssertJUnit.assertEquals(0, s.argmaxMedian(crew, ok, 2, 8));
@@ -66,7 +72,7 @@ public class LookaheadDepartMedianTest {
             AssertJUnit.assertEquals("most worlds agree: still departs", 1, s.argmaxMedian(snt, ok, 2, 8));
             double[][] flat = two(75, 75, 75, 75, 80, 75, 75, 75);
             AssertJUnit.assertEquals(1, s.argmaxMedian(flat, ok, 2, 8));
-            AssertJUnit.assertEquals(2, s.getStats().departMedianGated);
+            AssertJUnit.assertEquals(3, s.getStats().departMedianGated);
         } finally {
             s.shutdown();
         }

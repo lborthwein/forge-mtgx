@@ -163,8 +163,8 @@ public final class LookaheadSearch {
         public AiFixes.Mode copyEot = AiFixes.Mode.OFF;
         /**
          * Median departure gate (lane misplays-1005; off|shadow|on, OFF by default: decisions unchanged). A candidate may
-         * replace Forge's answer only if the MEDIAN of its paired differences to Forge's answer over the K worlds is above
-         * zero, i.e. it is better in more than half the worlds -- on top of departZ. The departZ test assumes roughly
+         * replace Forge's answer only if the LOWER MEDIAN of its paired differences to Forge's answer over the K worlds is
+         * above zero, i.e. it is strictly better in more than half the worlds -- on top of departZ. The departZ test assumes roughly
          * normal differences; a no-op or near-no-op whose play-outs are mostly identical to Forge's line, with a few worlds
          * where the opponent seat's Forge AI took a different path, gives zeros plus a few large values and passes it
          * (session 486d4d1b: Manamorphose [-10,575,-10,136,483,-10,-10,-10], Crew [249,0,0,249,0,0,0,178]). A statistical
@@ -1774,8 +1774,8 @@ public final class LookaheadSearch {
      * when positive.
      */
     /**
-     * As {@link #argmax}, with the median gate: a candidate is eligible only if its median paired difference to Forge's
-     * answer is above zero (and it passes departZ). Counts the candidates the gate alone sets aside.
+     * As {@link #argmax}, with the median gate: a candidate is eligible only if its lower median paired difference to
+     * Forge's answer is above zero, i.e. it is strictly better in more than half the worlds (and it passes departZ). Counts the candidates the gate alone sets aside.
      */
     int argmaxMedian(double[][] values, boolean[] ok, int n, int k) {
         if (!ok[0]) {
@@ -1805,14 +1805,18 @@ public final class LookaheadSearch {
         return best;
     }
 
-    /** The median over worlds of candidate c's paired difference to candidate 0 (Forge's answer). */
+    /**
+     * The lower median over worlds of candidate c's paired difference to candidate 0 (Forge's answer): the
+     * ceil(k/2)-th smallest. It is above zero exactly when the candidate is strictly better in more than half the worlds
+     * (with k = 8: in at least 5), so ties at zero -- worlds where the play-outs did not differ -- never count for it.
+     */
     static double medianDiff(double[][] values, int c, int k) {
         final double[] d = new double[k];
         for (int w = 0; w < k; w++) {
             d[w] = values[c][w] - values[0][w];
         }
         Arrays.sort(d);
-        return k % 2 == 1 ? d[k / 2] : (d[k / 2 - 1] + d[k / 2]) / 2.0;
+        return d[(k - 1) / 2];
     }
 
     static boolean confident(double[][] values, int c, int k, double z) {
