@@ -713,7 +713,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             final String kind = kindFor(input);
             final LinkedHashMap<String, ControlBinding> bindings = new LinkedHashMap<>();
             controlEnumerations.incrementAndGet();
-            final JsonArray controls = buildStatefulControls(input, kind, bindings);
+            final List<PreviewJob> previews = input instanceof InputPassPriority && InteractivePreview.enabled()
+                    ? new ArrayList<>() : null;
+            final JsonArray controls = buildStatefulControls(input, kind, bindings, previews);
             if (bindings.values().stream().allMatch(binding -> "concede".equals(binding.type))) {
                 throw unsupported("publishCurrentInput",
                         "Forge input " + input.getClass().getName() + " exposed no human controls",
@@ -728,6 +730,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             lastInputFingerprint = fingerprint;
 
             final String requestId = nextRequestId();
+            // After the fingerprint: the preview never decides whether a request is published.
+            if (previews != null && !previews.isEmpty()) {
+                attachPreviews(requestId, previews);
+            }
             final SpellAbility targeting = input instanceof InputSelectTargets ? controller.getTargetingAbility() : null;
             final JsonObject body;
             requestContext.set(targeting == null ? null : targetContext(targeting, controlTargets(controls)));
@@ -752,6 +758,108 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             fail("engine", "could not publish Forge input: " + safeThrowable(failure),
                     null, "publishCurrentInput", null, failure);
         }
+    }
+
+    /** A priority card control whose preview is computed once the request is known to be published. */
+    private record PreviewJob(Card card, JsonObject value, List<SpellAbility> possible,
+                              List<SpellAbility> unrestricted, List<SpellAbility> affordable) {
+    }
+
+    /**
+     * ACTION PREVIEW ({@link InteractivePreview}): add {@code value.preview} to each priority card
+     * control, hand first, inside the per-request budget. A read only, in a detached id scope, on
+     * this thread under {@link #engineGate} with {@link #readOnlyQuery} set (the caller's).
+     */
+    private void attachPreviews(final String requestId, final List<PreviewJob> jobs) {
+        final InteractivePreview.Pass pass = new InteractivePreview.Pass(InteractivePreview.budgetNanos());
+        final List<PreviewJob> ordered = new ArrayList<>(jobs);
+        // Hand first, then cards castable from other zones, then permanents' abilities.
+        ordered.sort(java.util.Comparator.comparingInt(job -> job.card().isInZone(ZoneType.Hand) ? 0
+                : job.card().isInZone(ZoneType.Battlefield) ? 2 : 1));
+        forge.util.IdScope.detached(() -> {
+            final InteractivePreview.Seat seat = previewSeat();
+            for (PreviewJob job : ordered) {
+                final JsonObject preview;
+                if (pass.expired()) {
+                    preview = InteractivePreview.unreached();
+                } else if (!InteractiveState.mayReceiveIdentity(job.card().getView(), human.getView())) {
+                    continue;
+                } else {
+                    // The "Choose an ability" modal lists every ability and offers the affordable
+                    // ones (canChooseOfferedAbility); a cast restriction is refused after the move.
+                    preview = InteractivePreview.forCard(pass, human, job.card(), job.possible(),
+                            ability -> job.affordable().contains(ability)
+                                    || (!job.unrestricted().contains(ability)
+                                    && forge.player.HumanManaAffordability.mayAfford(human, ability)),
+                            seat);
+                    markRestricted(preview, job);
+                }
+                job.value().add("preview", preview);
+            }
+            return null;
+        });
+        if (Boolean.getBoolean("forge.interactive.previewLog")) {
+            System.err.println("[preview] {\"requestId\":\"" + requestId + "\",\"cards\":" + pass.cards
+                    + ",\"controls\":" + jobs.size() + ",\"complete\":" + pass.complete + ",\"partial\":"
+                    + pass.partial + ",\"us\":" + pass.elapsedMicros() + "}");
+        }
+    }
+
+    /** An ability a cast restriction (CantBeCast / CantBeActivated) would refuse after the move. */
+    private static void markRestricted(final JsonObject preview, final PreviewJob job) {
+        if (!preview.has("abilities")) {
+            return;
+        }
+        for (com.google.gson.JsonElement element : preview.getAsJsonArray("abilities")) {
+            final JsonObject ability = element.getAsJsonObject();
+            final int i = ability.get("i").getAsInt();
+            if (i < job.possible().size() && !job.unrestricted().contains(job.possible().get(i))
+                    && !ability.has("refusal")) {
+                ability.addProperty("refusal", "restricted");
+            }
+        }
+    }
+
+    /** This seat's view of the preview's text and objects, with the card labels read once per request. */
+    private InteractivePreview.Seat previewSeat() {
+        final List<InteractiveText.CardLabel> labels = new ArrayList<>();
+        game.forEachCardInGame(card -> {
+            labels.add(new InteractiveText.CardLabel(card.getId(), card.getName(),
+                    InteractiveState.mayReceiveIdentity(card.getView(), human.getView())));
+            return true;
+        });
+        return new InteractivePreview.Seat() {
+            @Override
+            public String abilityLabel(final SpellAbility ability) {
+                final String described = describeAbility(ability, text -> sanitizeWith(text, labels, ability));
+                return described != null ? described
+                        : sanitizeWith(Objects.requireNonNullElse(ability.getDescription(), "Ability"), labels, ability);
+            }
+
+            @Override
+            public String text(final String text) {
+                return InteractiveTargetText.render(InteractiveText.sanitize(text, labels));
+            }
+
+            @Override
+            public boolean mayList(final Card card) {
+                return card.getView().canBeShownTo(human.getView());
+            }
+
+            @Override
+            public int seatOf(final Player player) {
+                return InteractiveGuiGame.this.seatOf(player);
+            }
+        };
+    }
+
+    private String sanitizeWith(final String text, final List<InteractiveText.CardLabel> labels,
+                                final SpellAbility subject) {
+        final Card host = subject.getHostCard();
+        final List<String> names = host != null
+                && InteractiveState.mayReceiveIdentity(host.getView(), human.getView())
+                ? List.of(host.getName()) : List.of();
+        return InteractiveTargetText.render(InteractiveText.sanitize(text, labels, names));
     }
 
     /**
@@ -784,7 +892,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     private JsonArray buildStatefulControls(final Input input, final String kind,
-                                            final Map<String, ControlBinding> bindings) {
+                                            final Map<String, ControlBinding> bindings,
+                                            final List<PreviewJob> previews) {
         final JsonArray controls = new JsonArray();
         if (input instanceof InputBlock) {
             addBlockControls(controls, bindings);
@@ -844,6 +953,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 // A land with a non-mana ability must still hold priority.
                 value.addProperty("manaOnly", !affordableAbilities.isEmpty()
                         && affordableAbilities.stream().allMatch(ability -> ability.isManaAbility()));
+                if (previews != null) {
+                    previews.add(new PreviewJob(card, value, possibleAbilities, priorityAbilities, affordableAbilities));
+                }
             }
             control.add("value", value);
             controls.add(control);
@@ -3175,34 +3287,43 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         final var offered = controller == null ? null : controller.getBrowserAbility(ability);
         if (offered != null) {
-            final StringBuilder description = new StringBuilder();
-            for (var node = offered; node != null; node = node.getSubAbility()) {
-                final Card source = node.getHostCard();
-                if (source == null || !InteractiveState.mayReceiveIdentity(source.getView(), human.getView())) {
-                    return "Ability of a hidden card";
-                }
-                // Sanitize dynamic literal references first. Only then fill the
-                // engine's self-reference placeholders from a verified public
-                // source. A hidden duplicate name must not erase CARDNAME, and
-                // knowing one public copy never authorizes other hidden copies.
-                final String name = node.getHostName(node).getTranslatedName();
-                String part = sanitizeText(node.getDescription())
-                        .replace("CARDNAME", name)
-                        .replace("NICKNAME", forge.util.Lang.getInstance().getNickName(name));
-                if (part.contains("ORIGINALHOST")) {
-                    final Card original = node.getOriginalHost();
-                    part = part.replace("ORIGINALHOST", original != null
-                            && InteractiveState.mayReceiveIdentity(original.getView(), human.getView())
-                            ? original.getDisplayName() : "a hidden card");
-                }
-                if (!part.isBlank()) {
-                    if (description.length() > 0) description.append(' ');
-                    description.append(part);
-                }
-            }
-            if (description.length() > 0) return description.toString();
+            final String described = describeAbility(offered, this::sanitizeText);
+            if (described != null) return described;
         }
         return sanitizeText(Objects.requireNonNullElse(ability.getDescription(), "Ability"));
+    }
+
+    /**
+     * The words of an offered ability and its sub-abilities, as the "Choose an ability" modal shows
+     * them; null when they come out empty. Shared by the modal and the action preview.
+     */
+    private String describeAbility(final SpellAbility offered, final Function<String, String> sanitize) {
+        final StringBuilder description = new StringBuilder();
+        for (var node = offered; node != null; node = node.getSubAbility()) {
+            final Card source = node.getHostCard();
+            if (source == null || !InteractiveState.mayReceiveIdentity(source.getView(), human.getView())) {
+                return "Ability of a hidden card";
+            }
+            // Sanitize dynamic literal references first. Only then fill the
+            // engine's self-reference placeholders from a verified public
+            // source. A hidden duplicate name must not erase CARDNAME, and
+            // knowing one public copy never authorizes other hidden copies.
+            final String name = node.getHostName(node).getTranslatedName();
+            String part = sanitize.apply(node.getDescription())
+                    .replace("CARDNAME", name)
+                    .replace("NICKNAME", forge.util.Lang.getInstance().getNickName(name));
+            if (part.contains("ORIGINALHOST")) {
+                final Card original = node.getOriginalHost();
+                part = part.replace("ORIGINALHOST", original != null
+                        && InteractiveState.mayReceiveIdentity(original.getView(), human.getView())
+                        ? original.getDisplayName() : "a hidden card");
+            }
+            if (!part.isBlank()) {
+                if (description.length() > 0) description.append(' ');
+                description.append(part);
+            }
+        }
+        return description.length() > 0 ? description.toString() : null;
     }
 
     private <T> String safeObjectLabel(final T value,
