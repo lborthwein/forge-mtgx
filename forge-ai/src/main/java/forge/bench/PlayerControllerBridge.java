@@ -230,6 +230,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         final int[] ids = IdSnap.take();
         final Object cache = forge.ai.AiCache.captureScope();
         final List<Object[]> memory = memorySnapshot(getGame());
+        final List<Object[]> express = expressSnapshot(getGame());
         forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
         forge.ai.AiCache.openScope();
         try {
@@ -239,6 +240,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             forge.util.MyRandom.setThreadRandom(live);
             IdSnap.restore(ids);
             memoryRestore(memory);
+            expressRestore(express);
         }
     }
 
@@ -261,6 +263,33 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             }
         }
         return out;
+    }
+
+    /**
+     * The colour choice every mana ability of every card in the game carries ({@code AbilityManaPart}'s express
+     * choice). Forge's test payment (canPayCost) sets it on combo sources it considers and clears it only on the ones
+     * it ends up using; the auto-tapper reads it later (lane rl-r0-b5-1006: 1 recorded game in 200 tapped a different
+     * source).
+     */
+    static List<Object[]> expressSnapshot(final Game game) {
+        final List<Object[]> out = new ArrayList<>();
+        for (Card c : game.getCardsInGame()) {
+            for (SpellAbility sa : c.getAllSpellAbilities()) {
+                for (SpellAbility cur = sa; cur != null; cur = cur.getSubAbility()) {
+                    final forge.game.spellability.AbilityManaPart mp = cur.getManaPart();
+                    if (mp != null) {
+                        out.add(new Object[] {mp, mp.getExpressChoice()});
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    static void expressRestore(final List<Object[]> snap) {
+        for (Object[] e : snap) {
+            ((forge.game.spellability.AbilityManaPart) e[0]).setExpressChoice((String) e[1]);
+        }
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
