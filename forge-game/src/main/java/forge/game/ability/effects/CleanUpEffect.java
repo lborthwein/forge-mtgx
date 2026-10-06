@@ -34,7 +34,14 @@ public class CleanUpEffect extends SpellAbilityEffect {
 
         if (sa.hasParam("ClearRemembered")) {
             source.clearRemembered();
-            game.getCardState(source).clearRemembered();
+            final Card current = game.getCardState(source);
+            // mtgx: an older object's ability (the last known information of a card that left the battlefield) must
+            // not clear what a NEWER battlefield object of the same card remembers (CR 400.7). A Spell Queller blinked
+            // by Displacer Kitten: the new object's enter trigger exiles a spell first, then the old object's leaves
+            // trigger cleans up, and used to erase the new object's link to that card, so it stayed exiled for good.
+            if (current == source || !current.isInPlay() || current.equalsWithGameTimestamp(source)) {
+                current.clearRemembered();
+            }
         }
         if (sa.hasParam("ForgetDefined")) {
             for (final GameEntity ge : AbilityUtils.getDefinedEntities(source, sa.getParam("ForgetDefined"), sa)) {
