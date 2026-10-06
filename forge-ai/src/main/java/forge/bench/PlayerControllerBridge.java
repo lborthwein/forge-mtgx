@@ -151,12 +151,15 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
     /*
      * RL record mode (lane rl-r0-b1-1005): an observer that delegates every ask must leave the game exactly as Forge
-     * alone would play it. Building the priority menu is not a pure read: ComputerUtilCost.canPayCost draws from the
-     * game's random stream (the "try not to lose a planeswalker" coin flip) and copies abilities, which takes ids.
-     * Measured: with those draws a delegate-everything recorder matched RlSimBench policy=forge on 4 of 24 games;
-     * skipping only canPayCost restored the call trace on 12 of 12. So when the local answerer says it only
-     * observes, the menu is built on a scratch random stream and the IdScope counters are put back afterwards. With
-     * no local answerer, or one that answers (an RL seat, whose chosen menu entry is played), this is body.get().
+     * alone would play it. Building the priority menu is not a pure read. ComputerUtilCost.canPayCost (Forge's AI
+     * affordability check, run on every menu entry) draws from the game's random stream (the "try not to lose a
+     * planeswalker" coin flip, ComputerUtilMana's reserve-mana roll), clears and fills Forge AI's card memory
+     * (AiCardMemory: held mana sources, unpaid costs), and copies abilities, which takes ids. Measured on 24 TRAIN
+     * games: a delegate-everything recorder matched RlSimBench policy=forge on 4 of 24; skipping only canPayCost gave
+     * identical call traces. So when the local answerer says it only observes, the menu is built on a scratch random
+     * stream and a scratch AI cache scope, and both seats' AI card memory and the IdScope counters are put back
+     * afterwards. With no local answerer, or one that answers (an RL seat, whose chosen entry is played), this is
+     * body.get() and nothing else.
      */
     private <T> T observing(final java.util.function.Supplier<T> body) {
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
@@ -165,12 +168,47 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final java.util.Random live = forge.util.MyRandom.getThreadRandom();
         final int[] ids = IdSnap.take();
+        final Object cache = forge.ai.AiCache.captureScope();
+        final List<Object[]> memory = memorySnapshot(getGame());
         forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
+        forge.ai.AiCache.openScope();
         try {
             return body.get();
         } finally {
+            forge.ai.AiCache.installScope(cache);
             forge.util.MyRandom.setThreadRandom(live);
             IdSnap.restore(ids);
+            memoryRestore(memory);
+        }
+    }
+
+    /** Every AI card-memory set of every AI-controlled player: {live set, copy of its contents}. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static List<Object[]> memorySnapshot(final Game game) {
+        final List<Object[]> out = new ArrayList<>();
+        for (Player p : game.getPlayers()) {
+            if (!p.getController().isAI()) {
+                continue;
+            }
+            final List<forge.ai.AiCardMemory.MemoryType> types = new ArrayList<>();
+            types.addAll(Arrays.asList(forge.ai.AiCardMemory.MemorySet.values()));
+            types.addAll(Arrays.asList(forge.ai.AiCardMemory.MemorySetMana.values()));
+            for (forge.ai.AiCardMemory.MemoryType t : types) {
+                final Set live = forge.ai.AiCardMemory.getMemorySet(p, t);
+                if (live != null) {
+                    out.add(new Object[] {live, new ArrayList<Object>(live)});
+                }
+            }
+        }
+        return out;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static void memoryRestore(final List<Object[]> snap) {
+        for (Object[] e : snap) {
+            final Set live = (Set) e[0];
+            live.clear();
+            live.addAll((List) e[1]);
         }
     }
 
