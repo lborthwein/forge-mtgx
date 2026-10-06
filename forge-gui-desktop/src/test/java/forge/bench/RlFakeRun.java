@@ -76,9 +76,10 @@ public final class RlFakeRun {
                 decks.add(p[s]);
                 shas.add(CardIndex.sha256(Files.readAllBytes(Paths.get(p[s]))));
             }
+            final String[] pairCtl = CYCLE.isEmpty() ? ctl : CYCLE.get(i % CYCLE.size());
             final boolean swap = alternate && (i % 2 == 1);
-            c.add(ctl[swap ? 1 : 0]);
-            c.add(ctl[swap ? 0 : 1]);
+            c.add(pairCtl[swap ? 1 : 0]);
+            c.add(pairCtl[swap ? 0 : 1]);
             g.add("decks", decks);
             g.add("deck_sha", shas);
             g.add("controllers", c);
@@ -147,6 +148,9 @@ public final class RlFakeRun {
         }
     }
 
+    /** Optional per-game controller pairs, cycled (multi-arm eval in one JVM): spec key controllersCycle. */
+    static final List<String[]> CYCLE = new ArrayList<>();
+
     public static void main(final String[] args) throws Exception {
         final JsonObject spec = JsonParser.parseString(new String(Files.readAllBytes(Paths.get(args[0])),
                 StandardCharsets.UTF_8)).getAsJsonObject();
@@ -155,6 +159,12 @@ public final class RlFakeRun {
             cfg.cardIndex = cfg.rlRoot + "/data/card-index.tsv";
         }
         final Path bank = Paths.get(spec.get("bank").getAsString());
+        if (spec.has("controllersCycle")) {
+            for (JsonElement e : spec.getAsJsonArray("controllersCycle")) {
+                final JsonArray a = e.getAsJsonArray();
+                CYCLE.add(new String[] {a.get(0).getAsString(), a.get(1).getAsString()});
+            }
+        }
         final JsonArray cj = spec.getAsJsonArray("controllers");
         final String[] ctl = {cj.get(0).getAsString(), cj.get(1).getAsString()};
         final int games = spec.get("games").getAsInt();
