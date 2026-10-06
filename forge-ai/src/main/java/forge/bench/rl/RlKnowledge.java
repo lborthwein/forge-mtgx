@@ -47,7 +47,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     /** One stack event (zones 20/21). */
     public static final class StackEvent {
         public final String name;
-        /** Forge's full card name (C3: a face resolves through it). */
+        /** Forge's full card name (C3: a face resolves through it); for an emblem, its walker's (C4'). */
         public final String fullName;
         public final boolean faceDown;
         public final boolean ability;
@@ -132,6 +132,10 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     private void see(final int s, final Card c) {
         if (s < 0 || s > 1 || c == null || c.isFaceDown()) {
             return;
+        }
+        final forge.card.GamePieceType gp = c.getGamePieceType();
+        if (gp == forge.card.GamePieceType.EFFECT || gp == forge.card.GamePieceType.DUNGEON) {
+            return; // emblems, designations, dungeons and Forge's effect objects are not nameable cards
         }
         final Player owner = c.getOwner();
         if (owner != null && seatOf(owner) != s && !c.isToken()) {
@@ -268,12 +272,15 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     public void cast(final GameEventSpellAbilityCast ev) {
         try {
             final CardView hv = ev.sa() == null ? null : ev.sa().getHostCard();
-            final Card host = hv == null ? null : game.findByView(hv);
+            // C4': an "X's Effect" host stands for its source card; an emblem keeps its name with its walker's
+            final Card host = RlFeaturizer.shownHost(hv == null ? null : game.findByView(hv));
             final Player act = ev.si() == null ? null : playerOf(ev.si().getActivatingPlayer());
             final boolean faceDown = host == null || host.isFaceDown();
-            final StackEvent e = new StackEvent(host == null ? null : host.getName(),
-                    host == null ? null : RlFeaturizer.fullName(host), faceDown,
-                    ev.sa() != null && !ev.sa().isSpell(), seatOf(act));
+            final String name = host == null ? null : host.getName();
+            final String full = host == null ? null : RlFeaturizer.isEmblemName(name)
+                    ? RlFeaturizer.emblemWalkerFullName(host) : RlFeaturizer.fullName(host);
+            final StackEvent e = new StackEvent(name, full, faceDown, ev.sa() != null && !ev.sa().isSpell(),
+                    seatOf(act));
             tail.addFirst(e);
             while (tail.size() > TAIL) {
                 tail.removeLast();

@@ -92,6 +92,38 @@ public final class RlFakeRun {
     /** Tokens per zone per frame (p50 / p99), and the frames whose token list was truncated (obs census). */
     static final class ZoneCensus {
         long frames, truncated, tokens;
+        // R-TRUNC (actor side, pre-cap): frames truncated, by what they dropped; tokens dropped per zone
+        long obsFrames, truncEventOnly, truncCardOrZone;
+        final long[] droppedByZone = new long[forge.bench.rl.RlSchema.ZONES.size()];
+        // C4': per game, the command-zone objects that stayed <unk> (designations), by name -> games
+        final java.util.Map<String, java.util.Set<Long>> commandUnknownGames = new java.util.TreeMap<>();
+        final java.util.Set<Long> games = new java.util.HashSet<>();
+
+        synchronized void observe(final RlWire.Decide f, final forge.bench.rl.RlFeaturizer.Obs o) {
+            if (o == null) {
+                return;
+            }
+            obsFrames++;
+            games.add(f.gameUid);
+            if (o.truncated) {
+                boolean card = false;
+                for (int z = 0; z < o.droppedByZone.length; z++) {
+                    droppedByZone[z] += o.droppedByZone[z];
+                    if (o.droppedByZone[z] > 0 && z != forge.bench.rl.RlSchema.Z_U_EVENT
+                            && z != forge.bench.rl.RlSchema.Z_O_EVENT) {
+                        card = true;
+                    }
+                }
+                if (card) {
+                    truncCardOrZone++;
+                } else {
+                    truncEventOnly++;
+                }
+            }
+            for (String n : o.commandUnknown) {
+                commandUnknownGames.computeIfAbsent(n, k -> new java.util.HashSet<>()).add(f.gameUid);
+            }
+        }
         final java.util.Map<Integer, List<Integer>> perZone = new java.util.TreeMap<>();
         final List<Integer> perFrame = new ArrayList<>();
 
@@ -144,6 +176,28 @@ public final class RlFakeRun {
                 z.add(forge.bench.rl.RlSchema.ZONES.get(e.getKey()), zz);
             }
             o.add("zones", z);
+            if (obsFrames > 0) {
+                final JsonObject t = new JsonObject();
+                t.addProperty("frames", obsFrames);
+                t.addProperty("truncated_event_tail_only", truncEventOnly);
+                t.addProperty("truncated_card_or_zone", truncCardOrZone);
+                t.addProperty("event_only_rate", (double) truncEventOnly / obsFrames);
+                t.addProperty("card_or_zone_rate", (double) truncCardOrZone / obsFrames);
+                final JsonObject d = new JsonObject();
+                for (int zi = 0; zi < droppedByZone.length; zi++) {
+                    if (droppedByZone[zi] > 0) {
+                        d.addProperty(forge.bench.rl.RlSchema.ZONES.get(zi), droppedByZone[zi]);
+                    }
+                }
+                t.add("dropped_tokens_by_zone", d);
+                o.add("truncation_by_class", t);
+                final JsonObject cu = new JsonObject();
+                cu.addProperty("games", games.size());
+                for (java.util.Map.Entry<String, java.util.Set<Long>> e : commandUnknownGames.entrySet()) {
+                    cu.addProperty(e.getKey(), e.getValue().size());
+                }
+                o.add("command_unknown_games", cu);
+            }
             return o;
         }
     }
@@ -216,6 +270,13 @@ public final class RlFakeRun {
             final ZoneCensus zc = new ZoneCensus();
             if (spec.has("zoneStats") && spec.get("zoneStats").getAsBoolean()) {
                 srv.capture = (type, frame, d, steps) -> zc.add(d);
+                final forge.bench.rl.RlSeat.FrameListener prev = RlActorBench.LISTENER;
+                RlActorBench.LISTENER = (g, player, f, m, ob, st, ans) -> {
+                    if (prev != null) {
+                        prev.onFrame(g, player, f, m, ob, st, ans);
+                    }
+                    zc.observe(f, ob);
+                };
             }
             rc = RlActorBench.run(cfg);
             stats = srv.stats();

@@ -56,6 +56,10 @@ public class RlKnowledgeTest extends AITest {
         final RlFeaturizer feat;
 
         Fixture() {
+            this(index());
+        }
+
+        Fixture(final CardIndex ix) {
             final BenchSession session = new BenchSession(new JsonRpcChannel(InputStream.nullInputStream(),
                     OutputStream.nullOutputStream()));
             final List<RegisteredPlayer> players = Lists.newArrayList();
@@ -75,7 +79,7 @@ public class RlKnowledgeTest extends AITest {
             know = new RlKnowledge(game);
             know.attach();
             session.setKnowledgeObserver(know);
-            feat = new RlFeaturizer(index());
+            feat = new RlFeaturizer(ix);
             feat.setKnowledge(know);
         }
 
@@ -343,6 +347,155 @@ public class RlKnowledgeTest extends AITest {
                 Assert.assertEquals(age, 0f);
             } else if (o.tokZone[i] == RlSchema.Z_O_EVENT) {
                 Assert.assertEquals(age, 1f / 16f);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------ C4'
+
+    /** Resolve a walker's emblem ability (loyalty ability or ETB SVar) and return the emblem in its command zone. */
+    private Card emblem(final Player p, final String walker, final forge.card.CardStateName state) {
+        final Card w = add(p, ZoneType.Battlefield, walker);
+        if (state != null) {
+            w.setState(state, true);
+        }
+        forge.game.spellability.SpellAbility sa = null;
+        for (forge.game.spellability.SpellAbility a : w.getSpellAbilities()) {
+            if (a.getApi() == forge.game.ability.ApiType.Effect
+                    && a.getParamOrDefault("Name", "").startsWith("Emblem")) {
+                sa = a;
+            }
+        }
+        if (sa == null && w.hasSVar("Emblem")) {
+            sa = forge.game.ability.AbilityFactory.getAbility(w.getSVar("Emblem"), w);
+        }
+        Assert.assertNotNull(sa, walker + ": its emblem ability");
+        sa.setActivatingPlayer(p);
+        forge.game.ability.AbilityUtils.resolve(sa);
+        Card found = null;
+        for (Card c : p.getCardsIn(ZoneType.Command)) {
+            if (c.isEmblem() && c.getEffectSource() == w) {
+                found = c;
+            }
+        }
+        Assert.assertNotNull(found, walker + ": the emblem is in the command zone");
+        return found;
+    }
+
+    private Card dungeon(final Fixture f, final Player p, final String script) {
+        final Card d = forge.game.card.CardFactory.getCard(forge.StaticData.instance().getAllTokens().getToken(script), p,
+                f.game);
+        d.setGamePieceType(forge.card.GamePieceType.DUNGEON);
+        f.game.getAction().moveToCommand(d, null);
+        return d;
+    }
+
+    /**
+     * Clarification C4': emblems resolve to their own "&lt;walker&gt; Emblem" row, else to the walker (C3: full card
+     * first); designations and dungeons by exact name (The Initiative and Undercity stay &lt;unk&gt; and are counted);
+     * a Forge "X's Effect" host in the event tail resolves to its source card. Emblems, designations and effects never
+     * enter the opponent seen-cards set (NAME).
+     */
+    @Test
+    public void emblemsDesignationsAndEffectHostsResolve() {
+        final String tsv = "<pad>\t0\n<unk>\t1\n"
+                + "Chandra, Torch of Defiance\t10\nChandra, Torch of Defiance Emblem\t11\n"
+                + "Elspeth, Knight-Errant\t12\nElspeth, Knight-Errant Emblem\t13\n"
+                + "Koth of the Hammer\t14\n" // no emblem row: the walker
+                + "Valki, God of Lies\t16\nTibalt, Cosmic Impostor\t17\nTibalt, Cosmic Impostor Emblem\t18\n"
+                + "The Monarch\t20\nLost Mine of Phandelver\t21\nForth Eorlingas!\t22\n";
+        final CardIndex ix = CardIndex.of(tsv.getBytes(StandardCharsets.UTF_8));
+        // the same walkers without any emblem row: each falls back to its walker's full card
+        final CardIndex walkersOnly = CardIndex.of(("<pad>\t0\n<unk>\t1\nChandra, Torch of Defiance\t10\n"
+                + "Elspeth, Knight-Errant\t12\nKoth of the Hammer\t14\nValki, God of Lies\t16\n"
+                + "Tibalt, Cosmic Impostor\t17\n").getBytes(StandardCharsets.UTF_8));
+        final Fixture f = new Fixture(ix);
+        final Card chandra = emblem(f.p0, "Chandra, Torch of Defiance", null);
+        final Card elspeth = emblem(f.p0, "Elspeth, Knight-Errant", null);
+        final Card koth = emblem(f.p1, "Koth of the Hammer", null);
+        final Card tibalt = emblem(f.p1, "Valki, God of Lies", forge.card.CardStateName.Backside);
+        Assert.assertEquals(chandra.getName(), "Emblem \u2014 Chandra, Torch of Defiance");
+        Assert.assertEquals(tibalt.getName(), "Emblem \u2014 Tibalt, Cosmic Impostor");
+        final Object[][] cases = {{chandra, 11, 10}, {elspeth, 13, 12}, {koth, 14, 14}, {tibalt, 18, 16}};
+        for (Object[] k : cases) {
+            final Card e = (Card) k[0];
+            Assert.assertEquals(RlFeaturizer.resolveCard(ix, e), ((Integer) k[1]).intValue(), e.getName());
+            Assert.assertEquals(RlFeaturizer.resolveCard(walkersOnly, e), ((Integer) k[2]).intValue(),
+                    e.getName() + " without an emblem row (Tibalt: the full card Valki, as C3)");
+            // the converter's name-only rule gives the same answer
+            Assert.assertEquals(RlFeaturizer.resolveEmblem(ix, e.getName(), null), ((Integer) k[1]).intValue());
+        }
+
+        // designations and dungeons, by exact name
+        f.game.getAction().becomeMonarch(f.p1, "CN2");
+        dungeon(f, f.p0, "lost_mine_of_phandelver");
+        f.game.getAction().takeInitiative(f.p0, "CLB");
+        dungeon(f, f.p1, "undercity");
+
+        final RlFeaturizer.Obs o = f.obs(f.p0);
+        final List<Integer> command = new ArrayList<>();
+        for (int[] t : zone(o, RlSchema.Z_COMMAND)) {
+            command.add(t[0]);
+        }
+        java.util.Collections.sort(command);
+        // 4 emblems (11, 13, 14, 18), the monarch 20, Lost Mine 21, The Initiative and Undercity <unk> (1)
+        Assert.assertEquals(command, java.util.Arrays.asList(1, 1, 11, 13, 14, 18, 20, 21));
+        Assert.assertEquals(new java.util.TreeSet<>(o.commandUnknown),
+                new java.util.TreeSet<>(java.util.Arrays.asList("The Initiative", "Undercity")));
+
+        // an "X's Effect" holding a delayed trigger: the event tail shows the source card
+        final Card forth = add(f.p1, ZoneType.Hand, "Forth Eorlingas!");
+        final forge.game.spellability.SpellAbility mk = forge.game.ability.AbilityFactory.getAbility(
+                forth.getSVar("DBEffect"), forth);
+        mk.setActivatingPlayer(f.p1);
+        forge.game.ability.AbilityUtils.resolve(mk);
+        Card effect = null;
+        for (Card c : f.p1.getCardsIn(ZoneType.Command)) {
+            if (c.getName().endsWith("'s Effect")) {
+                effect = c;
+            }
+        }
+        Assert.assertNotNull(effect, "Forth Eorlingas!'s Effect in the command zone");
+        final forge.game.spellability.SpellAbility trig = effect.getTriggers().iterator().next().ensureAbility();
+        Assert.assertSame(trig.getHostCard(), effect);
+        trig.setActivatingPlayer(f.p1);
+        f.game.getStack().add(trig);
+        final RlFeaturizer.Obs o2 = f.obs(f.p0);
+        final List<int[]> theirs = zone(o2, RlSchema.Z_O_EVENT);
+        Assert.assertEquals(theirs.size(), 1);
+        Assert.assertEquals(theirs.get(0)[0], 22, "the effect's trigger shows as Forth Eorlingas!");
+        // and is not a command-zone token
+        Assert.assertEquals(zone(o2, RlSchema.Z_COMMAND).size(), 8);
+
+        // nothing but real cards in the seen-cards set
+        for (int s = 0; s < 2; s++) {
+            for (String n : f.know.opponentSeen(s)) {
+                Assert.assertFalse(n.startsWith("Emblem") || n.startsWith("The ") || n.endsWith("Effect")
+                        || n.equals("Undercity") || n.equals("Lost Mine of Phandelver"), "seen " + n);
+            }
+        }
+
+        // Java/Python parity on the real table (C4' rule; 10-05 rows)
+        final String real = System.getProperty("rl.cardIndex");
+        if (real != null) {
+            try {
+                final CardIndex ri = CardIndex.load(java.nio.file.Paths.get(real));
+                Assert.assertEquals(RlFeaturizer.resolveCard(ri, chandra), 19846);
+                Assert.assertEquals(RlFeaturizer.resolveCard(ri, elspeth), 22073);
+                Assert.assertEquals(RlFeaturizer.resolveCard(ri, koth), 26221);
+                Assert.assertEquals(RlFeaturizer.resolveCard(ri, tibalt), 34322);
+                for (Card c : f.p1.getCardsIn(ZoneType.Command)) {
+                    if (c.getName().equals("The Monarch")) {
+                        Assert.assertEquals(RlFeaturizer.resolveCard(ri, c), 34018);
+                    }
+                }
+                for (Card c : f.p0.getCardsIn(ZoneType.Command)) {
+                    if (c.getName().equals("Lost Mine of Phandelver")) {
+                        Assert.assertEquals(RlFeaturizer.resolveCard(ri, c), 8869);
+                    }
+                }
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(e);
             }
         }
     }
