@@ -98,6 +98,41 @@ public final class RlFakeRun {
         // C4': per game, the command-zone objects that stayed <unk> (designations), by name -> games
         final java.util.Map<String, java.util.Set<Long>> commandUnknownGames = new java.util.TreeMap<>();
         final java.util.Set<Long> games = new java.util.HashSet<>();
+        // knowledge census: learn / forget reasons, and the resolving source of each library learn
+        final java.util.Map<String, Long> learned = new java.util.TreeMap<>();
+        final java.util.Map<String, Long> forgot = new java.util.TreeMap<>();
+        final java.util.Map<String, Long> libLearnBySource = new java.util.HashMap<>();
+
+        forge.bench.rl.RlKnowledge.Log log(final forge.game.Game game) {
+            return new forge.bench.rl.RlKnowledge.Log() {
+                @Override
+                public void learned(final int seat, final forge.game.card.Card card, final String how) {
+                    String src = "-";
+                    try {
+                        final forge.game.spellability.SpellAbility top = game.getStack().isEmpty() ? null
+                                : game.getStack().peekAbility();
+                        src = top == null ? "(no stack)" : top.getHostCard().getName();
+                    } catch (RuntimeException e) {
+                        src = "?";
+                    }
+                    synchronized (ZoneCensus.this) {
+                        learned.merge(how, 1L, Long::sum);
+                        if (card.isInZone(forge.game.zone.ZoneType.Library) || how.endsWith("Library")
+                                || how.equals("look")) {
+                            libLearnBySource.merge(how + " @ " + src, 1L, Long::sum);
+                        }
+                    }
+                }
+
+                @Override
+                public void forgot(final int seat, final int cardId, final String why) {
+                    synchronized (ZoneCensus.this) {
+                        forgot.merge(why.startsWith("moved ") && !why.contains("random") ? "moved unseen" : why, 1L,
+                                Long::sum);
+                    }
+                }
+            };
+        }
 
         synchronized void observe(final RlWire.Decide f, final forge.bench.rl.RlFeaturizer.Obs o) {
             if (o == null) {
@@ -197,6 +232,18 @@ public final class RlFakeRun {
                     cu.addProperty(e.getKey(), e.getValue().size());
                 }
                 o.add("command_unknown_games", cu);
+                final JsonObject kl = new JsonObject();
+                for (java.util.Map.Entry<String, Long> e : learned.entrySet()) kl.addProperty(e.getKey(), e.getValue());
+                final JsonObject kf = new JsonObject();
+                for (java.util.Map.Entry<String, Long> e : forgot.entrySet()) kf.addProperty(e.getKey(), e.getValue());
+                final JsonObject ks = new JsonObject();
+                libLearnBySource.entrySet().stream().sorted((a, b) -> Long.compare(b.getValue(), a.getValue())).limit(25)
+                        .forEach(e -> ks.addProperty(e.getKey(), e.getValue()));
+                final JsonObject k = new JsonObject();
+                k.add("learned", kl);
+                k.add("forgot", kf);
+                k.add("library_learns_by_source_top25", ks);
+                o.add("knowledge_reasons", k);
             }
             return o;
         }
@@ -270,6 +317,7 @@ public final class RlFakeRun {
             final ZoneCensus zc = new ZoneCensus();
             if (spec.has("zoneStats") && spec.get("zoneStats").getAsBoolean()) {
                 srv.capture = (type, frame, d, steps) -> zc.add(d);
+                RlActorBench.KNOWLEDGE_LOG = zc::log;
                 final forge.bench.rl.RlSeat.FrameListener prev = RlActorBench.LISTENER;
                 RlActorBench.LISTENER = (g, player, f, m, ob, st, ans) -> {
                     if (prev != null) {

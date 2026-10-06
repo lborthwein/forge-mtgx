@@ -391,6 +391,10 @@ public final class RlActorBench {
             // observation v1: what each seat has observed (reveals, its own looks, public moves, the stack tail)
             final RlKnowledge know = new RlKnowledge(game);
             know.attach();
+            final java.util.function.Function<Game, RlKnowledge.Log> logF = KNOWLEDGE_LOG;
+            if (logF != null) {
+                know.log = logF.apply(game);
+            }
             final java.util.function.Function<Game, BenchSession.KnowledgeObserver> tapF = KNOWLEDGE_TAP;
             if (tapF == null) {
                 session.setKnowledgeObserver(know);
@@ -796,6 +800,8 @@ public final class RlActorBench {
     }
     /** Tests only (knowledge witness): an extra observer of every game's reveals and looks. Null by default. */
     static volatile java.util.function.Function<Game, BenchSession.KnowledgeObserver> KNOWLEDGE_TAP = null;
+    /** Tests only (knowledge census): every game's learn / forget log. Null by default. */
+    static volatile java.util.function.Function<Game, RlKnowledge.Log> KNOWLEDGE_LOG = null;
     /** Tests only (goldens, visibility): observes every sent frame of every game. Null by default. */
     static volatile RlSeat.FrameListener LISTENER = null;
 

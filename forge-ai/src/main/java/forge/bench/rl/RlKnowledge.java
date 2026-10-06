@@ -18,6 +18,7 @@ import forge.game.card.CardView;
 import forge.game.event.GameEventCardChangeZone;
 import forge.game.event.GameEventShuffle;
 import forge.game.event.GameEventSpellAbilityCast;
+import forge.game.event.GameEventSpellResolved;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
 import forge.game.zone.ZoneType;
@@ -76,6 +77,12 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     @SuppressWarnings("unchecked")
     private final LinkedHashSet<String>[] seenOpp = new LinkedHashSet[] {new LinkedHashSet<>(), new LinkedHashSet<>()};
     private final Deque<StackEvent> tail = new ArrayDeque<>();
+    /**
+     * Library cards a seat has just looked at in order to arrange them (scry, surveil, "in any order"): their next move
+     * within the library is that arrangement. Any other move within a library (Forge's "in a random order") leaves
+     * nobody knowing where the card went. Cleared when the resolving spell or ability finishes.
+     */
+    private final Set<Integer> arranged = new HashSet<>();
     public Log log;
 
     public RlKnowledge(final Game game) {
@@ -194,6 +201,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         for (Card c : cards) {
             see(s, c);
             if (destination == ZoneType.Library) {
+                arranged.add(c.getId());
                 learn(s, c, "look");
                 // the other seat cannot know the order the looker leaves them in
                 for (int t = 0; t < 2; t++) {
@@ -224,6 +232,8 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         final ZoneType tz = to == null ? null : to.zoneType();
         final Player fp = from == null ? null : playerOf(from.player());
         final Player tp = to == null ? null : playerOf(to.player());
+        final boolean withinLibrary = fz == ZoneType.Library && tz == ZoneType.Library && fp == tp;
+        final boolean arrangedMove = withinLibrary && arranged.remove(c.getId());
         for (int s = 0; s < 2; s++) {
             final Player me = seatPlayer(s);
             if (me == null) {
@@ -240,8 +250,13 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
                 continue;
             }
             final boolean fromSeen = (fz != null && isPublic(fz)) || (fz == ZoneType.Hand && fp == me);
-            if (fz == ZoneType.Library && tz == ZoneType.Library && fp == tp) {
-                continue; // a rearrangement: the looker learnt it in onLook, the other seat forgot it there
+            if (withinLibrary) {
+                if (!arrangedMove) {
+                    // put back in an order nobody chose or saw (Forge's "in a random order"): the card is still among
+                    // those cards, but its position is unknown; obs-v1 has no segment, so it is forgotten
+                    forget(s, c.getId(), "moved within the library in a random order");
+                }
+                continue; // an arrangement: the looker learnt it in onLook, the other seat forgot it there
             }
             if (fromSeen) {
                 learn(s, c, fz + "->" + tz);
@@ -252,6 +267,11 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
                 forget(s, c.getId(), "moved " + fz + "->" + tz + " unseen");
             }
         }
+    }
+
+    @Subscribe
+    public void resolved(final GameEventSpellResolved ev) {
+        arranged.clear();
     }
 
     @Subscribe
