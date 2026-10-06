@@ -250,13 +250,10 @@ public class RlActorBenchTest {
                 + rec.recordsByFamily + ", server problems " + checker.problems);
         // Forge seats run the plain path: they must reproduce RlSimBench exactly.
         Assert.assertTrue(badForge.isEmpty(), "forge-seat digest mismatches: " + badForge);
-        // Recorder seats: KNOWN DEVIATION (lane rl-r0-b1-1005, orchestrator ruling 10-05). The bridge's priority-menu
-        // build runs Forge AI's canPayCost; its RNG draws, AI card memory and AI cache are isolated (observeOnly), which
-        // took identity from 4/24 to 22/24 (98/100 on another seed block); a residual side effect remains. The floor
-        // below catches a regression of the isolation; tighten it to n when the residual is fixed.
+        // Recorder seats must reproduce RlSimBench exactly as well (lane rl-r0-b5-1006 closed B1's residual: the
+        // observe-only recorder isolates canPayCost and skips the mana-ability channel).
         System.err.println("[do-no-harm] recorder identity " + recordSame + "/" + n);
-        Assert.assertTrue(recordSame >= Math.ceil(0.9 * n), "recorder identity regressed: " + recordSame + "/" + n
-                + "; mismatches " + bad);
+        Assert.assertTrue(bad.isEmpty(), "recorder digest mismatches: " + bad);
         Assert.assertEquals(checker.badFrames.get(), 0L, String.valueOf(checker.problems));
         Assert.assertEquals(checker.badTeachers.get(), 0L, String.valueOf(checker.problems));
         Assert.assertEquals(checker.trivialFrames.get(), 0L, String.valueOf(checker.problems));

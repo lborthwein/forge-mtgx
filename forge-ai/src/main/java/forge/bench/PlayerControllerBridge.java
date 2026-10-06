@@ -209,8 +209,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * affordability check, run on every menu entry) draws from the game's random stream (the "try not to lose a
      * planeswalker" coin flip, ComputerUtilMana's reserve-mana roll), clears and fills Forge AI's card memory
      * (AiCardMemory: held mana sources, unpaid costs), and copies abilities, which takes ids. Measured on 24 TRAIN
-     * games: a delegate-everything recorder matched RlSimBench policy=forge on 4 of 24; skipping only canPayCost gave
-     * identical call traces. So when the local answerer says it only observes, the menu is built on a scratch random
+     * games: a delegate-everything recorder matched RlSimBench policy=forge on 4 of 24, 22 of 24 with this isolation,
+     * and 24 of 24 once the mana-ability channel is also skipped (see the menu build). So when the local answerer
+     * says it only observes, the menu is built on a scratch random
      * stream and a scratch AI cache scope, and both seats' AI card memory and the IdScope counters are put back
      * afterwards. With no local answerer, or one that answers (an RL seat, whose chosen entry is played), this is
      * body.get() and nothing else.
