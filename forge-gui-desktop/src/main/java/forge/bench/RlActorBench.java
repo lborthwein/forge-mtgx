@@ -413,6 +413,7 @@ public final class RlActorBench {
                 });
             }
             feat.setKnowledge(know);
+            seat.seenNames = know::opponentSeen; // NAME candidates (ICR B4-families-coordination)
             out.knowledge = know;
             dg = new RlSimBench.Digest(game);
             game.subscribeToEvents(dg);
