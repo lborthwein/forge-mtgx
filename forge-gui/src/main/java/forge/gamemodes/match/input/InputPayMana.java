@@ -15,6 +15,7 @@ import forge.game.card.CardView;
 import forge.game.card.CardCollection;
 import forge.game.mana.ManaCostBeingPaid;
 import forge.game.mana.Mana;
+import forge.game.mana.ManaPool;
 import forge.game.player.PlaySpellAbility;
 import forge.game.player.Player;
 import forge.game.player.PlayerController.FullControlFlag;
@@ -505,12 +506,32 @@ public abstract class InputPayMana extends InputSyncronizedBase {
             }
         }
 
+        // With NoPaymentFromManaAbility (the browser seat) produced mana floats and the cost never
+        // shrinks, so colorNeeded keeps every colour the cost had, and a one-mana "{G} or {U}"
+        // source took the express choice's first colour every time: Botanical Sanctum paying for
+        // Oko ({1}{G}{U}) always made {U}, even after an Island had floated the {U} (owner report
+        // 2026-10-06T00-39-37). Count the floating mana first; ask when colours remain.
+        final byte stillNeeded = floatingPaymentColours(chosen, (byte) producedColorMask);
+        final boolean askColour = Integer.bitCount(stillNeeded & 0xFF) > 1 && chosen.getManaPart().isComboMana();
+        if (Integer.bitCount(stillNeeded & 0xFF) == 1) {
+            producedColorMask = stillNeeded;
+        }
         chosen.setManaExpressChoice(ColorSet.fromMask(producedColorMask));
 
         // System.out.println("Chosen sa=" + chosen + " of " + chosen.getHostCard() + " to pay mana");
 
         locked = true;
         game.getAction().invoke(() -> {
+            if (askColour) {
+                // ManaEffect narrows a combo source to the express choice's first colour, so the
+                // question is asked here, on the game thread, as ManaEffect asks at priority.
+                final byte picked = getController().chooseColor(
+                        Localizer.getInstance().getMessage("lblSelectManaProduce"), chosen,
+                        ColorSet.fromMask(stillNeeded));
+                if (picked != 0) {
+                    chosen.setManaExpressChoice(ColorSet.fromMask(picked));
+                }
+            }
             if (PlaySpellAbility.playSpellAbility(getController(), chosen.getActivatingPlayer(), chosen)) {
                 final List<AbilityManaPart> manaAbilities = chosen.getAllManaParts();
                 boolean restrictionsMet = true;
@@ -536,6 +557,38 @@ public abstract class InputPayMana extends InputSyncronizedBase {
         });
 
         return true;
+    }
+
+    /**
+     * For a seat whose produced mana floats ({@link FullControlFlag#NoPaymentFromManaAbility}): the
+     * colours among {@code producible} that the cost still needs once the floating unrestricted mana
+     * is counted against it. 0 keeps Forge's own express choice: a seat that pays as it taps, a
+     * source that is not a one-mana colour choice ("{G} or {U}", "any colour"), or a cost whose
+     * coloured part the floating mana already covers.
+     */
+    private byte floatingPaymentColours(final SpellAbility chosen, final byte producible) {
+        if (!player.getController().isFullControl(FullControlFlag.NoPaymentFromManaAbility)) {
+            return 0;
+        }
+        final AbilityManaPart part = chosen.getManaPart();
+        if (part == null || chosen.getSubAbility() != null || chosen.hasParam("Each")
+                || !(part.isComboMana() || part.isAnyMana()) || chosen.amountOfManaGenerated(false) != 1) {
+            return 0;
+        }
+        final ManaPool pool = player.getManaPool();
+        final ManaCostBeingPaid left = new ManaCostBeingPaid(manaCost);
+        for (final Mana mana : Lists.newArrayList(pool)) {
+            if (!mana.isRestricted() && left.isNeeded(mana, pool)) {
+                left.payMana(mana, pool);
+            }
+        }
+        byte needed = 0;
+        for (final byte color : ManaAtom.MANATYPES) {
+            if ((producible & color) != 0 && left.needsColor(color, pool)) {
+                needed |= color;
+            }
+        }
+        return needed;
     }
 
     protected boolean isAlreadyPaid() {

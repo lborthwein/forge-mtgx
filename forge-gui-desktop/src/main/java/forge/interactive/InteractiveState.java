@@ -175,7 +175,40 @@ final class InteractiveState {
             final JsonObject cardObject = element.getAsJsonObject();
             if (!identityVisibleForFid(cardObject, "fid", game, viewer)) {
                 redactPrivateCard(cardObject);
+            } else {
+                addNamedCards(cardObject, game);
             }
+        }
+    }
+
+    /**
+     * The card names this object's "choose a card name" chose (Phyrexian Revoker, Pithing Needle,
+     * Meddling Mage ...), as {@code namedCards}. The choice is announced to every player, and Forge's
+     * desktop shows it on the card, but the wire carried none of it: the owner's Oko was shut off by
+     * a Revoker whose choice nothing on the table showed (report 2026-10-06T01-51-13). Only on an
+     * object whose identity the viewer may already receive; the bench StateEncoder is untouched.
+     */
+    private static void addNamedCards(final JsonObject cardObject, final Game game) {
+        if (!cardObject.has("fid") || !cardObject.get("fid").isJsonPrimitive()) {
+            return;
+        }
+        try {
+            final Card card = game.findById(cardObject.get("fid").getAsInt());
+            final java.util.List<String> chosen = card == null ? null : card.getNamedCards();
+            if (chosen == null || chosen.isEmpty()) {
+                return;
+            }
+            final JsonArray names = new JsonArray();
+            for (String name : chosen) {
+                if (name != null && !name.isBlank()) {
+                    names.add(name);
+                }
+            }
+            if (!names.isEmpty()) {
+                cardObject.add("namedCards", names);
+            }
+        } catch (RuntimeException e) {
+            // An id that does not resolve names nothing.
         }
     }
 
