@@ -1310,6 +1310,16 @@ public class AiController {
     }
 
     public AiPlayDecision canPlayFromEffectAI(Spell spell, boolean mandatory, boolean withoutPayingManaCost) {
+        // mtgx (lane forge-spellhand-loop-1006): the recast guard also covers an optional cast offered by an effect.
+        // Displacer Kitten + Spell Queller + two free spells: each blink exiles the new spell and the leaving Queller
+        // offers the previous one back ("its owner may cast it"), forever. Declining an optional cast is always legal.
+        if (!mandatory && AiRecastGuard.blocks(player, spell)) {
+            final long key = ((long) game.getPhaseHandler().getTurn() << 32) | (spell.getHostCard().getId() & 0xffffffffL);
+            if (recastGuardLogged.add(key)) {
+                System.out.println(AiRecastGuard.logLine(player, spell));
+            }
+            return AiPlayDecision.StopRunawayActivations;
+        }
         if (spell instanceof SpellApiBased) {
             boolean chance;
             if (withoutPayingManaCost) {
