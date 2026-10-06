@@ -25,6 +25,8 @@ import forge.game.player.RegisteredPlayer;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.staticability.StaticAbility;
+import forge.game.replacement.ReplacementEffect;
+import forge.game.trigger.Trigger;
 import forge.game.trigger.TriggerType;
 import forge.game.zone.PlayerZoneBattlefield;
 import forge.game.zone.ZoneType;
@@ -760,8 +762,19 @@ public class GameCopier {
         newCard.setName(c.getName());
         newCard.setCommander(c.isCommander());
         newCard.setType(new CardType(c.getType()));
+        // mtgx (lane forge-spellhand-loop-1006): an effect card keeps ALL its abilities, not only its statics. Yawgmoth's
+        // Will's effect is a static ("you may play cards from your graveyard") AND a replacement ("if a card would be put
+        // into your graveyard, exile it instead"); copying only the static let a play-out recast Black Lotus from the
+        // graveyard forever (+3 mana each time) until the JVM ran out of heap (MX1 voids, deck ap06).
+        newCard.setSVars(c.getSVars());
         for (StaticAbility stAb : c.getStaticAbilities()) {
             newCard.addStaticAbility(stAb.copy(newCard, false));
+        }
+        for (ReplacementEffect re : c.getReplacementEffects()) {
+            newCard.addReplacementEffect(re.copy(newCard, false));
+        }
+        for (Trigger t : c.getTriggers()) {
+            newCard.addTrigger(t.copy(newCard, false));
         }
         for (SpellAbility sa : c.getSpellAbilities()) {
             SpellAbility saCopy = sa.copy(newCard, false);
