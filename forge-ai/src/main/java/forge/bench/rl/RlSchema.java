@@ -101,6 +101,16 @@ public final class RlSchema {
         return family >= F_PRIORITY && family <= F_START_PLAYER;
     }
 
+    /** Families 1..24: every family the RL seat answers (Phase B, lane rl-r0-b4-1006). */
+    public static boolean isLearned(final int family) {
+        return family >= F_PRIORITY && family <= F_COLOR;
+    }
+
+    /** The two-frame families (Appendix B.1): an ASSIGN frame, then a PERMUTE frame over the cards kept on top. */
+    public static boolean isTwoFrame(final int family) {
+        return family == F_SCRY || family == F_SURVEIL;
+    }
+
     public static String familyName(final int family) {
         return family > 0 && family <= N_FAMILIES ? FAMILIES.get(family) : "UNKNOWN";
     }
@@ -145,6 +155,25 @@ public final class RlSchema {
                 return F_SCRY;
             case "orderZone":
                 return F_ORDER;
+            // Phase B asks new in the bridge (lane rl-r0-b4-1006)
+            case "discardFrom":
+                return F_DISCARD_FROM;
+            case "costCards":
+                return F_COST_CARDS;
+            case "pile":
+                return F_PILE;
+            case "surveil":
+                return F_SURVEIL;
+            case "putOnTop":
+                return F_PUT_ON_TOP;
+            case "optionalTrigger":
+                return F_OPTIONAL_TRIGGER;
+            case "payToPrevent":
+                return F_PAY_TO_PREVENT;
+            case "name":
+                return F_NAME;
+            case "color":
+                return F_COLOR;
             default:
                 return 0;
         }

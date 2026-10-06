@@ -19,11 +19,13 @@ package forge.bench;
 
 import com.google.common.collect.*;
 import forge.LobbyPlayer;
+import forge.ai.AiCostDecision;
 import forge.ai.ComputerUtilAbility;
 import forge.ai.ComputerUtilCost;
 import forge.ai.ComputerUtilMana;
 import forge.ai.PlayerControllerAi;
 import forge.card.ColorSet;
+import forge.card.MagicColor;
 import forge.card.ICardFace;
 import forge.card.mana.ManaCost;
 import forge.card.mana.ManaCostShard;
@@ -83,7 +85,7 @@ import java.util.function.Predicate;
  * <em>refusal</em>: the call falls through to {@code super} and is counted separately from
  * an answer that explicitly asked to delegate.
  */
-public class PlayerControllerBridge extends PlayerControllerAi {
+public class PlayerControllerBridge extends PlayerControllerAi implements AiCostDecision.PaymentDecisions {
 
     private final BenchSession session;
     private final BenchSession.Mode mode;
@@ -1193,7 +1195,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         // The engine's own bound, which is Integer.MAX_VALUE for Multikicker; -1 when it is
         // effectively unbounded, so a host never sees a range it cannot price.
         body.addProperty("engineMax", max == Integer.MAX_VALUE ? -1 : max);
-        final JsonObject ans = ask("chooseNumberForKeywordCost", "keywordCost", body);
+        final JsonObject ans = ask("chooseNumberForKeywordCost", "keywordCost", body, sa);
         if (ans == null) {
             final Echo e = takeEcho();
             final int out = super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
@@ -1218,6 +1220,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             final List<OptionalCostValue> optionalCostValues) {
         count("chooseOptionalCosts");
         if (buildingMenu) {
+            note("probe.chooseOptionalCosts"); // RL census (lane rl-r0-b4-1006): a menu-build probe, not a decision
             // Decline while enumerating: taking them here would silently drop the unkicked
             // ability from the menu. Both variants are offered instead (see
             // legalSpellAbilities), so the host votes on the cost rather than inheriting it.
@@ -1240,7 +1243,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             menu.add(o);
         }
         body.add("menu", menu);
-        final JsonObject ans = ask("chooseOptionalCosts", "optionalCosts", body);
+        final JsonObject ans = ask("chooseOptionalCosts", "optionalCosts", body,
+                new Object[] {chosen, optionalCostValues});
         if (ans == null) {
             final Echo e = takeEcho();
             final List<OptionalCostValue> out = super.chooseOptionalCosts(chosen, optionalCostValues);
@@ -1686,7 +1690,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     public CardCollectionView tuckCardsViaMulligan(final CardCollectionView hand, final int cardsToReturn) {
         count("tuckCardsViaMulligan");
         if (!bridged() || cardsToReturn <= 0) {
-            return super.tuckCardsViaMulligan(hand, cardsToReturn);
+            return forgeTuck(hand, cardsToReturn);
         }
         final CardCollection picked = askForCards("tuckCardsViaMulligan", hand,
                 cardsToReturn, cardsToReturn, "put on the bottom (London mulligan)", null);
@@ -1695,11 +1699,24 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             // the token whenever the host actually answered — so the echo fires only on a
             // delegation, exactly as the ECHO block prescribes.
             final Echo e = takeEcho();
-            final CardCollectionView out = super.tuckCardsViaMulligan(hand, cardsToReturn);
+            final CardCollectionView out = forgeTuck(hand, cardsToReturn);
             echo(e, echoCards(out));
             return out;
         }
         return picked;
+    }
+
+    /**
+     * Forge's own London-mulligan choice. PlayerControllerAi.tuckCardsViaMulligan probes this controller's
+     * willPutCardOnTop as a heuristic; inside it that is not a decision, so it is never asked (lane rl-r0-b4-1006).
+     */
+    private CardCollectionView forgeTuck(final CardCollectionView hand, final int cardsToReturn) {
+        probing++;
+        try {
+            return super.tuckCardsViaMulligan(hand, cardsToReturn);
+        } finally {
+            probing--;
+        }
     }
 
     @Override
@@ -1845,6 +1862,9 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
         final JsonObject body = envelope(true);
         body.add("ability", StateEncoder.encodeSpellAbility(currentAbility));
+        if (session.getLocalAnswerer() != null) {
+            body.addProperty("origin", targetingOrigin); // RL seat census (lane rl-r0-b4-1006); never on the stdio wire
+        }
         final JsonArray menu = StateEncoder.encodeEntities(candidates);
         for (SpellAbilityStackInstance si : stack) {
             menu.add(StateEncoder.encodeStackCandidate(getGame(), si));
@@ -2073,7 +2093,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask("chooseSingleEntityForEffect", "entityChoice", body);
+        final JsonObject ans = ask("chooseSingleEntityForEffect", "entityChoice", body,
+                new Object[] {options, sa, isOptional});
         if (ans == null) {
             final Echo e = takeEcho();
             final T out = super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title,
@@ -2116,7 +2137,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask("chooseEntitiesForEffect", "entityChoice", body);
+        final JsonObject ans = ask("chooseEntitiesForEffect", "entityChoice", body,
+                new Object[] {options, sa, Boolean.FALSE});
         if (ans == null) {
             final Echo e = takeEcho();
             final List<T> out = super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa,
@@ -2155,7 +2177,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask("chooseNumber", "number", body);
+        final JsonObject ans = ask("chooseNumber", "number", body, sa);
         if (ans == null) {
             final Echo e = takeEcho();
             final int out = super.chooseNumber(sa, title, min, max);
@@ -2187,7 +2209,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask("chooseNumber", "number", body);
+        final JsonObject ans = ask("chooseNumber", "number", body, sa);
         if (ans == null) {
             final Echo e = takeEcho();
             final int out = super.chooseNumber(sa, title, values, relatedPlayer);
@@ -2227,7 +2249,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             modes.add(m);
         }
         body.add("menu", modes);
-        final JsonObject ans = ask("chooseModeForAbility", "mode", body);
+        final JsonObject ans = ask("chooseModeForAbility", "mode", body, new Object[] {sa, possible});
         if (ans == null) {
             final Echo e = takeEcho();
             final List<AbilitySub> out = super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
@@ -2269,7 +2291,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (cardToShow != null) {
             body.add("card", StateEncoder.encodeCardUnchecked(cardToShow));
         }
-        final JsonObject ans = ask("confirmAction", "confirm", body);
+        final JsonObject ans = ask("confirmAction", "confirm", body, new Object[] {sa, cardToShow});
         if (ans == null) {
             final Echo e = takeEcho();
             final boolean out = super.confirmAction(sa, mode0, message, options, cardToShow, params);
@@ -2297,7 +2319,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask("chooseBinary", "confirm", body);
+        final JsonObject ans = ask("chooseBinary", "confirm", body, new Object[] {sa, null});
         if (ans == null) {
             final Echo e = takeEcho();
             final boolean out = super.chooseBinary(sa, question, kindOfChoice, defaultChoice);
@@ -2320,7 +2342,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         final JsonObject body = envelope(true);
         body.add("menu", StateEncoder.encodeCards(topN));
-        final JsonObject ans = ask("arrangeForScry", "scry", body);
+        final JsonObject ans = ask("arrangeForScry", "scry", body, topN);
         if (ans == null) {
             final Echo e = takeEcho();
             final ImmutablePair<CardCollection, CardCollection> out = super.arrangeForScry(topN);
@@ -2509,17 +2531,17 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     // instrumentation; behaviour is byte-for-byte PlayerControllerAi.
 
     @Override
-    public SpellAbility getAbilityToPlay(Card hostCard, List<SpellAbility> abilities, ITriggerEvent triggerEvent) { count("getAbilityToPlay"); return super.getAbilityToPlay(hostCard, abilities, triggerEvent); }
+    public SpellAbility getAbilityToPlay(Card hostCard, List<SpellAbility> abilities, ITriggerEvent triggerEvent) { count("getAbilityToPlay"); return askOne("getAbilityToPlay", null, abilities, () -> super.getAbilityToPlay(hostCard, abilities, triggerEvent)); }
     @Override
-    public void playSpellAbilityNoStack(SpellAbility effectSA, boolean mayChoseNewTargets) { count("playSpellAbilityNoStack"); super.playSpellAbilityNoStack(effectSA, mayChoseNewTargets); }
+    public void playSpellAbilityNoStack(SpellAbility effectSA, boolean mayChoseNewTargets) { count("playSpellAbilityNoStack"); bridgedPlayNoStack(effectSA, mayChoseNewTargets); }
     @Override
-    public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) { count("orderSimultaneousSa"); return super.orderSimultaneousSa(activePlayerSAs); }
+    public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) { if (!quietOrder) { count("orderSimultaneousSa"); } return super.orderSimultaneousSa(activePlayerSAs); }
     @Override
-    public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) { count("orderAndPlaySimultaneousSa"); super.orderAndPlaySimultaneousSa(activePlayerSAs); }
+    public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) { count("orderAndPlaySimultaneousSa"); bridgedOrderAndPlay(activePlayerSAs); }
     @Override
-    public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) { count("playTrigger"); return super.playTrigger(host, wrapperAbility, isMandatory); }
+    public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) { count("playTrigger"); return bridgedPlayTrigger(host, wrapperAbility, isMandatory); }
     @Override
-    public boolean playSaFromPlayEffect(SpellAbility tgtSA) { count("playSaFromPlayEffect"); return super.playSaFromPlayEffect(tgtSA); }
+    public boolean playSaFromPlayEffect(SpellAbility tgtSA) { count("playSaFromPlayEffect"); return bridgedPlayFromEffect(tgtSA); }
     @Override
     public List<PaperCard> sideboard(final Deck deck, GameType gameType, String message) { count("sideboard"); return super.sideboard(deck, gameType, message); }
     @Override
@@ -2543,17 +2565,17 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public CardCollection chooseCardsForEffectMultiple(Map<String, CardCollection> validMap, SpellAbility sa, String title, boolean isOptional) { count("chooseCardsForEffectMultiple"); return super.chooseCardsForEffectMultiple(validMap, sa, title, isOptional); }
     @Override
-    public List<SpellAbility> chooseSpellAbilitiesForEffect(List<SpellAbility> spells, SpellAbility sa, String title, int num, Map<String, Object> params) { count("chooseSpellAbilitiesForEffect"); return super.chooseSpellAbilitiesForEffect(spells, sa, title, num, params); }
+    public List<SpellAbility> chooseSpellAbilitiesForEffect(List<SpellAbility> spells, SpellAbility sa, String title, int num, Map<String, Object> params) { count("chooseSpellAbilitiesForEffect"); return bridgedSpellAbilitiesForEffect(spells, sa, title, num, params); }
     @Override
-    public SpellAbility chooseSingleSpellForEffect(List<SpellAbility> spells, SpellAbility sa, String title, Map<String, Object> params) { count("chooseSingleSpellForEffect"); return super.chooseSingleSpellForEffect(spells, sa, title, params); }
+    public SpellAbility chooseSingleSpellForEffect(List<SpellAbility> spells, SpellAbility sa, String title, Map<String, Object> params) { count("chooseSingleSpellForEffect"); return askOne("chooseSingleSpellForEffect", sa, spells, () -> super.chooseSingleSpellForEffect(spells, sa, title, params)); }
     @Override
     public boolean confirmBidAction(SpellAbility sa, PlayerActionConfirmMode bidlife, String string, int bid, Player winner) { count("confirmBidAction"); return super.confirmBidAction(sa, bidlife, string, bid, winner); }
     @Override
-    public boolean confirmReplacementEffect(ReplacementEffect replacementEffect, SpellAbility effectSA, GameEntity affected, String question) { count("confirmReplacementEffect"); return super.confirmReplacementEffect(replacementEffect, effectSA, affected, question); }
+    public boolean confirmReplacementEffect(ReplacementEffect replacementEffect, SpellAbility effectSA, GameEntity affected, String question) { count("confirmReplacementEffect"); return bridgedConfirmReplacement(replacementEffect, effectSA, affected, question); }
     @Override
     public boolean confirmStaticApplication(Card hostCard, PlayerActionConfirmMode mode, String message, String logic) { count("confirmStaticApplication"); return super.confirmStaticApplication(hostCard, mode, message, logic); }
     @Override
-    public boolean confirmTrigger(WrappedAbility sa) { count("confirmTrigger"); return super.confirmTrigger(sa); }
+    public boolean confirmTrigger(WrappedAbility sa) { count("confirmTrigger"); return bridgedConfirmTrigger(sa); }
     @Override
     public List<Card> exertAttackers(List<Card> attackers) { count("exertAttackers"); return super.exertAttackers(attackers); }
     @Override
@@ -2569,13 +2591,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value) { count("notifyOfValue"); super.notifyOfValue(saSource, realtedTarget, value); }
     @Override
-    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { count("arrangeForSurveil"); return super.arrangeForSurveil(topN); }
+    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { count("arrangeForSurveil"); return bridgedArrangeForSurveil(topN); }
     @Override
-    public boolean willPutCardOnTop(Card c) { count("willPutCardOnTop"); return super.willPutCardOnTop(c); }
+    public boolean willPutCardOnTop(Card c) { count("willPutCardOnTop"); return bridgedWillPutCardOnTop(c); }
     @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) { count("orderMoveToZoneList"); return bridgedOrderMoveToZoneList(cards, destinationZone, source); }
     @Override
-    public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) { count("chooseCardsToDiscardFrom"); return super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser); }
+    public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) { count("chooseCardsToDiscardFrom"); return bridgedDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser); }
     @Override
     public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String[] unlessTypes, SpellAbility sa) { count("chooseCardsToDiscardUnlessType"); return super.chooseCardsToDiscardUnlessType(min, hand, unlessTypes, sa); }
     @Override
@@ -2615,29 +2637,27 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public Object vote(SpellAbility sa, String prompt, List<Object> options, ListMultimap<Object, Player> votes, Player forPlayer, boolean optional) { count("vote"); return super.vote(sa, prompt, options, votes, forPlayer, optional); }
     @Override
-    public boolean playChosenSpellAbility(SpellAbility sa) { count("playChosenSpellAbility"); return super.playChosenSpellAbility(sa); }
-    @Override
     public int chooseNumberForCostReduction(final SpellAbility sa, final int min, final int max) { count("chooseNumberForCostReduction"); return super.chooseNumberForCostReduction(sa, min, max); }
     @Override
     public boolean chooseFlipResult(SpellAbility sa, Player flipper, boolean call) { count("chooseFlipResult"); return super.chooseFlipResult(sa, flipper, call); }
     @Override
-    public byte chooseColor(String message, SpellAbility sa, ColorSet colors) { count("chooseColor"); return super.chooseColor(message, sa, colors); }
+    public byte chooseColor(String message, SpellAbility sa, ColorSet colors) { count("chooseColor"); return bridgedChooseColor(message, sa, colors); }
     @Override
     public byte chooseColorAllowColorless(String message, Card c, ColorSet colors) { count("chooseColorAllowColorless"); return super.chooseColorAllowColorless(message, c, colors); }
     @Override
-    public ColorSet chooseColors(String message, SpellAbility sa, int min, int max, ColorSet options) { count("chooseColors"); return super.chooseColors(message, sa, min, max, options); }
+    public ColorSet chooseColors(String message, SpellAbility sa, int min, int max, ColorSet options) { count("chooseColors"); return bridgedChooseColors(message, sa, min, max, options); }
     @Override
     public ICardFace chooseSingleCardFace(SpellAbility sa, String message, Predicate<ICardFace> cpp, String name) { count("chooseSingleCardFace"); return super.chooseSingleCardFace(sa, message, cpp, name); }
     @Override
-    public ICardFace chooseSingleCardFace(SpellAbility sa, List<ICardFace> faces, String message) { count("chooseSingleCardFace"); return super.chooseSingleCardFace(sa, faces, message); }
+    public ICardFace chooseSingleCardFace(SpellAbility sa, List<ICardFace> faces, String message) { count("chooseSingleCardFace"); return askOne("chooseSingleCardFace", sa, faces, () -> super.chooseSingleCardFace(sa, faces, message)); }
     @Override
     public CardState chooseSingleCardState(SpellAbility sa, List<CardState> states, String message, Map<String, Object> params) { count("chooseSingleCardState"); return super.chooseSingleCardState(sa, states, message, params); }
     @Override
-    public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) { count("chooseCardsPile"); return super.chooseCardsPile(sa, pile1, pile2, faceUp); }
+    public boolean chooseCardsPile(SpellAbility sa, CardCollectionView pile1, CardCollectionView pile2, String faceUp) { count("chooseCardsPile"); return bridgedChooseCardsPile(sa, pile1, pile2, faceUp); }
     @Override
     public CounterType chooseCounterType(List<CounterType> options, SpellAbility sa, String prompt, Map<String, Object> params) { count("chooseCounterType"); return super.chooseCounterType(options, sa, prompt, params); }
     @Override
-    public String chooseKeywordForPump(List<String> options, SpellAbility sa, String prompt, Card tgtCard) { count("chooseKeywordForPump"); return super.chooseKeywordForPump(options, sa, prompt, tgtCard); }
+    public String chooseKeywordForPump(List<String> options, SpellAbility sa, String prompt, Card tgtCard) { count("chooseKeywordForPump"); return askOne("chooseKeywordForPump", sa, options, () -> super.chooseKeywordForPump(options, sa, prompt, tgtCard)); }
     @Override
     public boolean confirmPayment(CostPart costPart, String string, SpellAbility sa) { count("confirmPayment"); return super.confirmPayment(costPart, string, sa); }
     @Override
@@ -2645,7 +2665,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public StaticAbility chooseSingleStaticAbility(List<StaticAbility> possibleReplacers) { count("chooseSingleStaticAbility"); return super.chooseSingleStaticAbility(possibleReplacers); }
     @Override
-    public String chooseProtectionType(SpellAbility sa, List<String> choices) { count("chooseProtectionType"); return super.chooseProtectionType(sa, choices); }
+    public String chooseProtectionType(SpellAbility sa, List<String> choices) { count("chooseProtectionType"); return askOne("chooseProtectionType", sa, choices, () -> super.chooseProtectionType(sa, choices)); }
     @Override
     public void revealAnte(String message, Multimap<Player, PaperCard> removedAnteCards) { count("revealAnte"); super.revealAnte(message, removedAnteCards); }
     @Override
@@ -2655,7 +2675,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public List<CostPart> orderCosts(List<CostPart> costs) { count("orderCosts"); return super.orderCosts(costs); }
     @Override
-    public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) { count("payCostToPreventEffect"); return super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers); }
+    public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) { count("payCostToPreventEffect"); return bridgedPayToPrevent(cost, sa, alreadyPaid, allPayers); }
     @Override
     public boolean payCostDuringRoll(Cost cost, SpellAbility sa) { count("payCostDuringRoll"); return super.payCostDuringRoll(cost, sa); }
     @Override
@@ -2665,13 +2685,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     @Override
     public boolean applyManaToCost(ManaCostBeingPaid toPay, SpellAbility ability, String prompt, ManaConversionMatrix matrix, boolean effect) { count("applyManaToCost"); return super.applyManaToCost(toPay, ability, prompt, matrix, effect); }
     @Override
-    public CardCollectionView chooseCardsForCost(CardCollectionView optionList, SpellAbility sa, CostPartWithList cpl, int amount, boolean isOptional, String prompt) { count("chooseCardsForCost"); return super.chooseCardsForCost(optionList, sa, cpl, amount, isOptional, prompt); }
+    public CardCollectionView chooseCardsForCost(CardCollectionView optionList, SpellAbility sa, CostPartWithList cpl, int amount, boolean isOptional, String prompt) { count("chooseCardsForCost"); return askCostCards(optionList, sa, cpl, amount, isOptional, prompt, () -> super.chooseCardsForCost(optionList, sa, cpl, amount, isOptional, prompt)); }
     @Override
     public CostDecisionMakerBase getCostDecisionMaker(Player player, SpellAbility ability, boolean effect, String prompt) { count("getCostDecisionMaker"); return super.getCostDecisionMaker(player, ability, effect, prompt); }
     @Override
-    public String chooseCardName(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) { count("chooseCardName"); return super.chooseCardName(sa, cpp, valid, message); }
+    public String chooseCardName(SpellAbility sa, Predicate<ICardFace> cpp, String valid, String message) { count("chooseCardName"); return bridgedChooseCardName(sa, cpp, null, () -> super.chooseCardName(sa, cpp, valid, message)); }
     @Override
-    public String chooseCardName(SpellAbility sa, List<ICardFace> faces, String message) { count("chooseCardName"); return super.chooseCardName(sa, faces, message); }
+    public String chooseCardName(SpellAbility sa, List<ICardFace> faces, String message) { count("chooseCardName"); return bridgedChooseCardName(sa, null, faces, () -> super.chooseCardName(sa, faces, message)); }
     /*
      * ---------------------------------------------------------------------
      * THE ZONE-CHANGE ASKS — v2.17, and until this they were COUNTED AND
@@ -2716,6 +2736,9 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
             Player decider) {
         count("chooseSingleCardForZoneChange");
+        if (localAnswers() && (decider != getPlayer() || fetchList == null || fetchList.isEmpty())) {
+            note(decider != getPlayer() ? "zoneChange.otherDecider" : "zoneChange.empty"); // RL census, rl-r0-b4-1006
+        }
         if (!bridged() || decider != getPlayer() || fetchList == null || fetchList.isEmpty()) {
             return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
                     selectPrompt, isOptional, decider);
@@ -2848,7 +2871,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask(method, "zoneChange", body);
+        final JsonObject ans = ask(method, "zoneChange", body, fetchList);
         if (ans == null) {
             return null;
         }
@@ -2934,7 +2957,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (source != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(source));
         }
-        final JsonObject ans = ask("orderMoveToZoneList", "orderZone", body);
+        final JsonObject ans = ask("orderMoveToZoneList", "orderZone", body,
+                new Object[] {cards, destinationZone, body.get("topFirst").getAsBoolean(), source});
         if (ans == null) {
             final Echo e = takeEcho();
             final CardCollectionView out = super.orderMoveToZoneList(cards, destinationZone, source);
@@ -2969,6 +2993,911 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             ordered.add(found);
         }
         return ordered;
+    }
+
+    // ============================================================================ RL seat, Phase B (rl-r0-b4-1006)
+    /*
+     * THE PHASE B ASKS (lane rl-r0-b4-1006; GOAL rev 5 R0, interfaces.md Appendix B.1). Every method below is posed
+     * ONLY to an in-process answerer (BenchSession.LocalAnswerer: the RL seat, playing or recording). With no local
+     * answerer, or an unbridged seat, each one is exactly its old one-line delegation to PlayerControllerAi, so the
+     * stdio host never sees the new kinds and the default path is unchanged. The house shape throughout: a light body,
+     * the Forge objects behind the menu passed in-process, null = delegate (Forge decides; its answer is echoed in the
+     * ask's own answer shape, for record mode), and every answer validated before it is applied; a refusal falls back
+     * to Forge's own decision and is counted.
+     *
+     * Three things are not asks but make the RL seat answer what was Forge's before:
+     *  - COST CARDS. Forge's AI never calls chooseCardsForCost: it pays sacrifice / discard / exile / return costs
+     *    through `new AiCostDecision(...)`. AiCostDecision.forPayment (the four real-payment sites) asks this
+     *    controller first (costDecisionForPayment), and the seat's decision maker poses those card choices as the
+     *    `costCards` ask, falling back to Forge's own visit.
+     *  - TRIGGER TARGETS. PlayerControllerAi puts a triggered ability on the stack through prepareSingleSa ->
+     *    doTrigger, which sets its targets without chooseTargetsFor. For a seat whose answers are played, Forge still
+     *    prepares the trigger (X, AI parameters, charm modes) and the seat then chooses the targets through the
+     *    ordinary `targets` ask (orchestrator ruling 10-05, ICR B4-families-coordination §4). The same holds for the
+     *    targets of a spell cast from an effect (playSaFromPlayEffect) and of an effect played without the stack.
+     *  - CHARM SPELLS. A modal spell the seat casts gets its modes at handlePlayingSpellAbility (CharmEffect), after
+     *    the bridge's ensureTargets ran; the chosen modes' targets are now asked there too.
+     */
+
+    /** An in-process answerer (the RL seat, playing or recording) answers this seat. */
+    private boolean localAnswers() {
+        return bridged() && session.getLocalAnswerer() != null;
+    }
+
+    /** ...and its answers are played (an RL seat), rather than only observed (record mode). */
+    private boolean seatPlays() {
+        return localAnswers() && !session.getLocalAnswerer().observeOnly();
+    }
+
+    /** A census note for the local answerer: counts only, never a decision. */
+    private void note(final String key) {
+        final BenchSession.LocalAnswerer l = session.getLocalAnswerer();
+        if (l == null || !isLiveGame()) {
+            return;
+        }
+        try {
+            l.note(getGame(), getPlayer(), key);
+        } catch (RuntimeException e) {
+            counters.instrument("note.failed");
+        }
+    }
+
+    /** Diagnosis switch (-Dbridge.forgeTriggerTargets=true): leave a seat's trigger targets to Forge, as before this
+     *  lane, for the before/after census. Off by default. */
+    static final boolean FORGE_TRIGGER_TARGETS = Boolean.getBoolean("bridge.forgeTriggerTargets");
+
+    /** Where the targeting being asked comes from (`targets` ask body "origin"): cast, trigger, playFromEffect, noStack. */
+    private String targetingOrigin = "cast";
+
+    /** True while orderAndPlay re-enters super for one copied spell: its singleton orderSimultaneousSa is not a call. */
+    private boolean quietOrder = false;
+
+    /** > 0 while Forge's AI runs a heuristic that probes this controller (never asked: forgeTuck, NAME's fallback). */
+    private int probing = 0;
+
+    /** {@code {"choices":[fid…]}} → cards of {@code pool}, count in [min, max], no repeats; null (refused) otherwise. */
+    private CardCollection pickCards(final String method, final JsonObject ans, final Iterable<Card> pool,
+            final int min, final int max) {
+        final List<Integer> ids = optIntList(ans, "choices");
+        if (ids == null) {
+            refuse(method, "missing/!array 'choices'");
+            return null;
+        }
+        if (ids.size() < min || ids.size() > max) {
+            refuse(method, "chose " + ids.size() + " outside [" + min + "," + max + "]");
+            return null;
+        }
+        final CardCollection picked = new CardCollection();
+        for (int fid : ids) {
+            final Card c = findCard(pool, fid);
+            if (c == null || picked.contains(c)) {
+                refuse(method, "unknown/duplicate card id " + fid);
+                return null;
+            }
+            picked.add(c);
+        }
+        return picked;
+    }
+
+    /** {@code {top:[fid…], <second>:[fid…]}} partitioning {@code cards}; null (refused) otherwise. */
+    private ImmutablePair<CardCollection, CardCollection> partition(final String method, final JsonObject ans,
+            final CardCollection cards, final String second) {
+        final List<Integer> top = optIntList(ans, "top");
+        final List<Integer> rest = optIntList(ans, second);
+        if (top == null || rest == null || top.size() + rest.size() != cards.size()) {
+            refuse(method, "top+" + second + " must partition the " + cards.size() + " cards");
+            return null;
+        }
+        final CardCollection a = new CardCollection();
+        final CardCollection b = new CardCollection();
+        for (int fid : top) {
+            final Card c = findCard(cards, fid);
+            if (c == null || a.contains(c)) {
+                refuse(method, "unknown/duplicate top card " + fid);
+                return null;
+            }
+            a.add(c);
+        }
+        for (int fid : rest) {
+            final Card c = findCard(cards, fid);
+            if (c == null || a.contains(c) || b.contains(c)) {
+                refuse(method, "unknown/duplicate " + second + " card " + fid);
+                return null;
+            }
+            b.add(c);
+        }
+        return ImmutablePair.of(a, b);
+    }
+
+    // ---- 16 DISCARD_FROM
+    private CardCollection bridgedDiscardFrom(final Player playerDiscard, final SpellAbility sa,
+            final CardCollection validCards, final int min, final int max, final CardCollectionView visibleToChooser) {
+        if (!localAnswers() || validCards == null || validCards.isEmpty()) {
+            return super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser);
+        }
+        final JsonObject body = envelope(true);
+        body.addProperty("min", min);
+        body.addProperty("max", max);
+        body.addProperty("ownHand", playerDiscard == getPlayer());
+        final JsonObject ans = ask("chooseCardsToDiscardFrom", "discardFrom", body,
+                new Object[] {validCards, sa, playerDiscard});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final CardCollection out = super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max,
+                    visibleToChooser);
+            echo(e, echoCards(out));
+            return out;
+        }
+        final CardCollection picked = pickCards("chooseCardsToDiscardFrom", ans, validCards, min, max);
+        return picked != null ? picked
+                : super.chooseCardsToDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser);
+    }
+
+    // ---- 17 COST_CARDS
+    /** The {@code costCards} round trip; {@code forge} is Forge's own choice (delegate and refusal). */
+    private CardCollectionView askCostCards(final CardCollectionView pool, final SpellAbility sa,
+            final CostPartWithList cpl, final int amount, final boolean optional, final String prompt,
+            final java.util.function.Supplier<CardCollectionView> forge) {
+        if (!localAnswers() || pool == null || pool.isEmpty() || amount <= 0) {
+            return forge.get();
+        }
+        final int min = optional ? 0 : amount;
+        final JsonObject body = envelope(true);
+        body.addProperty("min", min);
+        body.addProperty("max", amount);
+        body.addProperty("cost", cpl == null ? "" : cpl.getClass().getSimpleName());
+        final JsonObject ans = ask("chooseCardsForCost", "costCards", body, new Object[] {pool, sa, cpl});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final CardCollectionView out = forge.get();
+            echo(e, echoCards(out));
+            return out;
+        }
+        final CardCollection picked = pickCards("chooseCardsForCost", ans, pool, min, amount);
+        return picked != null ? picked : forge.get();
+    }
+
+    /** AiCostDecision.PaymentDecisions: the seat's decision maker for a real payment, or null (Forge's own). */
+    @Override
+    public AiCostDecision costDecisionForPayment(final Player payer, final SpellAbility sa, final boolean effect) {
+        if (!localAnswers() || payer != getPlayer() || sa == null) {
+            return null;
+        }
+        return new SeatCostDecision(payer, sa, effect);
+    }
+
+    /** "+withTotalCMCGE", "+WithDifferentNames", … : the shapes Forge pays by its own special rules. */
+    private static boolean specialType(final String t) {
+        return t == null || t.contains("+with") || t.contains("+With");
+    }
+
+    /**
+     * Forge's AI cost decisions with the card choices of typed discard / exile / sacrifice / return costs posed to the
+     * seat ({@code costCards}). Every other part, and every special shape, is Forge's own visit.
+     */
+    private final class SeatCostDecision extends AiCostDecision {
+        SeatCostDecision(final Player p, final SpellAbility sa, final boolean effect) {
+            super(p, sa, effect);
+        }
+
+        private PaymentDecision asked(final CostPartWithList cost, final CardCollectionView valid, final int c,
+                final java.util.function.Supplier<PaymentDecision> forge) {
+            if (c <= 0 || valid == null || valid.size() < c) {
+                return forge.get();
+            }
+            count("chooseCardsForCost");
+            final PaymentDecision[] fd = {null};
+            final boolean[] forgeDecided = {false};
+            final CardCollectionView pick = askCostCards(valid, ability, cost, c, false, null, () -> {
+                forgeDecided[0] = true;
+                fd[0] = forge.get();
+                return fd[0] == null ? null : fd[0].cards;
+            });
+            if (forgeDecided[0]) {
+                return fd[0];
+            }
+            return pick == null ? forge.get() : PaymentDecision.card(pick);
+        }
+
+        @Override
+        public PaymentDecision visit(final CostDiscard cost) {
+            final String t = cost.getType();
+            if (cost.payCostFromSource() || "Hand".equals(t) || "LastDrawn".equals(t) || "Random".equals(t)
+                    || specialType(t)) {
+                return super.visit(cost);
+            }
+            final CardCollectionView valid = CardLists.getValidCards(player.getCardsIn(ZoneType.Hand), t.split(";"),
+                    player, source, ability);
+            return asked(cost, valid, cost.getAbilityAmount(ability), () -> super.visit(cost));
+        }
+
+        @Override
+        public PaymentDecision visit(final CostExile cost) {
+            final String t = cost.getType();
+            if (cost.payCostFromSource() || "All".equals(t) || "OriginalHost".equals(t) || t.contains("FromTopGrave")
+                    || specialType(t) || cost.zoneRestriction == 0
+                    || (cost.getFrom().size() == 1 && cost.getFrom().get(0) == ZoneType.Library)) {
+                return super.visit(cost);
+            }
+            CardCollectionView list = cost.zoneRestriction != 1 ? player.getGame().getCardsIn(cost.getFrom())
+                    : player.getCardsIn(cost.getFrom());
+            list = CardLists.getValidCards(list, t.split(";"), player, source, ability);
+            list = CardLists.filter(list, CardPredicates.canExiledBy(ability, isEffect()));
+            return asked(cost, list, cost.getAbilityAmount(ability), () -> super.visit(cost));
+        }
+
+        @Override
+        public PaymentDecision visit(final CostSacrifice cost) {
+            final String t = cost.getType();
+            if (cost.payCostFromSource() || "OriginalHost".equals(t) || "All".equals(cost.getAmount())
+                    || specialType(t)) {
+                return super.visit(cost);
+            }
+            CardCollectionView list = CardLists.filter(player.getCardsIn(ZoneType.Battlefield),
+                    CardPredicates.canBeSacrificedBy(ability, isEffect()));
+            list = CardLists.getValidCards(list, t.split(";"), player, source, ability);
+            return asked(cost, list, cost.getAbilityAmount(ability), () -> super.visit(cost));
+        }
+
+        @Override
+        public PaymentDecision visit(final CostReturn cost) {
+            final String t = cost.getType();
+            if (cost.payCostFromSource() || specialType(t) || ability.getActivatingPlayer() == null) {
+                return super.visit(cost);
+            }
+            final CardCollectionView list = CardLists.getValidCards(
+                    ability.getActivatingPlayer().getCardsIn(ZoneType.Battlefield), t.split(";"), player, source,
+                    ability);
+            return asked(cost, list, cost.getAbilityAmount(ability), () -> super.visit(cost));
+        }
+    }
+
+    // ---- 19 SURVEIL
+    private ImmutablePair<CardCollection, CardCollection> bridgedArrangeForSurveil(final CardCollection topN) {
+        if (!localAnswers() || topN == null || topN.isEmpty()) {
+            return super.arrangeForSurveil(topN);
+        }
+        final JsonObject ans = ask("arrangeForSurveil", "surveil", envelope(true), topN);
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final ImmutablePair<CardCollection, CardCollection> out = super.arrangeForSurveil(topN);
+            final JsonObject a = new JsonObject();
+            a.add("top", fidArray(out == null ? null : out.getLeft()));
+            a.add("graveyard", fidArray(out == null ? null : out.getRight()));
+            echo(e, a);
+            return out;
+        }
+        final ImmutablePair<CardCollection, CardCollection> split = partition("arrangeForSurveil", ans, topN,
+                "graveyard");
+        return split != null ? split : super.arrangeForSurveil(topN);
+    }
+
+    // ---- 20 PUT_ON_TOP
+    private boolean bridgedWillPutCardOnTop(final Card c) {
+        if (!localAnswers() || c == null) {
+            return super.willPutCardOnTop(c);
+        }
+        if (probing > 0) {
+            note("probe.willPutCardOnTop");
+            return super.willPutCardOnTop(c);
+        }
+        final JsonObject ans = ask("willPutCardOnTop", "putOnTop", envelope(true), c);
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final boolean out = super.willPutCardOnTop(c);
+            echo(e, echoBool("yes", out));
+            return out;
+        }
+        final Boolean yes = optBool(ans, "yes");
+        if (yes == null) {
+            refuse("willPutCardOnTop", "expected boolean 'yes'");
+            return super.willPutCardOnTop(c);
+        }
+        return yes;
+    }
+
+    // ---- 18 PILE
+    private boolean bridgedChooseCardsPile(final SpellAbility sa, final CardCollectionView pile1,
+            final CardCollectionView pile2, final String faceUp) {
+        if (!localAnswers() || pile1 == null || pile2 == null) {
+            return super.chooseCardsPile(sa, pile1, pile2, faceUp);
+        }
+        final JsonObject body = envelope(true);
+        body.addProperty("faceUp", String.valueOf(faceUp));
+        final JsonObject ans = ask("chooseCardsPile", "pile", body, new Object[] {sa, pile1, pile2, faceUp});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final boolean out = super.chooseCardsPile(sa, pile1, pile2, faceUp);
+            echo(e, echoInt("pile", out ? 0 : 1));
+            return out;
+        }
+        final Integer pile = optInt(ans, "pile");
+        if (pile == null || pile < 0 || pile > 1) {
+            refuse("chooseCardsPile", "expected 'pile' 0 or 1");
+            return super.chooseCardsPile(sa, pile1, pile2, faceUp);
+        }
+        return pile == 0;
+    }
+
+    // ---- 21 OPTIONAL_TRIGGER
+    private boolean bridgedConfirmTrigger(final WrappedAbility wrapper) {
+        if (!localAnswers() || wrapper == null) {
+            return super.confirmTrigger(wrapper);
+        }
+        final boolean mandatory = wrapper.isMandatory();
+        final JsonObject body = envelope(true);
+        body.addProperty("mandatory", mandatory);
+        final JsonObject ans = ask("confirmTrigger", "optionalTrigger", body, new Object[] {wrapper, mandatory});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final boolean out = super.confirmTrigger(wrapper);
+            echo(e, echoBool("yes", out));
+            return out;
+        }
+        final Boolean yes = optBool(ans, "yes");
+        if (yes == null || (mandatory && !yes)) {
+            refuse("confirmTrigger", "expected boolean 'yes' (true for a mandatory trigger)");
+            return super.confirmTrigger(wrapper);
+        }
+        return yes;
+    }
+
+    // ---- 22 PAY_TO_PREVENT
+    private boolean bridgedPayToPrevent(final Cost cost, final SpellAbility sa, final boolean alreadyPaid,
+            final FCollectionView<Player> allPayers) {
+        if (!localAnswers() || cost == null || sa == null) {
+            return super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
+        }
+        // Payability only for a seat whose answers are played: canPayCost draws from the game's random stream (the
+        // record-mode do-no-harm residual), so a recorder offers YES unchecked.
+        boolean payable = true;
+        if (seatPlays()) {
+            try {
+                payable = ComputerUtilCost.canPayCost(cost, sa, getPlayer(), true);
+            } catch (RuntimeException e) {
+                payable = false;
+            }
+        }
+        int generic = 0;
+        try {
+            generic = cost.hasNoManaCost() ? 0 : cost.getTotalMana().getCMC();
+        } catch (RuntimeException e) {
+            generic = 0;
+        }
+        final JsonObject body = envelope(true);
+        body.addProperty("payable", payable);
+        body.addProperty("alreadyPaid", alreadyPaid);
+        body.addProperty("mana", generic);
+        final JsonObject ans = ask("payCostToPreventEffect", "payToPrevent", body,
+                new Object[] {cost, sa, payable, generic});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final boolean out = super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
+            echo(e, echoBool("yes", out));
+            return out;
+        }
+        final Boolean yes = optBool(ans, "yes");
+        if (yes == null || (yes && !payable)) {
+            refuse("payCostToPreventEffect", "expected boolean 'yes' (and a payable cost for yes)");
+            return super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
+        }
+        if (!yes) {
+            return false;
+        }
+        // as PlayerControllerAi pays it, with the seat's card choices for any card-shaped part
+        final boolean paid = new CostPayment(cost, sa).payComputerCosts(AiCostDecision.forPayment(getPlayer(), sa, true));
+        if (!paid) {
+            note("payToPrevent.payFailed");
+        }
+        return paid;
+    }
+
+    // ---- 23 NAME
+    private String bridgedChooseCardName(final SpellAbility sa, final Predicate<ICardFace> cpp,
+            final List<ICardFace> faces, final java.util.function.Supplier<String> forge) {
+        if (!localAnswers()) {
+            return forge.get();
+        }
+        if (probing > 0) {
+            note("probe.chooseCardName");
+            return forge.get();
+        }
+        final JsonObject ans = ask("chooseCardName", "name", envelope(true), new Object[] {sa, cpp, faces});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final String out = forgeName(forge);
+            final JsonObject a = new JsonObject();
+            a.addProperty("name", out == null ? "" : out);
+            echo(e, a);
+            return out;
+        }
+        final String name = ans.has("name") && !ans.get("name").isJsonNull() ? ans.get("name").getAsString() : null;
+        if (name == null || !nameLegal(name, cpp, faces)) {
+            refuse("chooseCardName", "name not legal here: " + name);
+            return forgeName(forge);
+        }
+        return name;
+    }
+
+    /** Forge's name (AILogic MakeCard re-enters chooseCardName with faces: a probe, never asked). */
+    private String forgeName(final java.util.function.Supplier<String> forge) {
+        probing++;
+        try {
+            return forge.get();
+        } finally {
+            probing--;
+        }
+    }
+
+    /** A name the ask allows: one of {@code faces}, or a card face {@code cpp} accepts. */
+    public static boolean nameLegal(final String name, final Predicate<ICardFace> cpp, final List<ICardFace> faces) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        if (faces != null) {
+            for (ICardFace f : faces) {
+                if (f != null && name.equals(f.getName())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        try {
+            final ICardFace f = forge.StaticData.instance().getCommonCards().getFaceByName(name);
+            return f != null && (cpp == null || cpp.test(f));
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    // ---- 24 COLOR
+    /** A colour chosen while a mana ability resolves (Forge's auto-payment): mechanical, never asked. */
+    private static boolean manaColour(final SpellAbility sa) {
+        if (sa == null) {
+            return true;
+        }
+        try {
+            final forge.game.ability.ApiType api = sa.getApi();
+            return sa.isManaAbility() || api == forge.game.ability.ApiType.Mana
+                    || api == forge.game.ability.ApiType.ManaReflected
+                    || api == forge.game.ability.ApiType.ReplaceMana;
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
+    /** WUBRG index 0..4 of a single-colour mask, or -1. */
+    public static int colourIndex(final byte mask) {
+        final byte[] m = MagicColor.WUBRG;
+        for (int i = 0; i < m.length; i++) {
+            if (m[i] == mask) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private byte bridgedChooseColor(final String message, final SpellAbility sa, final ColorSet colors) {
+        if (!localAnswers() || colors == null || colors.isColorless() || manaColour(sa)) {
+            if (localAnswers() && manaColour(sa)) {
+                note("chooseColor.mana");
+            }
+            return super.chooseColor(message, sa, colors);
+        }
+        final JsonObject ans = ask("chooseColor", "color", envelope(true), new Object[] {sa, colors, 1, 1});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final byte out = super.chooseColor(message, sa, colors);
+            echo(e, echoInt("color", colourIndex(out)));
+            return out;
+        }
+        final Integer i = optInt(ans, "color");
+        if (i == null || i < 0 || i >= MagicColor.WUBRG.length || (colors.getColor() & MagicColor.WUBRG[i]) == 0) {
+            refuse("chooseColor", "colour " + i + " not offered");
+            return super.chooseColor(message, sa, colors);
+        }
+        return MagicColor.WUBRG[i];
+    }
+
+    private ColorSet bridgedChooseColors(final String message, final SpellAbility sa, final int min, final int max,
+            final ColorSet options) {
+        if (!localAnswers() || options == null || options.isColorless() || manaColour(sa)) {
+            if (localAnswers() && manaColour(sa)) {
+                note("chooseColors.mana");
+            }
+            return super.chooseColors(message, sa, min, max, options);
+        }
+        final JsonObject ans = ask("chooseColors", "color", envelope(true), new Object[] {sa, options, min, max});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final ColorSet out = super.chooseColors(message, sa, min, max, options);
+            final JsonObject a = new JsonObject();
+            final JsonArray idx = new JsonArray();
+            if (out != null) {
+                for (int i = 0; i < MagicColor.WUBRG.length; i++) {
+                    if ((out.getColor() & MagicColor.WUBRG[i]) != 0) {
+                        idx.add(i);
+                    }
+                }
+            }
+            a.add("colors", idx);
+            echo(e, a);
+            return out;
+        }
+        final List<Integer> idx = optIntList(ans, "colors");
+        if (idx == null || idx.size() < min || idx.size() > max) {
+            refuse("chooseColors", "bad 'colors' for [" + min + "," + max + "]");
+            return super.chooseColors(message, sa, min, max, options);
+        }
+        byte mask = 0;
+        for (int i : idx) {
+            if (i < 0 || i >= MagicColor.WUBRG.length || (options.getColor() & MagicColor.WUBRG[i]) == 0
+                    || (mask & MagicColor.WUBRG[i]) != 0) {
+                refuse("chooseColors", "colour " + i + " not offered or repeated");
+                return super.chooseColors(message, sa, min, max, options);
+            }
+            mask |= MagicColor.WUBRG[i];
+        }
+        return ColorSet.fromMask(mask);
+    }
+
+    // ---- the remaining strategic choices (ICR B4-strategic-leftovers, ruled 10-05 21:41 PT): MODE and CONFIRM
+    /**
+     * One option of {@code options} (MODE, SUBSET min = max = 1; the answer is {@code {"choices": [i]}}): protection
+     * type, pump keyword, a spell for an effect (dungeon rooms, copies), a card face (which dungeon), which ability to
+     * cast from an effect. Forge's choice on delegation (echoed as its index) and on refusal.
+     */
+    private <T> T askOne(final String method, final SpellAbility sa, final List<T> options,
+            final java.util.function.Supplier<T> forge) {
+        if (!localAnswers() || options == null || options.isEmpty()) {
+            return forge.get();
+        }
+        if (probing > 0) {
+            note("probe." + method);
+            return forge.get();
+        }
+        final List<Integer> pick = askOptions(method, sa, options, 1, 1);
+        if (pick == null) {
+            final Echo e = takeEcho();
+            final T out = forgeProbe(forge);
+            final JsonObject a = new JsonObject();
+            final JsonArray idx = new JsonArray();
+            int at = out == null ? -1 : indexOfIdentity(options, out);
+            if (at < 0 && out != null) {
+                at = options.indexOf(out); // Forge may return an equal String it built itself (protection type)
+            }
+            if (at >= 0) {
+                idx.add(at);
+            }
+            a.add("choices", idx);
+            echo(e, a);
+            return out;
+        }
+        return options.get(pick.get(0));
+    }
+
+    /** The {@code mode} ask over arbitrary options; the chosen indices, or null (delegated, or refused). */
+    private List<Integer> askOptions(final String method, final SpellAbility sa, final List<?> options, final int min,
+            final int max) {
+        final JsonObject body = envelope(true);
+        body.addProperty("min", min);
+        body.addProperty("num", max);
+        body.addProperty("max", max);
+        final JsonObject ans = ask(method, "mode", body, new Object[] {sa, options, min, max});
+        if (ans == null) {
+            return null;
+        }
+        final List<Integer> idx = optIntList(ans, "choices");
+        if (idx == null || idx.size() < min || idx.size() > max) {
+            refuse(method, "bad 'choices' for [" + min + "," + max + "]");
+            return null;
+        }
+        final Set<Integer> seen = new HashSet<>();
+        for (int i : idx) {
+            if (i < 0 || i >= options.size() || !seen.add(i)) {
+                refuse(method, "option index out of range/repeated: " + i);
+                return null;
+            }
+        }
+        return idx;
+    }
+
+    private <T> T forgeProbe(final java.util.function.Supplier<T> forge) {
+        probing++;
+        try {
+            return forge.get();
+        } finally {
+            probing--;
+        }
+    }
+
+    private List<SpellAbility> bridgedSpellAbilitiesForEffect(final List<SpellAbility> spells, final SpellAbility sa,
+            final String title, final int num, final Map<String, Object> params) {
+        if (!localAnswers() || spells == null || spells.isEmpty() || num <= 0) {
+            return super.chooseSpellAbilitiesForEffect(spells, sa, title, num, params);
+        }
+        final int n = Math.min(num, spells.size());
+        final List<Integer> pick = askOptions("chooseSpellAbilitiesForEffect", sa, spells, n, n);
+        if (pick == null) {
+            final Echo e = takeEcho();
+            // PlayerControllerAi loops on chooseSingleSpellForEffect: a probe there, never asked
+            final List<SpellAbility> out = forgeProbe(
+                    () -> super.chooseSpellAbilitiesForEffect(spells, sa, title, num, params));
+            echo(e, echoIndices(spells, out));
+            return out;
+        }
+        final List<SpellAbility> chosen = new ArrayList<>();
+        for (int i : pick) {
+            chosen.add(spells.get(i));
+        }
+        return chosen;
+    }
+
+    private boolean bridgedConfirmReplacement(final ReplacementEffect re, final SpellAbility effectSA,
+            final GameEntity affected, final String question) {
+        if (!localAnswers() || re == null) {
+            return super.confirmReplacementEffect(re, effectSA, affected, question);
+        }
+        Card host = re.getHostCard();
+        final JsonObject body = envelope(true);
+        body.addProperty("message", String.valueOf(question));
+        final JsonObject ans = ask("confirmReplacementEffect", "confirm", body, new Object[] {effectSA, host});
+        if (ans == null) {
+            final Echo e = takeEcho();
+            final boolean out = super.confirmReplacementEffect(re, effectSA, affected, question);
+            echo(e, echoBool("yes", out));
+            return out;
+        }
+        final Boolean yes = optBool(ans, "yes");
+        if (yes == null) {
+            refuse("confirmReplacementEffect", "expected boolean 'yes'");
+            return super.confirmReplacementEffect(re, effectSA, affected, question);
+        }
+        // PlayerControllerAi's own preparation before it decides
+        if (host != null && host.hasAlternateState()) {
+            host = host.getGame().getCardState(host);
+        }
+        if (effectSA != null && host != null) {
+            effectSA.setActivatingPlayer(host.getController());
+        }
+        return yes;
+    }
+
+    // ---- TARGETS for triggers, effect casts, no-stack effects, charm modes
+    /** The ability itself, or the ability a trigger wraps. */
+    private static SpellAbility unwrap(final SpellAbility sa) {
+        return sa instanceof WrappedAbility ? ((WrappedAbility) sa).getWrappedAbility() : sa;
+    }
+
+    /** Whether any ability of the chain targets. */
+    private static boolean chainTargets(final SpellAbility sa) {
+        for (SpellAbility cur = unwrap(sa); cur != null; cur = cur.getSubAbility()) {
+            if (cur.usesTargeting()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Forge has prepared {@code root} (its AI set the targets); the seat now chooses them, one {@code targets} ask per
+     * targeting ability in chain order. An ask the seat cannot complete keeps Forge's targets (counted).
+     * {@code onlyUntargeted}: leave an ability that already has targets alone (charm modes after CharmEffect).
+     */
+    private void retargetForSeat(final SpellAbility root, final String origin, final boolean onlyUntargeted) {
+        for (SpellAbility cur = unwrap(root); cur != null; cur = cur.getSubAbility()) {
+            if (!cur.usesTargeting()) {
+                continue;
+            }
+            note(origin + ".targeting");
+            if (onlyUntargeted && !cur.getTargets().isEmpty()) {
+                continue;
+            }
+            final Player tp = cur.getTargetingPlayer();
+            if (tp != null && tp != getPlayer()) {
+                continue; // another player targets (TargetingPlayer): theirs to choose
+            }
+            final TargetChoices forge = cur.getTargets();
+            cur.resetTargets();
+            cur.setTargetingPlayer(getPlayer());
+            final String before = targetingOrigin;
+            targetingOrigin = origin;
+            boolean ok;
+            try {
+                ok = chooseTargetsFor(cur) && cur.isTargetNumberValid();
+            } catch (RuntimeException e) {
+                JsonRpcChannel.logErr("seat retargeting failed for " + cur, e);
+                ok = false;
+            } finally {
+                targetingOrigin = before;
+            }
+            if (!ok) {
+                cur.resetTargets();
+                cur.setTargets(forge);
+                note(origin + ".keptForge");
+            }
+        }
+    }
+
+    /** Record mode: show the recorder the targets Forge chose for {@code sa}'s chain. */
+    private void forgeTargeted(final SpellAbility sa, final String origin) {
+        final BenchSession.LocalAnswerer l = session.getLocalAnswerer();
+        if (l == null || !isLiveGame()) {
+            return;
+        }
+        try {
+            l.onForgeTargeted(getGame(), getPlayer(), origin, unwrap(sa));
+        } catch (RuntimeException e) {
+            counters.instrument("forgeTargeted.failed");
+            JsonRpcChannel.logErr("forge-targeted hook failed", e);
+        }
+    }
+
+    /** PlayerControllerAi.prepareSingleSa (private there), with the seat choosing the targets afterwards. */
+    private boolean prepareForSeat(final SpellAbility sa0, final boolean isMandatory) {
+        SpellAbility sa = sa0;
+        final Card host = sa.getHostCard();
+        if (sa.getApi() == forge.game.ability.ApiType.Charm) {
+            if (!forge.game.ability.effects.CharmEffect.makeChoices(sa)) {
+                return false;
+            }
+            if (!sa.hasParam("Random")) {
+                retargetForSeat(sa, "trigger", false);
+                return true;
+            }
+            sa = sa.getSubAbility();
+        }
+        if (sa.hasParam("TargetingPlayer")) {
+            final Player tp = AbilityUtils.getDefinedPlayers(host, sa.getParam("TargetingPlayer"), sa).get(0);
+            sa.setTargetingPlayer(tp);
+            return tp.getController().chooseTargetsFor(sa);
+        }
+        if (!getAi().doTrigger(sa, isMandatory)) {
+            return false;
+        }
+        retargetForSeat(sa, "trigger", false);
+        return true;
+    }
+
+    /** Before-census (diagnosis switch on): targeting abilities whose targets Forge chose with a real choice. */
+    private void countForgeChoice(final SpellAbility root, final String origin) {
+        for (SpellAbility cur = unwrap(root); cur != null; cur = cur.getSubAbility()) {
+            if (!cur.usesTargeting()) {
+                continue;
+            }
+            note(origin + ".targeting");
+            final int n = candidateCount(cur);
+            if (cur.getMaxTargets() > 0 && n > cur.getMinTargets()) {
+                note(origin + ".forgeChoice");
+            }
+        }
+    }
+
+    private void bridgedOrderAndPlay(final List<SpellAbility> sas) {
+        if (!localAnswers() || sas == null) {
+            super.orderAndPlaySimultaneousSa(sas);
+            return;
+        }
+        if (!seatPlays() || FORGE_TRIGGER_TARGETS) {
+            super.orderAndPlaySimultaneousSa(sas);
+            for (SpellAbility sa : sas) {
+                // only the triggers Forge put on the stack (prepareSingleSa drops one it cannot or will not target)
+                if (sa != null && sa.isTrigger() && !sa.isCopied() && chainTargets(sa)
+                        && getGame().getStack().getInstanceMatchingSpellAbilityID(sa) != null) {
+                    if (seatPlays()) {
+                        countForgeChoice(sa, "trigger");
+                    } else {
+                        forgeTargeted(sa, "trigger");
+                    }
+                }
+            }
+            return;
+        }
+        // PlayerControllerAi.orderAndPlaySimultaneousSa with the seat's trigger targets; copies are super's
+        for (final SpellAbility sa : orderSimultaneousSa(sas)) {
+            if (sa.isTrigger() && !sa.isCopied()) {
+                if (prepareForSeat(sa, true)) {
+                    forge.ai.ComputerUtil.playStack(sa, getPlayer(), getGame());
+                }
+            } else {
+                quietOrder = true;
+                try {
+                    super.orderAndPlaySimultaneousSa(Lists.newArrayList(sa));
+                } finally {
+                    quietOrder = false;
+                }
+            }
+        }
+    }
+
+    private boolean bridgedPlayTrigger(final Card host, final WrappedAbility w, final boolean isMandatory) {
+        if (!seatPlays() || FORGE_TRIGGER_TARGETS || w == null) {
+            return super.playTrigger(host, w, isMandatory);
+        }
+        if (prepareForSeat(w, isMandatory)) {
+            return forge.ai.ComputerUtil.playNoStack(w.getActivatingPlayer(), w, getGame(), true);
+        }
+        return false;
+    }
+
+    /**
+     * A spell cast from an effect ("you may cast it without paying its mana cost"). Census: calls, the optional ones
+     * (Forge's AI may decline: a real yes/no, family-25 candidate) and Forge's declines. For a seat whose answers are
+     * played, Forge's AI still makes the yes/no (counted) and the seat chooses the targets.
+     */
+    private boolean bridgedPlayFromEffect(final SpellAbility tgtSA) {
+        if (!localAnswers() || tgtSA == null) {
+            return super.playSaFromPlayEffect(tgtSA);
+        }
+        boolean optional;
+        try {
+            optional = !tgtSA.getPayCosts().isMandatory();
+        } catch (RuntimeException e) {
+            optional = false;
+        }
+        note("playFromEffect.calls");
+        if (optional) {
+            note("playFromEffect.optional");
+        }
+        if (!seatPlays() || !(tgtSA instanceof Spell)) {
+            final boolean out = super.playSaFromPlayEffect(tgtSA);
+            if (optional && !out) {
+                note("playFromEffect.declined");
+            }
+            return out;
+        }
+        final boolean noManaCost = tgtSA.hasParam("WithoutManaCost");
+        final boolean will = getAi().canPlayFromEffectAI((Spell) tgtSA, !optional, noManaCost)
+                == forge.ai.AiPlayDecision.WillPlay;
+        if (will || !optional) {
+            if (chainTargets(tgtSA)) {
+                retargetForSeat(tgtSA, "playFromEffect", false);
+            }
+            return forge.ai.ComputerUtil.playStack(tgtSA, getPlayer(), getGame());
+        }
+        note("playFromEffect.declined");
+        return false;
+    }
+
+    /** An effect played without the stack (replacement effects, opening-hand actions, resolving triggers). */
+    private void bridgedPlayNoStack(final SpellAbility effectSA, final boolean canSetupTargets) {
+        if (!localAnswers() || effectSA == null) {
+            super.playSpellAbilityNoStack(effectSA, canSetupTargets);
+            return;
+        }
+        note("noStack.calls");
+        final boolean targeting = canSetupTargets && chainTargets(effectSA);
+        if (targeting) {
+            note("noStack.setsTargets");
+        }
+        if (!seatPlays() || !targeting) {
+            super.playSpellAbilityNoStack(effectSA, canSetupTargets);
+            return;
+        }
+        // PlayerControllerAi.playSpellAbilityNoStack, with the seat's targets
+        getAi().doTrigger(effectSA, true);
+        retargetForSeat(effectSA, "noStack", false);
+        forge.ai.ComputerUtil.playNoStack(getPlayer(), effectSA, getGame(), true);
+    }
+
+    /**
+     * A spell or ability the seat chose at priority. A modal spell gets its modes inside handlePlayingSpellAbility
+     * (CharmEffect.makeChoices, the `mode` ask), after ensureTargets ran, so the chosen modes' targets are asked
+     * there. Everything else is PlayerControllerAi's.
+     */
+    @Override
+    public boolean playChosenSpellAbility(final SpellAbility sa) {
+        count("playChosenSpellAbility");
+        if (!seatPlays() || sa == null || sa.isLandAbility() || sa.getApi() != forge.game.ability.ApiType.Charm) {
+            return super.playChosenSpellAbility(sa);
+        }
+        for (SpellAbility cur = sa; cur != null; cur = cur.getSubAbility()) {
+            if (cur.hasParam("TargetingPlayer")) {
+                return super.playChosenSpellAbility(sa);
+            }
+        }
+        forge.ai.ComputerUtil.handlePlayingSpellAbility(getPlayer(), sa, root -> retargetForSeat(root, "cast", true));
+        return true;
     }
 
     @Override

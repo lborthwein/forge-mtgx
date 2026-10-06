@@ -106,6 +106,22 @@ public final class BenchSession {
         /** Called when the bridge refuses an answer (Forge decides instead). Default: nothing. */
         default void onRefused(forge.game.Game game, forge.game.player.Player player, String method, String why) {
         }
+
+        /**
+         * RL seat census (lane rl-r0-b4-1006): a named count the bridge observed for this seat (trigger targeting,
+         * spells cast from effects, effects played without the stack). Counts only. Default: nothing.
+         */
+        default void note(forge.game.Game game, forge.game.player.Player player, String key) {
+        }
+
+        /**
+         * RL record mode (lane rl-r0-b4-1006): Forge's AI has just chosen the targets of {@code sa}'s chain outside
+         * any ask (a triggered ability put on the stack); the targets are on the abilities. {@code origin} names the
+         * source ("trigger"). Read-only for the answerer. Default: nothing.
+         */
+        default void onForgeTargeted(forge.game.Game game, forge.game.player.Player player, String origin,
+                forge.game.spellability.SpellAbility sa) {
+        }
     }
 
     private LocalAnswerer localAnswerer = null;
