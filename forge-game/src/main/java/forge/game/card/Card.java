@@ -7566,7 +7566,28 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
 
         final String name = getName();
         final String set = getSetCode();
+        if (!PAPER_LOOKUP_MEMO) {
+            return lookupPaperCard(name, set);
+        }
+        // mtgx (lane forge-speed-1006): a card without its own paper card (tokens, effects, some copies) repeated the
+        // static-data lookup below at every rules query (isDoubleFaced, isModal, getCMC, ...). The lookup reads only
+        // static card data, which lazy loading only ever adds to, so its answer for (name, set code, art preference)
+        // is memoized, null included. -Dforge.paperLookupMemo=false always looks up.
+        final String key = name + '\u0000' + set + '\u0000' + StaticData.instance().getCardArtPreference();
+        final Optional<IPaperCard> hit = PAPER_LOOKUP.get(key);
+        if (hit != null) {
+            return hit.orElse(null);
+        }
+        cp = lookupPaperCard(name, set);
+        PAPER_LOOKUP.putIfAbsent(key, Optional.ofNullable(cp));
+        return cp;
+    }
 
+    private static final boolean PAPER_LOOKUP_MEMO = !"false".equals(System.getProperty("forge.paperLookupMemo"));
+    private static final Map<String, Optional<IPaperCard>> PAPER_LOOKUP = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static IPaperCard lookupPaperCard(final String name, final String set) {
+        IPaperCard cp;
         if (StringUtils.isNotBlank(set)) {
             cp = StaticData.instance().getVariantCards().getCard(name, set);
             if (cp != null) {
