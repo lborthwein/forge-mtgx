@@ -55,6 +55,7 @@ import forge.ai.AiCache;
 import forge.bench.rl.CardIndex;
 import forge.bench.rl.RlClient;
 import forge.bench.rl.RlFeaturizer;
+import forge.bench.rl.RlKnowledge;
 import forge.bench.rl.RlSchema;
 import forge.bench.rl.RlSeat;
 import forge.bench.rl.RlTape;
@@ -123,9 +124,15 @@ public final class RlActorBench {
         int maxGames = 0;
         /** MyRandom's global (non-thread) random, seeded once at boot; RlSimBench seeds it with its config seed. */
         long globalSeed = 0x5eedL;
+        /** Debug only (K8 converter parity, B6): one JSONL row per sent frame with the ForgeState at that moment. */
+        String debugForgeStateOut = null;
         List<String> replayTapes = new ArrayList<>();
         List<int[]> replayLines = new ArrayList<>();
         String replayOut = null;
+        /** Replay every (or a seeded sample of N) non-void line of every tape under this directory. */
+        String replayDir = null;
+        int replaySample = 0;
+        long replaySampleSeed = 1005L;
     }
 
     static Cfg parse(final JsonObject o) {
@@ -146,6 +153,7 @@ public final class RlActorBench {
         if (o.has("tapeRotate")) c.tapeRotate = o.get("tapeRotate").getAsInt();
         if (o.has("maxGames")) c.maxGames = o.get("maxGames").getAsInt();
         if (o.has("globalSeed")) c.globalSeed = o.get("globalSeed").getAsLong();
+        if (o.has("debugForgeStateOut")) c.debugForgeStateOut = o.get("debugForgeStateOut").getAsString();
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
             if (r.has("tapes")) for (JsonElement e : r.getAsJsonArray("tapes")) c.replayTapes.add(e.getAsString());
@@ -156,6 +164,9 @@ public final class RlActorBench {
                 }
             }
             if (r.has("out")) c.replayOut = r.get("out").getAsString();
+            if (r.has("dir")) c.replayDir = r.get("dir").getAsString();
+            if (r.has("sample")) c.replaySample = r.get("sample").getAsInt();
+            if (r.has("sampleSeed")) c.replaySampleSeed = r.get("sampleSeed").getAsLong();
         }
         return c;
     }
@@ -178,6 +189,9 @@ public final class RlActorBench {
                 case "--rl-root": c.rlRoot = v; break;
                 case "--out": c.replayOut = v; break;
                 case "--ai-timeout": c.aiTimeoutSec = Integer.parseInt(v); break;
+                case "--tapes": c.replayDir = v; break;
+                case "--sample": c.replaySample = Integer.parseInt(v); break;
+                case "--sample-seed": c.replaySampleSeed = Long.parseLong(v); break;
                 default: throw new IllegalArgumentException("unknown argument " + k);
             }
         }
@@ -274,6 +288,7 @@ public final class RlActorBench {
         String guardError;    // deck guard refusal (nothing played)
         String fatal;         // the connection is unusable
         RlSeat seat;
+        RlKnowledge knowledge; // the game's seat-knowledge tracker (tests)
     }
 
     static final ThreadMXBean TMX = ManagementFactory.getThreadMXBean();
@@ -327,6 +342,10 @@ public final class RlActorBench {
         sc.maxDecisions = cfg.maxDecisions;
         final RlSeat seat = new RlSeat(feat, ep, sc, uid, ctl, priv);
         seat.listener = listener;
+        feat.captureForgeState = cfg.debugForgeStateOut != null;
+        if (cfg.debugForgeStateOut != null) {
+            seat.listener = forgeStateDumper(cfg.debugForgeStateOut, listener, decks);
+        }
         out.seat = seat;
         boolean anyBridged = false;
         final List<RegisteredPlayer> seats = new ArrayList<>();
@@ -337,6 +356,11 @@ public final class RlActorBench {
             final LobbyPlayerBridge lp = new LobbyPlayerBridge("Seat" + s, null, session,
                     bridged ? BenchSession.Mode.BRIDGE : BenchSession.Mode.NULL, s);
             lp.setAiProfile("Default");
+            if (RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL) {
+                // an RL seat's delegated naming ("Forge's choice") must not read hidden zones (ICR B4 coordination);
+                // Forge seats and recorders keep upstream Forge AI (do-no-harm)
+                lp.setFairNaming(forge.ai.AiFixes.Mode.ON);
+            }
             lps.add(lp);
             final RegisteredPlayer rp = new RegisteredPlayer(deck(decks[s]));
             rp.setPlayer(lp);
@@ -364,6 +388,33 @@ public final class RlActorBench {
             game.AI_TIMEOUT = cfg.aiTimeoutSec;
             session.setLiveGame(game);
             seat.setGame(game);
+            // observation v1: what each seat has observed (reveals, its own looks, public moves, the stack tail)
+            final RlKnowledge know = new RlKnowledge(game);
+            know.attach();
+            final java.util.function.Function<Game, BenchSession.KnowledgeObserver> tapF = KNOWLEDGE_TAP;
+            if (tapF == null) {
+                session.setKnowledgeObserver(know);
+            } else {
+                final BenchSession.KnowledgeObserver tap = tapF.apply(game);
+                session.setKnowledgeObserver(new BenchSession.KnowledgeObserver() {
+                    @Override
+                    public void onReveal(final Game g, final Player v, final List<forge.game.card.Card> cards,
+                            final forge.game.zone.ZoneType z, final Player owner) {
+                        tap.onReveal(g, v, cards, z, owner);
+                        know.onReveal(g, v, cards, z, owner);
+                    }
+
+                    @Override
+                    public void onLook(final Game g, final Player v, final List<forge.game.card.Card> cards,
+                            final forge.game.zone.ZoneType dest) {
+                        tap.onLook(g, v, cards, dest);
+                        know.onLook(g, v, cards, dest);
+                    }
+                });
+            }
+            feat.setKnowledge(know);
+            seat.seenNames = know::opponentSeen; // NAME candidates (ICR B4-families-coordination)
+            out.knowledge = know;
             dg = new RlSimBench.Digest(game);
             game.subscribeToEvents(dg);
             RUNNING.put(Thread.currentThread(), new Object[] {game,
@@ -502,6 +553,45 @@ public final class RlActorBench {
     static final java.util.Set<String> NOT_DECISIONS = new java.util.HashSet<>(java.util.Arrays.asList("reveal",
             "notifyOfValue", "revealAnte", "revealAISkipCards", "revealUnsupported", "autoPassCancel",
             "awaitNextInput", "cancelAwaitNextInput", "getCostDecisionMaker", "playChosenSpellAbility"));
+
+    private static PrintWriter forgeStateOut;
+
+    /** The K8 parity dump (debug): {game_uid, dec_idx, seat, family, frame_type, frame_b64, forgeState, startingSeat,
+     *  mulligans, deckPath} per sent frame, the ForgeState taken with the frame's observation. */
+    static RlSeat.FrameListener forgeStateDumper(final String path, final RlSeat.FrameListener next,
+            final String[] decks) {
+        return (g, player, f, m, o, steps, answer) -> {
+            if (next != null) {
+                next.onFrame(g, player, f, m, o, steps, answer);
+            }
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(f.gameUid));
+            row.addProperty("dec_idx", f.decIdx);
+            row.addProperty("seat", f.seat);
+            row.addProperty("family", f.family);
+            row.addProperty("frame_type", f.teacher.length > 0 ? "RECORD" : "DECIDE");
+            row.addProperty("frame_b64", java.util.Base64.getEncoder().encodeToString(RlWire.encodeDecide(f)));
+            row.add("forgeState", o == null ? null : o.forgeState);
+            final Player sp = g.getStartingPlayer();
+            row.addProperty("startingSeat", sp == null ? -1 : g.getRegisteredPlayers().indexOf(sp));
+            final JsonArray mull = new JsonArray();
+            for (Player p : g.getRegisteredPlayers()) {
+                mull.add(p.getStats().getMulliganCount());
+            }
+            row.add("mulligans", mull);
+            row.addProperty("deckPath", decks[f.seat]);
+            synchronized (RlActorBench.class) {
+                try {
+                    if (forgeStateOut == null) {
+                        forgeStateOut = new PrintWriter(new FileWriter(path, StandardCharsets.UTF_8, true), true);
+                    }
+                    forgeStateOut.println(RlWire.canonicalString(row));
+                } catch (IOException e) {
+                    System.err.println("[rlactor] forge-state dump failed: " + e);
+                }
+            }
+        };
+    }
 
     static String lossReason(final Game game) {
         for (Player p : game.getRegisteredPlayers()) {
@@ -704,6 +794,8 @@ public final class RlActorBench {
             booted = true;
         }
     }
+    /** Tests only (knowledge witness): an extra observer of every game's reveals and looks. Null by default. */
+    static volatile java.util.function.Function<Game, BenchSession.KnowledgeObserver> KNOWLEDGE_TAP = null;
     /** Tests only (goldens, visibility): observes every sent frame of every game. Null by default. */
     static volatile RlSeat.FrameListener LISTENER = null;
 
@@ -806,7 +898,36 @@ public final class RlActorBench {
 
     // ------------------------------------------------------------------------------------------------ replay
 
+    /** Expand {@code replay.dir}: every tape file under it, every non-void line (or a seeded sample of N). */
+    static void expandReplayDir(final Cfg cfg) throws IOException {
+        if (cfg.replayDir == null) {
+            return;
+        }
+        final List<Path> files = new ArrayList<>();
+        try (java.util.stream.Stream<Path> st = Files.walk(Paths.get(cfg.replayDir))) {
+            st.filter(p -> p.getFileName().toString().matches("tapes-\\d+\\.jsonl\\.gz")).sorted().forEach(files::add);
+        }
+        final List<int[]> lines = new ArrayList<>();
+        for (Path f : files) {
+            final int fi = cfg.replayTapes.size();
+            cfg.replayTapes.add(f.toString());
+            final List<JsonObject> rows = RlTape.read(f);
+            for (int li = 0; li < rows.size(); li++) {
+                if (rows.get(li).get("void").isJsonNull()) {
+                    lines.add(new int[] {fi, li});
+                }
+            }
+        }
+        if (cfg.replaySample > 0 && cfg.replaySample < lines.size()) {
+            Collections.shuffle(lines, new Random(cfg.replaySampleSeed));
+            lines.subList(cfg.replaySample, lines.size()).clear();
+            lines.sort((a, b) -> a[0] != b[0] ? Integer.compare(a[0], b[0]) : Integer.compare(a[1], b[1]));
+        }
+        cfg.replayLines.addAll(lines);
+    }
+
     static int replay(final Cfg cfg, final CardIndex index, final String jarSha) throws IOException {
+        expandReplayDir(cfg);
         final RlFeaturizer feat = new RlFeaturizer(index);
         final Map<String, List<JsonObject>> cache = new HashMap<>();
         PrintWriter w = null;

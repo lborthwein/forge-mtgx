@@ -27,6 +27,7 @@ import forge.bench.rl.CardIndex;
 import forge.bench.rl.FakeRlServer;
 import forge.bench.rl.RlCandidates;
 import forge.bench.rl.RlFeaturizer;
+import forge.bench.rl.RlSchema;
 import forge.bench.rl.RlSeat;
 import forge.bench.rl.RlWire;
 import forge.deck.Deck;
@@ -249,13 +250,10 @@ public class RlActorBenchTest {
                 + rec.recordsByFamily + ", server problems " + checker.problems);
         // Forge seats run the plain path: they must reproduce RlSimBench exactly.
         Assert.assertTrue(badForge.isEmpty(), "forge-seat digest mismatches: " + badForge);
-        // Recorder seats: KNOWN DEVIATION (lane rl-r0-b1-1005, orchestrator ruling 10-05). The bridge's priority-menu
-        // build runs Forge AI's canPayCost; its RNG draws, AI card memory and AI cache are isolated (observeOnly), which
-        // took identity from 4/24 to 22/24 (98/100 on another seed block); a residual side effect remains. The floor
-        // below catches a regression of the isolation; tighten it to n when the residual is fixed.
+        // Recorder seats must reproduce RlSimBench exactly as well (lane rl-r0-b5-1006 closed B1's residual: the
+        // observe-only recorder isolates canPayCost and skips the mana-ability channel).
         System.err.println("[do-no-harm] recorder identity " + recordSame + "/" + n);
-        Assert.assertTrue(recordSame >= Math.ceil(0.9 * n), "recorder identity regressed: " + recordSame + "/" + n
-                + "; mismatches " + bad);
+        Assert.assertTrue(bad.isEmpty(), "recorder digest mismatches: " + bad);
         Assert.assertEquals(checker.badFrames.get(), 0L, String.valueOf(checker.problems));
         Assert.assertEquals(checker.badTeachers.get(), 0L, String.valueOf(checker.problems));
         Assert.assertEquals(checker.trivialFrames.get(), 0L, String.valueOf(checker.problems));
@@ -272,7 +270,11 @@ public class RlActorBenchTest {
         final FakeRlServer checker;
         int frames;
         int r11Done;
+        int knownTokens;
+        int mutantFrames;
+        int mutantCaught;
         final List<String> violations = new ArrayList<>();
+        final Map<Game, forge.bench.rl.RlKnowledgeOracle> oracles = new java.util.concurrent.ConcurrentHashMap<>();
 
         Witness(final FakeRlServer checker) {
             this.checker = checker;
@@ -287,6 +289,8 @@ public class RlActorBenchTest {
                 violations.add("trivial frame sent");
             }
             final boolean[] covered = new boolean[f.L];
+            final forge.bench.rl.RlKnowledgeOracle oracle = oracles.get(g);
+            final int s = g.getRegisteredPlayers().indexOf(seat);
             for (Map.Entry<Integer, Integer> e : o.posByCardId.entrySet()) {
                 final int pos = e.getValue();
                 covered[pos] = true;
@@ -295,15 +299,17 @@ public class RlActorBenchTest {
                     continue; // a spell on the stack, checked through its stack instance
                 }
                 if (!c.getView().canBeShownTo(seat.getView())) {
-                    violations.add("hidden card tokenised: " + c + " in " + c.getZone());
+                    // observation v1: a hidden card only if this seat observed it (independent oracle)
+                    knownTokens++;
+                    final int z = f.tokZone[pos];
+                    if (z != RlSchema.Z_O_HAND_KNOWN && z != RlSchema.Z_U_LIB_KNOWN && z != RlSchema.Z_O_LIB_KNOWN) {
+                        violations.add("hidden card in zone " + z + ": " + c + " in " + c.getZone());
+                    } else if (oracle == null || !oracle.justified(s, c)) {
+                        violations.add("hidden card the seat never observed: " + c + " in " + c.getZone()
+                                + " (zone " + z + ")");
+                    }
                 }
-                if (c.isInZone(ZoneType.Hand) && c.getOwner() != seat && !c.getView().canBeShownTo(seat.getView())) {
-                    violations.add("opponent hidden hand card: " + c);
-                }
-                if (c.isInZone(ZoneType.Library) && !c.getView().canBeShownTo(seat.getView())) {
-                    violations.add("library card without a known position: " + c);
-                }
-                final int want = c.isFaceDown() ? CardIndex.UNK : index.resolve(c.getName());
+                final int want = c.isFaceDown() ? CardIndex.UNK : RlFeaturizer.resolveCard(index, c);
                 if (f.tokCard[pos] != want) {
                     violations.add("tok_card " + f.tokCard[pos] + " is not the name index " + want + " of " + c);
                 }
@@ -312,8 +318,23 @@ public class RlActorBenchTest {
                 covered[pos] = true;
             }
             for (int i = 0; i < f.L; i++) {
-                if (!covered[i]) {
+                if (!covered[i] && f.tokZone[i] != RlSchema.Z_U_EVENT && f.tokZone[i] != RlSchema.Z_O_EVENT) {
                     violations.add("token " + i + " has no visible source");
+                }
+            }
+            // the peek mutant: zone 17 filled from the true library order must be caught by the same oracle
+            if (oracle != null) {
+                int caught = 0;
+                for (Card c : seat.getCardsIn(ZoneType.Library)) {
+                    if (!c.getView().canBeShownTo(seat.getView()) && !oracle.justified(s, c)) {
+                        caught++;
+                    }
+                }
+                if (!seat.getCardsIn(ZoneType.Library).isEmpty()) {
+                    mutantFrames++;
+                    if (caught > 0) {
+                        mutantCaught++;
+                    }
                 }
             }
             if (r11Done == 0) {
@@ -393,7 +414,12 @@ public class RlActorBenchTest {
         final Witness w = new Witness(checker);
         final List<JsonObject> tapes = new ArrayList<>();
         int trivial = 0;
-        final int games = Integer.getInteger("rl.visGames", 4);
+        final int games = Integer.getInteger("rl.visGames", 16);
+        RlActorBench.KNOWLEDGE_TAP = game -> {
+            final forge.bench.rl.RlKnowledgeOracle or = new forge.bench.rl.RlKnowledgeOracle(game);
+            w.oracles.put(game, or);
+            return or;
+        };
         for (int i = 0; i < games; i++) {
             final RlActorBench.Played p = RlActorBench.play(cfg("train"), "train",
                     game(i, "rl:M", i % 2 == 0 ? "rl:M" : "forge", true), new RlFeaturizer(index),
@@ -407,9 +433,15 @@ public class RlActorBenchTest {
                 }
             }
         }
-        System.err.println("[visibility] frames " + w.frames + ", R-11 witnesses " + w.r11Done + ", trivial auto "
-                + trivial + ", violations " + w.violations.subList(0, Math.min(10, w.violations.size())));
-        Assert.assertTrue(w.frames >= 100, "only " + w.frames + " frames");
+        RlActorBench.KNOWLEDGE_TAP = null;
+        System.err.println("[visibility] frames " + w.frames + ", known hidden tokens " + w.knownTokens
+                + ", peek mutant caught in " + w.mutantCaught + "/" + w.mutantFrames + " frames, R-11 witnesses "
+                + w.r11Done + ", trivial auto " + trivial + ", violations "
+                + w.violations.subList(0, Math.min(10, w.violations.size())));
+        Assert.assertTrue(w.frames >= Integer.getInteger("rl.visMinFrames", 1000), "only " + w.frames + " frames");
+        // the mutant escapes only where every own library card has been observed (small, fully scried libraries)
+        Assert.assertTrue(w.mutantFrames > 0 && w.mutantCaught >= 0.9 * w.mutantFrames,
+                "the peek mutant must be caught: " + w.mutantCaught + "/" + w.mutantFrames);
         Assert.assertTrue(w.r11Done >= 1, "no frame qualified for the R-11 witness");
         Assert.assertTrue(w.violations.isEmpty(), String.valueOf(w.violations));
         Assert.assertEquals(checker.badFrames.get(), 0L, String.valueOf(checker.problems));

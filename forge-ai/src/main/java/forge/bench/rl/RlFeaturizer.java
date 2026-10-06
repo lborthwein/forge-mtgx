@@ -64,6 +64,8 @@ public final class RlFeaturizer {
         public final Map<Integer, Integer> posByStackId = new HashMap<>();
         /** Unknown-name lookups in this frame's tokens and deck. */
         public int unknownNames;
+        /** Debug only (K8 converter parity, B6): the bridge's ForgeState of this seat at the same moment. */
+        public com.google.gson.JsonObject forgeState;
 
         public int pos(final Card c) {
             if (c == null) {
@@ -75,6 +77,14 @@ public final class RlFeaturizer {
     }
 
     private final CardIndex index;
+    /**
+     * Debug only (off by default; RlActorBench config {@code debugForgeStateOut}): also capture
+     * {@code StateEncoder.encode(game, seat)} with every observation, for the K8 converter parity check. The encoder
+     * reads mana abilities, so never set it in a run whose digests must match Forge.
+     */
+    public boolean captureForgeState = false;
+    /** Observation v1 seat knowledge for the current game (Appendix B.2); null = Phase A behaviour (visibility only). */
+    private RlKnowledge knowledge;
     /** Per (game, seat) deck arrays: constant through a game. */
     private final Map<Player, int[][]> deckCache = new java.util.IdentityHashMap<>();
 
@@ -89,6 +99,20 @@ public final class RlFeaturizer {
     /** Forget per-game caches (call between games). */
     public void reset() {
         deckCache.clear();
+        knowledge = null;
+    }
+
+    /** The current game's seat-knowledge tracker (observation v1). */
+    public void setKnowledge(final RlKnowledge k) {
+        this.knowledge = k;
+    }
+
+    public RlKnowledge knowledge() {
+        return knowledge;
+    }
+
+    private boolean knows(final Player seat, final Card c) {
+        return knowledge != null && knowledge.knows(knowledge.seatOf(seat), c);
     }
 
     /** The card index of a visible card, honouring face-down; counts unknown names into {@code o}. */
@@ -99,11 +123,50 @@ public final class RlFeaturizer {
         if (c.isFaceDown()) {
             return CardIndex.UNK;
         }
-        final int i = index.lookup(c.getName());
+        final int i = lookupCard(index, c);
         if (i == CardIndex.UNK && o != null) {
             o.unknownNames++;
         }
         return i;
+    }
+
+    /**
+     * Clarification C3: a face of a multi-face card (a split half, either face of a DFC / MDFC, an adventure's spell
+     * half) resolves to the FULL card's entry. Forge's full card name is the card's PaperCard name ("A // B" for split
+     * cards, the main face for every other layout), tried first, then the §3.2 rules on the face's own name; the same
+     * order as {@code tools/ml/rl/cardindex.py lookup} with its face map. Counts an unknown name.
+     */
+    public static int lookupCard(final CardIndex index, final Card c) {
+        final String full = fullName(c);
+        if (full != null && !full.equals(c.getName())) {
+            final int r = index.resolve(full);
+            if (r != CardIndex.UNK) {
+                return r;
+            }
+        }
+        return index.lookup(c.getName());
+    }
+
+    /** As {@link #lookupCard} without counting. */
+    public static int resolveCard(final CardIndex index, final Card c) {
+        final String full = fullName(c);
+        if (full != null && !full.equals(c.getName())) {
+            final int r = index.resolve(full);
+            if (r != CardIndex.UNK) {
+                return r;
+            }
+        }
+        return index.resolve(c.getName());
+    }
+
+    /** Forge's full card name (PaperCard), or null. */
+    public static String fullName(final Card c) {
+        try {
+            final forge.item.IPaperCard pc = c.getPaperCard();
+            return pc == null ? null : pc.getName();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /** Card index for a host card that is not (necessarily) a token, e.g. a candidate's card. */
@@ -134,6 +197,13 @@ public final class RlFeaturizer {
      */
     public Obs observe(final Game game, final Player seat, final int mullK, final boolean withPriv) {
         final Obs o = new Obs();
+        if (captureForgeState) {
+            try {
+                o.forgeState = forge.bench.StateEncoder.encode(game, seat);
+            } catch (RuntimeException e) {
+                o.forgeState = null;
+            }
+        }
         final Player opp = opponentOf(game, seat);
         final PlayerView viewer = seat.getView();
         final List<Tok> toks = new ArrayList<>(64);
@@ -178,16 +248,19 @@ public final class RlFeaturizer {
             lands(toks, opp, RlSchema.Z_O_LAND, viewer, combat, turn, o);
         }
         // 5. revealed opponent-hand cards; known own-library positions; known opponent-library positions
+        //    (visible now, or known to this seat from what it observed: Appendix B.2)
         if (opp != null) {
             for (Card c : opp.getCardsIn(ZoneType.Hand)) {
                 if (c.getView().canBeShownTo(viewer)) {
                     addCard(toks, c, RlSchema.Z_O_HAND_KNOWN, viewer, combat, turn, o);
+                } else if (knows(seat, c)) {
+                    addKnown(toks, c, RlSchema.Z_O_HAND_KNOWN, o);
                 }
             }
         }
-        library(toks, seat, RlSchema.Z_U_LIB_KNOWN, viewer, combat, turn, o);
+        library(toks, seat, seat, RlSchema.Z_U_LIB_KNOWN, viewer, combat, turn, o);
         if (opp != null) {
-            library(toks, opp, RlSchema.Z_O_LIB_KNOWN, viewer, combat, turn, o);
+            library(toks, seat, opp, RlSchema.Z_O_LIB_KNOWN, viewer, combat, turn, o);
         }
         // 6. own graveyard, opponent graveyard, own exile, opponent exile
         for (Card c : seat.getCardsIn(ZoneType.Graveyard)) {
@@ -206,13 +279,38 @@ public final class RlFeaturizer {
                 addCard(toks, c, RlSchema.Z_O_EXILE, viewer, combat, turn, o);
             }
         }
-        // 7. command zone and emblems
+        // 7. command zone: emblems, the monarch / initiative markers, dungeons, the ring (Forge's effect cards are not)
         for (Player p : game.getPlayers()) {
             for (Card c : p.getCardsIn(ZoneType.Command)) {
-                addCard(toks, c, RlSchema.Z_COMMAND, viewer, combat, turn, o);
+                if (commandObject(c)) {
+                    addCard(toks, c, RlSchema.Z_COMMAND, viewer, combat, turn, o);
+                }
             }
         }
-        // 8. event tail: Phase B
+        // 8. event tail: the last 16 spells and abilities put on the stack, newest first (zones 20 / 21)
+        if (knowledge != null) {
+            final int me = knowledge.seatOf(seat);
+            int rank = 0;
+            for (RlKnowledge.StackEvent e : knowledge.tail()) {
+                int card = CardIndex.UNK;
+                if (!e.faceDown && e.name != null) {
+                    card = e.fullName != null && !e.fullName.equals(e.name) ? index.resolve(e.fullName) : CardIndex.UNK;
+                    if (card == CardIndex.UNK) {
+                        card = index.lookup(e.name);
+                    }
+                }
+                if (card == CardIndex.UNK && !e.faceDown && e.name != null) {
+                    o.unknownNames++;
+                }
+                final Tok t = new Tok(card, e.controllerSeat == me ? RlSchema.Z_U_EVENT : RlSchema.Z_O_EVENT, null,
+                        null);
+                t.attr[RlSchema.A_IS_ABILITY] = e.ability ? 1f : 0f;
+                t.attr[RlSchema.A_FACE_DOWN] = e.faceDown ? 1f : 0f;
+                t.attr[RlSchema.A_EVENT_AGE] = rank / 16f;
+                toks.add(t);
+                rank++;
+            }
+        }
 
         o.tokensBeforeCap = toks.size();
         o.truncated = toks.size() > RlSchema.L_MAX;
@@ -267,18 +365,44 @@ public final class RlFeaturizer {
         }
     }
 
-    private void library(final List<Tok> toks, final Player p, final int zone, final PlayerView viewer,
-            final Combat combat, final int turn, final Obs o) {
+    private void library(final List<Tok> toks, final Player seat, final Player p, final int zone,
+            final PlayerView viewer, final Combat combat, final int turn, final Obs o) {
         int i = 0;
         for (Card c : p.getCardsIn(ZoneType.Library)) {
+            Tok t = null;
             if (c.getView().canBeShownTo(viewer)) {
-                final Tok t = addCard(toks, c, zone, viewer, combat, turn, o);
-                if (t != null) {
-                    t.attr[RlSchema.A_LIB_POS] = i / 10f;
-                }
+                t = addCard(toks, c, zone, viewer, combat, turn, o);
+            } else if (knows(seat, c)) {
+                t = addKnown(toks, c, zone, o);
+            }
+            if (t != null) {
+                t.attr[RlSchema.A_LIB_POS] = i / 10f;
             }
             i++;
         }
+    }
+
+    /** A hidden card the seat knows (Appendix B.2): its identity, no live attributes. */
+    private Tok addKnown(final List<Tok> toks, final Card c, final int zone, final Obs o) {
+        final int idx = lookupCard(index, c);
+        if (idx == CardIndex.UNK) {
+            o.unknownNames++;
+        }
+        final Tok t = new Tok(idx, zone, c, null);
+        toks.add(t);
+        return t;
+    }
+
+    /** Command-zone objects a person sees as game objects: emblems, dungeons, the monarch, initiative, the ring. */
+    static boolean commandObject(final Card c) {
+        if (c == null) {
+            return false;
+        }
+        if (c.isEmblem() || c.getType().isDungeon() || c.isCommander()) {
+            return true;
+        }
+        final String n = c.getName();
+        return "The Monarch".equals(n) || "The Initiative".equals(n) || "The Ring".equals(n);
     }
 
     private Tok addCard(final List<Tok> toks, final Card c, final int zone, final PlayerView viewer,
@@ -460,7 +584,7 @@ public final class RlFeaturizer {
         final List<Card> hidden = new ArrayList<>();
         if (opp != null) {
             for (Card c : opp.getCardsIn(ZoneType.Hand)) {
-                if (!c.getView().canBeShownTo(viewer)) {
+                if (!c.getView().canBeShownTo(viewer) && !knows(seat, c)) {
                     hidden.add(c);
                 }
             }
@@ -487,13 +611,13 @@ public final class RlFeaturizer {
             final Iterable<Card> ownLibrary, final Iterable<Card> oppLibrary) {
         final TreeMap<Long, Integer> m = new TreeMap<>();
         for (Card c : oppHiddenHand) {
-            m.merge(key(RlSchema.Z_PRIV_O_HAND, index.resolve(c.getName())), 1, Integer::sum);
+            m.merge(key(RlSchema.Z_PRIV_O_HAND, resolveCard(index, c)), 1, Integer::sum);
         }
         for (Card c : ownLibrary) {
-            m.merge(key(RlSchema.Z_PRIV_U_LIB, index.resolve(c.getName())), 1, Integer::sum);
+            m.merge(key(RlSchema.Z_PRIV_U_LIB, resolveCard(index, c)), 1, Integer::sum);
         }
         for (Card c : oppLibrary) {
-            m.merge(key(RlSchema.Z_PRIV_O_LIB, index.resolve(c.getName())), 1, Integer::sum);
+            m.merge(key(RlSchema.Z_PRIV_O_LIB, resolveCard(index, c)), 1, Integer::sum);
         }
         final int n = Math.min(m.size(), RlSchema.P_MAX);
         final int[][] b = new int[3][n];

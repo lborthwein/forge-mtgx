@@ -136,6 +136,58 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         counters.count(method);
     }
 
+    /*
+     * Seat knowledge (RL observation v1, lane rl-r0-b5-1006): what this seat is shown (reveals) and what it looks at
+     * while arranging cards (scry, surveil, "look at the top N, put them back in any order"). Reported to the
+     * session's knowledge observer, which is null by default: then these are no-ops. Called before the bridged()
+     * check, so a Forge-decided seat's looks are reported too (the other seat must forget the order it can no longer
+     * know). Live game only.
+     */
+    private void observeReveal(final Iterable<Card> cards, final ZoneType zone, final Player owner) {
+        final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
+        if (o == null || !isLiveGame() || cards == null) {
+            return;
+        }
+        try {
+            o.onReveal(getGame(), getPlayer(), Lists.newArrayList(cards), zone, owner);
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("knowledge observer failed on a reveal", e);
+        }
+    }
+
+    private void observeRevealViews(final List<CardView> views, final ZoneType zone, final PlayerView owner) {
+        final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
+        if (o == null || !isLiveGame() || views == null) {
+            return;
+        }
+        final List<Card> cards = new ArrayList<>();
+        for (CardView v : views) {
+            final Card c = v == null ? null : getGame().findByView(v);
+            if (c != null) {
+                cards.add(c);
+            }
+        }
+        Player own = null;
+        for (Player p : getGame().getPlayers()) {
+            if (owner != null && p.getView() == owner) {
+                own = p;
+            }
+        }
+        observeReveal(cards, zone, own);
+    }
+
+    private void observeLook(final Iterable<Card> cards, final ZoneType destination) {
+        final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
+        if (o == null || !isLiveGame() || cards == null) {
+            return;
+        }
+        try {
+            o.onLook(getGame(), getPlayer(), Lists.newArrayList(cards), destination);
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("knowledge observer failed on a look", e);
+        }
+    }
+
     /**
      * False inside a copied game built by {@code GameCopier} for the simulation search.
      * Such a controller must behave as plain {@link PlayerControllerAi}: it is deciding
@@ -157,21 +209,28 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * affordability check, run on every menu entry) draws from the game's random stream (the "try not to lose a
      * planeswalker" coin flip, ComputerUtilMana's reserve-mana roll), clears and fills Forge AI's card memory
      * (AiCardMemory: held mana sources, unpaid costs), and copies abilities, which takes ids. Measured on 24 TRAIN
-     * games: a delegate-everything recorder matched RlSimBench policy=forge on 4 of 24; skipping only canPayCost gave
-     * identical call traces. So when the local answerer says it only observes, the menu is built on a scratch random
+     * games: a delegate-everything recorder matched RlSimBench policy=forge on 4 of 24, 22 of 24 with this isolation,
+     * and 24 of 24 once the mana-ability channel is also skipped (see the menu build). So when the local answerer
+     * says it only observes, the menu is built on a scratch random
      * stream and a scratch AI cache scope, and both seats' AI card memory and the IdScope counters are put back
      * afterwards. With no local answerer, or one that answers (an RL seat, whose chosen entry is played), this is
      * body.get() and nothing else.
      */
-    private <T> T observing(final java.util.function.Supplier<T> body) {
+    /** True when the local answerer only observes (RL record mode); false on the default path. */
+    private boolean observeOnly() {
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
-        if (local == null || !local.observeOnly()) {
+        return local != null && local.observeOnly();
+    }
+
+    private <T> T observing(final java.util.function.Supplier<T> body) {
+        if (!observeOnly()) {
             return body.get();
         }
         final java.util.Random live = forge.util.MyRandom.getThreadRandom();
         final int[] ids = IdSnap.take();
         final Object cache = forge.ai.AiCache.captureScope();
         final List<Object[]> memory = memorySnapshot(getGame());
+        final List<Object[]> express = expressSnapshot(getGame());
         forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
         forge.ai.AiCache.openScope();
         try {
@@ -181,6 +240,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             forge.util.MyRandom.setThreadRandom(live);
             IdSnap.restore(ids);
             memoryRestore(memory);
+            expressRestore(express);
         }
     }
 
@@ -203,6 +263,33 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             }
         }
         return out;
+    }
+
+    /**
+     * The colour choice every mana ability of every card in the game carries ({@code AbilityManaPart}'s express
+     * choice). Forge's test payment (canPayCost) sets it on combo sources it considers and clears it only on the ones
+     * it ends up using; the auto-tapper reads it later (lane rl-r0-b5-1006: 1 recorded game in 200 tapped a different
+     * source).
+     */
+    static List<Object[]> expressSnapshot(final Game game) {
+        final List<Object[]> out = new ArrayList<>();
+        for (Card c : game.getCardsInGame()) {
+            for (SpellAbility sa : c.getAllSpellAbilities()) {
+                for (SpellAbility cur = sa; cur != null; cur = cur.getSubAbility()) {
+                    final forge.game.spellability.AbilityManaPart mp = cur.getManaPart();
+                    if (mp != null) {
+                        out.add(new Object[] {mp, mp.getExpressChoice()});
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    static void expressRestore(final List<Object[]> snap) {
+        for (Object[] e : snap) {
+            ((forge.game.spellability.AbilityManaPart) e[0]).setExpressChoice((String) e[1]);
+        }
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -741,7 +828,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 items.add(StateEncoder.encodeSpellAbility(sa));
             }
             body.add("menu", items);
-            body.add("manaAbilities", manaAbilityChannel());
+            // An observe-only recorder never reads this host-side field, and building it is not a pure read:
+            // encoding each mana ability (descriptions, stack descriptions) leaves state on combo mana abilities
+            // (Talismans) that Forge's auto-tapper reads later, so a recorded game tapped a different source than the
+            // Forge-only game on 2 of 24 seeds (lane rl-r0-b5-1006). Skipped for observers only.
+            body.add("manaAbilities", observeOnly() ? new JsonArray() : manaAbilityChannel());
             return null;
         });
         recordMenuCensus(diag, menu.size());
@@ -2337,6 +2428,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(final CardCollection topN) {
         count("arrangeForScry");
+        observeLook(topN, ZoneType.Library);
         if (!bridged() || topN == null || topN.isEmpty()) {
             return super.arrangeForScry(topN);
         }
@@ -2585,17 +2677,17 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public CardCollection orderAttackers(Card blocker, CardCollection attackers) { count("orderAttackers"); return super.orderAttackers(blocker, attackers); }
     @Override
-    public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
+    public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); observeReveal(cards, zone, owner); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
     @Override
-    public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
+    public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); observeRevealViews(cards, zone, owner); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
     @Override
     public void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value) { count("notifyOfValue"); super.notifyOfValue(saSource, realtedTarget, value); }
     @Override
-    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { count("arrangeForSurveil"); return bridgedArrangeForSurveil(topN); }
+    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { count("arrangeForSurveil"); observeLook(topN, ZoneType.Library); return bridgedArrangeForSurveil(topN); }
     @Override
     public boolean willPutCardOnTop(Card c) { count("willPutCardOnTop"); return bridgedWillPutCardOnTop(c); }
     @Override
-    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) { count("orderMoveToZoneList"); return bridgedOrderMoveToZoneList(cards, destinationZone, source); }
+    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) { count("orderMoveToZoneList"); observeLook(cards, destinationZone); return bridgedOrderMoveToZoneList(cards, destinationZone, source); }
     @Override
     public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) { count("chooseCardsToDiscardFrom"); return bridgedDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser); }
     @Override
