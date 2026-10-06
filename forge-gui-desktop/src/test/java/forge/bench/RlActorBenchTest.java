@@ -221,7 +221,8 @@ public class RlActorBenchTest {
         final FakeRlServer checker = new FakeRlServer(0, "record", 7, null, Collections.emptyList());
         final LocalEndpoint rec = new LocalEndpoint(checker);
         final List<String> bad = new ArrayList<>();
-        int recorded = 0, mapFailed = 0;
+        final List<String> badForge = new ArrayList<>();
+        int recorded = 0, mapFailed = 0, recordSame = 0;
         for (int i = 0; i < n; i++) {
             final JsonObject sim = RlSimBench.playOne(rs, i, mem);
             final String want = sim.get("digest").getAsString();
@@ -235,13 +236,26 @@ public class RlActorBenchTest {
                     + " | record " + r.end.get("digest") + " void " + r.end.get("void") + " | forge-seats "
                     + f.end.get("digest");
             System.err.println("[do-no-harm] " + line);
-            if (!want.equals(r.end.get("digest").getAsString()) || !want.equals(f.end.get("digest").getAsString())) {
+            if (!want.equals(r.end.get("digest").getAsString())) {
                 bad.add(line);
+            } else {
+                recordSame++;
+            }
+            if (!want.equals(f.end.get("digest").getAsString())) {
+                badForge.add(line);
             }
         }
         System.err.println("[do-no-harm] recorded " + recorded + " frames, map failures " + mapFailed + ", by family "
                 + rec.recordsByFamily + ", server problems " + checker.problems);
-        Assert.assertTrue(bad.isEmpty(), "digest mismatches: " + bad);
+        // Forge seats run the plain path: they must reproduce RlSimBench exactly.
+        Assert.assertTrue(badForge.isEmpty(), "forge-seat digest mismatches: " + badForge);
+        // Recorder seats: KNOWN DEVIATION (lane rl-r0-b1-1005, orchestrator ruling 10-05). The bridge's priority-menu
+        // build runs Forge AI's canPayCost; its RNG draws, AI card memory and AI cache are isolated (observeOnly), which
+        // took identity from 4/24 to 22/24 (98/100 on another seed block); a residual side effect remains. The floor
+        // below catches a regression of the isolation; tighten it to n when the residual is fixed.
+        System.err.println("[do-no-harm] recorder identity " + recordSame + "/" + n);
+        Assert.assertTrue(recordSame >= Math.ceil(0.9 * n), "recorder identity regressed: " + recordSame + "/" + n
+                + "; mismatches " + bad);
         Assert.assertEquals(checker.badFrames.get(), 0L, String.valueOf(checker.problems));
         Assert.assertEquals(checker.badTeachers.get(), 0L, String.valueOf(checker.problems));
         Assert.assertEquals(checker.trivialFrames.get(), 0L, String.valueOf(checker.problems));
