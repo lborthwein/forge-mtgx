@@ -136,6 +136,58 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         counters.count(method);
     }
 
+    /*
+     * Seat knowledge (RL observation v1, lane rl-r0-b5-1006): what this seat is shown (reveals) and what it looks at
+     * while arranging cards (scry, surveil, "look at the top N, put them back in any order"). Reported to the
+     * session's knowledge observer, which is null by default: then these are no-ops. Called before the bridged()
+     * check, so a Forge-decided seat's looks are reported too (the other seat must forget the order it can no longer
+     * know). Live game only.
+     */
+    private void observeReveal(final Iterable<Card> cards, final ZoneType zone, final Player owner) {
+        final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
+        if (o == null || !isLiveGame() || cards == null) {
+            return;
+        }
+        try {
+            o.onReveal(getGame(), getPlayer(), Lists.newArrayList(cards), zone, owner);
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("knowledge observer failed on a reveal", e);
+        }
+    }
+
+    private void observeRevealViews(final List<CardView> views, final ZoneType zone, final PlayerView owner) {
+        final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
+        if (o == null || !isLiveGame() || views == null) {
+            return;
+        }
+        final List<Card> cards = new ArrayList<>();
+        for (CardView v : views) {
+            final Card c = v == null ? null : getGame().findByView(v);
+            if (c != null) {
+                cards.add(c);
+            }
+        }
+        Player own = null;
+        for (Player p : getGame().getPlayers()) {
+            if (owner != null && p.getView() == owner) {
+                own = p;
+            }
+        }
+        observeReveal(cards, zone, own);
+    }
+
+    private void observeLook(final Iterable<Card> cards, final ZoneType destination) {
+        final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
+        if (o == null || !isLiveGame() || cards == null) {
+            return;
+        }
+        try {
+            o.onLook(getGame(), getPlayer(), Lists.newArrayList(cards), destination);
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("knowledge observer failed on a look", e);
+        }
+    }
+
     /**
      * False inside a copied game built by {@code GameCopier} for the simulation search.
      * Such a controller must behave as plain {@link PlayerControllerAi}: it is deciding
@@ -2337,6 +2389,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(final CardCollection topN) {
         count("arrangeForScry");
+        observeLook(topN, ZoneType.Library);
         if (!bridged() || topN == null || topN.isEmpty()) {
             return super.arrangeForScry(topN);
         }
@@ -2585,17 +2638,17 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public CardCollection orderAttackers(Card blocker, CardCollection attackers) { count("orderAttackers"); return super.orderAttackers(blocker, attackers); }
     @Override
-    public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
+    public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); observeReveal(cards, zone, owner); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
     @Override
-    public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
+    public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addMsgSuffix) { count("reveal"); observeRevealViews(cards, zone, owner); super.reveal(cards, zone, owner, messagePrefix, addMsgSuffix); }
     @Override
     public void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value) { count("notifyOfValue"); super.notifyOfValue(saSource, realtedTarget, value); }
     @Override
-    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { count("arrangeForSurveil"); return bridgedArrangeForSurveil(topN); }
+    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { count("arrangeForSurveil"); observeLook(topN, ZoneType.Library); return bridgedArrangeForSurveil(topN); }
     @Override
     public boolean willPutCardOnTop(Card c) { count("willPutCardOnTop"); return bridgedWillPutCardOnTop(c); }
     @Override
-    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) { count("orderMoveToZoneList"); return bridgedOrderMoveToZoneList(cards, destinationZone, source); }
+    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) { count("orderMoveToZoneList"); observeLook(cards, destinationZone); return bridgedOrderMoveToZoneList(cards, destinationZone, source); }
     @Override
     public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) { count("chooseCardsToDiscardFrom"); return bridgedDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser); }
     @Override

@@ -55,6 +55,7 @@ import forge.ai.AiCache;
 import forge.bench.rl.CardIndex;
 import forge.bench.rl.RlClient;
 import forge.bench.rl.RlFeaturizer;
+import forge.bench.rl.RlKnowledge;
 import forge.bench.rl.RlSchema;
 import forge.bench.rl.RlSeat;
 import forge.bench.rl.RlTape;
@@ -274,6 +275,7 @@ public final class RlActorBench {
         String guardError;    // deck guard refusal (nothing played)
         String fatal;         // the connection is unusable
         RlSeat seat;
+        RlKnowledge knowledge; // the game's seat-knowledge tracker (tests)
     }
 
     static final ThreadMXBean TMX = ManagementFactory.getThreadMXBean();
@@ -337,6 +339,11 @@ public final class RlActorBench {
             final LobbyPlayerBridge lp = new LobbyPlayerBridge("Seat" + s, null, session,
                     bridged ? BenchSession.Mode.BRIDGE : BenchSession.Mode.NULL, s);
             lp.setAiProfile("Default");
+            if (RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL) {
+                // an RL seat's delegated naming ("Forge's choice") must not read hidden zones (ICR B4 coordination);
+                // Forge seats and recorders keep upstream Forge AI (do-no-harm)
+                lp.setFairNaming(forge.ai.AiFixes.Mode.ON);
+            }
             lps.add(lp);
             final RegisteredPlayer rp = new RegisteredPlayer(deck(decks[s]));
             rp.setPlayer(lp);
@@ -364,6 +371,32 @@ public final class RlActorBench {
             game.AI_TIMEOUT = cfg.aiTimeoutSec;
             session.setLiveGame(game);
             seat.setGame(game);
+            // observation v1: what each seat has observed (reveals, its own looks, public moves, the stack tail)
+            final RlKnowledge know = new RlKnowledge(game);
+            know.attach();
+            final java.util.function.Function<Game, BenchSession.KnowledgeObserver> tapF = KNOWLEDGE_TAP;
+            if (tapF == null) {
+                session.setKnowledgeObserver(know);
+            } else {
+                final BenchSession.KnowledgeObserver tap = tapF.apply(game);
+                session.setKnowledgeObserver(new BenchSession.KnowledgeObserver() {
+                    @Override
+                    public void onReveal(final Game g, final Player v, final List<forge.game.card.Card> cards,
+                            final forge.game.zone.ZoneType z, final Player owner) {
+                        tap.onReveal(g, v, cards, z, owner);
+                        know.onReveal(g, v, cards, z, owner);
+                    }
+
+                    @Override
+                    public void onLook(final Game g, final Player v, final List<forge.game.card.Card> cards,
+                            final forge.game.zone.ZoneType dest) {
+                        tap.onLook(g, v, cards, dest);
+                        know.onLook(g, v, cards, dest);
+                    }
+                });
+            }
+            feat.setKnowledge(know);
+            out.knowledge = know;
             dg = new RlSimBench.Digest(game);
             game.subscribeToEvents(dg);
             RUNNING.put(Thread.currentThread(), new Object[] {game,
@@ -704,6 +737,8 @@ public final class RlActorBench {
             booted = true;
         }
     }
+    /** Tests only (knowledge witness): an extra observer of every game's reveals and looks. Null by default. */
+    static volatile java.util.function.Function<Game, BenchSession.KnowledgeObserver> KNOWLEDGE_TAP = null;
     /** Tests only (goldens, visibility): observes every sent frame of every game. Null by default. */
     static volatile RlSeat.FrameListener LISTENER = null;
 

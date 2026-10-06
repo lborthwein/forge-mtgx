@@ -58,9 +58,15 @@ public final class RlFakeRun {
 
     public static List<JsonObject> schedule(final Path bank, final int games, final long seed, final String[] ctl,
             final boolean alternate, final boolean priv, final long uidBase) throws IOException {
+        return schedule(bank, 0, games, seed, ctl, alternate, priv, uidBase);
+    }
+
+    /** Games start .. start+games-1: game i plays pair (i mod pairs) with seed + i and uid uidBase + i. */
+    public static List<JsonObject> schedule(final Path bank, final int start, final int games, final long seed,
+            final String[] ctl, final boolean alternate, final boolean priv, final long uidBase) throws IOException {
         final List<String[]> pairs = pairs(bank);
         final List<JsonObject> out = new ArrayList<>();
-        for (int i = 0; i < games; i++) {
+        for (int i = start; i < start + games; i++) {
             final String[] p = pairs.get(i % pairs.size());
             final JsonObject g = new JsonObject();
             g.addProperty("game_uid", Long.toUnsignedString(uidBase + i));
@@ -82,6 +88,65 @@ public final class RlFakeRun {
         return out;
     }
 
+    /** Tokens per zone per frame (p50 / p99), and the frames whose token list was truncated (obs census). */
+    static final class ZoneCensus {
+        long frames, truncated, tokens;
+        final java.util.Map<Integer, List<Integer>> perZone = new java.util.TreeMap<>();
+        final List<Integer> perFrame = new ArrayList<>();
+
+        synchronized void add(final forge.bench.rl.RlWire.Decide d) {
+            frames++;
+            if ((d.flags & forge.bench.rl.RlWire.F_TRUNC_TOKENS) != 0) {
+                truncated++;
+            }
+            tokens += d.L;
+            perFrame.add(d.L);
+            final int[] n = new int[25];
+            for (int i = 0; i < d.L; i++) {
+                n[d.tokZone[i] & 0xff]++;
+            }
+            for (int z = 1; z < 25; z++) {
+                perZone.computeIfAbsent(z, k -> new ArrayList<>()).add(n[z]);
+            }
+        }
+
+        static int pct(final List<Integer> l, final double p) {
+            final List<Integer> s = new ArrayList<>(l);
+            java.util.Collections.sort(s);
+            return s.isEmpty() ? 0 : s.get(Math.min(s.size() - 1, (int) (p * s.size())));
+        }
+
+        synchronized JsonObject json() {
+            final JsonObject o = new JsonObject();
+            o.addProperty("frames", frames);
+            o.addProperty("truncated", truncated);
+            o.addProperty("truncated_rate", frames == 0 ? 0 : (double) truncated / frames);
+            o.addProperty("L_p50", pct(perFrame, 0.5));
+            o.addProperty("L_p99", pct(perFrame, 0.99));
+            o.addProperty("L_max", pct(perFrame, 1.0));
+            final JsonObject z = new JsonObject();
+            for (java.util.Map.Entry<Integer, List<Integer>> e : perZone.entrySet()) {
+                long sum = 0;
+                long nonzero = 0;
+                for (int v : e.getValue()) {
+                    sum += v;
+                    nonzero += v > 0 ? 1 : 0;
+                }
+                if (sum == 0) {
+                    continue;
+                }
+                final JsonObject zz = new JsonObject();
+                zz.addProperty("mean", (double) sum / frames);
+                zz.addProperty("p50", pct(e.getValue(), 0.5));
+                zz.addProperty("p99", pct(e.getValue(), 0.99));
+                zz.addProperty("frames_with", nonzero);
+                z.add(forge.bench.rl.RlSchema.ZONES.get(e.getKey()), zz);
+            }
+            o.add("zones", z);
+            return o;
+        }
+    }
+
     public static void main(final String[] args) throws Exception {
         final JsonObject spec = JsonParser.parseString(new String(Files.readAllBytes(Paths.get(args[0])),
                 StandardCharsets.UTF_8)).getAsJsonObject();
@@ -94,7 +159,7 @@ public final class RlFakeRun {
         final String[] ctl = {cj.get(0).getAsString(), cj.get(1).getAsString()};
         final int games = spec.get("games").getAsInt();
         final long seed = spec.get("seed").getAsLong();
-        final List<JsonObject> sched = schedule(bank, games, seed, ctl,
+        final List<JsonObject> sched = schedule(bank, spec.has("start") ? spec.get("start").getAsInt() : 0, games, seed, ctl,
                 spec.has("alternate") && spec.get("alternate").getAsBoolean(),
                 spec.has("priv") && spec.get("priv").getAsBoolean(),
                 spec.has("uidBase") ? spec.get("uidBase").getAsLong() : 1L);
@@ -138,6 +203,10 @@ public final class RlFakeRun {
         try (FakeRlServer srv = new FakeRlServer(0, cfg.mode, spec.has("serverSeed") ? spec.get("serverSeed").getAsLong()
                 : 7L, idxSha, sched)) {
             cfg.server = "127.0.0.1:" + srv.port();
+            final ZoneCensus zc = new ZoneCensus();
+            if (spec.has("zoneStats") && spec.get("zoneStats").getAsBoolean()) {
+                srv.capture = (type, frame, d, steps) -> zc.add(d);
+            }
             rc = RlActorBench.run(cfg);
             stats = srv.stats();
             final JsonArray ends = new JsonArray();
@@ -145,6 +214,9 @@ public final class RlFakeRun {
                 for (JsonObject e : srv.ends) ends.add(e);
             }
             stats.addProperty("actor_exit", rc);
+            if (zc.frames > 0) {
+                stats.add("zone_census", zc.json());
+            }
             if (spec.has("endsOut")) {
                 final StringBuilder sb = new StringBuilder();
                 for (JsonElement e : ends) sb.append(RlWire.canonicalString(e)).append('\n');

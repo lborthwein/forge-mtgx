@@ -125,6 +125,33 @@ public final class BenchSession {
     }
 
     private LocalAnswerer localAnswerer = null;
+
+    /**
+     * RL observation v1 (lane rl-r0-b5-1006; null by default, and then the bridge's calls to it are no-ops): told what
+     * each bridged seat of the live game is shown or looks at. Implemented by the RL actor's seat-knowledge tracker.
+     */
+    public interface KnowledgeObserver {
+        /** {@code viewer} was shown {@code cards} (from {@code zone}, owned by {@code owner}); PlayerController.reveal. */
+        void onReveal(forge.game.Game game, forge.game.player.Player viewer, java.util.List<forge.game.card.Card> cards,
+                forge.game.zone.ZoneType zone, forge.game.player.Player owner);
+
+        /**
+         * {@code viewer} looked at {@code cards} to arrange them (scry, surveil, orderMoveToZoneList); for
+         * {@code destination} Library the order it leaves them in is its own choice.
+         */
+        void onLook(forge.game.Game game, forge.game.player.Player viewer, java.util.List<forge.game.card.Card> cards,
+                forge.game.zone.ZoneType destination);
+    }
+
+    private KnowledgeObserver knowledgeObserver = null;
+
+    public KnowledgeObserver getKnowledgeObserver() {
+        return knowledgeObserver;
+    }
+
+    public void setKnowledgeObserver(final KnowledgeObserver o) {
+        this.knowledgeObserver = o;
+    }
     /** RL-simulator probe: false skips the per-ask seat-visible state encoding (default true: unchanged). */
     private boolean encodeState = true;
 
