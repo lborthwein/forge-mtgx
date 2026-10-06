@@ -26,6 +26,11 @@ public final class RlFamilyChecks implements RlSeat.FrameListener {
     private final Map<String, int[]> byFamily = new TreeMap<>(); // family → {frames, checked, mismatches, skipped}
     private final Map<String, Integer> byMode = new TreeMap<>();
     private final List<String> problems = new ArrayList<>();
+    /**
+     * NAME pointers (observation v1): candidates, those pointing at a token, at a zone 16-18 token, and violations (a
+     * candidate whose card has a zone 16-18 token in the frame but points elsewhere).
+     */
+    private final int[] name = new int[4];
     /** Two-frame asks: the second frame's expected steps, by (game uid, dec_idx). */
     private final Map<String, short[]> expectSecond = new HashMap<>();
 
@@ -47,6 +52,9 @@ public final class RlFamilyChecks implements RlSeat.FrameListener {
         }
         if (f.teacher.length > 0) {
             return; // a RECORD frame: the mapper produced it
+        }
+        if (f.family == RlSchema.F_NAME) {
+            checkName(f);
         }
         final int[] r = row(f.family);
         r[0]++;
@@ -94,6 +102,43 @@ public final class RlFamilyChecks implements RlSeat.FrameListener {
         }
     }
 
+    private void checkName(final RlWire.Decide f) {
+        for (int i = 0; i < f.C; i++) {
+            if (f.candKind[i] != RlSchema.K_CARD) {
+                continue;
+            }
+            name[0]++;
+            final int t = f.candTok[i];
+            if (t >= 0) {
+                name[1]++;
+                final int z = f.tokZone[t] & 0xff;
+                if (z >= RlSchema.Z_O_HAND_KNOWN && z <= RlSchema.Z_O_LIB_KNOWN) {
+                    name[2]++;
+                }
+                if (f.tokCard[t] != f.candCard[i]) {
+                    name[3]++;
+                    problem("NAME candidate " + i + " points at a token of another card");
+                    continue;
+                }
+            }
+            if (f.candCard[i] <= 1) {
+                continue;
+            }
+            boolean known = false;
+            for (int k = 0; k < f.L; k++) {
+                final int z = f.tokZone[k] & 0xff;
+                known |= f.tokCard[k] == f.candCard[i] && z >= RlSchema.Z_O_HAND_KNOWN && z <= RlSchema.Z_O_LIB_KNOWN;
+            }
+            final boolean atKnown = t >= 0 && (f.tokZone[t] & 0xff) >= RlSchema.Z_O_HAND_KNOWN
+                    && (f.tokZone[t] & 0xff) <= RlSchema.Z_O_LIB_KNOWN;
+            if (known && !atKnown) {
+                name[3]++;
+                problem(Long.toUnsignedString(f.gameUid) + "/" + f.decIdx + ": NAME candidate " + i
+                        + " has a zone 16-18 token but points at " + t);
+            }
+        }
+    }
+
     private static boolean sameSet(final short[] a, final short[] b) {
         final short[] x = a.clone();
         final short[] y = b.clone();
@@ -133,6 +178,12 @@ public final class RlFamilyChecks implements RlSeat.FrameListener {
         }
         o.add("problems", p);
         o.addProperty("mismatches", mismatches());
+        final JsonObject nm = new JsonObject();
+        nm.addProperty("candidates", name[0]);
+        nm.addProperty("pointed", name[1]);
+        nm.addProperty("pointed_known_16_18", name[2]);
+        nm.addProperty("violations", name[3]);
+        o.add("name_pointers", nm);
         return o;
     }
 }
