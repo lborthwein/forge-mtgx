@@ -727,13 +727,28 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     /** Record mode: one TARGETS row per targeting ability of {@code chosen}'s chain (Forge's targets). */
     private boolean recordTargets(final int seat, final Game g, final Player player, final RlFeaturizer.Obs obs,
             final SpellAbility chosen, final String origin) {
-        for (Object[] t : RlCandidates.targetsFromChosen(g, chosen)) {
+        final List<Object[]> rows = RlCandidates.targetsFromChosen(g, chosen);
+        if (!rows.isEmpty() && !RlCandidates.stackAccepts(g, chosen)) {
+            // Forge's stack will refuse this activation (some ability's targets break its own target count): a
+            // per-game census note, so a reader can find the games where Forge's AI made an illegal activation
+            note("forgeRefused." + origin);
+        }
+        for (Object[] t : rows) {
             final RlCandidates.Menu tm = (RlCandidates.Menu) t[0];
             final short[] ts = (short[]) t[1];
             tm.origin = origin;
             synthTargets++;
             c(RlSchema.F_TARGETS).asks++;
             note("targets." + origin + ".asks");
+            if (tm.forgeIllegal != null) {
+                // Forge's own answer is outside the legal action space (too few targets for the ability's own
+                // count; Forge refuses the activation at the stack): no label exists, and the mapper did not fail
+                note("targets." + origin + ".forgeIllegal");
+                continue;
+            }
+            if (tm.offTargets) {
+                note("targets." + origin + ".offTargets");
+            }
             if (tm.unposable != null || ts == null) {
                 mapFailed.merge(RlSchema.F_TARGETS, 1, Integer::sum);
                 final String why = tm.unposable == null ? "other" : tm.unposable.startsWith("Forge's targets are not")
