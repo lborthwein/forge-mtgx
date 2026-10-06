@@ -170,9 +170,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         throw new IllegalArgumentException("unknown controller " + controller);
     }
 
-    /** Record-only games (every bridged seat a recorder) are pure observers: isolate ids (see the bridge). */
+    /** Record-only games (every bridged seat a recorder) are pure observers (see the bridge's observing()). */
     @Override
-    public boolean isolateIds() {
+    public boolean observeOnly() {
         if (NO_ISOLATE) {
             return false;
         }
@@ -184,7 +184,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         return true;
     }
 
-    /** Diagnosis switch (-Drlseat.noIsolate=true): record mode without id isolation. Off by default. */
+    /** Diagnosis switch (-Drlseat.noIsolate=true): record mode without the observer isolation. Off by default. */
     static final boolean NO_ISOLATE = Boolean.getBoolean("rlseat.noIsolate");
 
     public void setGame(final Game g) {
@@ -294,16 +294,31 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             endGame("max_decisions");
             return null;
         }
-        final RlFeaturizer.Obs obs = feat.observe(g, player, m.mullK, priv);
-        unkNames += obs.unknownNames;
-        m.bind(obs, feat, player);
         if (roles[seat] == Role.RECORD) {
-            pending.push(new Pending(method, seat, player, m, obs));
+            final java.util.Random live = observeOnly() ? forge.util.MyRandom.getThreadRandom() : null;
+            final int[] snap = observeOnly() ? idValues() : null;
+            if (snap != null) {
+                forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
+            }
+            try {
+                final RlFeaturizer.Obs ro = feat.observe(g, player, m.mullK, priv);
+                unkNames += ro.unknownNames;
+                m.bind(ro, feat, player);
+                pending.push(new Pending(method, seat, player, m, ro));
+            } finally {
+                if (snap != null) {
+                    forge.util.MyRandom.setThreadRandom(live);
+                    restoreIds(snap);
+                }
+            }
             while (pending.size() > 32) {
                 pending.removeLast();
             }
             return null;
         }
+        final RlFeaturizer.Obs obs = feat.observe(g, player, m.mullK, priv);
+        unkNames += obs.unknownNames;
+        m.bind(obs, feat, player);
         // ---- RL seat: DECIDE → DECISION
         final RlWire.Decide frame = frame(seat, g, m, obs);
         final RlWire.Decision d;
@@ -505,13 +520,20 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 break;
             }
         }
-        final int[] snap = isolateIds() ? idValues() : null;
+        if (!observeOnly()) {
+            echoed(g, p, forgeAnswer, forgeDecision);
+            return;
+        }
+        // the seat's own echo-time work (TARGETS synthesis reads the chosen spell's targets) is isolated as the
+        // bridge isolates its menu: scratch random stream, id counters put back
+        final java.util.Random live = forge.util.MyRandom.getThreadRandom();
+        final int[] snap = idValues();
+        forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
         try {
             echoed(g, p, forgeAnswer, forgeDecision);
         } finally {
-            if (snap != null) {
-                restoreIds(snap);
-            }
+            forge.util.MyRandom.setThreadRandom(live);
+            restoreIds(snap);
         }
     }
 

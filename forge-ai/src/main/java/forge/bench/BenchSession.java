@@ -95,10 +95,11 @@ public final class BenchSession {
         }
 
         /**
-         * True asks the bridge to put the IdScope counters back, before Forge decides a delegated ask, to their
-         * values at the top of that ask's handler (RL record mode: a pure observer). Default false.
+         * True when this answerer only observes (delegates every ask; RL record mode): the bridge then builds its
+         * priority menu on a scratch random stream and puts the IdScope counters back, so Forge plays the game it
+         * would have played alone. Default false (an answerer whose answers are played).
          */
-        default boolean isolateIds() {
+        default boolean observeOnly() {
             return false;
         }
 

@@ -146,26 +146,35 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     }
 
     private boolean bridged() {
-        final boolean b = mode == BenchSession.Mode.BRIDGE && isLiveGame() && !session.getChannel().isClosed();
-        if (b) {
-            final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
-            idSnap = local != null && local.isolateIds() ? IdSnap.take() : null;
-        }
-        return b;
+        return mode == BenchSession.Mode.BRIDGE && isLiveGame() && !session.getChannel().isClosed();
     }
 
     /*
-     * RL record mode (lane rl-r0-b1-1005): an observer that delegates must leave the game exactly as Forge alone
-     * would play it. Building a bridged ask is not free of side effects: the priority menu copies abilities
-     * (optional-cost variants) and takes LKI copies, and every copy draws a fresh id from the IdScope counters.
-     * SpellAbility.hashCode/equals are id-based, so shifted ids reorder hash collections and change Forge AI's later
-     * choices. When the local answerer asks for it, the counters are read at the top of the bridged handler and put
-     * back before Forge decides a delegated ask, so the delegated decision and everything after it see the ids a
-     * Forge-only game would. Off unless a local answerer returns true from isolateIds(); RL seats that answer leave it
-     * off (their menu objects are played and must keep live ids).
+     * RL record mode (lane rl-r0-b1-1005): an observer that delegates every ask must leave the game exactly as Forge
+     * alone would play it. Building the priority menu is not a pure read: ComputerUtilCost.canPayCost draws from the
+     * game's random stream (the "try not to lose a planeswalker" coin flip) and copies abilities, which takes ids.
+     * Measured: with those draws a delegate-everything recorder matched RlSimBench policy=forge on 4 of 24 games;
+     * skipping only canPayCost restored the call trace on 12 of 12. So when the local answerer says it only
+     * observes, the menu is built on a scratch random stream and the IdScope counters are put back afterwards. With
+     * no local answerer, or one that answers (an RL seat, whose chosen menu entry is played), this is body.get().
      */
-    private int[] idSnap = null;
+    private <T> T observing(final java.util.function.Supplier<T> body) {
+        final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
+        if (local == null || !local.observeOnly()) {
+            return body.get();
+        }
+        final java.util.Random live = forge.util.MyRandom.getThreadRandom();
+        final int[] ids = IdSnap.take();
+        forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
+        try {
+            return body.get();
+        } finally {
+            forge.util.MyRandom.setThreadRandom(live);
+            IdSnap.restore(ids);
+        }
+    }
 
+    /** IdScope counter values (record-mode observation; see {@link #observing}). */
     static final class IdSnap {
         private IdSnap() {
         }
@@ -226,12 +235,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
         final JsonObject ans = local != null ? local.answer(getGame(), getPlayer(), method, kind, body, menuObjects)
                 : session.getChannel().ask(kind, body);
-        final int[] snap = idSnap;
-        idSnap = null;
         if (ans == null || (ans.has("delegate") && ans.get("delegate").getAsBoolean())) {
-            if (snap != null) {
-                IdSnap.restore(snap);
-            }
             counters.delegateRequested(method);
             final Integer id = optInt(ans, "id");
             pendingEcho = new Echo(id == null ? -1 : id, kind, method);
@@ -686,17 +690,21 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             return super.chooseSpellAbilityToPlay();
         }
         final int[] diag = new int[DIAG_LEN];
-        final List<SpellAbility> menu = legalSpellAbilities(diag);
-        recordMenuCensus(diag, menu.size());
+        final List<SpellAbility> menu = new ArrayList<>();
         final JsonObject body = envelope(true);
-        body.add("menuDiag", menuDiagJson(diag, menu.size()));
-        final JsonArray items = new JsonArray();
-        items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
-        for (SpellAbility sa : menu) {
-            items.add(StateEncoder.encodeSpellAbility(sa));
-        }
-        body.add("menu", items);
-        body.add("manaAbilities", manaAbilityChannel());
+        observing(() -> {
+            menu.addAll(legalSpellAbilities(diag));
+            body.add("menuDiag", menuDiagJson(diag, menu.size()));
+            final JsonArray items = new JsonArray();
+            items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
+            for (SpellAbility sa : menu) {
+                items.add(StateEncoder.encodeSpellAbility(sa));
+            }
+            body.add("menu", items);
+            body.add("manaAbilities", manaAbilityChannel());
+            return null;
+        });
+        recordMenuCensus(diag, menu.size());
         final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body, menu);
         if (ans == null) {
             final Echo e = takeEcho();
