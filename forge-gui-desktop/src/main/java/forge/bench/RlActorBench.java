@@ -932,10 +932,19 @@ public final class RlActorBench {
         cfg.replayLines.addAll(lines);
     }
 
+    /**
+     * Replay the configured tape lines; with {@code threads} > 1 (lane rl-r0-b4b-1006) that many games run at once, each
+     * thread with its own featurizer as in train/record mode. Rows are written in the configured line order either way.
+     */
     static int replay(final Cfg cfg, final CardIndex index, final String jarSha) throws IOException {
         expandReplayDir(cfg);
-        final RlFeaturizer feat = new RlFeaturizer(index);
         final Map<String, List<JsonObject>> cache = new HashMap<>();
+        for (int[] fl : cfg.replayLines) {
+            final String f = cfg.replayTapes.get(fl[0]);
+            if (!cache.containsKey(f)) {
+                cache.put(f, RlTape.read(Paths.get(f)));
+            }
+        }
         PrintWriter w = null;
         if (cfg.replayOut != null) {
             final Path o = Paths.get(cfg.replayOut);
@@ -944,77 +953,98 @@ public final class RlActorBench {
             }
             w = new PrintWriter(new FileWriter(o.toFile(), StandardCharsets.UTF_8, true), true);
         }
-        int unequal = 0;
-        for (int[] fl : cfg.replayLines) {
-            final String f = cfg.replayTapes.get(fl[0]);
-            final JsonObject row = new JsonObject();
-            row.addProperty("tape", f);
-            row.addProperty("line", fl[1]);
-            try {
-                final List<JsonObject> lines = cache.computeIfAbsent(f, k -> {
-                    try {
-                        return RlTape.read(Paths.get(k));
-                    } catch (IOException e) {
-                        throw new IllegalStateException(e);
-                    }
-                });
-                final JsonObject t = lines.get(fl[1]);
-                row.add("game_uid", t.get("game_uid"));
-                row.add("digest_tape", t.get("digest"));
-                if (!t.get("void").isJsonNull()) {
-                    row.addProperty("error", "void");
-                    row.addProperty("equal", false);
-                } else {
-                    final JsonObject g = new JsonObject();
-                    g.add("game_uid", t.get("game_uid"));
-                    g.add("seed", t.get("seed"));
-                    final JsonArray decks = new JsonArray(), shas = new JsonArray();
-                    for (JsonElement d : t.getAsJsonArray("decks")) {
-                        decks.add(d.getAsJsonObject().get("path"));
-                        shas.add(d.getAsJsonObject().get("sha"));
-                    }
-                    g.add("decks", decks);
-                    g.add("deck_sha", shas);
-                    g.add("controllers", t.get("controllers"));
-                    g.addProperty("priv", false);
-                    // the deck guard of the tape's own mode; the seat's behaviour is the tape mode's
-                    final String tmode = t.get("mode").getAsString();
-                    final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
-                            t.get("game_uid").getAsString())), null, jarSha);
-                    if (p.guardError != null) {
-                        row.addProperty("error", "deck_guard: " + p.guardError);
-                        row.addProperty("equal", false);
-                    } else {
-                        row.add("digest_replay", p.end.get("digest"));
-                        final boolean eq = p.end.get("digest").getAsString().equals(t.get("digest").getAsString())
-                                && p.end.get("void").isJsonNull();
-                        row.addProperty("equal", eq);
-                        // the replayed game's own census (lane rl-r0-b4b-1006): a jar's asks on the exact games of a
-                        // tape, e.g. the before/after of a record-mode mapping fix
-                        if (p.tape != null && p.tape.has("census")) {
-                            row.add("census", p.tape.get("census"));
-                        }
-                        if (p.seat.fatal != null) {
-                            row.addProperty("error", p.seat.fatal);
-                        }
-                    }
+        final int n = cfg.replayLines.size();
+        final String[] out = new String[n];
+        final java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
+        final int threads = Math.max(1, Math.min(cfg.threads, n));
+        final List<Thread> ts = new ArrayList<>();
+        for (int k = 0; k < threads; k++) {
+            final Thread t = new Thread(() -> {
+                final RlFeaturizer feat = new RlFeaturizer(index);
+                for (int i = next.getAndIncrement(); i < n; i = next.getAndIncrement()) {
+                    final String r = RlWire.canonicalString(replayOne(cfg, cache, cfg.replayLines.get(i), feat, jarSha));
+                    System.err.println("[rlactor] replay " + r);
+                    out[i] = r;
                 }
-            } catch (RuntimeException e) {
-                row.addProperty("error", e.toString());
-                row.addProperty("equal", false);
+            }, "rlreplay-w" + k);
+            ts.add(t);
+            t.start();
+        }
+        for (Thread t : ts) {
+            try {
+                t.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("replay interrupted", e);
             }
-            if (!row.get("equal").getAsBoolean()) {
+        }
+        int unequal = 0;
+        for (String r : out) {
+            if (r == null || !com.google.gson.JsonParser.parseString(r).getAsJsonObject().get("equal").getAsBoolean()) {
                 unequal++;
             }
-            final String s = RlWire.canonicalString(row);
-            System.err.println("[rlactor] replay " + s);
-            if (w != null) {
-                w.println(s);
+            if (w != null && r != null) {
+                w.println(r);
             }
         }
         if (w != null) {
             w.close();
         }
         return unequal > 0 ? 4 : 0;
+    }
+
+    private static JsonObject replayOne(final Cfg cfg, final Map<String, List<JsonObject>> cache, final int[] fl,
+            final RlFeaturizer feat, final String jarSha) {
+        final String f = cfg.replayTapes.get(fl[0]);
+        final JsonObject row = new JsonObject();
+        row.addProperty("tape", f);
+        row.addProperty("line", fl[1]);
+        try {
+            final JsonObject t = cache.get(f).get(fl[1]);
+            row.add("game_uid", t.get("game_uid"));
+            row.add("digest_tape", t.get("digest"));
+            if (!t.get("void").isJsonNull()) {
+                row.addProperty("error", "void");
+                row.addProperty("equal", false);
+            } else {
+                final JsonObject g = new JsonObject();
+                g.add("game_uid", t.get("game_uid"));
+                g.add("seed", t.get("seed"));
+                final JsonArray decks = new JsonArray(), shas = new JsonArray();
+                for (JsonElement d : t.getAsJsonArray("decks")) {
+                    decks.add(d.getAsJsonObject().get("path"));
+                    shas.add(d.getAsJsonObject().get("sha"));
+                }
+                g.add("decks", decks);
+                g.add("deck_sha", shas);
+                g.add("controllers", t.get("controllers"));
+                g.addProperty("priv", false);
+                // the deck guard of the tape's own mode; the seat's behaviour is the tape mode's
+                final String tmode = t.get("mode").getAsString();
+                final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
+                        t.get("game_uid").getAsString())), null, jarSha);
+                if (p.guardError != null) {
+                    row.addProperty("error", "deck_guard: " + p.guardError);
+                    row.addProperty("equal", false);
+                } else {
+                    row.add("digest_replay", p.end.get("digest"));
+                    final boolean eq = p.end.get("digest").getAsString().equals(t.get("digest").getAsString())
+                            && p.end.get("void").isJsonNull();
+                    row.addProperty("equal", eq);
+                    // the replayed game's own census (lane rl-r0-b4b-1006): a jar's asks on the exact games of a
+                    // tape, e.g. the before/after of a record-mode mapping fix
+                    if (p.tape != null && p.tape.has("census")) {
+                        row.add("census", p.tape.get("census"));
+                    }
+                    if (p.seat.fatal != null) {
+                        row.addProperty("error", p.seat.fatal);
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            row.addProperty("error", e.toString());
+            row.addProperty("equal", false);
+        }
+        return row;
     }
 }

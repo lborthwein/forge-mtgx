@@ -84,6 +84,9 @@ public class ComputerUtil {
         final Card host = sa.getHostCard();
         final Zone hz = host.isCopiedSpell() ? null : host.getZone();
         source.setSplitStateToPlayAbility(sa);
+        // mtgx (AiLegalActivation): where a spell came from, to put it back if the stack would refuse its activation
+        Zone fromZone = null;
+        int zonePosition = 0;
 
         if (sa.isSpell() && !source.isCopiedSpell()) {
             sa = AbilityUtils.addSpliceEffects(sa);
@@ -98,6 +101,8 @@ public class ComputerUtil {
                 }
             }
 
+            fromZone = game.getZoneOf(source);
+            zonePosition = fromZone == null ? 0 : fromZone.getCards().indexOf(source);
             sa.setHostCard(game.getAction().moveToStack(source, sa));
         }
 
@@ -118,6 +123,13 @@ public class ComputerUtil {
                 return false;
             }
         }
+        // mtgx (AiLegalActivation): the stack refuses an activation whose targets break their own count, but only after
+        // its costs are paid, and never counts it; reverse it now, before anything is paid
+        if (!AiLegalActivation.legalTargeting(game, sa)) {
+            AiLegalActivation.rollback(sa, fromZone, zonePosition, new CostPayment(sa.getPayCosts(), sa), source,
+                    "before payment");
+            return false;
+        }
         // Spell Permanents inherit their cost from Mana Cost
         final Cost cost = sa.getPayCosts();
 
@@ -125,6 +137,7 @@ public class ComputerUtil {
 
         final CostPayment pay = new CostPayment(cost, sa);
         if (pay.payComputerCosts(AiCostDecision.forPayment(ai, sa, false))) {
+            AiLegalActivation.logIfRefusedAfterPayment(game, sa);
             game.getStack().addAndUnfreeze(sa);
             if (sa.getSplicedCards() != null && !sa.getSplicedCards().isEmpty()) {
                 game.getAction().reveal(sa.getSplicedCards(), ai, true, "Computer reveals spliced cards from ");
@@ -243,7 +256,15 @@ public class ComputerUtil {
             return false;
         }
 
+        // mtgx (AiLegalActivation): reverse an activation the stack would refuse for its targets before paying for it
+        if (!sa.isTrigger() && !AiLegalActivation.legalTargeting(game, sa)) {
+            AiLegalActivation.rollback(sa, sa.isSpell() ? fromZone : null, zonePosition, pay, source, "before payment");
+            return false;
+        }
         if (pay.payComputerCosts(AiCostDecision.forPayment(ai, sa, false))) {
+            if (!sa.isTrigger()) {
+                AiLegalActivation.logIfRefusedAfterPayment(game, sa);
+            }
             game.getStack().add(sa);
             return true;
         }

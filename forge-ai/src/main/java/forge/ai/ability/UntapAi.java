@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 
 import forge.ai.AiAbilityDecision;
+import forge.ai.AiLegalActivation;
 import forge.ai.AiPlayDecision;
 import forge.ai.ComputerUtil;
 import forge.ai.ComputerUtilAbility;
@@ -214,7 +215,12 @@ public class UntapAi extends SpellAbilityAi {
                 } else if (!sa.isMinTargetChosen() || sa.isZeroTargets()) {
                     // check if the cost is acceptable anyway (e.g. Planeswalker +Loyalty)
                     if (ComputerUtil.activateForCost(sa, ai)) {
-                        return true;
+                        // mtgx (AiLegalActivation): activating for the cost still needs its minimum number of legal
+                        // targets (Garruk Wildspeaker / Koth of the Hammer +1 in main 2 had none, and the stack
+                        // refused the activation after its +1 was paid); untapping an untapped permanent does nothing
+                        if (!AiLegalActivation.enabled() || completeMinTargets(sa, list)) {
+                            return true;
+                        }
                     }
                     sa.resetTargets();
                     return false;
@@ -251,6 +257,25 @@ public class UntapAi extends SpellAbilityAi {
             sa.getTargets().add(choice);
         }
         return true;
+    }
+
+    /** Add the least valuable legal targets from {@code list} until the minimum is chosen (mtgx, AiLegalActivation). */
+    private static boolean completeMinTargets(final SpellAbility sa, final CardCollection list) {
+        final CardCollection left = new CardCollection(list);
+        for (Object t : sa.getTargets()) {
+            if (t instanceof Card) {
+                left.remove((Card) t);
+            }
+        }
+        while (!sa.isMinTargetChosen() && sa.canAddMoreTarget()) {
+            final Card c = left.isEmpty() ? null : ComputerUtilCard.getWorstPermanentAI(left, false, false, false, false);
+            if (c == null) {
+                return false;
+            }
+            left.remove(c);
+            sa.getTargets().add(c);
+        }
+        return sa.isMinTargetChosen();
     }
 
     /**
