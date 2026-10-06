@@ -102,6 +102,8 @@ public class AiController {
      * Null (the default, and always outside a policy seat's re-ask) = upstream Forge AI, byte for byte.
      */
     private java.util.function.Predicate<SpellAbility> policyVeto = null;
+    /** mtgx {@link AiRecastGuard} (lane forge-spellhand-loop-1006): (turn, card id) pairs already logged as stopped. */
+    private final java.util.Set<Long> recastGuardLogged = new java.util.HashSet<>();
 
     public AiController(final Player computerPlayer, final Game game0) {
         player = computerPlayer;
@@ -899,6 +901,15 @@ public class AiController {
     }
 
     public AiPlayDecision canPlaySa(SpellAbility sa) {
+        // mtgx (lane forge-spellhand-loop-1006): a card already cast AiRecastGuard.limit() times this turn is not cast
+        // again this turn (a free recast loop, e.g. Displacer Kitten + Venser + Mana Crypt). Fires only at the limit.
+        if (AiRecastGuard.blocks(player, sa)) {
+            final long key = ((long) game.getPhaseHandler().getTurn() << 32) | (sa.getHostCard().getId() & 0xffffffffL);
+            if (recastGuardLogged.add(key)) {
+                System.out.println(AiRecastGuard.logLine(player, sa));
+            }
+            return AiPlayDecision.StopRunawayActivations;
+        }
         if (!checkAiSpecificRestrictions(sa)) {
             return AiPlayDecision.CantPlayAi;
         }
