@@ -1237,6 +1237,10 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * ceiling: mana left after the base cost, divided by the repeat's own mana cost.
      */
     private int affordableRepeats(final SpellAbility sa, final Cost cost, final int max) {
+        return affordableRepeats(getPlayer(), sa, cost, max);
+    }
+
+    static int affordableRepeats(final Player payer, final SpellAbility sa, final Cost cost, final int max) {
         int ceiling;
         try {
             final int repeatMana = cost == null || cost.hasNoManaCost()
@@ -1246,7 +1250,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 // these as a yes/no with max 1 and we have no cheap affordability model.
                 ceiling = Math.min(max, 1);
             } else {
-                final int available = ComputerUtilMana.getAvailableManaEstimate(getPlayer());
+                final int available = ComputerUtilMana.getAvailableManaEstimate(payer);
                 final int base = sa.getPayCosts() == null || sa.getPayCosts().hasNoManaCost()
                         ? 0 : sa.getPayCosts().getTotalMana().getCMC();
                 ceiling = Math.min(max, Math.max(0, (available - base) / repeatMana));
@@ -1256,6 +1260,44 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             ceiling = Math.min(max, 1);
         }
         return Math.max(0, ceiling);
+    }
+
+    /** Upper bound on the repeats {@link #payableRepeats} tries (an unbounded mana source must not spin forever). */
+    static final int REPEAT_CAP = 99;
+
+    /**
+     * Keyword-cost repeats for an RL seat or recorder (lane rl-r0-b4b-1006): Forge's own count, as
+     * {@code PlayerControllerAi.chooseNumberForKeywordCost} makes it, the most repeats whose total cost
+     * {@code canPayCost} accepts, and never fewer than the amount Forge's AI preset on the ability (Multikicker's
+     * {@code PermanentAi} count). The mana estimate in {@link #affordableRepeats} is not Forge's test: it offered fewer
+     * repeats than Forge's AI then chose (Squad, Multikicker), so a recorder could not name Forge's answer and an RL
+     * seat could not choose every amount Forge would pay. canPayCost draws from the game's random stream and AI card
+     * memory, so a recorder runs it isolated ({@link #observing}).
+     */
+    private int payableRepeats(final SpellAbility sa, final Cost cost, final KeywordInterface keyword, final int max) {
+        return observing(() -> payableRepeats(getPlayer(), sa, cost, keyword, max));
+    }
+
+    static int payableRepeats(final Player payer, final SpellAbility sa, final Cost cost,
+            final KeywordInterface keyword, final int max) {
+        int n = 0;
+        try {
+            final Cost soFar = sa.getPayCosts().copy();
+            for (int i = 0; i < Math.min(max, REPEAT_CAP); i++) {
+                soFar.add(cost);
+                if (!ComputerUtilCost.canPayCost(sa.copyWithDefinedCost(soFar), payer, sa.isTrigger())) {
+                    break;
+                }
+                n++;
+            }
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("keyword-cost payable count failed", e);
+            n = affordableRepeats(payer, sa, cost, max);
+        }
+        if (keyword != null && sa.hasOptionalKeywordAmount(keyword)) {
+            n = Math.max(n, Math.min(sa.getOptionalKeywordAmount(keyword), Math.min(max, REPEAT_CAP)));
+        }
+        return Math.max(0, n);
     }
 
     /**
@@ -1270,7 +1312,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!bridged()) {
             return super.chooseNumberForKeywordCost(sa, cost, keyword, prompt, max);
         }
-        final int ceiling = affordableRepeats(sa, cost, max);
+        final int ceiling = localAnswers() ? payableRepeats(sa, cost, keyword, max) : affordableRepeats(sa, cost, max);
         final JsonObject body = envelope(true);
         body.add("ability", StateEncoder.encodeSpellAbility(sa));
         body.addProperty("prompt", String.valueOf(prompt));

@@ -87,6 +87,19 @@ public final class RlCandidates {
         public boolean sourceIsSpell;
         /** TARGETS: where the targeting comes from (the bridge's "origin": cast, trigger, playFromEffect, noStack). */
         public String origin = "cast";
+        /**
+         * Record-mode TARGETS synthesis (lane rl-r0-b4b-1006): set when Forge's own targets break the ability's own
+         * target count ({@code !isTargetNumberValid()}, the test Forge's stack applies before it accepts the
+         * activation). Forge then refuses the whole activation ("Couldn't add to stack, failed to target"), so the
+         * answer is outside the legal action space: no label exists, and it is not a mapping failure.
+         */
+        public String forgeIllegal;
+        /**
+         * Record-mode TARGETS synthesis: the ability takes no targets on this cast (its target count evaluates to 0,
+         * e.g. a kicker-only target of an unkicked spell) but Forge's AI left targets on it. The seat's ask is trivial
+         * (min = max = 0), so the row is the trivial empty answer, not a mapping failure.
+         */
+        public boolean offTargets;
         /** SHAPE_CHOICES: the answer's list key ("choices"; "colors" for chooseColors). */
         String listKey = "choices";
         /** PERMUTE (ORDER): the steps are the final top-first order and the answer is Forge's move order reversed. */
@@ -1652,12 +1665,27 @@ public final class RlCandidates {
     // ------------------------------------------------------------------------------------------------ record-mode synthesis
 
     /**
+     * Whether Forge's stack accepts {@code root} with the targets it carries now: the test {@code MagicStack.add}
+     * applies before it puts an activation on the stack (every ability in the chain has a valid target count).
+     */
+    public static boolean stackAccepts(final Game game, final SpellAbility root) {
+        try {
+            return game.getStack().hasLegalTargeting(root);
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
+    /**
      * Record mode: the TARGETS decisions implied by a spell Forge's AI chose at priority. Forge's AI targets inside
      * {@code canPlayAI} and never calls {@code chooseTargetsFor} for its own casts, so the bridge never asks; the
      * RL seat, which casts through the bridge, is asked once per targeting (sub-)ability in chain order, over
      * {@code getAllCandidates} plus the stack candidates. This rebuilds that menu (the chosen targets included even
      * when a uniqueness rule would now exclude them) and returns one (menu, teacher steps) pair per targeting
-     * ability, or a menu with {@code unposable} set when Forge's targets cannot be named. Reads only.
+     * ability, or a menu with {@code unposable} set when Forge's targets cannot be named. Two cases are not mapping
+     * failures (lane rl-r0-b4b-1006): an ability whose target count is 0 on this cast is the seat's trivial empty ask
+     * ({@code offTargets} when Forge left stray targets on it), and Forge's targets that break the ability's own
+     * target count are Forge-illegal ({@code forgeIllegal}: Forge's stack refuses the activation). Reads only.
      */
     public static List<Object[]> targetsFromChosen(final Game game, final SpellAbility root) {
         final List<Object[]> out = new ArrayList<>();
@@ -1720,7 +1748,19 @@ public final class RlCandidates {
                         steps[j] = (short) at;
                     }
                     finish(m);
-                    if (steps != null && m.unposable == null) {
+                    final int maxT = cur.getMaxTargets();
+                    if (m.unposable == null && m.trivial && maxT == 0) {
+                        // no targets on this cast: the seat's ask is trivial (the empty answer), as in the seat path;
+                        // stray targets Forge's AI left on it are not a decision (they make Forge refuse the cast)
+                        m.offTargets = !chosen.isEmpty();
+                        steps = m.trivialSteps;
+                    } else if (!cur.isTargetNumberValid()) {
+                        // Forge's own answer breaks the ability's own target count (too few targets, typically: the
+                        // AI activates a +loyalty ability "for the cost" without targeting), so Forge refuses the
+                        // activation: outside the legal action space, whatever the menu could name
+                        m.forgeIllegal = chosen.size() + " targets outside [" + cur.getMinTargets() + "," + maxT + "]";
+                        steps = null;
+                    } else if (steps != null && m.unposable == null) {
                         final String bad = m.validate(steps);
                         if (bad != null) {
                             m.unposable = "Forge's targets break the menu's rules: " + bad;
@@ -1730,7 +1770,7 @@ public final class RlCandidates {
                 } catch (RuntimeException e) {
                     m.unposable = "targets synthesis failed: " + e;
                 }
-                if (steps == null && m.unposable == null) {
+                if (steps == null && m.unposable == null && m.forgeIllegal == null) {
                     m.unposable = "Forge's targets are not on the menu";
                 }
                 out.add(new Object[] {m, steps});
