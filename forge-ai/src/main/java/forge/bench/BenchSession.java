@@ -94,6 +94,14 @@ public final class BenchSession {
                 com.google.gson.JsonObject forgeAnswer, Object forgeDecision) {
         }
 
+        /**
+         * True asks the bridge to put the IdScope counters back, before Forge decides a delegated ask, to their
+         * values at the top of that ask's handler (RL record mode: a pure observer). Default false.
+         */
+        default boolean isolateIds() {
+            return false;
+        }
+
         /** Called when the bridge refuses an answer (Forge decides instead). Default: nothing. */
         default void onRefused(forge.game.Game game, forge.game.player.Player player, String method, String why) {
         }

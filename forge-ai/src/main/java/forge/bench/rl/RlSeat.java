@@ -170,6 +170,23 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         throw new IllegalArgumentException("unknown controller " + controller);
     }
 
+    /** Record-only games (every bridged seat a recorder) are pure observers: isolate ids (see the bridge). */
+    @Override
+    public boolean isolateIds() {
+        if (NO_ISOLATE) {
+            return false;
+        }
+        for (Role r : roles) {
+            if (r == Role.RL) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Diagnosis switch (-Drlseat.noIsolate=true): record mode without id isolation. Off by default. */
+    static final boolean NO_ISOLATE = Boolean.getBoolean("rlseat.noIsolate");
+
     public void setGame(final Game g) {
         this.game = g;
     }
@@ -488,6 +505,41 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 break;
             }
         }
+        final int[] snap = isolateIds() ? idValues() : null;
+        try {
+            echoed(g, p, forgeAnswer, forgeDecision);
+        } finally {
+            if (snap != null) {
+                restoreIds(snap);
+            }
+        }
+    }
+
+    static int[] idValues() {
+        final Object cap = forge.util.IdScope.capture();
+        if (!(cap instanceof java.util.concurrent.atomic.AtomicInteger[])) {
+            return null;
+        }
+        final java.util.concurrent.atomic.AtomicInteger[] a = (java.util.concurrent.atomic.AtomicInteger[]) cap;
+        final int[] v = new int[a.length];
+        for (int i = 0; i < a.length; i++) {
+            v[i] = a[i].get();
+        }
+        return v;
+    }
+
+    static void restoreIds(final int[] v) {
+        final Object cap = forge.util.IdScope.capture();
+        if (v == null || !(cap instanceof java.util.concurrent.atomic.AtomicInteger[])) {
+            return;
+        }
+        final java.util.concurrent.atomic.AtomicInteger[] a = (java.util.concurrent.atomic.AtomicInteger[]) cap;
+        for (int i = 0; i < a.length && i < v.length; i++) {
+            a[i].set(v[i]);
+        }
+    }
+
+    private void echoed(final Game g, final Pending p, final JsonObject forgeAnswer, final Object forgeDecision) {
         final RlCandidates.Menu m = p.menu;
         final short[] steps = m.fromEcho(forgeAnswer);
         if (steps == null) {

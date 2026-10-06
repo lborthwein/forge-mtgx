@@ -146,7 +146,53 @@ public class PlayerControllerBridge extends PlayerControllerAi {
     }
 
     private boolean bridged() {
-        return mode == BenchSession.Mode.BRIDGE && isLiveGame() && !session.getChannel().isClosed();
+        final boolean b = mode == BenchSession.Mode.BRIDGE && isLiveGame() && !session.getChannel().isClosed();
+        if (b) {
+            final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
+            idSnap = local != null && local.isolateIds() ? IdSnap.take() : null;
+        }
+        return b;
+    }
+
+    /*
+     * RL record mode (lane rl-r0-b1-1005): an observer that delegates must leave the game exactly as Forge alone
+     * would play it. Building a bridged ask is not free of side effects: the priority menu copies abilities
+     * (optional-cost variants) and takes LKI copies, and every copy draws a fresh id from the IdScope counters.
+     * SpellAbility.hashCode/equals are id-based, so shifted ids reorder hash collections and change Forge AI's later
+     * choices. When the local answerer asks for it, the counters are read at the top of the bridged handler and put
+     * back before Forge decides a delegated ask, so the delegated decision and everything after it see the ids a
+     * Forge-only game would. Off unless a local answerer returns true from isolateIds(); RL seats that answer leave it
+     * off (their menu objects are played and must keep live ids).
+     */
+    private int[] idSnap = null;
+
+    static final class IdSnap {
+        private IdSnap() {
+        }
+
+        static int[] take() {
+            final Object cap = forge.util.IdScope.capture();
+            if (!(cap instanceof java.util.concurrent.atomic.AtomicInteger[])) {
+                return null;
+            }
+            final java.util.concurrent.atomic.AtomicInteger[] a = (java.util.concurrent.atomic.AtomicInteger[]) cap;
+            final int[] v = new int[a.length];
+            for (int i = 0; i < a.length; i++) {
+                v[i] = a[i].get();
+            }
+            return v;
+        }
+
+        static void restore(final int[] v) {
+            final Object cap = forge.util.IdScope.capture();
+            if (v == null || !(cap instanceof java.util.concurrent.atomic.AtomicInteger[])) {
+                return;
+            }
+            final java.util.concurrent.atomic.AtomicInteger[] a = (java.util.concurrent.atomic.AtomicInteger[]) cap;
+            for (int i = 0; i < a.length && i < v.length; i++) {
+                a[i].set(v[i]);
+            }
+        }
     }
 
     /** Envelope shared by every ask: game id, seat and the seat-visible state. */
@@ -180,7 +226,12 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
         final JsonObject ans = local != null ? local.answer(getGame(), getPlayer(), method, kind, body, menuObjects)
                 : session.getChannel().ask(kind, body);
+        final int[] snap = idSnap;
+        idSnap = null;
         if (ans == null || (ans.has("delegate") && ans.get("delegate").getAsBoolean())) {
+            if (snap != null) {
+                IdSnap.restore(snap);
+            }
             counters.delegateRequested(method);
             final Integer id = optInt(ans, "id");
             pendingEcho = new Echo(id == null ? -1 : id, kind, method);
