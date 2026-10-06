@@ -179,6 +179,39 @@ public class RlKnowledgeTest extends AITest {
         Assert.assertEquals(zone(o, RlSchema.Z_O_LIB_KNOWN).size(), 0, "opponent shuffle clears zone 18");
     }
 
+    /**
+     * Forge's "put the rest on the bottom in a random order" (Torsten, Narset, cascade-like digs) moves revealed cards
+     * within the library without anyone choosing or seeing the order: every seat forgets those cards' positions.
+     */
+    @Test
+    public void randomOrderBottomForgetsPositions() {
+        final Fixture f = new Fixture();
+        fillLib(f.p0, 12);
+        final CardCollection top = f.p0.getTopXCardsFromLibrary(3);
+        f.game.getAction().reveal(top, ZoneType.Library, f.p0, false, "test"); // revealed to both seats
+        Assert.assertEquals(zone(f.obs(f.p0), RlSchema.Z_U_LIB_KNOWN).size(), 3);
+        Assert.assertEquals(zone(f.obs(f.p1), RlSchema.Z_O_LIB_KNOWN).size(), 3);
+        // RestRandomOrder: shuffled by Forge, then moved to the bottom one by one, no controller call
+        final List<Card> rest = Lists.newArrayList(top);
+        java.util.Collections.reverse(rest);
+        for (Card c : rest) {
+            f.game.getAction().moveToLibrary(c, -1, null);
+        }
+        Assert.assertEquals(zone(f.obs(f.p0), RlSchema.Z_U_LIB_KNOWN).size(), 0, "own: order unknown");
+        Assert.assertEquals(zone(f.obs(f.p1), RlSchema.Z_O_LIB_KNOWN).size(), 0, "opponent: order unknown");
+        // an arrangement is still known: look (scry) then the same moves
+        final CardCollection top2 = f.p0.getTopXCardsFromLibrary(2);
+        f.p0.getController().arrangeForScry(top2);
+        for (Card c : top2) {
+            f.game.getAction().moveToLibrary(c, -1, null);
+        }
+        Assert.assertEquals(zone(f.obs(f.p0), RlSchema.Z_U_LIB_KNOWN).size(), 2, "the looker chose that order");
+        // and the arrangement is used up: a later unseen move of the same card forgets it
+        final Card again = top2.get(0);
+        f.game.getAction().moveToLibrary(again, 0, null);
+        Assert.assertEquals(zone(f.obs(f.p0), RlSchema.Z_U_LIB_KNOWN).size(), 1);
+    }
+
     @Test
     public void scryToBottomLeavesTheTopSegment() {
         final Fixture f = new Fixture();
