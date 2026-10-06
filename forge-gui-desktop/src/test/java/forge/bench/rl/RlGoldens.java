@@ -27,8 +27,26 @@ public final class RlGoldens implements RlSeat.FrameListener {
     static final String[] WANTED = {"priority", "priority-x", "targets-spell", "targets-ability", "attack", "block",
             "mulligan", "mulligan-bottom", "start-player"};
 
+    /** Phase B (lane rl-r0-b4-1006): one frame per family 8-24; the two-frame families keep both frames of one ask. */
+    public static final String[] WANTED_B = {"entity", "cards", "mode", "confirm", "number", "optional-costs", "scry-assign",
+            "scry-permute", "order", "discard-from", "cost-cards", "pile", "surveil-assign", "surveil-permute",
+            "put-on-top", "optional-trigger", "pay-to-prevent", "name", "color", "targets-trigger"};
+
+    /** The kinds {@link #complete} waits for (default: Phase A's). */
+    public String[] wanted = WANTED;
+
+    /**
+     * Also keep RECORD frames (record mode; lane rl-r0-b4-1006), for families an RL seat is rarely asked: the frame is
+     * written as the DECIDE frame of the same ask (teacher stripped, n_teacher 0) with Forge's answer as
+     * {@code example_steps}, and {@code meta.source = "record"}.
+     */
+    public boolean acceptRecord = false;
+
+    /** The last ASSIGN frame of a two-frame family (per family), waiting for its PERMUTE partner. */
+    private final Map<Integer, Object[]> pendingAssign = new java.util.HashMap<>();
+
     public boolean complete() {
-        for (String w : WANTED) {
+        for (String w : wanted) {
             if (!kept.containsKey(w)) {
                 return false;
             }
@@ -39,6 +57,24 @@ public final class RlGoldens implements RlSeat.FrameListener {
     @Override
     public synchronized void onFrame(final Game game, final Player seat, final RlWire.Decide f,
             final RlCandidates.Menu m, final RlFeaturizer.Obs obs, final short[] steps, final JsonObject answer) {
+        if (f.teacher.length == 0) {
+            keep(game, seat, f, m, obs, steps, answer, false);
+            return;
+        }
+        if (!acceptRecord) {
+            return;
+        }
+        final short[] t = f.teacher;
+        f.teacher = new short[0]; // the ask's DECIDE layout; restored below (the RECORD frame was already sent)
+        try {
+            keep(game, seat, f, m, obs, t, answer, true);
+        } finally {
+            f.teacher = t;
+        }
+    }
+
+    private void keep(final Game game, final Player seat, final RlWire.Decide f, final RlCandidates.Menu m,
+            final RlFeaturizer.Obs obs, final short[] steps, final JsonObject answer, final boolean fromRecord) {
         String name = null;
         switch (f.family) {
             case RlSchema.F_PRIORITY: {
@@ -71,19 +107,73 @@ public final class RlGoldens implements RlSeat.FrameListener {
             case RlSchema.F_START_PLAYER:
                 name = "start-player";
                 break;
+            case RlSchema.F_ENTITY: name = "entity"; break;
+            case RlSchema.F_CARDS: name = "cards"; break;
+            case RlSchema.F_MODE: name = "mode"; break;
+            case RlSchema.F_CONFIRM: name = "confirm"; break;
+            case RlSchema.F_NUMBER: name = "number"; break;
+            case RlSchema.F_OPTIONAL_COSTS: name = "optional-costs"; break;
+            case RlSchema.F_ORDER: name = f.C >= 2 ? "order" : null; break;
+            case RlSchema.F_DISCARD_FROM: name = "discard-from"; break;
+            case RlSchema.F_COST_CARDS: name = "cost-cards"; break;
+            case RlSchema.F_PILE: name = "pile"; break;
+            case RlSchema.F_PUT_ON_TOP: name = "put-on-top"; break;
+            case RlSchema.F_OPTIONAL_TRIGGER: name = "optional-trigger"; break;
+            case RlSchema.F_PAY_TO_PREVENT: name = "pay-to-prevent"; break;
+            case RlSchema.F_NAME: name = "name"; break;
+            case RlSchema.F_COLOR: name = "color"; break;
+            case RlSchema.F_SCRY:
+            case RlSchema.F_SURVEIL: {
+                final String fam = f.family == RlSchema.F_SCRY ? "scry" : "surveil";
+                if (f.mode == RlSchema.M_ASSIGN) {
+                    if (!kept.containsKey(fam + "-permute")) {
+                        pendingAssign.put(f.family, new Object[] {f.gameUid, f.decIdx,
+                                RlWire.frameBytes(RlWire.T_DECIDE, 0, RlWire.encodeDecide(f)),
+                                describe(f, m, steps, answer, sourced(meta(f, m, seat), fromRecord))});
+                    }
+                    if (!kept.containsKey(fam + "-assign")) {
+                        name = fam + "-assign";
+                    }
+                } else if (!kept.containsKey(fam + "-permute")) {
+                    final Object[] a = pendingAssign.get(f.family);
+                    if (a != null && (Long) a[0] == f.gameUid && (Integer) a[1] == f.decIdx - 1) {
+                        // both frames of one ask: the pair replaces any lone first frame kept earlier
+                        kept.put(fam + "-assign", new Object[] {a[2], a[3]});
+                        name = fam + "-permute";
+                    }
+                }
+                break;
+            }
             default:
                 break;
+        }
+        if (f.family == RlSchema.F_TARGETS && m != null && "trigger".equals(m.origin) && f.C >= 2) {
+            name = kept.containsKey("targets-trigger") ? null : "targets-trigger";
         }
         if (name == null || kept.containsKey(name)) {
             return;
         }
+        final byte[] frame = RlWire.frameBytes(RlWire.T_DECIDE, 0, RlWire.encodeDecide(f));
+        kept.put(name, new Object[] {frame, describe(f, m, steps, answer, sourced(meta(f, m, seat), fromRecord))});
+    }
+
+    static JsonObject sourced(final JsonObject meta, final boolean fromRecord) {
+        meta.addProperty("source", fromRecord ? "record (example_steps = Forge's answer)" : "train (fake server)");
+        return meta;
+    }
+
+    static JsonObject meta(final RlWire.Decide f, final RlCandidates.Menu m, final Player seat) {
         final JsonObject meta = new JsonObject();
         meta.addProperty("family_name", RlSchema.familyName(f.family));
         meta.addProperty("source_is_spell", m.family == RlSchema.F_TARGETS ? m.sourceIsSpell : null);
         meta.addProperty("source_card", m.source == null ? null : m.source.getName());
         meta.addProperty("seat_name", seat.getName());
-        final byte[] frame = RlWire.frameBytes(RlWire.T_DECIDE, 0, RlWire.encodeDecide(f));
-        kept.put(name, new Object[] {frame, describe(f, m, steps, answer, meta)});
+        meta.addProperty("method", m.method);
+        meta.addProperty("ask_kind", m.kind);
+        if (m.family == RlSchema.F_TARGETS) {
+            meta.addProperty("origin", m.origin);
+        }
+        return meta;
     }
 
     /** The field-by-field decode of a DECIDE frame plus the answer contract. */
@@ -135,12 +225,28 @@ public final class RlGoldens implements RlSeat.FrameListener {
         if (m != null) {
             final JsonObject ans = new JsonObject();
             ans.addProperty("shape", m.shape == RlCandidates.SHAPE_SINGLE ? "single"
-                    : m.shape == RlCandidates.SHAPE_CHOICES ? "choices" : "pairs");
+                    : m.shape == RlCandidates.SHAPE_CHOICES ? "choices" : m.shape == RlCandidates.SHAPE_PAIRS ? "pairs"
+                    : m.shape == RlCandidates.SHAPE_PERMUTE ? "permute" : "two_frame");
             final JsonArray fr = new JsonArray();
             for (int i = 0; i < m.C(); i++) fr.add(m.fragment(i));
             ans.add("fragments", fr);
-            ans.add("rule", new com.google.gson.JsonPrimitive("single: fragments[steps[0]]; choices: {\"choices\": "
-                    + "[fragments[s] for s in steps]}; pairs: {\"pairs\": [fragments[s] for s in steps if not null]}"));
+            if (m.shape == RlCandidates.SHAPE_CHOICES) {
+                ans.addProperty("list_key", m.listKey());
+            }
+            if (m.shape == RlCandidates.SHAPE_PERMUTE) {
+                ans.addProperty("reverse", m.reversed());
+            }
+            if (m.shape == RlCandidates.SHAPE_TWO_FRAME) {
+                ans.addProperty("rest_key", m.restKey());
+            }
+            ans.add("rule", new com.google.gson.JsonPrimitive("single: fragments[steps[0]]; choices: {list_key: "
+                    + "[fragments[s] for s in steps]}; pairs: {\"pairs\": [fragments[s] for s in steps if not null]}; "
+                    + "permute (steps = the final top-first order): {\"choices\": [fragments[s] for s in "
+                    + "(reversed(steps) if reverse else steps)]}; two_frame (SCRY/SURVEIL first frame, ASSIGN: per slot "
+                    + "YES = keep on top, NO = bottom/graveyard; fragments = the slot card's fid): with the second "
+                    + "frame's steps p (PERMUTE over the kept cards in slot order; absent when fewer than 2 are kept), "
+                    + "{\"top\": [kept[s] for s in p] (else the kept card), \"bottom\"|\"graveyard\": [fid of each NO "
+                    + "slot, in slot order]}"));
             o.add("answer_contract", ans);
         }
         if (steps != null) {
@@ -165,6 +271,25 @@ public final class RlGoldens implements RlSeat.FrameListener {
             case "choices": {
                 final JsonArray a = new JsonArray();
                 for (short s : steps) a.add(fr.get(s).deepCopy());
+                o.add(c.has("list_key") ? c.get("list_key").getAsString() : "choices", a);
+                return o;
+            }
+            case "two_frame": {
+                // this frame alone: the YES slots' cards (top, in slot order) and the NO slots' (rest)
+                final JsonArray kinds = golden.getAsJsonObject("arrays").getAsJsonArray("cand_kind");
+                final JsonArray top = new JsonArray();
+                final JsonArray rest = new JsonArray();
+                for (short s : steps) {
+                    (kinds.get(s).getAsInt() == RlSchema.K_YES ? top : rest).add(fr.get(s).deepCopy());
+                }
+                o.add("top", top);
+                o.add(c.get("rest_key").getAsString(), rest);
+                return o;
+            }
+            case "permute": {
+                final boolean rev = c.has("reverse") && c.get("reverse").getAsBoolean();
+                final JsonArray a = new JsonArray();
+                for (int k = 0; k < steps.length; k++) a.add(fr.get(steps[rev ? steps.length - 1 - k : k]).deepCopy());
                 o.add("choices", a);
                 return o;
             }
