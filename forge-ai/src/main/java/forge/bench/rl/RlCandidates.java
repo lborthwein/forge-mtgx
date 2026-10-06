@@ -135,7 +135,7 @@ public final class RlCandidates {
                 final Cand x = cands.get(i);
                 kindA[i] = (byte) x.kind;
                 if (x.name != null) {
-                    card[i] = f.index().resolve(x.name);
+                    card[i] = nameIndex(f.index(), x.name);
                     tok[i] = (short) tokenOfCard(o, card[i]);
                 } else if (x.host != null) {
                     tok[i] = (short) o.pos(x.host);
@@ -1189,17 +1189,48 @@ public final class RlCandidates {
         return o;
     }
 
-    /** The first token showing card index {@code idx} (NAME candidates), or -1. */
+    /**
+     * A NAME candidate's token: a zone 16-18 token showing card index {@code idx} (a hidden card the seat knows: the
+     * opponent's known hand, known library positions; observation v1), else the first token showing it, else -1.
+     */
     static int tokenOfCard(final RlFeaturizer.Obs o, final int idx) {
         if (idx <= CardIndex.UNK) {
             return -1;
         }
+        int first = -1;
         for (int i = 0; i < o.L; i++) {
-            if (o.tokCard[i] == idx) {
+            if (o.tokCard[i] != idx) {
+                continue;
+            }
+            final int z = o.tokZone[i] & 0xff;
+            if (z >= RlSchema.Z_O_HAND_KNOWN && z <= RlSchema.Z_O_LIB_KNOWN) {
                 return i;
             }
+            if (first < 0) {
+                first = i;
+            }
         }
-        return -1;
+        return first;
+    }
+
+    /**
+     * A NAME candidate's card index (clarification C3): the name's own entry, else the full card's when the name is one
+     * face of a multi-face card (Forge's card database maps every face name to its full card), else {@code <unk>}.
+     */
+    public static int nameIndex(final CardIndex index, final String name) {
+        final int r = index.resolve(name);
+        if (r != CardIndex.UNK) {
+            return r;
+        }
+        try {
+            final forge.item.PaperCard pc = forge.StaticData.instance().getCommonCards().getCard(name);
+            if (pc != null && !name.equals(pc.getName())) {
+                return index.resolve(pc.getName());
+            }
+        } catch (RuntimeException e) {
+            // no card database (unit tests): the name's own entry stands
+        }
+        return CardIndex.UNK;
     }
 
     /** SINGLE over [YES, NO] (either may be illegal: absent), {@code host} the card the question is about. */

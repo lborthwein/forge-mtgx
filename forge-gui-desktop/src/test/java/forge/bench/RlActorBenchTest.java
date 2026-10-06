@@ -470,4 +470,23 @@ public class RlActorBenchTest {
             Assert.assertEquals(r.end.get("digest"), t.get("digest"), "replay digest of " + t.get("game_uid"));
         }
     }
+
+    /**
+     * NAME candidates (lane rl-r0-b4-1006, clarification C3): a face name of a multi-face card resolves to its full card's
+     * index entry; an ordinary name to its own. Needs the real card index ({@code -Drl.cardIndex}).
+     */
+    @Test
+    public void nameCandidateFacesResolveToFullCard() {
+        final int full = index.resolve("Fire // Ice");
+        if (full == CardIndex.UNK) {
+            throw new org.testng.SkipException("card index without Fire // Ice (run with -Drl.cardIndex)");
+        }
+        Assert.assertEquals(forge.bench.rl.RlCandidates.nameIndex(index, "Fire"), full, "split half");
+        Assert.assertEquals(forge.bench.rl.RlCandidates.nameIndex(index, "Ice"), full, "split half");
+        Assert.assertEquals(forge.bench.rl.RlCandidates.nameIndex(index, "Fire // Ice"), full, "full name");
+        final int bolt = index.resolve("Lightning Bolt");
+        Assert.assertTrue(bolt > CardIndex.UNK);
+        Assert.assertEquals(forge.bench.rl.RlCandidates.nameIndex(index, "Lightning Bolt"), bolt);
+        Assert.assertEquals(forge.bench.rl.RlCandidates.nameIndex(index, "No Such Card Anywhere"), CardIndex.UNK);
+    }
 }
