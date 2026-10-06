@@ -121,6 +121,8 @@ public final class RlActorBench {
         int readTimeoutSec = 120;
         int tapeRotate = 1000;
         int maxGames = 0;
+        /** MyRandom's global (non-thread) random, seeded once at boot; RlSimBench seeds it with its config seed. */
+        long globalSeed = 0x5eedL;
         List<String> replayTapes = new ArrayList<>();
         List<int[]> replayLines = new ArrayList<>();
         String replayOut = null;
@@ -143,6 +145,7 @@ public final class RlActorBench {
         if (o.has("readTimeoutSec")) c.readTimeoutSec = o.get("readTimeoutSec").getAsInt();
         if (o.has("tapeRotate")) c.tapeRotate = o.get("tapeRotate").getAsInt();
         if (o.has("maxGames")) c.maxGames = o.get("maxGames").getAsInt();
+        if (o.has("globalSeed")) c.globalSeed = o.get("globalSeed").getAsLong();
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
             if (r.has("tapes")) for (JsonElement e : r.getAsJsonArray("tapes")) c.replayTapes.add(e.getAsString());
@@ -428,6 +431,7 @@ public final class RlActorBench {
             forgeDecided.merge(e.getKey(), -e.getValue(), Integer::sum);
         }
         forgeDecided.values().removeIf(v -> v <= 0);
+        forgeDecided.keySet().removeAll(NOT_DECISIONS);
         forgeDecided.putAll(seat.forgeDecidedExtra);
 
         final JsonObject end = new JsonObject();
@@ -493,6 +497,11 @@ public final class RlActorBench {
         MyRandom.setThreadRandom(null);
         return out;
     }
+
+    /** Controller entry points that notify or plumb rather than decide; left out of forge_decided. */
+    static final java.util.Set<String> NOT_DECISIONS = new java.util.HashSet<>(java.util.Arrays.asList("reveal",
+            "notifyOfValue", "revealAnte", "revealAISkipCards", "revealUnsupported", "autoPassCancel",
+            "awaitNextInput", "cancelAwaitNextInput", "getCostDecisionMaker", "playChosenSpellAbility"));
 
     static String lossReason(final Game game) {
         for (Player p : game.getRegisteredPlayers()) {
@@ -572,13 +581,17 @@ public final class RlActorBench {
     static final Map<String, AtomicLong> VOID_BY = new ConcurrentHashMap<>();
 
     static void boot() {
+        boot(0x5eedL);
+    }
+
+    static void boot(final long globalSeed) {
         GuiBase.setInterface(new GuiDesktop());
         FModel.initialize(null, prefs -> {
             prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
             prefs.setPref(FPref.UI_LANGUAGE, "en-US");
             return null;
         });
-        MyRandom.setRandom(new Random(0x5eedL));
+        MyRandom.setRandom(new Random(globalSeed));
     }
 
     static String jarSha(final Cfg cfg) {
@@ -616,7 +629,7 @@ public final class RlActorBench {
 
     /** The whole actor run; returns the exit code. Boots Forge once per JVM. */
     public static int run(final Cfg cfg) throws Exception {
-        ensureBooted();
+        ensureBooted(cfg.globalSeed);
         final CardIndex index = CardIndex.load(Paths.get(cfg.cardIndex));
         final String jarSha = jarSha(cfg);
         if ("replay".equals(cfg.mode)) {
@@ -682,8 +695,12 @@ public final class RlActorBench {
 
     /** Boot Forge once per JVM (card database, preferences). */
     static synchronized void ensureBooted() {
+        ensureBooted(0x5eedL);
+    }
+
+    static synchronized void ensureBooted(final long globalSeed) {
         if (!booted) {
-            boot();
+            boot(globalSeed);
             booted = true;
         }
     }
