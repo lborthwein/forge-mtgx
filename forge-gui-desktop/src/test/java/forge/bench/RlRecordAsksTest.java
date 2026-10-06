@@ -3,9 +3,11 @@ package forge.bench;
 import java.util.List;
 
 import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
 import forge.ai.AITest;
+import forge.ai.AiLegalActivation;
 import forge.ai.AiPlayDecision;
 import forge.ai.PlayerControllerAi;
 import forge.bench.rl.RlCandidates;
@@ -36,6 +38,20 @@ import forge.game.zone.ZoneType;
  * </ul>
  */
 public class RlRecordAsksTest extends AITest {
+
+    /**
+     * The Forge-illegal shapes come from Forge's AI as it was: with AiLegalActivation on (the default since lane
+     * rl-r0-b4b-1006 follow-up B) the AI no longer makes them, so these tests build them with it off. The record
+     * classification still has to hold for any AI answer the stack would refuse.
+     */
+    private static void upstreamAi() {
+        AiLegalActivation.setEnabled(false);
+    }
+
+    @AfterMethod
+    public void restoreAi() {
+        AiLegalActivation.setEnabled(true);
+    }
 
     private static Card withLoyalty(final Card c, final int n, final Player p) {
         c.addCounterInternal(CounterEnumType.LOYALTY, n, p, false, null, null);
@@ -69,6 +85,7 @@ public class RlRecordAsksTest extends AITest {
 
     @Test
     public void garrukPlusOneForTheCostIsForgeIllegal() {
+        upstreamAi();
         final Game game = initAndCreateGame();
         final Player p = game.getPlayers().get(1);
         addCards("Forest", 3, p);
@@ -81,6 +98,7 @@ public class RlRecordAsksTest extends AITest {
 
     @Test
     public void garrukPlusOneWithOneTappedLandIsForgeIllegal() {
+        upstreamAi();
         final Game game = initAndCreateGame();
         final Player p = game.getPlayers().get(1);
         addCards("Forest", 2, p);
@@ -94,6 +112,7 @@ public class RlRecordAsksTest extends AITest {
 
     @Test
     public void kothPlusOneForTheCostIsForgeIllegal() {
+        upstreamAi();
         final Game game = initAndCreateGame();
         final Player p = game.getPlayers().get(1);
         addCards("Mountain", 2, p);

@@ -996,6 +996,11 @@ public class AiController {
                 return AiPlayDecision.TargetingFailed;
             }
         }
+        // mtgx (AiLegalActivation, lane rl-r0-b4b-1006): never choose an activation the stack would refuse for its
+        // targets (it would be paid for and not happen, and be chosen again)
+        if (!AiLegalActivation.legalTargeting(game, sa)) {
+            return AiPlayDecision.TargetingFailed;
+        }
 
         return saSideEffects(spellHost, sa);
     }
