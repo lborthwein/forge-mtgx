@@ -269,6 +269,54 @@ public class RlKnowledgeTest extends AITest {
         Assert.assertEquals(zone(f.obs(f.p1), RlSchema.Z_O_LIB_KNOWN).size(), 0);
     }
 
+    /**
+     * Clarification C3: a face of a multi-face card resolves to the FULL card's entry. A table where faces have
+     * entries of their own (as Insectile Aberration, Petty Theft and Tibalt do in cards-ext) proves the full name wins.
+     */
+    @Test
+    public void faceNamesResolveToTheFullCard() {
+        final String tsv = "<pad>\t0\n<unk>\t1\nFire // Ice\t100\nDelver of Secrets\t101\nInsectile Aberration\t102\n"
+                + "Valki, God of Lies\t103\nTibalt, Cosmic Impostor\t104\nBrazen Borrower\t105\nPetty Theft\t106\n";
+        final CardIndex ix = CardIndex.of(tsv.getBytes(StandardCharsets.UTF_8));
+        final Fixture f = new Fixture();
+        final Object[][] cases = {
+            {"Fire // Ice", forge.card.CardStateName.LeftSplit, "Fire", 100},
+            {"Fire // Ice", forge.card.CardStateName.RightSplit, "Ice", 100},
+            {"Delver of Secrets", forge.card.CardStateName.Backside, "Insectile Aberration", 101},
+            {"Valki, God of Lies", forge.card.CardStateName.Backside, "Tibalt, Cosmic Impostor", 103},
+            {"Brazen Borrower", forge.card.CardStateName.Secondary, "Petty Theft", 105},
+        };
+        for (Object[] k : cases) {
+            final Card c = add(f.p0, ZoneType.Hand, (String) k[0]);
+            c.setState((forge.card.CardStateName) k[1], true);
+            Assert.assertEquals(c.getName(), k[2], "the face is " + k[2]);
+            Assert.assertEquals(RlFeaturizer.resolveCard(ix, c), ((Integer) k[3]).intValue(), (String) k[2]);
+            // and the full card itself
+            c.setState(forge.card.CardStateName.Original, true);
+            Assert.assertEquals(RlFeaturizer.resolveCard(ix, c), ((Integer) k[3]).intValue(), (String) k[0]);
+        }
+        // Java/Python parity on the real table (tools/ml/rl/cardindex.py lookup with forge-faces.json, 10-05):
+        // Fire 22884, Tibalt 16153, Insectile Aberration 3701, Petty Theft 2063
+        final String real = System.getProperty("rl.cardIndex");
+        if (real != null) {
+            try {
+                final CardIndex ri = CardIndex.load(java.nio.file.Paths.get(real));
+                final Object[][] parity = {{"Fire // Ice", forge.card.CardStateName.LeftSplit, 22884},
+                    {"Valki, God of Lies", forge.card.CardStateName.Backside, 16153},
+                    {"Delver of Secrets", forge.card.CardStateName.Backside, 3701},
+                    {"Brazen Borrower", forge.card.CardStateName.Secondary, 2063}};
+                for (Object[] k : parity) {
+                    final Card c = add(f.p0, ZoneType.Hand, (String) k[0]);
+                    c.setState((forge.card.CardStateName) k[1], true);
+                    Assert.assertEquals(RlFeaturizer.resolveCard(ri, c), ((Integer) k[2]).intValue(),
+                            "parity with cardindex.py for " + c.getName());
+                }
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+    }
+
     @Test
     public void eventTailNewestFirstPerController() {
         final Fixture f = new Fixture();
