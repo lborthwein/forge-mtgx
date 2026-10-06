@@ -60,6 +60,9 @@ public class PlayerControllerAi extends PlayerController {
 
     private boolean pilotsNonAggroDeck = false;
 
+    /** fairNaming (lane ai-misplays-1006; {@link FairNaming}): names of opponents' cards this player has seen this game. */
+    private final Set<String> fairNamingSeen = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     public PlayerControllerAi(Game game, Player p, LobbyPlayer lp) {
         super(game, p, lp);
 
@@ -68,6 +71,11 @@ public class PlayerControllerAi extends PlayerController {
 
     public boolean pilotsNonAggroDeck() {
         return pilotsNonAggroDeck;
+    }
+
+    /** fairNaming memory ({@link FairNaming#observe}); filled only when this player's option is not off. */
+    Set<String> getFairNamingSeen() {
+        return fairNamingSeen;
     }
 
     public void setupAutoProfile(Deck deck) {
@@ -501,12 +509,20 @@ public class PlayerControllerAi extends PlayerController {
         for (Card c : cards) {
             AiCardMemory.rememberCard(player, c, AiCardMemory.MemorySet.REVEALED_CARDS);
         }
+        FairNaming.observeRevealed(player, cards);
     }
 
     @Override
     public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addSuffix) {
         for (CardView cv : cards) {
             AiCardMemory.rememberCard(player, player.getGame().findByView(cv), AiCardMemory.MemorySet.REVEALED_CARDS);
+        }
+        if (FairNaming.mode(player) != AiFixes.Mode.OFF) {
+            final List<Card> revealed = new ArrayList<>();
+            for (CardView cv : cards) {
+                revealed.add(player.getGame().findByView(cv));
+            }
+            FairNaming.observeRevealed(player, revealed);
         }
     }
 
@@ -830,6 +846,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        FairNaming.observe(player);
         return brains.chooseSpellAbilityToPlay();
     }
 
@@ -1535,7 +1552,18 @@ public class PlayerControllerAi extends PlayerController {
             if (logic.equals("MostProminentInComputerDeck")) {
                 name = ComputerUtilCard.getMostProminentCardName(aiLibrary);
             } else if (logic.equals("MostProminentInHumanDeck")) {
-                name = ComputerUtilCard.getMostProminentCardName(oppLibrary);
+                // fairNaming (lane ai-misplays-1006): ON counts the opponent's cards this player has seen, not its library.
+                final CardCollectionView upstreamLibrary = oppLibrary;
+                name = FairNaming.decide(player, source == null ? logic : source.getName(),
+                        () -> ComputerUtilCard.getMostProminentCardName(upstreamLibrary),
+                        () -> {
+                            final Player opp = player.getStrongestOpponent();
+                            CardCollectionView known = FairNaming.known(player, opp);
+                            if (!valid.isEmpty()) {
+                                known = CardLists.getValidCards(known, valid, source.getController(), source, sa);
+                            }
+                            return ComputerUtilCard.getMostProminentCardName(known);
+                        });
             } else if (logic.equals("MostProminentCreatureInComputerDeck")) {
                 CardCollectionView cards = CardLists.getValidCards(aiLibrary, "Creature", player, sa.getHostCard(), sa);
                 name = ComputerUtilCard.getMostProminentCardName(cards);
@@ -1561,10 +1589,14 @@ public class PlayerControllerAi extends PlayerController {
             }
         } else {
             CardCollectionView list = CardLists.filterControlledBy(getGame().getCardsInGame(), player.getOpponents());
-            list = CardLists.filter(list, CardPredicates.NON_LANDS);
-            if (!list.isEmpty()) {
-                return list.get(0).getName();
-            }
+            final CardCollectionView nonLands = CardLists.filter(list, CardPredicates.NON_LANDS);
+            // fairNaming (lane ai-misplays-1006): ON names only an opponent's card this player has seen.
+            return FairNaming.decide(player, sa.getHostCard() == null ? "NameCard" : sa.getHostCard().getName(),
+                    () -> nonLands.isEmpty() ? "Morphling" : nonLands.get(0).getName(),
+                    () -> {
+                        final CardCollectionView known = FairNaming.knownAmong(player, nonLands);
+                        return known.isEmpty() ? "Morphling" : known.get(0).getName();
+                    });
         }
         return "Morphling";
     }

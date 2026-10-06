@@ -17,6 +17,9 @@ public class LobbyPlayerAi extends LobbyPlayer implements IGameEntitiesFactory {
     /** mtgx Forge AI fixes of 2026-09-28 ({@link AiFixes}); OFF (upstream Forge AI) by default. */
     private AiFixes.Mode aiFixes0928 = AiFixes.Mode.OFF;
     private AiFixes.Counters aiFixesCounters;
+    /** mtgx fair card naming of 2026-10-06 ({@link FairNaming}); OFF (upstream Forge AI) by default. */
+    private AiFixes.Mode fairNaming = AiFixes.Mode.OFF;
+    private FairNaming.Counters fairNamingCounters;
 
     public LobbyPlayerAi(String name, Set<AIOption> options) {
         super(name);
@@ -47,6 +50,22 @@ public class LobbyPlayerAi extends LobbyPlayer implements IGameEntitiesFactory {
 
     void setAiFixesCounters(AiFixes.Counters counters) {
         this.aiFixesCounters = counters;
+    }
+
+    public AiFixes.Mode getFairNaming() {
+        return fairNaming;
+    }
+
+    public void setFairNaming(AiFixes.Mode mode) {
+        this.fairNaming = mode == null ? AiFixes.Mode.OFF : mode;
+    }
+
+    public FairNaming.Counters getFairNamingCounters() {
+        return fairNamingCounters;
+    }
+
+    void setFairNamingCounters(FairNaming.Counters counters) {
+        this.fairNamingCounters = counters;
     }
 
     public void setRotateProfileEachGame(boolean rotateProfileEachGame) {
