@@ -94,7 +94,15 @@ public class PlayEffect extends SpellAbilityEffect {
         int totalCMCLimit = Integer.MAX_VALUE;
         final Player controller;
         if (sa.hasParam("Controller")) {
-            controller = AbilityUtils.getDefinedPlayers(source, sa.getParam("Controller"), sa).get(0);
+            final List<Player> defined = AbilityUtils.getDefinedPlayers(source, sa.getParam("Controller"), sa);
+            if (defined.isEmpty()) {
+                // No player is defined to play anything, so nothing happens. E.g. Spell Queller's leaves-the-battlefield
+                // ability ("the exiled card's owner may cast that card", Controller$ RememberedOwner) of an object that
+                // exiled nothing: it refers only to a card its own linked ability exiled (CR 607.2a), not to one a new
+                // Spell Queller object exiled after a blink (CR 400.7).
+                return;
+            }
+            controller = defined.get(0);
         } else {
             controller = sa.getActivatingPlayer();
         }
