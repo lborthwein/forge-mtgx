@@ -132,10 +132,15 @@ public final class AiFixes {
         }
     }
 
-    /** A copy's lobby player takes the original's mode and counters (look-ahead play-outs; see GameCopier). */
+    /**
+     * A copy's lobby player takes the original's mode and counters (look-ahead play-outs; see GameCopier), and its
+     * fairNaming mode and counters ({@link FairNaming}, lane ai-misplays-1006).
+     */
     public static void inherit(final LobbyPlayerAi from, final LobbyPlayerAi to) {
         to.setAiFixes0928(from.getAiFixes0928());
         to.setAiFixesCounters(from.getAiFixesCounters());
+        to.setFairNaming(from.getFairNaming());
+        to.setFairNamingCounters(from.getFairNamingCounters());
     }
 
     /** Start counting this lobby player's fix spots in {@code game} (a bench run's live game). */

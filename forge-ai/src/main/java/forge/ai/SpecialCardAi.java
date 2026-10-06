@@ -303,6 +303,13 @@ public class SpecialCardAi {
     public static class PithingNeedle {
         // TODO Build out exclusion list based off cards in my deck and cards that other needles have chosen
         public static String chooseCard(final Player ai, final SpellAbility sa) {
+            // fairNaming (lane ai-misplays-1006, forge.ai.FairNaming): OFF is upstream's choice below, unchanged; ON names
+            // only an opponent's card this player has seen (no key-card list, no hidden zone).
+            return FairNaming.decide(ai, sa.getHostCard() == null ? "PithingNeedle" : sa.getHostCard().getName(),
+                    () -> chooseCardUpstream(ai, sa), () -> chooseCardFair(ai, sa));
+        }
+
+        private static String chooseCardUpstream(final Player ai, final SpellAbility sa) {
             String keyCardChoice = chooseCardViaKeyCard(ai, sa);
             if (keyCardChoice != null) {
                 return keyCardChoice;
@@ -313,6 +320,16 @@ public class SpecialCardAi {
                 return choice;
             }
             return chooseNonBattlefieldName();
+        }
+
+        /**
+         * fairNaming ON: {@link #chooseCardViaScoring} over the opponents' cards this player has seen
+         * ({@link FairNaming#known}); the key-card list (the opponent's deck metadata) is not read. With no seen opponent
+         * card that scores, upstream's own name for that case ({@link #chooseNonBattlefieldName}), not one of its own cards.
+         */
+        static String chooseCardFair(final Player ai, final SpellAbility sa) {
+            final String choice = chooseCardViaScoring(ai, sa, true);
+            return choice != null ? choice : chooseNonBattlefieldName();
         }
 
         // Helper method to score a card's abilities and static effects
@@ -449,6 +466,11 @@ public class SpecialCardAi {
 
 
         public static String chooseCardViaScoring(final Player ai, final SpellAbility sa) {
+            return chooseCardViaScoring(ai, sa, false);
+        }
+
+        /** {@code fair}: only the opponents' cards {@code ai} has seen ({@link FairNaming#known}), and null unless one scores. */
+        static String chooseCardViaScoring(final Player ai, final SpellAbility sa, final boolean fair) {
             // Look through opponents' known zones (library, hand, graveyard, exile) for dangerous
             // cards to name with Pithing Needle. Prefer planeswalkers, otherwise any card that
             // has a non-trigger, non-mana SpellAbility (activated/static abilities that are relevant).
@@ -458,7 +480,7 @@ public class SpecialCardAi {
             boolean knowHand = sa.getParam("AILogic").equals("SorcerousSpyglass");
 
             for (Player opp : ai.getOpponents()) {
-                for (Card c : opp.getAllCards()) {
+                for (Card c : fair ? FairNaming.known(ai, opp) : opp.getAllCards()) {
                     if (skipLands && c.isLand()) {
                         continue;
                     }
@@ -509,7 +531,12 @@ public class SpecialCardAi {
                 return null;
             }
 
-            return nameToScore.entrySet().stream().max(Map.Entry.comparingByValue()).get().getKey();
+            final Map.Entry<String, Integer> best = nameToScore.entrySet().stream().max(Map.Entry.comparingByValue()).get();
+            if (fair && best.getValue() <= 0) {
+                // Only its own cards (scored <= 0) or nothing seen of the opponents: do not name one of its own cards.
+                return null;
+            }
+            return best.getKey();
         }
     }
 

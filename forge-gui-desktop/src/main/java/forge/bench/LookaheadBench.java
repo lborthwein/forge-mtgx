@@ -10,6 +10,7 @@ import forge.GuiDesktop;
 import forge.LobbyPlayer;
 import forge.ai.AIOption;
 import forge.ai.AiFixes;
+import forge.ai.FairNaming;
 import forge.ai.LobbyPlayerAi;
 import forge.ai.simulation.LobbyPlayerLookahead;
 import forge.ai.simulation.LobbyPlayerPolicy;
@@ -73,8 +74,10 @@ import java.util.concurrent.TimeoutException;
  * this turn; see LookaheadSearch.Config#crewNoop), copyEot
  * (off|shadow|on, lane misplays-1005: copies carry the live game's pending until-end-of-turn commands; see
  * LookaheadSearch.Config#copyEot), departMedian (off|shadow|on, lane misplays-1005: a departure also needs a positive
- * median paired difference; see LookaheadSearch.Config#departMedian)},
+ * median paired difference; see LookaheadSearch.Config#departMedian), fairNaming (off|shadow|on, lane ai-misplays-1006:
+ * the look-ahead seats' own Forge AI names cards only from the opponent's cards it has seen; see forge.ai.FairNaming)},
  * "defaultAiFixes0928": off|shadow|on (the "default"/"sim"/"policy" seats; off unless a predeclared read says otherwise),
+ * "defaultFairNaming": off|shadow|on (the same seats' fairNaming; off by default),
  * "policy":{url,checkpointSha256,timeoutMs,cast,land,react,shadow,threshold,maxForcesPerTurn,log,placebo} (lane
  * l2-fork-1001: the "policy" seats, Forge AI plus policy P1 with no search; "placebo":{veto,force,land,react,reactVeto,
  * seed} = the matched placebo arm instead of P1, no service, lane l2-nor1-1002; see {@link PolicyPilot}),
@@ -210,6 +213,10 @@ public final class LookaheadBench {
         final AiFixes.Mode laFixes = AiFixes.Mode.parse(la.has("aiFixes0928") ? la.get("aiFixes0928").getAsString() : null);
         final AiFixes.Mode defaultFixes = AiFixes.Mode.parse(
                 cfg.has("defaultAiFixes0928") ? cfg.get("defaultAiFixes0928").getAsString() : null);
+        // fairNaming (lane ai-misplays-1006; forge.ai.FairNaming), per seat kind as aiFixes0928. Off unless set.
+        final AiFixes.Mode laFair = AiFixes.Mode.parse(la.has("fairNaming") ? la.get("fairNaming").getAsString() : null);
+        final AiFixes.Mode defaultFair = AiFixes.Mode.parse(
+                cfg.has("defaultFairNaming") ? cfg.get("defaultFairNaming").getAsString() : null);
         {
             // HX: the policy-prior pin is checked once at JVM start; a missing pin, an unreachable service or another
             // checkpoint refuses the whole run (exit 4) before any game.
@@ -434,6 +441,7 @@ public final class LookaheadBench {
                     LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);
                     l.setAiProfile(profiles[i]);
                     l.setAiFixes0928(laFixes);
+                    l.setFairNaming(laFair);
                     searches.add(s);
                     laLobbies.add(l);
                     pilots.add(null);
@@ -445,6 +453,7 @@ public final class LookaheadBench {
                     final LobbyPlayerLookahead l = new LobbyPlayerLookahead(name);
                     l.setAiProfile(profiles[i]);
                     l.setAiFixes0928(defaultFixes);
+                    l.setFairNaming(defaultFair);
                     searches.add(s);
                     laLobbies.add(l);
                     pilots.add(null);
@@ -457,6 +466,7 @@ public final class LookaheadBench {
                     final LobbyPlayerPolicy l = new LobbyPlayerPolicy(name);
                     l.setAiProfile(profiles[i]);
                     l.setAiFixes0928(defaultFixes);
+                    l.setFairNaming(defaultFair);
                     searches.add(null);
                     laLobbies.add(null);
                     pilots.add(pilot);
@@ -466,6 +476,7 @@ public final class LookaheadBench {
                     LobbyPlayerAi l = new LobbyPlayerAi(name, options);
                     l.setAiProfile(profiles[i]);
                     l.setAiFixes0928(defaultFixes);
+                    l.setFairNaming(defaultFair);
                     searches.add(null);
                     laLobbies.add(null);
                     pilots.add(null);
@@ -496,10 +507,14 @@ public final class LookaheadBench {
             // (upstream 2.0.15 removed Game.AI_CAN_USE_TIMEOUT; AI_TIMEOUT now bounds the forced-attacker tasks too)
             game.AI_TIMEOUT = aiTimeoutSec;
             final AiFixes.Counters[] fixCounters = new AiFixes.Counters[2];
+            final FairNaming.Counters[] fairCounters = new FairNaming.Counters[2];
             for (int i = 0; i < 2; i++) {
                 final LobbyPlayerAi l = (LobbyPlayerAi) seats.get(i).getPlayer();
                 if (l.getAiFixes0928() != AiFixes.Mode.OFF) {
                     fixCounters[i] = AiFixes.count(l, game);
+                }
+                if (l.getFairNaming() != AiFixes.Mode.OFF) {
+                    fairCounters[i] = FairNaming.count(l, game);
                 }
             }
             for (int i = 0; i < 2; i++) {
@@ -727,6 +742,15 @@ public final class LookaheadBench {
                             : fixCounters[i].toJson(((LobbyPlayerAi) seats.get(i).getPlayer()).getAiFixes0928()));
                 }
                 row.add("aiFixes0928", fx);
+            }
+            if (fairCounters[0] != null || fairCounters[1] != null) {
+                // Only when a seat's fairNaming is not off: off rows keep their schema.
+                final JsonArray fn = new JsonArray();
+                for (int i = 0; i < 2; i++) {
+                    fn.add(fairCounters[i] == null ? null
+                            : fairCounters[i].toJson(((LobbyPlayerAi) seats.get(i).getPlayer()).getFairNaming()));
+                }
+                row.add("fairNaming", fn);
             }
             Files.writeString(out, new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(row) + "\n", StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);

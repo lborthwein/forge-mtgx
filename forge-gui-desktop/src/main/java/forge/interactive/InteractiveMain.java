@@ -138,6 +138,7 @@ public final class InteractiveMain {
             final Game game = match.createGame();
             bindAiFixes(registered);
             bindLookahead(registered, game, config.seed());
+            countFairNaming(registered, game);
             final Player human = playerAtSeat(game, config.humanSeat());
             if (human == null || !(human.getController() instanceof PlayerControllerHuman humanController)) {
                 throw new IllegalStateException("configured human seat did not create PlayerControllerHuman");
@@ -263,6 +264,7 @@ public final class InteractiveMain {
             final Game game = match.createGame();
             bindAiFixes(registered);
             bindLookahead(registered, game, config.seed());
+            countFairNaming(registered, game);
 
             final List<PlayerControllerHuman> controllers = new ArrayList<>();
             for (InteractiveProtocol.Channel channel : channels) {
@@ -483,10 +485,26 @@ public final class InteractiveMain {
     private static void bindAiFixes(final List<RegisteredPlayer> registered) {
         final String v = System.getProperty("forge.interactive.aiFixes0928");
         final forge.ai.AiFixes.Mode mode = forge.ai.AiFixes.Mode.parse(v);
+        // -Dforge.interactive.fairNaming=on|shadow|off (lane ai-misplays-1006; off by default): every Forge AI seat, the
+        // look-ahead seat included, names cards only from the opponent's cards it has seen (forge.ai.FairNaming). It is a
+        // property of the table, not a search knob; a fairNaming key in the look-ahead spec overrides it for that seat.
+        final forge.ai.AiFixes.Mode fairNaming = forge.ai.AiFixes.Mode.parse(System.getProperty("forge.interactive.fairNaming"));
         for (RegisteredPlayer rp : registered) {
+            if (rp.getPlayer() instanceof forge.ai.LobbyPlayerAi lp) {
+                lp.setFairNaming(fairNaming);
+            }
             if (rp.getPlayer() instanceof forge.ai.LobbyPlayerAi lp
                     && !(lp instanceof forge.ai.simulation.LobbyPlayerLookahead)) {
                 lp.setAiFixes0928(mode);
+            }
+        }
+    }
+
+    /** fairNaming (lane ai-misplays-1006): count each AI seat's naming decisions in this live game (only when not off). */
+    private static void countFairNaming(final List<RegisteredPlayer> registered, final Game game) {
+        for (RegisteredPlayer rp : registered) {
+            if (rp.getPlayer() instanceof forge.ai.LobbyPlayerAi lp && lp.getFairNaming() != forge.ai.AiFixes.Mode.OFF) {
+                forge.ai.FairNaming.count(lp, game);
             }
         }
     }
@@ -498,6 +516,7 @@ public final class InteractiveMain {
         }
         final forge.ai.simulation.LookaheadSearch.Config c = new forge.ai.simulation.LookaheadSearch.Config();
         forge.ai.AiFixes.Mode aiFixes = forge.ai.AiFixes.Mode.OFF;
+        forge.ai.AiFixes.Mode fairNaming = null;
         for (String kv : spec.split(",")) {
             final String[] p = kv.split("=", 2);
             if (p.length != 2) {
@@ -540,12 +559,17 @@ public final class InteractiveMain {
                 case "beliefCubeSha256": c.beliefCubeSha256 = p[1].trim(); break;
                 case "beliefBasics": c.beliefBasics = Integer.parseInt(p[1].trim()); break;
                 case "aiFixes0928": aiFixes = forge.ai.AiFixes.Mode.parse(p[1]); break;
+                // lane ai-misplays-1006 (off by default): the look-ahead seat's Forge AI names cards fairly (forge.ai.FairNaming).
+                case "fairNaming": fairNaming = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 default: break;
             }
         }
         for (int i = 0; i < registered.size(); i++) {
             if (registered.get(i).getPlayer() instanceof forge.ai.simulation.LobbyPlayerLookahead lp) {
                 lp.setAiFixes0928(aiFixes);
+                if (fairNaming != null) {
+                    lp.setFairNaming(fairNaming);
+                }
                 c.seed = seed * 31 + i;
                 lp.bind(game, new forge.ai.simulation.LookaheadSearch(c));
             }
