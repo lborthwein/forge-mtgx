@@ -215,9 +215,14 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * afterwards. With no local answerer, or one that answers (an RL seat, whose chosen entry is played), this is
      * body.get() and nothing else.
      */
-    private <T> T observing(final java.util.function.Supplier<T> body) {
+    /** True when the local answerer only observes (RL record mode); false on the default path. */
+    private boolean observeOnly() {
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
-        if (local == null || !local.observeOnly()) {
+        return local != null && local.observeOnly();
+    }
+
+    private <T> T observing(final java.util.function.Supplier<T> body) {
+        if (!observeOnly()) {
             return body.get();
         }
         final java.util.Random live = forge.util.MyRandom.getThreadRandom();
@@ -793,7 +798,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 items.add(StateEncoder.encodeSpellAbility(sa));
             }
             body.add("menu", items);
-            body.add("manaAbilities", manaAbilityChannel());
+            // An observe-only recorder never reads this host-side field, and building it is not a pure read:
+            // encoding each mana ability (descriptions, stack descriptions) leaves state on combo mana abilities
+            // (Talismans) that Forge's auto-tapper reads later, so a recorded game tapped a different source than the
+            // Forge-only game on 2 of 24 seeds (lane rl-r0-b5-1006). Skipped for observers only.
+            body.add("manaAbilities", observeOnly() ? new JsonArray() : manaAbilityChannel());
             return null;
         });
         recordMenuCensus(diag, menu.size());
