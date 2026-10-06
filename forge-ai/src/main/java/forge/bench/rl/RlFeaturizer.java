@@ -140,7 +140,8 @@ public final class RlFeaturizer {
      * cards, the main face for every other layout), tried first, then the §3.2 rules on the face's own name; the same
      * order as {@code tools/ml/rl/cardindex.py lookup} with its face map. Counts an unknown name.
      */
-    public static int lookupCard(final CardIndex index, final Card c) {
+    public static int lookupCard(final CardIndex index, final Card card) {
+        final Card c = shownHost(card); // C4': an "X's Effect" object (a stack item's or candidate's host) is X
         if (isEmblemName(c.getName())) {
             final int r = resolveEmblem(index, c.getName(), emblemWalkerFullName(c));
             return r != CardIndex.UNK ? r : index.lookup(c.getName());
@@ -156,7 +157,8 @@ public final class RlFeaturizer {
     }
 
     /** As {@link #lookupCard} without counting. */
-    public static int resolveCard(final CardIndex index, final Card c) {
+    public static int resolveCard(final CardIndex index, final Card card) {
+        final Card c = shownHost(card);
         if (isEmblemName(c.getName())) {
             return resolveEmblem(index, c.getName(), emblemWalkerFullName(c));
         }
@@ -202,9 +204,10 @@ public final class RlFeaturizer {
     }
 
     /**
-     * C4': the card an event-tail host stands for. A Forge "Effect" object that is not itself a command-zone game
-     * object (an "X's Effect" holding a delayed trigger) stands for its effect source's card; everything else stands
-     * for itself.
+     * C4': the card a host stands for. A Forge "Effect" object that is not itself a command-zone game object (an
+     * "X's Effect" / "X's Boon" holding a delayed trigger) stands for its effect source's card, wherever it appears:
+     * the event tail, a stack item's host, a candidate's host. Everything else stands for itself. (Name rule for the
+     * converter: "X (id)'s Effect" is X.)
      */
     public static Card shownHost(final Card host) {
         if (host != null && host.getGamePieceType() == forge.card.GamePieceType.EFFECT && !commandObject(host)) {

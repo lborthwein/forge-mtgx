@@ -464,6 +464,11 @@ public class RlKnowledgeTest extends AITest {
         final List<int[]> theirs = zone(o2, RlSchema.Z_O_EVENT);
         Assert.assertEquals(theirs.size(), 1);
         Assert.assertEquals(theirs.get(0)[0], 22, "the effect's trigger shows as Forth Eorlingas!");
+        // and so does the trigger's stack item (its host is the effect object too)
+        final List<int[]> stack = zone(o2, RlSchema.Z_O_STACK);
+        Assert.assertEquals(stack.size(), 1);
+        Assert.assertEquals(stack.get(0)[0], 22, "the stack item shows as Forth Eorlingas!");
+        Assert.assertEquals(RlFeaturizer.resolveCard(ix, effect), 22);
         // and is not a command-zone token
         Assert.assertEquals(zone(o2, RlSchema.Z_COMMAND).size(), 8);
 
