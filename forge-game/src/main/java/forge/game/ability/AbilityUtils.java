@@ -2022,6 +2022,11 @@ public class AbilityUtils {
         ////////////////////
         // card info
 
+        return xCountPart2(c, s, ctb, s2, l, expr, player, sq, paidparts, someCards, game);
+    }
+
+    // forge-speed-1006: xCount continues here so that no method exceeds the 8000-byte JIT limit.
+    private static int xCountPart2(Card c, final String s, final CardTraitBase ctb, final String s2, final String[] l, final String expr, Player player, final String[] sq, String[] paidparts, Iterable<Card> someCards, final Game game) {
         // Count$CardMulticolor.<numMC>.<numNotMC>
         if (sq[0].contains("CardMulticolor")) {
             final boolean isMulti = c.getColor().isMulticolor();
@@ -2354,6 +2359,11 @@ public class AbilityUtils {
             return doXMath(player.getTotalCommanderCast(), expr, c, ctb);
         }
 
+        return xCountPart3(c, s, ctb, s2, l, expr, player, sq, paidparts, someCards, game);
+    }
+
+    // forge-speed-1006: xCount continues here so that no method exceeds the 8000-byte JIT limit.
+    private static int xCountPart3(Card c, final String s, final CardTraitBase ctb, final String s2, final String[] l, final String expr, Player player, final String[] sq, String[] paidparts, Iterable<Card> someCards, final Game game) {
         if (sq[0].contains("LifeYouLostThisTurn")) {
             return doXMath(player.getLifeLostThisTurn(), expr, c, ctb);
         }

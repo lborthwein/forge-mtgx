@@ -690,7 +690,15 @@ public class CardProperty {
                         break;
                 }
             }
-        } else if (property.startsWith("MostProminentColor")) {
+        } else {
+            return cardHasPropertyPart2(card, property, sourceController, source, spellAbility, game, combat, lki, controller);
+        }
+        return true;
+    }
+
+    // forge-speed-1006: the chain continues here so that no method exceeds the 8000-byte JIT limit.
+    private static boolean cardHasPropertyPart2(Card card, String property, Player sourceController, Card source, CardTraitBase spellAbility, final Game game, final Combat combat, final Card lki, final Player controller) {
+        if (property.startsWith("MostProminentColor")) {
             // MostProminentColor <color>
             // e.g. MostProminentColor black
             String[] props = property.split(" ");
@@ -1313,7 +1321,15 @@ public class CardProperty {
                     }
                 }
             }
-        } else if (property.startsWith("enchanted")) {
+        } else {
+            return cardHasPropertyPart3(card, property, sourceController, source, spellAbility, game, combat, lki, controller);
+        }
+        return true;
+    }
+
+    // forge-speed-1006: the chain continues here so that no method exceeds the 8000-byte JIT limit.
+    private static boolean cardHasPropertyPart3(Card card, String property, Player sourceController, Card source, CardTraitBase spellAbility, final Game game, final Combat combat, final Card lki, final Player controller) {
+        if (property.startsWith("enchanted")) {
             if (!card.isEnchanted()) {
                 return false;
             }
