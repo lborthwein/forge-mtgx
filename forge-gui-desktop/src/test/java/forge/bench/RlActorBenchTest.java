@@ -309,7 +309,7 @@ public class RlActorBenchTest {
                                 + " (zone " + z + ")");
                     }
                 }
-                final int want = c.isFaceDown() ? CardIndex.UNK : index.resolve(c.getName());
+                final int want = c.isFaceDown() ? CardIndex.UNK : RlFeaturizer.resolveCard(index, c);
                 if (f.tokCard[pos] != want) {
                     violations.add("tok_card " + f.tokCard[pos] + " is not the name index " + want + " of " + c);
                 }

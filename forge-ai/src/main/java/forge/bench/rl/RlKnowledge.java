@@ -47,12 +47,16 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     /** One stack event (zones 20/21). */
     public static final class StackEvent {
         public final String name;
+        /** Forge's full card name (C3: a face resolves through it). */
+        public final String fullName;
         public final boolean faceDown;
         public final boolean ability;
         public final int controllerSeat;
 
-        StackEvent(final String name, final boolean faceDown, final boolean ability, final int controllerSeat) {
+        StackEvent(final String name, final String fullName, final boolean faceDown, final boolean ability,
+                final int controllerSeat) {
             this.name = name;
+            this.fullName = fullName;
             this.faceDown = faceDown;
             this.ability = ability;
             this.controllerSeat = controllerSeat;
@@ -267,7 +271,8 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             final Card host = hv == null ? null : game.findByView(hv);
             final Player act = ev.si() == null ? null : playerOf(ev.si().getActivatingPlayer());
             final boolean faceDown = host == null || host.isFaceDown();
-            final StackEvent e = new StackEvent(host == null ? null : host.getName(), faceDown,
+            final StackEvent e = new StackEvent(host == null ? null : host.getName(),
+                    host == null ? null : RlFeaturizer.fullName(host), faceDown,
                     ev.sa() != null && !ev.sa().isSpell(), seatOf(act));
             tail.addFirst(e);
             while (tail.size() > TAIL) {

@@ -115,11 +115,50 @@ public final class RlFeaturizer {
         if (c.isFaceDown()) {
             return CardIndex.UNK;
         }
-        final int i = index.lookup(c.getName());
+        final int i = lookupCard(index, c);
         if (i == CardIndex.UNK && o != null) {
             o.unknownNames++;
         }
         return i;
+    }
+
+    /**
+     * Clarification C3: a face of a multi-face card (a split half, either face of a DFC / MDFC, an adventure's spell
+     * half) resolves to the FULL card's entry. Forge's full card name is the card's PaperCard name ("A // B" for split
+     * cards, the main face for every other layout), tried first, then the §3.2 rules on the face's own name; the same
+     * order as {@code tools/ml/rl/cardindex.py lookup} with its face map. Counts an unknown name.
+     */
+    public static int lookupCard(final CardIndex index, final Card c) {
+        final String full = fullName(c);
+        if (full != null && !full.equals(c.getName())) {
+            final int r = index.resolve(full);
+            if (r != CardIndex.UNK) {
+                return r;
+            }
+        }
+        return index.lookup(c.getName());
+    }
+
+    /** As {@link #lookupCard} without counting. */
+    public static int resolveCard(final CardIndex index, final Card c) {
+        final String full = fullName(c);
+        if (full != null && !full.equals(c.getName())) {
+            final int r = index.resolve(full);
+            if (r != CardIndex.UNK) {
+                return r;
+            }
+        }
+        return index.resolve(c.getName());
+    }
+
+    /** Forge's full card name (PaperCard), or null. */
+    public static String fullName(final Card c) {
+        try {
+            final forge.item.IPaperCard pc = c.getPaperCard();
+            return pc == null ? null : pc.getName();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /** Card index for a host card that is not (necessarily) a token, e.g. a candidate's card. */
@@ -238,7 +277,13 @@ public final class RlFeaturizer {
             final int me = knowledge.seatOf(seat);
             int rank = 0;
             for (RlKnowledge.StackEvent e : knowledge.tail()) {
-                final int card = e.faceDown || e.name == null ? CardIndex.UNK : index.lookup(e.name);
+                int card = CardIndex.UNK;
+                if (!e.faceDown && e.name != null) {
+                    card = e.fullName != null && !e.fullName.equals(e.name) ? index.resolve(e.fullName) : CardIndex.UNK;
+                    if (card == CardIndex.UNK) {
+                        card = index.lookup(e.name);
+                    }
+                }
                 if (card == CardIndex.UNK && !e.faceDown && e.name != null) {
                     o.unknownNames++;
                 }
@@ -324,7 +369,7 @@ public final class RlFeaturizer {
 
     /** A hidden card the seat knows (Appendix B.2): its identity, no live attributes. */
     private Tok addKnown(final List<Tok> toks, final Card c, final int zone, final Obs o) {
-        final int idx = index.lookup(c.getName());
+        final int idx = lookupCard(index, c);
         if (idx == CardIndex.UNK) {
             o.unknownNames++;
         }
@@ -551,13 +596,13 @@ public final class RlFeaturizer {
             final Iterable<Card> ownLibrary, final Iterable<Card> oppLibrary) {
         final TreeMap<Long, Integer> m = new TreeMap<>();
         for (Card c : oppHiddenHand) {
-            m.merge(key(RlSchema.Z_PRIV_O_HAND, index.resolve(c.getName())), 1, Integer::sum);
+            m.merge(key(RlSchema.Z_PRIV_O_HAND, resolveCard(index, c)), 1, Integer::sum);
         }
         for (Card c : ownLibrary) {
-            m.merge(key(RlSchema.Z_PRIV_U_LIB, index.resolve(c.getName())), 1, Integer::sum);
+            m.merge(key(RlSchema.Z_PRIV_U_LIB, resolveCard(index, c)), 1, Integer::sum);
         }
         for (Card c : oppLibrary) {
-            m.merge(key(RlSchema.Z_PRIV_O_LIB, index.resolve(c.getName())), 1, Integer::sum);
+            m.merge(key(RlSchema.Z_PRIV_O_LIB, resolveCard(index, c)), 1, Integer::sum);
         }
         final int n = Math.min(m.size(), RlSchema.P_MAX);
         final int[][] b = new int[3][n];
