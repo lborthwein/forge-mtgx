@@ -48,6 +48,10 @@ public final class RlFeaturizer {
         public float[] tokAttr;
         public boolean truncated;
         public int tokensBeforeCap;
+        /** R-TRUNC census: tokens dropped by the cap, by zone id (diagnostics; not on the wire). */
+        public int[] droppedByZone = new int[0];
+        /** C4' census: names of command-zone objects (zone 19) that resolved to {@code <unk>} (diagnostics). */
+        public List<String> commandUnknown = new ArrayList<>();
         public int D;
         public int[] deckCard;
         public byte[] deckCnt;
@@ -136,7 +140,12 @@ public final class RlFeaturizer {
      * cards, the main face for every other layout), tried first, then the §3.2 rules on the face's own name; the same
      * order as {@code tools/ml/rl/cardindex.py lookup} with its face map. Counts an unknown name.
      */
-    public static int lookupCard(final CardIndex index, final Card c) {
+    public static int lookupCard(final CardIndex index, final Card card) {
+        final Card c = shownHost(card); // C4': an "X's Effect" object (a stack item's or candidate's host) is X
+        if (isEmblemName(c.getName())) {
+            final int r = resolveEmblem(index, c.getName(), emblemWalkerFullName(c));
+            return r != CardIndex.UNK ? r : index.lookup(c.getName());
+        }
         final String full = fullName(c);
         if (full != null && !full.equals(c.getName())) {
             final int r = index.resolve(full);
@@ -148,7 +157,11 @@ public final class RlFeaturizer {
     }
 
     /** As {@link #lookupCard} without counting. */
-    public static int resolveCard(final CardIndex index, final Card c) {
+    public static int resolveCard(final CardIndex index, final Card card) {
+        final Card c = shownHost(card);
+        if (isEmblemName(c.getName())) {
+            return resolveEmblem(index, c.getName(), emblemWalkerFullName(c));
+        }
         final String full = fullName(c);
         if (full != null && !full.equals(c.getName())) {
             final int r = index.resolve(full);
@@ -157,6 +170,53 @@ public final class RlFeaturizer {
             }
         }
         return index.resolve(c.getName());
+    }
+
+    /** Forge's emblem names: "Emblem — <walker>" (the card table's rows are "<walker> Emblem"). */
+    public static final String EMBLEM_PREFIX = "Emblem \u2014 ";
+
+    public static boolean isEmblemName(final String name) {
+        return name != null && name.startsWith(EMBLEM_PREFIX);
+    }
+
+    /**
+     * Clarification C4' (supersedes C4): an emblem resolves to its own {@code "<walker> Emblem"} row; else to its
+     * walker's full card (C3: {@code walkerFullName}, the effect source's PaperCard name, when known), else to the
+     * walker by name. The same rule as the k8 converter / cardindex.py: strip "Emblem — ", look up
+     * "&lt;rest&gt; Emblem", else C3 on &lt;rest&gt;. UNK when nothing resolves (not counted).
+     */
+    public static int resolveEmblem(final CardIndex index, final String name, final String walkerFullName) {
+        final String walker = name.substring(EMBLEM_PREFIX.length());
+        int r = index.resolve(walker + " Emblem");
+        if (r == CardIndex.UNK && walkerFullName != null) {
+            r = index.resolve(walkerFullName);
+        }
+        if (r == CardIndex.UNK) {
+            r = index.resolve(walker);
+        }
+        return r;
+    }
+
+    /** An emblem's walker: the full card name of its effect source, or null. */
+    public static String emblemWalkerFullName(final Card emblem) {
+        final Card s = emblem.getEffectSource();
+        return s == null || s == emblem ? null : fullName(s);
+    }
+
+    /**
+     * C4': the card a host stands for. A Forge "Effect" object that is not itself a command-zone game object (an
+     * "X's Effect" / "X's Boon" holding a delayed trigger) stands for its effect source's card, wherever it appears:
+     * the event tail, a stack item's host, a candidate's host. Everything else stands for itself. (Name rule for the
+     * converter: "X (id)'s Effect" is X.)
+     */
+    public static Card shownHost(final Card host) {
+        if (host != null && host.getGamePieceType() == forge.card.GamePieceType.EFFECT && !commandObject(host)) {
+            final Card src = host.getEffectSource();
+            if (src != null && src != host) {
+                return src;
+            }
+        }
+        return host;
     }
 
     /** Forge's full card name (PaperCard), or null. */
@@ -283,7 +343,10 @@ public final class RlFeaturizer {
         for (Player p : game.getPlayers()) {
             for (Card c : p.getCardsIn(ZoneType.Command)) {
                 if (commandObject(c)) {
-                    addCard(toks, c, RlSchema.Z_COMMAND, viewer, combat, turn, o);
+                    final Tok t = addCard(toks, c, RlSchema.Z_COMMAND, viewer, combat, turn, o);
+                    if (t != null && t.card == CardIndex.UNK) {
+                        o.commandUnknown.add(c.getName());
+                    }
                 }
             }
         }
@@ -294,7 +357,12 @@ public final class RlFeaturizer {
             for (RlKnowledge.StackEvent e : knowledge.tail()) {
                 int card = CardIndex.UNK;
                 if (!e.faceDown && e.name != null) {
-                    card = e.fullName != null && !e.fullName.equals(e.name) ? index.resolve(e.fullName) : CardIndex.UNK;
+                    if (isEmblemName(e.name)) {
+                        card = resolveEmblem(index, e.name, e.fullName); // C4': fullName is the walker's
+                    } else {
+                        card = e.fullName != null && !e.fullName.equals(e.name) ? index.resolve(e.fullName)
+                                : CardIndex.UNK;
+                    }
                     if (card == CardIndex.UNK) {
                         card = index.lookup(e.name);
                     }
@@ -314,6 +382,12 @@ public final class RlFeaturizer {
 
         o.tokensBeforeCap = toks.size();
         o.truncated = toks.size() > RlSchema.L_MAX;
+        if (o.truncated) {
+            o.droppedByZone = new int[RlSchema.ZONES.size()];
+            for (int i = RlSchema.L_MAX; i < toks.size(); i++) {
+                o.droppedByZone[toks.get(i).zone]++;
+            }
+        }
         o.L = Math.min(toks.size(), RlSchema.L_MAX);
         o.tokCard = new int[o.L];
         o.tokZone = new byte[o.L];
