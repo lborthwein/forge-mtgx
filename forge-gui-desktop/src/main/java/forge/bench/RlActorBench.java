@@ -989,6 +989,11 @@ public final class RlActorBench {
                         final boolean eq = p.end.get("digest").getAsString().equals(t.get("digest").getAsString())
                                 && p.end.get("void").isJsonNull();
                         row.addProperty("equal", eq);
+                        // the replayed game's own census (lane rl-r0-b4b-1006): a jar's asks on the exact games of a
+                        // tape, e.g. the before/after of a record-mode mapping fix
+                        if (p.tape != null && p.tape.has("census")) {
+                            row.add("census", p.tape.get("census"));
+                        }
                         if (p.seat.fatal != null) {
                             row.addProperty("error", p.seat.fatal);
                         }
