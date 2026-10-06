@@ -149,6 +149,99 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         return mode == BenchSession.Mode.BRIDGE && isLiveGame() && !session.getChannel().isClosed();
     }
 
+    /*
+     * RL record mode (lane rl-r0-b1-1005): an observer that delegates every ask must leave the game exactly as Forge
+     * alone would play it. Building the priority menu is not a pure read. ComputerUtilCost.canPayCost (Forge's AI
+     * affordability check, run on every menu entry) draws from the game's random stream (the "try not to lose a
+     * planeswalker" coin flip, ComputerUtilMana's reserve-mana roll), clears and fills Forge AI's card memory
+     * (AiCardMemory: held mana sources, unpaid costs), and copies abilities, which takes ids. Measured on 24 TRAIN
+     * games: a delegate-everything recorder matched RlSimBench policy=forge on 4 of 24; skipping only canPayCost gave
+     * identical call traces. So when the local answerer says it only observes, the menu is built on a scratch random
+     * stream and a scratch AI cache scope, and both seats' AI card memory and the IdScope counters are put back
+     * afterwards. With no local answerer, or one that answers (an RL seat, whose chosen entry is played), this is
+     * body.get() and nothing else.
+     */
+    private <T> T observing(final java.util.function.Supplier<T> body) {
+        final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
+        if (local == null || !local.observeOnly()) {
+            return body.get();
+        }
+        final java.util.Random live = forge.util.MyRandom.getThreadRandom();
+        final int[] ids = IdSnap.take();
+        final Object cache = forge.ai.AiCache.captureScope();
+        final List<Object[]> memory = memorySnapshot(getGame());
+        forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
+        forge.ai.AiCache.openScope();
+        try {
+            return body.get();
+        } finally {
+            forge.ai.AiCache.installScope(cache);
+            forge.util.MyRandom.setThreadRandom(live);
+            IdSnap.restore(ids);
+            memoryRestore(memory);
+        }
+    }
+
+    /** Every AI card-memory set of every AI-controlled player: {live set, copy of its contents}. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static List<Object[]> memorySnapshot(final Game game) {
+        final List<Object[]> out = new ArrayList<>();
+        for (Player p : game.getPlayers()) {
+            if (!p.getController().isAI()) {
+                continue;
+            }
+            final List<forge.ai.AiCardMemory.MemoryType> types = new ArrayList<>();
+            types.addAll(Arrays.asList(forge.ai.AiCardMemory.MemorySet.values()));
+            types.addAll(Arrays.asList(forge.ai.AiCardMemory.MemorySetMana.values()));
+            for (forge.ai.AiCardMemory.MemoryType t : types) {
+                final Set live = forge.ai.AiCardMemory.getMemorySet(p, t);
+                if (live != null) {
+                    out.add(new Object[] {live, new ArrayList<Object>(live)});
+                }
+            }
+        }
+        return out;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static void memoryRestore(final List<Object[]> snap) {
+        for (Object[] e : snap) {
+            final Set live = (Set) e[0];
+            live.clear();
+            live.addAll((List) e[1]);
+        }
+    }
+
+    /** IdScope counter values (record-mode observation; see {@link #observing}). */
+    static final class IdSnap {
+        private IdSnap() {
+        }
+
+        static int[] take() {
+            final Object cap = forge.util.IdScope.capture();
+            if (!(cap instanceof java.util.concurrent.atomic.AtomicInteger[])) {
+                return null;
+            }
+            final java.util.concurrent.atomic.AtomicInteger[] a = (java.util.concurrent.atomic.AtomicInteger[]) cap;
+            final int[] v = new int[a.length];
+            for (int i = 0; i < a.length; i++) {
+                v[i] = a[i].get();
+            }
+            return v;
+        }
+
+        static void restore(final int[] v) {
+            final Object cap = forge.util.IdScope.capture();
+            if (v == null || !(cap instanceof java.util.concurrent.atomic.AtomicInteger[])) {
+                return;
+            }
+            final java.util.concurrent.atomic.AtomicInteger[] a = (java.util.concurrent.atomic.AtomicInteger[]) cap;
+            for (int i = 0; i < a.length && i < v.length; i++) {
+                a[i].set(v[i]);
+            }
+        }
+    }
+
     /** Envelope shared by every ask: game id, seat and the seat-visible state. */
     private JsonObject envelope(final boolean withState) {
         final JsonObject o = new JsonObject();
@@ -172,8 +265,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * below for why the arming and the reading are two steps.
      */
     private JsonObject ask(final String method, final String kind, final JsonObject body) {
+        return ask(method, kind, body, null);
+    }
+
+    /** As above; {@code menuObjects} reach an in-process answerer only (see BenchSession.LocalAnswerer). */
+    private JsonObject ask(final String method, final String kind, final JsonObject body, final Object menuObjects) {
         final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
-        final JsonObject ans = local != null ? local.answer(getGame(), getPlayer(), kind, body)
+        final JsonObject ans = local != null ? local.answer(getGame(), getPlayer(), method, kind, body, menuObjects)
                 : session.getChannel().ask(kind, body);
         if (ans == null || (ans.has("delegate") && ans.get("delegate").getAsBoolean())) {
             counters.delegateRequested(method);
@@ -259,7 +357,27 @@ public class PlayerControllerBridge extends PlayerControllerAi {
      * training row, and a lost training row must not be a lost game.
      */
     private void echo(final Echo e, final JsonObject answer) {
-        if (e == null || answer == null || session.getChannel().isClosed()) {
+        echo(e, answer, null);
+    }
+
+    /**
+     * As above, with the raw decision for an in-process answerer (RL record mode, lane rl-r0-b1-1005). The local
+     * hook runs before the closed-channel return; with no local answerer this is the method above to the byte.
+     */
+    private void echo(final Echo e, final JsonObject answer, final Object decision) {
+        if (e == null || answer == null) {
+            return;
+        }
+        final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
+        if (local != null) {
+            try {
+                local.onEcho(getGame(), getPlayer(), e.method, e.kind, answer, decision);
+            } catch (RuntimeException ex) {
+                counters.instrument("echo.local.failed." + e.kind);
+                JsonRpcChannel.logErr("local echo failed for " + e.method + " (" + e.kind + ")", ex);
+            }
+        }
+        if (session.getChannel().isClosed()) {
             return;
         }
         try {
@@ -517,6 +635,10 @@ public class PlayerControllerBridge extends PlayerControllerAi {
 
     private void refuse(final String method, final String why) {
         counters.delegateRefused(method, why);
+        final BenchSession.LocalAnswerer local = session.getLocalAnswerer();
+        if (local != null) {
+            local.onRefused(getGame(), getPlayer(), method, why);
+        }
     }
 
     private static Integer optInt(final JsonObject o, final String key) {
@@ -606,22 +728,26 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             return super.chooseSpellAbilityToPlay();
         }
         final int[] diag = new int[DIAG_LEN];
-        final List<SpellAbility> menu = legalSpellAbilities(diag);
-        recordMenuCensus(diag, menu.size());
+        final List<SpellAbility> menu = new ArrayList<>();
         final JsonObject body = envelope(true);
-        body.add("menuDiag", menuDiagJson(diag, menu.size()));
-        final JsonArray items = new JsonArray();
-        items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
-        for (SpellAbility sa : menu) {
-            items.add(StateEncoder.encodeSpellAbility(sa));
-        }
-        body.add("menu", items);
-        body.add("manaAbilities", manaAbilityChannel());
-        final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body);
+        observing(() -> {
+            menu.addAll(legalSpellAbilities(diag));
+            body.add("menuDiag", menuDiagJson(diag, menu.size()));
+            final JsonArray items = new JsonArray();
+            items.add(StateEncoder.encodeSpellAbility(null)); // choice 0 is always pass
+            for (SpellAbility sa : menu) {
+                items.add(StateEncoder.encodeSpellAbility(sa));
+            }
+            body.add("menu", items);
+            body.add("manaAbilities", manaAbilityChannel());
+            return null;
+        });
+        recordMenuCensus(diag, menu.size());
+        final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body, menu);
         if (ans == null) {
             final Echo e = takeEcho();
             final List<SpellAbility> out = super.chooseSpellAbilityToPlay();
-            echo(e, echoPriority(menu, out));
+            echo(e, echoPriority(menu, out), out);
             return out;
         }
         final Integer choice = optInt(ans, "choice");
@@ -1256,7 +1382,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         body.add("legalPairsTyped", legalPairsTyped);
         addAttackRequirements(body, combat, possible, defenders);
 
-        final JsonObject ans = ask("declareAttackers", "attackers", body);
+        final JsonObject ans = ask("declareAttackers", "attackers", body,
+                new Object[] {possible, defenders, combat});
         if (ans == null) {
             final Echo e = takeEcho();
             super.declareAttackers(attacker, combat);
@@ -1446,7 +1573,8 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         }
         body.add("legalPairs", legalPairs);
 
-        final JsonObject ans = ask("declareBlockers", "blockers", body);
+        final JsonObject ans = ask("declareBlockers", "blockers", body,
+                new Object[] {possible, attackers, combat});
         if (ans == null) {
             final Echo e = takeEcho();
             super.declareBlockers(defender, combat);
@@ -1669,7 +1797,7 @@ public class PlayerControllerBridge extends PlayerControllerAi {
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask(method, "cardsChoice", body);
+        final JsonObject ans = ask(method, "cardsChoice", body, pool);
         if (ans == null) {
             return null;
         }
@@ -1746,12 +1874,13 @@ public class PlayerControllerBridge extends PlayerControllerAi {
             body.addProperty("divideRemaining", currentAbility.getStillToDivide());
         }
 
-        final JsonObject ans = ask("chooseTargetsFor", "targets", body);
+        final JsonObject ans = ask("chooseTargetsFor", "targets", body,
+                new Object[] {currentAbility, candidates, stack});
         if (ans == null) {
             final Echo e = takeEcho();
             final boolean out = super.chooseTargetsFor(currentAbility);
             // The chosen targets are on the ability, not in the return value.
-            echo(e, echoTargets(currentAbility, out));
+            echo(e, echoTargets(currentAbility, out), currentAbility);
             return out;
         }
         if (!ans.has("choices") || !ans.get("choices").isJsonArray()) {
