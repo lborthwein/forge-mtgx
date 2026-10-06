@@ -1991,7 +1991,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         }
         final List<SpellAbilityStackInstance> stack = stackCandidates(currentAbility);
         final int min = currentAbility.getMinTargets();
-        final int max = currentAbility.getMaxTargets();
+        final int max = dividedTargetCap(currentAbility, currentAbility.getMaxTargets());
 
         final JsonObject body = envelope(true);
         body.add("ability", StateEncoder.encodeSpellAbility(currentAbility));
@@ -2078,6 +2078,33 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return super.chooseTargetsFor(currentAbility);
         }
         return true;
+    }
+
+    /**
+     * RL seats (lane rl-r0-b4b-1006): a divided-as-you-choose ability gives every target at least one (CR 601.2d), so
+     * no more targets than the amount to divide can be chosen. The seat's menu says so, rather than refusing the
+     * answer afterwards ("cannot divide 2 among 4 targets": Fire Covenant with X = 2). Other hosts keep the
+     * engine's own maximum.
+     */
+    private int dividedTargetCap(final SpellAbility sa, final int max) {
+        return localAnswers() ? dividedTargetCap0(sa, max) : max;
+    }
+
+    static int dividedTargetCap0(final SpellAbility sa, final int max) {
+        if (!sa.isDividedAsYouChoose() || sa.getDividedValue() == null) {
+            return max;
+        }
+        return Math.max(0, Math.min(max, sa.getStillToDivide() + sa.getTargets().size()));
+    }
+
+    /**
+     * Clear an ability's targets before the seat chooses them: {@code clearTargets}, not {@code resetTargets}, because
+     * it also (re)computes the amount a divided-as-you-choose ability divides. Forge's AI never sets it on the triggers
+     * it prepares (Inferno Titan, Fury, The Grand Evolution), so every seat ask for one was refused "no total to
+     * divide" and fell back to Forge (lane rl-r0-b4b-1006: 119 of 119 divided refusals in 1,000 r1-bank train games).
+     */
+    static void clearForSeat(final SpellAbility cur) {
+        cur.clearTargets();
     }
 
     /**
@@ -3832,7 +3859,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 continue; // another player targets (TargetingPlayer): theirs to choose
             }
             final TargetChoices forge = cur.getTargets();
-            cur.resetTargets();
+            clearForSeat(cur);
             cur.setTargetingPlayer(getPlayer());
             final String before = targetingOrigin;
             targetingOrigin = origin;
