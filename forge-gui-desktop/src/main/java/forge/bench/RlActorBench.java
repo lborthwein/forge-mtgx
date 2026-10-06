@@ -127,6 +127,10 @@ public final class RlActorBench {
         List<String> replayTapes = new ArrayList<>();
         List<int[]> replayLines = new ArrayList<>();
         String replayOut = null;
+        /** Replay every (or a seeded sample of N) non-void line of every tape under this directory. */
+        String replayDir = null;
+        int replaySample = 0;
+        long replaySampleSeed = 1005L;
     }
 
     static Cfg parse(final JsonObject o) {
@@ -157,6 +161,9 @@ public final class RlActorBench {
                 }
             }
             if (r.has("out")) c.replayOut = r.get("out").getAsString();
+            if (r.has("dir")) c.replayDir = r.get("dir").getAsString();
+            if (r.has("sample")) c.replaySample = r.get("sample").getAsInt();
+            if (r.has("sampleSeed")) c.replaySampleSeed = r.get("sampleSeed").getAsLong();
         }
         return c;
     }
@@ -179,6 +186,9 @@ public final class RlActorBench {
                 case "--rl-root": c.rlRoot = v; break;
                 case "--out": c.replayOut = v; break;
                 case "--ai-timeout": c.aiTimeoutSec = Integer.parseInt(v); break;
+                case "--tapes": c.replayDir = v; break;
+                case "--sample": c.replaySample = Integer.parseInt(v); break;
+                case "--sample-seed": c.replaySampleSeed = Long.parseLong(v); break;
                 default: throw new IllegalArgumentException("unknown argument " + k);
             }
         }
@@ -841,7 +851,36 @@ public final class RlActorBench {
 
     // ------------------------------------------------------------------------------------------------ replay
 
+    /** Expand {@code replay.dir}: every tape file under it, every non-void line (or a seeded sample of N). */
+    static void expandReplayDir(final Cfg cfg) throws IOException {
+        if (cfg.replayDir == null) {
+            return;
+        }
+        final List<Path> files = new ArrayList<>();
+        try (java.util.stream.Stream<Path> st = Files.walk(Paths.get(cfg.replayDir))) {
+            st.filter(p -> p.getFileName().toString().matches("tapes-\\d+\\.jsonl\\.gz")).sorted().forEach(files::add);
+        }
+        final List<int[]> lines = new ArrayList<>();
+        for (Path f : files) {
+            final int fi = cfg.replayTapes.size();
+            cfg.replayTapes.add(f.toString());
+            final List<JsonObject> rows = RlTape.read(f);
+            for (int li = 0; li < rows.size(); li++) {
+                if (rows.get(li).get("void").isJsonNull()) {
+                    lines.add(new int[] {fi, li});
+                }
+            }
+        }
+        if (cfg.replaySample > 0 && cfg.replaySample < lines.size()) {
+            Collections.shuffle(lines, new Random(cfg.replaySampleSeed));
+            lines.subList(cfg.replaySample, lines.size()).clear();
+            lines.sort((a, b) -> a[0] != b[0] ? Integer.compare(a[0], b[0]) : Integer.compare(a[1], b[1]));
+        }
+        cfg.replayLines.addAll(lines);
+    }
+
     static int replay(final Cfg cfg, final CardIndex index, final String jarSha) throws IOException {
+        expandReplayDir(cfg);
         final RlFeaturizer feat = new RlFeaturizer(index);
         final Map<String, List<JsonObject>> cache = new HashMap<>();
         PrintWriter w = null;
