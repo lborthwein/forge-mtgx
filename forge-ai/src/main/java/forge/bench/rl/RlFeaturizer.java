@@ -64,6 +64,8 @@ public final class RlFeaturizer {
         public final Map<Integer, Integer> posByStackId = new HashMap<>();
         /** Unknown-name lookups in this frame's tokens and deck. */
         public int unknownNames;
+        /** Debug only (K8 converter parity, B6): the bridge's ForgeState of this seat at the same moment. */
+        public com.google.gson.JsonObject forgeState;
 
         public int pos(final Card c) {
             if (c == null) {
@@ -75,6 +77,12 @@ public final class RlFeaturizer {
     }
 
     private final CardIndex index;
+    /**
+     * Debug only (off by default; RlActorBench config {@code debugForgeStateOut}): also capture
+     * {@code StateEncoder.encode(game, seat)} with every observation, for the K8 converter parity check. The encoder
+     * reads mana abilities, so never set it in a run whose digests must match Forge.
+     */
+    public boolean captureForgeState = false;
     /** Observation v1 seat knowledge for the current game (Appendix B.2); null = Phase A behaviour (visibility only). */
     private RlKnowledge knowledge;
     /** Per (game, seat) deck arrays: constant through a game. */
@@ -189,6 +197,13 @@ public final class RlFeaturizer {
      */
     public Obs observe(final Game game, final Player seat, final int mullK, final boolean withPriv) {
         final Obs o = new Obs();
+        if (captureForgeState) {
+            try {
+                o.forgeState = forge.bench.StateEncoder.encode(game, seat);
+            } catch (RuntimeException e) {
+                o.forgeState = null;
+            }
+        }
         final Player opp = opponentOf(game, seat);
         final PlayerView viewer = seat.getView();
         final List<Tok> toks = new ArrayList<>(64);

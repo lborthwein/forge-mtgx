@@ -124,6 +124,8 @@ public final class RlActorBench {
         int maxGames = 0;
         /** MyRandom's global (non-thread) random, seeded once at boot; RlSimBench seeds it with its config seed. */
         long globalSeed = 0x5eedL;
+        /** Debug only (K8 converter parity, B6): one JSONL row per sent frame with the ForgeState at that moment. */
+        String debugForgeStateOut = null;
         List<String> replayTapes = new ArrayList<>();
         List<int[]> replayLines = new ArrayList<>();
         String replayOut = null;
@@ -151,6 +153,7 @@ public final class RlActorBench {
         if (o.has("tapeRotate")) c.tapeRotate = o.get("tapeRotate").getAsInt();
         if (o.has("maxGames")) c.maxGames = o.get("maxGames").getAsInt();
         if (o.has("globalSeed")) c.globalSeed = o.get("globalSeed").getAsLong();
+        if (o.has("debugForgeStateOut")) c.debugForgeStateOut = o.get("debugForgeStateOut").getAsString();
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
             if (r.has("tapes")) for (JsonElement e : r.getAsJsonArray("tapes")) c.replayTapes.add(e.getAsString());
@@ -339,6 +342,10 @@ public final class RlActorBench {
         sc.maxDecisions = cfg.maxDecisions;
         final RlSeat seat = new RlSeat(feat, ep, sc, uid, ctl, priv);
         seat.listener = listener;
+        feat.captureForgeState = cfg.debugForgeStateOut != null;
+        if (cfg.debugForgeStateOut != null) {
+            seat.listener = forgeStateDumper(cfg.debugForgeStateOut, listener, decks);
+        }
         out.seat = seat;
         boolean anyBridged = false;
         final List<RegisteredPlayer> seats = new ArrayList<>();
@@ -545,6 +552,45 @@ public final class RlActorBench {
     static final java.util.Set<String> NOT_DECISIONS = new java.util.HashSet<>(java.util.Arrays.asList("reveal",
             "notifyOfValue", "revealAnte", "revealAISkipCards", "revealUnsupported", "autoPassCancel",
             "awaitNextInput", "cancelAwaitNextInput", "getCostDecisionMaker", "playChosenSpellAbility"));
+
+    private static PrintWriter forgeStateOut;
+
+    /** The K8 parity dump (debug): {game_uid, dec_idx, seat, family, frame_type, frame_b64, forgeState, startingSeat,
+     *  mulligans, deckPath} per sent frame, the ForgeState taken with the frame's observation. */
+    static RlSeat.FrameListener forgeStateDumper(final String path, final RlSeat.FrameListener next,
+            final String[] decks) {
+        return (g, player, f, m, o, steps, answer) -> {
+            if (next != null) {
+                next.onFrame(g, player, f, m, o, steps, answer);
+            }
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(f.gameUid));
+            row.addProperty("dec_idx", f.decIdx);
+            row.addProperty("seat", f.seat);
+            row.addProperty("family", f.family);
+            row.addProperty("frame_type", f.teacher.length > 0 ? "RECORD" : "DECIDE");
+            row.addProperty("frame_b64", java.util.Base64.getEncoder().encodeToString(RlWire.encodeDecide(f)));
+            row.add("forgeState", o == null ? null : o.forgeState);
+            final Player sp = g.getStartingPlayer();
+            row.addProperty("startingSeat", sp == null ? -1 : g.getRegisteredPlayers().indexOf(sp));
+            final JsonArray mull = new JsonArray();
+            for (Player p : g.getRegisteredPlayers()) {
+                mull.add(p.getStats().getMulliganCount());
+            }
+            row.add("mulligans", mull);
+            row.addProperty("deckPath", decks[f.seat]);
+            synchronized (RlActorBench.class) {
+                try {
+                    if (forgeStateOut == null) {
+                        forgeStateOut = new PrintWriter(new FileWriter(path, StandardCharsets.UTF_8, true), true);
+                    }
+                    forgeStateOut.println(RlWire.canonicalString(row));
+                } catch (IOException e) {
+                    System.err.println("[rlactor] forge-state dump failed: " + e);
+                }
+            }
+        };
+    }
 
     static String lossReason(final Game game) {
         for (Player p : game.getRegisteredPlayers()) {
