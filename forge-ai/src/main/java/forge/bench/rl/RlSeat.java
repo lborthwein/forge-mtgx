@@ -20,14 +20,14 @@ import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
 
 /**
- * The RL seat (lane rl-r0-b1-1005): a {@link BenchSession.LocalAnswerer} for the bridged seats of ONE game, which
- * turns every Phase A ask into a DECIDE frame (or, in record mode, a RECORD frame carrying Forge's own answer).
+ * The RL seat (lanes rl-r0-b1-1005, rl-r0-b4-1006): a {@link BenchSession.LocalAnswerer} for the bridged seats of ONE
+ * game, which turns every ask of families 1-24 into a DECIDE frame (record mode: a RECORD frame with Forge's answer).
  *
  * <ul>
  *   <li><b>Trivial asks</b> (a pass-only priority menu, or exactly one legal answer) are answered here, counted in
  *       the census, and never sent (§2.3).</li>
- *   <li><b>Phase B families</b> and asks over the caps ({@code C > C_MAX}; {@code S > S_MAX}) are delegated to Forge
- *       and counted ({@code forge_decided["capC:<family>"]}).</li>
+ *   <li>Asks over the caps ({@code C > C_MAX}; {@code S > S_MAX}) are delegated to Forge and counted
+ *       ({@code forge_decided["capC:<family>"]}).</li>
  *   <li><b>Environment rules</b> (as RlSimBench): after {@code capActions} non-pass priority actions by one player in
  *       one turn the seat passes ({@code cap_hits}); a game is void after {@code maxDecisions} sent decisions.</li>
  *   <li><b>Refusals:</b> when the bridge (or {@code CombatUtil}) refuses a decoded answer, Forge decides; the dec_idx
@@ -89,8 +89,16 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     /** TARGETS frames sent with cand_tgt[1] = −1 (clarification C2). */
     public int srcMissing = 0;
     private final int[][] turnActs = {{-1, 0}, {-1, 0}};
-    /** method → dec_idx of its latest unsettled answer (−1 = trivial / forced). */
+    /** method → dec_idx of its latest unsettled answer (−1 = trivial / forced); two-frame asks add their second. */
     private final Map<String, Integer> lastAnswered = new HashMap<>();
+    private final Map<String, Integer> lastAnswered2 = new HashMap<>();
+    /** Census notes from the bridge (trigger targeting, effect casts, …) and per-origin TARGETS counts. */
+    private final Map<String, Integer> notes = new TreeMap<>();
+    /**
+     * NAME candidates: the opponent cards the seat has seen this game, by name, first-seen order (B5's
+     * RlKnowledge.opponentSeen, set by the runner). Default: the opponent cards visible to the seat now.
+     */
+    public java.util.function.IntFunction<List<String>> seenNames = null;
     private final Map<String, Integer> lastFamily = new HashMap<>();
     /** Record mode: frames waiting for Forge's echo. */
     private final Deque<Pending> pending = new ArrayDeque<>();
@@ -241,32 +249,47 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         final int family = RlSchema.familyOf(kind, method);
         if (family == RlSchema.F_PRIORITY) {
             lastAnswered.clear();
+            lastAnswered2.clear();
         } else if (method != null) {
             lastAnswered.remove(method);
+            lastAnswered2.remove(method);
         }
         if (family > 0) {
             c(family).asks++;
         }
-        if (!RlSchema.isPhaseA(family)) {
-            return null; // Phase B and the mechanical kinds: Forge decides (forge_decided by method)
+        if (!RlSchema.isLearned(family)) {
+            return null; // the mechanical kinds: Forge decides (forge_decided by method)
         }
         if (RECORD_BARE && roles[seat] == Role.RECORD) {
             return null; // diagnosis only: the bridge's own BRIDGE-mode work, none of the seat's
         }
-        final RlCandidates.Menu m = RlCandidates.build(g, player, method, kind, body, objs);
+        final RlCandidates.Menu m = RlCandidates.build(g, player, method, kind, body, objs,
+                family == RlSchema.F_NAME ? seen(g, player, seat) : null);
+        if (family == RlSchema.F_TARGETS && m != null) {
+            note("targets." + m.origin + ".asks");
+        }
         if (m == null || m.unposable != null) {
             forgeDecidedExtra.merge("unposed:" + RlSchema.familyName(family), 1, Integer::sum);
             return null;
         }
         if (m.trivial) {
             c(family).trivial++;
+            if (family == RlSchema.F_TARGETS) {
+                note("targets." + m.origin + ".trivial");
+            }
             if (roles[seat] == Role.RECORD) {
                 return null;
+            }
+            final JsonObject ta = RlSchema.isTwoFrame(family) ? m.answerTwoFrame(m.trivialSteps, null, null)
+                    : m.answer(m.trivialSteps);
+            if (isDelegate(ta)) {
+                forgeDecidedExtra.merge("forgeChoice:" + RlSchema.familyName(family), 1, Integer::sum);
+                return ta;
             }
             lastAnswered.put(method, -1);
             lastFamily.put(method, family);
             ok(method);
-            return m.answer(m.trivialSteps);
+            return ta;
         }
         if (m.C() > RlSchema.C_MAX || m.S() > RlSchema.S_MAX) {
             forgeDecidedExtra.merge((m.C() > RlSchema.C_MAX ? "capC:" : "capS:") + RlSchema.familyName(family), 1,
@@ -321,6 +344,86 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         m.bind(obs, feat, player);
         // ---- RL seat: DECIDE → DECISION
         final RlWire.Decide frame = frame(seat, g, m, obs);
+        final RlWire.Decision d = decide(frame);
+        if (d == null) {
+            return null;
+        }
+        final String bad = d.status == RlWire.ST_OK ? m.validate(d.steps) : null;
+        if (bad != null) {
+            System.err.println("[rlseat] invalid DECISION steps for dec " + frame.decIdx + ": " + bad);
+            endGame("server_error");
+            return null;
+        }
+        noteSent(seat, family, m, frame, d.steps);
+        noteVersion(seat, controllers[seat].substring(3), d.policyVersion);
+        if (family == RlSchema.F_TARGETS) {
+            note("targets." + m.origin + ".sent");
+        }
+        if (d.status == RlWire.ST_DELEGATE) {
+            overridden.add(frame.decIdx);
+            forgeDecidedExtra.merge("serverDelegate:" + RlSchema.familyName(family), 1, Integer::sum);
+            return null;
+        }
+        // two-frame families (SCRY, SURVEIL): the PERMUTE frame over the cards kept on top, if two or more
+        RlCandidates.Menu m2 = null;
+        RlWire.Decide frame2 = null;
+        short[] steps2 = null;
+        if (RlSchema.isTwoFrame(family)) {
+            m2 = m.secondFrame(d.steps);
+            if (m2 != null && m2.unposable == null && !m2.trivial) {
+                m2.bind(obs, feat, player);
+                frame2 = frame(seat, g, m2, obs);
+                final RlWire.Decision d2 = decide(frame2);
+                if (d2 == null) {
+                    return null;
+                }
+                final String bad2 = d2.status == RlWire.ST_OK ? m2.validate(d2.steps) : null;
+                if (d2.status != RlWire.ST_OK || bad2 != null) {
+                    System.err.println("[rlseat] invalid second-frame DECISION for dec " + frame2.decIdx + ": "
+                            + (bad2 != null ? bad2 : "status " + d2.status));
+                    endGame("server_error");
+                    return null;
+                }
+                noteSent(seat, family, m2, frame2, d2.steps);
+                noteVersion(seat, controllers[seat].substring(3), d2.policyVersion);
+                steps2 = d2.steps;
+            } else if (m2 != null && m2.trivial) {
+                c(family).trivial++;
+                steps2 = m2.trivialSteps;
+            }
+        }
+        final JsonObject ans = RlSchema.isTwoFrame(family) ? m.answerTwoFrame(d.steps, m2, steps2) : m.answer(d.steps);
+        if (listener != null) {
+            listener.onFrame(g, player, frame, m, obs, d.steps, ans);
+            if (frame2 != null) {
+                listener.onFrame(g, player, frame2, m2, obs, steps2, ans);
+            }
+        }
+        if (isDelegate(ans)) {
+            // NAME's "Forge's choice": the seat's decision is to let Forge name (delegated and counted)
+            forgeDecidedExtra.merge("forgeChoice:" + RlSchema.familyName(family), 1, Integer::sum);
+            return ans;
+        }
+        lastAnswered.put(method, frame.decIdx);
+        if (frame2 != null) {
+            lastAnswered2.put(method, frame2.decIdx);
+        }
+        lastFamily.put(method, family);
+        ok(method);
+        if (family == RlSchema.F_PRIORITY && ans.get("choice").getAsInt() > 0) {
+            final int turn = g.getPhaseHandler().getTurn();
+            final int[] ta = turnActs[seat];
+            if (ta[0] != turn) {
+                ta[0] = turn;
+                ta[1] = 0;
+            }
+            ta[1]++;
+        }
+        return ans;
+    }
+
+    /** DECIDE → DECISION for one frame; null (the game is ended as server_error) on any transport or protocol fault. */
+    private RlWire.Decision decide(final RlWire.Decide frame) {
         final RlWire.Decision d;
         try {
             d = ep.decide(RlWire.encodeDecide(frame));
@@ -343,36 +446,57 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             endGame("server_error");
             return null;
         }
-        final String bad = d.status == RlWire.ST_OK ? m.validate(d.steps) : null;
-        if (bad != null) {
-            System.err.println("[rlseat] invalid DECISION steps for dec " + frame.decIdx + ": " + bad);
-            endGame("server_error");
-            return null;
-        }
-        noteSent(seat, family, m, frame, d.steps);
-        noteVersion(seat, controllers[seat].substring(3), d.policyVersion);
-        if (d.status == RlWire.ST_DELEGATE) {
-            overridden.add(frame.decIdx);
-            forgeDecidedExtra.merge("serverDelegate:" + RlSchema.familyName(family), 1, Integer::sum);
-            return null;
-        }
-        final JsonObject ans = m.answer(d.steps);
-        if (listener != null) {
-            listener.onFrame(g, player, frame, m, obs, d.steps, ans);
-        }
-        lastAnswered.put(method, frame.decIdx);
-        lastFamily.put(method, family);
-        ok(method);
-        if (family == RlSchema.F_PRIORITY && ans.get("choice").getAsInt() > 0) {
-            final int turn = g.getPhaseHandler().getTurn();
-            final int[] ta = turnActs[seat];
-            if (ta[0] != turn) {
-                ta[0] = turn;
-                ta[1] = 0;
+        return d;
+    }
+
+    private static boolean isDelegate(final JsonObject a) {
+        return a != null && a.has("delegate") && a.get("delegate").getAsBoolean();
+    }
+
+    /** NAME candidates' seen set (see {@link #seenNames}). */
+    private List<String> seen(final Game g, final Player player, final int seat) {
+        if (seenNames != null) {
+            try {
+                return seenNames.apply(seat);
+            } catch (RuntimeException e) {
+                // fall back below
             }
-            ta[1]++;
         }
-        return ans;
+        final List<String> out = new ArrayList<>();
+        final Player opp = RlFeaturizer.opponentOf(g, player);
+        if (opp == null) {
+            return out;
+        }
+        final forge.game.player.PlayerView viewer = player.getView();
+        for (forge.game.zone.ZoneType z : new forge.game.zone.ZoneType[] {forge.game.zone.ZoneType.Battlefield,
+                forge.game.zone.ZoneType.Graveyard, forge.game.zone.ZoneType.Exile, forge.game.zone.ZoneType.Hand,
+                forge.game.zone.ZoneType.Command}) {
+            for (forge.game.card.Card c : opp.getCardsIn(z)) {
+                if (!c.isFaceDown() && c.getView().canBeShownTo(viewer) && !out.contains(c.getName())) {
+                    out.add(c.getName());
+                }
+            }
+        }
+        for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+            final forge.game.card.Card c = si.getSourceCard();
+            if (c != null && si.getActivatingPlayer() == opp && !c.isFaceDown()
+                    && c.getView().canBeShownTo(viewer) && !out.contains(c.getName())) {
+                out.add(c.getName());
+            }
+        }
+        return out;
+    }
+
+    private void note(final String key) {
+        notes.merge(key, 1, Integer::sum);
+    }
+
+    /** The bridge's census notes (see BenchSession.LocalAnswerer#note). */
+    @Override
+    public void note(final Game g, final Player player, final String key) {
+        if (g == game) {
+            note(key);
+        }
     }
 
     private RlWire.Decide frame(final int seat, final Game g, final RlCandidates.Menu m, final RlFeaturizer.Obs o) {
@@ -481,11 +605,15 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             return;
         }
         final Integer d = lastAnswered.remove(method);
+        final Integer d2 = lastAnswered2.remove(method);
         if (d == null) {
             return;
         }
         final Integer fam = lastFamily.get(method);
         okAnswers.merge(method, -1, Integer::sum);
+        if (d2 != null) {
+            overridden.add(d2);
+        }
         if (d >= 0) {
             overridden.add(d);
             if (fam != null) {
@@ -563,6 +691,24 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
 
     private void echoed(final Game g, final Pending p, final JsonObject forgeAnswer, final Object forgeDecision) {
         final RlCandidates.Menu m = p.menu;
+        if (RlSchema.isTwoFrame(m.family)) {
+            final Object[] two = m.fromEchoTwoFrame(forgeAnswer);
+            if (two == null) {
+                mapFailed.merge(m.family, 1, Integer::sum);
+                return;
+            }
+            if (!sendRecord(p.seat, g, m, p.obs, (short[]) two[0])) {
+                return;
+            }
+            final RlCandidates.Menu m2 = (RlCandidates.Menu) two[1];
+            if (m2 != null && !m2.trivial && m2.unposable == null) {
+                m2.bind(p.obs, feat, p.player);
+                sendRecord(p.seat, g, m2, p.obs, (short[]) two[2]);
+            } else if (m2 != null && m2.trivial) {
+                c(m.family).trivial++;
+            }
+            return;
+        }
         final short[] steps = m.fromEcho(forgeAnswer);
         if (steps == null) {
             mapFailed.merge(m.family, 1, Integer::sum);
@@ -572,27 +718,75 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         if (m.family == RlSchema.F_PRIORITY && forgeDecision instanceof List && !((List<?>) forgeDecision).isEmpty()
                 && ((List<?>) forgeDecision).get(0) instanceof SpellAbility) {
             final SpellAbility chosen = (SpellAbility) ((List<?>) forgeDecision).get(0);
-            for (Object[] t : RlCandidates.targetsFromChosen(g, chosen)) {
-                final RlCandidates.Menu tm = (RlCandidates.Menu) t[0];
-                final short[] ts = (short[]) t[1];
-                synthTargets++;
-                c(RlSchema.F_TARGETS).asks++;
-                if (tm.unposable != null || ts == null) {
-                    mapFailed.merge(RlSchema.F_TARGETS, 1, Integer::sum);
-                    continue;
-                }
-                if (tm.trivial) {
-                    c(RlSchema.F_TARGETS).trivial++;
-                    continue;
-                }
-                if (tm.C() > RlSchema.C_MAX) {
-                    forgeDecidedExtra.merge("capC:TARGETS", 1, Integer::sum);
-                    continue;
-                }
-                tm.bind(p.obs, feat, p.player);
-                if (!sendRecord(p.seat, g, tm, p.obs, ts)) {
-                    return;
-                }
+            if (!recordTargets(p.seat, g, p.player, p.obs, chosen, "cast")) {
+                return;
+            }
+        }
+    }
+
+    /** Record mode: one TARGETS row per targeting ability of {@code chosen}'s chain (Forge's targets). */
+    private boolean recordTargets(final int seat, final Game g, final Player player, final RlFeaturizer.Obs obs,
+            final SpellAbility chosen, final String origin) {
+        for (Object[] t : RlCandidates.targetsFromChosen(g, chosen)) {
+            final RlCandidates.Menu tm = (RlCandidates.Menu) t[0];
+            final short[] ts = (short[]) t[1];
+            tm.origin = origin;
+            synthTargets++;
+            c(RlSchema.F_TARGETS).asks++;
+            note("targets." + origin + ".asks");
+            if (tm.unposable != null || ts == null) {
+                mapFailed.merge(RlSchema.F_TARGETS, 1, Integer::sum);
+                final String why = tm.unposable == null ? "other" : tm.unposable.startsWith("Forge's targets are not")
+                        ? "nomatch" : tm.unposable.startsWith("Forge's targets break") ? "rules"
+                        : tm.unposable.startsWith("SUBSET min") ? "fewOptions" : "other";
+                note("targets." + origin + ".mapFail." + why);
+                continue;
+            }
+            if (tm.trivial) {
+                c(RlSchema.F_TARGETS).trivial++;
+                note("targets." + origin + ".trivial");
+                continue;
+            }
+            if (tm.C() > RlSchema.C_MAX) {
+                forgeDecidedExtra.merge("capC:TARGETS", 1, Integer::sum);
+                continue;
+            }
+            tm.bind(obs, feat, player);
+            if (!sendRecord(seat, g, tm, obs, ts)) {
+                return false;
+            }
+            note("targets." + origin + ".sent");
+        }
+        return true;
+    }
+
+    /**
+     * Record mode: Forge's AI chose the targets of a triggered ability it put on the stack (no ask was raised). One
+     * TARGETS row per targeting ability, observed now (isolated as the echo-time work is).
+     */
+    @Override
+    public void onForgeTargeted(final Game g, final Player player, final String origin, final SpellAbility sa) {
+        if (g != game || voidReason != null || g.isGameOver()) {
+            return;
+        }
+        final int seat = seatOf(g, player);
+        if (seat < 0 || seat >= roles.length || roles[seat] != Role.RECORD || sa == null) {
+            return;
+        }
+        final boolean iso = observeOnly();
+        final java.util.Random live = iso ? forge.util.MyRandom.getThreadRandom() : null;
+        final int[] snap = iso ? idValues() : null;
+        if (iso) {
+            forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
+        }
+        try {
+            final RlFeaturizer.Obs ro = feat.observe(g, player, 0, priv);
+            unkNames += ro.unknownNames;
+            recordTargets(seat, g, player, ro, sa, origin);
+        } finally {
+            if (iso) {
+                forge.util.MyRandom.setThreadRandom(live);
+                restoreIds(snap);
             }
         }
     }
@@ -663,6 +857,13 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             o.addProperty("synth_targets", synthTargets);
         }
         o.addProperty("src_missing", srcMissing);
+        if (!notes.isEmpty()) {
+            final JsonObject n = new JsonObject();
+            for (Map.Entry<String, Integer> e : notes.entrySet()) {
+                n.addProperty(e.getKey(), e.getValue());
+            }
+            o.add("notes", n);
+        }
         return o;
     }
 

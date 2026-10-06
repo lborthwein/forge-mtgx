@@ -1294,7 +1294,7 @@ public class PlayerControllerAi extends PlayerController {
             }
 
             final CostPayment pay = new CostPayment(cost, sa);
-            return pay.payComputerCosts(new AiCostDecision(player, sa, true));
+            return pay.payComputerCosts(AiCostDecision.forPayment(player, sa, true));
         }
         return false;
     }

@@ -44,6 +44,30 @@ public class AiCostDecision extends CostDecisionMakerBase {
         }
     }
 
+    /**
+     * A controller that supplies its own decision maker for real payments (lane rl-r0-b4-1006: the bench bridge of an
+     * RL seat, which asks the seat which cards to sacrifice, discard, exile or return). Returns null to keep Forge's
+     * own {@link AiCostDecision}.
+     */
+    public interface PaymentDecisions {
+        AiCostDecision costDecisionForPayment(Player payer, SpellAbility sa, boolean effect);
+    }
+
+    /**
+     * The decision maker for a real payment ({@code CostPayment.payComputerCosts}). Identical to
+     * {@code new AiCostDecision(ai, sa, effect)} unless the payer's controller is a {@link PaymentDecisions} that
+     * supplies one, which only an RL seat's bench bridge does (off by default).
+     */
+    public static AiCostDecision forPayment(final Player ai, final SpellAbility sa, final boolean effect) {
+        if (ai != null && ai.getController() instanceof PaymentDecisions) {
+            final AiCostDecision d = ((PaymentDecisions) ai.getController()).costDecisionForPayment(ai, sa, effect);
+            if (d != null) {
+                return d;
+            }
+        }
+        return new AiCostDecision(ai, sa, effect);
+    }
+
     @Override
     public PaymentDecision visit(CostAddMana cost) {
         int c = cost.getAbilityAmount(ability);

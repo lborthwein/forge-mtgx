@@ -16,6 +16,7 @@ import com.google.gson.JsonParser;
 
 import forge.bench.rl.CardIndex;
 import forge.bench.rl.FakeRlServer;
+import forge.bench.rl.RlFamilyChecks;
 import forge.bench.rl.RlGoldens;
 import forge.bench.rl.RlWire;
 
@@ -119,7 +120,18 @@ public final class RlFakeRun {
         RlGoldens goldens = null;
         if (spec.has("goldens")) {
             goldens = new RlGoldens();
+            if (spec.has("goldensWanted") && "B".equals(spec.get("goldensWanted").getAsString())) {
+                goldens.wanted = RlGoldens.WANTED_B; // lane rl-r0-b4-1006: families 8-24
+            }
+            goldens.acceptRecord = spec.has("goldensRecord") && spec.get("goldensRecord").getAsBoolean();
             RlActorBench.LISTENER = goldens;
+        }
+        // lane rl-r0-b4-1006: round-trip every sent frame's answer through the record-mode mapper
+        RlFamilyChecks checks = null;
+        if (spec.has("checks") && spec.get("checks").getAsBoolean()) {
+            checks = new RlFamilyChecks();
+            checks.goldens = goldens;
+            RlActorBench.LISTENER = checks;
         }
         final int rc;
         final JsonObject stats;
@@ -142,6 +154,9 @@ public final class RlFakeRun {
         if (goldens != null) {
             goldens.write(Paths.get(spec.get("goldens").getAsString()));
             stats.addProperty("goldens", String.join(",", goldens.kept.keySet()));
+        }
+        if (checks != null) {
+            stats.add("roundtrip", checks.toJson());
         }
         Files.write(Paths.get(spec.get("out").getAsString()), (RlWire.canonicalString(stats) + "\n")
                 .getBytes(StandardCharsets.UTF_8));

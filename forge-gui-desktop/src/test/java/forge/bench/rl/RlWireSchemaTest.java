@@ -360,9 +360,29 @@ public class RlWireSchemaTest {
             final short[] steps = new short[st.size()];
             for (int i = 0; i < steps.length; i++) steps[i] = st.get(i).getAsShort();
             Assert.assertNull(FakeRlServer.legal(d, steps), b.getName());
-            Assert.assertEquals(RlGoldens.applyContract(g, steps), g.get("example_answer"), b.getName());
+            final JsonObject got = RlGoldens.applyContract(g, steps);
+            final JsonObject ex = g.getAsJsonObject("example_answer");
+            final JsonObject contract = g.getAsJsonObject("answer_contract");
+            if ("two_frame".equals(contract.get("shape").getAsString())) {
+                // SCRY/SURVEIL first frame (lane rl-r0-b4-1006): it fixes which cards stay on top and the rest in
+                // order; their order on top is the second frame's
+                final String rk = contract.get("rest_key").getAsString();
+                Assert.assertEquals(got.get(rk), ex.get(rk), b.getName());
+                Assert.assertEquals(sorted(got.getAsJsonArray("top")), sorted(ex.getAsJsonArray("top")), b.getName());
+            } else if (RlSchema.isTwoFrame(d.family)) {
+                Assert.assertEquals(got.get("choices"), ex.get("top"), b.getName()); // the PERMUTE frame: top order
+            } else {
+                Assert.assertEquals(got, ex, b.getName());
+            }
             n++;
         }
         Assert.assertTrue(n >= 7, "at least one golden per Phase A family, got " + n);
+    }
+
+    private static java.util.List<String> sorted(final JsonArray a) {
+        final java.util.List<String> out = new java.util.ArrayList<>();
+        for (com.google.gson.JsonElement e : a) out.add(e.toString());
+        java.util.Collections.sort(out);
+        return out;
     }
 }

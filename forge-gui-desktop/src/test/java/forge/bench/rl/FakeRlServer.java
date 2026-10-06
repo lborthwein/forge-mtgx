@@ -24,7 +24,8 @@ import com.google.gson.JsonObject;
 /**
  * Test-scope wire/1 server (lane rl-r0-b1-1005): serves a fixed GAME schedule, answers every DECIDE with uniformly
  * random legal steps under the §5.3 decoding rules (SINGLE: one legal candidate; SUBSET: picks among the unchosen
- * legal candidates plus STOP once {@code t >= min_pick}, ending at {@code max_pick}; ASSIGN: one candidate per slot),
+ * legal candidates plus STOP once {@code t >= min_pick}, ending at {@code max_pick}; ASSIGN: one candidate per slot;
+ * PERMUTE (Phase B, lane rl-r0-b4-1006): a uniform permutation),
  * acks RECORD and GAME_END, and checks every frame it receives (layout, pointer ranges, trivial asks, RECORD teacher
  * legality). The per-decision random stream depends only on (seed, game_uid, dec_idx), never on batch or thread.
  */
@@ -213,11 +214,7 @@ public final class FakeRlServer implements Closeable {
                 prevCard = d.privCard[i];
             }
         }
-        final int expectMode = d.family == RlSchema.F_PRIORITY || d.family == RlSchema.F_MULLIGAN
-                || d.family == RlSchema.F_START_PLAYER ? RlSchema.M_SINGLE
-                : d.family == RlSchema.F_TARGETS || d.family == RlSchema.F_MULLIGAN_BOTTOM ? RlSchema.M_SUBSET
-                : d.family == RlSchema.F_ATTACK || d.family == RlSchema.F_BLOCK ? RlSchema.M_ASSIGN : -1;
-        if (d.mode != expectMode) {
+        if (!modeAllowed(d.family, d.mode)) {
             badFrames.incrementAndGet();
             problem("family " + d.family + " with mode " + d.mode);
         }
@@ -262,6 +259,44 @@ public final class FakeRlServer implements Closeable {
         }
     }
 
+    /** Appendix A/B.1: the decision modes each family may use (two-frame families: ASSIGN, then PERMUTE). */
+    public static boolean modeAllowed(final int family, final int mode) {
+        switch (family) {
+            case RlSchema.F_PRIORITY:
+            case RlSchema.F_MULLIGAN:
+            case RlSchema.F_START_PLAYER:
+            case RlSchema.F_CONFIRM:
+            case RlSchema.F_NUMBER:
+            case RlSchema.F_PILE:
+            case RlSchema.F_PUT_ON_TOP:
+            case RlSchema.F_OPTIONAL_TRIGGER:
+            case RlSchema.F_PAY_TO_PREVENT:
+            case RlSchema.F_NAME:
+                return mode == RlSchema.M_SINGLE;
+            case RlSchema.F_TARGETS:
+            case RlSchema.F_MULLIGAN_BOTTOM:
+            case RlSchema.F_CARDS:
+            case RlSchema.F_MODE:
+            case RlSchema.F_OPTIONAL_COSTS:
+            case RlSchema.F_DISCARD_FROM:
+            case RlSchema.F_COST_CARDS:
+                return mode == RlSchema.M_SUBSET;
+            case RlSchema.F_ENTITY:
+            case RlSchema.F_COLOR:
+                return mode == RlSchema.M_SINGLE || mode == RlSchema.M_SUBSET;
+            case RlSchema.F_ATTACK:
+            case RlSchema.F_BLOCK:
+                return mode == RlSchema.M_ASSIGN;
+            case RlSchema.F_SCRY:
+            case RlSchema.F_SURVEIL:
+                return mode == RlSchema.M_ASSIGN || mode == RlSchema.M_PERMUTE;
+            case RlSchema.F_ORDER:
+                return mode == RlSchema.M_PERMUTE;
+            default:
+                return false;
+        }
+    }
+
     public static boolean trivial(final RlWire.Decide d) {
         switch (d.mode) {
             case RlSchema.M_SINGLE: {
@@ -280,6 +315,11 @@ public final class FakeRlServer implements Closeable {
                     }
                 }
                 return true;
+            }
+            case RlSchema.M_PERMUTE: {
+                int n = 0;
+                for (int i = 0; i < d.C; i++) if (d.candKind[i] > 0) n++;
+                return n <= 1;
             }
             default:
                 return false;
@@ -313,6 +353,19 @@ public final class FakeRlServer implements Closeable {
                     if (steps[s] < 0 || steps[s] >= d.C || d.candSlot[steps[s]] != s) {
                         return "ASSIGN slot " + s;
                     }
+                }
+                return null;
+            }
+            case RlSchema.M_PERMUTE: {
+                if (steps.length != d.C) {
+                    return "PERMUTE length";
+                }
+                final boolean[] seen = new boolean[d.C];
+                for (short s : steps) {
+                    if (s < 0 || s >= d.C || seen[s] || d.candKind[s] <= 0) {
+                        return "PERMUTE step " + s;
+                    }
+                    seen[s] = true;
                 }
                 return null;
             }
@@ -357,6 +410,16 @@ public final class FakeRlServer implements Closeable {
                     final List<Integer> opts = new ArrayList<>();
                     for (int i = 0; i < d.C; i++) if (d.candSlot[i] == s && d.candKind[i] > 0) opts.add(i);
                     out[s] = (short) (int) opts.get(r.nextInt(opts.size()));
+                }
+                return out;
+            }
+            case RlSchema.M_PERMUTE: {
+                // §5.3 PERMUTE: C-1 uniform picks among the not-yet-placed candidates, the last forced
+                final List<Integer> left = new ArrayList<>();
+                for (int i = 0; i < d.C; i++) left.add(i);
+                final short[] out = new short[d.C];
+                for (int k = 0; k < d.C; k++) {
+                    out[k] = (short) (int) left.remove(k == d.C - 1 ? 0 : r.nextInt(left.size()));
                 }
                 return out;
             }

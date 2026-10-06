@@ -24,7 +24,7 @@ import forge.game.zone.ZoneType;
 
 /**
  * One bridge ask → its candidate arrays, decision mode and answer rule (interfaces.md §2.3, §2.4, §3.5; lane
- * rl-r0-b1-1005). Built in two steps so that trivial asks never pay for an observation: {@link #build} reads the ask
+ * rl-r0-b1-1005; families 8-24 per Appendix B.1, PERMUTE and the SCRY/SURVEIL two-frame asks: lane rl-r0-b4-1006). Built in two steps so that trivial asks never pay for an observation: {@link #build} reads the ask
  * (structure, legality, answer fragments) and {@link Menu#bind} fills the token pointers from an observation.
  *
  * <p>Pointer conventions (documented in the golden {@code .json}): {@code cand_tok} is the candidate's own card
@@ -38,6 +38,10 @@ public final class RlCandidates {
     }
 
     public static final int SHAPE_SINGLE = 1, SHAPE_CHOICES = 2, SHAPE_PAIRS = 3;
+    /** Phase B (lane rl-r0-b4-1006): a full permutation → {@code {"choices": [frag…]}} (ORDER). */
+    public static final int SHAPE_PERMUTE = 4;
+    /** Phase B: SCRY / SURVEIL, whose answer is composed from two frames ({@link Menu#answerTwoFrame}). */
+    public static final int SHAPE_TWO_FRAME = 5;
 
     /** One candidate before pointer binding. */
     static final class Cand {
@@ -51,6 +55,9 @@ public final class RlCandidates {
         int flags;
         JsonElement frag;          // answer fragment; null = NONE in an ASSIGN slot
         String key;                // echo-matching key
+        Object tgt1;               // Player / Card / null → cand_tgt[1] when the menu has no source pointer (PILE)
+        String name;               // NAME: the card name → cand_card (and cand_tok, a token of that name if any)
+        boolean hidden;            // the chooser cannot see this card's face (a face-down pile): cand_card = <unk>
     }
 
     /** The decision an ask poses. */
@@ -78,6 +85,18 @@ public final class RlCandidates {
         public boolean sourceMissing;
         /** TARGETS: whether the targeting ability belongs to a spell (else a permanent's / card's ability). */
         public boolean sourceIsSpell;
+        /** TARGETS: where the targeting comes from (the bridge's "origin": cast, trigger, playFromEffect, noStack). */
+        public String origin = "cast";
+        /** SHAPE_CHOICES: the answer's list key ("choices"; "colors" for chooseColors). */
+        String listKey = "choices";
+        /** PERMUTE (ORDER): the steps are the final top-first order and the answer is Forge's move order reversed. */
+        boolean reverse;
+        /** Two-frame families (SCRY, SURVEIL): the key of the cards not kept on top ("bottom" / "graveyard"). */
+        String restKey;
+        /** Two-frame families: the looked-at cards in Forge's order (the ASSIGN slots). */
+        final List<Card> looked = new ArrayList<>();
+        /** Two-frame families, second frame: the cards kept on top, in the candidates' order. */
+        final List<Card> kept = new ArrayList<>();
 
         // bound arrays
         public byte[] kindA;
@@ -101,7 +120,8 @@ public final class RlCandidates {
         /** Fill the pointer arrays from an observation of the asking seat. */
         public void bind(final RlFeaturizer.Obs o, final RlFeaturizer f, final Player seat) {
             final int c = C();
-            final int src = family == RlSchema.F_TARGETS ? pointer(source, o, seat) : -1;
+            final boolean srcFamily = family == RlSchema.F_TARGETS || family == RlSchema.F_ENTITY;
+            final int src = srcFamily ? pointer(source, o, seat) : -1;
             sourceMissing = family == RlSchema.F_TARGETS && src < 0;
             kindA = new byte[c];
             tok = new short[c];
@@ -114,9 +134,15 @@ public final class RlCandidates {
             for (int i = 0; i < c; i++) {
                 final Cand x = cands.get(i);
                 kindA[i] = (byte) x.kind;
-                if (x.host != null) {
+                if (x.name != null) {
+                    card[i] = f.index().resolve(x.name);
+                    tok[i] = (short) tokenOfCard(o, card[i]);
+                } else if (x.host != null) {
                     tok[i] = (short) o.pos(x.host);
-                    card[i] = f.cardIndexOf(x.host);
+                    card[i] = x.hidden ? CardIndex.UNK : f.cardIndexOf(x.host);
+                } else if (x.hidden) {
+                    tok[i] = -1;
+                    card[i] = CardIndex.UNK;
                 } else if (x.hostStack != null) {
                     final Integer p = o.posByStackId.get(x.hostStack.getId());
                     tok[i] = (short) (p == null ? -1 : p);
@@ -126,7 +152,7 @@ public final class RlCandidates {
                     card[i] = 0;
                 }
                 tgt[2 * i] = (short) pointer(x.tgt0, o, seat);
-                tgt[2 * i + 1] = (short) src;
+                tgt[2 * i + 1] = (short) (srcFamily ? src : pointer(x.tgt1, o, seat));
                 slot[i] = (short) x.slot;
                 num[i] = (short) x.num;
                 ability[i] = (byte) Math.max(0, Math.min(15, x.ability));
@@ -151,6 +177,14 @@ public final class RlCandidates {
                     for (short s : steps) {
                         a.add(cands.get(s).frag.deepCopy());
                     }
+                    o.add(listKey, a);
+                    return o;
+                }
+                case SHAPE_PERMUTE: {
+                    final JsonArray a = new JsonArray();
+                    for (int k = 0; k < steps.length; k++) {
+                        a.add(cands.get(steps[reverse ? steps.length - 1 - k : k]).frag.deepCopy());
+                    }
                     o.add("choices", a);
                     return o;
                 }
@@ -165,6 +199,8 @@ public final class RlCandidates {
                     o.add("pairs", a);
                     return o;
                 }
+                case SHAPE_TWO_FRAME:
+                    return answerTwoFrame(steps, null, null); // the first frame alone: kept cards in slot order
                 default:
                     throw new IllegalStateException("no answer shape");
             }
@@ -210,9 +246,37 @@ public final class RlCandidates {
                     }
                     return null;
                 }
+                case RlSchema.M_PERMUTE: {
+                    if (steps.length != c) {
+                        return "PERMUTE needs " + c + " steps, got " + steps.length;
+                    }
+                    final boolean[] seen = new boolean[c];
+                    for (short s : steps) {
+                        if (s < 0 || s >= c || cands.get(s).kind <= 0 || seen[s]) {
+                            return "PERMUTE step out of range or repeated: " + s;
+                        }
+                        seen[s] = true;
+                    }
+                    return null;
+                }
                 default:
                     return "unsupported mode " + mode;
             }
+        }
+
+        /** SHAPE_CHOICES' list key (goldens). */
+        public String listKey() {
+            return listKey;
+        }
+
+        /** Two-frame families: the answer key of the cards not kept on top (goldens). */
+        public String restKey() {
+            return restKey;
+        }
+
+        /** SHAPE_PERMUTE: the answer is the steps reversed (goldens). */
+        public boolean reversed() {
+            return reverse;
         }
 
         /** Candidate i's answer fragment (goldens). */
@@ -321,9 +385,223 @@ public final class RlCandidates {
                     }
                     return out;
                 }
+                // ---- Phase B (lane rl-r0-b4-1006)
+                case RlSchema.F_ENTITY: {
+                    if (mode == RlSchema.M_SINGLE) {
+                        if (echo.has("none") && !echo.get("none").isJsonNull() && echo.get("none").getAsBoolean()) {
+                            return single(indexOfKey("none"));
+                        }
+                        if (!echo.has("choice") || echo.get("choice").isJsonNull()) {
+                            return null;
+                        }
+                        return single(indexOfKey("i:" + echo.get("choice").getAsInt()));
+                    }
+                    return listByKey(echo, "choices", "i:");
+                }
+                case RlSchema.F_CARDS:
+                case RlSchema.F_DISCARD_FROM:
+                case RlSchema.F_COST_CARDS:
+                    return listByKey(echo, "choices", "card:");
+                case RlSchema.F_MODE:
+                case RlSchema.F_OPTIONAL_COSTS:
+                    return listByKey(echo, "choices", "i:");
+                case RlSchema.F_CONFIRM:
+                case RlSchema.F_PUT_ON_TOP:
+                case RlSchema.F_OPTIONAL_TRIGGER:
+                case RlSchema.F_PAY_TO_PREVENT:
+                    return echo.has("yes") && !echo.get("yes").isJsonNull()
+                            ? single(indexOfKey(echo.get("yes").getAsBoolean() ? "yes" : "no")) : null;
+                case RlSchema.F_NUMBER:
+                    return echo.has("value") && !echo.get("value").isJsonNull()
+                            ? single(indexOfKey("v:" + echo.get("value").getAsInt())) : null;
+                case RlSchema.F_PILE:
+                    return echo.has("pile") && !echo.get("pile").isJsonNull()
+                            ? single(indexOfKey("pile:" + echo.get("pile").getAsInt())) : null;
+                case RlSchema.F_NAME: {
+                    if (!echo.has("name") || echo.get("name").isJsonNull()) {
+                        return null;
+                    }
+                    int i = indexOfKey("name:" + echo.get("name").getAsString());
+                    if (i < 0) {
+                        i = indexOfKey("forge"); // a name off this menu is what "Forge's choice" means
+                    }
+                    return single(i);
+                }
+                case RlSchema.F_COLOR:
+                    if (mode == RlSchema.M_SINGLE) {
+                        return echo.has("color") && !echo.get("color").isJsonNull()
+                                ? single(indexOfKey("c:" + echo.get("color").getAsInt())) : null;
+                    }
+                    return listByKey(echo, "colors", "c:");
+                case RlSchema.F_ORDER: {
+                    final short[] mv = keysOf(echo, "choices", "card:");
+                    if (mv == null || mv.length != C()) {
+                        return null;
+                    }
+                    final short[] out = new short[mv.length];
+                    for (int k = 0; k < mv.length; k++) {
+                        out[k] = mv[reverse ? mv.length - 1 - k : k];
+                    }
+                    return validate(out) == null ? out : null;
+                }
                 default:
                     return null;
             }
+        }
+
+        private short[] single(final int i) {
+            if (i < 0) {
+                return null;
+            }
+            final short[] out = {(short) i};
+            return validate(out) == null ? out : null;
+        }
+
+        /** The candidates whose keys are {@code prefix + element} for each element of {@code echo[key]}, in order. */
+        private short[] keysOf(final JsonObject echo, final String key, final String prefix) {
+            if (!echo.has(key) || !echo.get(key).isJsonArray()) {
+                return null;
+            }
+            final JsonArray a = echo.getAsJsonArray(key);
+            final short[] out = new short[a.size()];
+            for (int j = 0; j < a.size(); j++) {
+                final JsonElement e = a.get(j);
+                final int i = indexOfKey(prefix + (e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber()
+                        ? String.valueOf(e.getAsInt()) : e.getAsString()));
+                if (i < 0) {
+                    return null;
+                }
+                out[j] = (short) i;
+            }
+            return out;
+        }
+
+        private short[] listByKey(final JsonObject echo, final String key, final String prefix) {
+            final short[] out = keysOf(echo, key, prefix);
+            return out != null && validate(out) == null ? out : null;
+        }
+
+        // ---- two-frame families (SCRY, SURVEIL)
+
+        /**
+         * The second frame of a two-frame ask: PERMUTE over the cards the first frame's steps keep on top (in the
+         * looked-at order), or null when fewer than two are kept (no second frame).
+         */
+        public Menu secondFrame(final short[] steps1) {
+            final List<Card> keep = keptBy(steps1);
+            if (keep.size() < 2) {
+                return null;
+            }
+            final Menu p = new Menu();
+            p.family = family;
+            p.method = method;
+            p.kind = kind;
+            p.mode = RlSchema.M_PERMUTE;
+            p.shape = SHAPE_PERMUTE;
+            p.restKey = restKey;
+            for (Card c : keep) {
+                final Cand x = new Cand();
+                x.kind = RlSchema.K_CARD;
+                x.host = c;
+                x.frag = new JsonPrimitive(c.getId());
+                x.key = "card:" + c.getId();
+                p.cands.add(x);
+                p.kept.add(c);
+            }
+            finish(p);
+            return p;
+        }
+
+        private List<Card> keptBy(final short[] steps1) {
+            final List<Card> keep = new ArrayList<>();
+            for (int s = 0; s < looked.size() && s < steps1.length; s++) {
+                if (cands.get(steps1[s]).kind == RlSchema.K_YES) {
+                    keep.add(looked.get(s));
+                }
+            }
+            return keep;
+        }
+
+        /** The answer of a two-frame ask: {@code {top: [fid…] (top first), <rest>: [fid…]}}. */
+        public JsonObject answerTwoFrame(final short[] steps1, final Menu second, final short[] steps2) {
+            final JsonObject o = new JsonObject();
+            final JsonArray top = new JsonArray();
+            final JsonArray rest = new JsonArray();
+            if (second == null) {
+                for (Card c : keptBy(steps1)) {
+                    top.add(c.getId());
+                }
+            } else {
+                for (short k : steps2) {
+                    top.add(second.kept.get(k).getId());
+                }
+            }
+            for (int s = 0; s < looked.size(); s++) {
+                if (cands.get(steps1[s]).kind != RlSchema.K_YES) {
+                    rest.add(looked.get(s).getId());
+                }
+            }
+            o.add("top", top);
+            o.add(restKey, rest);
+            return o;
+        }
+
+        /**
+         * Record mode: Forge's {@code {top, <rest>}} → {steps1, second frame or null, steps2 or null}, or null when the
+         * answer does not partition the looked-at cards.
+         */
+        public Object[] fromEchoTwoFrame(final JsonObject echo) {
+            if (echo == null || !echo.has("top") || !echo.has(restKey)) {
+                return null;
+            }
+            final List<Integer> top = new ArrayList<>();
+            for (JsonElement e : echo.getAsJsonArray("top")) {
+                top.add(e.getAsInt());
+            }
+            int restN = echo.getAsJsonArray(restKey).size();
+            if (top.size() + restN != looked.size()) {
+                return null;
+            }
+            final short[] steps1 = new short[looked.size()];
+            for (int s = 0; s < looked.size(); s++) {
+                final boolean onTop = top.contains(looked.get(s).getId());
+                int found = -1;
+                for (int i = 0; i < C(); i++) {
+                    final Cand x = cands.get(i);
+                    if (x.slot == s && x.kind == (onTop ? RlSchema.K_YES : RlSchema.K_NO)) {
+                        found = i;
+                        break;
+                    }
+                }
+                if (found < 0) {
+                    return null;
+                }
+                steps1[s] = (short) found;
+            }
+            if (validate(steps1) != null || keptBy(steps1).size() != top.size()) {
+                return null;
+            }
+            final Menu second = secondFrame(steps1);
+            short[] steps2 = null;
+            if (second != null) {
+                steps2 = new short[top.size()];
+                for (int k = 0; k < top.size(); k++) {
+                    int at = -1;
+                    for (int i = 0; i < second.kept.size(); i++) {
+                        if (second.kept.get(i).getId() == top.get(k)) {
+                            at = i;
+                        }
+                    }
+                    if (at < 0) {
+                        return null;
+                    }
+                    steps2[k] = (short) at;
+                }
+                if (second.validate(steps2) != null) {
+                    return null;
+                }
+            }
+            return new Object[] {steps1, second, steps2};
         }
 
         private int indexOfKey(final String key) {
@@ -373,12 +651,21 @@ public final class RlCandidates {
     // ------------------------------------------------------------------------------------------------ build
 
     /**
-     * The menu of one Phase A ask, or null for a family this builder does not pose (Phase B, or an unknown kind).
+     * The menu of one ask (the 7-argument form without a seen-cards set).
      */
     public static Menu build(final Game game, final Player seat, final String method, final String kind,
             final JsonObject body, final Object objs) {
+        return build(game, seat, method, kind, body, objs, null);
+    }
+
+    /**
+     * The menu of one ask of any family 1–24 ({@code seen}: the opponent cards the seat has seen, by name, in
+     * first-seen order, for NAME; may be null), or null for a kind no family names.
+     */
+    public static Menu build(final Game game, final Player seat, final String method, final String kind,
+            final JsonObject body, final Object objs, final List<String> seen) {
         final int family = RlSchema.familyOf(kind, method);
-        if (!RlSchema.isPhaseA(family)) {
+        if (!RlSchema.isLearned(family)) {
             return null;
         }
         final Menu m = new Menu();
@@ -407,6 +694,67 @@ public final class RlCandidates {
                     break;
                 case RlSchema.F_MULLIGAN_BOTTOM:
                     bottom(m, body, objs);
+                    break;
+                // ---- Phase B (lane rl-r0-b4-1006; interfaces Appendix B.1)
+                case RlSchema.F_ENTITY:
+                    entity(m, body, objs);
+                    break;
+                case RlSchema.F_CARDS:
+                case RlSchema.F_DISCARD_FROM:
+                case RlSchema.F_COST_CARDS:
+                    cards(m, body, objs);
+                    break;
+                case RlSchema.F_MODE:
+                    if ("chooseModeForAbility".equals(m.method)) {
+                        modes(m, body, objs);
+                    } else {
+                        options(m, objs);
+                    }
+                    break;
+                case RlSchema.F_CONFIRM: {
+                    final Object[] o = arr(objs, 2);
+                    final SpellAbility sa = (SpellAbility) o[0];
+                    final Card shown = (Card) o[1];
+                    yesNo(m, shown != null ? shown : sa == null ? null : sa.getHostCard(), true, true, -1);
+                    break;
+                }
+                case RlSchema.F_NUMBER:
+                    number(m, body, objs);
+                    break;
+                case RlSchema.F_OPTIONAL_COSTS:
+                    optionalCosts(m, objs);
+                    break;
+                case RlSchema.F_SCRY:
+                case RlSchema.F_SURVEIL:
+                    look(m, objs);
+                    break;
+                case RlSchema.F_ORDER:
+                    order(m, objs);
+                    break;
+                case RlSchema.F_PILE:
+                    pile(m, objs);
+                    break;
+                case RlSchema.F_PUT_ON_TOP:
+                    yesNo(m, (Card) objs, true, true, -1);
+                    break;
+                case RlSchema.F_OPTIONAL_TRIGGER: {
+                    final Object[] o = arr(objs, 2);
+                    final SpellAbility w = (SpellAbility) o[0];
+                    yesNo(m, w == null ? null : w.getHostCard(), true, !Boolean.TRUE.equals(o[1]), -1);
+                    break;
+                }
+                case RlSchema.F_PAY_TO_PREVENT: {
+                    final Object[] o = arr(objs, 4);
+                    final SpellAbility sa = (SpellAbility) o[1];
+                    yesNo(m, sa == null ? null : sa.getHostCard(), Boolean.TRUE.equals(o[2]), true,
+                            o[3] instanceof Integer ? (Integer) o[3] : -1);
+                    break;
+                }
+                case RlSchema.F_NAME:
+                    name(m, seat, objs, seen);
+                    break;
+                case RlSchema.F_COLOR:
+                    color(m, objs);
                     break;
                 default:
                     return null;
@@ -475,6 +823,17 @@ public final class RlCandidates {
                 }
                 m.minPick = m.S();
                 m.maxPick = m.S();
+                break;
+            }
+            case RlSchema.M_PERMUTE: {
+                if (c == 0) {
+                    m.unposable = "PERMUTE over nothing";
+                } else if (c == 1) {
+                    m.trivial = true;
+                    m.trivialSteps = new short[] {0};
+                }
+                m.minPick = c;
+                m.maxPick = c;
                 break;
             }
             default:
@@ -629,6 +988,9 @@ public final class RlCandidates {
         final List<SpellAbilityStackInstance> stack = (List<SpellAbilityStackInstance>) o[2];
         m.source = o[0] instanceof SpellAbility ? ((SpellAbility) o[0]).getHostCard() : null;
         m.sourceIsSpell = o[0] instanceof SpellAbility && ((SpellAbility) o[0]).getRootAbility().isSpell();
+        if (body.has("origin") && !body.get("origin").isJsonNull()) {
+            m.origin = body.get("origin").getAsString();
+        }
         addTargets(m, ents, stack);
         final int min = body.has("min") ? body.get("min").getAsInt() : 1;
         final int max = body.has("max") ? body.get("max").getAsInt() : 1;
@@ -810,6 +1172,452 @@ public final class RlCandidates {
         m.mullK = m.minPick;
     }
 
+    // ------------------------------------------------------------------------------------------------ Phase B builders
+    // lane rl-r0-b4-1006; interfaces.md Appendix B.1. Keys (echo matching): "i:<index>" (index-answered menus),
+    // "card:<fid>", "v:<value>", "pile:<p>", "name:<name>", "c:<colour>", "yes"/"no", "none", "forge".
+
+    private static Object[] arr(final Object objs, final int n) {
+        if (!(objs instanceof Object[]) || ((Object[]) objs).length < n) {
+            throw new IllegalArgumentException("ask without its menu objects");
+        }
+        return (Object[]) objs;
+    }
+
+    private static JsonObject kv(final String key, final JsonElement v) {
+        final JsonObject o = new JsonObject();
+        o.add(key, v);
+        return o;
+    }
+
+    /** The first token showing card index {@code idx} (NAME candidates), or -1. */
+    static int tokenOfCard(final RlFeaturizer.Obs o, final int idx) {
+        if (idx <= CardIndex.UNK) {
+            return -1;
+        }
+        for (int i = 0; i < o.L; i++) {
+            if (o.tokCard[i] == idx) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** SINGLE over [YES, NO] (either may be illegal: absent), {@code host} the card the question is about. */
+    private static void yesNo(final Menu m, final Card host, final boolean yes, final boolean no, final int num) {
+        m.mode = RlSchema.M_SINGLE;
+        m.shape = SHAPE_SINGLE;
+        m.minPick = 1;
+        m.maxPick = 1;
+        if (yes) {
+            final Cand y = new Cand();
+            y.kind = RlSchema.K_YES;
+            y.host = host;
+            y.num = num;
+            y.frag = flag("yes", true);
+            y.key = "yes";
+            m.cands.add(y);
+        }
+        if (no) {
+            final Cand n = new Cand();
+            n.kind = RlSchema.K_NO;
+            n.host = host;
+            n.frag = flag("yes", false);
+            n.key = "no";
+            m.cands.add(n);
+        }
+    }
+
+    /** 8 ENTITY: chooseSingleEntityForEffect (SINGLE, NONE when optional) / chooseEntitiesForEffect (SUBSET). */
+    @SuppressWarnings("unchecked")
+    private static void entity(final Menu m, final JsonObject body, final Object objs) {
+        final Object[] o = arr(objs, 3);
+        final List<? extends GameEntity> options = (List<? extends GameEntity>) o[0];
+        final SpellAbility sa = (SpellAbility) o[1];
+        final boolean optional = Boolean.TRUE.equals(o[2]);
+        final boolean single = "chooseSingleEntityForEffect".equals(m.method);
+        m.source = sa == null ? null : sa.getHostCard();
+        for (int i = 0; i < options.size(); i++) {
+            final GameEntity ge = options.get(i);
+            final Cand c = new Cand();
+            if (ge instanceof Player) {
+                c.kind = RlSchema.K_PLAYER;
+                c.tgt0 = ge;
+            } else {
+                c.kind = RlSchema.K_CARD;
+                c.host = ge instanceof Card ? (Card) ge : null;
+            }
+            c.frag = single ? kv("choice", new JsonPrimitive(i)) : new JsonPrimitive(i);
+            c.key = "i:" + i;
+            m.cands.add(c);
+        }
+        if (single) {
+            if (optional) {
+                final Cand none = new Cand();
+                none.kind = RlSchema.K_NONE;
+                none.frag = flag("none", true);
+                none.key = "none";
+                m.cands.add(none);
+            }
+            m.mode = RlSchema.M_SINGLE;
+            m.shape = SHAPE_SINGLE;
+            m.minPick = 1;
+            m.maxPick = 1;
+        } else {
+            m.mode = RlSchema.M_SUBSET;
+            m.shape = SHAPE_CHOICES;
+            final int min = body.has("min") ? body.get("min").getAsInt() : 0;
+            final int max = body.has("max") ? body.get("max").getAsInt() : options.size();
+            m.minPick = Math.max(0, min);
+            m.maxPick = Math.min(Math.max(0, max), m.C());
+        }
+    }
+
+    /** 9 CARDS, 16 DISCARD_FROM, 17 COST_CARDS: SUBSET over a card pool, answered by fids. */
+    @SuppressWarnings("unchecked")
+    private static void cards(final Menu m, final JsonObject body, final Object objs) {
+        final Object pool = objs instanceof Object[] ? ((Object[]) objs)[0] : objs;
+        if (!(pool instanceof Iterable)) {
+            m.unposable = m.kind + " ask without its pool";
+            return;
+        }
+        m.mode = RlSchema.M_SUBSET;
+        m.shape = SHAPE_CHOICES;
+        for (Card c : (Iterable<Card>) pool) {
+            final Cand x = new Cand();
+            x.kind = RlSchema.K_CARD;
+            x.host = c;
+            x.frag = new JsonPrimitive(c.getId());
+            x.key = "card:" + c.getId();
+            m.cands.add(x);
+        }
+        final int min = body.has("min") ? body.get("min").getAsInt() : 0;
+        final int max = body.has("max") ? body.get("max").getAsInt() : min;
+        m.minPick = Math.max(0, min);
+        m.maxPick = Math.min(Math.max(0, max), m.C());
+    }
+
+    /** 10 MODE: SUBSET (min, num) over the modes; cand_num = cand_ability = the mode index, the host card. */
+    @SuppressWarnings("unchecked")
+    private static void modes(final Menu m, final JsonObject body, final Object objs) {
+        final Object[] o = arr(objs, 2);
+        final SpellAbility sa = (SpellAbility) o[0];
+        final List<? extends SpellAbility> possible = (List<? extends SpellAbility>) o[1];
+        m.mode = RlSchema.M_SUBSET;
+        m.shape = SHAPE_CHOICES;
+        final Card host = sa == null ? null : sa.getHostCard();
+        for (int i = 0; i < possible.size(); i++) {
+            final Cand c = new Cand();
+            c.kind = RlSchema.K_MODE;
+            c.host = host;
+            c.num = i;
+            c.ability = i;
+            c.frag = new JsonPrimitive(i);
+            c.key = "i:" + i;
+            m.cands.add(c);
+        }
+        final int min = body.has("min") ? body.get("min").getAsInt() : 1;
+        final int num = body.has("num") ? body.get("num").getAsInt() : 1;
+        m.minPick = Math.max(0, min);
+        m.maxPick = Math.min(Math.max(0, num), m.C());
+    }
+
+    /**
+     * 10 MODE for the other strategic option asks (ICR B4-strategic-leftovers, ruled 10-05): protection type, pump
+     * keyword, a spell for an effect, a card face, the ability to cast from an effect, generic spell-ability choices.
+     * SUBSET (min, max from the ask; min = max = 1 for single choices); cand_num = cand_ability = the option index;
+     * cand_tok / cand_card = the option's host card (a spell ability), its name (a card face), else the source's host.
+     */
+    @SuppressWarnings("unchecked")
+    private static void options(final Menu m, final Object objs) {
+        final Object[] o = arr(objs, 4);
+        final SpellAbility sa = (SpellAbility) o[0];
+        final List<?> opts = (List<?>) o[1];
+        m.mode = RlSchema.M_SUBSET;
+        m.shape = SHAPE_CHOICES;
+        final Card src = sa == null ? null : sa.getHostCard();
+        for (int i = 0; i < opts.size(); i++) {
+            final Object x = opts.get(i);
+            final Cand c = new Cand();
+            c.kind = RlSchema.K_MODE;
+            if (x instanceof SpellAbility) {
+                c.host = ((SpellAbility) x).getHostCard();
+            } else if (x instanceof forge.card.ICardFace) {
+                c.name = ((forge.card.ICardFace) x).getName();
+            } else {
+                c.host = src;
+            }
+            c.num = i;
+            c.ability = i;
+            c.frag = new JsonPrimitive(i);
+            c.key = "i:" + i;
+            m.cands.add(c);
+        }
+        m.minPick = Math.max(0, (Integer) o[2]);
+        m.maxPick = Math.min(Math.max(0, (Integer) o[3]), m.C());
+    }
+
+    /**
+     * 12 NUMBER: SINGLE over the allowed values ascending (cand_num = the value). Over C_MAX values: C_MAX evenly
+     * spaced, min and max included.
+     */
+    private static void number(final Menu m, final JsonObject body, final Object objs) {
+        m.mode = RlSchema.M_SINGLE;
+        m.shape = SHAPE_SINGLE;
+        m.minPick = 1;
+        m.maxPick = 1;
+        final Card host = objs instanceof SpellAbility ? ((SpellAbility) objs).getHostCard() : null;
+        final java.util.TreeSet<Integer> vals = new java.util.TreeSet<>();
+        if (body.has("values") && body.get("values").isJsonArray()) {
+            final List<Integer> all = new ArrayList<>();
+            for (JsonElement e : body.getAsJsonArray("values")) {
+                all.add(e.getAsInt());
+            }
+            final List<Integer> distinct = new ArrayList<>(new java.util.TreeSet<>(all));
+            final int n = distinct.size();
+            if (n <= RlSchema.C_MAX) {
+                vals.addAll(distinct);
+            } else {
+                for (int k = 0; k < RlSchema.C_MAX; k++) {
+                    vals.add(distinct.get((int) Math.round(k * (n - 1) / (double) (RlSchema.C_MAX - 1))));
+                }
+            }
+        } else {
+            final long lo = body.has("min") ? body.get("min").getAsLong() : 0;
+            final long hi = body.has("max") ? body.get("max").getAsLong() : lo;
+            if (hi < lo) {
+                m.unposable = "number range [" + lo + "," + hi + "]";
+                return;
+            }
+            if (hi - lo + 1 <= RlSchema.C_MAX) {
+                for (long v = lo; v <= hi; v++) {
+                    vals.add((int) v);
+                }
+            } else {
+                for (int k = 0; k < RlSchema.C_MAX; k++) {
+                    vals.add((int) (lo + Math.round(k * (hi - lo) / (double) (RlSchema.C_MAX - 1))));
+                }
+            }
+        }
+        for (int v : vals) {
+            final Cand c = new Cand();
+            c.kind = RlSchema.K_NUMBER;
+            c.host = host;
+            c.num = Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, v));
+            c.frag = kv("value", new JsonPrimitive(v));
+            c.key = "v:" + v;
+            m.cands.add(c);
+        }
+    }
+
+    /** 13 OPTIONAL_COSTS: SUBSET 0..n; cand_num = the cost index, cand_flags bit1 = a kicker. */
+    @SuppressWarnings("unchecked")
+    private static void optionalCosts(final Menu m, final Object objs) {
+        final Object[] o = arr(objs, 2);
+        final SpellAbility sa = (SpellAbility) o[0];
+        final List<forge.game.spellability.OptionalCostValue> costs =
+                (List<forge.game.spellability.OptionalCostValue>) o[1];
+        m.mode = RlSchema.M_SUBSET;
+        m.shape = SHAPE_CHOICES;
+        final Card host = sa == null ? null : sa.getHostCard();
+        for (int i = 0; i < costs.size(); i++) {
+            final Cand c = new Cand();
+            c.kind = RlSchema.K_MODE;
+            c.host = host;
+            c.num = i;
+            final forge.game.spellability.OptionalCost t = costs.get(i).getType();
+            if (t == forge.game.spellability.OptionalCost.Kicker1 || t == forge.game.spellability.OptionalCost.Kicker2) {
+                c.flags = 2;
+            }
+            c.frag = new JsonPrimitive(i);
+            c.key = "i:" + i;
+            m.cands.add(c);
+        }
+        m.minPick = 0;
+        m.maxPick = m.C();
+    }
+
+    /**
+     * 14 SCRY, 19 SURVEIL, first frame: ASSIGN with one slot per looked-at card (Forge's order, top first) and two
+     * candidates each: YES = keep on top, NO = bottom (scry) / graveyard (surveil). The second frame is
+     * {@link Menu#secondFrame}.
+     */
+    @SuppressWarnings("unchecked")
+    private static void look(final Menu m, final Object objs) {
+        if (!(objs instanceof Iterable)) {
+            m.unposable = m.kind + " ask without its cards";
+            return;
+        }
+        m.mode = RlSchema.M_ASSIGN;
+        m.shape = SHAPE_TWO_FRAME;
+        m.restKey = m.family == RlSchema.F_SCRY ? "bottom" : "graveyard";
+        int s = 0;
+        for (Card c : (Iterable<Card>) objs) {
+            m.slotCards.add(c);
+            m.looked.add(c);
+            final Cand y = new Cand();
+            y.kind = RlSchema.K_YES;
+            y.host = c;
+            y.slot = s;
+            y.frag = new JsonPrimitive(c.getId());
+            y.key = "top:" + c.getId();
+            m.cands.add(y);
+            final Cand n = new Cand();
+            n.kind = RlSchema.K_NO;
+            n.host = c;
+            n.slot = s;
+            n.frag = new JsonPrimitive(c.getId());
+            n.key = "rest:" + c.getId();
+            m.cands.add(n);
+            s++;
+        }
+    }
+
+    /**
+     * 15 ORDER (orderMoveToZoneList): PERMUTE over the cards. Steps = the final top-first order (ruling 10-05): for a
+     * move onto the top of a library ({@code topFirst}) the answer, Forge's move order, is the steps reversed;
+     * otherwise the answer is the steps.
+     */
+    @SuppressWarnings("unchecked")
+    private static void order(final Menu m, final Object objs) {
+        final Object[] o = arr(objs, 3);
+        m.mode = RlSchema.M_PERMUTE;
+        m.shape = SHAPE_PERMUTE;
+        m.reverse = Boolean.TRUE.equals(o[2]);
+        for (Card c : (Iterable<Card>) o[0]) {
+            final Cand x = new Cand();
+            x.kind = RlSchema.K_CARD;
+            x.host = c;
+            x.frag = new JsonPrimitive(c.getId());
+            x.key = "card:" + c.getId();
+            m.cands.add(x);
+        }
+    }
+
+    /**
+     * 18 PILE: SINGLE over [pile A, pile B] (kind MODE); cand_num = the pile's size, cand_card = its highest-MV card,
+     * cand_tgt = tokens of its two highest-MV members (lossy). A face-down pile shows only its size.
+     */
+    private static void pile(final Menu m, final Object objs) {
+        final Object[] o = arr(objs, 4);
+        // TwoPilesEffect passes its FaceDown parameter (PlayerController names it faceUp): "False" = both piles face
+        // up, "True" = both face down, "One" = pile 1 (the separator's pick) face down
+        final String faceDown = String.valueOf(o[3]);
+        m.mode = RlSchema.M_SINGLE;
+        m.shape = SHAPE_SINGLE;
+        m.minPick = 1;
+        m.maxPick = 1;
+        for (int p = 0; p < 2; p++) {
+            @SuppressWarnings("unchecked")
+            final List<Card> pile = new ArrayList<>((java.util.Collection<Card>) (p == 0 ? o[1] : o[2]));
+            final boolean hidden = "True".equals(faceDown) || ("One".equals(faceDown) && p == 0);
+            pile.sort((a, b) -> a.getCMC() != b.getCMC() ? Integer.compare(b.getCMC(), a.getCMC())
+                    : Integer.compare(a.getId(), b.getId()));
+            final Cand c = new Cand();
+            c.kind = RlSchema.K_MODE;
+            c.num = pile.size();
+            if (hidden) {
+                c.hidden = true;
+            } else {
+                c.host = pile.isEmpty() ? null : pile.get(0);
+                c.tgt0 = pile.isEmpty() ? null : pile.get(0);
+                c.tgt1 = pile.size() < 2 ? null : pile.get(1);
+            }
+            c.frag = kv("pile", new JsonPrimitive(p));
+            c.key = "pile:" + p;
+            m.cands.add(c);
+        }
+    }
+
+    /**
+     * 23 NAME: SINGLE over the legal names among the opponent cards the seat has seen (first-seen order) and its own
+     * deck (deck order), or over the ask's own faces; then "Forge's choice" (kind MODE, cand_num -1; delegated).
+     */
+    @SuppressWarnings("unchecked")
+    private static void name(final Menu m, final Player seat, final Object objs, final List<String> seen) {
+        final Object[] o = arr(objs, 3);
+        final java.util.function.Predicate<forge.card.ICardFace> cpp =
+                (java.util.function.Predicate<forge.card.ICardFace>) o[1];
+        final List<forge.card.ICardFace> faces = (List<forge.card.ICardFace>) o[2];
+        m.mode = RlSchema.M_SINGLE;
+        m.shape = SHAPE_SINGLE;
+        m.minPick = 1;
+        m.maxPick = 1;
+        final java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        if (faces != null) {
+            for (forge.card.ICardFace f : faces) {
+                if (f != null) {
+                    names.add(f.getName());
+                }
+            }
+        } else {
+            final List<String> pool = new ArrayList<>();
+            if (seen != null) {
+                pool.addAll(seen);
+            }
+            final forge.game.player.RegisteredPlayer rp = seat.getRegisteredPlayer();
+            if (rp != null && rp.getDeck() != null && rp.getDeck().getMain() != null) {
+                for (Map.Entry<forge.item.PaperCard, Integer> e : rp.getDeck().getMain()) {
+                    pool.add(e.getKey().getName());
+                }
+            }
+            for (String n : pool) {
+                if (!names.contains(n) && forge.bench.PlayerControllerBridge.nameLegal(n, cpp, null)) {
+                    names.add(n);
+                }
+            }
+        }
+        for (String n : names) {
+            if (m.C() >= RlSchema.C_MAX - 1) {
+                break;
+            }
+            final Cand c = new Cand();
+            c.kind = RlSchema.K_CARD;
+            c.name = n;
+            c.frag = kv("name", new JsonPrimitive(n));
+            c.key = "name:" + n;
+            m.cands.add(c);
+        }
+        final Cand forge = new Cand();
+        forge.kind = RlSchema.K_MODE;
+        forge.num = -1;
+        forge.frag = flag("delegate", true);
+        forge.key = "forge";
+        m.cands.add(forge);
+    }
+
+    /** 24 COLOR: chooseColor SINGLE, chooseColors SUBSET; MODE candidates, cand_num 0-4 = W, U, B, R, G. */
+    private static void color(final Menu m, final Object objs) {
+        final Object[] o = arr(objs, 4);
+        final SpellAbility sa = (SpellAbility) o[0];
+        final forge.card.ColorSet cs = (forge.card.ColorSet) o[1];
+        final boolean single = "chooseColor".equals(m.method);
+        final Card host = sa == null ? null : sa.getHostCard();
+        for (int i = 0; i < forge.card.MagicColor.WUBRG.length; i++) {
+            if ((cs.getColor() & forge.card.MagicColor.WUBRG[i]) == 0) {
+                continue;
+            }
+            final Cand c = new Cand();
+            c.kind = RlSchema.K_MODE;
+            c.host = host;
+            c.num = i;
+            c.frag = single ? kv("color", new JsonPrimitive(i)) : new JsonPrimitive(i);
+            c.key = "c:" + i;
+            m.cands.add(c);
+        }
+        if (single) {
+            m.mode = RlSchema.M_SINGLE;
+            m.shape = SHAPE_SINGLE;
+            m.minPick = 1;
+            m.maxPick = 1;
+        } else {
+            m.mode = RlSchema.M_SUBSET;
+            m.shape = SHAPE_CHOICES;
+            m.listKey = "colors";
+            m.minPick = Math.max(0, (Integer) o[2]);
+            m.maxPick = Math.min(Math.max(0, (Integer) o[3]), m.C());
+        }
+    }
+
     // ------------------------------------------------------------------------------------------------ record-mode synthesis
 
     /**
@@ -881,8 +1689,12 @@ public final class RlCandidates {
                         steps[j] = (short) at;
                     }
                     finish(m);
-                    if (steps != null && m.unposable == null && m.validate(steps) != null) {
-                        steps = null;
+                    if (steps != null && m.unposable == null) {
+                        final String bad = m.validate(steps);
+                        if (bad != null) {
+                            m.unposable = "Forge's targets break the menu's rules: " + bad;
+                            steps = null;
+                        }
                     }
                 } catch (RuntimeException e) {
                     m.unposable = "targets synthesis failed: " + e;
