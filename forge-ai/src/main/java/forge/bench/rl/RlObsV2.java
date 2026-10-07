@@ -26,8 +26,6 @@ import forge.game.player.Player;
 import forge.game.player.PlayerView;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
-import forge.game.staticability.StaticAbility;
-import forge.game.trigger.Trigger;
 import forge.game.zone.ZoneType;
 
 /**
@@ -712,20 +710,14 @@ final class RlObsV2 {
         return b;
     }
 
-    /** A spell, activated, triggered or static ability on the card that is not its own (granted by an effect). */
+    /**
+     * A spell or activated ability another object's static ability grants the card ("equipped creature has ..."):
+     * Forge's grantor. (Forge's intrinsic flag is not this: most scripted abilities carry it unset.) Granted keywords
+     * are KW facts; granted triggers and statics are not covered by this bit.
+     */
     private static boolean granted(final Card c) {
         for (SpellAbility sa : c.getSpellAbilities()) {
-            if (!sa.isIntrinsic()) {
-                return true;
-            }
-        }
-        for (Trigger t : c.getTriggers()) {
-            if (!t.isIntrinsic()) {
-                return true;
-            }
-        }
-        for (StaticAbility st : c.getStaticAbilities()) {
-            if (!st.isIntrinsic()) {
+            if (sa.getGrantorStatic() != null) {
                 return true;
             }
         }

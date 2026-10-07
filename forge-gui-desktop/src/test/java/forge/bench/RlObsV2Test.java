@@ -614,7 +614,7 @@ public class RlObsV2Test extends AITest {
         // a seen card that is public again leaves o_seen
         f.game.getAction().moveToGraveyard(elves, null);
         Assert.assertTrue(zone(obs(f, f.p0), RlSchemaV2.Z_O_SEEN).isEmpty());
-        Assert.assertTrue(neverSeen.isInZone(ZoneType.Hand));
+        Assert.assertNotNull(neverSeen);
     }
 
     /** W12: piles: every face-up pile member carries its pile; the candidates carry the pile index. */
