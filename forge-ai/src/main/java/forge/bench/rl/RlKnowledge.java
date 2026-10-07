@@ -4,9 +4,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import com.google.common.eventbus.Subscribe;
@@ -41,6 +43,13 @@ import forge.game.zone.ZoneView;
  * public zone or its own hand going into a hidden zone it can follow). Knowledge is dropped on a shuffle of that
  * library, when another player rearranges cards it knew, and on any move between hidden zones that it cannot follow.
  * Forge's hidden truth is read for one thing only: the current index of a card the seat already knows.
+ *
+ * <p><b>Hands (finding F1, lane rl-obs-v2-1006).</b> When a card leaves another player's hand and the seat does not see
+ * which card it was (a Brainstorm put-back, a foretell, a morph cast face down), the seat cannot tell whether it was
+ * one it knew, so it forgets every card of that hand it knew before the move. Whether the seat saw the card is decided
+ * once Forge has finished the move: Forge exiles a foretold card (and a card exiled "face down") face up, then turns it
+ * face down. Such moves wait in {@link #pending} until the next query or resolution, and a card that is face down by
+ * then was not seen: it does not enter the seen-cards set (NAME) either.
  */
 public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     public static final int TAIL = 16;
@@ -72,8 +81,34 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     }
 
     private final Game game;
+    /** Per seat: the hidden cards it knows, by id, with the event clock of the latest observation that taught it. */
     @SuppressWarnings("unchecked")
-    private final Set<Integer>[] known = new Set[] {new HashSet<>(), new HashSet<>()};
+    private final Map<Integer, Long>[] known = new Map[] {new HashMap<>(), new HashMap<>()};
+    /** Event clock: one tick per zone change. */
+    private long clock = 0;
+
+    /**
+     * A move whose visibility to {@code seat} is settled later ({@link #settle}): the card entered a zone where Forge
+     * may still turn it face down. {@code name}: the seen-cards entry the move added (removed again if the card was not
+     * seen); {@code handOwner}: the player whose hand it left, if not the seat itself.
+     */
+    private static final class Pending {
+        final int seat;
+        final int cardId;
+        final String name;
+        final Player handOwner;
+        final long at;
+
+        Pending(final int seat, final int cardId, final String name, final Player handOwner, final long at) {
+            this.seat = seat;
+            this.cardId = cardId;
+            this.name = name;
+            this.handOwner = handOwner;
+            this.at = at;
+        }
+    }
+
+    private final List<Pending> pending = new ArrayList<>();
     @SuppressWarnings("unchecked")
     private final LinkedHashSet<String>[] seenOpp = new LinkedHashSet[] {new LinkedHashSet<>(), new LinkedHashSet<>()};
     private final Deque<StackEvent> tail = new ArrayDeque<>();
@@ -122,7 +157,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         if (s < 0 || s > 1 || c == null) {
             return;
         }
-        if (known[s].add(c.getId()) && log != null) {
+        if (known[s].put(c.getId(), clock) == null && log != null) {
             log.learned(s, c, how);
         }
     }
@@ -131,22 +166,58 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         if (s < 0 || s > 1) {
             return;
         }
-        if (known[s].remove(id) && log != null) {
+        if (known[s].remove(id) != null && log != null) {
             log.forgot(s, id, why);
         }
     }
 
-    private void see(final int s, final Card c) {
+    /** Adds an opponent card's name to the seen-cards set; returns the name if this call added it, else null. */
+    private String see(final int s, final Card c) {
         if (s < 0 || s > 1 || c == null || c.isFaceDown()) {
-            return;
+            return null;
         }
         final forge.card.GamePieceType gp = c.getGamePieceType();
         if (gp == forge.card.GamePieceType.EFFECT || gp == forge.card.GamePieceType.DUNGEON) {
-            return; // emblems, designations, dungeons and Forge's effect objects are not nameable cards
+            return null; // emblems, designations, dungeons and Forge's effect objects are not nameable cards
         }
         final Player owner = c.getOwner();
         if (owner != null && seatOf(owner) != s && !c.isToken()) {
-            seenOpp[s].add(c.getName());
+            final String n = c.getName();
+            return seenOpp[s].add(n) ? n : null;
+        }
+        return null;
+    }
+
+    /** F1: seat {@code s} forgets every card of {@code p}'s hand it knew before event {@code at}. */
+    private void blurHand(final int s, final Player p, final long at) {
+        for (Card h : p.getCardsIn(ZoneType.Hand)) {
+            final Long t = known[s].get(h.getId());
+            if (t != null && t < at) {
+                forget(s, h.getId(), "an unseen card left that hand");
+            }
+        }
+    }
+
+    /** Settles the pending moves: a card that is not face up where the seat can see it now was not seen. */
+    private void settle() {
+        if (pending.isEmpty()) {
+            return;
+        }
+        final List<Pending> ps = new ArrayList<>(pending);
+        pending.clear();
+        for (Pending p : ps) {
+            final Player me = seatPlayer(p.seat);
+            final Card c = game.findById(p.cardId);
+            final boolean seen = me != null && c != null && !c.isFaceDown() && c.getView().canBeShownTo(me.getView());
+            if (seen) {
+                continue;
+            }
+            if (p.name != null && seenOpp[p.seat].remove(p.name) && log != null) {
+                log.forgot(p.seat, p.cardId, "seen name withdrawn: the card never showed face up");
+            }
+            if (p.handOwner != null) {
+                blurHand(p.seat, p.handOwner, p.at);
+            }
         }
     }
 
@@ -154,11 +225,13 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
 
     /** Does seat {@code s} know this hidden card's identity (zone 16 / 17 / 18)? */
     public boolean knows(final int s, final Card c) {
-        return s >= 0 && s <= 1 && c != null && known[s].contains(c.getId());
+        settle();
+        return s >= 0 && s <= 1 && c != null && known[s].containsKey(c.getId());
     }
 
     /** The opponent cards seat {@code s} has seen this game, by name, first seen first. */
     public List<String> seenOpponentNames(final int s) {
+        settle();
         return s >= 0 && s <= 1 ? Collections.unmodifiableList(new ArrayList<>(seenOpp[s])) : Collections.emptyList();
     }
 
@@ -169,11 +242,13 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
 
     /** The last {@link #TAIL} stack events, newest first. */
     public List<StackEvent> tail() {
+        settle();
         return new ArrayList<>(tail);
     }
 
     /** Number of known hidden cards (diagnostics). */
     public int knownCount(final int s) {
+        settle();
         return known[s].size();
     }
 
@@ -234,14 +309,22 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         final Player tp = to == null ? null : playerOf(to.player());
         final boolean withinLibrary = fz == ZoneType.Library && tz == ZoneType.Library && fp == tp;
         final boolean arrangedMove = withinLibrary && arranged.remove(c.getId());
+        clock++;
         for (int s = 0; s < 2; s++) {
             final Player me = seatPlayer(s);
             if (me == null) {
                 continue;
             }
             final boolean visibleNow = c.getView().canBeShownTo(me.getView()) && !c.isFaceDown();
+            // F1: a card leaving another player's hand; seen only if it ends up face up where this seat can see it
+            final Player otherHand = fz == ZoneType.Hand && fp != null && fp != me ? fp : null;
             if (visibleNow) {
-                see(s, c);
+                final String added = see(s, c);
+                if ((added != null || otherHand != null) && mayTurnFaceDown(tz)) {
+                    pending.add(new Pending(s, c.getId(), added, otherHand, clock));
+                }
+            } else if (otherHand != null) {
+                blurHand(s, otherHand, clock);
             }
             final boolean hiddenNow = tz == ZoneType.Library || (tz == ZoneType.Hand && tp != me)
                     || (tz == ZoneType.Exile && c.isFaceDown());
@@ -269,9 +352,15 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         }
     }
 
+    /** Zones where Forge may turn a card face down right after moving it there (foretell, "exile it face down"). */
+    private static boolean mayTurnFaceDown(final ZoneType z) {
+        return z == ZoneType.Exile || z == ZoneType.Battlefield || z == ZoneType.Stack || z == ZoneType.Command;
+    }
+
     @Subscribe
     public void resolved(final GameEventSpellResolved ev) {
         arranged.clear();
+        settle();
     }
 
     @Subscribe
