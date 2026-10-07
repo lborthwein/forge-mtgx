@@ -29,6 +29,8 @@ public final class RlWire {
     }
 
     public static final String PROTO = "mtgx-rl-wire/1";
+    /** Observation v2 frames (ICR obs-v2-1006, note N1): the same messages, DECIDE / RECORD extended. */
+    public static final String PROTO_V2 = RlSchemaV2.PROTO;
     public static final int MAX_FRAME = 1 << 20;
 
     public static final int T_HELLO = 0x0001, T_HELLO_ACK = 0x0002, T_NEXT_GAME = 0x0010, T_GAME = 0x0011,
@@ -38,6 +40,8 @@ public final class RlWire {
     public static final int HEADER = 64;
     public static final int DECISION_HEADER = 28;
     public static final int F_HAS_PRIV = 1, F_TRUNC_TOKENS = 2, F_TRUNC_CANDS = 4;
+    /** v2: a relation or fact was dropped because its token was truncated. */
+    public static final int F_DROPPED_REFS = 8;
     public static final int ST_OK = 0, ST_DELEGATE = 1, ST_ERROR = 2;
 
     public static String typeName(final int t) {
@@ -274,6 +278,38 @@ public final class RlWire {
         public byte[] privCnt = new byte[0];
         /** RECORD only: the teacher's steps in the §2.4 encoding. */
         public short[] teacher = new short[0];
+        /** Observation schema version: 1 (wire/1) or 2 (wire/2: v2 widths and the arrays below). */
+        public int version = 1;
+        public int R, F, Dr;
+        public long[] tokBits = new long[0];
+        public short[] relSrc = new short[0];
+        public short[] relDst = new short[0];
+        public byte[] relType = new byte[0];
+        public byte[] relArg = new byte[0];
+        public short[] relNum = new short[0];
+        public short[] factTok = new short[0];
+        /** u16 on the wire. */
+        public short[] factId = new short[0];
+        public int[] factArg = new int[0];
+        public short[] factNum = new short[0];
+        public int[] restCard = new int[0];
+        public byte[] restCnt = new byte[0];
+
+        /** A v2 frame: v2 widths, empty v2 arrays. */
+        public static Decide v2() {
+            final Decide d = new Decide();
+            d.version = 2;
+            d.ctx = new float[RlSchemaV2.N_CTX];
+            return d;
+        }
+
+        public int nAttr() {
+            return version == 2 ? RlSchemaV2.N_ATTR : RlSchema.N_ATTR;
+        }
+
+        public int nCtx() {
+            return version == 2 ? RlSchemaV2.N_CTX : RlSchema.N_CTX;
+        }
 
         public boolean hasPriv() {
             return (flags & F_HAS_PRIV) != 0;
@@ -281,13 +317,16 @@ public final class RlWire {
     }
 
     public static int decideSize(final Decide d) {
-        final int na = RlSchema.N_ATTR;
+        final int na = d.nAttr();
         int n = HEADER;
         n += d.L * 4 + d.L + d.L * na * 4;
         n += d.D * 4 + d.D;
-        n += RlSchema.N_SCAL * 4 + RlSchema.N_CTX * 4;
+        n += RlSchema.N_SCAL * 4 + d.nCtx() * 4;
         n += d.C * (1 + 2 + 4 + 4 + 2 + 2 + 1 + 1);
         n += d.S * 2;
+        if (d.version == 2) {
+            n += d.L * 8 + d.R * (2 + 2 + 1 + 1 + 2) + d.F * (2 + 2 + 4 + 2) + d.Dr * (4 + 1);
+        }
         if (d.hasPriv()) {
             n += d.P * (4 + 1 + 1);
         }
@@ -304,10 +343,15 @@ public final class RlWire {
                 .putShort((short) (d.hasPriv() ? d.P : 0)).putShort((short) d.minPick).putShort((short) d.maxPick)
                 .putShort((short) d.turn);
         b.putInt(d.teacher.length);
-        b.put(new byte[28]);
+        if (d.version == 2) {
+            b.putShort((short) d.R).putShort((short) d.F).putShort((short) d.Dr);
+            b.put(new byte[22]);
+        } else {
+            b.put(new byte[28]);
+        }
         for (int i = 0; i < d.L; i++) b.putInt(d.tokCard[i]);
         b.put(d.tokZone, 0, d.L);
-        for (int i = 0; i < d.L * RlSchema.N_ATTR; i++) b.putFloat(d.tokAttr[i]);
+        for (int i = 0; i < d.L * d.nAttr(); i++) b.putFloat(d.tokAttr[i]);
         for (int i = 0; i < d.D; i++) b.putInt(d.deckCard[i]);
         b.put(d.deckCnt, 0, d.D);
         for (float f : d.scal) b.putFloat(f);
@@ -321,6 +365,20 @@ public final class RlWire {
         b.put(d.candAbility, 0, d.C);
         b.put(d.candFlags, 0, d.C);
         for (int i = 0; i < d.S; i++) b.putShort(d.slotTok[i]);
+        if (d.version == 2) {
+            for (int i = 0; i < d.L; i++) b.putLong(d.tokBits[i]);
+            for (int i = 0; i < d.R; i++) b.putShort(d.relSrc[i]);
+            for (int i = 0; i < d.R; i++) b.putShort(d.relDst[i]);
+            b.put(d.relType, 0, d.R);
+            b.put(d.relArg, 0, d.R);
+            for (int i = 0; i < d.R; i++) b.putShort(d.relNum[i]);
+            for (int i = 0; i < d.F; i++) b.putShort(d.factTok[i]);
+            for (int i = 0; i < d.F; i++) b.putShort(d.factId[i]);
+            for (int i = 0; i < d.F; i++) b.putInt(d.factArg[i]);
+            for (int i = 0; i < d.F; i++) b.putShort(d.factNum[i]);
+            for (int i = 0; i < d.Dr; i++) b.putInt(d.restCard[i]);
+            b.put(d.restCnt, 0, d.Dr);
+        }
         if (d.hasPriv()) {
             for (int i = 0; i < d.P; i++) b.putInt(d.privCard[i]);
             b.put(d.privZone, 0, d.P);
@@ -334,10 +392,20 @@ public final class RlWire {
     }
 
     private static void check(final Decide d) {
-        final int na = RlSchema.N_ATTR;
+        final int na = d.nAttr();
+        if (d.version != 1 && d.version != 2) {
+            throw new IllegalArgumentException("DECIDE version " + d.version);
+        }
+        if (d.version == 2 && (d.tokBits.length < d.L || d.relSrc.length < d.R || d.relDst.length < d.R
+                || d.relType.length < d.R || d.relArg.length < d.R || d.relNum.length < d.R || d.factTok.length < d.F
+                || d.factId.length < d.F || d.factArg.length < d.F || d.factNum.length < d.F
+                || d.restCard.length < d.Dr || d.restCnt.length < d.Dr || d.R > 0xffff || d.F > 0xffff
+                || d.Dr > 0xffff)) {
+            throw new IllegalArgumentException("DECIDE v2 arrays shorter than their counts");
+        }
         if (d.tokCard.length < d.L || d.tokZone.length < d.L || d.tokAttr.length < d.L * na
                 || d.deckCard.length < d.D || d.deckCnt.length < d.D || d.scal.length != RlSchema.N_SCAL
-                || d.ctx.length != RlSchema.N_CTX || d.candKind.length < d.C || d.candTok.length < d.C
+                || d.ctx.length != d.nCtx() || d.candKind.length < d.C || d.candTok.length < d.C
                 || d.candCard.length < d.C || d.candTgt.length < 2 * d.C || d.candSlot.length < d.C
                 || d.candNum.length < d.C || d.candAbility.length < d.C || d.candFlags.length < d.C
                 || d.slotTok.length < d.S
@@ -351,8 +419,16 @@ public final class RlWire {
     }
 
     public static Decide decodeDecide(final byte[] p) {
+        return decodeDecide(p, 1);
+    }
+
+    /** Decode a DECIDE / RECORD payload of observation schema {@code version} (1 = wire/1, 2 = wire/2). */
+    public static Decide decodeDecide(final byte[] p, final int version) {
         final ByteBuffer b = ByteBuffer.wrap(p).order(ByteOrder.LITTLE_ENDIAN);
-        final Decide d = new Decide();
+        final Decide d = version == 2 ? Decide.v2() : new Decide();
+        if (version != 1 && version != 2) {
+            throw new IllegalArgumentException("DECIDE version " + version);
+        }
         d.gameUid = b.getLong();
         d.decIdx = b.getInt();
         d.seat = b.get() & 0xff;
@@ -368,7 +444,12 @@ public final class RlWire {
         d.maxPick = b.getShort() & 0xffff;
         d.turn = b.getShort() & 0xffff;
         final long nTeacher = b.getInt() & 0xffffffffL;
-        for (int i = 0; i < 28; i++) {
+        if (version == 2) {
+            d.R = b.getShort() & 0xffff;
+            d.F = b.getShort() & 0xffff;
+            d.Dr = b.getShort() & 0xffff;
+        }
+        for (int i = 0; i < (version == 2 ? 22 : 28); i++) {
             if (b.get() != 0) {
                 throw new IllegalArgumentException("DECIDE reserved bytes are not zero");
             }
@@ -376,14 +457,14 @@ public final class RlWire {
         if (!d.hasPriv() && d.P != 0) {
             throw new IllegalArgumentException("DECIDE P > 0 without has_priv");
         }
-        final int na = RlSchema.N_ATTR;
+        final int na = d.nAttr();
         d.tokCard = ints(b, d.L);
         d.tokZone = bytes(b, d.L);
         d.tokAttr = floats(b, d.L * na);
         d.deckCard = ints(b, d.D);
         d.deckCnt = bytes(b, d.D);
         d.scal = floats(b, RlSchema.N_SCAL);
-        d.ctx = floats(b, RlSchema.N_CTX);
+        d.ctx = floats(b, d.nCtx());
         d.candKind = bytes(b, d.C);
         d.candTok = shorts(b, d.C);
         d.candCard = ints(b, d.C);
@@ -393,6 +474,21 @@ public final class RlWire {
         d.candAbility = bytes(b, d.C);
         d.candFlags = bytes(b, d.C);
         d.slotTok = shorts(b, d.S);
+        if (version == 2) {
+            d.tokBits = new long[d.L];
+            for (int i = 0; i < d.L; i++) d.tokBits[i] = b.getLong();
+            d.relSrc = shorts(b, d.R);
+            d.relDst = shorts(b, d.R);
+            d.relType = bytes(b, d.R);
+            d.relArg = bytes(b, d.R);
+            d.relNum = shorts(b, d.R);
+            d.factTok = shorts(b, d.F);
+            d.factId = shorts(b, d.F);
+            d.factArg = ints(b, d.F);
+            d.factNum = shorts(b, d.F);
+            d.restCard = ints(b, d.Dr);
+            d.restCnt = bytes(b, d.Dr);
+        }
         if (d.hasPriv()) {
             d.privCard = ints(b, d.P);
             d.privZone = bytes(b, d.P);

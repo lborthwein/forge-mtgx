@@ -324,7 +324,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
             }
             try {
-                final RlFeaturizer.Obs ro = feat.observe(g, player, m.mullK, priv);
+                final RlFeaturizer.Obs ro = feat.observe(g, player, m.mullK, priv, m);
                 unkNames += ro.unknownNames;
                 m.bind(ro, feat, player);
                 pending.push(new Pending(method, seat, player, m, ro));
@@ -339,7 +339,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             }
             return null;
         }
-        final RlFeaturizer.Obs obs = feat.observe(g, player, m.mullK, priv);
+        final RlFeaturizer.Obs obs = feat.observe(g, player, m.mullK, priv, m);
         unkNames += obs.unknownNames;
         m.bind(obs, feat, player);
         // ---- RL seat: DECIDE → DECISION
@@ -500,13 +500,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     }
 
     private RlWire.Decide frame(final int seat, final Game g, final RlCandidates.Menu m, final RlFeaturizer.Obs o) {
-        final RlWire.Decide f = new RlWire.Decide();
+        final RlWire.Decide f = o.version == 2 ? RlWire.Decide.v2() : new RlWire.Decide();
         f.gameUid = uid;
         f.decIdx = decIdx;
         f.seat = seat;
         f.family = m.family;
         f.mode = m.mode;
-        f.flags = (o.hasPriv ? RlWire.F_HAS_PRIV : 0) | (o.truncated ? RlWire.F_TRUNC_TOKENS : 0);
+        f.flags = (o.hasPriv ? RlWire.F_HAS_PRIV : 0) | (o.truncated ? RlWire.F_TRUNC_TOKENS : 0)
+                | (o.droppedRefs ? RlWire.F_DROPPED_REFS : 0);
         f.minPick = m.minPick;
         f.maxPick = m.maxPick;
         f.turn = Math.min(0xffff, g.getPhaseHandler().getTurn());
@@ -521,7 +522,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         f.deckCard = o.deckCard;
         f.deckCnt = o.deckCnt;
         System.arraycopy(o.scal, 0, f.scal, 0, RlSchema.N_SCAL);
-        System.arraycopy(o.ctx, 0, f.ctx, 0, RlSchema.N_CTX);
+        System.arraycopy(o.ctx, 0, f.ctx, 0, f.nCtx());
         f.candKind = m.kindA;
         f.candTok = m.tok;
         f.candCard = m.card;
@@ -531,6 +532,23 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         f.candAbility = m.ability;
         f.candFlags = m.flagsA;
         f.slotTok = m.slotTok;
+        if (o.version == 2) {
+            f.R = o.R;
+            f.F = o.F;
+            f.Dr = o.Dr;
+            f.tokBits = o.tokBits;
+            f.relSrc = o.relSrc;
+            f.relDst = o.relDst;
+            f.relType = o.relType;
+            f.relArg = o.relArg;
+            f.relNum = o.relNum;
+            f.factTok = o.factTok;
+            f.factId = o.factId;
+            f.factArg = o.factArg;
+            f.factNum = o.factNum;
+            f.restCard = o.restCard;
+            f.restCnt = o.restCnt;
+        }
         if (o.hasPriv) {
             f.privCard = o.privCard;
             f.privZone = o.privZone;

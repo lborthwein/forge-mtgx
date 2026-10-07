@@ -56,7 +56,8 @@ public final class RlFeaturizer {
         public int[] deckCard;
         public byte[] deckCnt;
         public final float[] scal = new float[RlSchema.N_SCAL];
-        public final float[] ctx = new float[RlSchema.N_CTX];
+        /** N_CTX of the observation's schema (v1 32, v2 69). */
+        public float[] ctx = new float[RlSchema.N_CTX];
         public boolean hasPriv;
         public int P;
         public int[] privCard = new int[0];
@@ -70,6 +71,30 @@ public final class RlFeaturizer {
         public int unknownNames;
         /** Debug only (K8 converter parity, B6): the bridge's ForgeState of this seat at the same moment. */
         public com.google.gson.JsonObject forgeState;
+
+        // ---- observation v2 (lane rl-obs-v2-1006; ICR obs-v2-1006 note N1); empty in v1
+        public int version = 1;
+        public long[] tokBits = new long[0];
+        public int R, F, Dr;
+        public short[] relSrc = new short[0];
+        public short[] relDst = new short[0];
+        public byte[] relType = new byte[0];
+        public byte[] relArg = new byte[0];
+        public short[] relNum = new short[0];
+        public short[] factTok = new short[0];
+        public short[] factId = new short[0];
+        public int[] factArg = new int[0];
+        public short[] factNum = new short[0];
+        public int[] restCard = new int[0];
+        public byte[] restCnt = new byte[0];
+        /** v2: a relation or fact was dropped because its token was truncated (wire flags bit3). */
+        public boolean droppedRefs;
+        /** v2 census: relations whose endpoint is not a token in this frame; facts that hit a vocabulary's OTHER. */
+        public int relsUnresolved, factsOther, relsCapped, factsCapped;
+        /** v2 census: o_seen tokens in this frame. */
+        public int oSeen;
+        /** v2, in-process only (witness tests): the card ids behind the o_seen tokens, in token order. */
+        public final List<Integer> oSeenIds = new ArrayList<>();
 
         public int pos(final Card c) {
             if (c == null) {
@@ -91,6 +116,27 @@ public final class RlFeaturizer {
     private RlKnowledge knowledge;
     /** Per (game, seat) deck arrays: constant through a game. */
     private final Map<Player, int[][]> deckCache = new java.util.IdentityHashMap<>();
+    /** Observation schema version: 1 (default, mtgx-rl-obs/1) or 2 (mtgx-rl-obs/2, RlObsV2). */
+    private int version = 1;
+
+    public int version() {
+        return version;
+    }
+
+    public void setVersion(final int v) {
+        if (v != 1 && v != 2) {
+            throw new IllegalArgumentException("observation schema version " + v);
+        }
+        this.version = v;
+    }
+
+    public String schemaSha() {
+        return version == 2 ? RlSchemaV2.schemaSha() : RlSchema.schemaSha();
+    }
+
+    public String proto() {
+        return version == 2 ? RlWire.PROTO_V2 : RlWire.PROTO;
+    }
 
     public RlFeaturizer(final CardIndex index) {
         this.index = index;
@@ -115,7 +161,7 @@ public final class RlFeaturizer {
         return knowledge;
     }
 
-    private boolean knows(final Player seat, final Card c) {
+    boolean knows(final Player seat, final Card c) {
         return knowledge != null && knowledge.knows(knowledge.seatOf(seat), c);
     }
 
@@ -256,6 +302,15 @@ public final class RlFeaturizer {
      * @param withPriv build the privileged block (train and record modes only)
      */
     public Obs observe(final Game game, final Player seat, final int mullK, final boolean withPriv) {
+        return observe(game, seat, mullK, withPriv, null);
+    }
+
+    /** As above; {@code menu} (v2 only: PILE membership facts) is the ask being posed, or null. */
+    public Obs observe(final Game game, final Player seat, final int mullK, final boolean withPriv,
+            final RlCandidates.Menu menu) {
+        if (version == 2) {
+            return RlObsV2.observe(this, game, seat, mullK, withPriv, menu);
+        }
         final Obs o = new Obs();
         if (captureForgeState) {
             try {
@@ -532,7 +587,7 @@ public final class RlFeaturizer {
 
     // ------------------------------------------------------------------------------------------------ deck
 
-    private void deck(final Player seat, final Obs o) {
+    void deck(final Player seat, final Obs o) {
         int[][] d = deckCache.get(seat);
         if (d == null) {
             final TreeMap<Integer, Integer> m = new TreeMap<>();
@@ -569,7 +624,7 @@ public final class RlFeaturizer {
     // ------------------------------------------------------------------------------------------------ scalars, ctx
 
     /** As tools/ml/foundation/forge_state.py + serve.py encode_states (format TradDraft, game 1, mana spent 0). */
-    private static void scalars(final Game game, final Player seat, final Player opp, final int mullK, final Obs o) {
+    static void scalars(final Game game, final Player seat, final Player opp, final int mullK, final Obs o) {
         final float[] s = o.scal;
         final PhaseHandler ph = game.getPhaseHandler();
         final int turn = ph.getTurn() == 0 ? 1 : ph.getTurn();
@@ -597,7 +652,7 @@ public final class RlFeaturizer {
         }
     }
 
-    private static void context(final Game game, final Player seat, final Player opp, final Obs o) {
+    static void context(final Game game, final Player seat, final Player opp, final Obs o) {
         final float[] x = o.ctx;
         final PhaseHandler ph = game.getPhaseHandler();
         final PhaseType phase = ph.getPhase();
@@ -683,15 +738,23 @@ public final class RlFeaturizer {
      */
     public static int[][] privBlock(final CardIndex index, final Iterable<Card> oppHiddenHand,
             final Iterable<Card> ownLibrary, final Iterable<Card> oppLibrary) {
+        return privBlock(index, oppHiddenHand, ownLibrary, oppLibrary, RlSchema.Z_PRIV_O_HAND, RlSchema.Z_PRIV_U_LIB,
+                RlSchema.Z_PRIV_O_LIB);
+    }
+
+    /** As above with the schema's three critic-only zone ids (v1 22-24, v2 23-25). */
+    public static int[][] privBlock(final CardIndex index, final Iterable<Card> oppHiddenHand,
+            final Iterable<Card> ownLibrary, final Iterable<Card> oppLibrary, final int zHand, final int zOwnLib,
+            final int zOppLib) {
         final TreeMap<Long, Integer> m = new TreeMap<>();
         for (Card c : oppHiddenHand) {
-            m.merge(key(RlSchema.Z_PRIV_O_HAND, resolveCard(index, c)), 1, Integer::sum);
+            m.merge(key(zHand, resolveCard(index, c)), 1, Integer::sum);
         }
         for (Card c : ownLibrary) {
-            m.merge(key(RlSchema.Z_PRIV_U_LIB, resolveCard(index, c)), 1, Integer::sum);
+            m.merge(key(zOwnLib, resolveCard(index, c)), 1, Integer::sum);
         }
         for (Card c : oppLibrary) {
-            m.merge(key(RlSchema.Z_PRIV_O_LIB, resolveCard(index, c)), 1, Integer::sum);
+            m.merge(key(zOppLib, resolveCard(index, c)), 1, Integer::sum);
         }
         final int n = Math.min(m.size(), RlSchema.P_MAX);
         final int[][] b = new int[3][n];

@@ -94,7 +94,16 @@ public final class RlFakeRun {
         long frames, truncated, tokens;
         // R-TRUNC (actor side, pre-cap): frames truncated, by what they dropped; tokens dropped per zone
         long obsFrames, truncEventOnly, truncCardOrZone;
-        final long[] droppedByZone = new long[forge.bench.rl.RlSchema.ZONES.size()];
+        final long[] droppedByZone = new long[forge.bench.rl.RlSchemaV2.ZONES.size()];
+        // obs-v2 census (lane rl-obs-v2-1006, gate G5): coverage of each new field
+        long v2Frames, v2DroppedRefs, v2RelsUnresolved, v2FactsOther, v2RelsCapped, v2FactsCapped, v2BitTokens;
+        final java.util.Map<String, Long> relFramesByType = new java.util.TreeMap<>();
+        final java.util.Map<String, Long> relsByType = new java.util.TreeMap<>();
+        final java.util.Map<String, Long> factFramesByClass = new java.util.TreeMap<>();
+        final java.util.Map<String, Long> factsByClass = new java.util.TreeMap<>();
+        final long[] bitTokens = new long[64];
+        final List<Integer> perFrameR = new ArrayList<>(), perFrameF = new ArrayList<>(), perFrameDr = new ArrayList<>();
+        final java.util.Map<String, Long> otherCtxFrames = new java.util.TreeMap<>();
         // C4': per game, the command-zone objects that stayed <unk> (designations), by name -> games
         final java.util.Map<String, java.util.Set<Long>> commandUnknownGames = new java.util.TreeMap<>();
         final java.util.Set<Long> games = new java.util.HashSet<>();
@@ -140,6 +149,13 @@ public final class RlFakeRun {
             }
             obsFrames++;
             games.add(f.gameUid);
+            if (o.version == 2) {
+                v2DroppedRefs += o.droppedRefs ? 1 : 0;
+                v2RelsUnresolved += o.relsUnresolved;
+                v2FactsOther += o.factsOther;
+                v2RelsCapped += o.relsCapped;
+                v2FactsCapped += o.factsCapped;
+            }
             if (o.truncated) {
                 boolean card = false;
                 for (int z = 0; z < o.droppedByZone.length; z++) {
@@ -161,6 +177,7 @@ public final class RlFakeRun {
         }
         final java.util.Map<Integer, List<Integer>> perZone = new java.util.TreeMap<>();
         final List<Integer> perFrame = new ArrayList<>();
+        boolean v2;
 
         synchronized void add(final forge.bench.rl.RlWire.Decide d) {
             frames++;
@@ -169,13 +186,73 @@ public final class RlFakeRun {
             }
             tokens += d.L;
             perFrame.add(d.L);
-            final int[] n = new int[25];
+            final int[] n = new int[26];
             for (int i = 0; i < d.L; i++) {
                 n[d.tokZone[i] & 0xff]++;
             }
-            for (int z = 1; z < 25; z++) {
+            for (int z = 1; z < 26; z++) {
                 perZone.computeIfAbsent(z, k -> new ArrayList<>()).add(n[z]);
             }
+            v2 = d.version == 2;
+            if (v2) {
+                v2Frames++;
+                perFrameR.add(d.R);
+                perFrameF.add(d.F);
+                perFrameDr.add(d.Dr);
+                final java.util.Set<String> rt = new java.util.HashSet<>();
+                for (int i = 0; i < d.R; i++) {
+                    final String t = forge.bench.rl.RlSchemaV2.REL_TYPES.get(d.relType[i] & 0xff)
+                            + (d.relType[i] == forge.bench.rl.RlSchemaV2.R_LINKED ? ":" + d.relArg[i] : "");
+                    relsByType.merge(t, 1L, Long::sum);
+                    rt.add(t);
+                }
+                for (String t : rt) {
+                    relFramesByType.merge(t, 1L, Long::sum);
+                }
+                final java.util.Set<String> fc = new java.util.HashSet<>();
+                for (int i = 0; i < d.F; i++) {
+                    final String name = forge.bench.rl.RlSchemaV2.FACTS.get(d.factId[i] & 0xffff);
+                    final int k = name.indexOf(':');
+                    final String cls = name.startsWith("KW:") || name.startsWith("COUNTER:") || name.startsWith("ALT:")
+                            || name.startsWith("OPT:") || name.startsWith("ROOM:") || name.startsWith("DESIG:")
+                            || name.startsWith("CAST_FROM:") || name.startsWith("MODE:") || name.startsWith("PILE:")
+                            || name.startsWith("CHOSEN_COLOR:") ? name.substring(0, k) : name;
+                    factsByClass.merge(cls, 1L, Long::sum);
+                    fc.add(cls);
+                    if (name.endsWith(":OTHER")) {
+                        factsByClass.merge(name, 1L, Long::sum);
+                    }
+                }
+                for (String c : fc) {
+                    factFramesByClass.merge(c, 1L, Long::sum);
+                }
+                for (int i = 0; i < d.L; i++) {
+                    final long b = d.tokBits[i];
+                    if (b != 0) {
+                        v2BitTokens++;
+                    }
+                    for (int k = 0; k < 64; k++) {
+                        if ((b >>> k & 1L) != 0) {
+                            bitTokens[k]++;
+                        }
+                    }
+                }
+                final int[] extra = {forge.bench.rl.RlSchemaV2.C_ENERGY_U, forge.bench.rl.RlSchemaV2.C_RING_U,
+                    forge.bench.rl.RlSchemaV2.C_LIFE_LOST_U, forge.bench.rl.RlSchemaV2.C_DRAWN_O,
+                    forge.bench.rl.RlSchemaV2.C_DISCARDED_O, forge.bench.rl.RlSchemaV2.C_COMBAT_DMG_U,
+                    forge.bench.rl.RlSchemaV2.C_DAY};
+                for (int c : extra) {
+                    if (d.ctx[c] != 0f) {
+                        otherCtxFrames.merge(forge.bench.rl.RlSchemaV2.CTX.get(c), 1L, Long::sum);
+                    }
+                }
+            }
+        }
+
+        static JsonObject mapJson(final java.util.Map<String, Long> m) {
+            final JsonObject o = new JsonObject();
+            for (java.util.Map.Entry<String, Long> e : m.entrySet()) o.addProperty(e.getKey(), e.getValue());
+            return o;
         }
 
         static int pct(final List<Integer> l, final double p) {
@@ -208,9 +285,40 @@ public final class RlFakeRun {
                 zz.addProperty("p50", pct(e.getValue(), 0.5));
                 zz.addProperty("p99", pct(e.getValue(), 0.99));
                 zz.addProperty("frames_with", nonzero);
-                z.add(forge.bench.rl.RlSchema.ZONES.get(e.getKey()), zz);
+                z.add((v2 ? forge.bench.rl.RlSchemaV2.ZONES : forge.bench.rl.RlSchema.ZONES).get(e.getKey()), zz);
             }
             o.add("zones", z);
+            if (v2Frames > 0) {
+                final JsonObject v = new JsonObject();
+                v.addProperty("frames", v2Frames);
+                v.addProperty("R_p50", pct(perFrameR, 0.5));
+                v.addProperty("R_p99", pct(perFrameR, 0.99));
+                v.addProperty("R_max", pct(perFrameR, 1.0));
+                v.addProperty("F_p50", pct(perFrameF, 0.5));
+                v.addProperty("F_p99", pct(perFrameF, 0.99));
+                v.addProperty("F_max", pct(perFrameF, 1.0));
+                v.addProperty("Dr_p50", pct(perFrameDr, 0.5));
+                v.addProperty("Dr_max", pct(perFrameDr, 1.0));
+                v.addProperty("frames_dropped_refs", v2DroppedRefs);
+                v.addProperty("rels_unresolved", v2RelsUnresolved);
+                v.addProperty("facts_other", v2FactsOther);
+                v.addProperty("rels_capped", v2RelsCapped);
+                v.addProperty("facts_capped", v2FactsCapped);
+                v.addProperty("tokens_with_bits", v2BitTokens);
+                v.add("rel_frames_by_type", mapJson(relFramesByType));
+                v.add("rels_by_type", mapJson(relsByType));
+                v.add("fact_frames_by_class", mapJson(factFramesByClass));
+                v.add("facts_by_class", mapJson(factsByClass));
+                final JsonObject bt = new JsonObject();
+                for (int k = 0; k < 64; k++) {
+                    if (bitTokens[k] > 0) {
+                        bt.addProperty(forge.bench.rl.RlSchemaV2.BITS.get(k), bitTokens[k]);
+                    }
+                }
+                v.add("tokens_by_bit", bt);
+                v.add("ctx_nonzero_frames", mapJson(otherCtxFrames));
+                o.add("v2", v);
+            }
             if (obsFrames > 0) {
                 final JsonObject t = new JsonObject();
                 t.addProperty("frames", obsFrames);
@@ -221,7 +329,8 @@ public final class RlFakeRun {
                 final JsonObject d = new JsonObject();
                 for (int zi = 0; zi < droppedByZone.length; zi++) {
                     if (droppedByZone[zi] > 0) {
-                        d.addProperty(forge.bench.rl.RlSchema.ZONES.get(zi), droppedByZone[zi]);
+                        d.addProperty((v2 ? forge.bench.rl.RlSchemaV2.ZONES : forge.bench.rl.RlSchema.ZONES).get(zi),
+                                droppedByZone[zi]);
                     }
                 }
                 t.add("dropped_tokens_by_zone", d);
@@ -315,8 +424,19 @@ public final class RlFakeRun {
                 : 7L, idxSha, sched)) {
             cfg.server = "127.0.0.1:" + srv.port();
             final ZoneCensus zc = new ZoneCensus();
-            if (spec.has("zoneStats") && spec.get("zoneStats").getAsBoolean()) {
-                srv.capture = (type, frame, d, steps) -> zc.add(d);
+            final RlFrameSha fsha = spec.has("frameSha") && spec.get("frameSha").getAsBoolean() ? new RlFrameSha() : null;
+            final boolean zcOn = spec.has("zoneStats") && spec.get("zoneStats").getAsBoolean();
+            if (fsha != null || zcOn) {
+                srv.capture = (type, frame, d, steps) -> {
+                    if (zcOn) {
+                        zc.add(d);
+                    }
+                    if (fsha != null) {
+                        fsha.add(d.gameUid, frame);
+                    }
+                };
+            }
+            if (zcOn) {
                 RlActorBench.KNOWLEDGE_LOG = zc::log;
                 final forge.bench.rl.RlSeat.FrameListener prev = RlActorBench.LISTENER;
                 RlActorBench.LISTENER = (g, player, f, m, ob, st, ans) -> {
@@ -333,6 +453,14 @@ public final class RlFakeRun {
                 for (JsonObject e : srv.ends) ends.add(e);
             }
             stats.addProperty("actor_exit", rc);
+            if (fsha != null) {
+                stats.addProperty("frame_sha", fsha.total());
+                stats.addProperty("frame_sha_frames", fsha.frames);
+                if (spec.has("frameShaOut")) {
+                    Files.write(Paths.get(spec.get("frameShaOut").getAsString()),
+                            fsha.lines().getBytes(StandardCharsets.UTF_8));
+                }
+            }
             if (zc.frames > 0) {
                 stats.add("zone_census", zc.json());
             }

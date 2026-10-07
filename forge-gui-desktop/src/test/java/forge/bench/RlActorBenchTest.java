@@ -137,6 +137,8 @@ public class RlActorBenchTest {
         final FakeRlServer checker;
         final Map<Integer, Integer> recordsByFamily = new HashMap<>();
         int decides;
+        /** The frames' observation schema (obs-v2 tests set 2). */
+        int version = 1;
 
         LocalEndpoint(final FakeRlServer checker) {
             this.checker = checker;
@@ -144,7 +146,7 @@ public class RlActorBenchTest {
 
         @Override
         public RlWire.Decision decide(final byte[] p) {
-            final RlWire.Decide d = RlWire.decodeDecide(p);
+            final RlWire.Decide d = RlWire.decodeDecide(p, version);
             checker.check(d, false);
             decides++;
             final RlWire.Decision x = new RlWire.Decision();
@@ -158,7 +160,7 @@ public class RlActorBenchTest {
 
         @Override
         public void record(final byte[] p) {
-            final RlWire.Decide d = RlWire.decodeDecide(p);
+            final RlWire.Decide d = RlWire.decodeDecide(p, version);
             checker.check(d, true);
             recordsByFamily.merge(d.family, 1, Integer::sum);
         }
