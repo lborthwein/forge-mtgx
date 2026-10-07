@@ -61,6 +61,8 @@ final class RlObsV2 {
         final Card src;
         final SpellAbilityStackInstance si;
         RlKnowledge.StackEvent ev;
+        /** A known-hidden or o_seen token: identity only (no bits, facts or relations). */
+        boolean identityOnly;
         long bits;
         final List<int[]> facts = new ArrayList<>(2);
 
@@ -165,11 +167,11 @@ final class RlObsV2 {
             }
         }
         for (Card c : seat.getCardsIn(ZoneType.Exile)) {
-            x.add(toks, c, RlSchema.Z_U_EXILE);
+            x.exiled(toks, c, RlSchema.Z_U_EXILE);
         }
         if (opp != null) {
             for (Card c : opp.getCardsIn(ZoneType.Exile)) {
-                x.add(toks, c, RlSchema.Z_O_EXILE);
+                x.exiled(toks, c, RlSchema.Z_O_EXILE);
             }
         }
         // 7. command zone
@@ -194,6 +196,7 @@ final class RlObsV2 {
                 }
                 final Tok t = new Tok(resolveNames(index, e.getValue()[0], e.getValue()[1]), RlSchemaV2.Z_O_SEEN,
                         null, null);
+                t.identityOnly = true;
                 toks.add(t);
                 o.oSeen++;
                 o.oSeenIds.add(e.getKey());
@@ -404,9 +407,28 @@ final class RlObsV2 {
             return t;
         }
 
+        /**
+         * An exiled card: as {@link #add}; a face-down card the seat may not look at (an opponent's foretold card) is
+         * still there to see as a face-down card: {@code <unk>}, face_down, presence only (note N2).
+         */
+        Tok exiled(final List<Tok> toks, final Card c, final int zone) {
+            if (c.getView().canBeShownTo(viewer)) {
+                return add(toks, c, zone);
+            }
+            if (!c.isFaceDown()) {
+                return null;
+            }
+            final Tok t = new Tok(CardIndex.UNK, zone, c, null);
+            t.identityOnly = true;
+            t.attr[RlSchema.A_FACE_DOWN] = 1f;
+            toks.add(t);
+            return t;
+        }
+
         /** A hidden card the seat knows: identity only (v1 addKnown), plus known_to_opp for its own library. */
         Tok addKnown(final List<Tok> toks, final Card c, final int zone) {
             final Tok t = new Tok(lookupCounting(c), zone, c, null);
+            t.identityOnly = true;
             if (c.getOwner() == seat && know != null && oppSeat >= 0 && know.knows(oppSeat, c)) {
                 t.attr[RlSchemaV2.A_KNOWN_TO_OPP] = 1f;
             }
@@ -757,7 +779,11 @@ final class RlObsV2 {
     private static void relations(final RlFeaturizer.Obs o, final Game game, final Player seat, final Combat combat,
             final List<Tok> toks, final Map<Integer, Integer> preCard, final Map<Integer, Integer> preStack) {
         final List<int[]> rs = new ArrayList<>();
-        final Rel r = new Rel(o, game, seat, preCard, preStack, rs);
+        final boolean[] idOnly = new boolean[toks.size()];
+        for (int i = 0; i < toks.size(); i++) {
+            idOnly[i] = toks.get(i).identityOnly;
+        }
+        final Rel r = new Rel(o, game, seat, preCard, preStack, rs, idOnly);
         for (int i = 0; i < toks.size(); i++) {
             final Tok t = toks.get(i);
             if (t.si != null) {
@@ -851,9 +877,11 @@ final class RlObsV2 {
         final Player seat;
         final Map<Integer, Integer> preCard, preStack;
         final List<int[]> out;
+        final boolean[] idOnly;
 
         Rel(final RlFeaturizer.Obs o, final Game game, final Player seat, final Map<Integer, Integer> preCard,
-                final Map<Integer, Integer> preStack, final List<int[]> out) {
+                final Map<Integer, Integer> preStack, final List<int[]> out, final boolean[] idOnly) {
+            this.idOnly = idOnly;
             this.o = o;
             this.game = game;
             this.seat = seat;
@@ -863,6 +891,11 @@ final class RlObsV2 {
         }
 
         void add(final int src, final int dst, final int type, final int arg, final int num) {
+            // relations join objects the seat sees now; a known-hidden or o_seen token takes none
+            if (idOnly[src] || (dst >= 0 && idOnly[dst])) {
+                o.relsUnresolved++;
+                return;
+            }
             if (src >= o.L || dst >= o.L) {
                 o.droppedRefs = true;
                 return;

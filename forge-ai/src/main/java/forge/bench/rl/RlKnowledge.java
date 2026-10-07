@@ -397,6 +397,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
                 learn(s, c, fz + "->" + tz);
                 if (fz != null && isPublic(fz)) {
                     see(s, c);
+                    seeId(s, c);
                 }
             } else {
                 forget(s, c.getId(), "moved " + fz + "->" + tz + " unseen");

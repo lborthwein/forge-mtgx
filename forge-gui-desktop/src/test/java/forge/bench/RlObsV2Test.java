@@ -170,7 +170,7 @@ public class RlObsV2Test extends AITest {
                 sa.getTargets().add((forge.game.GameObject) t);
             }
         }
-        f.game.getStack().add(sa);
+        f.game.getStack().addAndUnfreeze(sa); // a cast: the spell moves to the stack
         return sa;
     }
 
@@ -216,7 +216,7 @@ public class RlObsV2Test extends AITest {
         fsa.getTargets().add(e2);
         fsa.getTargets().addDividedAllocation(e1, 1);
         fsa.getTargets().addDividedAllocation(e2, 1);
-        g.game.getStack().add(fsa);
+        g.game.getStack().addAndUnfreeze(fsa);
         final RlFeaturizer.Obs og = obs(g, g.p0);
         final int sf = stackPos(og, fsa, g);
         Assert.assertTrue(fsa.isDividedAsYouChoose(), "Forked Bolt divides");
@@ -236,7 +236,7 @@ public class RlObsV2Test extends AITest {
             bsa.setTargets(new TargetChoices());
         }
         bsa.getTargets().add(f.p0);
-        f.game.getStack().add(bsa);
+        f.game.getStack().addAndUnfreeze(bsa);
         RlFeaturizer.Obs o = obs(f, f.p0);
         final int[] x = fact(o, stackPos(o, bsa, f), "X");
         Assert.assertNotNull(x, "X on Blaze: " + facts(o, stackPos(o, bsa, f)).size());
@@ -249,7 +249,7 @@ public class RlObsV2Test extends AITest {
         Assert.assertTrue(choices.size() >= 4, "Kolaghan's Command has four modes");
         final List<forge.game.spellability.AbilitySub> chosen = new ArrayList<>(List.of(choices.get(1), choices.get(3)));
         root.setChosenList(chosen);
-        f.game.getStack().add(root);
+        f.game.getStack().addAndUnfreeze(root);
         o = obs(f, f.p0);
         final int k = stackPos(o, root, f);
         Assert.assertNotNull(fact(o, k, "MODE:1"), "mode 1 chosen");
@@ -501,8 +501,13 @@ public class RlObsV2Test extends AITest {
         Assert.assertEquals(own.tokCard[pos(own, ex)], idx("Saw It Coming"), "and its foretold card");
         final RlFeaturizer.Obs opp = obs(f, f.p0);
         Assert.assertEquals(opp.tokCard[pos(opp, morph)], CardIndex.UNK, "the opponent sees <unk>");
-        Assert.assertEquals(opp.tokCard[pos(opp, ex)], CardIndex.UNK);
-        Assert.assertTrue(facts(opp, pos(opp, ex)).isEmpty() || noIdentityFacts(opp, pos(opp, ex)));
+        // the opponent sees a face-down card in exile (note N2): <unk>, face down, nothing else
+        final int oe = pos(opp, ex);
+        Assert.assertEquals(opp.tokCard[oe], CardIndex.UNK);
+        Assert.assertEquals(opp.tokZone[oe], RlSchema.Z_O_EXILE);
+        Assert.assertEquals(opp.tokAttr[oe * RlSchemaV2.N_ATTR + RlSchema.A_FACE_DOWN], 1f);
+        Assert.assertEquals(opp.tokBits[oe], 0L);
+        Assert.assertTrue(facts(opp, oe).isEmpty());
         // the identity is there to leak (the mutant that resolves it would differ)
         Assert.assertNotEquals(RlFeaturizer.lookupCard(f.feat.index(), morph), CardIndex.UNK);
         // event tail: a face-down cast is the caster's to see
@@ -543,7 +548,7 @@ public class RlObsV2Test extends AITest {
         f.p0.drawCard();
         f.p0.drawCard();
         final Card d = add(f.p0, ZoneType.Hand, "Dark Ritual");
-        f.p0.discard(d, null, false, null);
+        f.p0.discard(d, null, false, forge.game.ability.AbilityKey.newMap());
         final Card old = add(f.p1, ZoneType.Graveyard, "Lightning Bolt");
         old.setTurnInZone(f.game.getPhaseHandler().getTurn() - 3);
         final RlFeaturizer.Obs o = obs(f, f.p0);

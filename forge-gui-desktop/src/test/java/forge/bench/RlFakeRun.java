@@ -426,13 +426,25 @@ public final class RlFakeRun {
             final ZoneCensus zc = new ZoneCensus();
             final RlFrameSha fsha = spec.has("frameSha") && spec.get("frameSha").getAsBoolean() ? new RlFrameSha() : null;
             final boolean zcOn = spec.has("zoneStats") && spec.get("zoneStats").getAsBoolean();
-            if (fsha != null || zcOn) {
+            // obs-v2 goldens for the Python side (lane rl-obs-v2-1006): the first v2 frames with relations and facts
+            final java.nio.file.Path dump = spec.has("dumpFrames") ? Paths.get(spec.get("dumpFrames").getAsString())
+                    : null;
+            final int dumpN = spec.has("dumpFramesN") ? spec.get("dumpFramesN").getAsInt() : 6;
+            final java.util.concurrent.atomic.AtomicInteger dumped = new java.util.concurrent.atomic.AtomicInteger();
+            final java.util.Set<Integer> dumpedFamilies = java.util.concurrent.ConcurrentHashMap.newKeySet();
+            if (fsha != null || zcOn || dump != null) {
                 srv.capture = (type, frame, d, steps) -> {
                     if (zcOn) {
                         zc.add(d);
                     }
                     if (fsha != null) {
                         fsha.add(d.gameUid, frame);
+                    }
+                    if (dump != null && d.version == 2 && d.R > 0 && d.F > 0 && dumpedFamilies.add(d.family)) {
+                        final int k = dumped.getAndIncrement();
+                        if (k < dumpN) {
+                            RlV2Golden.write(dump, k, frame, d);
+                        }
                     }
                 };
             }

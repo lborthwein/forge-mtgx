@@ -98,6 +98,13 @@ public class RlObsV2GamesTest {
                 if (!c.getView().canBeShownTo(seat.getView())) {
                     knownTokens++;
                     identityOnly[pos] = true;
+                    if ((z == RlSchema.Z_U_EXILE || z == RlSchema.Z_O_EXILE) && c.isFaceDown() && c.isInZone(ZoneType.Exile)) {
+                        // note N2: a face-down exiled card the seat may not look at: presence only
+                        if (f.tokCard[pos] != CardIndex.UNK) {
+                            violation("a face-down exiled card resolved: " + c);
+                        }
+                        continue;
+                    }
                     if (z != RlSchema.Z_O_HAND_KNOWN && z != RlSchema.Z_U_LIB_KNOWN && z != RlSchema.Z_O_LIB_KNOWN) {
                         violation("hidden card in zone " + z + ": " + c);
                     } else if (oracle == null || !oracle.justified(s, c)) {
