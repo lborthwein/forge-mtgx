@@ -76,6 +76,11 @@ public final class RlKnowledgeOracle implements BenchSession.KnowledgeObserver {
         return true;
     }
 
+    /** obs-v2 o_seen: has seat {@code s} ever observed this card (a reveal, its own look, or a public / own-hand origin)? */
+    public boolean everObserved(final int s, final int cardId) {
+        return observed[s].containsKey(cardId);
+    }
+
     private void settle() {
         for (long[] p : pending) {
             final int s = (int) p[0];

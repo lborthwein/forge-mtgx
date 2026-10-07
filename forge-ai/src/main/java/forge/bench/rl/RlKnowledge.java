@@ -62,6 +62,14 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         public final boolean faceDown;
         public final boolean ability;
         public final int controllerSeat;
+        /** v2 only: stack facts recorded at cast, flattened (fact id, arg, num) triples (RlStackFacts). */
+        public int[] facts = new int[0];
+        /**
+         * v2 only: the targets recorded at cast, each {kind, ref, depth, divided}: kind 0 a card (ref = card id), 1 a
+         * player (ref = seat), 2 a stack item (ref = stack instance id); depth = the targeting ability's place in the
+         * sub-ability chain; divided = the amount assigned, or -1.
+         */
+        public List<int[]> targets = java.util.Collections.emptyList();
 
         StackEvent(final String name, final String fullName, final boolean faceDown, final boolean ability,
                 final int controllerSeat) {
@@ -99,6 +107,9 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         final Player handOwner;
         final long at;
 
+        /** v2: the seen-ids entry the move added (removed again if the card was not seen). */
+        boolean idAdded;
+
         Pending(final int seat, final int cardId, final String name, final Player handOwner, final long at) {
             this.seat = seat;
             this.cardId = cardId;
@@ -109,6 +120,13 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     }
 
     private final List<Pending> pending = new ArrayList<>();
+
+    /** Observation v2 (lane rl-obs-v2-1006): keep the v2 extras (seen ids, tail facts and targets). Off for v1. */
+    public boolean v2 = false;
+    /** v2: per seat, the opponent cards it has seen face up, by id, with {name, full name} as seen (zone o_seen). */
+    @SuppressWarnings("unchecked")
+    private final java.util.LinkedHashMap<Integer, String[]>[] seenIds = new java.util.LinkedHashMap[] {
+        new java.util.LinkedHashMap<>(), new java.util.LinkedHashMap<>()};
     @SuppressWarnings("unchecked")
     private final LinkedHashSet<String>[] seenOpp = new LinkedHashSet[] {new LinkedHashSet<>(), new LinkedHashSet<>()};
     private final Deque<StackEvent> tail = new ArrayDeque<>();
@@ -188,6 +206,22 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         return null;
     }
 
+    /** v2: records an opponent card seen face up by id; true if this call added it. */
+    private boolean seeId(final int s, final Card c) {
+        if (!v2 || s < 0 || s > 1 || c == null || c.isFaceDown() || c.isToken()) {
+            return false;
+        }
+        final forge.card.GamePieceType gp = c.getGamePieceType();
+        if (gp == forge.card.GamePieceType.EFFECT || gp == forge.card.GamePieceType.DUNGEON) {
+            return false;
+        }
+        final Player owner = c.getOwner();
+        if (owner == null || seatOf(owner) == s) {
+            return false;
+        }
+        return seenIds[s].putIfAbsent(c.getId(), new String[] {c.getName(), RlFeaturizer.fullName(c)}) == null;
+    }
+
     /** F1: seat {@code s} forgets every card of {@code p}'s hand it knew before event {@code at}. */
     private void blurHand(final int s, final Player p, final long at) {
         for (Card h : p.getCardsIn(ZoneType.Hand)) {
@@ -215,6 +249,9 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             if (p.name != null && seenOpp[p.seat].remove(p.name) && log != null) {
                 log.forgot(p.seat, p.cardId, "seen name withdrawn: the card never showed face up");
             }
+            if (p.idAdded) {
+                seenIds[p.seat].remove(p.cardId);
+            }
             if (p.handOwner != null) {
                 blurHand(p.seat, p.handOwner, p.at);
             }
@@ -238,6 +275,16 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     /** B4's NAME candidates (ICR B4-families-coordination): the same list as {@link #seenOpponentNames}. */
     public List<String> opponentSeen(final int s) {
         return seenOpponentNames(s);
+    }
+
+    /**
+     * v2: the opponent cards seat {@code s} has seen face up this game, by card id, first seen first, each with
+     * {name, full name} as seen. The o_seen zone holds those not shown in the frame by other tokens.
+     */
+    public Map<Integer, String[]> seenOpponentIds(final int s) {
+        settle();
+        return s >= 0 && s <= 1 ? Collections.unmodifiableMap(new java.util.LinkedHashMap<>(seenIds[s]))
+                : Collections.emptyMap();
     }
 
     /** The last {@link #TAIL} stack events, newest first. */
@@ -264,6 +311,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         for (Card c : cards) {
             learn(s, c, "reveal:" + zone);
             see(s, c);
+            seeId(s, c);
         }
     }
 
@@ -275,6 +323,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         final int s = seatOf(viewer);
         for (Card c : cards) {
             see(s, c);
+            seeId(s, c);
             if (destination == ZoneType.Library) {
                 arranged.add(c.getId());
                 learn(s, c, "look");
@@ -320,8 +369,11 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             final Player otherHand = fz == ZoneType.Hand && fp != null && fp != me ? fp : null;
             if (visibleNow) {
                 final String added = see(s, c);
-                if ((added != null || otherHand != null) && mayTurnFaceDown(tz)) {
-                    pending.add(new Pending(s, c.getId(), added, otherHand, clock));
+                final boolean idAdded = seeId(s, c);
+                if ((added != null || idAdded || otherHand != null) && mayTurnFaceDown(tz)) {
+                    final Pending p = new Pending(s, c.getId(), added, otherHand, clock);
+                    p.idAdded = idAdded;
+                    pending.add(p);
                 }
             } else if (otherHand != null) {
                 blurHand(s, otherHand, clock);
@@ -345,6 +397,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
                 learn(s, c, fz + "->" + tz);
                 if (fz != null && isPublic(fz)) {
                     see(s, c);
+                    seeId(s, c);
                 }
             } else {
                 forget(s, c.getId(), "moved " + fz + "->" + tz + " unseen");
@@ -390,6 +443,16 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
                     ? RlFeaturizer.emblemWalkerFullName(host) : RlFeaturizer.fullName(host);
             final StackEvent e = new StackEvent(name, full, faceDown, ev.sa() != null && !ev.sa().isSpell(),
                     seatOf(act));
+            if (v2 && ev.si() != null) {
+                for (forge.game.spellability.SpellAbilityStackInstance si : game.getStack()) {
+                    if (si.getId() == ev.si().getId()) {
+                        final forge.game.spellability.SpellAbility root = si.getSpellAbility();
+                        e.facts = RlStackFacts.facts(root, si.getSourceCard());
+                        e.targets = RlStackFacts.targetRefs(game, root);
+                        break;
+                    }
+                }
+            }
             tail.addFirst(e);
             while (tail.size() > TAIL) {
                 tail.removeLast();
@@ -397,6 +460,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             if (host != null && !faceDown) {
                 for (int s = 0; s < 2; s++) {
                     see(s, host);
+                    seeId(s, host);
                 }
             }
         } catch (RuntimeException ex) {

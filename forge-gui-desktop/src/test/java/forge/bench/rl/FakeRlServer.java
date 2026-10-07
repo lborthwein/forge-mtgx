@@ -102,9 +102,13 @@ public final class FakeRlServer implements Closeable {
             final JsonObject hello = h.json();
             hellos.add(hello);
             String refuse = null;
-            if (!RlWire.PROTO.equals(hello.get("proto").getAsString())) {
+            // wire/1 with obs-v1, or wire/2 with obs-v2 (lane rl-obs-v2-1006)
+            final String proto = hello.get("proto").getAsString();
+            final int version = RlWire.PROTO_V2.equals(proto) ? 2 : RlWire.PROTO.equals(proto) ? 1 : 0;
+            if (version == 0) {
                 refuse = "proto";
-            } else if (!RlSchema.schemaSha().equals(hello.get("schema_sha").getAsString())) {
+            } else if (!(version == 2 ? forge.bench.rl.RlSchemaV2.schemaSha() : RlSchema.schemaSha())
+                    .equals(hello.get("schema_sha").getAsString())) {
                 refuse = "schema_sha";
             } else if (expectCardIndexSha != null
                     && !expectCardIndexSha.equals(hello.get("card_index_sha").getAsString())) {
@@ -139,7 +143,7 @@ public final class FakeRlServer implements Closeable {
                     }
                     case RlWire.T_DECIDE: {
                         decides.incrementAndGet();
-                        final RlWire.Decide d = RlWire.decodeDecide(f.payload);
+                        final RlWire.Decide d = RlWire.decodeDecide(f.payload, version);
                         check(d, false);
                         final RlWire.Decision x = new RlWire.Decision();
                         x.gameUid = d.gameUid;
@@ -155,7 +159,7 @@ public final class FakeRlServer implements Closeable {
                     }
                     case RlWire.T_RECORD: {
                         records.incrementAndGet();
-                        final RlWire.Decide d = RlWire.decodeDecide(f.payload);
+                        final RlWire.Decide d = RlWire.decodeDecide(f.payload, version);
                         check(d, true);
                         if (capture != null) {
                             capture.frame(f.type, RlWire.frameBytes(f.type, f.flags, f.payload), d, d.teacher);
@@ -203,9 +207,10 @@ public final class FakeRlServer implements Closeable {
                 problem("priv block in eval mode");
             }
             int prevZone = -1, prevCard = Integer.MIN_VALUE;
+            final int z0 = d.version == 2 ? 23 : 22;
             for (int i = 0; i < d.P; i++) {
                 final int z = d.privZone[i] & 0xff;
-                if (z < 22 || z > 24 || (z == prevZone && d.privCard[i] <= prevCard) || z < prevZone) {
+                if (z < z0 || z > z0 + 2 || (z == prevZone && d.privCard[i] <= prevCard) || z < prevZone) {
                     badFrames.incrementAndGet();
                     problem("priv block not sorted by (zone, card) at " + i);
                     break;
@@ -218,13 +223,18 @@ public final class FakeRlServer implements Closeable {
             badFrames.incrementAndGet();
             problem("family " + d.family + " with mode " + d.mode);
         }
-        if (d.L > RlSchema.L_MAX || d.C > RlSchema.C_MAX || d.S > RlSchema.S_MAX || d.D > RlSchema.D_MAX
+        final int lMax = d.version == 2 ? forge.bench.rl.RlSchemaV2.L_MAX : RlSchema.L_MAX;
+        if (d.L > lMax || d.C > RlSchema.C_MAX || d.S > RlSchema.S_MAX || d.D > RlSchema.D_MAX
                 || d.P > RlSchema.P_MAX) {
             badFrames.incrementAndGet();
             problem("caps exceeded: L" + d.L + " C" + d.C + " S" + d.S);
         }
+        if (d.version == 2) {
+            checkV2(d);
+        }
+        final int zMax = d.version == 2 ? forge.bench.rl.RlSchemaV2.Z_O_SEEN : 21;
         for (int i = 0; i < d.L; i++) {
-            if ((d.tokZone[i] & 0xff) < 1 || (d.tokZone[i] & 0xff) > 21 || d.tokCard[i] < 1) {
+            if ((d.tokZone[i] & 0xff) < 1 || (d.tokZone[i] & 0xff) > zMax || d.tokCard[i] < 1) {
                 badFrames.incrementAndGet();
                 problem("bad token " + i + ": zone " + d.tokZone[i] + " card " + d.tokCard[i]);
                 break;
@@ -256,6 +266,49 @@ public final class FakeRlServer implements Closeable {
                 badTeachers.incrementAndGet();
                 problem("illegal teacher: " + why);
             }
+        }
+    }
+
+    /** v2 invariants (note N1): relation and fact ranges and orders, the O1 multiset's caps and order. */
+    void checkV2(final RlWire.Decide d) {
+        final int nFacts = forge.bench.rl.RlSchemaV2.FACTS.size();
+        String bad = null;
+        if (d.R > forge.bench.rl.RlSchemaV2.R_MAX || d.F > forge.bench.rl.RlSchemaV2.F_MAX || d.Dr > RlSchema.D_MAX) {
+            bad = "v2 caps exceeded";
+        }
+        long prev = Long.MIN_VALUE;
+        for (int i = 0; i < d.R && bad == null; i++) {
+            final int src = d.relSrc[i], dst = d.relDst[i], ty = d.relType[i] & 0xff;
+            if (src < 0 || src >= d.L || dst < -3 || dst == -1 || dst >= d.L || ty < 1
+                    || ty >= forge.bench.rl.RlSchemaV2.REL_TYPES.size()) {
+                bad = "bad relation " + i;
+            }
+            final long k = ((long) src << 16) | (ty << 8) | (d.relArg[i] & 0xff);
+            if (k < prev) {
+                bad = "relations not sorted at " + i;
+            }
+            prev = k;
+        }
+        prev = Long.MIN_VALUE;
+        for (int i = 0; i < d.F && bad == null; i++) {
+            final int tok = d.factTok[i], id = d.factId[i] & 0xffff;
+            if (tok < 0 || tok >= d.L || id < 1 || id >= nFacts) {
+                bad = "bad fact " + i;
+            }
+            final long k = ((long) tok << 16) | id;
+            if (k < prev) {
+                bad = "facts not sorted at " + i;
+            }
+            prev = k;
+        }
+        for (int i = 1; i < d.Dr && bad == null; i++) {
+            if (d.restCard[i] <= d.restCard[i - 1]) {
+                bad = "rest multiset not sorted at " + i;
+            }
+        }
+        if (bad != null) {
+            badFrames.incrementAndGet();
+            problem(bad + " family " + d.family);
         }
     }
 

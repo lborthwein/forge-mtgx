@@ -110,6 +110,9 @@ public final class RlCandidates {
         final List<Card> looked = new ArrayList<>();
         /** Two-frame families, second frame: the cards kept on top, in the candidates' order. */
         final List<Card> kept = new ArrayList<>();
+        /** PILE (obs-v2 pile-membership facts): the two piles' cards, and whether each is face down to the chooser. */
+        public final List<List<Card>> piles = new ArrayList<>();
+        public final List<Boolean> pileHidden = new ArrayList<>();
 
         // bound arrays
         public byte[] kindA;
@@ -169,6 +172,9 @@ public final class RlCandidates {
                 slot[i] = (short) x.slot;
                 num[i] = (short) x.num;
                 ability[i] = (byte) Math.max(0, Math.min(15, x.ability));
+                if (f.version() == 2 && family == RlSchema.F_PILE) {
+                    ability[i] = (byte) i; // obs-v2: the pile index, matching its members' PILE:<i> facts
+                }
                 flagsA[i] = (byte) x.flags;
             }
             slotTok = new short[S()];
@@ -1554,6 +1560,8 @@ public final class RlCandidates {
             @SuppressWarnings("unchecked")
             final List<Card> pile = new ArrayList<>((java.util.Collection<Card>) (p == 0 ? o[1] : o[2]));
             final boolean hidden = "True".equals(faceDown) || ("One".equals(faceDown) && p == 0);
+            m.piles.add(new ArrayList<>(pile));
+            m.pileHidden.add(hidden);
             pile.sort((a, b) -> a.getCMC() != b.getCMC() ? Integer.compare(b.getCMC(), a.getCMC())
                     : Integer.compare(a.getId(), b.getId()));
             final Cand c = new Cand();

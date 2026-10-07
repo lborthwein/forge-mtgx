@@ -133,6 +133,8 @@ public final class RlActorBench {
         String replayDir = null;
         int replaySample = 0;
         long replaySampleSeed = 1005L;
+        /** Observation schema: 1 (mtgx-rl-obs/1, wire/1; the default) or 2 (mtgx-rl-obs/2, wire/2; lane rl-obs-v2-1006). */
+        int obsSchema = 1;
     }
 
     static Cfg parse(final JsonObject o) {
@@ -154,6 +156,12 @@ public final class RlActorBench {
         if (o.has("maxGames")) c.maxGames = o.get("maxGames").getAsInt();
         if (o.has("globalSeed")) c.globalSeed = o.get("globalSeed").getAsLong();
         if (o.has("debugForgeStateOut")) c.debugForgeStateOut = o.get("debugForgeStateOut").getAsString();
+        if (o.has("obsSchema")) {
+            c.obsSchema = o.get("obsSchema").getAsInt();
+            if (c.obsSchema != 1 && c.obsSchema != 2) {
+                throw new IllegalArgumentException("obsSchema must be 1 or 2, not " + c.obsSchema);
+            }
+        }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
             if (r.has("tapes")) for (JsonElement e : r.getAsJsonArray("tapes")) c.replayTapes.add(e.getAsString());
@@ -340,6 +348,9 @@ public final class RlActorBench {
         sc.mode = mode;
         sc.capActions = cfg.capActions;
         sc.maxDecisions = cfg.maxDecisions;
+        // the observation schema: the actor's, or (replay) the tape's
+        final int obsVersion = g.has("obs_schema") ? g.get("obs_schema").getAsInt() : cfg.obsSchema;
+        feat.setVersion(obsVersion);
         final RlSeat seat = new RlSeat(feat, ep, sc, uid, ctl, priv);
         seat.listener = listener;
         feat.captureForgeState = cfg.debugForgeStateOut != null;
@@ -390,6 +401,7 @@ public final class RlActorBench {
             seat.setGame(game);
             // observation v1: what each seat has observed (reveals, its own looks, public moves, the stack tail)
             final RlKnowledge know = new RlKnowledge(game);
+            know.v2 = obsVersion == 2;
             know.attach();
             final java.util.function.Function<Game, RlKnowledge.Log> logF = KNOWLEDGE_LOG;
             if (logF != null) {
@@ -525,7 +537,7 @@ public final class RlActorBench {
         t.add("controllers", ctlJ.deepCopy());
         t.addProperty("starting_seat", startingSeat);
         t.addProperty("jar_sha", jarSha);
-        t.addProperty("schema_sha", RlSchema.schemaSha());
+        t.addProperty("schema_sha", feat.schemaSha());
         t.addProperty("card_index_sha", feat.index().sha());
         t.add("result", end.get("result"));
         t.add("void", end.get("void"));
@@ -633,6 +645,8 @@ public final class RlActorBench {
 
     /** Replay: RL seats answer from the tape's {@code dec} rows, asserting family and C at each dec_idx. */
     static RlSeat.Endpoint tapeEndpoint(final JsonObject line, final long uid) {
+        final int version = line.has("schema_sha")
+                && forge.bench.rl.RlSchemaV2.schemaSha().equals(line.get("schema_sha").getAsString()) ? 2 : 1;
         final Map<Integer, JsonArray> rows = new HashMap<>();
         for (JsonElement e : line.getAsJsonArray("dec")) {
             final JsonArray r = e.getAsJsonArray();
@@ -641,7 +655,7 @@ public final class RlActorBench {
         return new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
-                final RlWire.Decide d = RlWire.decodeDecide(p);
+                final RlWire.Decide d = RlWire.decodeDecide(p, version);
                 final JsonArray r = rows.get(d.decIdx);
                 if (r == null) {
                     throw new RlClient.ServerError("replay", "no tape row for dec " + d.decIdx);
@@ -811,8 +825,9 @@ public final class RlActorBench {
         try {
             cl = RlClient.connect(cfg.server, 10_000, cfg.readTimeoutSec * 1000);
             final JsonObject hello = new JsonObject();
-            hello.addProperty("proto", RlWire.PROTO);
-            hello.addProperty("schema_sha", RlSchema.schemaSha());
+            hello.addProperty("proto", cfg.obsSchema == 2 ? RlWire.PROTO_V2 : RlWire.PROTO);
+            hello.addProperty("schema_sha", cfg.obsSchema == 2 ? forge.bench.rl.RlSchemaV2.schemaSha()
+                    : RlSchema.schemaSha());
             hello.addProperty("card_index_sha", index.sha());
             hello.addProperty("jar_sha", jarSha);
             hello.addProperty("actor_id", cfg.actorId);
@@ -1019,6 +1034,8 @@ public final class RlActorBench {
                 g.add("deck_sha", shas);
                 g.add("controllers", t.get("controllers"));
                 g.addProperty("priv", false);
+                g.addProperty("obs_schema", t.has("schema_sha") && forge.bench.rl.RlSchemaV2.schemaSha().equals(
+                        t.get("schema_sha").getAsString()) ? 2 : 1);
                 // the deck guard of the tape's own mode; the seat's behaviour is the tape mode's
                 final String tmode = t.get("mode").getAsString();
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
