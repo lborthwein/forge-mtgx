@@ -105,6 +105,41 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     /** Optional observer of sent frames (goldens, visibility tests). */
     public FrameListener listener;
 
+    /**
+     * S1 (lane s1-search-1007; null by default, and then nothing changes): the look-ahead over the policy's own priority
+     * decisions. After the server's DECISION at a PRIORITY ask of an RL seat, the search may replace the chosen
+     * candidate; the tape row and the answer carry the candidate actually played (so a tape replays without the search).
+     */
+    public PrioritySearch search;
+    /** S1: priority decisions whose candidate the search replaced. */
+    public int searchDepartures = 0;
+
+    /** S1: the search hook (implemented by {@link RlSearch}). */
+    public interface PrioritySearch {
+        /**
+         * @return the candidate index to play instead of {@code greedy}, -1 to keep it, or {@link #VOID} to end the game
+         *         (the search's CPU cap)
+         */
+        int decide(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, int greedy, List<SpellAbility> menuObjs);
+
+        int VOID = -2;
+    }
+
+    /**
+     * S1 policy play-outs (null by default): the first PRIORITY ask of this seat is answered with this choice and never
+     * sent (the searched candidate a look-ahead play-out starts with); then this seat is the policy as usual.
+     */
+    public PlayoutFirst playoutFirst;
+
+    /** S1: the forced first priority answer of a play-out seat. */
+    public interface PlayoutFirst {
+        /** The candidate index to answer with, or -1 (the play-out fails; {@link #why} says why). */
+        int choose(Game g, Player p, RlCandidates.Menu m, List<SpellAbility> menuObjs,
+                java.util.function.Supplier<RlWire.Decide> frame);
+
+        String why();
+    }
+
     /** Diagnosis switch (-Drlseat.recordBare=true): recorder seats delegate before building any candidate or
      *  observation, isolating the bridge's BRIDGE-mode work in a do-no-harm bisect. Off by default. */
     static final boolean RECORD_BARE = Boolean.getBoolean("rlseat.recordBare");
@@ -272,6 +307,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             forgeDecidedExtra.merge("unposed:" + RlSchema.familyName(family), 1, Integer::sum);
             return null;
         }
+        if (playoutFirst != null && family == RlSchema.F_PRIORITY && roles[seat] == Role.RL) {
+            return forcedFirst(g, player, seat, method, m, objs);
+        }
         if (m.trivial) {
             c(family).trivial++;
             if (family == RlSchema.F_TARGETS) {
@@ -354,6 +392,25 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             endGame("server_error");
             return null;
         }
+        if (search != null && family == RlSchema.F_PRIORITY && d.status == RlWire.ST_OK && objs instanceof List) {
+            // S1: the look-ahead over the policy's own priority decision (the policy's choice is its default)
+            @SuppressWarnings("unchecked")
+            final List<SpellAbility> menuObjs = (List<SpellAbility>) objs;
+            final int alt = search.decide(g, player, m, frame, d.steps[0], menuObjs);
+            if (alt == PrioritySearch.VOID) {
+                endGame("cpu_cap");
+                return null;
+            }
+            if (alt >= 0 && alt != d.steps[0]) {
+                if (m.validate(new short[] {(short) alt}) != null) {
+                    System.err.println("[rlseat] search answered an invalid candidate " + alt + " for dec " + frame.decIdx);
+                    endGame("server_error");
+                    return null;
+                }
+                d.steps = new short[] {(short) alt};
+                searchDepartures++;
+            }
+        }
         noteSent(seat, family, m, frame, d.steps);
         noteVersion(seat, controllers[seat].substring(3), d.policyVersion);
         if (family == RlSchema.F_TARGETS) {
@@ -411,6 +468,50 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         lastFamily.put(method, family);
         ok(method);
         if (family == RlSchema.F_PRIORITY && ans.get("choice").getAsInt() > 0) {
+            final int turn = g.getPhaseHandler().getTurn();
+            final int[] ta = turnActs[seat];
+            if (ta[0] != turn) {
+                ta[0] = turn;
+                ta[1] = 0;
+            }
+            ta[1]++;
+        }
+        return ans;
+    }
+
+    /**
+     * S1 policy play-outs: the first PRIORITY ask of the play-out seat, answered with the searched candidate (never sent).
+     * No match ends the play-out game as {@code server_error} with {@link #fatal} set (the look-ahead counts the
+     * play-out as failed).
+     */
+    private JsonObject forcedFirst(final Game g, final Player player, final int seat, final String method,
+            final RlCandidates.Menu m, final Object objs) {
+        final PlayoutFirst pf = playoutFirst;
+        playoutFirst = null;
+        @SuppressWarnings("unchecked")
+        final List<SpellAbility> menuObjs = objs instanceof List ? (List<SpellAbility>) objs : java.util.Collections.emptyList();
+        final int idx;
+        try {
+            idx = pf.choose(g, player, m, menuObjs, () -> {
+                final RlFeaturizer.Obs o = feat.observe(g, player, m.mullK, priv, m);
+                m.bind(o, feat, player);
+                return frame(seat, g, m, o);
+            });
+        } catch (RuntimeException e) {
+            fatal = "play-out first action: " + e;
+            endGame("server_error");
+            return null;
+        }
+        if (idx < 0 || idx >= m.C()) {
+            fatal = "play-out first action: " + pf.why();
+            endGame("server_error");
+            return null;
+        }
+        final JsonObject ans = m.answer(new short[] {(short) idx});
+        lastAnswered.put(method, -1);
+        lastFamily.put(method, RlSchema.F_PRIORITY);
+        ok(method);
+        if (ans.get("choice").getAsInt() > 0) {
             final int turn = g.getPhaseHandler().getTurn();
             final int[] ta = turnActs[seat];
             if (ta[0] != turn) {
