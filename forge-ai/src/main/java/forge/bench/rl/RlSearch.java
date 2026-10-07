@@ -70,6 +70,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean playoutSample = false;
         public String deadEtb = "off", zeroX = "off", crewNoop = "off", departMedian = "off";
         public boolean stack = false;
+        /** Also search pass (second, after the default), as K8's candidate set does, whatever its prior. */
+        public boolean includePass = false;
         /** host:port of tools/ml/rl/search_server.py. */
         public String server;
         public int readTimeoutMs = 120_000;
@@ -84,7 +86,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
-                "cpuCapMs", "seedSalt", "decisionLog", "policySha"));
+                "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -109,6 +111,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("crewNoop")) c.crewNoop = o.get("crewNoop").getAsString();
             if (o.has("departMedian")) c.departMedian = o.get("departMedian").getAsString();
             if (o.has("stack")) c.stack = o.get("stack").getAsBoolean();
+            if (o.has("includePass")) c.includePass = o.get("includePass").getAsBoolean();
             if (o.has("server") && !o.get("server").isJsonNull()) c.server = o.get("server").getAsString();
             if (o.has("readTimeoutMs")) c.readTimeoutMs = o.get("readTimeoutMs").getAsInt();
             if (o.has("cpuCapMs")) c.cpuCapMs = o.get("cpuCapMs").getAsLong();
@@ -156,6 +159,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("crewNoop", crewNoop);
             o.addProperty("departMedian", departMedian);
             o.addProperty("stack", stack);
+            o.addProperty("includePass", includePass);
             o.addProperty("cpuCapMs", cpuCapMs);
             o.addProperty("seedSalt", seedSalt);
             if (policySha != null) {
@@ -271,6 +275,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     // ------------------------------------------------------------------------------------------------ the decision
 
+    /** S1: one action's identity across identical copies (card name, zone, land flag, ability text); pass = "pass". */
+    static String actionKey(final SpellAbility sa) {
+        if (sa == null) {
+            return "pass";
+        }
+        final forge.game.card.Card h = sa.getHostCard();
+        final String zone = h == null || h.getZone() == null ? "?" : String.valueOf(h.getZone().getZoneType());
+        return (h == null ? "?" : h.getName()) + "|" + zone + "|" + (sa.isLandAbility() ? "L" : "S") + "|"
+                + sa.getDescription();
+    }
+
     /** The bridge menu entry (1-based; 0 = pass) and the announced X (-1 = none) of a PRIORITY candidate. */
     static int choiceOf(final RlCandidates.Menu m, final int i) {
         final JsonElement f = m.cands.get(i).frag;
@@ -306,8 +321,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             scoreFailures++;
             return -1;
         }
-        // pool X variants per menu entry: prior = sum, the entry's candidate = its most likely variant
-        final Map<Integer, double[]> by = new TreeMap<>();
+        // Pool the candidates into entries: X variants of one menu entry, and menu entries that are the same action
+        // (the same card name, zone, land flag and ability text: three Islands in hand are one land play). An entry's
+        // prior is its candidates' summed probability; its menu choice and candidate are its most likely candidate's,
+        // except the default entry's, which are the policy's own (greedy) choice.
+        final int def0 = choiceOf(m, greedy);
+        final Map<String, Integer> entryOf = new java.util.HashMap<>();
+        final Map<Integer, double[]> by = new TreeMap<>();   // entry choice -> {prior, candidate, best p}
         for (int i = 0; i < c; i++) {
             if (m.cands.get(i).kind <= 0) {
                 continue;
@@ -316,17 +336,33 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (ch < 0 || ch > menuObjs.size()) {
                 continue;
             }
-            final double[] a = by.computeIfAbsent(ch, k -> new double[] {0.0, -1, -1.0});
+            final String key = actionKey(ch == 0 ? null : menuObjs.get(ch - 1));
+            Integer e = entryOf.get(key);
+            if (e == null) {
+                e = ch;
+                entryOf.put(key, e);
+            }
+            final double[] a = by.computeIfAbsent(e, k -> new double[] {0.0, -1, -1.0});
             a[0] += sc.probs[i];
             if (sc.probs[i] > a[2]) {
                 a[1] = i;
                 a[2] = sc.probs[i];
             }
         }
-        final int def = choiceOf(m, greedy);
-        if (!by.containsKey(def)) {
+        final Integer defEntry = entryOf.get(actionKey(def0 == 0 ? null : menuObjs.get(def0 - 1)));
+        if (defEntry == null || !by.containsKey(defEntry)) {
             return -1;
         }
+        if (defEntry != def0) {
+            // the default entry stands for the policy's own choice
+            final double[] a = by.remove(defEntry);
+            a[1] = greedy;
+            by.put(def0, a);
+            entryOf.replaceAll((k, v) -> v.equals(defEntry) ? def0 : v);
+        } else {
+            by.get(def0)[1] = greedy;
+        }
+        final int def = def0;
         final List<Integer> order = new ArrayList<>();
         order.add(def);
         final List<Integer> rest = new ArrayList<>(by.keySet());
@@ -335,6 +371,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final int k = Double.compare(by.get(y)[0], by.get(x)[0]);
             return k != 0 ? k : Integer.compare(x, y);
         });
+        if (cfg.includePass && def != 0 && by.containsKey(0)) {
+            // K8's candidate shape: the default, then pass, then the prior's next entries
+            order.remove(Integer.valueOf(0));
+            rest.remove(Integer.valueOf(0));
+            order.add(0);
+        }
         order.addAll(rest);
         final List<SpellAbility> given = new ArrayList<>(order.size());
         for (int ch : order) {
