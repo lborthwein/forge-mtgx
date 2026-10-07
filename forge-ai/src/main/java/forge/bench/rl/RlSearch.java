@@ -75,7 +75,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /** host:port of tools/ml/rl/search_server.py. */
         public String server;
         public int readTimeoutMs = 120_000;
-        /** Per game: the game thread's CPU plus the search's worker-thread CPU, in ms; past it the game is void. 0 = none. */
+        /**
+         * Per game, in ms: the game thread's CPU plus its account (the search's workers and every Forge AI eval thread,
+         * forge.ai.CpuAccount); past it the game is void (cpu_cap). 0 = none.
+         */
         public long cpuCapMs = 0;
         public long seedSalt = 0x51L;
         /** One JSONL row per searched decision (this JVM appends; "{actor}" = the actor id), or null. */
@@ -179,6 +182,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private final String jarSha;
     private final String actorId;
     private final long cpu0;
+    /** The game's CPU account (RlActorBench sets it on the game thread): the look-ahead's and Forge AI's other threads. */
+    private final java.util.concurrent.atomic.AtomicLong[] gameAcc;
     private double poolCpuMs = 0, searchCpuMs = 0, scoreMs = 0;
     private int scoreCalls = 0, scoreFailures = 0, priorityAsks = 0, searchedAsks = 0, departures = 0,
             searchStackSkipped = 0, playoutFirstAmbiguous = 0;
@@ -218,6 +223,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         this.ls = new LookaheadSearch(lc);
         ls.setHooks(this, "value".equals(cfg.leaf), "policy".equals(cfg.playout));
         this.cpu0 = TMX.getCurrentThreadCpuTime();
+        this.gameAcc = forge.ai.CpuAccount.get();
     }
 
     static long splitmix(long z) {
@@ -434,9 +440,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return rows;
     }
 
-    /** The game thread's CPU since this search was made plus the look-ahead's worker-thread CPU, in ms. */
+    /**
+     * The game's CPU since this search was made, in ms: the game thread's, plus every thread charged to the game's
+     * account (the look-ahead's workers and all Forge AI eval threads), or, without an account, the workers' only.
+     */
     public double gameCpuMs() {
-        return (TMX.getCurrentThreadCpuTime() - cpu0) / 1e6 + poolCpuMs;
+        final double other = gameAcc != null && gameAcc.length > 0 ? gameAcc[0].get() / 1e6 : poolCpuMs;
+        return (TMX.getCurrentThreadCpuTime() - cpu0) / 1e6 + other;
     }
 
     public double poolCpuMs() {

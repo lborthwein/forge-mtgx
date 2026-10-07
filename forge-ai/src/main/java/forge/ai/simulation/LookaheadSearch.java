@@ -1647,6 +1647,9 @@ public final class LookaheadSearch {
         final long c0 = TMX.getCurrentThreadCpuTime();
         final java.util.concurrent.atomic.AtomicLong pc = new java.util.concurrent.atomic.AtomicLong();
         poolCpu = pc;
+        // the decision's account: the pool threads' CPU and every Forge AI eval thread the decision starts (measurement)
+        final java.util.concurrent.atomic.AtomicLong[] prevAcc = forge.ai.CpuAccount.get();
+        forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
         deadline = cfg.budgetMs > 0 ? t0 + cfg.budgetMs * 1_000_000L : 0L;
         boolean searched = false;
         try {
@@ -1662,6 +1665,7 @@ public final class LookaheadSearch {
         } finally {
             deadline = 0L;
             poolCpu = null;
+            forge.ai.CpuAccount.set(prevAcc);
             final long dt = System.nanoTime() - t0;
             final long cpu = TMX.getCurrentThreadCpuTime() - c0 + pc.get();
             res.ms = dt / 1e6;
@@ -2917,18 +2921,21 @@ public final class LookaheadSearch {
             return;
         }
         List<Future<?>> fs = new ArrayList<>();
-        final java.util.concurrent.atomic.AtomicLong cpu = poolCpu;
+        final java.util.concurrent.atomic.AtomicLong[] acc = poolCpu == null ? null : forge.ai.CpuAccount.get();
         for (Runnable r : tasks) {
-            if (cpu == null) {
+            if (acc == null) {
                 fs.add(pool.submit(r));
             } else {
-                // S1: the worker threads' CPU time of this decision (measurement only)
+                // S1: a worker thread's CPU, and its Forge AI eval threads', go to the deciding thread's accounts
+                // (the decision's and the game's; measurement only)
                 fs.add(pool.submit(() -> {
-                    final long c0 = TMX.getCurrentThreadCpuTime();
+                    final long c0 = forge.ai.CpuAccount.now();
+                    forge.ai.CpuAccount.set(acc);
                     try {
                         r.run();
                     } finally {
-                        cpu.addAndGet(TMX.getCurrentThreadCpuTime() - c0);
+                        forge.ai.CpuAccount.set(null);
+                        forge.ai.CpuAccount.charge(acc, forge.ai.CpuAccount.now() - c0);
                     }
                 }));
             }

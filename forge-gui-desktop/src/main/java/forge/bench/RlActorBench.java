@@ -402,6 +402,10 @@ public final class RlActorBench {
         IdScope.open();
         AiCache.openScope();
         feat.reset();
+        // S1 (lane s1-search-1007; measurement only): the CPU of this game's other threads (Forge AI eval threads, the
+        // look-ahead's workers) is charged to this account; cpu_ms stays the game thread's own
+        final java.util.concurrent.atomic.AtomicLong gameAcc = new java.util.concurrent.atomic.AtomicLong();
+        forge.ai.CpuAccount.set(new java.util.concurrent.atomic.AtomicLong[] {gameAcc});
         final long cpu0 = TMX.getCurrentThreadCpuTime();
         final long t0 = System.nanoTime();
         Game game = null;
@@ -475,6 +479,8 @@ public final class RlActorBench {
         }
         final long wallMs = (System.nanoTime() - t0) / 1_000_000L;
         final long cpuMs = (TMX.getCurrentThreadCpuTime() - cpu0) / 1_000_000L;
+        forge.ai.CpuAccount.set(null);
+        final long cpuOtherMs = gameAcc.get() / 1_000_000L;
         String voidReason = null;
         if (TIMED_OUT.remove(uid) != null) {
             voidReason = "timeout";
@@ -543,6 +549,10 @@ public final class RlActorBench {
         end.addProperty("digest", digest);
         end.addProperty("cpu_ms", cpuMs);
         end.addProperty("wall_ms", wallMs);
+        if (cpuOtherMs > 0) {
+            // S1: the game's other threads (Forge AI eval threads, the look-ahead's workers); cpu_ms + this = the game's
+            end.addProperty("cpu_other_ms", cpuOtherMs);
+        }
         if (search != null) {
             // S1: the look-ahead's worker threads' CPU is not in cpu_ms (the game thread's)
             end.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
@@ -586,6 +596,9 @@ public final class RlActorBench {
         t.add("dec", decRows);
         t.addProperty("cpu_ms", cpuMs);
         t.addProperty("wall_ms", wallMs);
+        if (cpuOtherMs > 0) {
+            t.addProperty("cpu_other_ms", cpuOtherMs);
+        }
         if (search != null) {
             t.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
             t.add("search", end.get("search"));

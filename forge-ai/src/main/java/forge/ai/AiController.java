@@ -1736,7 +1736,9 @@ public class AiController {
 
             return null;
         });
-        Thread t = new Thread(future, "Game AI Eval");
+        // CpuAccount.charged: the eval thread's CPU is charged to the asking thread's accounts (an RL search seat's game,
+        // lane s1-search-1007); with none set it is the FutureTask itself, as before
+        Thread t = new Thread(CpuAccount.charged(future), "Game AI Eval");
         t.setDaemon(true);
         t.start();
         try {
