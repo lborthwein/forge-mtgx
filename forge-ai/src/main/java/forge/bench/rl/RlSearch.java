@@ -78,7 +78,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /** Per game: the game thread's CPU plus the search's worker-thread CPU, in ms; past it the game is void. 0 = none. */
         public long cpuCapMs = 0;
         public long seedSalt = 0x51L;
-        /** One JSONL row per searched decision (this JVM appends), or null. */
+        /** One JSONL row per searched decision (this JVM appends; "{actor}" = the actor id), or null. */
         public String decisionLog;
         /** The checkpoint the service must serve (HELLO_ACK policy_sha), or null = not checked. */
         public String policySha;
@@ -469,8 +469,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (cfg.decisionLog == null || rows.isEmpty()) {
             return;
         }
+        final String path = cfg.decisionLog.replace("{actor}", actorId == null ? "actor" : actorId);
         synchronized (RlSearch.class) {
-            try (PrintWriter w = new PrintWriter(new FileWriter(cfg.decisionLog, StandardCharsets.UTF_8, true))) {
+            try (PrintWriter w = new PrintWriter(new FileWriter(path, StandardCharsets.UTF_8, true))) {
                 for (JsonObject r : rows) {
                     w.println(RlWire.canonicalString(r));
                 }
