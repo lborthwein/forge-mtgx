@@ -308,6 +308,11 @@ public final class RlActorBench {
             if (d == null) {
                 throw new IllegalArgumentException("could not parse deck " + p);
             }
+            // k8-determinism-1008: a Deck loads its card sections lazily, without a lock, on first access. This cache
+            // shares one Deck between game threads, and two games copying a not-yet-loaded Deck at once could give one
+            // of them a partial deck (a game "lost to its library on turn 1"). Load it here, inside computeIfAbsent,
+            // before any game can see it; a loaded Deck is only read.
+            d.getMain();
             return d;
         });
     }
@@ -521,9 +526,14 @@ public final class RlActorBench {
         rules.setSimTimeout(cfg.gameTimeoutSec);
         final Match match = new Match(rules, seats, "rl-sim");
 
-        MyRandom.setThreadRandom(new Random(seed));
+        final Random gameRandom = new Random(seed);
+        MyRandom.setThreadRandom(gameRandom);
         IdScope.open();
         AiCache.openScope();
+        // k8-determinism-1008: the game's own random stream, id scope and AI-cache scope; each must still be this
+        // thread's at game end (a look-ahead that dropped the AI-cache scope shared Forge AI's cache across games)
+        final Object gameIds = IdScope.capture();
+        final Object gameCache = AiCache.captureScope();
         feat.reset();
         // S1 (lane s1-search-1007; measurement only): the CPU of this game's other threads (Forge AI eval threads, the
         // look-ahead's workers) is charged to this account; cpu_ms stays the game thread's own
@@ -533,6 +543,7 @@ public final class RlActorBench {
         final long t0 = System.nanoTime();
         Game game = null;
         RlSimBench.Digest dg = null;
+        LookaheadBench.Digest dgLb = null;
         String crash = null;
         RlSearch search = null;
         try {
@@ -583,6 +594,10 @@ public final class RlActorBench {
             }
             dg = new RlSimBench.Digest(game);
             game.subscribeToEvents(dg);
+            // k8-determinism-1008 (measurement only): LookaheadBench's digest of the same game, so a game here and its
+            // LookaheadBench row (panel N / K rows, pf1 rows) compare digest for digest
+            dgLb = new LookaheadBench.Digest(game);
+            game.subscribeToEvents(dgLb);
             RUNNING.put(Thread.currentThread(), new Object[] {game,
                     System.currentTimeMillis() + cfg.gameTimeoutSec * 1000L, uid});
             match.startGame(game, null);
@@ -631,6 +646,18 @@ public final class RlActorBench {
         final List<String> fps = new ArrayList<>(dg == null ? Collections.emptyList() : dg.fps);
         fps.add(game == null ? "none" : RlSimBench.outcomeText(game));
         final String digest = RlSimBench.sha16(fps);
+        final String digestLb = dgLb == null || game == null ? null : dgLb.hex();
+        // k8-determinism-1008: which of the game's own scopes this thread no longer holds (empty = isolated)
+        final JsonArray lost = new JsonArray();
+        if (MyRandom.getThreadRandom() != gameRandom) {
+            lost.add("random");
+        }
+        if (IdScope.capture() != gameIds) {
+            lost.add("ids");
+        }
+        if (AiCache.captureScope() != gameCache) {
+            lost.add("aiCache");
+        }
         final int[] result = {0, 0};
         String reason = voidReason == null ? "draw" : voidReason;
         if (voidReason == null && game != null && game.getOutcome() != null && !game.getOutcome().isDraw()) {
@@ -689,6 +716,12 @@ public final class RlActorBench {
         end.add("overridden", ov);
         end.addProperty("cap_hits", seat.capHits);
         end.addProperty("digest", digest);
+        if (digestLb != null) {
+            end.addProperty("digest_lb", digestLb);
+        }
+        if (lost.size() > 0) {
+            end.add("scope_lost", lost);
+        }
         end.addProperty("cpu_ms", cpuMs);
         end.addProperty("wall_ms", wallMs);
         if (cpuOtherMs > 0) {
@@ -728,6 +761,12 @@ public final class RlActorBench {
         t.addProperty("reason", reason);
         t.addProperty("turns", turns);
         t.addProperty("digest", digest);
+        if (digestLb != null) {
+            t.addProperty("digest_lb", digestLb);
+        }
+        if (lost.size() > 0) {
+            t.add("scope_lost", lost);
+        }
         t.addProperty("cap_hits", seat.capHits);
         final JsonObject fd = new JsonObject();
         for (Map.Entry<String, Integer> e : forgeDecided.entrySet()) fd.addProperty(e.getKey(), e.getValue());
@@ -1244,6 +1283,27 @@ public final class RlActorBench {
                     row.addProperty("equal", false);
                 } else {
                     row.add("digest_replay", p.end.get("digest"));
+                    // k8-determinism-1008: the LookaheadBench digest (the tape's, when it has one) and a K8 seat's
+                    // search counts, so a replay audits against LookaheadBench rows and the live run's counts
+                    if (t.has("digest_lb")) {
+                        row.add("digest_lb_tape", t.get("digest_lb"));
+                    }
+                    if (p.end.has("digest_lb")) {
+                        row.add("digest_lb_replay", p.end.get("digest_lb"));
+                    }
+                    if (p.end.has("opp_search")) {
+                        final JsonObject os = p.end.getAsJsonObject("opp_search");
+                        final JsonObject k = new JsonObject();
+                        for (String key : new String[] {"decisions", "searched", "departed"}) {
+                            if (os.has(key)) {
+                                k.add(key, os.get(key));
+                            }
+                        }
+                        row.add("opp_search", k);
+                    }
+                    if (p.end.has("scope_lost")) {
+                        row.add("scope_lost", p.end.get("scope_lost"));
+                    }
                     final boolean eq = p.end.get("digest").getAsString().equals(t.get("digest").getAsString())
                             && p.end.get("void").isJsonNull();
                     row.addProperty("equal", eq);
