@@ -207,6 +207,64 @@ public class RlActorBenchOpponentTest {
                     RlActorBench.tapeEndpoint(t, RlWire.parseUid(t.get("game_uid").getAsString())), null, "test");
             Assert.assertNull(r.guardError);
             Assert.assertEquals(r.end.get("digest"), p.end.get("digest"), "K8 replay digest, game " + k);
+            // k8-determinism-1008: the LookaheadBench digest is recorded and replays too; no scope was lost
+            Assert.assertTrue(p.end.has("digest_lb") && p.tape.has("digest_lb"), p.end.toString());
+            Assert.assertEquals(r.end.get("digest_lb"), p.end.get("digest_lb"), "K8 replay LookaheadBench digest, game " + k);
+            Assert.assertFalse(p.end.has("scope_lost"), "game " + k + " lost " + p.end.get("scope_lost"));
+            Assert.assertFalse(r.end.has("scope_lost"), "replay " + k + " lost " + r.end.get("scope_lost"));
+        }
+    }
+
+    /**
+     * Lane k8-determinism-1008: a game with a K8 seat is a pure function of its row. The look-ahead's candidate
+     * enumeration used to remove the game thread's AI-cache scope (AiCache.closeScope) instead of restoring it, so from
+     * the first searched decision on, the game's Forge AI shared Forge's one process-wide cache with every other game in
+     * the JVM, and a game played beside others differed from its replay alone (gen-check-1007 G4b/G4c). Each game must
+     * keep its own random stream, id scope and AI-cache scope to the end, and give the same digests whether it plays alone
+     * or at the same time as other K8 games.
+     */
+    @Test
+    public void k8GamesKeepTheirScopesAndPlayTogetherAsAlone() throws Exception {
+        final RlActorBench.Cfg cfg = RlActorBenchTest.cfg("eval");
+        cfg.k8 = JsonParser.parseString(CHEAP).getAsJsonObject();
+        final int n = 3;
+        final JsonObject[] games = new JsonObject[n];
+        final String[] alone = new String[n];
+        for (int k = 0; k < n; k++) {
+            games[k] = evalGame(k, k % 2 == 0 ? "forge" : "lookahead:K8", k % 2 == 0 ? "lookahead:K8" : "forge");
+            final RlActorBench.Played p = RlActorBench.play(cfg, "eval", games[k], new RlFeaturizer(RlActorBenchTest.index),
+                    endpoint("eval"), null, "test");
+            Assert.assertNull(p.guardError);
+            Assert.assertFalse(p.end.has("scope_lost"), "alone " + k + " lost " + p.end.get("scope_lost"));
+            Assert.assertTrue(p.end.getAsJsonObject("opp_search").get("decisions").getAsInt() > 0);
+            alone[k] = p.end.get("digest").getAsString() + "/" + p.end.get("digest_lb").getAsString();
+        }
+        final String[] together = new String[n];
+        final Throwable[] failed = new Throwable[n];
+        final java.util.List<Thread> ts = new java.util.ArrayList<>();
+        for (int k = 0; k < n; k++) {
+            final int kk = k;
+            final Thread t = new Thread(() -> {
+                try {
+                    final RlActorBench.Played p = RlActorBench.play(cfg, "eval", games[kk],
+                            new RlFeaturizer(RlActorBenchTest.index), endpoint("eval"), null, "test");
+                    Assert.assertFalse(p.end.has("scope_lost"), "together " + kk + " lost " + p.end.get("scope_lost"));
+                    together[kk] = p.end.get("digest").getAsString() + "/" + p.end.get("digest_lb").getAsString();
+                } catch (Throwable e) {
+                    failed[kk] = e;
+                }
+            }, "rlactor-test-" + k);
+            ts.add(t);
+            t.start();
+        }
+        for (Thread t : ts) {
+            t.join();
+        }
+        for (int k = 0; k < n; k++) {
+            if (failed[k] != null) {
+                throw new AssertionError("game " + k + " played together failed", failed[k]);
+            }
+            Assert.assertEquals(together[k], alone[k], "game " + k + ": together vs alone (digest/digest_lb)");
         }
     }
 }
