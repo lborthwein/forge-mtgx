@@ -914,6 +914,7 @@ public final class PolicyPilot {
     private <T> T inCopy(Game g, Player liveMe, boolean withStack, InCopy<T> f) {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(LookaheadSearch.mix(cfg.seed, 0x9011c7L + copies++)));
+        final Object prevAiCache = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds = forge.util.IdScope.capture();
         forge.util.IdScope.open();
@@ -923,7 +924,7 @@ public final class PolicyPilot {
             final Game c = copier.makeCopy();
             return f.apply(c, (Player) copier.find(liveMe));
         } finally {
-            AiCache.closeScope();
+            AiCache.installScope(prevAiCache);
             forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
         }

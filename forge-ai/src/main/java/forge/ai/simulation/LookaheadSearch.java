@@ -1855,6 +1855,7 @@ public final class LookaheadSearch {
         crewNoopKeys.clear();
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 7)));
+        final Object prevAiCache1 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds = forge.util.IdScope.capture();
         forge.util.IdScope.open();
@@ -1935,7 +1936,7 @@ public final class LookaheadSearch {
                 oAt.add(allAt.get(i));
             }
         } finally {
-            AiCache.closeScope();
+            AiCache.installScope(prevAiCache1);
             forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
         }
@@ -2274,6 +2275,7 @@ public final class LookaheadSearch {
     public static JsonObject encodeInCopy(Game g, Player p, long seed) {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(seed));
+        final Object prevAiCache2 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds = forge.util.IdScope.capture();
         forge.util.IdScope.open();
@@ -2290,7 +2292,7 @@ public final class LookaheadSearch {
         } catch (RuntimeException | StackOverflowError e) {
             return null;
         } finally {
-            AiCache.closeScope();
+            AiCache.installScope(prevAiCache2);
             forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
         }
@@ -2991,6 +2993,7 @@ public final class LookaheadSearch {
         }
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 7)));
+        final Object prevAiCache3 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds1 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
@@ -3140,7 +3143,7 @@ public final class LookaheadSearch {
             }
             return out.subList(0, 1);
         } finally {
-            AiCache.closeScope();
+            AiCache.installScope(prevAiCache3);
             forge.util.IdScope.install(prevIds1);
             MyRandom.setThreadRandom(prev);
         }
@@ -4545,6 +4548,7 @@ public final class LookaheadSearch {
         final Rollout r = new Rollout();
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(worldSeed, 1)));
+        final Object prevAiCache4 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds = forge.util.IdScope.capture();
         forge.util.IdScope.open();
@@ -4601,7 +4605,7 @@ public final class LookaheadSearch {
             r.value = Double.NEGATIVE_INFINITY;
             System.err.println("[lookahead] combat rollout failed: " + e);
         } finally {
-            AiCache.closeScope();
+            AiCache.installScope(prevAiCache4);
             forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
         }
@@ -5614,6 +5618,7 @@ public final class LookaheadSearch {
         // (1) Copy cost and copy fidelity, no resampling.
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 99)));
+        final Object prevAiCache5 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds3 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
@@ -5656,7 +5661,7 @@ public final class LookaheadSearch {
         } catch (RuntimeException e) {
             p.addProperty("copyProbeError", e.toString());
         } finally {
-            AiCache.closeScope();
+            AiCache.installScope(prevAiCache5);
             forge.util.IdScope.install(prevIds3);
             MyRandom.setThreadRandom(prev);
         }
@@ -5673,6 +5678,7 @@ public final class LookaheadSearch {
         // (3) Forge's own simulation AI, same position, its cost per decision (depth/budget as configured).
         final Random prev2 = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(decisionSeed, 98)));
+        final Object prevAiCache6 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds4 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
@@ -5689,7 +5695,7 @@ public final class LookaheadSearch {
         } catch (RuntimeException e) {
             p.addProperty("simAiError", e.toString());
         } finally {
-            AiCache.closeScope();
+            AiCache.installScope(prevAiCache6);
             forge.util.IdScope.install(prevIds4);
             MyRandom.setThreadRandom(prev2);
         }
@@ -5715,6 +5721,7 @@ public final class LookaheadSearch {
         final Rollout r = new Rollout();
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new Random(mix(s, 1)));
+        final Object prevAiCache7 = AiCache.captureScope(); // restored below, never removed (k8-determinism-1008)
         AiCache.openScope();
         final Object prevIds5 = forge.util.IdScope.capture();
         forge.util.IdScope.open();
@@ -5758,7 +5765,7 @@ public final class LookaheadSearch {
         } catch (RuntimeException e) {
             r.ok = false;
         } finally {
-            AiCache.closeScope();
+            AiCache.installScope(prevAiCache7);
             forge.util.IdScope.install(prevIds5);
             MyRandom.setThreadRandom(prev);
         }
