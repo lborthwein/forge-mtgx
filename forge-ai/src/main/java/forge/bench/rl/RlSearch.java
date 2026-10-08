@@ -420,6 +420,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.add("prior", pr);
             row.add("entry", ix);
             row.add("ev", ev);
+            // per-world values (diagnostics: paired differences, sign consistency across worlds)
+            final JsonArray vw = new JsonArray();
+            final double scale = "value".equals(cfg.leaf) ? 1e4 : 10;
+            for (int j = 0; j < r.values.length; j++) {
+                final JsonArray w = new JsonArray();
+                for (double x : r.values[j]) {
+                    if (Double.isInfinite(x) || Double.isNaN(x)) {
+                        w.add((Number) null);
+                    } else {
+                        w.add(Math.round(x * scale) / scale);
+                    }
+                }
+                vw.add(w);
+            }
+            row.add("values", vw);
             row.addProperty("p_default", Math.round(by.get(def)[0] * 1e5) / 1e5);
             row.addProperty("outcome", r.outcome);
             row.addProperty("chosen", r.chosen <= 0 ? 0 : order.get(r.chosen));

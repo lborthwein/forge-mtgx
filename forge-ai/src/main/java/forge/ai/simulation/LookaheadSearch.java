@@ -1592,6 +1592,8 @@ public final class LookaheadSearch {
         /** The searched candidates as indices into the given list (default first), and their mean values (NaN = a world failed). */
         public int[] givenIndex = new int[0];
         public double[] ev = new double[0];
+        /** Every searched candidate's per-world value (the leaf's scale; -inf = a failed play-out), for diagnostics. */
+        public double[][] values = new double[0][];
         /** Candidates whose play-out failed in some world (never chosen). */
         public int failed;
         public int worlds;
@@ -1787,6 +1789,7 @@ public final class LookaheadSearch {
         res.outcome = outcome;
         res.worlds = k;
         res.ev = ev;
+        res.values = values;
         res.givenIndex = new int[n];
         for (int c = 0; c < n; c++) {
             res.givenIndex[c] = at.get(c);
