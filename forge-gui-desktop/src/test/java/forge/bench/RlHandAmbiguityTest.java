@@ -8,7 +8,6 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import forge.ai.AITest;
-import forge.bench.rl.RlFeaturizer;
 import forge.bench.rl.RlSchema;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;

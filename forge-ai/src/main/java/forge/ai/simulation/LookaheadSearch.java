@@ -172,6 +172,11 @@ public final class LookaheadSearch {
          */
         public AiFixes.Mode departMedian = AiFixes.Mode.OFF;
         public int maxDeparturesPerTurn = 12;
+        /**
+         * S1 value leaf (lane s1-search-1007; used only with the hooks' value leaf): main-loop steps a play-out may run
+         * past the start of the horizon turn waiting for the searching seat's first priority there. Not in the config JSON.
+         */
+        public int leafExtraSteps = 400;
         /** Probe instrumentation (copy timing, copy fidelity, determinism, sim-AI cost). */
         public boolean probe = false;
         /** C2: also search attack and block declarations. */
@@ -532,6 +537,18 @@ public final class LookaheadSearch {
         public long beliefWorlds, beliefCards, beliefCreateNanos, beliefMismatch, beliefPoolSlots, beliefUnknownCards;
         public String beliefDigest, beliefCheckpoint, beliefLastError;
         public final JsonArray beliefCoverage = new JsonArray();
+        /**
+         * S1 (reported only when {@link #decideGiven} ran): its decisions (given candidate sets), those with a non-empty
+         * stack it skipped, the uncontested ones (under two candidates), the value-leaf calls, leaves, fallbacks to the
+         * static values, leaves taken late (no priority of the seat within the extra steps, taken at the cap) and call
+         * time, policy play-outs failed by their seat, and the CPU time of every searched given decision (decision
+         * thread plus pool threads).
+         */
+        public boolean s1On;
+        public long givenDecisions, givenStackSkipped, givenUncontested, leafCalls, leafLeaves, leafFallbacks, leafLate,
+                leafNanos, playoutSeatFailures, searchCpuNanos;
+        public String leafLastError, playoutLastFailure;
+        public final List<Double> searchCpuMsEach = new ArrayList<>();
 
         public JsonObject toJson() {
             JsonObject o = new JsonObject();
@@ -753,6 +770,31 @@ public final class LookaheadSearch {
                 }
                 o.add("labels", l);
             }
+            if (s1On) {
+                final JsonObject s = new JsonObject();
+                s.addProperty("givenDecisions", givenDecisions);
+                s.addProperty("stackSkipped", givenStackSkipped);
+                s.addProperty("uncontested", givenUncontested);
+                s.addProperty("leafCalls", leafCalls);
+                s.addProperty("leafLeaves", leafLeaves);
+                s.addProperty("leafFallbacks", leafFallbacks);
+                s.addProperty("leafLate", leafLate);
+                s.addProperty("leafMs", leafNanos / 1e6);
+                s.addProperty("playoutSeatFailures", playoutSeatFailures);
+                s.addProperty("searchCpuMs", searchCpuNanos / 1e6);
+                final JsonArray cpu = new JsonArray();
+                for (Double d : searchCpuMsEach) {
+                    cpu.add(Math.round(d * 10) / 10.0);
+                }
+                s.add("searchCpuMsEach", cpu);
+                if (leafLastError != null) {
+                    s.addProperty("leafLastError", leafLastError);
+                }
+                if (playoutLastFailure != null) {
+                    s.addProperty("playoutLastFailure", playoutLastFailure);
+                }
+                o.add("s1", s);
+            }
             if (rankerOn) {
                 final JsonObject r = new JsonObject();
                 r.addProperty("decisions", rankerDecisions);
@@ -916,6 +958,108 @@ public final class LookaheadSearch {
 
     /** Fidelity probe: the live game's fingerprint at the watched turn, compared with a truth rollout. */
     private FidelityWatch liveWatch = null;
+
+    // ------------------------------------------------------------------ S1 hooks (lane s1-search-1007)
+
+    /**
+     * S1: the first action of a play-out as a play-out seat must take it (the candidate searched): pass, or the ability
+     * of the host card {@code hostId} whose description is {@code desc} (a land play when {@code land}).
+     */
+    public static final class FirstAction {
+        public final boolean pass;
+        public final int hostId;
+        public final String desc;
+        public final boolean land;
+
+        FirstAction(Cand c) {
+            this.pass = c.pass;
+            this.hostId = c.hostId;
+            this.desc = c.desc;
+            this.land = c.land;
+        }
+
+        /** The ability of {@code sa}'s menu entry is this action (host id, land flag, description). */
+        public boolean matches(SpellAbility sa) {
+            if (sa == null) {
+                return pass;
+            }
+            return !pass && sa.getHostCard() != null && sa.getHostCard().getId() == hostId && sa.isLandAbility() == land
+                    && desc.equals(sa.getDescription());
+        }
+    }
+
+    /**
+     * S1: one play-out's horizon probe. With a value leaf the play-out runs past the start of the horizon turn to the
+     * searching seat's first priority in it, where {@link SearchHooks#captureLeaf} takes the leaf observation (a decision
+     * point, as the value head's training rows are); the play-out seat (Forge AI or a policy seat) calls
+     * {@link #onPriority} whenever the seat gets priority.
+     */
+    public static final class LeafProbe {
+        private final SearchHooks hooks;
+        private final Object ctx;
+        TurnWatch watch;
+        Object payload;
+        volatile boolean done;
+
+        LeafProbe(SearchHooks hooks, Object ctx) {
+            this.hooks = hooks;
+            this.ctx = ctx;
+        }
+
+        /** The searching seat has priority in play-out {@code g}: take the leaf there if the horizon turn has begun. */
+        public void onPriority(Game g, Player me) {
+            if (!done && watch != null && watch.reached) {
+                payload = hooks.captureLeaf(ctx, g, me);
+                done = true;
+            }
+        }
+    }
+
+    /** S1: a policy-piloted searching seat inside one play-out. */
+    public interface PlayoutSeat {
+        PlayerControllerAi controller();
+
+        /** Why the seat could not play this play-out (the play-out then fails), or null. */
+        String failure();
+    }
+
+    /**
+     * S1 (lane s1-search-1007; all null by default, and then nothing below runs): what a learned policy and value
+     * supply to {@link #decideGiven}. Every method is called only when its option is set with {@link #setHooks}.
+     */
+    public interface SearchHooks {
+        /** Decision thread, inside the copy's preparation (after the world draw): a per-copy context, or null. */
+        Object onCopy(Game copy, Player me);
+
+        /** Play-out thread: the leaf payload (an encoded observation of {@code me}) at the probe point. */
+        Object captureLeaf(Object copyCtx, Game g, Player me);
+
+        /** Decision thread: one value per leaf payload, P(the seat wins) in [0, 1], in order; null = failed. */
+        double[] leafValues(List<Object> payloads);
+
+        /** Play-out thread: the searching seat's controller for a policy play-out that starts with {@code first}. */
+        PlayoutSeat playoutSeat(Object copyCtx, Game g, Player me, FirstAction first, long seed, LeafProbe probe);
+    }
+
+    private SearchHooks hooks = null;
+    private boolean hookLeaf = false, hookPlayout = false;
+    /** S1: the CPU time of pool tasks (play-outs on worker threads) is summed here while it is non-null. */
+    private volatile java.util.concurrent.atomic.AtomicLong poolCpu = null;
+    private static final java.lang.management.ThreadMXBean TMX = java.lang.management.ManagementFactory.getThreadMXBean();
+
+    /**
+     * S1: install the learned hooks. {@code valueLeaf}: non-terminal play-outs are scored by
+     * {@link SearchHooks#leafValues} at the seat's first priority in the horizon turn (terminal ones 1 / 0 / 0.5);
+     * {@code policyPlayouts}: the searching seat's play-out controller comes from {@link SearchHooks#playoutSeat}.
+     */
+    public void setHooks(SearchHooks h, boolean valueLeaf, boolean policyPlayouts) {
+        if (h == null && (valueLeaf || policyPlayouts)) {
+            throw new IllegalArgumentException("S1 hooks: a value leaf or policy play-outs need hooks");
+        }
+        this.hooks = h;
+        this.hookLeaf = h != null && valueLeaf;
+        this.hookPlayout = h != null && policyPlayouts;
+    }
 
     public LookaheadSearch(Config cfg) {
         this(cfg, null);
@@ -1437,6 +1581,425 @@ public final class LookaheadSearch {
         return answer;
     }
 
+    // ------------------------------------------------------------------ S1: a given candidate set (lane s1-search-1007)
+
+    /** S1: what one {@link #decideGiven} call did, for the caller's per-decision log. */
+    public static final class GivenResult {
+        /** Index into the given list to play: 0 = the default; -1 = not searched (the default stands). */
+        public int chosen = -1;
+        /** unsearched | stack | uncontested | kept | departed | loop-guard | capped | failed. */
+        public String outcome = "unsearched";
+        /** The searched candidates as indices into the given list (default first), and their mean values (NaN = a world failed). */
+        public int[] givenIndex = new int[0];
+        public double[] ev = new double[0];
+        /** Every searched candidate's per-world value (the leaf's scale; -inf = a failed play-out), for diagnostics. */
+        public double[][] values = new double[0][];
+        /** Candidates whose play-out failed in some world (never chosen). */
+        public int failed;
+        public int worlds;
+        public boolean leafFallback;
+        /** Wall and CPU time of the call (CPU = the calling thread's plus the pool threads'), and the pool part. */
+        public double ms, cpuMs, poolCpuMs;
+    }
+
+    /**
+     * S1 (lane s1-search-1007): search a GIVEN candidate set at a priority decision of {@code me} in the live game,
+     * instead of Forge's own (Forge's answer, pass, the next legal). {@code given} is in the caller's order of
+     * preference (a learned policy's prior): index 0 is the default the search departs from (the base policy's own
+     * answer); null is pass. Candidates are taken in that order, duplicates (same host, land flag and description)
+     * skipped, guarded ones (deadEtb / zeroX / crewNoop ON) dropped except the default, until {@code breadth} are taken.
+     * Every other part is the K8 recipe: K worlds with common random numbers, play-outs to the start of turn now +
+     * horizon (with a value leaf: the seat's first priority in it), argmax with the departZ / median / margin gates, the
+     * per-turn departure guards. Forge AI targets each candidate in its copy (with policy play-outs the play-out seat
+     * does). The live game is only read. With no hooks set and no guard on, nothing here touches the other paths.
+     */
+    public GivenResult decideGiven(Game live, Player me, List<SpellAbility> given, int breadth) {
+        final GivenResult res = new GivenResult();
+        stats.s1On = true;
+        stats.decisions++;
+        stats.givenDecisions++;
+        final int index = decisionIndex++;
+        final boolean onStack = !live.getStack().isEmpty();
+        if (onStack) {
+            stats.stackDecisions++;
+            if (!cfg.stack) {
+                stats.stackSkipped++;
+                stats.givenStackSkipped++;
+                res.outcome = "stack";
+                return res;
+            }
+            final String why = GameCopier.stackUnsupported(live);
+            if (why != null) {
+                stats.stackSkipped++;
+                stats.stackUnsupported++;
+                stats.givenStackSkipped++;
+                stats.stackWhy.merge(why, 1L, Long::sum);
+                res.outcome = "stack";
+                return res;
+            }
+        }
+        final PhaseHandler ph = live.getPhaseHandler();
+        final int turn = ph.getTurn();
+        if (turn != departuresTurn) {
+            departuresTurn = turn;
+            departuresThisTurn = 0;
+            departureCounts.clear();
+        }
+        final long t0 = System.nanoTime();
+        final long c0 = TMX.getCurrentThreadCpuTime();
+        final java.util.concurrent.atomic.AtomicLong pc = new java.util.concurrent.atomic.AtomicLong();
+        poolCpu = pc;
+        // the decision's account: the pool threads' CPU and every Forge AI eval thread the decision starts (measurement)
+        final java.util.concurrent.atomic.AtomicLong[] prevAcc = forge.ai.CpuAccount.get();
+        forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
+        deadline = cfg.budgetMs > 0 ? t0 + cfg.budgetMs * 1_000_000L : 0L;
+        boolean searched = false;
+        try {
+            searched = decideGiven0(live, me, given, Math.max(1, breadth), index, onStack, ph, turn, res);
+        } catch (RuntimeException e) {
+            stats.departFallback++;
+            res.chosen = 0;
+            res.outcome = "failed";
+            System.err.println("[lookahead] given search failed at decision " + index + ", playing the default: " + e);
+            if (FAILURE_TRACES.getAndIncrement() < 20) {
+                e.printStackTrace();
+            }
+        } finally {
+            deadline = 0L;
+            poolCpu = null;
+            forge.ai.CpuAccount.set(prevAcc);
+            final long dt = System.nanoTime() - t0;
+            final long cpu = TMX.getCurrentThreadCpuTime() - c0 + pc.get();
+            res.ms = dt / 1e6;
+            res.cpuMs = cpu / 1e6;
+            res.poolCpuMs = pc.get() / 1e6;
+            if (searched) {
+                stats.searchNanos += dt;
+                stats.maxSearchNanos = Math.max(stats.maxSearchNanos, dt);
+                stats.searchMsEach.add(dt / 1e6);
+                stats.searchCpuNanos += cpu;
+                stats.searchCpuMsEach.add(cpu / 1e6);
+            }
+        }
+        return res;
+    }
+
+    private boolean decideGiven0(Game live, Player me, List<SpellAbility> given, int breadth, int index, boolean onStack,
+            PhaseHandler ph, int turn, GivenResult res) {
+        final long decisionSeed = mix(cfg.seed, 0x5eedL + index);
+        final List<Cand> all = new ArrayList<>();
+        final List<Integer> allAt = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        for (int i = 0; i < given.size(); i++) {
+            final Cand c = new Cand(given.get(i), false);
+            if (seen.add(c.key())) {
+                all.add(c);
+                allAt.add(i);
+            }
+        }
+        final List<Cand> cands = new ArrayList<>();
+        final List<Integer> at = new ArrayList<>();
+        guardGiven(live, me, all, allAt, breadth, decisionSeed, cands, at);
+        if (cands.size() < 2) {
+            stats.uncontested++;
+            stats.givenUncontested++;
+            res.outcome = "uncontested";
+            return false;
+        }
+        stats.searched++;
+        if (onStack) {
+            stats.stackSearched++;
+        }
+        lastCandidates = cands;
+        final int k = Math.max(1, cfg.worlds);
+        final int n = cands.size();
+        final double[][] values = new double[n][k];
+        final Rollout[][] outs = new Rollout[n][k];
+        final boolean[] ok = new boolean[n];
+        Arrays.fill(ok, true);
+        explainChoices = EXPLAIN ? new String[n] : null;
+        labelChoices = null;
+        labelTargets = null;
+        final int aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+        if (hookLeaf) {
+            final long fb = stats.leafFallbacks;
+            valueLeaves(values, outs, ok, k);
+            res.leafFallback = stats.leafFallbacks != fb;
+        }
+        final boolean overBudget = aborted > 0;
+        final double[] ev = new double[n];
+        for (int c = 0; c < n; c++) {
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += values[c][w];
+            }
+            ev[c] = ok[c] ? s / k : Double.NaN;
+            if (!ok[c]) {
+                stats.candidatesDropped++;
+                res.failed++;
+            }
+        }
+        final int plainBest = overBudget ? 0 : argmax(values, ok, n, k);
+        int best = plainBest;
+        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget) {
+            final int medBest = argmaxMedian(values, ok, n, k);
+            if (medBest != plainBest) {
+                stats.departMedianChanged++;
+                if (cfg.departMedian == AiFixes.Mode.ON) {
+                    best = medBest;
+                }
+            }
+        }
+        if (cfg.deadEtb == AiFixes.Mode.SHADOW && best != 0 && deadEtbKeys.contains(cands.get(best).key())) {
+            stats.deadEtbShadowBest++;
+        }
+        if (cfg.zeroX == AiFixes.Mode.SHADOW && best != 0 && zeroXKeys.contains(cands.get(best).key())) {
+            stats.zeroXShadowBest++;
+        }
+        if (cfg.crewNoop == AiFixes.Mode.SHADOW && best != 0 && crewNoopKeys.contains(cands.get(best).key())) {
+            stats.crewNoopShadowBest++;
+        }
+        res.chosen = 0;
+        String outcome = "kept";
+        if (best != 0 && !cfg.shadow) {
+            final Cand chosen = cands.get(best);
+            final String key = chosen.key() + "@" + ph.getPhase() + "#" + live.getStack().size();
+            final int seenN = departureCounts.getOrDefault(key, 0);
+            if (departuresThisTurn >= cfg.maxDeparturesPerTurn || seenN >= 2) {
+                stats.loopGuard++;
+                outcome = "loop-guard";
+            } else {
+                res.chosen = at.get(best);
+                stats.departed++;
+                if (onStack) {
+                    stats.stackDeparted++;
+                }
+                departuresThisTurn++;
+                departureCounts.put(key, seenN + 1);
+                outcome = "departed";
+            }
+        } else if (best != 0) {
+            outcome = "shadow-would-depart";
+        }
+        if (overBudget) {
+            stats.capped++;
+            res.chosen = 0;
+            outcome = "capped";
+        }
+        res.outcome = outcome;
+        res.worlds = k;
+        res.ev = ev;
+        res.values = values;
+        res.givenIndex = new int[n];
+        for (int c = 0; c < n; c++) {
+            res.givenIndex[c] = at.get(c);
+        }
+        if (Boolean.getBoolean("lookahead.trace")) {
+            final StringBuilder tb = new StringBuilder("[ltrace] given d=").append(index).append(" T").append(turn).append(' ')
+                    .append(ph.getPhase()).append(" best=").append(best).append(" out=").append(outcome);
+            for (int c = 0; c < n; c++) {
+                tb.append(" | ").append(cands.get(c).label.replace('|', '/')).append(ok[c] ? "" : " FAIL");
+                for (int w = 0; w < k; w++) {
+                    tb.append(' ').append(Double.doubleToLongBits(values[c][w]));
+                }
+            }
+            System.err.println(tb);
+        }
+        if (EXPLAIN) {
+            final JsonObject x = new JsonObject();
+            x.addProperty("given", true);
+            x.addProperty("decision", index);
+            x.addProperty("turn", turn);
+            x.addProperty("phase", String.valueOf(ph.getPhase()));
+            x.addProperty("best", best);
+            x.addProperty("outcome", outcome);
+            final JsonArray ca = new JsonArray();
+            for (int c = 0; c < n; c++) {
+                final JsonObject co = new JsonObject();
+                co.addProperty("label", cands.get(c).label);
+                co.addProperty("choices", explainChoices != null && explainChoices[c] != null ? explainChoices[c] : "");
+                co.addProperty("ok", ok[c]);
+                co.addProperty("ev", ok[c] ? ev[c] : null);
+                final JsonArray vs = new JsonArray();
+                for (int w = 0; w < k; w++) {
+                    vs.add(values[c][w]);
+                }
+                co.add("values", vs);
+                ca.add(co);
+            }
+            x.add("candidates", ca);
+            System.err.println("[lookahead-explain] " + x);
+        }
+        return true;
+    }
+
+    /**
+     * S1: the given candidates in order, up to {@code breadth}, with the guards applied as {@link #enumerate} applies them
+     * (in an enumeration copy; ON drops a guarded candidate other than the default and the next one takes its slot,
+     * SHADOW keeps it and records its key). Never throws: on a copy failure the first {@code breadth} are taken unguarded.
+     */
+    private void guardGiven(Game live, Player liveMe, List<Cand> all, List<Integer> allAt, int breadth, long decisionSeed,
+            List<Cand> out, List<Integer> outAt) {
+        final boolean guard = cfg.deadEtb != AiFixes.Mode.OFF;
+        final boolean zguard = cfg.zeroX != AiFixes.Mode.OFF;
+        final boolean cguard = cfg.crewNoop != AiFixes.Mode.OFF;
+        if (!guard && !zguard && !cguard) {
+            for (int i = 0; i < all.size() && out.size() < breadth; i++) {
+                out.add(all.get(i));
+                outAt.add(allAt.get(i));
+            }
+            return;
+        }
+        deadEtbKeys.clear();
+        zeroXKeys.clear();
+        crewNoopKeys.clear();
+        final Random prev = MyRandom.getThreadRandom();
+        MyRandom.setThreadRandom(new Random(mix(decisionSeed, 7)));
+        AiCache.openScope();
+        final Object prevIds = forge.util.IdScope.capture();
+        forge.util.IdScope.open();
+        int deadHere = 0, zeroHere = 0, crewHere = 0;
+        final List<Cand> o = new ArrayList<>();
+        final List<Integer> oAt = new ArrayList<>();
+        try {
+            final GameCopier copier = copierOf(live);
+            copier.setCopyStack(cfg.stack);
+            final Game g = copier.makeCopy();
+            final Player me = (Player) copier.find(liveMe);
+            for (int i = 0; i < all.size() && o.size() < breadth; i++) {
+                final Cand c = all.get(i);
+                final SpellAbility sa = c.pass ? null : locate(g, me, c);
+                if (sa != null) {
+                    sa.setActivatingPlayer(me);
+                }
+                final boolean dead = guard && sa != null && deadEtbPermanent(sa, me);
+                final boolean zero = zguard && sa != null && zeroXSpell(sa, me);
+                final boolean crew = cguard && sa != null && crewNoop(sa, me);
+                if (i == 0) {
+                    // the default is never dropped (as Forge's answer in enumerate)
+                    if (dead) {
+                        stats.deadEtbForge++;
+                    }
+                    if (zero) {
+                        stats.zeroXForge++;
+                    }
+                    if (crew) {
+                        stats.crewNoopForge++;
+                    }
+                } else {
+                    if (dead) {
+                        deadHere++;
+                        stats.deadEtbCands++;
+                        if (cfg.deadEtb == AiFixes.Mode.ON) {
+                            stats.deadEtbDropped++;
+                            continue;
+                        }
+                        deadEtbKeys.add(c.key());
+                    }
+                    if (zero) {
+                        zeroHere++;
+                        stats.zeroXCands++;
+                        if (cfg.zeroX == AiFixes.Mode.ON) {
+                            stats.zeroXDropped++;
+                            continue;
+                        }
+                        zeroXKeys.add(c.key());
+                    }
+                    if (crew) {
+                        crewHere++;
+                        stats.crewNoopCands++;
+                        if (cfg.crewNoop == AiFixes.Mode.ON) {
+                            stats.crewNoopDropped++;
+                            continue;
+                        }
+                        crewNoopKeys.add(c.key());
+                    }
+                }
+                o.add(c);
+                oAt.add(allAt.get(i));
+            }
+            if (deadHere > 0) {
+                stats.deadEtbDecisions++;
+            }
+            if (zeroHere > 0) {
+                stats.zeroXDecisions++;
+            }
+            if (crewHere > 0) {
+                stats.crewNoopDecisions++;
+            }
+        } catch (RuntimeException e) {
+            o.clear();
+            oAt.clear();
+            for (int i = 0; i < all.size() && o.size() < breadth; i++) {
+                o.add(all.get(i));
+                oAt.add(allAt.get(i));
+            }
+        } finally {
+            AiCache.closeScope();
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+        out.addAll(o);
+        outAt.addAll(oAt);
+    }
+
+    /**
+     * S1 value leaf: replace one decision's static leaf values by the hooks' P(win) (terminal play-outs 1 / 0 / 0.5). One
+     * call carries every non-terminal leaf, world-major then candidate-minor. On a failure the decision keeps its static
+     * values (all of them: a decision never mixes the two scales) and the fallback is counted.
+     */
+    private void valueLeaves(double[][] values, Rollout[][] outs, boolean[] ok, int k) {
+        final int n = values.length;
+        final List<Object> leaves = new ArrayList<>();
+        final List<int[]> where = new ArrayList<>();
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final Rollout r = outs[c][w];
+                if (ok[c] && r != null && r.ok && Double.isNaN(r.pTerminal)) {
+                    if (r.leafPayload == null) {
+                        stats.leafFallbacks++;
+                        stats.leafLastError = "a non-terminal play-out has no leaf payload";
+                        return;
+                    }
+                    leaves.add(r.leafPayload);
+                    where.add(new int[] {c, w});
+                }
+            }
+        }
+        double[] p = null;
+        if (!leaves.isEmpty()) {
+            final long t = System.nanoTime();
+            try {
+                p = hooks.leafValues(leaves);
+            } catch (RuntimeException e) {
+                p = null;
+                stats.leafLastError = String.valueOf(e);
+            }
+            stats.leafNanos += System.nanoTime() - t;
+            if (p == null || p.length != leaves.size()) {
+                stats.leafFallbacks++;
+                if (p != null) {
+                    stats.leafLastError = "leaf values: " + p.length + " for " + leaves.size() + " leaves";
+                }
+                System.err.println("[lookahead] value leaf failed, static fallback: " + stats.leafLastError);
+                return;
+            }
+            stats.leafCalls++;
+            stats.leafLeaves += leaves.size();
+        }
+        for (int w = 0; w < k; w++) {
+            for (int c = 0; c < n; c++) {
+                final Rollout r = outs[c][w];
+                if (ok[c] && r != null && r.ok && !Double.isNaN(r.pTerminal)) {
+                    values[c][w] = r.pTerminal;
+                }
+            }
+        }
+        for (int i = 0; i < where.size(); i++) {
+            values[where.get(i)[0]][where.get(i)[1]] = p[i];
+        }
+    }
+
     /**
      * Label dump: one searched decision as a JSON object for the sink. Reads only the search's own arrays, the
      * enumeration copy's root state, Forge AI's answer and turn/phase/stack/mulligan counters of the live game. Never
@@ -1778,6 +2341,13 @@ public final class LookaheadSearch {
             if (r.reused) {
                 stats.reuseHits++;
                 stats.reuseStepsSaved += r.reusedSteps;
+            }
+            if (r.leafLate) {
+                stats.leafLate++;
+            }
+            if (r.seatFailure != null) {
+                stats.playoutSeatFailures++;
+                stats.playoutLastFailure = r.seatFailure;
             }
         }
     }
@@ -2354,8 +2924,24 @@ public final class LookaheadSearch {
             return;
         }
         List<Future<?>> fs = new ArrayList<>();
+        final java.util.concurrent.atomic.AtomicLong[] acc = poolCpu == null ? null : forge.ai.CpuAccount.get();
         for (Runnable r : tasks) {
-            fs.add(pool.submit(r));
+            if (acc == null) {
+                fs.add(pool.submit(r));
+            } else {
+                // S1: a worker thread's CPU, and its Forge AI eval threads', go to the deciding thread's accounts
+                // (the decision's and the game's; measurement only)
+                fs.add(pool.submit(() -> {
+                    final long c0 = forge.ai.CpuAccount.now();
+                    forge.ai.CpuAccount.set(acc);
+                    try {
+                        r.run();
+                    } finally {
+                        forge.ai.CpuAccount.set(null);
+                        forge.ai.CpuAccount.charge(acc, forge.ai.CpuAccount.now() - c0);
+                    }
+                }));
+            }
         }
         for (Future<?> f : fs) {
             try {
@@ -3117,6 +3703,11 @@ public final class LookaheadSearch {
         int totalSteps;
         int reusedSteps;
         boolean reused;
+        /** S1 value leaf: the hooks' payload for a non-terminal play-out (null otherwise), and whether it came late. */
+        Object leafPayload;
+        boolean leafLate;
+        /** S1 policy play-out: why its seat could not play it (the play-out failed), or null. */
+        String seatFailure;
     }
 
     /**
@@ -3168,6 +3759,8 @@ public final class LookaheadSearch {
         /** Reuse probe: where to record this seat's priority points, and the play-out's step counter. */
         List<TrajPoint> trajectory;
         int[] stepRef;
+        /** S1 value leaf: told whenever this seat gets priority (null = off). */
+        LeafProbe probe;
 
         ScriptedFirst(Game g, Player p, forge.LobbyPlayer lp, List<SpellAbility> first) {
             super(g, p, lp);
@@ -3185,6 +3778,9 @@ public final class LookaheadSearch {
 
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
+            if (probe != null) {
+                probe.onPriority(getGame(), getPlayer());
+            }
             if (!used) {
                 used = true;
                 return first;
@@ -3248,6 +3844,10 @@ public final class LookaheadSearch {
         int forcedId = -1;
         /** Tutor ranking: a triggered search's ability rebuilt in the copy (null = the search is on the copy's stack). */
         SpellAbility trigSa;
+        /** S1: the hooks' per-copy context; a policy play-out's first action and seed (null / 0 otherwise). */
+        Object hookCtx;
+        FirstAction firstAction;
+        long playoutSeed;
     }
 
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
@@ -3299,7 +3899,19 @@ public final class LookaheadSearch {
                     }
                     MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
                 }
-                if (!c.pass) {
+                if (hookLeaf || hookPlayout) {
+                    // S1: the hooks' per-copy context (a seat-knowledge tracker forked into the copy, attached to it)
+                    p.hookCtx = hooks.onCopy(p.g, p.me);
+                }
+                if (hookPlayout) {
+                    // S1 policy play-out: the play-out seat takes the candidate itself (and chooses its targets); here
+                    // only that the candidate exists in the copy. The seed is the world's: common random numbers.
+                    p.firstAction = new FirstAction(c);
+                    p.playoutSeed = mix(worldSeed, 5);
+                    if (!c.pass && locate(p.g, p.me, c) == null) {
+                        p.failed = true;
+                    }
+                } else if (!c.pass) {
                     SpellAbility sa = prepare(p.g, p.me, c, defSa, copier);
                     if (sa == null) {
                         p.failed = true;
@@ -3367,11 +3979,20 @@ public final class LookaheadSearch {
             final Game g = p.g;
             final Player me = p.me;
             r.copyNanos = p.copyNanos;
-            final ScriptedFirst sf = new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), p.first);
+            // S1 (null unless the hooks are set): the value-leaf probe, and a policy-piloted searching seat
+            final LeafProbe probe = hookLeaf ? new LeafProbe(hooks, p.hookCtx) : null;
+            PlayoutSeat seat = null;
             final int[] stepRef = new int[1];
-            sf.trajectory = p.trajectory;
-            sf.stepRef = stepRef;
-            me.dangerouslySetController(sf);
+            if (hookPlayout) {
+                seat = hooks.playoutSeat(p.hookCtx, g, me, p.firstAction, p.playoutSeed, probe);
+                me.dangerouslySetController(seat.controller());
+            } else {
+                final ScriptedFirst sf = new ScriptedFirst(g, me, me.getController().getLobbyPlayer(), p.first);
+                sf.trajectory = p.trajectory;
+                sf.stepRef = stepRef;
+                sf.probe = probe;
+                me.dangerouslySetController(sf);
+            }
             for (Player o : g.getPlayers()) {
                 if (o != me) {
                     o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
@@ -3384,21 +4005,31 @@ public final class LookaheadSearch {
             }
             final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, Boolean.TRUE.equals(wantFp) ? me : null);
             g.subscribeToEvents(watch);
+            if (probe != null) {
+                probe.watch = watch;
+            }
             long b = System.nanoTime();
             int steps = 0;
+            int extra = 0;
             final List<String> sl = p.stepLog;
             int logSeen = sl == null ? 0 : g.getGameLog().getAllEntries().size();
             if (memo != null) {
                 r.keys = new ArrayList<>();
             }
             WorldMemo.Entry hit = null;
-            while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
+            // Without a probe: to the start of the horizon turn (K8). With one: on to the seat's first priority in it,
+            // at most leafExtraSteps main-loop steps past its start.
+            while (!g.isGameOver() && !(probe == null ? watch.reached : probe.done || watch.reached && extra >= cfg.leafExtraSteps)
+                    && steps < cfg.maxSteps) {
                 if (pastDeadline()) {
                     r.aborted = true;
                     break;
                 }
                 ph.mainLoopStep();
                 steps++;
+                if (probe != null && watch.reached) {
+                    extra++;
+                }
                 stepRef[0] = steps;
                 if (memo != null && (cfg.dedupSteps <= 0 || steps <= cfg.dedupSteps)) {
                     final long ka = System.nanoTime();
@@ -3458,6 +4089,18 @@ public final class LookaheadSearch {
                         r.leaf = forge.bench.StateEncoder.encode(g, me);
                     }
                 }
+                if (probe != null) {
+                    r.pTerminal = terminalP(g, me);
+                    if (Double.isNaN(r.pTerminal)) {
+                        if (!probe.done) {
+                            // no priority of the seat within the extra steps (or a capped play-out): the leaf is here
+                            probe.payload = hooks.captureLeaf(p.hookCtx, g, me);
+                            probe.done = true;
+                            r.leafLate = true;
+                        }
+                        r.leafPayload = probe.payload;
+                    }
+                }
                 r.fingerprint = watch.fingerprint;
                 if (memo != null) {
                     // The end state's key (verify compares it): the state after the last step, whatever the key window.
@@ -3466,6 +4109,11 @@ public final class LookaheadSearch {
             }
             if (memo != null) {
                 memo.add(cand, r);
+            }
+            if (seat != null && seat.failure() != null) {
+                r.ok = false;
+                r.value = Double.NEGATIVE_INFINITY;
+                r.seatFailure = seat.failure();
             }
         } catch (RuntimeException | StackOverflowError e) {
             r.ok = false;

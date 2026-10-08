@@ -57,6 +57,7 @@ import forge.bench.rl.RlClient;
 import forge.bench.rl.RlFeaturizer;
 import forge.bench.rl.RlKnowledge;
 import forge.bench.rl.RlSchema;
+import forge.bench.rl.RlSearch;
 import forge.bench.rl.RlSeat;
 import forge.bench.rl.RlTape;
 import forge.bench.rl.RlWire;
@@ -135,6 +136,11 @@ public final class RlActorBench {
         long replaySampleSeed = 1005L;
         /** Observation schema: 1 (mtgx-rl-obs/1, wire/1; the default) or 2 (mtgx-rl-obs/2, wire/2; lane rl-obs-v2-1006). */
         int obsSchema = 1;
+        /**
+         * S1 (lane s1-search-1007; null = off, the default, and nothing changes): the look-ahead over the RL seats' own
+         * priority decisions ({@link RlSearch.Config}), eval and train modes, obs-v1 only.
+         */
+        RlSearch.Config search = null;
     }
 
     static Cfg parse(final JsonObject o) {
@@ -160,6 +166,12 @@ public final class RlActorBench {
             c.obsSchema = o.get("obsSchema").getAsInt();
             if (c.obsSchema != 1 && c.obsSchema != 2) {
                 throw new IllegalArgumentException("obsSchema must be 1 or 2, not " + c.obsSchema);
+            }
+        }
+        if (o.has("search") && o.get("search").isJsonObject()) {
+            c.search = RlSearch.Config.parse(o.getAsJsonObject("search"));
+            if (c.obsSchema != 1) {
+                throw new IllegalArgumentException("search needs obsSchema 1");
             }
         }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
@@ -297,6 +309,7 @@ public final class RlActorBench {
         String fatal;         // the connection is unusable
         RlSeat seat;
         RlKnowledge knowledge; // the game's seat-knowledge tracker (tests)
+        RlSearch search;       // S1: the game's look-ahead (null when off)
     }
 
     static final ThreadMXBean TMX = ManagementFactory.getThreadMXBean();
@@ -389,11 +402,16 @@ public final class RlActorBench {
         IdScope.open();
         AiCache.openScope();
         feat.reset();
+        // S1 (lane s1-search-1007; measurement only): the CPU of this game's other threads (Forge AI eval threads, the
+        // look-ahead's workers) is charged to this account; cpu_ms stays the game thread's own
+        final java.util.concurrent.atomic.AtomicLong gameAcc = new java.util.concurrent.atomic.AtomicLong();
+        forge.ai.CpuAccount.set(new java.util.concurrent.atomic.AtomicLong[] {gameAcc});
         final long cpu0 = TMX.getCurrentThreadCpuTime();
         final long t0 = System.nanoTime();
         Game game = null;
         RlSimBench.Digest dg = null;
         String crash = null;
+        RlSearch search = null;
         try {
             game = match.createGame();
             game.AI_TIMEOUT = cfg.aiTimeoutSec;
@@ -431,6 +449,12 @@ public final class RlActorBench {
             feat.setKnowledge(know);
             seat.seenNames = know::opponentSeen; // NAME candidates (ICR B4-families-coordination)
             out.knowledge = know;
+            if (cfg.search != null && !"replay".equals(mode) && !"record".equals(mode)) {
+                // S1: the look-ahead over the RL seats' own priority decisions (one per game; world seeds from the GAME seed)
+                search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId);
+                seat.search = search;
+                out.search = search;
+            }
             dg = new RlSimBench.Digest(game);
             game.subscribeToEvents(dg);
             RUNNING.put(Thread.currentThread(), new Object[] {game,
@@ -448,9 +472,15 @@ public final class RlActorBench {
             if (game != null && !game.isGameOver()) {
                 game.setGameOver(GameEndReason.Draw);
             }
+            if (search != null) {
+                search.flushLog();
+                search.close();
+            }
         }
         final long wallMs = (System.nanoTime() - t0) / 1_000_000L;
         final long cpuMs = (TMX.getCurrentThreadCpuTime() - cpu0) / 1_000_000L;
+        forge.ai.CpuAccount.set(null);
+        final long cpuOtherMs = gameAcc.get() / 1_000_000L;
         String voidReason = null;
         if (TIMED_OUT.remove(uid) != null) {
             voidReason = "timeout";
@@ -519,6 +549,15 @@ public final class RlActorBench {
         end.addProperty("digest", digest);
         end.addProperty("cpu_ms", cpuMs);
         end.addProperty("wall_ms", wallMs);
+        if (cpuOtherMs > 0) {
+            // S1: the game's other threads (Forge AI eval threads, the look-ahead's workers); cpu_ms + this = the game's
+            end.addProperty("cpu_other_ms", cpuOtherMs);
+        }
+        if (search != null) {
+            // S1: the look-ahead's worker threads' CPU is not in cpu_ms (the game thread's)
+            end.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
+            end.add("search", search.summary());
+        }
         out.end = end;
 
         final JsonObject t = new JsonObject();
@@ -557,6 +596,13 @@ public final class RlActorBench {
         t.add("dec", decRows);
         t.addProperty("cpu_ms", cpuMs);
         t.addProperty("wall_ms", wallMs);
+        if (cpuOtherMs > 0) {
+            t.addProperty("cpu_other_ms", cpuOtherMs);
+        }
+        if (search != null) {
+            t.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
+            t.add("search", end.get("search"));
+        }
         out.tape = t;
 
         AiCache.closeScope();

@@ -147,6 +147,37 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         game.subscribeToEvents(this);
     }
 
+    /**
+     * S1 (lane s1-search-1007): this tracker's state carried into a {@link forge.ai.simulation.GameCopier} copy of its
+     * game (card and player ids survive the copy), NOT attached. A look-ahead play-out attaches it to the copy so the
+     * leaf observation and a policy-piloted seat see what the live seat knew at the root, plus the public events of the
+     * play-out. Reads this tracker's fields only (no settle): safe while the live game waits for the search. Reveals
+     * and looks inside the copy are not reported (no bridge there).
+     */
+    public RlKnowledge forkFor(final Game copy) {
+        final RlKnowledge k = new RlKnowledge(copy);
+        k.v2 = v2;
+        k.clock = clock;
+        for (int s = 0; s < 2; s++) {
+            k.known[s].putAll(known[s]);
+            k.seenIds[s].putAll(seenIds[s]);
+            k.seenOpp[s].addAll(seenOpp[s]);
+        }
+        k.tail.addAll(tail);
+        k.arranged.addAll(arranged);
+        for (Pending p : pending) {
+            Player owner = null;
+            if (p.handOwner != null) {
+                final int i = game.getRegisteredPlayers().indexOf(p.handOwner);
+                owner = i >= 0 && i < copy.getRegisteredPlayers().size() ? copy.getRegisteredPlayers().get(i) : null;
+            }
+            final Pending q = new Pending(p.seat, p.cardId, p.name, owner, p.at);
+            q.idAdded = p.idAdded;
+            k.pending.add(q);
+        }
+        return k;
+    }
+
     public Game game() {
         return game;
     }
