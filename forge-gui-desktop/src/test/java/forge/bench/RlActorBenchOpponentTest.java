@@ -260,6 +260,18 @@ public class RlActorBenchOpponentTest {
                     }
                 }
             }
+            // the property itself, deterministic: a Deck handed out by either cache has no section left to load lazily
+            for (java.util.Map<String, forge.deck.Deck> cache : java.util.Arrays.asList(RlActorBench.DECKS,
+                    RlSimBench.DECKS)) {
+                cache.remove(path);
+                final forge.deck.Deck d = cache == RlActorBench.DECKS ? RlActorBench.deck(path) : RlSimBench.deck(path);
+                final java.lang.reflect.Field deferred = forge.deck.Deck.class.getDeclaredField("deferredSections");
+                final java.lang.reflect.Field loaded = forge.deck.Deck.class.getDeclaredField("loadedSections");
+                deferred.setAccessible(true);
+                loaded.setAccessible(true);
+                Assert.assertNull(deferred.get(d), name + ": the cached deck still has deferred sections");
+                Assert.assertNotNull(loaded.get(d), name + ": the cached deck was never loaded");
+            }
         }
     }
 
