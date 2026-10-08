@@ -210,6 +210,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         if ("forge".equals(controller)) {
             return Role.FORGE;
         }
+        // lane gen-check-1007: unbridged opponent seats the runner builds itself (RlActorBench): Forge AI under one
+        // shipped profile ("forge:<Profile>"; the runner refuses an unshipped name) and the K8 look-ahead seat
+        if (controller.startsWith("forge:") && controller.length() > 6) {
+            return Role.FORGE;
+        }
+        if ("lookahead:K8".equals(controller)) {
+            return Role.FORGE;
+        }
         throw new IllegalArgumentException("unknown controller " + controller);
     }
 

@@ -96,7 +96,10 @@ import forge.util.MyRandom;
  * {@code ... RlActorBench --mode replay --tape <file> --line <n> [--card-index <tsv>] [--rl-root <dir>] [--out <f>]};
  * cwd = forge-gui with res/. Config keys: {@code mode, server, actorId, threads, rlRoot, cardIndex, tapesDir,
  * capActions (40), gameTimeoutSec (300), maxDecisions (3000), jarSha, aiTimeoutSec (5), readTimeoutSec (120),
- * tapeRotate (1000), maxGames (0 = until stop), replay {tapes, lines [[fileIdx, line]], out}}.
+ * tapeRotate (1000), maxGames (0 = until stop), replay {tapes, lines [[fileIdx, line]], out}, k8 (the spec of a
+ * {@code lookahead:K8} opponent seat, lane gen-check-1007)}. Opponent controllers besides {@code forge}:
+ * {@code forge:<Profile>} (Forge AI under a shipped {@code res/ai} profile; train and eval) and {@code lookahead:K8}
+ * (Forge AI Default plus the look-ahead with the {@code k8} spec; eval only).
  * Exit codes: 0 done; 2 config / HELLO refused / deck guard; 3 a thread died on a transport or protocol error;
  * 4 replay finished with an unequal digest.
  */
@@ -141,6 +144,12 @@ public final class RlActorBench {
          * priority decisions ({@link RlSearch.Config}), eval and train modes, obs-v1 only.
          */
         RlSearch.Config search = null;
+        /**
+         * gen-check-1007 (null = none): the spec of a {@code lookahead:K8} opponent seat: keys of LookaheadBench's
+         * "lookahead" block ({@link #K8_KEYS}) plus the seat's own Forge AI options aiFixes0928 and fairNaming. A GAME's
+         * (or a replayed tape's) own "k8" object takes precedence; the tape records the spec it played.
+         */
+        JsonObject k8 = null;
     }
 
     static Cfg parse(final JsonObject o) {
@@ -173,6 +182,10 @@ public final class RlActorBench {
             if (c.obsSchema != 1) {
                 throw new IllegalArgumentException("search needs obsSchema 1");
             }
+        }
+        if (o.has("k8") && !o.get("k8").isJsonNull()) {
+            c.k8 = o.getAsJsonObject("k8");
+            k8Config(c.k8, 0L); // every key and value is checked once at JVM start (exit 2 on a bad spec)
         }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
@@ -299,6 +312,62 @@ public final class RlActorBench {
         });
     }
 
+    // ------------------------------------------------------------------------------------------------ opponent seats
+
+    /** gen-check-1007: the K8 look-ahead opponent seat's controller value (ICR B7-k8-opponent-seat). */
+    static final String K8_CONTROLLER = "lookahead:K8";
+
+    /**
+     * gen-check-1007: the keys a {@code k8} spec may set. The search keys have LookaheadBench's "lookahead" names and
+     * defaults (the panel's K-arm instrument); aiFixes0928 and fairNaming are the seat's own Forge AI options (as
+     * LookaheadBench's look-ahead seats). Anything else refuses the spec.
+     */
+    static final java.util.Set<String> K8_KEYS = Collections.unmodifiableSet(new java.util.TreeSet<>(
+            java.util.Arrays.asList("worlds", "breadth", "horizonTurns", "threads", "reuse", "margin", "departZ",
+                    "deadEtb", "zeroX", "crewNoop", "copyEot", "departMedian", "maxSteps", "budgetMs", "aiFixes0928",
+                    "fairNaming")));
+
+    /**
+     * The Forge AI profile of a seat: {@code forge:<Profile>} plays that shipped profile; {@code forge}, the K8 seat
+     * and every bridged seat play "Default" (as before this option).
+     */
+    static String aiProfileOf(final String controller) {
+        return controller != null && controller.startsWith("forge:") ? controller.substring("forge:".length())
+                : "Default";
+    }
+
+    /** The K8 seat's search config from a spec (LookaheadBench's parse of the same keys); throws on a bad spec. */
+    static forge.ai.simulation.LookaheadSearch.Config k8Config(final JsonObject la, final long seed) {
+        for (String k : la.keySet()) {
+            if (!K8_KEYS.contains(k)) {
+                throw new IllegalArgumentException("k8: unknown key '" + k + "' (allowed " + K8_KEYS + ")");
+            }
+        }
+        final forge.ai.simulation.LookaheadSearch.Config c = new forge.ai.simulation.LookaheadSearch.Config();
+        c.worlds = la.has("worlds") ? la.get("worlds").getAsInt() : 1;
+        c.breadth = la.has("breadth") ? la.get("breadth").getAsInt() : 4;
+        c.horizonTurns = la.has("horizonTurns") ? la.get("horizonTurns").getAsInt() : 2;
+        c.threads = la.has("threads") ? la.get("threads").getAsInt() : 0;
+        c.reuse = la.has("reuse") && la.get("reuse").getAsBoolean();
+        c.margin = la.has("margin") ? la.get("margin").getAsDouble() : 0.0;
+        c.departZ = la.has("departZ") ? la.get("departZ").getAsDouble() : 0.0;
+        c.deadEtb = forge.ai.AiFixes.Mode.parse(la.has("deadEtb") ? la.get("deadEtb").getAsString() : null);
+        c.zeroX = forge.ai.AiFixes.Mode.parse(la.has("zeroX") ? la.get("zeroX").getAsString() : null);
+        c.crewNoop = forge.ai.AiFixes.Mode.parse(la.has("crewNoop") ? la.get("crewNoop").getAsString() : null);
+        c.copyEot = forge.ai.AiFixes.Mode.parse(la.has("copyEot") ? la.get("copyEot").getAsString() : null);
+        c.departMedian = forge.ai.AiFixes.Mode.parse(la.has("departMedian") ? la.get("departMedian").getAsString() : null);
+        c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
+        c.budgetMs = la.has("budgetMs") ? la.get("budgetMs").getAsLong() : 0L;
+        k8Mode(la, "aiFixes0928");
+        k8Mode(la, "fairNaming");
+        c.seed = seed;
+        return c;
+    }
+
+    static forge.ai.AiFixes.Mode k8Mode(final JsonObject la, final String key) {
+        return forge.ai.AiFixes.Mode.parse(la.has(key) ? la.get(key).getAsString() : null);
+    }
+
     // ------------------------------------------------------------------------------------------------ one game
 
     /** The outcome of one played game. */
@@ -310,6 +379,7 @@ public final class RlActorBench {
         RlSeat seat;
         RlKnowledge knowledge; // the game's seat-knowledge tracker (tests)
         RlSearch search;       // S1: the game's look-ahead (null when off)
+        forge.ai.LobbyPlayerAi[] lobbies; // gen-check-1007: each seat's lobby player (tests)
     }
 
     static final ThreadMXBean TMX = ManagementFactory.getThreadMXBean();
@@ -353,6 +423,37 @@ public final class RlActorBench {
                 return out;
             }
         }
+        // gen-check-1007: the opponent-profile and K8 seats (eval; profiles also in train); refusals play nothing
+        final JsonObject k8spec = g.has("k8") && g.get("k8").isJsonObject() ? g.getAsJsonObject("k8") : cfg.k8;
+        for (int s = 0; s < 2; s++) {
+            if (ctl[s].startsWith("forge:")) {
+                if (!"eval".equals(mode) && !"train".equals(mode)) {
+                    out.guardError = "controller " + ctl[s] + " is not allowed in " + mode + " mode";
+                    return out;
+                }
+                final List<String> shipped = forge.ai.AiProfileUtil.getAvailableProfiles();
+                if (!shipped.contains(aiProfileOf(ctl[s]))) {
+                    out.guardError = "controller " + ctl[s] + ": AI profile '" + aiProfileOf(ctl[s])
+                            + "' is not shipped (available " + shipped + ")";
+                    return out;
+                }
+            } else if (K8_CONTROLLER.equals(ctl[s])) {
+                if (!"eval".equals(mode)) {
+                    out.guardError = "controller " + ctl[s] + " is not allowed in " + mode + " mode";
+                    return out;
+                }
+                if (k8spec == null) {
+                    out.guardError = "controller " + ctl[s] + " needs the actor config's k8 spec";
+                    return out;
+                }
+                try {
+                    k8Config(k8spec, 0L);
+                } catch (RuntimeException e) {
+                    out.guardError = "controller " + ctl[s] + ": " + e.getMessage();
+                    return out;
+                }
+            }
+        }
 
         final JsonRpcChannel ch = new JsonRpcChannel(InputStream.nullInputStream(), OutputStream.nullOutputStream());
         final BenchSession session = new BenchSession(ch);
@@ -373,23 +474,45 @@ public final class RlActorBench {
         out.seat = seat;
         boolean anyBridged = false;
         final List<RegisteredPlayer> seats = new ArrayList<>();
-        final List<LobbyPlayerBridge> lps = new ArrayList<>();
+        final LobbyPlayerBridge[] lps = new LobbyPlayerBridge[2];      // null for the K8 seat
+        final forge.ai.LobbyPlayerAi[] lobbies = new forge.ai.LobbyPlayerAi[2];
+        forge.ai.simulation.LobbyPlayerLookahead k8Lobby = null;
+        forge.ai.simulation.LookaheadSearch k8Search = null;
+        int k8Seat = -1;
         for (int s = 0; s < 2; s++) {
-            final boolean bridged = RlSeat.roleOf(ctl[s]) != RlSeat.Role.FORGE;
-            anyBridged |= bridged;
-            final LobbyPlayerBridge lp = new LobbyPlayerBridge("Seat" + s, null, session,
-                    bridged ? BenchSession.Mode.BRIDGE : BenchSession.Mode.NULL, s);
-            lp.setAiProfile("Default");
-            if (RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL) {
-                // an RL seat's delegated naming ("Forge's choice") must not read hidden zones (ICR B4 coordination);
-                // Forge seats and recorders keep upstream Forge AI (do-no-harm)
-                lp.setFairNaming(forge.ai.AiFixes.Mode.ON);
+            final forge.ai.LobbyPlayerAi any;
+            if (K8_CONTROLLER.equals(ctl[s])) {
+                // gen-check-1007: Forge AI (Default) plus the look-ahead, as LookaheadBench's "lookahead" seat; its
+                // search seed is the game seed mixed with the seat index, as there
+                final forge.ai.simulation.LobbyPlayerLookahead l = new forge.ai.simulation.LobbyPlayerLookahead("Seat" + s);
+                l.setAiProfile("Default");
+                l.setAiFixes0928(k8Mode(k8spec, "aiFixes0928"));
+                l.setFairNaming(k8Mode(k8spec, "fairNaming"));
+                k8Search = new forge.ai.simulation.LookaheadSearch(k8Config(k8spec, seed * 31 + s));
+                k8Lobby = l;
+                k8Seat = s;
+                any = l;
+            } else {
+                final boolean bridged = RlSeat.roleOf(ctl[s]) != RlSeat.Role.FORGE;
+                anyBridged |= bridged;
+                final LobbyPlayerBridge lp = new LobbyPlayerBridge("Seat" + s, null, session,
+                        bridged ? BenchSession.Mode.BRIDGE : BenchSession.Mode.NULL, s);
+                // "Default" unless a forge:<Profile> opponent seat names a shipped profile (gen-check-1007)
+                lp.setAiProfile(aiProfileOf(ctl[s]));
+                if (RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL) {
+                    // an RL seat's delegated naming ("Forge's choice") must not read hidden zones (ICR B4 coordination);
+                    // Forge seats and recorders keep upstream Forge AI (do-no-harm)
+                    lp.setFairNaming(forge.ai.AiFixes.Mode.ON);
+                }
+                lps[s] = lp;
+                any = lp;
             }
-            lps.add(lp);
+            lobbies[s] = any;
             final RegisteredPlayer rp = new RegisteredPlayer(deck(decks[s]));
-            rp.setPlayer(lp);
+            rp.setPlayer(any);
             seats.add(rp);
         }
+        out.lobbies = lobbies;
         if (anyBridged) {
             session.setLocalAnswerer(seat);
         }
@@ -417,6 +540,9 @@ public final class RlActorBench {
             game.AI_TIMEOUT = cfg.aiTimeoutSec;
             session.setLiveGame(game);
             seat.setGame(game);
+            if (k8Lobby != null) {
+                k8Lobby.bind(game, k8Search); // gen-check-1007: the K8 seat searches this live game only
+            }
             // observation v1: what each seat has observed (reveals, its own looks, public moves, the stack tail)
             final RlKnowledge know = new RlKnowledge(game);
             know.v2 = obsVersion == 2;
@@ -477,6 +603,17 @@ public final class RlActorBench {
                 search.close();
             }
         }
+        JsonObject k8Stats = null;
+        if (k8Search != null) {
+            // gen-check-1007: as LookaheadBench records a look-ahead seat (stats + config), then frees its workers
+            if (game != null) {
+                k8Search.finishGame(game);
+            }
+            k8Stats = k8Search.getStats().toJson();
+            k8Stats.add("config", k8Search.getConfig().toJson());
+            k8Stats.addProperty("seat", k8Seat);
+            k8Search.shutdown();
+        }
         final long wallMs = (System.nanoTime() - t0) / 1_000_000L;
         final long cpuMs = (TMX.getCurrentThreadCpuTime() - cpu0) / 1_000_000L;
         forge.ai.CpuAccount.set(null);
@@ -498,7 +635,12 @@ public final class RlActorBench {
         String reason = voidReason == null ? "draw" : voidReason;
         if (voidReason == null && game != null && game.getOutcome() != null && !game.getOutcome().isDraw()) {
             final LobbyPlayer w = game.getOutcome().getWinningLobbyPlayer();
-            final int ws = w instanceof LobbyPlayerBridge ? ((LobbyPlayerBridge) w).getSeat() : -1;
+            int ws = -1; // the seat whose lobby player won (a bridge's getSeat() is its index; the K8 seat has none)
+            for (int s = 0; s < 2; s++) {
+                if (lobbies[s] == w) {
+                    ws = s;
+                }
+            }
             if (ws == 0 || ws == 1) {
                 result[ws] = 1;
                 result[1 - ws] = -1;
@@ -517,7 +659,7 @@ public final class RlActorBench {
             if (RlSeat.roleOf(ctl[s]) == RlSeat.Role.FORGE) {
                 continue;
             }
-            final JsonObject cj = lps.get(s).getCounters().toJson();
+            final JsonObject cj = lps[s].getCounters().toJson();
             if (cj.has("calls") && cj.get("calls").isJsonObject()) {
                 for (Map.Entry<String, JsonElement> e : cj.getAsJsonObject("calls").entrySet()) {
                     forgeDecided.merge(e.getKey(), e.getValue().getAsInt(), Integer::sum);
@@ -557,6 +699,9 @@ public final class RlActorBench {
             // S1: the look-ahead's worker threads' CPU is not in cpu_ms (the game thread's)
             end.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
             end.add("search", search.summary());
+        }
+        if (k8Stats != null) {
+            end.add("opp_search", k8Stats); // gen-check-1007: the K8 seat's look-ahead stats and config
         }
         out.end = end;
 
@@ -602,6 +747,11 @@ public final class RlActorBench {
         if (search != null) {
             t.addProperty("search_pool_cpu_ms", Math.round(search.poolCpuMs()));
             t.add("search", end.get("search"));
+        }
+        if (k8Seat >= 0) {
+            // gen-check-1007: the K8 seat's spec (a replay plays the tape's spec) and its search stats
+            t.add("k8", k8spec.deepCopy());
+            t.add("opp_search", end.get("opp_search"));
         }
         out.tape = t;
 
@@ -1079,6 +1229,9 @@ public final class RlActorBench {
                 g.add("decks", decks);
                 g.add("deck_sha", shas);
                 g.add("controllers", t.get("controllers"));
+                if (t.has("k8")) {
+                    g.add("k8", t.get("k8")); // gen-check-1007: the K8 seat replays with the spec it played
+                }
                 g.addProperty("priv", false);
                 g.addProperty("obs_schema", t.has("schema_sha") && forge.bench.rl.RlSchemaV2.schemaSha().equals(
                         t.get("schema_sha").getAsString()) ? 2 : 1);
