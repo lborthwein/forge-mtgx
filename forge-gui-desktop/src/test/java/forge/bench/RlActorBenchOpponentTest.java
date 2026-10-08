@@ -216,6 +216,54 @@ public class RlActorBenchOpponentTest {
     }
 
     /**
+     * Lane k8-determinism-1008: RlActorBench (and RlSimBench) share one parsed Deck per path between game threads. A
+     * Deck loads its sections lazily and without a lock, so games that copied a not-yet-loaded shared Deck at the same
+     * moment could get a partial deck (gen-check-1007 G2/G3: two Default-vs-Default games "lost to their library on turn
+     * 1"). The cache now loads the deck before publishing it: every concurrent first use sees the whole deck.
+     */
+    @Test
+    public void sharedDeckIsWholeForConcurrentFirstUse() throws Exception {
+        for (String name : new String[] {"ev0.dck", "ev1.dck"}) {
+            final String path = RlActorBenchTest.evalBank.resolve("decks/" + name).toString();
+            final int expected = new forge.game.player.RegisteredPlayer(
+                    forge.deck.io.DeckSerializer.fromFile(new java.io.File(path))).getDeck().getMain().countAll();
+            Assert.assertTrue(expected >= 40, name + " has " + expected);
+            for (int round = 0; round < 25; round++) {
+                for (java.util.Map<String, forge.deck.Deck> cache : java.util.Arrays.asList(RlActorBench.DECKS,
+                        RlSimBench.DECKS)) {
+                    cache.remove(path);
+                    final int n = 8;
+                    final java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+                    final int[] got = new int[n];
+                    final java.util.List<Thread> ts = new java.util.ArrayList<>();
+                    for (int i = 0; i < n; i++) {
+                        final int ii = i;
+                        final Thread t = new Thread(() -> {
+                            try {
+                                go.await();
+                                final forge.deck.Deck d = cache == RlActorBench.DECKS ? RlActorBench.deck(path)
+                                        : RlSimBench.deck(path);
+                                got[ii] = new forge.game.player.RegisteredPlayer(d).getDeck().getMain().countAll();
+                            } catch (Throwable e) {
+                                got[ii] = -1;
+                            }
+                        });
+                        ts.add(t);
+                        t.start();
+                    }
+                    go.countDown();
+                    for (Thread t : ts) {
+                        t.join();
+                    }
+                    for (int i = 0; i < n; i++) {
+                        Assert.assertEquals(got[i], expected, name + " round " + round + " thread " + i);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Lane k8-determinism-1008: a game with a K8 seat is a pure function of its row. The look-ahead's candidate
      * enumeration used to remove the game thread's AI-cache scope (AiCache.closeScope) instead of restoring it, so from
      * the first searched decision on, the game's Forge AI shared Forge's one process-wide cache with every other game in

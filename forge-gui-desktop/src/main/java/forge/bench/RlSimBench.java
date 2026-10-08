@@ -919,6 +919,11 @@ public final class RlSimBench {
             if (d == null) {
                 throw new IllegalArgumentException("could not parse deck " + p);
             }
+            // k8-determinism-1008: a Deck loads its card sections lazily, without a lock, on first access. This cache
+            // shares one Deck between game threads, and two games copying a not-yet-loaded Deck at once could give one
+            // of them a partial deck (a game "lost to its library on turn 1"). Load it here, inside computeIfAbsent,
+            // before any game can see it; a loaded Deck is only read.
+            d.getMain();
             return d;
         });
     }
