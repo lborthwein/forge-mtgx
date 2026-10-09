@@ -459,6 +459,19 @@ public final class RlActorBench {
                 }
             }
         }
+        // cm-curriculum-1009 (G3): opening-hand seeding, a TRAIN curriculum; null (off, the default) without a GAME
+        // "seeding" object, and then nothing below changes (no subscription, no random draw, no tape key)
+        final RlSeeding seeding;
+        try {
+            seeding = RlSeeding.of(g, seed);
+        } catch (RuntimeException e) {
+            out.guardError = "seeding: " + e.getMessage();
+            return out;
+        }
+        if (seeding != null && "eval".equals(mode)) {
+            out.guardError = "seeding is a TRAIN curriculum: not allowed in eval mode";
+            return out;
+        }
 
         final JsonRpcChannel ch = new JsonRpcChannel(InputStream.nullInputStream(), OutputStream.nullOutputStream());
         final BenchSession session = new BenchSession(ch);
@@ -548,6 +561,9 @@ public final class RlActorBench {
         RlSearch search = null;
         try {
             game = match.createGame();
+            if (seeding != null) {
+                seeding.attach(game); // G3: reorders the seeded seats' libraries when the game starts
+            }
             game.AI_TIMEOUT = cfg.aiTimeoutSec;
             session.setLiveGame(game);
             seat.setGame(game);
@@ -736,6 +752,9 @@ public final class RlActorBench {
         if (k8Stats != null) {
             end.add("opp_search", k8Stats); // gen-check-1007: the K8 seat's look-ahead stats and config
         }
+        if (seeding != null) {
+            end.add("seeded", seeding.seeded()); // G3: per seat, what was placed (or why not)
+        }
         out.end = end;
 
         final JsonObject t = new JsonObject();
@@ -791,6 +810,10 @@ public final class RlActorBench {
             // gen-check-1007: the K8 seat's spec (a replay plays the tape's spec) and its search stats
             t.add("k8", k8spec.deepCopy());
             t.add("opp_search", end.get("opp_search"));
+        }
+        if (seeding != null) {
+            t.add("seeding", seeding.spec()); // G3: the spec as played (a replay re-applies it) and its outcome
+            t.add("seeded", end.get("seeded"));
         }
         out.tape = t;
 
@@ -1271,6 +1294,9 @@ public final class RlActorBench {
                 if (t.has("k8")) {
                     g.add("k8", t.get("k8")); // gen-check-1007: the K8 seat replays with the spec it played
                 }
+                if (t.has("seeding")) {
+                    g.add("seeding", t.get("seeding")); // cm-curriculum-1009: the seeding it played, re-applied
+                }
                 g.addProperty("priv", false);
                 g.addProperty("obs_schema", t.has("schema_sha") && forge.bench.rl.RlSchemaV2.schemaSha().equals(
                         t.get("schema_sha").getAsString()) ? 2 : 1);
@@ -1304,8 +1330,14 @@ public final class RlActorBench {
                     if (p.end.has("scope_lost")) {
                         row.add("scope_lost", p.end.get("scope_lost"));
                     }
-                    final boolean eq = p.end.get("digest").getAsString().equals(t.get("digest").getAsString())
+                    boolean eq = p.end.get("digest").getAsString().equals(t.get("digest").getAsString())
                             && p.end.get("void").isJsonNull();
+                    if (t.has("seeded")) {
+                        // cm-curriculum-1009: a seeded tape replays only if the same pieces went to the same places
+                        final boolean se = t.get("seeded").equals(p.end.get("seeded"));
+                        row.addProperty("seeded_equal", se);
+                        eq &= se;
+                    }
                     row.addProperty("equal", eq);
                     // the replayed game's own census (lane rl-r0-b4b-1006): a jar's asks on the exact games of a
                     // tape, e.g. the before/after of a record-mode mapping fix
