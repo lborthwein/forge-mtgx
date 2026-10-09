@@ -193,6 +193,11 @@ public final class InteractiveMain {
             } catch (CompletionException ignored) {
                 // engineFailure already emitted the only allowed fatal message.
             }
+            if (policy != null) {
+                // lane live-sc-1009: the seat's end line and its connections close before the terminal goes out (the host
+                // may stop the JVM as soon as it has the terminal)
+                policy.finish();
+            }
 
             if (!gui.hasFailed()) {
                 gui.emitFinalState();

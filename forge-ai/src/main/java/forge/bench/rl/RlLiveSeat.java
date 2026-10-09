@@ -364,8 +364,14 @@ public final class RlLiveSeat {
         System.err.println("[lookahead-decision] " + d);
     }
 
-    /** Game end: one summary line, then every connection and the search's pool are closed. */
-    public void finish() {
+    private boolean finished = false;
+
+    /** Game end: one summary line, then every connection and the search's pool are closed (once). */
+    public synchronized void finish() {
+        if (finished) {
+            return;
+        }
+        finished = true;
         try {
             final JsonObject o = new JsonObject();
             o.addProperty("end", true);
