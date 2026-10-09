@@ -97,6 +97,16 @@ public final class FakeSearchService implements Closeable {
                 if (f.type == RlSearchClient.T_SCORE) {
                     scores.incrementAndGet();
                     final RlWire.Decide d = RlWire.decodeDecide(f.payload, 1);
+                    if (d.mode != RlSchema.M_SINGLE) {
+                        // as search_server.py: SCORE takes SINGLE-mode frames only; an error closes the connection
+                        errors.incrementAndGet();
+                        final JsonObject e = new JsonObject();
+                        e.addProperty("code", "mode");
+                        e.addProperty("msg", "SCORE takes SINGLE-mode frames only");
+                        RlWire.writeFrame(out, RlWire.T_ERROR, 0, RlWire.canonical(e));
+                        out.flush();
+                        return;
+                    }
                     final ByteBuffer b = ByteBuffer.allocate(RlSearchClient.SCORES_HEADER + 4 * d.C).order(ByteOrder.LITTLE_ENDIAN);
                     int legal = 0;
                     for (int i = 0; i < d.C; i++) {

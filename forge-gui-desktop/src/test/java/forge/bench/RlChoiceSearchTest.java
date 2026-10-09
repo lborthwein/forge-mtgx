@@ -108,8 +108,11 @@ public class RlChoiceSearchTest {
                 Assert.assertTrue(p.end.get("void").isJsonNull(), "game " + i + " void " + p.end.get("void"));
                 final JsonObject st = p.end.getAsJsonObject("search").getAsJsonObject("st");
                 Assert.assertNotNull(st, "an S-t game's summary carries its S-t counts");
-                Assert.assertEquals(p.end.getAsJsonObject("search").getAsJsonObject("lookahead").getAsJsonObject("s1")
-                        .get("leafFallbacks").getAsInt(), 0);
+                final JsonObject s1 = p.end.getAsJsonObject("search").getAsJsonObject("lookahead").getAsJsonObject("s1");
+                Assert.assertEquals(s1.get("leafFallbacks").getAsInt(), 0);
+                // every probe's SCORE is a frame the service takes (SINGLE): no connection is lost, no play-out fails
+                Assert.assertEquals(s1.get("playoutSeatFailures").getAsInt(), 0, String.valueOf(s1.get("playoutLastFailure")));
+                Assert.assertEquals(st.get("reconnects").getAsInt(), 0);
                 probeAsks += st.get("probe_asks").getAsInt();
                 macros += st.get("macros").getAsInt();
                 macroDepartures += st.get("macro_departures").getAsInt();
@@ -122,6 +125,7 @@ public class RlChoiceSearchTest {
                 tapes.add(p.tape);
                 System.err.println("[st-test] game " + i + " " + st);
             }
+            Assert.assertEquals(svc.errors.get(), 0L, "the service refused a request");
             Assert.assertTrue(probeAsks > 0, "the probes recorded no choice ask");
             Assert.assertTrue(macros > 0, "no macro candidate was searched");
             Assert.assertTrue(playoutHits > 0, "no macro play-out answered from its schedule");

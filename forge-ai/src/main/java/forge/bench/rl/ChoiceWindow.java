@@ -145,6 +145,8 @@ public final class ChoiceWindow {
     /** The recorder's asks, in order (the caller's list; appended as they come), or null when not recording. */
     private final List<Ask> recorded;
     private final Map<String, Integer> ordinals = new HashMap<>();
+    /** Every ask the window saw, by "FAMILY:what happened" (diagnostics: why a probe recorded or skipped an ask). */
+    private final Map<String, Integer> seen = new java.util.TreeMap<>();
     private boolean open = false;
     private boolean closed = false;
     private int turn = -1;
@@ -230,6 +232,16 @@ public final class ChoiceWindow {
                 counters.unused.incrementAndGet();
             }
         }
+    }
+
+    /** Diagnostics: count one ask of {@code family} the window saw and what became of it. */
+    public void saw(final int family, final String what) {
+        seen.merge(RlSchema.familyName(family) + ":" + what, 1, Integer::sum);
+    }
+
+    /** Diagnostics: the asks this window saw (a copy). */
+    public Map<String, Integer> seen() {
+        return new java.util.TreeMap<>(seen);
     }
 
     /** The next ordinal of {@code askKey} in this window (every ask of the key counts, trivial ones too). */

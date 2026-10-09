@@ -276,6 +276,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private final java.util.Set<Integer> choiceFams;
     /** The current decision's probe records (searched candidate index -> its world-0 play-out's asks). */
     private final Map<Integer, List<ChoiceWindow.Ask>> probeAsks = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The current decision's probe windows (diagnostics: what each probe saw). */
+    private final List<ChoiceWindow> probeWindows = Collections.synchronizedList(new ArrayList<>());
+    /** Over the game: every ask the probes saw, by "FAMILY:what happened". */
+    private final Map<String, Integer> probeSeen = new TreeMap<>();
     /** The current decision's prior per given candidate (the pooled entries, given order). */
     private double[] givenPrior = new double[0];
     /** The current decision's macros (expander order). */
@@ -366,6 +370,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return c;
     }
 
+    /**
+     * Drop this thread's connection after a failed call (cm-choice-search-1009): the service closes a connection on any
+     * error it answers, so the next call on this thread connects again instead of failing on a dead socket. Nothing
+     * changes while every call succeeds.
+     */
+    private void drop() {
+        final RlSearchClient c = client.get();
+        if (c != null) {
+            client.remove();
+            clients.remove(c);
+            c.close();
+            synchronized (this) {
+                reconnects++;
+            }
+        }
+    }
+
+    private int reconnects = 0;
+
     /** Close every connection and the look-ahead's pool (call at game end). */
     public void close() {
         ls.shutdown();
@@ -415,6 +438,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         try {
             sc = client().score(RlWire.encodeDecide(frame));
         } catch (IOException | RuntimeException e) {
+            drop();
             scoreFailures++;
             System.err.println("[rlsearch] SCORE failed, keeping the policy's choice: " + e);
             return -1;
@@ -491,6 +515,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
             probeAsks.clear();
+            probeWindows.clear();
             macroList = new ArrayList<>();
             givenPrior = new double[order.size()];
             for (int i = 0; i < order.size(); i++) {
@@ -525,6 +550,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             macrosSearched += macroList.size();
             for (MacroSpec ms : macroList) {
                 ms.playout.addTo(playoutCounters);
+            }
+        }
+        final Map<String, Integer> seenNow = new TreeMap<>();
+        if (cfg.choices > 0) {
+            synchronized (probeWindows) {
+                for (ChoiceWindow w : probeWindows) {
+                    for (Map.Entry<String, Integer> e : w.seen().entrySet()) {
+                        seenNow.merge(e.getKey(), e.getValue(), Integer::sum);
+                        probeSeen.merge(e.getKey(), e.getValue(), Integer::sum);
+                    }
+                }
             }
         }
         final Searched hook = onSearched;
@@ -596,10 +632,30 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.add("macros", md);
                 row.addProperty("chosen_macro", r.chosenMacro);
                 int asks = 0;
-                for (List<ChoiceWindow.Ask> l : probeAsks.values()) {
-                    asks += l.size();
+                final JsonArray pa = new JsonArray();
+                for (Map.Entry<Integer, List<ChoiceWindow.Ask>> e : new TreeMap<>(probeAsks).entrySet()) {
+                    synchronized (e.getValue()) {
+                        for (ChoiceWindow.Ask a : e.getValue()) {
+                            asks++;
+                            // [searched candidate, ask, ordinal, C, the largest prior, the policy's own answer's prior]
+                            final JsonArray x = new JsonArray();
+                            x.add(e.getKey());
+                            x.add(a.ask);
+                            x.add(a.ordinal);
+                            x.add(a.C);
+                            x.add(Math.round(a.maxPrior() * 1e4) / 1e4);
+                            x.add(a.greedy >= 0 && a.greedy < a.C ? Math.round(a.prior[a.greedy] * 1e4) / 1e4 : -1.0);
+                            pa.add(x);
+                        }
+                    }
                 }
                 row.addProperty("probe_asks", asks);
+                row.add("probe", pa);
+                final JsonObject ps = new JsonObject();
+                for (Map.Entry<String, Integer> e : seenNow.entrySet()) {
+                    ps.addProperty(e.getKey(), e.getValue());
+                }
+                row.add("probe_seen", ps);
             }
             row.addProperty("p_default", Math.round(by.get(def)[0] * 1e5) / 1e5);
             row.addProperty("outcome", r.outcome);
@@ -748,11 +804,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // S-t (only when on, so an S1 game's summary is unchanged)
             final JsonObject st = new JsonObject();
             st.addProperty("probe_asks", probeAsksTotal);
+            st.addProperty("reconnects", reconnects);
             st.addProperty("contested_asks", contestedAsks);
             st.addProperty("macro_decisions", macroDecisions);
             st.addProperty("macros", macrosSearched);
             st.addProperty("macro_departures", macroDepartures);
             st.addProperty("macro_default_departures", macroDefaultDepartures);
+            final JsonObject ps = new JsonObject();
+            for (Map.Entry<String, Integer> e : probeSeen.entrySet()) {
+                ps.addProperty(e.getKey(), e.getValue());
+            }
+            st.add("probe_seen", ps);
             st.add("live", liveCounters.toJson());
             st.add("playout", playoutCounters.toJson());
             o.add("st", st);
@@ -854,6 +916,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         try {
             v = client().values(ps);
         } catch (IOException | RuntimeException e) {
+            drop();
             System.err.println("[rlsearch] LEAVES failed: " + e);
             return null;
         }
@@ -902,7 +965,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
-                return client().decide(p, cfg.playoutSample);
+                try {
+                    return client().decide(p, cfg.playoutSample);
+                } catch (IOException | RuntimeException e) {
+                    drop();
+                    throw e;
+                }
             }
 
             @Override
@@ -940,7 +1008,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     playoutFirstAmbiguous++;
                 }
                 try {
-                    final RlSearchClient.Scores s = client().score(RlWire.encodeDecide(frame.get()));
+                    final RlSearchClient.Scores s;
+                    try {
+                        s = client().score(RlWire.encodeDecide(frame.get()));
+                    } catch (IOException | RuntimeException e) {
+                        drop();
+                        throw e;
+                    }
                     int best = match.get(0);
                     for (int i : match) {
                         if (i < s.probs.length && s.probs[i] > s.probs[best]) {
@@ -968,7 +1042,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 final List<ChoiceWindow.Ask> into = probeAsks.computeIfAbsent(first.candIndex,
                         k -> Collections.synchronizedList(new ArrayList<>()));
                 rs.window = ChoiceWindow.recorder(choiceFams, payload -> {
-                    final RlSearchClient.Scores ps = client().score(payload);
+                    final RlSearchClient.Scores ps;
+                    try {
+                        ps = client().score(payload);
+                    } catch (IOException | RuntimeException e) {
+                        drop();
+                        throw e;
+                    }
                     if (ps.status != RlWire.ST_OK) {
                         return null;
                     }
@@ -978,6 +1058,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     }
                     return d;
                 }, into);
+                probeWindows.add(rs.window);
             }
         }
         session.setLocalAnswerer(rs);
