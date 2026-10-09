@@ -549,7 +549,7 @@ public final class LookaheadSearch {
                 leafNanos, playoutSeatFailures, searchCpuNanos;
         /** S-t (lane cm-choice-search-1009; reported only when a decision expanded choices): decisions with macro
          *  candidates, macro candidates played, macro departures. */
-        public long givenMacroDecisions, givenMacros, givenMacroDepartures;
+        public long givenMacroDecisions, givenMacros, givenMacroDepartures, givenMacroRedundant;
         public String leafLastError, playoutLastFailure;
         public final List<Double> searchCpuMsEach = new ArrayList<>();
 
@@ -800,6 +800,7 @@ public final class LookaheadSearch {
                     s.addProperty("macroDecisions", givenMacroDecisions);
                     s.addProperty("macros", givenMacros);
                     s.addProperty("macroDepartures", givenMacroDepartures);
+                    s.addProperty("macroRedundant", givenMacroRedundant);
                 }
                 o.add("s1", s);
             }
@@ -1892,10 +1893,30 @@ public final class LookaheadSearch {
                 res.failed++;
             }
         }
-        final int plainBest = overBudget ? 0 : argmax(values, ok, n, k);
+        // S-t: a macro whose value equals an earlier searched candidate's in every world (typically its base: its
+        // forced answer changed nothing the leaf sees) is out of the choice. An exact tie would otherwise be broken by
+        // floating-point noise in the service's batching, and the same units would not replay the same game (lane
+        // cm-choice-search-1009). Without macros (the S1 path) okArg is ok itself.
+        boolean[] okArg = ok;
+        if (macroOf != null) {
+            okArg = ok.clone();
+            for (int c = 0; c < n; c++) {
+                if (macroOf[c] < 0 || !ok[c]) {
+                    continue;
+                }
+                for (int i = 0; i < c; i++) {
+                    if (okArg[i] && sameValues(values[c], values[i], k)) {
+                        okArg[c] = false;
+                        stats.givenMacroRedundant++;
+                        break;
+                    }
+                }
+            }
+        }
+        final int plainBest = overBudget ? 0 : argmax(values, okArg, n, k);
         int best = plainBest;
         if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget) {
-            final int medBest = argmaxMedian(values, ok, n, k);
+            final int medBest = argmaxMedian(values, okArg, n, k);
             if (medBest != plainBest) {
                 stats.departMedianChanged++;
                 if (cfg.departMedian == AiFixes.Mode.ON) {
@@ -1991,6 +2012,16 @@ public final class LookaheadSearch {
             }
             x.add("candidates", ca);
             System.err.println("[lookahead-explain] " + x);
+        }
+        return true;
+    }
+
+    /** S-t: values within 1e-6 of each other in every world (P(win) scale; the leaf is float32). */
+    static boolean sameValues(double[] a, double[] b, int k) {
+        for (int w = 0; w < k; w++) {
+            if (!(Math.abs(a[w] - b[w]) <= 1e-6)) {
+                return false;
+            }
         }
         return true;
     }
