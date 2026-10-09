@@ -547,6 +547,9 @@ public final class LookaheadSearch {
         public boolean s1On;
         public long givenDecisions, givenStackSkipped, givenUncontested, leafCalls, leafLeaves, leafFallbacks, leafLate,
                 leafNanos, playoutSeatFailures, searchCpuNanos;
+        /** S-t (lane cm-choice-search-1009; reported only when a decision expanded choices): decisions with macro
+         *  candidates, macro candidates played, macro departures. */
+        public long givenMacroDecisions, givenMacros, givenMacroDepartures;
         public String leafLastError, playoutLastFailure;
         public final List<Double> searchCpuMsEach = new ArrayList<>();
 
@@ -793,6 +796,11 @@ public final class LookaheadSearch {
                 if (playoutLastFailure != null) {
                     s.addProperty("playoutLastFailure", playoutLastFailure);
                 }
+                if (givenMacroDecisions > 0) {
+                    s.addProperty("macroDecisions", givenMacroDecisions);
+                    s.addProperty("macros", givenMacros);
+                    s.addProperty("macroDepartures", givenMacroDepartures);
+                }
                 o.add("s1", s);
             }
             if (rankerOn) {
@@ -831,6 +839,10 @@ public final class LookaheadSearch {
         final String kind;
         /** Target variant: the first single-target slot's target ("P<player index>", "C<card id>", "N" = none); null = Forge AI's. */
         final String tgt;
+        /** S-t macro (lane cm-choice-search-1009): the policy play-out seat's forced choice answers (null = none). */
+        final Object schedule;
+        /** S-t macro: the schedule's label (part of the key), or null. */
+        final String macro;
 
         private Cand(Cand base, String tgt, String tgtLabel) {
             this.pass = false;
@@ -841,6 +853,22 @@ public final class LookaheadSearch {
             this.label = base.label + " -> " + tgtLabel;
             this.kind = base.kind;
             this.tgt = tgt;
+            this.schedule = null;
+            this.macro = null;
+        }
+
+        /** S-t: {@code base} played out with a forced-answer schedule for its choice asks (a macro candidate). */
+        Cand(Cand base, Object schedule, String macro) {
+            this.pass = base.pass;
+            this.hostId = base.hostId;
+            this.desc = base.desc;
+            this.land = base.land;
+            this.isDefault = false;
+            this.label = base.label + " + " + macro;
+            this.kind = base.kind;
+            this.tgt = base.tgt;
+            this.schedule = schedule;
+            this.macro = macro;
         }
 
         Cand(SpellAbility sa, boolean isDefault) {
@@ -852,6 +880,8 @@ public final class LookaheadSearch {
             this.label = sa == null ? "pass" : (sa.getHostCard().getName() + " :: " + trim(sa.toString()));
             this.kind = sa == null ? "pass" : land ? "land" : sa.isSpell() ? "cast" : sa.isActivatedAbility() ? "activate" : "other";
             this.tgt = null;
+            this.schedule = null;
+            this.macro = null;
         }
 
         /** The prior request's candidate: {id, kind, fid} (fid = the host card's id, absent for pass). */
@@ -866,7 +896,8 @@ public final class LookaheadSearch {
         }
 
         String key() {
-            return pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc + (tgt == null ? "" : "|T:" + tgt);
+            return (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc + (tgt == null ? "" : "|T:" + tgt))
+                    + (macro == null ? "" : "|M:" + macro);
         }
 
         private static String trim(String s) {
@@ -970,12 +1001,23 @@ public final class LookaheadSearch {
         public final int hostId;
         public final String desc;
         public final boolean land;
+        /** S-t (lane cm-choice-search-1009): a macro candidate's forced choice answers (null = none). */
+        public final Object schedule;
+        /**
+         * S-t: set only while {@link #decideGiven(Game, Player, List, int, ChoiceExpander)} expands choices: the
+         * candidate's index in the searched list, the world, and whether this play-out is the candidate's probe (world 0
+         * of the base candidates: its choice asks are recorded).
+         */
+        public int candIndex = -1;
+        public int world = -1;
+        public boolean probe = false;
 
         FirstAction(Cand c) {
             this.pass = c.pass;
             this.hostId = c.hostId;
             this.desc = c.desc;
             this.land = c.land;
+            this.schedule = c.schedule;
         }
 
         /** The ability of {@code sa}'s menu entry is this action (host id, land flag, description). */
@@ -1600,7 +1642,42 @@ public final class LookaheadSearch {
         public boolean leafFallback;
         /** Wall and CPU time of the call (CPU = the calling thread's plus the pool threads'), and the pool part. */
         public double ms, cpuMs, poolCpuMs;
+        /**
+         * S-t (lane cm-choice-search-1009): per searched candidate, the index of its macro in the expander's list (-1 =
+         * a base candidate; empty without an expander), and the chosen candidate's (-1 = none, or a base candidate).
+         */
+        public int[] macro = new int[0];
+        public int chosenMacro = -1;
     }
+
+    /**
+     * S-t (lane cm-choice-search-1009): one macro candidate, a searched base candidate (index into the searched list)
+     * played out with a forced-answer schedule for its choice asks (opaque here: the policy play-out seat reads it from
+     * {@link FirstAction#schedule}).
+     */
+    public static final class Macro {
+        public final int base;
+        public final Object schedule;
+        public final String label;
+
+        public Macro(int base, Object schedule, String label) {
+            this.base = base;
+            this.schedule = schedule;
+            this.label = label;
+        }
+    }
+
+    /**
+     * S-t: after the base candidates' play-outs (whose world-0 play-outs were probes: {@link FirstAction#probe}), the
+     * macro candidates to add. {@code givenIndex[c]} is searched candidate c's index in the given list.
+     */
+    public interface ChoiceExpander {
+        List<Macro> expand(int[] givenIndex);
+    }
+
+    /** S-t: tag the policy play-outs' first actions (candidate index, world, probe), set only inside an expansion. */
+    private boolean choiceTag = false, choiceProbe = false;
+    private int choiceIndexBase = 0;
 
     /**
      * S1 (lane s1-search-1007): search a GIVEN candidate set at a priority decision of {@code me} in the live game,
@@ -1614,6 +1691,19 @@ public final class LookaheadSearch {
      * does). The live game is only read. With no hooks set and no guard on, nothing here touches the other paths.
      */
     public GivenResult decideGiven(Game live, Player me, List<SpellAbility> given, int breadth) {
+        return decideGiven(live, me, given, breadth, null);
+    }
+
+    /**
+     * S-t (lane cm-choice-search-1009): as {@link #decideGiven(Game, Player, List, int)}; with an {@code expander} (policy
+     * play-outs only), the base candidates' world-0 play-outs are probes, and the macro candidates the expander returns
+     * are played out in the same K worlds (common random numbers) and compete with the base candidates in the same
+     * argmax and departZ gate. A null expander is exactly the S1 search.
+     */
+    public GivenResult decideGiven(Game live, Player me, List<SpellAbility> given, int breadth, ChoiceExpander expander) {
+        if (expander != null && !hookPlayout) {
+            throw new IllegalStateException("S-t: expanding choices needs policy play-outs");
+        }
         final GivenResult res = new GivenResult();
         stats.s1On = true;
         stats.decisions++;
@@ -1655,7 +1745,7 @@ public final class LookaheadSearch {
         deadline = cfg.budgetMs > 0 ? t0 + cfg.budgetMs * 1_000_000L : 0L;
         boolean searched = false;
         try {
-            searched = decideGiven0(live, me, given, Math.max(1, breadth), index, onStack, ph, turn, res);
+            searched = decideGiven0(live, me, given, Math.max(1, breadth), index, onStack, ph, turn, res, expander);
         } catch (RuntimeException e) {
             stats.departFallback++;
             res.chosen = 0;
@@ -1685,7 +1775,7 @@ public final class LookaheadSearch {
     }
 
     private boolean decideGiven0(Game live, Player me, List<SpellAbility> given, int breadth, int index, boolean onStack,
-            PhaseHandler ph, int turn, GivenResult res) {
+            PhaseHandler ph, int turn, GivenResult res, ChoiceExpander expander) {
         final long decisionSeed = mix(cfg.seed, 0x5eedL + index);
         final List<Cand> all = new ArrayList<>();
         final List<Integer> allAt = new ArrayList<>();
@@ -1697,7 +1787,7 @@ public final class LookaheadSearch {
                 allAt.add(i);
             }
         }
-        final List<Cand> cands = new ArrayList<>();
+        List<Cand> cands = new ArrayList<>();
         final List<Integer> at = new ArrayList<>();
         guardGiven(live, me, all, allAt, breadth, decisionSeed, cands, at);
         if (cands.size() < 2) {
@@ -1712,15 +1802,76 @@ public final class LookaheadSearch {
         }
         lastCandidates = cands;
         final int k = Math.max(1, cfg.worlds);
-        final int n = cands.size();
-        final double[][] values = new double[n][k];
-        final Rollout[][] outs = new Rollout[n][k];
-        final boolean[] ok = new boolean[n];
+        int n = cands.size();
+        double[][] values = new double[n][k];
+        Rollout[][] outs = new Rollout[n][k];
+        boolean[] ok = new boolean[n];
         Arrays.fill(ok, true);
         explainChoices = EXPLAIN ? new String[n] : null;
         labelChoices = null;
         labelTargets = null;
-        final int aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+        int aborted;
+        int[] macroOf = null;
+        if (expander == null) {
+            aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+        } else {
+            // S-t: the base candidates first (their world-0 play-outs record the choice asks), then the macros
+            choiceTag = true;
+            choiceProbe = true;
+            choiceIndexBase = 0;
+            try {
+                aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+            } finally {
+                choiceTag = false;
+                choiceProbe = false;
+            }
+            final List<Macro> ms = aborted == 0 ? expander.expand(toArray(at)) : null;
+            if (ms != null && !ms.isEmpty()) {
+                final int nm = ms.size();
+                final List<Cand> mc = new ArrayList<>(nm);
+                for (Macro m : ms) {
+                    mc.add(new Cand(cands.get(m.base), m.schedule, m.label));
+                }
+                final double[][] mv = new double[nm][k];
+                final Rollout[][] mo = new Rollout[nm][k];
+                final boolean[] mok = new boolean[nm];
+                Arrays.fill(mok, true);
+                final String[] baseExplain = explainChoices;
+                explainChoices = EXPLAIN ? new String[nm] : null;
+                choiceTag = true;
+                choiceIndexBase = n;
+                try {
+                    aborted += playAll(live, me, mc, null, decisionSeed, new Carried[k], mv, mo, mok, null);
+                } finally {
+                    choiceTag = false;
+                    choiceIndexBase = 0;
+                }
+                if (EXPLAIN) {
+                    final String[] ex = Arrays.copyOf(baseExplain, n + nm);
+                    System.arraycopy(explainChoices, 0, ex, n, nm);
+                    explainChoices = ex;
+                }
+                final List<Cand> merged = new ArrayList<>(cands);
+                merged.addAll(mc);
+                cands = merged;
+                values = Arrays.copyOf(values, n + nm);
+                outs = Arrays.copyOf(outs, n + nm);
+                ok = Arrays.copyOf(ok, n + nm);
+                macroOf = new int[n + nm];
+                Arrays.fill(macroOf, -1);
+                for (int j = 0; j < nm; j++) {
+                    values[n + j] = mv[j];
+                    outs[n + j] = mo[j];
+                    ok[n + j] = mok[j];
+                    macroOf[n + j] = j;
+                    at.add(at.get(ms.get(j).base));
+                }
+                n += nm;
+                lastCandidates = cands;
+                stats.givenMacroDecisions++;
+                stats.givenMacros += nm;
+            }
+        }
         // live-sc-1009: over the wall budget the default is played whatever the values say, so the leaf call is skipped
         // (aborted is always 0 without a budget: the S1 read's path is unchanged)
         if (hookLeaf && aborted == 0) {
@@ -1776,6 +1927,11 @@ public final class LookaheadSearch {
                 if (onStack) {
                     stats.stackDeparted++;
                 }
+                if (macroOf != null && macroOf[best] >= 0) {
+                    // S-t: a macro departure (its base action, then its scheduled choice answers)
+                    res.chosenMacro = macroOf[best];
+                    stats.givenMacroDepartures++;
+                }
                 departuresThisTurn++;
                 departureCounts.put(key, seenN + 1);
                 outcome = "departed";
@@ -1786,6 +1942,7 @@ public final class LookaheadSearch {
         if (overBudget) {
             stats.capped++;
             res.chosen = 0;
+            res.chosenMacro = -1;
             outcome = "capped";
         }
         res.outcome = outcome;
@@ -1795,6 +1952,9 @@ public final class LookaheadSearch {
         res.givenIndex = new int[n];
         for (int c = 0; c < n; c++) {
             res.givenIndex[c] = at.get(c);
+        }
+        if (macroOf != null) {
+            res.macro = macroOf;
         }
         if (Boolean.getBoolean("lookahead.trace")) {
             final StringBuilder tb = new StringBuilder("[ltrace] given d=").append(index).append(" T").append(turn).append(' ')
@@ -1833,6 +1993,14 @@ public final class LookaheadSearch {
             System.err.println("[lookahead-explain] " + x);
         }
         return true;
+    }
+
+    private static int[] toArray(List<Integer> xs) {
+        final int[] a = new int[xs.size()];
+        for (int i = 0; i < a.length; i++) {
+            a[i] = xs.get(i);
+        }
+        return a;
     }
 
     /**
@@ -2753,6 +2921,14 @@ public final class LookaheadSearch {
                 }
                 prep[c][w] = prepare(live, me, cands.get(c), defSa, mix(decisionSeed, 1000 + w), cfg.resample, cw == null ? null : cw.at);
                 prep[c][w].trajectory = cfg.reuse ? new ArrayList<>() : null;
+                if (choiceTag && prep[c][w].firstAction != null) {
+                    // S-t (lane cm-choice-search-1009): which candidate and world this policy play-out is, and whether it
+                    // is the candidate's probe (world 0 of the base candidates)
+                    final FirstAction fa = prep[c][w].firstAction;
+                    fa.candIndex = choiceIndexBase + c;
+                    fa.world = w;
+                    fa.probe = choiceProbe && w == 0;
+                }
                 if (EXPLAIN && w == 0) {
                     explainChoices[c] = describeChoices(prep[c][w].first);
                 }
