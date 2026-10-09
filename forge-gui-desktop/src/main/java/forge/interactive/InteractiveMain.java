@@ -109,6 +109,7 @@ public final class InteractiveMain {
 
         InteractiveGuiGame gui = null;
         boolean completedNormally = false;
+        forge.bench.rl.RlLiveSeat policy = null;
         try {
             System.setProperty("java.util.Arrays.useLegacyMergeSort", "true");
             System.setProperty("sun.java2d.d3d", "false");
@@ -116,9 +117,14 @@ public final class InteractiveMain {
             final InteractiveGuiDesktop desktop = new InteractiveGuiDesktop();
             GuiBase.setInterface(desktop);
             initializeForge();
+            // lane live-sc-1009 (off unless -Dforge.interactive.policySearch is set): the AI seat is the S1 read's S-c
+            // when its policy service answers with the pinned checkpoint; otherwise the usual opponent below
+            if (policySpec() != null) {
+                policy = forge.bench.rl.RlLiveSeat.connect(policySpec(), "live-" + config.session());
+            }
             MyRandom.setRandom(new Random(config.seed()));
 
-            final List<RegisteredPlayer> registered = createPlayers(config);
+            final List<RegisteredPlayer> registered = createPlayers(config, policy);
             final GameRules rules = new GameRules(GameType.Constructed);
             rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
             rules.setGamesPerMatch(1);
@@ -138,6 +144,7 @@ public final class InteractiveMain {
             final Game game = match.createGame();
             bindAiFixes(registered);
             bindLookahead(registered, game, config.seed());
+            bindPolicy(registered, game, config.seed());
             countFairNaming(registered, game);
             final Player human = playerAtSeat(game, config.humanSeat());
             if (human == null || !(human.getController() instanceof PlayerControllerHuman humanController)) {
@@ -207,6 +214,9 @@ public final class InteractiveMain {
         } finally {
             if (gui != null) {
                 gui.close();
+            }
+            if (policy != null) {
+                policy.finish();
             }
         }
         // Forge initializes Swing/FModel threads that can outlive a completed match.
@@ -420,14 +430,14 @@ public final class InteractiveMain {
             preferences.setPref(FPref.YIELD_AUTO_PASS_RESPECTS_INTERRUPTS, false);
             return null;
         });
-        if (System.getProperty("forge.interactive.lookahead") != null) {
+        if (System.getProperty("forge.interactive.lookahead") != null || policySpec() != null) {
             // Look-ahead play-outs may run on threads: fill the lazily built token table up front (see TokenDb).
             FModel.getMagicDb().getAllTokens().preloadTokens();
         }
     }
 
-    private static List<RegisteredPlayer> createPlayers(
-            final InteractiveProtocol.Config config) throws InteractiveProtocol.ProtocolException {
+    private static List<RegisteredPlayer> createPlayers(final InteractiveProtocol.Config config,
+            final forge.bench.rl.RlLiveSeat policy) throws InteractiveProtocol.ProtocolException {
         final List<RegisteredPlayer> players = new ArrayList<>(2);
         for (int seat = 0; seat < 2; seat++) {
             final Path path = config.decks().get(seat);
@@ -439,6 +449,8 @@ public final class InteractiveMain {
             validateLoadedDeck(path, deck);
             final LobbyPlayer lobbyPlayer = seat == config.humanSeat()
                     ? GamePlayerUtil.getGuiPlayer()
+                    : policy != null
+                            ? policy.lobby("Default Forge", seat, config.aiProfile())
                     : lookaheadSpec() != null
                             ? lookaheadLobby(config.aiProfile())
                             : GamePlayerUtil.createAiPlayer("Default Forge", seat, 0, null,
@@ -494,7 +506,8 @@ public final class InteractiveMain {
                 lp.setFairNaming(fairNaming);
             }
             if (rp.getPlayer() instanceof forge.ai.LobbyPlayerAi lp
-                    && !(lp instanceof forge.ai.simulation.LobbyPlayerLookahead)) {
+                    && !(lp instanceof forge.ai.simulation.LobbyPlayerLookahead)
+                    && !(lp instanceof forge.bench.rl.LobbyPlayerPolicy)) {
                 lp.setAiFixes0928(mode);
             }
         }
@@ -514,7 +527,57 @@ public final class InteractiveMain {
         if (spec == null) {
             return;
         }
-        final forge.ai.simulation.LookaheadSearch.Config c = new forge.ai.simulation.LookaheadSearch.Config();
+        final ParsedLookahead pl = parseLookahead(spec);
+        final forge.ai.simulation.LookaheadSearch.Config c = pl.config;
+        for (int i = 0; i < registered.size(); i++) {
+            if (registered.get(i).getPlayer() instanceof forge.ai.simulation.LobbyPlayerLookahead lp) {
+                lp.setAiFixes0928(pl.aiFixes);
+                if (pl.fairNaming != null) {
+                    lp.setFairNaming(pl.fairNaming);
+                }
+                c.seed = seed * 31 + i;
+                lp.bind(game, new forge.ai.simulation.LookaheadSearch(c));
+            }
+        }
+    }
+
+    /** {@code -Dforge.interactive.policySearch} (lane live-sc-1009; off unless set), see {@link forge.bench.rl.RlLiveSeat}. */
+    private static String policySpec() {
+        final String v = System.getProperty("forge.interactive.policySearch");
+        return v == null || v.isBlank() ? null : v;
+    }
+
+    /**
+     * lane live-sc-1009: bind the policy seat (if one was seated) to the live game. A degraded seat plays the live K8
+     * look-ahead: this server's look-ahead spec with the seed and Forge AI fixes a look-ahead seat here would get.
+     */
+    private static void bindPolicy(final List<RegisteredPlayer> registered, final Game game, final long seed) {
+        for (int i = 0; i < registered.size(); i++) {
+            if (registered.get(i).getPlayer() instanceof forge.bench.rl.LobbyPlayerPolicy lp) {
+                final String spec = lookaheadSpec();
+                forge.ai.simulation.LookaheadSearch.Config k8 = null;
+                forge.ai.AiFixes.Mode k8Fixes = forge.ai.AiFixes.Mode.OFF;
+                if (spec != null) {
+                    final ParsedLookahead pl = parseLookahead(spec);
+                    k8 = pl.config;
+                    k8.seed = seed * 31 + i;
+                    k8Fixes = pl.aiFixes;
+                }
+                lp.live().bind(game, i, seed, k8, k8Fixes);
+            }
+        }
+    }
+
+    /** A look-ahead spec as {@link #bindLookahead} reads it. */
+    private static final class ParsedLookahead {
+        final forge.ai.simulation.LookaheadSearch.Config config = new forge.ai.simulation.LookaheadSearch.Config();
+        forge.ai.AiFixes.Mode aiFixes = forge.ai.AiFixes.Mode.OFF;
+        forge.ai.AiFixes.Mode fairNaming = null;
+    }
+
+    private static ParsedLookahead parseLookahead(final String spec) {
+        final ParsedLookahead pl = new ParsedLookahead();
+        final forge.ai.simulation.LookaheadSearch.Config c = pl.config;
         forge.ai.AiFixes.Mode aiFixes = forge.ai.AiFixes.Mode.OFF;
         forge.ai.AiFixes.Mode fairNaming = null;
         for (String kv : spec.split(",")) {
@@ -564,16 +627,9 @@ public final class InteractiveMain {
                 default: break;
             }
         }
-        for (int i = 0; i < registered.size(); i++) {
-            if (registered.get(i).getPlayer() instanceof forge.ai.simulation.LobbyPlayerLookahead lp) {
-                lp.setAiFixes0928(aiFixes);
-                if (fairNaming != null) {
-                    lp.setFairNaming(fairNaming);
-                }
-                c.seed = seed * 31 + i;
-                lp.bind(game, new forge.ai.simulation.LookaheadSearch(c));
-            }
-        }
+        pl.aiFixes = aiFixes;
+        pl.fairNaming = fairNaming;
+        return pl;
     }
 
     private static void configureHumanPayment(final PlayerControllerHuman controller) {

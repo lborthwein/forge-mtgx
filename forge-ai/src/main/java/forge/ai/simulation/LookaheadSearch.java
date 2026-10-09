@@ -1721,7 +1721,9 @@ public final class LookaheadSearch {
         labelChoices = null;
         labelTargets = null;
         final int aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
-        if (hookLeaf) {
+        // live-sc-1009: over the wall budget the default is played whatever the values say, so the leaf call is skipped
+        // (aborted is always 0 without a budget: the S1 read's path is unchanged)
+        if (hookLeaf && aborted == 0) {
             final long fb = stats.leafFallbacks;
             valueLeaves(values, outs, ok, k);
             res.leafFallback = stats.leafFallbacks != fb;
