@@ -125,6 +125,16 @@ public class ChoiceWindowTest {
         Assert.assertEquals(a.prior[2], 0.0);
         Assert.assertEquals(a.maxPrior(), 0.75);
         Assert.assertEquals(a.loose[0], ChoiceWindow.looseKey(m, 0, null));
+        Assert.assertEquals(a.alternatives(), java.util.Collections.singletonList(0), "legal, not the policy's own answer");
+        // two candidates with one identity (two copies of a card) are one alternative, the more likely one; a legal
+        // candidate whose prior underflowed to 0 is still an alternative
+        final List<ChoiceWindow.Ask> into2 = new ArrayList<>();
+        final ChoiceWindow w2 = ChoiceWindow.recorder(ChoiceWindow.parseFamilies("MODE"),
+                p -> new double[] {0.1, 0.6, 0.3, 0.0}, into2);
+        w2.open(5);
+        final RlCandidates.Menu m2 = menu(RlSchema.M_SINGLE, "i:0", "i:1", "i:0", "i:3");
+        w2.record(ASK, w2.nextOrdinal(ASK), RlSchema.F_MODE, m2, null, new byte[0], 1);
+        Assert.assertEquals(into2.get(0).alternatives(), Arrays.asList(2, 3));
         // a scorer that fails records nothing
         final ChoiceWindow f = ChoiceWindow.recorder(ChoiceWindow.parseFamilies("MODE"), p -> {
             throw new java.io.IOException("down");

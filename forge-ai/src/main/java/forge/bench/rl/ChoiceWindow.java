@@ -66,11 +66,13 @@ public final class ChoiceWindow {
         public final String[] loose;
         /** The policy's prior per candidate (0 for an illegal one). */
         public final double[] prior;
+        /** Legal candidates (a legal candidate's prior may underflow to 0). */
+        public final boolean[] legal;
         /** The policy's own answer (candidate index; -1 = unknown). */
         public final int greedy;
 
         Ask(final String ask, final int ordinal, final int family, final String[] exact, final String[] loose,
-                final double[] prior, final int greedy) {
+                final double[] prior, final boolean[] legal, final int greedy) {
             this.ask = ask;
             this.ordinal = ordinal;
             this.family = family;
@@ -78,7 +80,33 @@ public final class ChoiceWindow {
             this.exact = exact;
             this.loose = loose;
             this.prior = prior;
+            this.legal = legal;
             this.greedy = greedy;
+        }
+
+        /**
+         * The alternatives to the policy's own answer: legal candidates whose identity without ids (name, zone,
+         * controller: {@link ChoiceWindow#looseKey}) differs from the policy's answer's, one per identity (the most
+         * likely), most likely first. Two copies of one land are one alternative.
+         */
+        public List<Integer> alternatives() {
+            final Map<String, Integer> best = new HashMap<>();
+            final String own = greedy >= 0 && greedy < C ? loose[greedy] : null;
+            for (int i = 0; i < C; i++) {
+                if (!legal[i] || loose[i].equals(own)) {
+                    continue;
+                }
+                final Integer b = best.get(loose[i]);
+                if (b == null || prior[i] > prior[b]) {
+                    best.put(loose[i], i);
+                }
+            }
+            final List<Integer> out = new ArrayList<>(best.values());
+            out.sort((x, y) -> {
+                final int k = Double.compare(prior[y], prior[x]);
+                return k != 0 ? k : Integer.compare(x, y);
+            });
+            return out;
         }
 
         public double maxPrior() {
@@ -341,12 +369,14 @@ public final class ChoiceWindow {
         final String[] ex = new String[m.C()];
         final String[] lo = new String[m.C()];
         final double[] pr = new double[m.C()];
+        final boolean[] lg = new boolean[m.C()];
         for (int i = 0; i < m.C(); i++) {
             ex[i] = exactKey(m, i);
             lo[i] = looseKey(m, i, me);
-            pr[i] = m.cands.get(i).kind > 0 ? p[i] : 0.0;
+            lg[i] = m.cands.get(i).kind > 0;
+            pr[i] = lg[i] ? p[i] : 0.0;
         }
-        recorded.add(new Ask(askKey, ordinal, family, ex, lo, pr, policyAnswer));
+        recorded.add(new Ask(askKey, ordinal, family, ex, lo, pr, lg, policyAnswer));
     }
 
     // ------------------------------------------------------------------------------------------------ identities

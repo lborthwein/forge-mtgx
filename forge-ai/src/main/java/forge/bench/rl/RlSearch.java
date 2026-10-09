@@ -54,12 +54,12 @@ import forge.game.spellability.SpellAbility;
  * <p><b>S-t</b> (lane cm-choice-search-1009; spec key {@code choices} = m > 0, policy play-outs only; with m = 0, the
  * default, nothing below the S1 search runs): each searched candidate's world-0 play-out is also a probe that records
  * the seat's choice asks inside the candidate's resolution window ({@link ChoiceWindow}: until the seat's next priority
- * with an empty stack, or the end of the turn) with the policy's prior. For the first m asks of a candidate the policy
- * does not answer with prior {@code >= choiceMaxProb}, the top {@code choiceAlts} other answers by prior each make a
- * <i>macro candidate</i>: the candidate with that answer forced (a schedule matched by the ask's identity and ordinal and
- * the answer's identity, {@link ChoiceWindow}). Macros, ranked by joint prior (candidate's x answer's) up to
- * {@code choiceCap} searched candidates in all, are played out in the same K worlds and compete in the same argmax and
- * departZ gate. A macro departure plays its base action and installs its schedule in the live seat's window; a
+ * with an empty stack, or the end of the turn) with the policy's prior. For the first m asks of a candidate that have an
+ * alternative (and, with {@code choiceMaxProb} < 1, that the policy answers with prior below it), the top
+ * {@code choiceAlts} other answers by prior each make a <i>macro candidate</i>: the candidate with that answer forced (a
+ * schedule matched by the ask's identity and ordinal and the answer's identity, {@link ChoiceWindow}). Macros, in search
+ * order (or by joint prior: {@code choiceRank}) up to {@code choiceCap} searched candidates in all, are played out in the
+ * same K worlds and compete in the same argmax and departZ gate. A macro departure plays its base action and installs its schedule in the live seat's window; a
  * scheduled live ask whose answer is not a candidate falls back to the policy (counted).
  */
 public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.SearchHooks, LookaheadSearch.ChoiceExpander {
@@ -111,10 +111,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int choices = 0;
         /** S-t: alternative answers per expanded ask (b), by the policy's prior. */
         public int choiceAlts = 2;
-        /** S-t: an ask is contested when the policy's largest prior over its candidates is below this. */
-        public double choiceMaxProb = 0.9;
-        /** S-t: searched candidates in all (base + macro), macros ranked by joint prior. */
+        /**
+         * S-t: an ask is expanded when the policy's largest prior over its candidates is below this; 1 (the default) =
+         * every ask with an alternative, however sure the policy is (lane cm-choice-search-1009: the policy picks Woodfall
+         * Primus over Craterhoof for Natural Order with prior 1.0, so a confidence filter never searches that pick).
+         */
+        public double choiceMaxProb = 1.0;
+        /** S-t: searched candidates in all (base + macro). */
         public int choiceCap = 10;
+        /**
+         * S-t: which macros fill the cap. "base" (the default): the searched candidates in search order (the policy's own
+         * choice first, then by prior), each candidate's asks in window order, each ask's alternatives by prior.
+         * "joint": by joint prior (candidate's x answer's; this lane's first spec, which ranks a confidently wrong
+         * policy's needed answer last).
+         */
+        public String choiceRank = "base";
         /** S-t: the families a probe records and expands. */
         public String choiceFamilies = ChoiceWindow.DEFAULT_FAMILIES;
         java.util.Set<Integer> choiceFamilySet = null;
@@ -123,7 +134,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
-                "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies"));
+                "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -162,6 +173,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("choiceMaxProb")) c.choiceMaxProb = o.get("choiceMaxProb").getAsDouble();
             if (o.has("choiceCap")) c.choiceCap = o.get("choiceCap").getAsInt();
             if (o.has("choiceFamilies")) c.choiceFamilies = o.get("choiceFamilies").getAsString();
+            if (o.has("choiceRank")) c.choiceRank = o.get("choiceRank").getAsString();
             c.check();
             return c;
         }
@@ -184,6 +196,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (choices < 0 || choiceAlts < 1 || choiceCap < 2 || !(choiceMaxProb > 0 && choiceMaxProb <= 1)) {
                 throw new IllegalArgumentException("search: choices >= 0, choiceAlts >= 1, choiceCap >= 2, 0 < choiceMaxProb <= 1");
+            }
+            if (!"base".equals(choiceRank) && !"joint".equals(choiceRank)) {
+                throw new IllegalArgumentException("search.choiceRank must be base or joint, not " + choiceRank);
             }
             if (choices > 0 && !"policy".equals(playout)) {
                 throw new IllegalArgumentException("search.choices (S-t) needs playout=policy");
@@ -230,6 +245,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.addProperty("choiceMaxProb", choiceMaxProb);
                 o.addProperty("choiceCap", choiceCap);
                 o.addProperty("choiceFamilies", choiceFamilies);
+                o.addProperty("choiceRank", choiceRank);
             }
             return o;
         }
@@ -679,9 +695,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /**
      * S-t: the macro candidates of the current decision. Per searched candidate (its probe's asks in order), the first
-     * {@code choices} contested asks (largest prior below {@code choiceMaxProb}) each give their top {@code choiceAlts}
-     * other answers by prior; macros are ranked by joint prior (the candidate's x the answer's), ties in the order found,
-     * and the first {@code choiceCap} minus the base count are kept.
+     * {@code choices} expandable asks (an alternative exists; with {@code choiceMaxProb} < 1, also the largest prior below
+     * it) each give their top {@code choiceAlts} alternatives ({@link ChoiceWindow.Ask#alternatives}: other identities
+     * than the policy's own answer, by prior). The first {@code choiceCap} minus the base count are kept, in the order
+     * found ({@code choiceRank} base) or by joint prior (joint), ties in the order found.
      */
     @Override
     public List<LookaheadSearch.Macro> expand(final int[] givenIndex) {
@@ -701,21 +718,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 if (used >= cfg.choices) {
                     break;
                 }
-                if (a.maxPrior() >= cfg.choiceMaxProb) {
+                if (cfg.choiceMaxProb < 1.0 && a.maxPrior() >= cfg.choiceMaxProb) {
+                    continue;
+                }
+                final List<Integer> alts = a.alternatives();
+                if (alts.isEmpty()) {
                     continue;
                 }
                 used++;
                 contestedAsks++;
-                final List<Integer> alts = new ArrayList<>();
-                for (int i = 0; i < a.C; i++) {
-                    if (i != a.greedy && a.prior[i] > 0) {
-                        alts.add(i);
-                    }
-                }
-                alts.sort((x, y) -> {
-                    final int k = Double.compare(a.prior[y], a.prior[x]);
-                    return k != 0 ? k : Integer.compare(x, y);
-                });
                 for (int t = 0; t < Math.min(cfg.choiceAlts, alts.size()); t++) {
                     final int alt = alts.get(t);
                     final ChoiceWindow.Entry e = new ChoiceWindow.Entry(a.ask, a.ordinal, a.exact[alt], a.loose[alt]);
@@ -734,10 +745,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         for (int i = 0; i < found.size(); i++) {
             rank.add(i);
         }
-        rank.sort((x, y) -> {
-            final int k = Double.compare(found.get(y).jointPrior, found.get(x).jointPrior);
-            return k != 0 ? k : Integer.compare(x, y);
-        });
+        if ("joint".equals(cfg.choiceRank)) {
+            rank.sort((x, y) -> {
+                final int k = Double.compare(found.get(y).jointPrior, found.get(x).jointPrior);
+                return k != 0 ? k : Integer.compare(x, y);
+            });
+        }
         final java.util.Map<Integer, Integer> baseOf = new java.util.HashMap<>();
         for (int c = 0; c < givenIndex.length; c++) {
             baseOf.putIfAbsent(givenIndex[c], c);
@@ -805,7 +818,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final JsonObject st = new JsonObject();
             st.addProperty("probe_asks", probeAsksTotal);
             st.addProperty("reconnects", reconnects);
-            st.addProperty("contested_asks", contestedAsks);
+            st.addProperty("expanded_asks", contestedAsks);
             st.addProperty("macro_decisions", macroDecisions);
             st.addProperty("macros", macrosSearched);
             st.addProperty("macro_departures", macroDepartures);

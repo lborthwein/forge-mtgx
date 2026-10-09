@@ -44,16 +44,20 @@ public class RlChoiceSearchTest {
     public void specKeysParseAndAnS1SpecIsUnchanged() {
         final RlSearch.Config off = spec("127.0.0.1:1", "");
         Assert.assertEquals(off.choices, 0);
-        for (String k : new String[] {"choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies"}) {
+        Assert.assertEquals(off.choiceMaxProb, 1.0, "every ask with an alternative, however sure the policy is");
+        Assert.assertEquals(off.choiceRank, "base");
+        for (String k : new String[] {"choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank"}) {
             Assert.assertFalse(off.toJson().has(k), "an S1 spec's JSON carries no " + k);
         }
         final RlSearch.Config on = spec("127.0.0.1:1", ",\"choices\":2,\"choiceAlts\":3,\"choiceCap\":9,"
-                + "\"choiceMaxProb\":0.8,\"choiceFamilies\":\"TARGETS,CARDS\"");
+                + "\"choiceMaxProb\":0.8,\"choiceFamilies\":\"TARGETS,CARDS\",\"choiceRank\":\"joint\"");
         Assert.assertEquals(on.choices, 2);
         Assert.assertEquals(on.choiceAlts, 3);
         Assert.assertEquals(on.choiceCap, 9);
         Assert.assertEquals(on.choiceMaxProb, 0.8);
         Assert.assertEquals(on.toJson().get("choiceFamilies").getAsString(), "TARGETS,CARDS");
+        Assert.assertEquals(on.toJson().get("choiceRank").getAsString(), "joint");
+        Assert.assertThrows(IllegalArgumentException.class, () -> spec("127.0.0.1:1", ",\"choices\":1,\"choiceRank\":\"best\""));
         Assert.assertThrows(IllegalArgumentException.class, () -> RlSearch.Config.parse(JsonParser.parseString(
                 "{\"server\":\"127.0.0.1:1\",\"playout\":\"forge\",\"choices\":1}").getAsJsonObject()));
         Assert.assertThrows(IllegalArgumentException.class, () -> spec("127.0.0.1:1", ",\"choices\":1,"
