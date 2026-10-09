@@ -58,6 +58,10 @@ public class RlChoiceSearchTest {
         Assert.assertEquals(on.toJson().get("choiceFamilies").getAsString(), "TARGETS,CARDS");
         Assert.assertEquals(on.toJson().get("choiceRank").getAsString(), "joint");
         Assert.assertThrows(IllegalArgumentException.class, () -> spec("127.0.0.1:1", ",\"choices\":1,\"choiceRank\":\"best\""));
+        Assert.assertEquals(off.sameDepartures, 2, "the S1 read's loop guard");
+        Assert.assertFalse(off.toJson().has("sameDepartures"));
+        Assert.assertEquals(spec("127.0.0.1:1", ",\"sameDepartures\":8").toJson().get("sameDepartures").getAsInt(), 8);
+        Assert.assertThrows(IllegalArgumentException.class, () -> spec("127.0.0.1:1", ",\"sameDepartures\":0"));
         Assert.assertThrows(IllegalArgumentException.class, () -> RlSearch.Config.parse(JsonParser.parseString(
                 "{\"server\":\"127.0.0.1:1\",\"playout\":\"forge\",\"choices\":1}").getAsJsonObject()));
         Assert.assertThrows(IllegalArgumentException.class, () -> spec("127.0.0.1:1", ",\"choices\":1,"

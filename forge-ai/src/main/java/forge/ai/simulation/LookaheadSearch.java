@@ -173,6 +173,13 @@ public final class LookaheadSearch {
         public AiFixes.Mode departMedian = AiFixes.Mode.OFF;
         public int maxDeparturesPerTurn = 12;
         /**
+         * Given-candidate searches only ({@link #decideGiven}; lane cm-choice-search-1009): departures to one candidate key
+         * at one phase and stack size per turn before the loop guard keeps the default. 2 = K8's rule (K8's own paths keep
+         * their fixed 2). A combo loop repeats one action (Kiki-Jiki's activation with the same untap) more than twice.
+         * Not in the config JSON unless changed.
+         */
+        public int maxSameDepartures = 2;
+        /**
          * S1 value leaf (lane s1-search-1007; used only with the hooks' value leaf): main-loop steps a play-out may run
          * past the start of the horizon turn waiting for the searching seat's first priority there. Not in the config JSON.
          */
@@ -360,6 +367,9 @@ public final class LookaheadSearch {
                 o.addProperty("departMedian", departMedian.key());
             }
             o.addProperty("maxDeparturesPerTurn", maxDeparturesPerTurn);
+            if (maxSameDepartures != 2) {
+                o.addProperty("maxSameDepartures", maxSameDepartures);
+            }
             o.addProperty("probe", probe);
             o.addProperty("combat", combat);
             if (stack) {
@@ -1939,7 +1949,7 @@ public final class LookaheadSearch {
             final Cand chosen = cands.get(best);
             final String key = chosen.key() + "@" + ph.getPhase() + "#" + live.getStack().size();
             final int seenN = departureCounts.getOrDefault(key, 0);
-            if (departuresThisTurn >= cfg.maxDeparturesPerTurn || seenN >= 2) {
+            if (departuresThisTurn >= cfg.maxDeparturesPerTurn || seenN >= cfg.maxSameDepartures) {
                 stats.loopGuard++;
                 outcome = "loop-guard";
             } else {

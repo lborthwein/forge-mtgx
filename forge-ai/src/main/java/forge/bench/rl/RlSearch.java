@@ -126,6 +126,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * policy's needed answer last).
          */
         public String choiceRank = "base";
+        /**
+         * The loop guard (lane cm-choice-search-1009): departures to one candidate at one phase and stack size per turn.
+         * 2 = the S1 read's (K8's) rule; a combo loop (Kiki-Jiki + Zealous Conscripts) repeats one action more often.
+         */
+        public int sameDepartures = 2;
         /** S-t: the families a probe records and expands. */
         public String choiceFamilies = ChoiceWindow.DEFAULT_FAMILIES;
         java.util.Set<Integer> choiceFamilySet = null;
@@ -134,7 +139,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
-                "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank"));
+                "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -174,6 +179,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("choiceCap")) c.choiceCap = o.get("choiceCap").getAsInt();
             if (o.has("choiceFamilies")) c.choiceFamilies = o.get("choiceFamilies").getAsString();
             if (o.has("choiceRank")) c.choiceRank = o.get("choiceRank").getAsString();
+            if (o.has("sameDepartures")) c.sameDepartures = o.get("sameDepartures").getAsInt();
             c.check();
             return c;
         }
@@ -196,6 +202,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (choices < 0 || choiceAlts < 1 || choiceCap < 2 || !(choiceMaxProb > 0 && choiceMaxProb <= 1)) {
                 throw new IllegalArgumentException("search: choices >= 0, choiceAlts >= 1, choiceCap >= 2, 0 < choiceMaxProb <= 1");
+            }
+            if (sameDepartures < 1) {
+                throw new IllegalArgumentException("search.sameDepartures >= 1");
             }
             if (!"base".equals(choiceRank) && !"joint".equals(choiceRank)) {
                 throw new IllegalArgumentException("search.choiceRank must be base or joint, not " + choiceRank);
@@ -237,6 +246,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (budgetMs > 0) {
                 // live-sc-1009: only when set, so a bench spec's JSON is unchanged
                 o.addProperty("budgetMs", budgetMs);
+            }
+            if (sameDepartures != 2) {
+                // cm-choice-search-1009: only when changed, so an S1 spec's JSON is unchanged
+                o.addProperty("sameDepartures", sameDepartures);
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -336,6 +349,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.departMedian = AiFixes.Mode.parse(cfg.departMedian);
         lc.stack = cfg.stack;
         lc.budgetMs = cfg.budgetMs;
+        lc.maxSameDepartures = cfg.sameDepartures;
         this.ls = new LookaheadSearch(lc);
         ls.setHooks(this, "value".equals(cfg.leaf), "policy".equals(cfg.playout));
         this.choiceFams = cfg.choices > 0 ? (cfg.choiceFamilySet != null ? cfg.choiceFamilySet
