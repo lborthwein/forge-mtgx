@@ -68,7 +68,7 @@ public final class RlClient implements Closeable {
     public static RlClient connect(final String hostPort, final int connectTimeoutMs, final int readTimeoutMs)
             throws IOException {
         if (hostPort.startsWith("unix:")) {
-            return new RlClient(UdsChannel.open(hostPort.substring(5), readTimeoutMs));
+            return new RlClient(UdsChannel.open(hostPort.substring(5), connectTimeoutMs, readTimeoutMs));
         }
         final int c = hostPort.lastIndexOf(':');
         if (c <= 0) {
@@ -189,14 +189,34 @@ public final class RlClient implements Closeable {
         final InputStream in;
         final OutputStream out;
 
-        static UdsChannel open(final String path, final int readTimeoutMs) throws IOException {
-            final SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
-            try {
-                ch.connect(UnixDomainSocketAddress.of(path));
-                return new UdsChannel(ch, readTimeoutMs);
-            } catch (IOException | RuntimeException e) {
-                ch.close();
-                throw e;
+        /**
+         * Connect, retrying for up to {@code connectTimeoutMs}: a Unix socket REFUSES a connect while the server's
+         * backlog is full (TCP retries its SYN instead), and hundreds of game threads connect at once.
+         */
+        static UdsChannel open(final String path, final int connectTimeoutMs, final int readTimeoutMs)
+                throws IOException {
+            final long deadline = System.nanoTime() + Math.max(1, connectTimeoutMs) * 1_000_000L;
+            final java.util.Random jitter = new java.util.Random(System.nanoTime() ^ Thread.currentThread().getId());
+            while (true) {
+                final SocketChannel ch = SocketChannel.open(StandardProtocolFamily.UNIX);
+                try {
+                    ch.connect(UnixDomainSocketAddress.of(path));
+                    return new UdsChannel(ch, readTimeoutMs);
+                } catch (java.net.ConnectException e) {
+                    ch.close();
+                    if (System.nanoTime() > deadline) {
+                        throw e;
+                    }
+                    try {
+                        Thread.sleep(20 + jitter.nextInt(80));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw e;
+                    }
+                } catch (IOException | RuntimeException e) {
+                    ch.close();
+                    throw e;
+                }
             }
         }
 

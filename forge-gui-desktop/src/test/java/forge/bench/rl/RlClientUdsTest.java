@@ -121,6 +121,26 @@ public class RlClientUdsTest {
     }
 
     @Test
+    public void aRefusedConnectIsRetriedUntilTheConnectTimeout() throws Exception {
+        final Path p = sockPath();
+        try (ServerSocketChannel ss = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+            ss.bind(UnixDomainSocketAddress.of(p));
+        }                                                   // closed: the socket file stays, connects are refused
+        try {
+            final long t0 = System.nanoTime();
+            try {
+                RlClient.connect("unix:" + p, 400, 1000).close();
+                Assert.fail("connected to a closed socket");
+            } catch (java.net.ConnectException e) {
+                final long ms = (System.nanoTime() - t0) / 1_000_000L;
+                Assert.assertTrue(ms >= 350 && ms < 3000, "gave up after " + ms + " ms");
+            }
+        } finally {
+            Files.deleteIfExists(p);
+        }
+    }
+
+    @Test
     public void tcpAddressesAreUnchanged() {
         try {
             RlClient.connect("127.0.0.1", 100, 100);
