@@ -259,7 +259,19 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         return census.computeIfAbsent(family, k -> new Census());
     }
 
+    /**
+     * Live play (lane live-sc-1009; null by default, and then nothing changes): where the seat would end its game (a void
+     * in a bench run: a service or protocol fault, max_decisions), it calls this with the reason instead and answers
+     * nothing, so Forge decides that ask. The live runner then stops asking the seat: a player's game is never ended by
+     * the seat's faults.
+     */
+    public java.util.function.Consumer<String> onFault;
+
     private void endGame(final String reason) {
+        if (onFault != null) {
+            onFault.accept(reason);
+            return;
+        }
         if (voidReason == null) {
             voidReason = reason;
         }

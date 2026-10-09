@@ -85,11 +85,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String decisionLog;
         /** The checkpoint the service must serve (HELLO_ACK policy_sha), or null = not checked. */
         public String policySha;
+        /**
+         * Live play (lane live-sc-1009; 0 = none, the default: decisions do not depend on the host): the look-ahead's
+         * wall-clock budget per searched decision ({@link LookaheadSearch.Config#budgetMs}); past it the default (the
+         * policy's own choice) is played ("capped"), as the live K8 plays Forge's answer.
+         */
+        public long budgetMs = 0L;
+        /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
+        public int connectTimeoutMs = 10_000;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
-                "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass"));
+                "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -121,6 +129,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("seedSalt")) c.seedSalt = o.get("seedSalt").getAsLong();
             if (o.has("decisionLog") && !o.get("decisionLog").isJsonNull()) c.decisionLog = o.get("decisionLog").getAsString();
             if (o.has("policySha") && !o.get("policySha").isJsonNull()) c.policySha = o.get("policySha").getAsString();
+            if (o.has("budgetMs")) c.budgetMs = o.get("budgetMs").getAsLong();
+            if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
             c.check();
             return c;
         }
@@ -134,6 +144,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (worlds < 1 || breadth < 2 || horizon < 1) {
                 throw new IllegalArgumentException("search: worlds >= 1, breadth >= 2, horizon >= 1");
+            }
+            if (budgetMs < 0 || connectTimeoutMs < 1 || readTimeoutMs < 1) {
+                throw new IllegalArgumentException("search: budgetMs >= 0, connectTimeoutMs >= 1, readTimeoutMs >= 1");
             }
             if (server == null) {
                 throw new IllegalArgumentException("search.server (host:port of the search service) is required");
@@ -167,6 +180,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.addProperty("seedSalt", seedSalt);
             if (policySha != null) {
                 o.addProperty("policySha", policySha);
+            }
+            if (budgetMs > 0) {
+                // live-sc-1009: only when set, so a bench spec's JSON is unchanged
+                o.addProperty("budgetMs", budgetMs);
             }
             return o;
         }
@@ -220,6 +237,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.crewNoop = AiFixes.Mode.parse(cfg.crewNoop);
         lc.departMedian = AiFixes.Mode.parse(cfg.departMedian);
         lc.stack = cfg.stack;
+        lc.budgetMs = cfg.budgetMs;
         this.ls = new LookaheadSearch(lc);
         ls.setHooks(this, "value".equals(cfg.leaf), "policy".equals(cfg.playout));
         this.cpu0 = TMX.getCurrentThreadCpuTime();
@@ -238,7 +256,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private RlSearchClient client() throws IOException {
         RlSearchClient c = client.get();
         if (c == null) {
-            c = new RlSearchClient(cfg.server, 10_000, cfg.readTimeoutMs);
+            c = new RlSearchClient(cfg.server, cfg.connectTimeoutMs, cfg.readTimeoutMs);
             final JsonObject h = new JsonObject();
             h.addProperty("proto", RlSearchClient.PROTO);
             h.addProperty("schema_sha", RlSchema.schemaSha());
@@ -399,6 +417,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             answer = (int) by.get(order.get(r.chosen))[1];
             departures++;
         }
+        final Searched hook = onSearched;
+        if (hook != null && r.givenIndex.length > 0) {
+            try {
+                hook.searched(g, r, by.size(), (System.nanoTime() - t0) / 1e6 - r.ms);
+            } catch (RuntimeException e) {
+                System.err.println("[rlsearch] onSearched failed: " + e);
+            }
+        }
         if (cfg.decisionLog != null || rowsWanted) {
             final JsonObject row = new JsonObject();
             row.addProperty("game_uid", Long.toUnsignedString(uid));
@@ -450,6 +476,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** Keep the per-decision rows in memory (tests) even without a log file. */
     public boolean rowsWanted = false;
+
+    /** Live play (lane live-sc-1009): told about every searched decision (null by default: nothing is called). */
+    public interface Searched {
+        /** {@code entries}: the pooled menu entries; {@code scoreMs}: the SCORE round trip and pooling before the search. */
+        void searched(Game g, LookaheadSearch.GivenResult r, int entries, double scoreMs);
+    }
+
+    public Searched onSearched;
+
+    /** The search's per-game counters (live play: the decision lines' running totals). */
+    public LookaheadSearch.Stats lookaheadStats() {
+        return ls.getStats();
+    }
 
     public List<JsonObject> rows() {
         return rows;

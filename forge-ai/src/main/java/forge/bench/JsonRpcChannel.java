@@ -407,6 +407,15 @@ public final class JsonRpcChannel {
         return closed;
     }
 
+    /**
+     * Live play (lane live-sc-1009): mark the channel closed, as a host that closed stdin does, so every bridged seat on
+     * it delegates every ask to Forge AI from here on. Called only by the live policy seat when it degrades; nothing
+     * else calls it.
+     */
+    public void close() {
+        closed = true;
+    }
+
     private static JsonObject delegateAnswer(final int id) {
         JsonObject o = new JsonObject();
         o.addProperty("type", "answer");
