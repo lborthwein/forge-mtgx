@@ -974,7 +974,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * The CHOICE record of a scheduled live ask (r3-distill-1010): called by the live seat after its window's schedule
      * answered ask {@code askKey}#{@code ordinal} with {@code scheduled} (the policy's own answer was {@code mine}). Each
      * candidate's {@code match}: m = macro m's answer at this ask (same ask, ordinal and base candidate as the departed
-     * macro), -2 = the probe policy's own answer there (its value is the base candidate's), -1 = unsearched.
+     * macro), -2 = the policy's own (live) answer's identity (its value is the base candidate's: the base's play-out
+     * answered with the policy), -1 = unsearched. A candidate that is both a macro's answer and the policy's takes the
+     * macro (its value is that answer's, forced).
      */
     @Override
     public void scheduledAsk(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
@@ -1008,6 +1010,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return;
             }
             final MacroSpec m0 = lm.macros.get(lm.macro);
+            // the policy's own live answer stands for the base candidate (its play-out answered with the policy)
+            final String own = mine >= 0 && mine < m.C() && m.cands.get(mine).kind > 0 ? ChoiceWindow.looseKey(m, mine, me)
+                    : null;
             final JsonArray match = new JsonArray();
             for (int i = 0; i < m.C(); i++) {
                 if (m.cands.get(i).kind <= 0) {
@@ -1024,7 +1029,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                         k = q;
                     }
                 }
-                if (k < 0 && m0.ownLoose != null && m0.ownLoose.equals(l)) {
+                if (k < 0 && own != null && own.equals(l)) {
                     k = -2;
                 }
                 match.add(k);
