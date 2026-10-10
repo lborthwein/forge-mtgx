@@ -95,20 +95,43 @@ public class InteractiveTargetPromptTest extends AITest {
         }
 
         JsonObject request() throws InterruptedException {
+            return next("request");
+        }
+
+        /** The next wire message of {@code type}, skipping the others. */
+        JsonObject next(final String type) throws InterruptedException {
             final long deadline = System.currentTimeMillis() + 30000;
             while (true) {
                 final JsonObject m = wire.poll(Math.max(0, deadline - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
-                assertNotNull(m, "a request");
+                assertNotNull(m, "a " + type);
                 if ("error".equals(m.get("type").getAsString())) {
                     fail("the bridge failed: " + m);
                 }
-                if ("request".equals(m.get("type").getAsString())) {
+                if (type.equals(m.get("type").getAsString())) {
                     return m;
                 }
             }
         }
 
         void answer(final JsonObject request, final String type, final String controlId) throws IOException {
+            final JsonObject action = new JsonObject();
+            action.addProperty("type", type);
+            action.addProperty("controlId", controlId);
+            send(request, action);
+        }
+
+        /** Answer a list choice with the one item {@code itemId}. */
+        void answerChoice(final JsonObject request, final String itemId) throws IOException {
+            final JsonObject action = new JsonObject();
+            action.addProperty("type", "choice");
+            action.addProperty("controlId", "choices");
+            final com.google.gson.JsonArray choices = new com.google.gson.JsonArray();
+            choices.add(itemId);
+            action.add("choices", choices);
+            send(request, action);
+        }
+
+        private void send(final JsonObject request, final JsonObject action) throws IOException {
             final JsonObject input = new JsonObject();
             input.addProperty("protocol", "mtgx-forge-interactive/1");
             input.addProperty("session", SESSION);
@@ -116,9 +139,6 @@ public class InteractiveTargetPromptTest extends AITest {
             input.addProperty("requestId", request.get("requestId").getAsString());
             input.addProperty("inputId", UUID.randomUUID().toString());
             input.addProperty("kind", request.get("kind").getAsString());
-            final JsonObject action = new JsonObject();
-            action.addProperty("type", type);
-            action.addProperty("controlId", controlId);
             input.add("action", action);
             client.write(input + "\n");
             client.flush();
@@ -270,6 +290,100 @@ public class InteractiveTargetPromptTest extends AITest {
             assertFalse(context.get("targetRequired").getAsBoolean(), context.toString());
             assertEquals(context.get("targetMin").getAsInt(), 0);
         }
+    }
+
+    /**
+     * A target in two zones (owner report 2026-10-10T06-30-52: Venser, Shaper Savant's "spell or permanent"
+     * menu offered "--CARDS ON BATTLEFIELD:--" and "--CARDS IN STACK:--" as choices). Forge's list carries a
+     * caption before each zone's cards; on the wire each caption is an item with {@code header: true} and
+     * its text unchanged, the candidates carry no flag, and an answer naming a caption is refused with the
+     * request left open. The seat then answers with a card and Forge goes on.
+     */
+    @Test(timeOut = 900000)
+    public void zoneCaptionsTravelAsHeadersAndAreNeverAnAnswer() throws Exception {
+        final Card[] unsubstantiate = new Card[1];
+        final Card[] bears = new Card[1];
+        final Card[] walk = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            addCard("Island", seat);
+            addCard("Island", seat);
+            unsubstantiate[0] = addCardToZone("Unsubstantiate", seat, ZoneType.Hand);
+            bears[0] = addCard("Grizzly Bears", foe);
+            walk[0] = onStack(seat.getGame(), addCardToZone("Time Walk", foe, ZoneType.Hand), foe);
+        })) {
+            final JsonObject target = h.cast(unsubstantiate[0]);
+            assertEquals(target.get("inputClass").getAsString(), "modal:getChoices", target.toString());
+            final com.google.gson.JsonArray items = target.getAsJsonArray("controls").get(0).getAsJsonObject()
+                    .getAsJsonArray("items");
+            final List<String> labels = new java.util.ArrayList<>();
+            final List<String> headers = new java.util.ArrayList<>();
+            String bearsId = null;
+            for (com.google.gson.JsonElement element : items) {
+                final JsonObject item = element.getAsJsonObject();
+                final String label = item.get("label").getAsString();
+                labels.add(label);
+                if (item.has("header")) {
+                    assertTrue(item.get("header").getAsBoolean(), item.toString());
+                    headers.add(item.get("id").getAsString());
+                }
+                if (label.equals("Grizzly Bears (" + bears[0].getId() + ")")) {
+                    bearsId = item.get("id").getAsString();
+                }
+            }
+            assertEquals(labels, List.of("--CARDS ON BATTLEFIELD:--", "Grizzly Bears (" + bears[0].getId() + ")",
+                    "--CARDS IN STACK:--", "Time Walk (" + walk[0].getId() + ")"), items.toString());
+            assertEquals(headers, List.of("choice:0", "choice:2"), items.toString());
+            // The target facts still name the captions as headings (older clients read these).
+            final JsonObject options = context(target).getAsJsonObject("targetOption");
+            assertTrue(options.getAsJsonObject("choice:0").get("heading").getAsBoolean(), options.toString());
+            assertTrue(options.getAsJsonObject("choice:2").get("heading").getAsBoolean(), options.toString());
+
+            h.answerChoice(target, "choice:2");
+            final JsonObject refused = h.next("ack");
+            assertEquals(refused.get("requestId").getAsString(), target.get("requestId").getAsString());
+            assertFalse(refused.get("accepted").getAsBoolean(), refused.toString());
+            assertTrue(refused.get("reason").getAsString().contains("section heading"), refused.toString());
+            assertFalse(refused.get("reason").getAsString().contains("Forge"), refused.toString());
+
+            // The same request is still open: a card answers it.
+            assertNotNull(bearsId, items.toString());
+            h.answerChoice(target, bearsId);
+            final JsonObject accepted = h.next("ack");
+            assertEquals(accepted.get("requestId").getAsString(), target.get("requestId").getAsString());
+            assertTrue(accepted.get("accepted").getAsBoolean(), accepted.toString());
+            final JsonObject after = h.request();
+            assertFalse(after.get("requestId").getAsString().equals(target.get("requestId").getAsString()));
+            assertFalse(after.toString().contains("--CARDS"), "the target was taken, not asked again: " + after);
+        }
+    }
+
+    /** Which list entries are Forge's section captions: exact zone captions and divider cards only. */
+    @Test
+    public void sectionHeadingsAreForgesCaptionsOnly() {
+        for (String caption : List.of("--CARDS ON BATTLEFIELD:--", "--CARDS IN EXILE:--", "--CARDS IN GRAVEYARD:--",
+                "--CARDS IN LIBRARY:--", "--CARDS IN STACK:--", "--CARDS IN ANTE:--")) {
+            assertEquals(InteractiveGuiGame.sectionHeading(caption), caption);
+        }
+        assertEquals(InteractiveGuiGame.sectionHeading(new forge.game.card.CardView(-1, null, "--PERMANENTS:--")),
+                "--PERMANENTS:--");
+        assertEquals(InteractiveGuiGame.sectionHeading(
+                new forge.game.card.CardView(-2, null, "--SPELLS ON THE STACK:--")), "--SPELLS ON THE STACK:--");
+        // Real answers: "[FINISH TARGETING]", a pile (Fact or Fiction), a card, a positive-id card with that name.
+        assertEquals(InteractiveGuiGame.sectionHeading("[FINISH TARGETING]"), null);
+        assertEquals(InteractiveGuiGame.sectionHeading("-- Pile 1 (3 cards) --"), null);
+        assertEquals(InteractiveGuiGame.sectionHeading(
+                new forge.game.card.CardView(Integer.MIN_VALUE, null, "-- Pile 1 (3 cards) --")), null);
+        assertEquals(InteractiveGuiGame.sectionHeading("Grizzly Bears (12)"), null);
+        assertEquals(InteractiveGuiGame.sectionHeading(new forge.game.card.CardView(7, null, "--PERMANENTS:--")), null);
+
+        final JsonObject choice = JsonParser.parseString(
+                "{\"type\":\"choice\",\"controlId\":\"choices\",\"choices\":[\"choice:0\"]}").getAsJsonObject();
+        assertNotNull(InteractiveGuiGame.validateNotHeading(choice, java.util.Set.of("choice:0")));
+        assertEquals(InteractiveGuiGame.validateNotHeading(choice, java.util.Set.of("choice:1")), null);
+        assertEquals(InteractiveGuiGame.validateNotHeading(choice, java.util.Set.of()), null);
+        final JsonObject cancel = JsonParser.parseString(
+                "{\"type\":\"cancel\",\"controlId\":\"choices:cancel\"}").getAsJsonObject();
+        assertEquals(InteractiveGuiGame.validateNotHeading(cancel, java.util.Set.of("choice:0")), null);
     }
 
     /** Not a target choice: no target facts. */
