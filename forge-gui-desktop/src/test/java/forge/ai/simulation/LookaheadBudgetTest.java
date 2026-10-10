@@ -286,6 +286,40 @@ public class LookaheadBudgetTest extends SimulationTest {
         }
     }
 
+    /**
+     * K8 path with a budget: a play-out worker that dies (an Error, which play() does not catch) fails the decision as
+     * before the lane (Forge's answer is played), and its sibling play-outs are told to stop and never write afterwards.
+     */
+    @Test
+    public void k8WorkerFailureWithABudgetPlaysForgesAnswerAndStopsTheOthers() throws Exception {
+        Game game = board();
+        Player a = game.getPlayers().get(0);
+        PlayerControllerAi ctrl = (PlayerControllerAi) a.getController();
+        List<SpellAbility> def = ctrl.chooseSpellAbilityToPlay();
+        String before = LookaheadSearch.fingerprint(game);
+        LookaheadSearch s = given(60_000);
+        final AtomicBoolean once = new AtomicBoolean();
+        s.playoutStepHook = g -> {
+            if (once.compareAndSet(false, true)) {
+                throw new AssertionError("test: a dying play-out worker");
+            }
+        };
+        try {
+            final long t0 = System.nanoTime();
+            List<SpellAbility> answer = s.decide(ctrl, def);
+            final long ms = (System.nanoTime() - t0) / 1_000_000L;
+            AssertJUnit.assertSame("a failed search plays Forge's own answer", def, answer);
+            AssertJUnit.assertEquals(1, s.getStats().departFallback);
+            AssertJUnit.assertTrue("no wait for the budget: " + ms + " ms", ms < 30_000);
+            final String stats = s.getStats().toJson().toString();
+            Thread.sleep(1500);
+            AssertJUnit.assertEquals("the stopped siblings never write after the failure", stats, s.getStats().toJson().toString());
+            AssertJUnit.assertEquals(before, LookaheadSearch.fingerprint(game));
+        } finally {
+            s.shutdown();
+        }
+    }
+
     /** S1 path: policy seats looping in one step with requests stop at their first request past the budget. */
     @Test
     public void givenPlayoutSeatLoopingWithRequestsStopsAtItsNextRequest() throws Exception {

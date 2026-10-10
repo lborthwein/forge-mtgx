@@ -3136,15 +3136,23 @@ public final class LookaheadSearch {
                 });
             }
         }
-        if (!runAll(tasks, budget)) {
-            // sc-wallguard-1009: the hard wall cut the wait. Every play-out without a result is stopped by the budget
-            // (its decision is capped); from here on no straggler writes into these arrays.
-            synchronized (values) {
-                sealed[0] = true;
-                for (int c = 0; c < n; c++) {
-                    for (int w = 0; w < k; w++) {
-                        if (outs[c][w] == null) {
-                            record(values, outs, ok, c, w, aborted());
+        final Budget wall = budget;
+        boolean waited = false;
+        try {
+            waited = runAll(tasks, wall);
+        } finally {
+            if (!waited && wall != null) {
+                // sc-wallguard-1009: the hard wall cut the wait (or, with a budget, a worker failed). Every play-out
+                // without a result is stopped by the budget (its decision is capped); from here on no straggler writes
+                // into these arrays or the counters.
+                wall.stop();
+                synchronized (values) {
+                    sealed[0] = true;
+                    for (int c = 0; c < n; c++) {
+                        for (int w = 0; w < k; w++) {
+                            if (outs[c][w] == null) {
+                                record(values, outs, ok, c, w, aborted());
+                            }
                         }
                     }
                 }
@@ -3334,6 +3342,11 @@ public final class LookaheadSearch {
                         + running.get() + " still running were told to stop, the decision is capped");
                 return false;
             } catch (Exception e) {
+                // a failed worker fails the decision (as without the wall); the others are told to stop first
+                wall.stop();
+                for (int j = i + 1; j < fs.size(); j++) {
+                    fs.get(j).cancel(false);
+                }
                 throw new RuntimeException("look-ahead worker failed", e);
             }
         }
