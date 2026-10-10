@@ -82,6 +82,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /**
  * A real {@link PlayerControllerHuman} GUI whose renderer and input device are an NDJSON
@@ -2730,11 +2731,23 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         final JsonArray items = new JsonArray();
         final LinkedHashMap<String, T> byId = new LinkedHashMap<>();
+        final Set<String> headings = new LinkedHashSet<>();
         for (int i = 0; i < options.size(); i++) {
             final T option = options.get(i);
             final String id = "choice:" + i;
             byId.put(id, option);
-            items.add(item(id, offeredObjectLabel(option, display)));
+            final String heading = sectionHeading(option);
+            if (heading == null) {
+                items.add(item(id, offeredObjectLabel(option, display)));
+                continue;
+            }
+            // A caption between the candidates, not a candidate: `header` says so on the wire, so a
+            // client draws it as a heading without matching its text. A divider card's label is its
+            // caption, never the "Face-down card (-1)" a zone-less card would otherwise get.
+            final JsonObject entry = item(id, option instanceof String ? offeredObjectLabel(option, display) : heading);
+            entry.addProperty("header", true);
+            items.add(entry);
+            headings.add(id);
         }
         final JsonObject chooser = control("choices", "choice", sanitizeText(message));
         chooser.add("items", items);
@@ -2761,7 +2774,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         requestContext.set(targeting == null ? null : targetContext(targeting, itemTargets(byId)));
         try {
             answer = ask("choice", inputClass, title, message, min, max,
-                    min == 0, controls, action -> validateChoices(action, byId.keySet(), min, max));
+                    min == 0, controls, action -> {
+                        final String invalid = validateChoices(action, byId.keySet(), min, max);
+                        return invalid != null ? invalid : validateNotHeading(action, headings);
+                    });
         } finally {
             requestContext.remove();
         }
@@ -2774,6 +2790,53 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             result.add(byId.get(id));
         }
         return result;
+    }
+
+    /** "--CARDS ON BATTLEFIELD:--", "--PERMANENTS:--": Forge's section captions in a choice list. */
+    private static final Pattern SECTION_HEADING = Pattern.compile("--[^\\r\\n]+:--");
+
+    /**
+     * The caption, when this list entry is one of Forge's section headings rather than a choice, or null.
+     * Two sources build lists this way:
+     * <ul>
+     *   <li>{@code TargetSelection.chooseCardFromList} (a target in more than one zone: Venser, Shaper
+     *   Savant's "spell or permanent") puts a String before each zone's cards: "--CARDS ON BATTLEFIELD:--",
+     *   "--CARDS IN EXILE:--", "--CARDS IN GRAVEYARD:--", "--CARDS IN LIBRARY:--", "--CARDS IN STACK:--",
+     *   "--CARDS IN ANTE:--";</li>
+     *   <li>{@code ChooseSourceEffect} ("choose a source") puts a divider card with a negative id before
+     *   each group: "--PERMANENTS:--", "--SPELLS ON THE STACK:--", "--OBJECTS REFERRED TO ON THE STACK:--",
+     *   "--CARDS IN THE COMMAND ZONE:--".</li>
+     * </ul>
+     * Forge's own answer to a heading is to ask again (TargetSelection takes it as no target and loops;
+     * ChooseSourceEffect loops while the name starts with "--"). Pile choices ("-- Pile 1 (3 cards) --")
+     * are real answers and do not match.
+     */
+    static String sectionHeading(final Object option) {
+        if (option instanceof String text) {
+            return SECTION_HEADING.matcher(text).matches() ? text : null;
+        }
+        if (option instanceof CardView card && card.getId() < 0) {
+            final String name = card.getName();
+            return name != null && SECTION_HEADING.matcher(name).matches() ? name : null;
+        }
+        return null;
+    }
+
+    /**
+     * Refuses an answer that picks a section heading, so the request stays open and the seat answers
+     * again; a heading is never handed to Forge. A client that predates the {@code header} flag can
+     * still send one; Forge would have asked again, and the refusal does the same without a new request.
+     */
+    static String validateNotHeading(final JsonObject action, final Set<String> headings) {
+        if (headings.isEmpty() || !"choice".equals(string(action, "type"))) {
+            return null;
+        }
+        for (String id : actionChoiceIds(action)) {
+            if (headings.contains(id)) {
+                return "that is a section heading, not a choice";
+            }
+        }
+        return null;
     }
 
     /**

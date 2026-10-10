@@ -3,10 +3,13 @@ package forge.interactive;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import forge.game.Game;
+import forge.game.card.Card;
 import forge.game.card.CardView;
 import forge.game.event.*;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
+import forge.game.zone.Zone;
+import forge.game.zone.ZoneType;
 
 /** Small, visibility-filtered facts copied synchronously from engine events.
  * Never serialize event.toString(), ability descriptions, or a mutable game snapshot.
@@ -31,6 +34,9 @@ final class InteractiveGameEvents {
                     : e.si().isTrigger() ? "ability_triggered" : "ability_activated");
             seat(result, game, e.si().getActivatingPlayer());
             result.addProperty("card", label(e.sa().getHostCard(), viewer));
+            if (e.sa().isSpell()) {
+                castFrom(result, game, e.sa().getHostCard());
+            }
         } else if (event instanceof GameEventPlayerLivesChanged e) {
             if (e.oldLives() == e.newLives()) {
                 return result;
@@ -82,6 +88,25 @@ final class InteractiveGameEvents {
         // A library-to-hand zone change is not necessarily a draw (it can be a
         // search). Do not fabricate draw/discard/destroy causes from zone changes.
         return result;
+    }
+
+    /**
+     * {@code fromZone}: the zone a spell was cast from (Forge's zone name: "Hand", "Graveyard", "Exile",
+     * "Library", "Command"), read from the card on the stack as the cast event fires. Where a spell is
+     * cast from is public (the card moves from there to the stack), whatever the card's identity. A
+     * client uses it to say where a card went between two of its views: Venser, Shaper Savant returned a
+     * spell to its owner's hand and the owner cast it again before the human looked (owner report
+     * 2026-10-10T06-30-52). Absent for a copy, which was cast from nowhere.
+     */
+    private static void castFrom(final JsonObject result, final Game game, final CardView host) {
+        if (host == null) {
+            return;
+        }
+        final Card card = game.findById(host.getId());
+        final Zone from = card == null || !card.isInZone(ZoneType.Stack) ? null : card.getCastFrom();
+        if (from != null && from.getZoneType() != null) {
+            result.addProperty("fromZone", from.getZoneType().name());
+        }
     }
 
     private static void kind(final JsonObject result, final String kind) {
