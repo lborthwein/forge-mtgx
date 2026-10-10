@@ -141,7 +141,8 @@ public final class RlActorBench {
         int obsSchema = 1;
         /**
          * S1 (lane s1-search-1007; null = off, the default, and nothing changes): the look-ahead over the RL seats' own
-         * priority decisions ({@link RlSearch.Config}), eval and train modes, obs-v1 only.
+         * priority decisions ({@link RlSearch.Config}), eval and train modes, in the actor's observation schema (obs-v1,
+         * or obs-v2 since lane search-v2-1009; a spec {@code obs} pin must equal {@code obsSchema}).
          */
         RlSearch.Config search = null;
         /**
@@ -179,8 +180,8 @@ public final class RlActorBench {
         }
         if (o.has("search") && o.get("search").isJsonObject()) {
             c.search = RlSearch.Config.parse(o.getAsJsonObject("search"));
-            if (c.obsSchema != 1) {
-                throw new IllegalArgumentException("search needs obsSchema 1");
+            if (c.search.obs != 0 && c.search.obs != c.obsSchema) {
+                throw new IllegalArgumentException("search.obs " + c.search.obs + " != obsSchema " + c.obsSchema);
             }
         }
         if (o.has("k8") && !o.get("k8").isJsonNull()) {
@@ -605,7 +606,7 @@ public final class RlActorBench {
             out.knowledge = know;
             if (cfg.search != null && !"replay".equals(mode) && !"record".equals(mode)) {
                 // S1: the look-ahead over the RL seats' own priority decisions (one per game; world seeds from the GAME seed)
-                search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId);
+                search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId, obsVersion);
                 seat.search = search;
                 out.search = search;
             }

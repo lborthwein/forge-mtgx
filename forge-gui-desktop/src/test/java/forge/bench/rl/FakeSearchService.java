@@ -25,10 +25,28 @@ import com.google.gson.JsonObject;
  * DECIDE → random legal steps (FakeRlServer's rule, seeded by game and decision); LEAVES → v(o) = 0 for every leaf.
  * {@link #failAfterDecides}: after that many DECIDE frames in all, the service drops every connection and stops
  * listening (a service that died mid-game).
+ *
+ * <p>Lane search-v2-1009: the service has an observation schema ({@link #FakeSearchService(String, int)}; 1 by default)
+ * and is as strict as {@code search_server.py} about it: a HELLO with another schema's sha is answered ERROR and closed,
+ * the HELLO_ACK names its schema ({@code obs_schema}; {@link #ackObs} overrides it, -1 leaves it out), and every SCORE,
+ * DECIDE and LEAVES payload is decoded as that schema's frame (a frame of the other schema fails to decode and the
+ * connection is closed, as the real service does). With {@link #checker} set, every DECIDE frame goes through
+ * {@link FakeRlServer#check} and every SCORE and leaf frame through its v2 structure check.
  */
 public final class FakeSearchService implements Closeable {
     private final ServerSocket ss;
     private final String policySha;
+    /** The observation schema this service decodes (search-v2-1009). */
+    public final int obs;
+    /** The HELLO_ACK's {@code obs_schema}: the service's own by default; -1 = left out (an older service). */
+    public volatile int ackObs;
+    /** Optional frame checker (search-v2-1009). */
+    public volatile FakeRlServer checker = null;
+    /** Frames refused or failed to decode (search-v2-1009). */
+    public final AtomicLong refusedHellos = new AtomicLong(), badFrames = new AtomicLong();
+    /** The leaf payloads seen, when {@link #keepLeaves} (tests that compare leaf observations). */
+    public volatile boolean keepLeaves = false;
+    public final List<byte[]> leafPayloads = Collections.synchronizedList(new ArrayList<>());
     private final List<Socket> sockets = Collections.synchronizedList(new ArrayList<>());
     public volatile long failAfterDecides = Long.MAX_VALUE;
     /**
@@ -41,8 +59,17 @@ public final class FakeSearchService implements Closeable {
     private volatile boolean dead = false;
 
     public FakeSearchService(final String policySha) throws IOException {
+        this(policySha, 1);
+    }
+
+    public FakeSearchService(final String policySha, final int obs) throws IOException {
+        if (obs != 1 && obs != 2) {
+            throw new IllegalArgumentException("obs " + obs);
+        }
         this.ss = new ServerSocket(0, 64, InetAddress.getLoopbackAddress());
         this.policySha = policySha;
+        this.obs = obs;
+        this.ackObs = obs;
         final Thread t = new Thread(this::acceptLoop, "fake-search-accept");
         t.setDaemon(true);
         t.start();
@@ -83,6 +110,18 @@ public final class FakeSearchService implements Closeable {
                 errors.incrementAndGet();
                 return;
             }
+            final JsonObject hello = h.json();
+            final String want = obs == 2 ? RlSchemaV2.schemaSha() : RlSchema.schemaSha();
+            if (!hello.has("schema_sha") || !want.equals(hello.get("schema_sha").getAsString())) {
+                // as search_server.py: another schema's HELLO is answered ERROR and the connection closed
+                refusedHellos.incrementAndGet();
+                final JsonObject e = new JsonObject();
+                e.addProperty("code", "schema_sha");
+                e.addProperty("msg", "schema_sha " + hello.get("schema_sha") + " != " + want);
+                RlWire.writeFrame(out, RlWire.T_ERROR, 0, RlWire.canonical(e));
+                out.flush();
+                return;
+            }
             hellos.incrementAndGet();
             final JsonObject ack = new JsonObject();
             ack.addProperty("ok", true);
@@ -90,13 +129,23 @@ public final class FakeSearchService implements Closeable {
             ack.addProperty("policy_sha", policySha);
             ack.addProperty("policy_version", 7);
             ack.addProperty("device", "cpu");
+            if (ackObs >= 0) {
+                ack.addProperty("obs_schema", ackObs);
+            }
             RlWire.writeFrame(out, RlWire.T_HELLO_ACK, 0, RlWire.canonical(ack));
             out.flush();
             while (!dead) {
                 final RlWire.Frame f = RlWire.readFrame(in);
                 if (f.type == RlSearchClient.T_SCORE) {
                     scores.incrementAndGet();
-                    final RlWire.Decide d = RlWire.decodeDecide(f.payload, 1);
+                    final RlWire.Decide d = decode(f.payload);
+                    if (d == null) {
+                        return;
+                    }
+                    final FakeRlServer ck = checker;
+                    if (ck != null && d.version == 2) {
+                        ck.checkV2(d);
+                    }
                     if (d.mode != RlSchema.M_SINGLE) {
                         // as search_server.py: SCORE takes SINGLE-mode frames only; an error closes the connection
                         errors.incrementAndGet();
@@ -125,7 +174,14 @@ public final class FakeSearchService implements Closeable {
                         die();
                         return;
                     }
-                    final RlWire.Decide d = RlWire.decodeDecide(f.payload, 1);
+                    final RlWire.Decide d = decode(f.payload);
+                    if (d == null) {
+                        return;
+                    }
+                    final FakeRlServer ck = checker;
+                    if (ck != null) {
+                        ck.check(d, false);
+                    }
                     final RlWire.Decision x = new RlWire.Decision();
                     x.gameUid = d.gameUid;
                     x.decIdx = d.decIdx;
@@ -144,6 +200,17 @@ public final class FakeSearchService implements Closeable {
                         final int len = p.getInt();
                         final byte[] leaf = new byte[len];
                         p.get(leaf);
+                        final RlWire.Decide ld = decode(leaf);
+                        if (ld == null) {
+                            return;
+                        }
+                        final FakeRlServer ck = checker;
+                        if (ck != null && ld.version == 2) {
+                            ck.checkV2(ld);
+                        }
+                        if (keepLeaves) {
+                            leafPayloads.add(leaf);
+                        }
                         b.putFloat(lv == null ? 0f : (float) lv.applyAsDouble(leaf));
                     }
                     RlWire.writeFrame(out, RlSearchClient.T_VALUES, 0, b.array());
@@ -155,6 +222,17 @@ public final class FakeSearchService implements Closeable {
             }
         } catch (IOException | RuntimeException e) {
             // a closed connection ends this thread
+        }
+    }
+
+    /** This service's decode of a DECIDE payload, or null (counted) when it is not a frame of its schema. */
+    private RlWire.Decide decode(final byte[] p) {
+        try {
+            return RlWire.decodeDecide(p, obs);
+        } catch (RuntimeException e) {
+            badFrames.incrementAndGet();
+            errors.incrementAndGet();
+            return null;
         }
     }
 

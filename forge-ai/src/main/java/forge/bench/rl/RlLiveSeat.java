@@ -28,6 +28,11 @@ import forge.game.Game;
  * the service's {@code policy_sha} must equal the spec's {@code policySha}. Any failure returns null and the server seats
  * its usual opponent (the K8 look-ahead seat, or classic Forge AI) instead: a player always gets a game.
  *
+ * <p><b>Observation schema</b> (lane search-v2-1009): the spec's {@code obs} (1, the default, or 2) is the seat's
+ * schema: its featurizer, seat knowledge and search run it, its HELLO names that schema's sha, and the service's
+ * HELLO_ACK must name the same schema ({@code obs_schema}; under obs-v2 it must be present). A checkpoint of the other
+ * schema is therefore refused at boot, by the service or by the seat, and the server seats its usual opponent.
+ *
  * <p><b>Faults in a game.</b> A service or protocol fault (a refused connection, a timeout, an ERROR frame, a malformed
  * answer, max_decisions) never ends or stalls the game. The seat degrades once, for the rest of the game: every ask is
  * Forge AI's from then on, and its priority decisions go through the K8 look-ahead with the live K8 spec, i.e. the live
@@ -110,6 +115,7 @@ public final class RlLiveSeat {
                     case "maxDecisions": s.maxDecisions = Integer.parseInt(v); break;
                     case "aiFixes0928": s.aiFixes0928 = AiFixes.Mode.parse(v); break;
                     case "log": s.log = !"0".equals(v); break;
+                    case "obs": c.obs = Integer.parseInt(v); break;
                     default: throw new IllegalArgumentException("policySearch: unknown key " + k);
                 }
             }
@@ -122,6 +128,11 @@ public final class RlLiveSeat {
             c.check();
             AiFixes.Mode.parse(c.departMedian);
             return s;
+        }
+
+        /** The seat's observation schema (search-v2-1009): the spec's {@code obs}, else 1. */
+        public int obs() {
+            return search.obs == 0 ? 1 : search.obs;
         }
     }
 
@@ -178,7 +189,7 @@ public final class RlLiveSeat {
             c = new RlSearchClient(spec.search.server, spec.search.connectTimeoutMs, spec.seatTimeoutMs);
             final JsonObject h = new JsonObject();
             h.addProperty("proto", RlSearchClient.PROTO);
-            h.addProperty("schema_sha", RlSchema.schemaSha());
+            h.addProperty("schema_sha", RlSearch.schemaSha(spec.obs()));
             h.addProperty("card_index_sha", index.sha());
             h.addProperty("jar_sha", jarSha);
             h.addProperty("actor_id", actorId);
@@ -186,6 +197,7 @@ public final class RlLiveSeat {
             h.addProperty("pid", ProcessHandle.current().pid());
             h.addProperty("mode", "search");
             final JsonObject ack = c.hello(h);
+            RlSearch.checkObs(ack, spec.obs());
             final String got = ack.has("policy_sha") && !ack.get("policy_sha").isJsonNull() ? ack.get("policy_sha").getAsString() : null;
             if (!spec.search.policySha.equals(got)) {
                 throw new RlClient.ServerError("policy_sha", "the service serves " + got + ", the spec pins " + spec.search.policySha);
@@ -197,6 +209,9 @@ public final class RlLiveSeat {
             o.addProperty("policyVersion", ack.has("policy_version") ? ack.get("policy_version").getAsLong() : -1);
             o.addProperty("device", ack.has("device") ? ack.get("device").getAsString() : "?");
             o.addProperty("cardIndexSha", index.sha());
+            if (spec.obs() != 1) {
+                o.addProperty("obs", spec.obs());   // search-v2-1009: only for obs-v2, so the v1 line is unchanged
+            }
             o.addProperty("server", spec.search.server);
             o.addProperty("budgetMs", spec.search.budgetMs);
             o.addProperty("helloMs", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
@@ -255,7 +270,7 @@ public final class RlLiveSeat {
         this.k8AiFixes = k8AiFixes == null ? AiFixes.Mode.OFF : k8AiFixes;
         final long uid = RlSearch.splitmix(seed ^ 0x6c697665L);
         final RlFeaturizer feat = new RlFeaturizer(index);
-        feat.setVersion(1);
+        feat.setVersion(spec.obs());
         feat.reset();
         final String[] ctl = new String[g.getRegisteredPlayers().size()];
         for (int s = 0; s < ctl.length; s++) {
@@ -280,12 +295,13 @@ public final class RlLiveSeat {
         session.setLiveGame(g);
         rs.setGame(g);
         final RlKnowledge know = new RlKnowledge(g);
+        know.v2 = spec.obs() == 2;
         know.attach();
         session.setKnowledgeObserver(know);
         feat.setKnowledge(know);
         rs.seenNames = know::opponentSeen;
         rs.onFault = this::degrade;
-        final RlSearch s = new RlSearch(spec.search, seed, uid, index, know, jarSha, actorId);
+        final RlSearch s = new RlSearch(spec.search, seed, uid, index, know, jarSha, actorId, spec.obs());
         if (spec.log) {
             s.onSearched = this::searched;
         }
