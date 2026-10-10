@@ -49,7 +49,14 @@ import forge.game.spellability.SpellAbility;
  *   <li><b>Choice.</b> K8's: argmax of the mean over worlds, a departure from the default only past the departZ gate,
  *       the per-turn guards. A departure answers the chosen entry's most likely candidate.</li>
  * </ol>
- * Every other ask of the seat is the policy's (greedy), as for the pure policy. The observation is obs-v1 only.
+ * Every other ask of the seat is the policy's (greedy), as for the pure policy.
+ *
+ * <p><b>Observation schema</b> (lane search-v2-1009): the search speaks the seat's own schema, obs-v1 (wire/1, the
+ * default) or obs-v2 (wire/2): its HELLO names that schema's sha (the service refuses another), the copies' featurizers
+ * and forked seat knowledge run it, and the leaf frames are that schema's PRIORITY frames, so v(o), the prior and the
+ * play-out seat read the observation the policy was trained on. The spec key {@code obs} (absent = the seat's) pins it:
+ * a seat of another schema refuses the spec, and a service whose HELLO_ACK names another schema is refused. Under
+ * obs-v1 every frame, HELLO and log row is byte-identical to the S1 read's.
  *
  * <p><b>S-t</b> (lane cm-choice-search-1009; spec key {@code choices} = m > 0, policy play-outs only; with m = 0, the
  * default, nothing below the S1 search runs): each searched candidate's world-0 play-out is also a probe that records
@@ -134,12 +141,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /** S-t: the families a probe records and expands. */
         public String choiceFamilies = ChoiceWindow.DEFAULT_FAMILIES;
         java.util.Set<Integer> choiceFamilySet = null;
+        /**
+         * The observation schema the search's policy speaks (lane search-v2-1009): 1 (obs-v1, wire/1) or 2 (obs-v2,
+         * wire/2); 0 (the default) = the seat's. Set, it is a pin: a seat of another schema refuses the spec.
+         */
+        public int obs = 0;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
-                "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures"));
+                "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
+                "obs"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -180,6 +193,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("choiceFamilies")) c.choiceFamilies = o.get("choiceFamilies").getAsString();
             if (o.has("choiceRank")) c.choiceRank = o.get("choiceRank").getAsString();
             if (o.has("sameDepartures")) c.sameDepartures = o.get("sameDepartures").getAsInt();
+            if (o.has("obs")) c.obs = o.get("obs").getAsInt();
             c.check();
             return c;
         }
@@ -205,6 +219,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (sameDepartures < 1) {
                 throw new IllegalArgumentException("search.sameDepartures >= 1");
+            }
+            if (obs != 0 && obs != 1 && obs != 2) {
+                throw new IllegalArgumentException("search.obs must be 1 or 2 (or absent: the seat's), not " + obs);
             }
             if (!"base".equals(choiceRank) && !"joint".equals(choiceRank)) {
                 throw new IllegalArgumentException("search.choiceRank must be base or joint, not " + choiceRank);
@@ -251,6 +268,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 // cm-choice-search-1009: only when changed, so an S1 spec's JSON is unchanged
                 o.addProperty("sameDepartures", sameDepartures);
             }
+            if (obs != 0) {
+                // search-v2-1009: only when pinned, so an S1 spec's JSON is unchanged
+                o.addProperty("obs", obs);
+            }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
                 o.addProperty("choices", choices);
@@ -271,6 +292,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private final long uid;
     private final CardIndex index;
     private final RlKnowledge liveKnow;
+    /** The observation schema of the seat, its copies and the service (search-v2-1009): 1 or 2. */
+    private final int obsVersion;
     private final String jarSha;
     private final String actorId;
     private final long cpu0;
@@ -327,6 +350,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      */
     public RlSearch(final Config cfg, final long gameSeed, final long uid, final CardIndex index, final RlKnowledge liveKnow,
             final String jarSha, final String actorId) {
+        this(cfg, gameSeed, uid, index, liveKnow, jarSha, actorId, 1);
+    }
+
+    /**
+     * As above for a seat of observation schema {@code obsVersion} (1 or 2; lane search-v2-1009). A spec that pins
+     * another schema ({@link Config#obs}) is refused.
+     */
+    public RlSearch(final Config cfg, final long gameSeed, final long uid, final CardIndex index, final RlKnowledge liveKnow,
+            final String jarSha, final String actorId, final int obsVersion) {
+        if (obsVersion != 1 && obsVersion != 2) {
+            throw new IllegalArgumentException("search: observation schema " + obsVersion);
+        }
+        if (cfg.obs != 0 && cfg.obs != obsVersion) {
+            throw new IllegalArgumentException("search.obs pins obs-v" + cfg.obs + ", the seat is obs-v" + obsVersion);
+        }
+        this.obsVersion = obsVersion;
         this.cfg = cfg;
         this.uid = uid;
         this.index = index;
@@ -373,7 +412,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             c = new RlSearchClient(cfg.server, cfg.connectTimeoutMs, cfg.readTimeoutMs);
             final JsonObject h = new JsonObject();
             h.addProperty("proto", RlSearchClient.PROTO);
-            h.addProperty("schema_sha", RlSchema.schemaSha());
+            h.addProperty("schema_sha", schemaSha(obsVersion));
             h.addProperty("card_index_sha", index.sha());
             h.addProperty("jar_sha", jarSha);
             h.addProperty("actor_id", actorId);
@@ -382,6 +421,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             h.addProperty("mode", "search");
             try {
                 c.hello(h);
+                checkObs(c.ack, obsVersion);
             } catch (IOException e) {
                 c.close();
                 throw e;
@@ -418,6 +458,29 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     private int reconnects = 0;
+
+    /** The HELLO's {@code schema_sha} for observation schema {@code v} (search-v2-1009; obs-v1: the S1 read's). */
+    public static String schemaSha(final int v) {
+        return v == 2 ? RlSchemaV2.schemaSha() : RlSchema.schemaSha();
+    }
+
+    /**
+     * The service's observation schema against the seat's (search-v2-1009): a HELLO_ACK that names another schema
+     * ({@code obs_schema}) is refused; under obs-v2 the ACK must name it (a service that does not say which schema it
+     * decodes with is not trusted with v2 frames). An obs-v1 seat accepts an ACK without the key (the S1 read's service).
+     */
+    public static void checkObs(final JsonObject ack, final int v) throws RlClient.ServerError {
+        final Integer got = ack != null && ack.has("obs_schema") && !ack.get("obs_schema").isJsonNull()
+                ? ack.get("obs_schema").getAsInt() : null;
+        if (got == null ? v != 1 : got != v) {
+            throw new RlClient.ServerError("obs_schema", "the service decodes obs-v" + (got == null ? "? (not stated)" : got)
+                    + ", the seat speaks obs-v" + v);
+        }
+    }
+
+    public int obsVersion() {
+        return obsVersion;
+    }
 
     /** Close every connection and the look-ahead's pool (call at game end). */
     public void close() {
@@ -827,6 +890,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (voided != null) {
             o.addProperty("voided", voided);
         }
+        if (obsVersion != 1) {
+            // search-v2-1009: only for an obs-v2 seat, so an S1 game's summary is unchanged
+            o.addProperty("obs", obsVersion);
+        }
         if (cfg.choices > 0) {
             // S-t (only when on, so an S1 game's summary is unchanged)
             final JsonObject st = new JsonObject();
@@ -882,23 +949,33 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     @Override
     public Object onCopy(final Game copy, final Player me) {
-        final RlKnowledge k = liveKnow == null ? new RlKnowledge(copy) : liveKnow.forkFor(copy);
+        final RlKnowledge k;
+        if (liveKnow == null) {
+            k = new RlKnowledge(copy);
+            k.v2 = obsVersion == 2;
+        } else {
+            k = liveKnow.forkFor(copy);   // carries the live tracker's v2 extras (seen ids, tail facts and targets)
+        }
         k.attach();
         final RlFeaturizer f = new RlFeaturizer(index);
-        f.setVersion(1);
+        f.setVersion(obsVersion);
         f.setKnowledge(k);
         return new CopyCtx(k, f);
     }
 
-    /** A PRIORITY frame of the seat with only PASS as candidate: v(o) reads the observation alone. */
-    static RlWire.Decide leafFrame(final RlFeaturizer.Obs o, final long uid, final int seat, final int turn) {
-        final RlWire.Decide f = new RlWire.Decide();
+    /**
+     * A PRIORITY frame of the seat with only PASS as candidate: v(o) reads the observation alone. Its observation part
+     * is the seat's own frame's ({@code RlSeat.frame}) in the observation's schema: obs-v1 as the S1 read's, obs-v2 with
+     * its widths, bits, relations, facts and remaining multiset (search-v2-1009).
+     */
+    public static RlWire.Decide leafFrame(final RlFeaturizer.Obs o, final long uid, final int seat, final int turn) {
+        final RlWire.Decide f = o.version == 2 ? RlWire.Decide.v2() : new RlWire.Decide();
         f.gameUid = uid;
         f.decIdx = 0;
         f.seat = seat;
         f.family = RlSchema.F_PRIORITY;
         f.mode = RlSchema.M_SINGLE;
-        f.flags = o.truncated ? RlWire.F_TRUNC_TOKENS : 0;
+        f.flags = (o.truncated ? RlWire.F_TRUNC_TOKENS : 0) | (o.version == 2 && o.droppedRefs ? RlWire.F_DROPPED_REFS : 0);
         f.minPick = 1;
         f.maxPick = 1;
         f.turn = Math.min(0xffff, turn);
@@ -913,7 +990,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         f.deckCard = o.deckCard;
         f.deckCnt = o.deckCnt;
         System.arraycopy(o.scal, 0, f.scal, 0, RlSchema.N_SCAL);
-        System.arraycopy(o.ctx, 0, f.ctx, 0, RlSchema.N_CTX);
+        System.arraycopy(o.ctx, 0, f.ctx, 0, f.nCtx());
         f.candKind = new byte[] {(byte) RlSchema.K_PASS};
         f.candTok = new short[] {-1};
         f.candCard = new int[] {0};
@@ -923,6 +1000,23 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         f.candAbility = new byte[] {0};
         f.candFlags = new byte[] {0};
         f.slotTok = new short[0];
+        if (o.version == 2) {
+            f.R = o.R;
+            f.F = o.F;
+            f.Dr = o.Dr;
+            f.tokBits = o.tokBits;
+            f.relSrc = o.relSrc;
+            f.relDst = o.relDst;
+            f.relType = o.relType;
+            f.relArg = o.relArg;
+            f.relNum = o.relNum;
+            f.factTok = o.factTok;
+            f.factId = o.factId;
+            f.factArg = o.factArg;
+            f.factNum = o.factNum;
+            f.restCard = o.restCard;
+            f.restCnt = o.restCnt;
+        }
         return f;
     }
 

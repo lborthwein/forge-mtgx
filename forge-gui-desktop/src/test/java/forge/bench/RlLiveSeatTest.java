@@ -246,4 +246,45 @@ public class RlLiveSeatTest {
             Assert.assertNotEquals(g[0].getOutcome().getWinCondition(), forge.game.GameEndReason.Draw);
         }
     }
+
+    // ------------------------------------------------------------------------------------------------ obs-v2 (search-v2-1009)
+
+    @Test
+    public void aWholeObsV2GameCompletesWithThePolicySeatAndItsSearch() throws Exception {
+        try (FakeSearchService svc = new FakeSearchService(SHA, 2)) {
+            svc.checker = new forge.bench.rl.FakeRlServer(0, "eval", 7, null, java.util.Collections.emptyList());
+            svc.leafValue = RlChoiceSearchTest::hashValue;
+            final RlLiveSeat live = RlLiveSeat.connect(spec(svc.address(), "worlds=2,threads=2,budgetMs=4000,obs=2"), "t");
+            Assert.assertNotNull(live, "an obs-v2 spec binds an obs-v2 service");
+            Assert.assertEquals(live.spec().obs(), 2);
+            final Game[] g = new Game[1];
+            final String err = captureErr(() -> g[0] = play(live, 722159003L));
+            Assert.assertTrue(g[0].isGameOver());
+            Assert.assertNotNull(g[0].getOutcome());
+            Assert.assertFalse(live.degraded(), "a healthy obs-v2 service never degrades the seat");
+            Assert.assertTrue(svc.decides.get() > 0 && svc.scores.get() > 0 && svc.leaves.get() > 0,
+                    "DECIDE " + svc.decides + ", SCORE " + svc.scores + ", LEAVES " + svc.leaves);
+            Assert.assertEquals(svc.refusedHellos.get(), 0L);
+            Assert.assertEquals(svc.badFrames.get(), 0L, "every frame the seat and its search sent is obs-v2");
+            Assert.assertEquals(svc.errors.get(), 0L);
+            Assert.assertEquals(svc.checker.badFrames.get(), 0L, String.valueOf(svc.checker.problems));
+            Assert.assertTrue(err.contains("[lookahead-decision] {\"seat\":\"policy\""), "decision lines for the host");
+            Assert.assertTrue(err.contains("\"obs\":2"), "the end summary names obs-v2");
+        }
+    }
+
+    @Test
+    public void anObsV2SeatWhoseServiceDiesDegradesToK8AndTheGameStillEnds() throws Exception {
+        try (FakeSearchService svc = new FakeSearchService(SHA, 2)) {
+            svc.failAfterDecides = 150;
+            final RlLiveSeat live = RlLiveSeat.connect(spec(svc.address(), "worlds=2,threads=2,budgetMs=4000,obs=2"), "t");
+            Assert.assertNotNull(live);
+            final Game[] g = new Game[1];
+            final String err = captureErr(() -> g[0] = play(live, 722159004L));
+            Assert.assertTrue(g[0].isGameOver());
+            Assert.assertTrue(live.degraded(), "the seat degrades when its service goes away");
+            Assert.assertTrue(err.contains("\"fallback\":\"k8\""), "the degraded seat plays the K8 look-ahead");
+            Assert.assertNotEquals(g[0].getOutcome().getWinCondition(), forge.game.GameEndReason.Draw);
+        }
+    }
 }
