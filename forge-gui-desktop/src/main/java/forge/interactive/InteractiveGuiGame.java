@@ -898,8 +898,20 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * selection) has nothing to pay for.
      */
     static boolean controlPayable(final Player human, final List<SpellAbility> offered) {
-        return offered.isEmpty() || offered.stream()
-                .anyMatch(ability -> forge.player.HumanManaAffordability.payable(human, ability));
+        return offered.isEmpty() || offered.stream().anyMatch(ability -> payableOrUnsure(human, ability));
+    }
+
+    /**
+     * A flag must never cost the player the request it rides on: a check that throws (an unexpected
+     * cost shape) says payable, the safe side, and is logged, instead of failing the publish.
+     */
+    private static boolean payableOrUnsure(final Player human, final SpellAbility ability) {
+        try {
+            return forge.player.HumanManaAffordability.payable(human, ability);
+        } catch (RuntimeException failure) {
+            System.err.println("[forge.interactive] payable check failed, reporting payable: " + failure);
+            return true;
+        }
     }
 
     private JsonArray buildStatefulControls(final Input input, final String kind,
