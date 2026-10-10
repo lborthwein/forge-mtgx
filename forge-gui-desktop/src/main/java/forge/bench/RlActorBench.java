@@ -437,7 +437,8 @@ public final class RlActorBench {
                     return out;
                 }
                 final List<String> shipped = forge.ai.AiProfileUtil.getAvailableProfiles();
-                if (!shipped.contains(aiProfileOf(ctl[s]))) {
+                // combo-ai-port-1009: a built-in profile (forge:CubeCombo, the cube combo policy) is accepted too
+                if (!forge.ai.AiProfileUtil.isKnownProfile(aiProfileOf(ctl[s]))) {
                     out.guardError = "controller " + ctl[s] + ": AI profile '" + aiProfileOf(ctl[s])
                             + "' is not shipped (available " + shipped + ")";
                     return out;

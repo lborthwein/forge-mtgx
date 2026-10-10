@@ -193,6 +193,7 @@ public class ChangeZoneAi extends SpellAbilityAi {
      */
     @Override
     public AiAbilityDecision chkDrawback(Player aiPlayer, SpellAbility sa) {
+        if (CubeComboAi.selectBlinkSource(aiPlayer, sa)) return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         if (sa.isHidden()) {
             return hiddenOriginPlayDrawbackAI(aiPlayer, sa);
         }
@@ -212,6 +213,19 @@ public class ChangeZoneAi extends SpellAbilityAi {
      */
     @Override
     protected AiAbilityDecision doTriggerNoCost(Player aiPlayer, SpellAbility sa, boolean mandatory) {
+        if (CubeComboAi.selectNonDiscardingComboBlink(aiPlayer, sa, mandatory && !sa.isOptionalTrigger())) {
+            forge.ai.CubeComboAi.receipt("CUBE_COMBO_BLINK selected=non-pyromancer-alternative source=" + sa.getHostCard().getName()
+                    + " mandatoryCall=" + mandatory + " optionalTrigger=" + sa.isOptionalTrigger()
+                    + " targets=" + sa.getTargets().getTargetCards().stream().map(Card::getName).toList());
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        if (CubeComboAi.declineDestructiveComboBlink(aiPlayer, sa, mandatory)) {
+            forge.ai.CubeComboAi.receipt("CUBE_COMBO_BLINK declined=forced-reserved-discard source=" + sa.getHostCard().getName());
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+        if (forge.ai.CubeComboAi.control(aiPlayer) != null && forge.ai.CubeComboAi.control(aiPlayer).chooseKittenBlink(sa))
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        if (CubeComboAi.selectBlinkSource(aiPlayer, sa)) return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         String aiLogic = sa.getParamOrDefault("AILogic", "");
 
         if (sa.isReplacementAbility() && "Command".equals(sa.getParam("Destination")) && "ReplacedCard".equals(sa.getParam("Defined"))) {
@@ -775,11 +789,33 @@ public class ChangeZoneAi extends SpellAbilityAi {
     protected boolean checkPhaseRestrictions(Player ai, SpellAbility sa, PhaseHandler ph) {
         String aiLogic = sa.getParamOrDefault("AILogic", "");
 
+        // v73. The phase rule this method is MISSING, named in the reanimation
+        // census section 6: it has rules only for Hand <- Graveyard and
+        // Library <- Graveyard, so a Library -> Graveyard graveyard tutor - an
+        // INSTANT, in this cube - has no end-of-turn preference and is cast
+        // whenever AiController first offers it. CubeReanimatorPlan supplies the
+        // window; it answers false for every seat that is not the cube combo
+        // policy, for every ability that is not a graveyard tutor, and for every
+        // board on which it is not actively sequencing one, so an ordinary
+        // decision reaches the rest of this method unchanged.
+        if (forge.ai.CubeReanimatorPlan.holdSearch(ai, sa)) {
+            return false;
+        }
+
         if (aiLogic.equals("SurvivalOfTheFittest")) {
             return ph.getNextTurn().equals(ai) && ph.is(PhaseType.END_OF_TURN);
         } else if (aiLogic.equals("Main1") && ph.is(PhaseType.MAIN1, ai)) {
             return true;
         } else if (aiLogic.equals("BeforeCombat")) {
+            // v52 D4, gated on the cube-combo seat so the Default arm is
+            // byte-identical: this native gate reads the PHASE only and never
+            // whose TURN it is, so Default puts a bomb onto the battlefield
+            // during the opponent's upkeep, where it can never attack, and the
+            // end-step trigger sacrifices it for nothing. CubeBombPlan adds the
+            // own-turn / empty-stack / can-actually-attack veto.
+            if (CubeBombPlan.declineCheatIn(ai, sa)) {
+                return false;
+            }
             return !ai.getGame().getPhaseHandler().getPhase().isAfter(PhaseType.COMBAT_BEGIN);
         }
 
@@ -1175,6 +1211,37 @@ public class ChangeZoneAi extends SpellAbilityAi {
                     choice = origin.contains(ZoneType.Battlefield)
                             ? ComputerUtilCard.getBestRemovalTargetAI(ai, list)
                             : ComputerUtilCard.getMostExpensivePermanentAI(list);
+                    // v73. The SPELL form of a reanimation (Reanimate, Death,
+                    // Persist, From the Catacombs, Necromancy's RaiseDead,
+                    // Recurring Nightmare) chooses its target HERE, by plain
+                    // max(mana value), and there is no PlayerController hook for
+                    // it. CubeReanimatorPlan ranks the same native candidate list
+                    // by the v62 value terms instead; it answers null for every
+                    // seat that is not the cube combo policy, for every ability
+                    // that is not ours, for a list of fewer than two legal
+                    // candidates, and whenever it agrees with `choice` - so an
+                    // ordinary decision reaches this line and leaves it
+                    // unchanged. Same guard shape as the Kitten blink hook above
+                    // and CubeBombPlan.declineCheatIn below.
+                    //
+                    // v77 D1. The STRUCTURAL half of the scope fix. v73 placed
+                    // the call after the ternary, so it also re-ranked the
+                    // getBestRemovalTargetAI arm -- every BOUNCE, EXILE
+                    // removal, tuck and blink, whose origin contains the
+                    // battlefield. A reanimation has Origin$ Graveyard and can
+                    // never take that arm, so restricting the call to the
+                    // getMostExpensivePermanentAI arm removes nothing the hook
+                    // was registered for. CubeReanimatorPlan carries the
+                    // authoritative printed-shape gate (reanimationShape); this
+                    // guard makes the confinement visible in the file that had
+                    // to be corrected, and holds even if a later caller reaches
+                    // the plan by another path.
+                    if (!origin.contains(ZoneType.Battlefield)) {
+                        Card preferred = forge.ai.CubeReanimatorPlan.preferReanimationTarget(ai, sa, list, choice);
+                        if (preferred != null) {
+                            choice = preferred;
+                        }
+                    }
                     if (choice.isCreature() && origin.contains(ZoneType.Graveyard)) {
                         // Karmic Guide can chain another creature
                         for (Card c : list) {
@@ -1218,6 +1285,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
                         // No creatures or spells?
                         CardLists.shuffle(list);
                         choice = list.get(0);
+                    }
+                    if (destination.equals(ZoneType.Hand) && origin.size() == 1 && origin.contains(ZoneType.Graveyard)) {
+                        Card recurrence = forge.ai.CubeExtraTurnPlan.preferRecurrence(ai, sa, list, choice);
+                        if (recurrence != null) choice = recurrence;
                     }
                 } else {
                     choice = ComputerUtilCard.getBestAI(list);
@@ -1507,6 +1578,19 @@ public class ChangeZoneAi extends SpellAbilityAi {
     public static Card chooseCardToHiddenOriginChangeZone(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, Player player, final Player decider) {
         if (fetchList.isEmpty()) {
             return null;
+        }
+        if (destination == ZoneType.Hand && origin.contains(ZoneType.Library) && player == decider) {
+            Card comboPartner = CubeComboAi.chooseTutorPartner(player, sa, fetchList);
+            if (comboPartner != null) return comboPartner;
+            // v63 C2. The same hook, one step further: a search that puts the
+            // fetched card in our own HAND does not spend it, so a plan piece
+            // that is not castable THIS turn is still the right fetch. Only
+            // reached when the line above has already declined, so the Kiki
+            // route keeps its priority. Everything below - keyCards, the
+            // AILogic branches and getBestAI - is unchanged and still answers
+            // every board where no family is exactly one piece short.
+            Card planPiece = CubeComboAi.chooseHandTutorPiece(player, sa, fetchList);
+            if (planPiece != null) return planPiece;
         }
         List<String> keyCards = player.getRegisteredPlayer().getDeck().getKeyCards();
         String position = sa.getParamOrDefault("LibraryPosition", null);

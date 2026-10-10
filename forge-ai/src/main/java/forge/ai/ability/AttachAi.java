@@ -48,6 +48,14 @@ public class AttachAi extends SpellAbilityAi {
         final Cost abCost = sa.getPayCosts();
         final Card source = sa.getHostCard();
 
+        // v53 D2: the versioned cube policy holds its engine Aura while that
+        // Aura's own partner is in our hand and none is on our battlefield.
+        // An Aura spent on a non-partner is gone for the rest of the game.
+        // Gated on CubeComboAi.enabled(ai): the Default arm never reaches it.
+        if (CubeComboAi.enabled(ai) && CubeComboAi.holdTwinAura(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         // TODO: improve this so that the AI can use a flash aura buff as a means of killing opposing creatures and gaining card advantage
         if (source.hasKeyword("MayFlashSac") && !ai.canCastSorcery()) {
             return new AiAbilityDecision(0, AiPlayDecision.TimingRestrictions);
@@ -586,7 +594,30 @@ public class AttachAi extends SpellAbilityAi {
             return result;
         });
 
-        final Card c = ComputerUtilCard.getBestCreatureAI(betterList);
+        Card c = ComputerUtilCard.getBestCreatureAI(betterList);
+
+        // v76 D1: the versioned cube policy ranks its own reanimation Aura's
+        // target by the v62 value terms instead of by getBestCreatureAI, which
+        // is a BODY SCORE and cannot see that Ashen Rider's enters-trigger
+        // exiles a permanent. This is census section 6.4 and v73's registered
+        // limitation 1; no PlayerController hook reaches this choice.
+        //
+        // betterList is passed rather than rebuilt: it is the only list in the
+        // chain that has had the aura's printed Enchant restriction, the
+        // canBeAttached check under the aura's own animated LKI, and the printed
+        // AttachAITgts (strictly applied by ComputerUtil.filterAITgts above)
+        // ALL applied to it, so every printed restriction is honoured without
+        // the plan knowing any of them exists.
+        //
+        // Gated on CubeComboAi.enabled(ai) as this file's v53 and v41 hooks are;
+        // a null answer leaves the ordinary choice and everything below it
+        // untouched, and the Default arm never calls in.
+        if (CubeComboAi.enabled(ai)) {
+            final Card preferred = CubeReanimatorPlan.preferAuraTarget(ai, sa, attachSource, betterList, c);
+            if (preferred != null) {
+                c = preferred;
+            }
+        }
 
         // If Mandatory (brought directly into play without casting) gotta
         // choose something
@@ -951,6 +982,26 @@ public class AttachAi extends SpellAbilityAi {
 
     @Override
     public AiAbilityDecision chkDrawback(final Player ai, final SpellAbility sa) {
+        // Sword's free return is followed by a defined, non-targeting attach.
+        // The generic fallback below rejects that subability, which makes the
+        // native controller decline the entire optional return trigger. Keep
+        // the baseline unchanged; only the versioned cube policy opts in.
+        final SpellAbility parent = sa.getParent();
+        final Card returningEquipment = sa.getHostCard();
+        if (CubeComboAi.enabled(ai) && parent != null && parent.getApi() == ApiType.ChangeZone
+                && "Graveyard".equals(parent.getParam("Origin"))
+                && "Battlefield".equals(parent.getParam("Destination"))
+                && "Self".equals(parent.getParam("Defined"))
+                && "TriggeredCardLKICopy".equals(sa.getParam("Defined"))
+                && !returningEquipment.isFaceDown() && "Sword of the Meek".equals(returningEquipment.getName())
+                && returningEquipment.getOwner() == ai && returningEquipment.isInZone(ZoneType.Graveyard)) {
+            for (Card defined : AbilityUtils.getDefinedCards(returningEquipment, sa.getParam("Defined"), sa)) {
+                Card recipient = ai.getGame().getCardState(defined);
+                if (recipient != null && recipient.isInPlay() && recipient.getController() == ai
+                        && recipient.canBeAttached(returningEquipment, sa))
+                    return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+            }
+        }
         if (sa.isTrigger() && sa.usesTargeting()) {
             CardCollection targetables = CardLists.getTargetableCards(ai.getCardsIn(ZoneType.Battlefield), sa);
             CardCollection source = AbilityUtils.getDefinedCards(sa.getHostCard(), sa.getParam("Object"), sa);
@@ -1342,7 +1393,16 @@ public class AttachAi extends SpellAbilityAi {
         // Filter AI-specific targets if provided
         prefList = ComputerUtil.filterAITgts(sa, aiPlayer, prefList, true);
 
-        Card c = attachGeneralAI(aiPlayer, sa, prefList, mandatory, attachSource, sa.getParam("AILogic"));
+        // v53 D1: the versioned cube policy puts its engine Aura on its own
+        // Twin partner instead of on whatever the Pump logic likes best, which
+        // is how the v50 drafted read lost a fully-assembled line to a Young
+        // Pyromancer. Gated on CubeComboAi.enabled(aiPlayer); a null answer
+        // falls through to the unchanged native choice, and every downstream
+        // check below is untouched.
+        Card c = CubeComboAi.enabled(aiPlayer) ? CubeComboAi.twinAuraTarget(aiPlayer, sa, prefList) : null;
+        if (c == null) {
+            c = attachGeneralAI(aiPlayer, sa, prefList, mandatory, attachSource, sa.getParam("AILogic"));
+        }
 
         AiController aic = ((PlayerControllerAi)aiPlayer.getController()).getAi();
         if (c != null && attachSource.isEquipment()

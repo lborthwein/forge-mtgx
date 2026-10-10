@@ -81,7 +81,29 @@ public class LobbyPlayerBridge extends LobbyPlayerAi {
     @Override
     public Player createIngamePlayer(final Game game, final int id) {
         final Player p = new Player(getName(), game, id);
-        p.setFirstController(createControllerFor(p));
+        p.setFirstController(cubeCombo() ? createCubeComboControllerFor(p) : createControllerFor(p));
         return p;
+    }
+
+    /**
+     * mtgx (lane combo-ai-port-1009): a Forge seat ({@link BenchSession.Mode#NULL}) whose AI profile sets
+     * {@link forge.ai.AiProps#CUBE_COMBO_PLANS} plays the cube combo policy. A bridged seat (an RL policy's seat, a
+     * recorder) never does: the profile option there is refused, not ignored, because the policy is an opponent
+     * population tool and must never answer for, or label, a learning seat.
+     */
+    private boolean cubeCombo() {
+        if (!forge.ai.AiProfileUtil.cubeComboPlans(this)) {
+            return false;
+        }
+        if (mode != BenchSession.Mode.NULL) {
+            throw new IllegalStateException("the cube combo profile is for Forge seats only, not a " + mode + " seat");
+        }
+        return true;
+    }
+
+    private PlayerControllerBridge createCubeComboControllerFor(final Player p) {
+        final PlayerControllerBridge result = new CubeComboBridgeController(p.getGame(), p, this, session, seat, counters);
+        result.getAi().setUseSimulation(option);
+        return result;
     }
 }

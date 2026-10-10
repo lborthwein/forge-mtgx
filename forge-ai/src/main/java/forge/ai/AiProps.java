@@ -147,7 +147,13 @@ public enum AiProps {
     SIDEBOARDING_CHANCE_ON_WIN("0"),
     SIDEBOARDING_IN_LIMITED_FORMATS("false"),
     SIDEBOARDING_SHARED_TYPE_ONLY("false"),
-    SIDEBOARDING_PLANESWALKER_EQ_CREATURE("false");
+    SIDEBOARDING_PLANESWALKER_EQ_CREATURE("false"),
+    /**
+     * mtgx (lane combo-ai-port-1009): run the cube combo execution policy ({@link CubeComboControl}, lineage v104) on
+     * this seat. OFF unless a profile sets it; no shipped profile file does (the built-in profile "CubeCombo" in
+     * {@link AiProfileUtil} is Default plus this key), so every existing profile's seats are unchanged.
+     */
+    CUBE_COMBO_PLANS("false");
     // Experimental features, must be promoted or removed after extensive testing and, ideally, defaulting
     // <-- There are no experimental options here -->
 
