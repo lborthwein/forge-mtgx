@@ -439,6 +439,55 @@ public class InteractivePayableTest extends AITest {
         assertEquals(flag(bears), Boolean.FALSE);
     }
 
+    // ------------------------------------------------------------------ the price is a lower bound
+
+    /**
+     * Soundness of the price: on every board, presentationManaCostLowerBound never asks for more than
+     * Forge's own payment pricing (CostAdjustment.adjust on a disposable copy, as
+     * HumanManaAffordabilityEngineSmoke does): no higher mana value, and no coloured shard Forge would
+     * not ask for. The reference may choose (both seats here are AI); the query under test never does.
+     */
+    @Test
+    public void thePriceNeverExceedsForgesOwn() {
+        final List<List<String>> modifiers = List.of(List.of(), List.of("Zirda, the Dawnwaker"),
+                List.of("Thalia, Guardian of Thraben"), List.of("Goblin Electromancer"), List.of("Trinisphere"),
+                List.of("Helm of Awakening"), List.of("Sphere of Resistance"),
+                List.of("Zirda, the Dawnwaker", "Thalia, Guardian of Thraben"),
+                List.of("Zirda, the Dawnwaker", "Goblin Electromancer", "Trinisphere"),
+                List.of("Goblin Electromancer", "Helm of Awakening", "Thalia, Guardian of Thraben"));
+        final List<String> spells = List.of("Lightning Bolt", "Lightning Strike", "Counterspell", "Grizzly Bears",
+                "Portal to Phyrexia", "Oust", "Snap", "Mulldrifter", "Force of Will", "Dismember", "Zirda, the Dawnwaker");
+        int checked = 0;
+        for (List<String> modifier : modifiers) {
+            for (String name : spells) {
+                board();
+                for (String m : modifier) permanent(m);
+                final Card card = hand(name);
+                settle();
+                for (SpellAbility sa : card.getAllPossibleAbilities(me, false)) {
+                    if (!sa.isSpell()) continue;
+                    final forge.card.mana.ManaCost lower = forge.game.cost.CostAdjustment.presentationManaCostLowerBound(sa);
+                    if (lower == null) continue;
+                    final SpellAbility copy = sa.copy(card, me, true);
+                    final forge.game.cost.Cost raised = forge.game.cost.CostAdjustment.adjust(copy.getPayCosts(), copy, false);
+                    final forge.game.mana.ManaCostBeingPaid paid = new forge.game.mana.ManaCostBeingPaid(
+                            raised.getCostMana() == null ? forge.card.mana.ManaCost.ZERO : raised.getCostMana().getMana());
+                    forge.game.cost.CostAdjustment.adjust(paid, copy, me, null, true, false);
+                    final forge.card.mana.ManaCost actual = paid.toManaCost();
+                    final String where = name + " (" + sa + ") with " + modifier + ": lower " + lower + " vs Forge " + actual;
+                    assertTrue(lower.getCMC() <= actual.getCMC(), where);
+                    final List<forge.card.mana.ManaCostShard> asked = new ArrayList<>();
+                    actual.forEach(asked::add);
+                    for (forge.card.mana.ManaCostShard shard : lower) {
+                        assertTrue(asked.remove(shard), "a shard Forge does not ask for: " + where);
+                    }
+                    checked++;
+                }
+            }
+        }
+        assertTrue(checked >= 100, "priced " + checked);
+    }
+
     // ------------------------------------------------------------------ no side effects
 
     /**
