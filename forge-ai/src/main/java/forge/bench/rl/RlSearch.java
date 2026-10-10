@@ -50,8 +50,19 @@ import forge.game.spellability.SpellAbility;
  *       the per-turn guards. A departure answers the chosen entry's most likely candidate.</li>
  * </ol>
  * Every other ask of the seat is the policy's (greedy), as for the pure policy. The observation is obs-v1 only.
+ *
+ * <p><b>S-t</b> (lane cm-choice-search-1009; spec key {@code choices} = m > 0, policy play-outs only; with m = 0, the
+ * default, nothing below the S1 search runs): each searched candidate's world-0 play-out is also a probe that records
+ * the seat's choice asks inside the candidate's resolution window ({@link ChoiceWindow}: until the seat's next priority
+ * with an empty stack, or the end of the turn) with the policy's prior. For the first m asks of a candidate that have an
+ * alternative (and, with {@code choiceMaxProb} < 1, that the policy answers with prior below it), the top
+ * {@code choiceAlts} other answers by prior each make a <i>macro candidate</i>: the candidate with that answer forced (a
+ * schedule matched by the ask's identity and ordinal and the answer's identity, {@link ChoiceWindow}). Macros, in search
+ * order (or by joint prior: {@code choiceRank}) up to {@code choiceCap} searched candidates in all, are played out in the
+ * same K worlds and compete in the same argmax and departZ gate. A macro departure plays its base action and installs its schedule in the live seat's window; a
+ * scheduled live ask whose answer is not a candidate falls back to the policy (counted).
  */
-public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.SearchHooks {
+public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.SearchHooks, LookaheadSearch.ChoiceExpander {
 
     /** The arm's search spec (RlActorBench config key {@code search}). */
     public static final class Config {
@@ -93,11 +104,42 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public long budgetMs = 0L;
         /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
         public int connectTimeoutMs = 10_000;
+        /**
+         * S-t (lane cm-choice-search-1009): the contested choice asks expanded per searched candidate (m); 0 = off (the
+         * S1 search exactly). Policy play-outs only.
+         */
+        public int choices = 0;
+        /** S-t: alternative answers per expanded ask (b), by the policy's prior. */
+        public int choiceAlts = 2;
+        /**
+         * S-t: an ask is expanded when the policy's largest prior over its candidates is below this; 1 (the default) =
+         * every ask with an alternative, however sure the policy is (lane cm-choice-search-1009: the policy picks Woodfall
+         * Primus over Craterhoof for Natural Order with prior 1.0, so a confidence filter never searches that pick).
+         */
+        public double choiceMaxProb = 1.0;
+        /** S-t: searched candidates in all (base + macro). */
+        public int choiceCap = 10;
+        /**
+         * S-t: which macros fill the cap. "base" (the default): the searched candidates in search order (the policy's own
+         * choice first, then by prior), each candidate's asks in window order, each ask's alternatives by prior.
+         * "joint": by joint prior (candidate's x answer's; this lane's first spec, which ranks a confidently wrong
+         * policy's needed answer last).
+         */
+        public String choiceRank = "base";
+        /**
+         * The loop guard (lane cm-choice-search-1009): departures to one candidate at one phase and stack size per turn.
+         * 2 = the S1 read's (K8's) rule; a combo loop (Kiki-Jiki + Zealous Conscripts) repeats one action more often.
+         */
+        public int sameDepartures = 2;
+        /** S-t: the families a probe records and expands. */
+        public String choiceFamilies = ChoiceWindow.DEFAULT_FAMILIES;
+        java.util.Set<Integer> choiceFamilySet = null;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
-                "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs"));
+                "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
+                "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -131,6 +173,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("policySha") && !o.get("policySha").isJsonNull()) c.policySha = o.get("policySha").getAsString();
             if (o.has("budgetMs")) c.budgetMs = o.get("budgetMs").getAsLong();
             if (o.has("connectTimeoutMs")) c.connectTimeoutMs = o.get("connectTimeoutMs").getAsInt();
+            if (o.has("choices")) c.choices = o.get("choices").getAsInt();
+            if (o.has("choiceAlts")) c.choiceAlts = o.get("choiceAlts").getAsInt();
+            if (o.has("choiceMaxProb")) c.choiceMaxProb = o.get("choiceMaxProb").getAsDouble();
+            if (o.has("choiceCap")) c.choiceCap = o.get("choiceCap").getAsInt();
+            if (o.has("choiceFamilies")) c.choiceFamilies = o.get("choiceFamilies").getAsString();
+            if (o.has("choiceRank")) c.choiceRank = o.get("choiceRank").getAsString();
+            if (o.has("sameDepartures")) c.sameDepartures = o.get("sameDepartures").getAsInt();
             c.check();
             return c;
         }
@@ -151,6 +200,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (server == null) {
                 throw new IllegalArgumentException("search.server (host:port of the search service) is required");
             }
+            if (choices < 0 || choiceAlts < 1 || choiceCap < 2 || !(choiceMaxProb > 0 && choiceMaxProb <= 1)) {
+                throw new IllegalArgumentException("search: choices >= 0, choiceAlts >= 1, choiceCap >= 2, 0 < choiceMaxProb <= 1");
+            }
+            if (sameDepartures < 1) {
+                throw new IllegalArgumentException("search.sameDepartures >= 1");
+            }
+            if (!"base".equals(choiceRank) && !"joint".equals(choiceRank)) {
+                throw new IllegalArgumentException("search.choiceRank must be base or joint, not " + choiceRank);
+            }
+            if (choices > 0 && !"policy".equals(playout)) {
+                throw new IllegalArgumentException("search.choices (S-t) needs playout=policy");
+            }
+            choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
             AiFixes.Mode.parse(zeroX);
             AiFixes.Mode.parse(crewNoop);
@@ -185,6 +247,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 // live-sc-1009: only when set, so a bench spec's JSON is unchanged
                 o.addProperty("budgetMs", budgetMs);
             }
+            if (sameDepartures != 2) {
+                // cm-choice-search-1009: only when changed, so an S1 spec's JSON is unchanged
+                o.addProperty("sameDepartures", sameDepartures);
+            }
+            if (choices > 0) {
+                // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
+                o.addProperty("choices", choices);
+                o.addProperty("choiceAlts", choiceAlts);
+                o.addProperty("choiceMaxProb", choiceMaxProb);
+                o.addProperty("choiceCap", choiceCap);
+                o.addProperty("choiceFamilies", choiceFamilies);
+                o.addProperty("choiceRank", choiceRank);
+            }
             return o;
         }
     }
@@ -209,6 +284,42 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private final List<RlSearchClient> clients = Collections.synchronizedList(new ArrayList<>());
     private final List<JsonObject> rows = new ArrayList<>();
     public String voided;
+
+    // ---- S-t (lane cm-choice-search-1009; untouched while cfg.choices == 0)
+    /** One macro candidate's forced answers, and the counts of its schedule across its play-outs. */
+    static final class MacroSpec {
+        final List<ChoiceWindow.Entry> entries;
+        final ChoiceWindow.Counters playout = new ChoiceWindow.Counters();
+        final int baseGiven;
+        final double jointPrior;
+        final String label;
+
+        MacroSpec(final List<ChoiceWindow.Entry> entries, final int baseGiven, final double jointPrior, final String label) {
+            this.entries = entries;
+            this.baseGiven = baseGiven;
+            this.jointPrior = jointPrior;
+            this.label = label;
+        }
+    }
+
+    private final java.util.Set<Integer> choiceFams;
+    /** The current decision's probe records (searched candidate index -> its world-0 play-out's asks). */
+    private final Map<Integer, List<ChoiceWindow.Ask>> probeAsks = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The current decision's probe windows (diagnostics: what each probe saw). */
+    private final List<ChoiceWindow> probeWindows = Collections.synchronizedList(new ArrayList<>());
+    /** Over the game: every ask the probes saw, by "FAMILY:what happened". */
+    private final Map<String, Integer> probeSeen = new TreeMap<>();
+    /** The current decision's prior per given candidate (the pooled entries, given order). */
+    private double[] givenPrior = new double[0];
+    /** The current decision's macros (expander order). */
+    private List<MacroSpec> macroList = new ArrayList<>();
+    /** A macro departure's window, taken by the live seat right after {@link #decide}. */
+    private ChoiceWindow pendingWindow = null;
+    /** The live seat's schedule counts over the game, and the play-outs' (every macro's, summed at the end). */
+    private final ChoiceWindow.Counters liveCounters = new ChoiceWindow.Counters();
+    private final ChoiceWindow.Counters playoutCounters = new ChoiceWindow.Counters();
+    private int probeAsksTotal = 0, contestedAsks = 0, macroDecisions = 0, macrosSearched = 0, macroDepartures = 0,
+            macroDefaultDepartures = 0;
 
     /**
      * One game's search for its RL seat. {@code gameSeed} fixes the world draws (decisions are a function of the
@@ -238,8 +349,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.departMedian = AiFixes.Mode.parse(cfg.departMedian);
         lc.stack = cfg.stack;
         lc.budgetMs = cfg.budgetMs;
+        lc.maxSameDepartures = cfg.sameDepartures;
         this.ls = new LookaheadSearch(lc);
         ls.setHooks(this, "value".equals(cfg.leaf), "policy".equals(cfg.playout));
+        this.choiceFams = cfg.choices > 0 ? (cfg.choiceFamilySet != null ? cfg.choiceFamilySet
+                : ChoiceWindow.parseFamilies(cfg.choiceFamilies)) : null;
         this.cpu0 = TMX.getCurrentThreadCpuTime();
         this.gameAcc = forge.ai.CpuAccount.get();
     }
@@ -286,6 +400,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return c;
     }
 
+    /**
+     * Drop this thread's connection after a failed call (cm-choice-search-1009): the service closes a connection on any
+     * error it answers, so the next call on this thread connects again instead of failing on a dead socket. Nothing
+     * changes while every call succeeds.
+     */
+    private void drop() {
+        final RlSearchClient c = client.get();
+        if (c != null) {
+            client.remove();
+            clients.remove(c);
+            c.close();
+            synchronized (this) {
+                reconnects++;
+            }
+        }
+    }
+
+    private int reconnects = 0;
+
     /** Close every connection and the look-ahead's pool (call at game end). */
     public void close() {
         ls.shutdown();
@@ -320,6 +453,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     @Override
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
+        pendingWindow = null;
         priorityAsks++;
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
@@ -334,6 +468,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         try {
             sc = client().score(RlWire.encodeDecide(frame));
         } catch (IOException | RuntimeException e) {
+            drop();
             scoreFailures++;
             System.err.println("[rlsearch] SCORE failed, keeping the policy's choice: " + e);
             return -1;
@@ -406,7 +541,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         for (int ch : order) {
             given.add(ch == 0 ? null : menuObjs.get(ch - 1));
         }
-        final LookaheadSearch.GivenResult r = ls.decideGiven(g, me, given, cfg.breadth);
+        final LookaheadSearch.GivenResult r;
+        if (cfg.choices > 0) {
+            // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
+            probeAsks.clear();
+            probeWindows.clear();
+            macroList = new ArrayList<>();
+            givenPrior = new double[order.size()];
+            for (int i = 0; i < order.size(); i++) {
+                givenPrior[i] = by.get(order.get(i))[0];
+            }
+            r = ls.decideGiven(g, me, given, cfg.breadth, this);
+        } else {
+            r = ls.decideGiven(g, me, given, cfg.breadth);
+        }
         poolCpuMs += r.poolCpuMs;
         int answer = -1;
         if (r.givenIndex.length > 0) {
@@ -416,6 +564,34 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (r.chosen > 0) {
             answer = (int) by.get(order.get(r.chosen))[1];
             departures++;
+        }
+        if (r.chosenMacro >= 0) {
+            // S-t: a macro departure: its base action (the default's when r.chosen == 0), then its schedule
+            final MacroSpec ms = macroList.get(r.chosenMacro);
+            pendingWindow = ChoiceWindow.scheduled(ms.entries, liveCounters);
+            macroDepartures++;
+            if (r.chosen == 0) {
+                macroDefaultDepartures++;
+                departures++;
+            }
+        }
+        if (cfg.choices > 0 && r.macro.length > 0) {
+            macroDecisions++;
+            macrosSearched += macroList.size();
+            for (MacroSpec ms : macroList) {
+                ms.playout.addTo(playoutCounters);
+            }
+        }
+        final Map<String, Integer> seenNow = new TreeMap<>();
+        if (cfg.choices > 0) {
+            synchronized (probeWindows) {
+                for (ChoiceWindow w : probeWindows) {
+                    for (Map.Entry<String, Integer> e : w.seen().entrySet()) {
+                        seenNow.merge(e.getKey(), e.getValue(), Integer::sum);
+                        probeSeen.merge(e.getKey(), e.getValue(), Integer::sum);
+                    }
+                }
+            }
         }
         final Searched hook = onSearched;
         if (hook != null && r.givenIndex.length > 0) {
@@ -461,6 +637,56 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 vw.add(w);
             }
             row.add("values", vw);
+            if (cfg.choices > 0) {
+                // S-t: per searched candidate, its macro (-1 = a base candidate), and every macro's schedule
+                final JsonArray mi = new JsonArray();
+                for (int j = 0; j < r.givenIndex.length; j++) {
+                    mi.add(j < r.macro.length ? r.macro[j] : -1);
+                }
+                row.add("macro", mi);
+                final JsonArray md = new JsonArray();
+                for (MacroSpec ms : macroList) {
+                    final JsonObject x = new JsonObject();
+                    x.addProperty("base", order.get(ms.baseGiven));
+                    x.addProperty("joint_prior", Math.round(ms.jointPrior * 1e5) / 1e5);
+                    final JsonArray es = new JsonArray();
+                    for (ChoiceWindow.Entry e : ms.entries) {
+                        es.add(e.label());
+                    }
+                    x.add("schedule", es);
+                    x.addProperty("playout_hits", ms.playout.hits());
+                    x.addProperty("playout_miss", ms.playout.miss.get());
+                    x.addProperty("playout_unused", ms.playout.unused.get());
+                    md.add(x);
+                }
+                row.add("macros", md);
+                row.addProperty("chosen_macro", r.chosenMacro);
+                int asks = 0;
+                final JsonArray pa = new JsonArray();
+                for (Map.Entry<Integer, List<ChoiceWindow.Ask>> e : new TreeMap<>(probeAsks).entrySet()) {
+                    synchronized (e.getValue()) {
+                        for (ChoiceWindow.Ask a : e.getValue()) {
+                            asks++;
+                            // [searched candidate, ask, ordinal, C, the largest prior, the policy's own answer's prior]
+                            final JsonArray x = new JsonArray();
+                            x.add(e.getKey());
+                            x.add(a.ask);
+                            x.add(a.ordinal);
+                            x.add(a.C);
+                            x.add(Math.round(a.maxPrior() * 1e4) / 1e4);
+                            x.add(a.greedy >= 0 && a.greedy < a.C ? Math.round(a.prior[a.greedy] * 1e4) / 1e4 : -1.0);
+                            pa.add(x);
+                        }
+                    }
+                }
+                row.addProperty("probe_asks", asks);
+                row.add("probe", pa);
+                final JsonObject ps = new JsonObject();
+                for (Map.Entry<String, Integer> e : seenNow.entrySet()) {
+                    ps.addProperty(e.getKey(), e.getValue());
+                }
+                row.add("probe_seen", ps);
+            }
             row.addProperty("p_default", Math.round(by.get(def)[0] * 1e5) / 1e5);
             row.addProperty("outcome", r.outcome);
             row.addProperty("chosen", r.chosen <= 0 ? 0 : order.get(r.chosen));
@@ -472,6 +698,83 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             rows.add(row);
         }
         return answer;
+    }
+
+    @Override
+    public ChoiceWindow takeWindow() {
+        final ChoiceWindow w = pendingWindow;
+        pendingWindow = null;
+        return w;
+    }
+
+    /**
+     * S-t: the macro candidates of the current decision. Per searched candidate (its probe's asks in order), the first
+     * {@code choices} expandable asks (an alternative exists; with {@code choiceMaxProb} < 1, also the largest prior below
+     * it) each give their top {@code choiceAlts} alternatives ({@link ChoiceWindow.Ask#alternatives}: other identities
+     * than the policy's own answer, by prior). The first {@code choiceCap} minus the base count are kept, in the order
+     * found ({@code choiceRank} base) or by joint prior (joint), ties in the order found.
+     */
+    @Override
+    public List<LookaheadSearch.Macro> expand(final int[] givenIndex) {
+        final List<MacroSpec> found = new ArrayList<>();
+        for (int c = 0; c < givenIndex.length; c++) {
+            final List<ChoiceWindow.Ask> asks = probeAsks.get(c);
+            if (asks == null) {
+                continue;
+            }
+            final List<ChoiceWindow.Ask> copy;
+            synchronized (asks) {
+                copy = new ArrayList<>(asks);
+            }
+            probeAsksTotal += copy.size();
+            int used = 0;
+            for (ChoiceWindow.Ask a : copy) {
+                if (used >= cfg.choices) {
+                    break;
+                }
+                if (cfg.choiceMaxProb < 1.0 && a.maxPrior() >= cfg.choiceMaxProb) {
+                    continue;
+                }
+                final List<Integer> alts = a.alternatives();
+                if (alts.isEmpty()) {
+                    continue;
+                }
+                used++;
+                contestedAsks++;
+                for (int t = 0; t < Math.min(cfg.choiceAlts, alts.size()); t++) {
+                    final int alt = alts.get(t);
+                    final ChoiceWindow.Entry e = new ChoiceWindow.Entry(a.ask, a.ordinal, a.exact[alt], a.loose[alt]);
+                    final int gi = givenIndex[c];
+                    final double jp = (gi < givenPrior.length ? givenPrior[gi] : 0.0) * a.prior[alt];
+                    found.add(new MacroSpec(java.util.Collections.singletonList(e), gi, jp, e.label()));
+                }
+            }
+        }
+        final int room = cfg.choiceCap - givenIndex.length;
+        final List<LookaheadSearch.Macro> out = new ArrayList<>();
+        if (room <= 0 || found.isEmpty()) {
+            return out;
+        }
+        final List<Integer> rank = new ArrayList<>();
+        for (int i = 0; i < found.size(); i++) {
+            rank.add(i);
+        }
+        if ("joint".equals(cfg.choiceRank)) {
+            rank.sort((x, y) -> {
+                final int k = Double.compare(found.get(y).jointPrior, found.get(x).jointPrior);
+                return k != 0 ? k : Integer.compare(x, y);
+            });
+        }
+        final java.util.Map<Integer, Integer> baseOf = new java.util.HashMap<>();
+        for (int c = 0; c < givenIndex.length; c++) {
+            baseOf.putIfAbsent(givenIndex[c], c);
+        }
+        for (int i = 0; i < Math.min(room, rank.size()); i++) {
+            final MacroSpec ms = found.get(rank.get(i));
+            macroList.add(ms);
+            out.add(new LookaheadSearch.Macro(baseOf.get(ms.baseGiven), ms, ms.label));
+        }
+        return out;
     }
 
     /** Keep the per-decision rows in memory (tests) even without a log file. */
@@ -523,6 +826,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         o.addProperty("playout_first_ambiguous", playoutFirstAmbiguous);
         if (voided != null) {
             o.addProperty("voided", voided);
+        }
+        if (cfg.choices > 0) {
+            // S-t (only when on, so an S1 game's summary is unchanged)
+            final JsonObject st = new JsonObject();
+            st.addProperty("probe_asks", probeAsksTotal);
+            st.addProperty("reconnects", reconnects);
+            st.addProperty("expanded_asks", contestedAsks);
+            st.addProperty("macro_decisions", macroDecisions);
+            st.addProperty("macros", macrosSearched);
+            st.addProperty("macro_departures", macroDepartures);
+            st.addProperty("macro_default_departures", macroDefaultDepartures);
+            final JsonObject ps = new JsonObject();
+            for (Map.Entry<String, Integer> e : probeSeen.entrySet()) {
+                ps.addProperty(e.getKey(), e.getValue());
+            }
+            st.add("probe_seen", ps);
+            st.add("live", liveCounters.toJson());
+            st.add("playout", playoutCounters.toJson());
+            o.add("st", st);
         }
         o.add("lookahead", ls.getStats().toJson());
         return o;
@@ -621,6 +943,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         try {
             v = client().values(ps);
         } catch (IOException | RuntimeException e) {
+            drop();
             System.err.println("[rlsearch] LEAVES failed: " + e);
             return null;
         }
@@ -669,7 +992,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
-                return client().decide(p, cfg.playoutSample);
+                try {
+                    return client().decide(p, cfg.playoutSample);
+                } catch (IOException | RuntimeException e) {
+                    drop();
+                    throw e;
+                }
             }
 
             @Override
@@ -707,7 +1035,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     playoutFirstAmbiguous++;
                 }
                 try {
-                    final RlSearchClient.Scores s = client().score(RlWire.encodeDecide(frame.get()));
+                    final RlSearchClient.Scores s;
+                    try {
+                        s = client().score(RlWire.encodeDecide(frame.get()));
+                    } catch (IOException | RuntimeException e) {
+                        drop();
+                        throw e;
+                    }
                     int best = match.get(0);
                     for (int i : match) {
                         if (i < s.probs.length && s.probs[i] > s.probs[best]) {
@@ -726,6 +1060,34 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return why[0];
             }
         };
+        if (cfg.choices > 0) {
+            // S-t: a macro's play-out answers its schedule; a base candidate's world-0 play-out records its choice asks
+            if (first.schedule instanceof MacroSpec) {
+                final MacroSpec ms = (MacroSpec) first.schedule;
+                rs.window = ChoiceWindow.scheduled(ms.entries, ms.playout);
+            } else if (first.probe && first.candIndex >= 0) {
+                final List<ChoiceWindow.Ask> into = probeAsks.computeIfAbsent(first.candIndex,
+                        k -> Collections.synchronizedList(new ArrayList<>()));
+                rs.window = ChoiceWindow.recorder(choiceFams, payload -> {
+                    final RlSearchClient.Scores ps;
+                    try {
+                        ps = client().score(payload);
+                    } catch (IOException | RuntimeException e) {
+                        drop();
+                        throw e;
+                    }
+                    if (ps.status != RlWire.ST_OK) {
+                        return null;
+                    }
+                    final double[] d = new double[ps.probs.length];
+                    for (int i = 0; i < d.length; i++) {
+                        d[i] = ps.probs[i];
+                    }
+                    return d;
+                }, into);
+                probeWindows.add(rs.window);
+            }
+        }
         session.setLocalAnswerer(rs);
         final PlayoutController pc = new PlayoutController(g, me, me.getController().getLobbyPlayer(), session, seat, probe);
         return new LookaheadSearch.PlayoutSeat() {

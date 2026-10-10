@@ -31,6 +31,11 @@ public final class FakeSearchService implements Closeable {
     private final String policySha;
     private final List<Socket> sockets = Collections.synchronizedList(new ArrayList<>());
     public volatile long failAfterDecides = Long.MAX_VALUE;
+    /**
+     * Lane cm-choice-search-1009: v(o) of a leaf payload, in [-1, 1] (null, the default: 0 for every leaf). Tests that
+     * need the search to depart give the leaves values that differ.
+     */
+    public volatile java.util.function.ToDoubleFunction<byte[]> leafValue = null;
     public final AtomicLong hellos = new AtomicLong(), scores = new AtomicLong(), decides = new AtomicLong(),
             leaves = new AtomicLong(), errors = new AtomicLong();
     private volatile boolean dead = false;
@@ -92,6 +97,16 @@ public final class FakeSearchService implements Closeable {
                 if (f.type == RlSearchClient.T_SCORE) {
                     scores.incrementAndGet();
                     final RlWire.Decide d = RlWire.decodeDecide(f.payload, 1);
+                    if (d.mode != RlSchema.M_SINGLE) {
+                        // as search_server.py: SCORE takes SINGLE-mode frames only; an error closes the connection
+                        errors.incrementAndGet();
+                        final JsonObject e = new JsonObject();
+                        e.addProperty("code", "mode");
+                        e.addProperty("msg", "SCORE takes SINGLE-mode frames only");
+                        RlWire.writeFrame(out, RlWire.T_ERROR, 0, RlWire.canonical(e));
+                        out.flush();
+                        return;
+                    }
                     final ByteBuffer b = ByteBuffer.allocate(RlSearchClient.SCORES_HEADER + 4 * d.C).order(ByteOrder.LITTLE_ENDIAN);
                     int legal = 0;
                     for (int i = 0; i < d.C; i++) {
@@ -124,8 +139,12 @@ public final class FakeSearchService implements Closeable {
                     leaves.addAndGet(n);
                     final ByteBuffer b = ByteBuffer.allocate(8 + 4 * n).order(ByteOrder.LITTLE_ENDIAN);
                     b.putInt(n).putInt(7);
+                    final java.util.function.ToDoubleFunction<byte[]> lv = leafValue;
                     for (int i = 0; i < n; i++) {
-                        b.putFloat(0f);
+                        final int len = p.getInt();
+                        final byte[] leaf = new byte[len];
+                        p.get(leaf);
+                        b.putFloat(lv == null ? 0f : (float) lv.applyAsDouble(leaf));
                     }
                     RlWire.writeFrame(out, RlSearchClient.T_VALUES, 0, b.array());
                 } else {

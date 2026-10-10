@@ -123,7 +123,24 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         int decide(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, int greedy, List<SpellAbility> menuObjs);
 
         int VOID = -2;
+
+        /**
+         * S-t (lane cm-choice-search-1009): after {@link #decide}, the forced answers of a macro departure (the window
+         * the seat answers its next choice asks from), or null (always null unless the spec's {@code choices} > 0).
+         */
+        default ChoiceWindow takeWindow() {
+            return null;
+        }
     }
+
+    /**
+     * S-t (lane cm-choice-search-1009; null by default, and then nothing changes): the seat's current choice window, a
+     * macro candidate's forced answers to the choice asks of one priority action (live after a macro departure, or in a
+     * play-out), or the probe's recorder (a play-out). See {@link ChoiceWindow}.
+     */
+    public ChoiceWindow window;
+    /** S-t: choice answers the window's schedule changed (the tape rows carry the answers played). */
+    public int windowOverrides = 0;
 
     /**
      * S1 policy play-outs (null by default): the first PRIORITY ask of this seat is answered with this choice and never
@@ -302,6 +319,15 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             return null;
         }
         final int family = RlSchema.familyOf(kind, method);
+        if (window != null && roles[seat] == Role.RL && window.endsAt(g, family)) {
+            // S-t: the seat's next priority with an empty stack (or a new turn) ends the action's choice window
+            window.saw(RlSchema.F_PRIORITY, family == RlSchema.F_PRIORITY && g.getStack().isEmpty() ? "closedAtPriority"
+                    : "closedAtNewTurn");
+            window.close();
+            window = null;
+        } else if (window != null && window.isOpen() && roles[seat] == Role.RL && family == RlSchema.F_PRIORITY) {
+            window.saw(RlSchema.F_PRIORITY, "withStack");
+        }
         if (family == RlSchema.F_PRIORITY) {
             lastAnswered.clear();
             lastAnswered2.clear();
@@ -323,7 +349,15 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         if (family == RlSchema.F_TARGETS && m != null) {
             note("targets." + m.origin + ".asks");
         }
+        // S-t: a choice ask inside the seat's open window (null otherwise: nothing below reads these)
+        final String wAsk = window != null && window.isOpen() && roles[seat] == Role.RL && family != RlSchema.F_PRIORITY
+                && m != null ? ChoiceWindow.askKey(family, method, m, body) : null;
+        final int wOrd = wAsk == null ? -1 : window.nextOrdinal(wAsk);
         if (m == null || m.unposable != null) {
+            if (wAsk != null) {
+                window.saw(family, "unposed");
+                window.notPosed(wAsk, wOrd, false);
+            }
             forgeDecidedExtra.merge("unposed:" + RlSchema.familyName(family), 1, Integer::sum);
             return null;
         }
@@ -331,6 +365,10 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             return forcedFirst(g, player, seat, method, m, objs);
         }
         if (m.trivial) {
+            if (wAsk != null) {
+                window.saw(family, "trivial");
+                window.notPosed(wAsk, wOrd, true);
+            }
             c(family).trivial++;
             if (family == RlSchema.F_TARGETS) {
                 note("targets." + m.origin + ".trivial");
@@ -350,6 +388,10 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             return ta;
         }
         if (m.C() > RlSchema.C_MAX || m.S() > RlSchema.S_MAX) {
+            if (wAsk != null) {
+                window.saw(family, "capped");
+                window.notPosed(wAsk, wOrd, false);
+            }
             forgeDecidedExtra.merge((m.C() > RlSchema.C_MAX ? "capC:" : "capS:") + RlSchema.familyName(family), 1,
                     Integer::sum);
             return null;
@@ -429,6 +471,48 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 }
                 d.steps = new short[] {(short) alt};
                 searchDepartures++;
+            }
+            final ChoiceWindow w = search.takeWindow();
+            if (w != null) {
+                // S-t: a macro departure: the action's choice asks are answered from its schedule until the window ends
+                if (window != null) {
+                    window.close();
+                }
+                window = w;
+                window.open(g.getPhaseHandler().getTurn());
+            }
+        }
+        if (wAsk != null && !(d.status == RlWire.ST_OK && d.steps.length <= 1)) {
+            window.saw(family, d.status == RlWire.ST_OK ? "multiStep" : "delegated");
+        }
+        if (wAsk != null && d.status == RlWire.ST_OK && d.steps.length <= 1) {
+            // S-t: the probe records the ask (the policy's prior and answer); a schedule answers it
+            final int mine = d.steps.length == 1 ? d.steps[0] : -1;
+            if (window.wants(family, m)) {
+                window.saw(family, "recorded");
+                // the prior is the policy's first-step distribution over the candidates: SCORE takes SINGLE frames,
+                // and a one-pick SUBSET frame's candidate logits are the same (the candidate encoder does not read the
+                // mode); an optional pick's STOP mass is left out (the prior is conditional on picking a candidate)
+                final int mo = frame.mode, mi = frame.minPick, ma = frame.maxPick;
+                final byte[] sp;
+                try {
+                    frame.mode = RlSchema.M_SINGLE;
+                    frame.minPick = 1;
+                    frame.maxPick = 1;
+                    sp = RlWire.encodeDecide(frame);
+                } finally {
+                    frame.mode = mo;
+                    frame.minPick = mi;
+                    frame.maxPick = ma;
+                }
+                window.record(wAsk, wOrd, family, m, player, sp, mine);
+            } else {
+                window.saw(family, ChoiceWindow.singlePick(m) ? "otherFamily" : "notOnePick");
+            }
+            final int forced = window.scheduledAnswer(wAsk, wOrd, m, player, mine);
+            if (forced >= 0 && forced != mine && m.validate(new short[] {(short) forced}) == null) {
+                d.steps = new short[] {(short) forced};
+                windowOverrides++;
             }
         }
         noteSent(seat, family, m, frame, d.steps);
@@ -528,6 +612,11 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             return null;
         }
         final JsonObject ans = m.answer(new short[] {(short) idx});
+        if (window != null) {
+            // S-t: the searched action's choice window (a macro's schedule, or the probe's recorder) opens here
+            window.open(g.getPhaseHandler().getTurn());
+            window.saw(RlSchema.F_PRIORITY, ans.get("choice").getAsInt() > 0 ? "openedOnAction" : "openedOnPass");
+        }
         lastAnswered.put(method, -1);
         lastFamily.put(method, RlSchema.F_PRIORITY);
         ok(method);
