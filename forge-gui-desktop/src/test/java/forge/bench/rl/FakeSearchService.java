@@ -24,7 +24,9 @@ import com.google.gson.JsonObject;
  * HELLO → HELLO_ACK with a configurable {@code policy_sha}; SCORE → uniform probabilities over the legal candidates;
  * DECIDE → random legal steps (FakeRlServer's rule, seeded by game and decision); LEAVES → v(o) = 0 for every leaf.
  * {@link #failAfterDecides}: after that many DECIDE frames in all, the service drops every connection and stops
- * listening (a service that died mid-game).
+ * listening (a service that died mid-game). {@link #playoutDecideDelayMs} (lane sc-wallguard-1009): DECIDE answers on the
+ * look-ahead's play-out connections (HELLO thread {@code Game-lookahead-*}) come that much later (a slow or looping
+ * play-out seat that keeps the search past its budget).
  */
 public final class FakeSearchService implements Closeable {
     private final ServerSocket ss;
@@ -36,6 +38,8 @@ public final class FakeSearchService implements Closeable {
      * need the search to depart give the leaves values that differ.
      */
     public volatile java.util.function.ToDoubleFunction<byte[]> leafValue = null;
+    /** Lane sc-wallguard-1009: delay of every DECIDE answer on a play-out connection, in ms (0 = none, the default). */
+    public volatile long playoutDecideDelayMs = 0;
     public final AtomicLong hellos = new AtomicLong(), scores = new AtomicLong(), decides = new AtomicLong(),
             leaves = new AtomicLong(), errors = new AtomicLong();
     private volatile boolean dead = false;
@@ -84,6 +88,8 @@ public final class FakeSearchService implements Closeable {
                 return;
             }
             hellos.incrementAndGet();
+            final JsonObject hello = h.json();
+            final boolean playout = hello.has("thread") && hello.get("thread").getAsString().startsWith("Game-lookahead");
             final JsonObject ack = new JsonObject();
             ack.addProperty("ok", true);
             ack.addProperty("server", "search");
@@ -124,6 +130,14 @@ public final class FakeSearchService implements Closeable {
                     if (decides.incrementAndGet() > failAfterDecides) {
                         die();
                         return;
+                    }
+                    final long delay = playoutDecideDelayMs;
+                    if (playout && delay > 0) {
+                        try {
+                            Thread.sleep(delay);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
                     }
                     final RlWire.Decide d = RlWire.decodeDecide(f.payload, 1);
                     final RlWire.Decision x = new RlWire.Decision();

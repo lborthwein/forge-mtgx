@@ -35,6 +35,12 @@ import forge.game.Game;
  * play-out drops its candidate; a failed leaf call keeps the static leaf for that decision; a failed SCORE keeps the
  * policy's choice), as in the read.
  *
+ * <p><b>Wall</b> (lane sc-wallguard-1009). A searched decision past its budget plays the policy's own choice
+ * ("capped"): its policy play-outs stop at their next service request or main-loop step, and the wait for them ends at
+ * the budget plus {@link LookaheadSearch#WALL_GRACE_MS} at the latest (then the decision line carries
+ * {@code "wall":true}). So the seat's wait for one searched decision is bounded by about the budget plus 1 s, besides
+ * the SCORE and leaf round trips (each bounded by {@code readTimeoutMs}).
+ *
  * <p><b>Logs</b> (stderr, for the host): {@code [policy-seat] {...}} once at bind, at a degrade and at the end; one
  * {@code [lookahead-decision] {...}} per searched decision in the K8 line's shape (searchMs, capped, outcome, departed,
  * running totals) plus {@code "seat":"policy"}.
@@ -354,6 +360,10 @@ public final class RlLiveSeat {
         d.addProperty("cpuMs", Math.round(r.cpuMs));
         d.addProperty("scoreMs", Math.round(scoreMs * 10) / 10.0);
         d.addProperty("capped", "capped".equals(r.outcome));
+        if (r.wall) {
+            // sc-wallguard-1009: only when the hard wall cut the wait, so the line is otherwise unchanged
+            d.addProperty("wall", true);
+        }
         d.addProperty("outcome", r.outcome);
         d.addProperty("departed", r.chosen > 0);
         d.addProperty("failed", r.failed);

@@ -99,7 +99,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         /**
          * Live play (lane live-sc-1009; 0 = none, the default: decisions do not depend on the host): the look-ahead's
          * wall-clock budget per searched decision ({@link LookaheadSearch.Config#budgetMs}); past it the default (the
-         * policy's own choice) is played ("capped"), as the live K8 plays Forge's answer.
+         * policy's own choice) is played ("capped"), as the live K8 plays Forge's answer. A policy play-out seat stops at
+         * its next service request past it, and the wait for the play-outs ends at the budget plus
+         * {@link LookaheadSearch#WALL_GRACE_MS} at the latest (lane sc-wallguard-1009).
          */
         public long budgetMs = 0L;
         /** Connect timeout of each search-service connection, in ms (live play shortens it; default as S1). */
@@ -279,6 +281,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private double poolCpuMs = 0, searchCpuMs = 0, scoreMs = 0;
     private int scoreCalls = 0, scoreFailures = 0, priorityAsks = 0, searchedAsks = 0, departures = 0,
             searchStackSkipped = 0, playoutFirstAmbiguous = 0;
+    /** Lane sc-wallguard-1009: play-out service requests refused because their decision was past its budget. */
+    private final java.util.concurrent.atomic.AtomicInteger budgetStops = new java.util.concurrent.atomic.AtomicInteger();
     /** Search-service connections, one per thread (the game thread and the look-ahead's pool threads). */
     private final ThreadLocal<RlSearchClient> client = new ThreadLocal<>();
     private final List<RlSearchClient> clients = Collections.synchronizedList(new ArrayList<>());
@@ -824,6 +828,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         o.addProperty("search_cpu_ms", Math.round(searchCpuMs));
         o.addProperty("pool_cpu_ms", Math.round(poolCpuMs));
         o.addProperty("playout_first_ambiguous", playoutFirstAmbiguous);
+        if (budgetStops.get() > 0) {
+            // sc-wallguard-1009: only when the budget stopped a play-out seat, so an unbudgeted summary is unchanged
+            o.addProperty("playout_budget_stops", budgetStops.get());
+        }
         if (voided != null) {
             o.addProperty("voided", voided);
         }
@@ -973,6 +981,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /**
+     * Lane sc-wallguard-1009: a policy play-out's service request past its decision's wall budget is refused here, before
+     * it is sent (the connection stays as it is). The seat ends its copy as on any transport fault, and the look-ahead
+     * counts the play-out as stopped by the budget (the decision is capped and plays the policy's own choice). A seat
+     * looping inside one Forge step (the SCL read's two overruns: max_decisions in one step) so stops within one request
+     * of the deadline. Never without a budget.
+     */
+    private void budgetStop(final LookaheadSearch.FirstAction first) throws IOException {
+        if (first != null && first.overBudget()) {
+            budgetStops.incrementAndGet();
+            throw new IOException("budget: the search's wall budget ran out");
+        }
+    }
+
     @Override
     public LookaheadSearch.PlayoutSeat playoutSeat(final Object copyCtx, final Game g, final Player me,
             final LookaheadSearch.FirstAction first, final long seed, final LookaheadSearch.LeafProbe probe) {
@@ -992,6 +1014,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
+                budgetStop(first);
                 try {
                     return client().decide(p, cfg.playoutSample);
                 } catch (IOException | RuntimeException e) {
@@ -1036,6 +1059,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
                 try {
                     final RlSearchClient.Scores s;
+                    budgetStop(first);
                     try {
                         s = client().score(RlWire.encodeDecide(frame.get()));
                     } catch (IOException | RuntimeException e) {
@@ -1070,6 +1094,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                         k -> Collections.synchronizedList(new ArrayList<>()));
                 rs.window = ChoiceWindow.recorder(choiceFams, payload -> {
                     final RlSearchClient.Scores ps;
+                    budgetStop(first);
                     try {
                         ps = client().score(payload);
                     } catch (IOException | RuntimeException e) {
