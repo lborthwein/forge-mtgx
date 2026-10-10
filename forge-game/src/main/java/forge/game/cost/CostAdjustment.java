@@ -89,6 +89,76 @@ public class CostAdjustment {
         return result.toManaCost();
     }
 
+    /**
+     * A LOWER BOUND on the mana {@code sa} will cost, for the human priority controls'
+     * {@code payable} flag (castable-1010): when even this price cannot be paid, the real one
+     * cannot. Null means unknown, never unpayable. X counts as 0. A read like
+     * {@link #presentationManaCost}: no controller, no choice, no copy of {@code sa}.
+     *
+     * <p>Unlike {@link #presentationManaCost}, a cost static that cannot apply to {@code sa}
+     * is ignored instead of making the price unknown. Zirda, the Dawnwaker's "abilities you
+     * activate cost {2} less (not below one mana)" made every price unknown while Zirda was on
+     * the battlefield or in hand (live reports 2026-10-10). Each step can only lower the price:
+     * <ul>
+     *   <li>a raise is applied only when it surely applies now by a fixed amount; any other is
+     *       skipped;</li>
+     *   <li>a reduction that may apply once targets are chosen counts as applying, and each
+     *       reduction is taken as large as its own floor allows against the whole cost, which
+     *       is at least what any order of several gives;</li>
+     *   <li>a reduction whose size or colour is a choice (UpTo, Color, Relative) makes the price
+     *       unknown.</li>
+     * </ul>
+     * Delve, convoke and improvise are payments, not prices: the caller counts them as mana.</p>
+     */
+    public static ManaCost presentationManaCostLowerBound(final SpellAbility sa) {
+        if (sa == null || sa.getActivatingPlayer() == null || sa.getPayCosts() == null
+                || sa.isCastFaceDown() || sa.isBestow() || sa.hasParam("ReduceCost")) return null;
+        final Card host = sa.getHostCard();
+        final Game game = sa.getActivatingPlayer().getGame();
+        final CardCollection active = new CardCollection(game.getCardsIn(ZoneType.Battlefield));
+        active.addAll(game.getCardsIn(ZoneType.Stack));
+        active.addAll(game.getCardsIn(ZoneType.Command));
+        if (!active.contains(host)) active.add(host);
+        final List<StaticAbility> raises = Lists.newArrayList();
+        final List<StaticAbility> reduces = Lists.newArrayList();
+        final List<StaticAbility> sets = Lists.newArrayList();
+        for (Card card : active) {
+            for (StaticAbility st : card.getStaticAbilities()) {
+                if (st.checkMode(StaticAbilityMode.RaiseCost)) {
+                    // applyRaiseCostAbility checks the requirement itself.
+                    if (!st.hasParam("ValidTarget") && !st.hasParam("Relative") && (st.hasParam("ForEachShard")
+                            || !st.hasParam("Amount") || StringUtils.isNumeric(st.getParam("Amount")))) {
+                        raises.add(st);
+                    }
+                } else if (st.checkMode(StaticAbilityMode.ReduceCost)) {
+                    if (!checkRequirementBeforeTargets(sa, st)) continue;
+                    if (st.hasParam("UpTo") || st.hasParam("Color") || st.hasParam("Relative")) return null;
+                    reduces.add(st);
+                } else if (st.checkMode(StaticAbilityMode.SetCost)) {
+                    // applySetCostAbility checks the requirement itself; a target-dependent set may not apply.
+                    if (st.hasParam("ValidTarget")) continue;
+                    if (!StringUtils.isNumeric(st.getParamOrDefault("Amount", ""))) return null;
+                    sets.add(st);
+                }
+            }
+        }
+        final Cost adjusted = sa.getPayCosts().copy();
+        for (StaticAbility st : raises) applyRaiseCostAbility(adjusted, sa, st);
+        final CostPartMana mana = adjusted.getCostMana();
+        if (mana == null) return ManaCost.ZERO;
+        final ManaCostBeingPaid result = new ManaCostBeingPaid(mana.getMana());
+        int generic = 0;
+        for (StaticAbility st : reduces) generic += applyReduceCostAbility(st, sa, result, 0);
+        result.decreaseGenericMana(generic);
+        if (sa.isSpell()) {
+            for (String pip : sa.getPipsToReduce()) {
+                result.decreaseShard(ManaCostShard.parseNonGeneric(pip), 1);
+            }
+        }
+        for (StaticAbility st : sets) applySetCostAbility(st, sa, result);
+        return result.toManaCost();
+    }
+
     public static Cost adjust(final Cost cost, final SpellAbility sa, boolean effect) {
         if (sa.isTrigger() || cost == null || effect) {
             sa.setMaxWaterbend(cost);
@@ -567,6 +637,11 @@ public class CostAdjustment {
     }    
 
     private static boolean checkRequirement(final SpellAbility sa, final StaticAbility st) {
+        return checkRequirementBeforeTargets(sa, st) && checkTargetRequirement(sa, st);
+    }
+
+    /** {@link #checkRequirement} without its ValidTarget clause: whether {@code st} may apply once targets are chosen. */
+    private static boolean checkRequirementBeforeTargets(final SpellAbility sa, final StaticAbility st) {
         if (!st.checkConditions()) {
             return false;
         }
@@ -642,6 +717,13 @@ public class CostAdjustment {
                 }
             }
         }
+        return true;
+    }
+
+    /** {@link #checkRequirement}'s ValidTarget clause. */
+    private static boolean checkTargetRequirement(final SpellAbility sa, final StaticAbility st) {
+        final Card hostCard = st.getHostCard();
+        final Player controller = hostCard.getController();
         if (st.hasParam("ValidTarget")) {
             SpellAbility curSa = sa;
             boolean targetValid = false;
