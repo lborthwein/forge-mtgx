@@ -137,7 +137,9 @@ public class RlObsV2GamesTest {
                 identityOnly[i] = true;
                 final int id = o.oSeenIds.get(j++);
                 if (!seen.contains(id) && (oracle == null || !oracle.everObserved(s, id))) {
-                    violation("o_seen card never seen face up: " + g.findById(id));
+                    final Card gone = g.findById(id);
+                    violation("o_seen card never seen face up: id " + id + " tok_card " + f.tokCard[i] + " "
+                            + (gone == null ? "(no longer in the game)" : gone + " in " + gone.getZone()));
                 }
                 final Card c = g.findById(id);
                 if (c != null && c.getOwner() == seat) {

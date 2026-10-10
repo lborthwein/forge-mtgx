@@ -1,16 +1,20 @@
 package forge.bench.rl;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import com.google.common.eventbus.Subscribe;
 
 import forge.bench.BenchSession;
 import forge.game.Game;
 import forge.game.card.Card;
+import forge.game.card.CardView;
 import forge.game.event.GameEventCardChangeZone;
 import forge.game.event.GameEventShuffle;
+import forge.game.event.GameEventSpellAbilityCast;
 import forge.game.player.Player;
 import forge.game.zone.ZoneType;
 
@@ -25,6 +29,10 @@ import forge.game.zone.ZoneType;
  * which card it was, every card of that hand is hidden from the seat again, because it cannot tell which one left.
  * "Did not see" is decided once Forge has finished the move (a foretold card is exiled face up, then turned face down):
  * at the next check or resolution, the moved card must be face up where the seat can see it.
+ *
+ * <p>o_seen (lane obsv2-oracle-1010): an object put on the stack face up, where the seat can see it, was seen. A copy of
+ * a spell (Krark, the Thumbless; storm; Twincast) is created on the stack and ceases to exist when it leaves, with no
+ * zone change either way, so only the cast event shows it. This feeds {@link #everObserved} only.
  */
 public final class RlKnowledgeOracle implements BenchSession.KnowledgeObserver {
     private final Game game;
@@ -37,6 +45,9 @@ public final class RlKnowledgeOracle implements BenchSession.KnowledgeObserver {
     private final long[][] handBlur = new long[2][2];
     /** Hand departures whose visibility to a seat is settled at the next check or resolution: {seat, card id, owner, clock}. */
     private final List<long[]> pending = new java.util.ArrayList<>();
+    /** Per seat: ids of objects the seat saw face up on the stack as they were put there (o_seen only). */
+    @SuppressWarnings("unchecked")
+    private final Set<Integer>[] seenOnStack = new Set[] {new HashSet<>(), new HashSet<>()};
 
     public RlKnowledgeOracle(final Game game) {
         this.game = game;
@@ -76,9 +87,12 @@ public final class RlKnowledgeOracle implements BenchSession.KnowledgeObserver {
         return true;
     }
 
-    /** obs-v2 o_seen: has seat {@code s} ever observed this card (a reveal, its own look, or a public / own-hand origin)? */
+    /**
+     * obs-v2 o_seen: has seat {@code s} ever observed this card (a reveal, its own look, a public / own-hand origin, or
+     * face up on the stack as it was put there)?
+     */
     public boolean everObserved(final int s, final int cardId) {
-        return observed[s].containsKey(cardId);
+        return observed[s].containsKey(cardId) || seenOnStack[s].contains(cardId);
     }
 
     private void settle() {
@@ -97,6 +111,21 @@ public final class RlKnowledgeOracle implements BenchSession.KnowledgeObserver {
     @Subscribe
     public void resolved(final forge.game.event.GameEventSpellResolved ev) {
         settle();
+    }
+
+    /** A spell or ability put on the stack: its source, if it is there face up where the seat can see it, was seen. */
+    @Subscribe
+    public void cast(final GameEventSpellAbilityCast ev) {
+        final CardView hv = ev.sa() == null ? null : ev.sa().getHostCard();
+        final Card c = hv == null ? null : game.findByView(hv);
+        if (c == null || c.isFaceDown() || !c.isInZone(ZoneType.Stack)) {
+            return;
+        }
+        for (int s = 0; s < 2; s++) {
+            if (c.getView().canBeShownTo(game.getRegisteredPlayers().get(s).getView())) {
+                seenOnStack[s].add(c.getId());
+            }
+        }
     }
 
     @Override
