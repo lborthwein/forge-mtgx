@@ -250,8 +250,100 @@ public class AiCostDecision extends CostDecisionMakerBase {
             return null;
         } else {
             CardCollectionView chosen = ComputerUtil.chooseExileFrom(player, cost, source, c, ability, isEffect());
+            chosen = preferNonPieceExile(cost, c, chosen);
             return null == chosen ? null : PaymentDecision.card(chosen);
         }
+    }
+
+    /** v63 C3 - the gate pieces of the cube-combo policy's three card-based
+     * families. A literal set here, deliberately and temporarily: the plans
+     * that own these names ({@code CubeBreachPlan}, {@code CubeDoomsdayPlan})
+     * are outside this increment's file allowance, and the two v49
+     * {@code discardProtectedCards} statics answer only the COMPLETE-gate case
+     * while this rule also has to cover the ONE-SHORT case - the Thassa's
+     * Oracle of {@code doom-16702353-s0} is named by no existing predicate.
+     * Follow-up: derive this union from each plan's own zone definitions in
+     * {@code CubeComboAi.protectedPieceNames}. */
+    private static final Set<String> CUBE_GATE_PIECES = Set.of(
+            "Doomsday", "Thassa's Oracle",
+            "Yawgmoth's Will", "Tendrils of Agony",
+            "Underworld Breach", "Brain Freeze",
+            "Black Lotus", "Lion's Eye Diamond", "Lotus Petal");
+
+    /** v63 C3, from the v60 Doomsday/Storm loss diagnosis section 5. Our own
+     * Force of Will exiled Thassa's Oracle twice and Brain Freeze once in 64
+     * games; in the two Doomsday games that exile closed EVERY route for the
+     * rest of the game, because {@code availableInOwnDeck} does not count
+     * exile, and produced fourteen decline passes that read, misleadingly, as
+     * {@code no-pile-route}.
+     *
+     * <p>This is a PREFERENCE BETWEEN LEGAL PITCHES and never a refusal to pay:
+     * the ordinary AI's own decision is computed first and returned untouched
+     * unless it holds a piece a plan is relying on, and when no unprotected
+     * alternative exists the ordinary decision stands and native rules proceed.
+     * Same shape and same narrowness as the shipped v49
+     * {@code discardProtectedCards} swap.</p>
+     *
+     * <p>Every clause is a restriction, and all of them must hold: the payer is
+     * a cube-combo seat, the ability is ours, the cost shape is an exile of a
+     * card from OUR OWN hand that is not the source itself (exactly Force of
+     * Will's {@code ExileFromHand<1/Card.Blue+Other>} alternative cost - the
+     * Breach escape cost exiles from the graveyard and never reaches this), and
+     * a family is currently exactly one piece short or a Storm/Breach gate is
+     * currently complete. A gate that is already TWO short is deliberately not
+     * defended, and a piece with a redundant copy in another of our own visible
+     * zones is not protected.</p>
+     *
+     * <p>Own hand, own graveyard and own battlefield only; no opponent zone and
+     * no library contents are read.</p> */
+    private CardCollectionView preferNonPieceExile(CostExile cost, int amount, CardCollectionView ordinary) {
+        if (ordinary == null || ordinary.isEmpty() || !CubeComboAi.enabled(player)) return ordinary;
+        if (cost.from == null || cost.from.size() != 1 || !cost.getFrom().contains(ZoneType.Hand)
+                || cost.zoneRestriction != 1 || cost.payCostFromSource()) return ordinary;
+        if (ability == null || ability.getActivatingPlayer() != player) return ordinary;
+        Set<String> protectedNames = CubeComboAi.probeIds(player, this::cubeProtectedPitchNames);
+        if (protectedNames.isEmpty()) return ordinary;
+        CardCollection kept = new CardCollection();
+        for (Card card : ordinary)
+            if (card.isInZone(ZoneType.Hand) && protectedNames.contains(card.getName())) kept.add(card);
+        if (kept.isEmpty()) return ordinary;
+        // Rebuild the native candidate list exactly as ComputerUtil.chooseExileFrom
+        // does, drop the protected cards, and re-run the identical native
+        // chooser on the remainder, so the choice among the alternatives is
+        // still the ordinary AI's and no random draw moves.
+        CardCollection valid = new CardCollection(player.getCardsIn(cost.from));
+        valid = CardLists.getValidCards(valid, cost.getType().split(";"), source.getController(), source, ability);
+        CardCollection alternatives = new CardCollection();
+        for (Card card : valid) if (!protectedNames.contains(card.getName())) alternatives.add(card);
+        if (alternatives.size() < amount) return ordinary;
+        CardCollection swapped = ComputerUtil.chooseExileFromList(player, alternatives, source, amount, ability, isEffect());
+        if (swapped == null || swapped.size() < amount) return ordinary;
+        for (Card card : kept)
+            CubeComboAi.receipt("CUBE_COMBO_PITCH kept=" + card.getName().replace(' ', '_')
+                    + " exiled=" + swapped.getFirst().getName().replace(' ', '_')
+                    + " source=" + source.getName().replace(' ', '_'));
+        return swapped;
+    }
+
+    /** The names in OUR OWN hand this pitch must not take: a gate piece of a
+     * card-based family, of which this is our last own-visible copy, while some
+     * family is exactly one piece short or a Storm/Breach gate is complete.
+     * Empty in every other case, which is the common one. */
+    private Set<String> cubeProtectedPitchNames() {
+        boolean oneShort = !CubeComboAi.planCompletingNames(player).isEmpty();
+        boolean gateComplete = !CubeStormPlan.discardProtectedCards(player).isEmpty()
+                || !CubeBreachPlan.discardProtectedCards(player).isEmpty();
+        if (!oneShort && !gateComplete) return Collections.emptySet();
+        Set<String> names = new HashSet<>();
+        for (Card card : player.getCardsIn(ZoneType.Hand)) {
+            if (card.isFaceDown() || !CUBE_GATE_PIECES.contains(card.getName())) continue;
+            int copies = 0;
+            for (ZoneType zone : List.of(ZoneType.Hand, ZoneType.Graveyard, ZoneType.Battlefield))
+                for (Card other : player.getCardsIn(zone))
+                    if (!other.isFaceDown() && other.getName().equals(card.getName())) copies++;
+            if (copies <= 1) names.add(card.getName());
+        }
+        return names;
     }
 
     @Override
@@ -529,7 +621,59 @@ public class AiCostDecision extends CostDecisionMakerBase {
 
         final AiController aic = ((PlayerControllerAi)player.getController()).getAi();
         CardCollectionView list = aic.chooseSacrificeType(cost.getType(), ability, isEffect(), c, null);
+        list = preferSpareTinkerSacrifice(cost, c, list);
         return list == null ? null : PaymentDecision.card(list);
+    }
+
+    /** v79, from {@code 2026-09-12-tinker-v71}'s registered follow-up 1. The
+     * artifact our own seat spends to pay Tinker's additional
+     * {@code Sac<1/Artifact>} cost.
+     *
+     * <p>{@code tinker.txt}'s own {@code SVar:AIPreference:SacCost$} excludes
+     * Lotus Petal BY NAME from its {@code Artifact.cmcEQ0} tier and the Petal
+     * matches no later tier, so on a board of Lotus Petal + Sensei's Divining
+     * Top the native payment reaches the {@code cmcEQ1} tier and takes the
+     * TOP - a piece {@code CubeTopPlan} owns - with the Petal untouched. v71
+     * could only REFUSE that cast ({@code tinker:sac-piece}) and so threw the
+     * whole Tinker away; this chooses the Petal instead.</p>
+     *
+     * <p><b>Same shape as v63's {@link #preferNonPieceExile}, deliberately.</b>
+     * This is a PREFERENCE BETWEEN LEGAL PAYMENTS and never a refusal to pay:
+     * the ordinary AI's own decision is computed FIRST, above, and is returned
+     * untouched unless it holds a card a plan is relying on; when no admissible
+     * alternative exists the ordinary decision stands and native rules proceed.
+     * A preference hook must never make a cast the engine has already begun
+     * unpayable - so {@code null} from
+     * {@link CubeBombPlan#preferSpareArtifact} degrades to Default here rather
+     * than refusing. That state is unreachable while the forecast and the
+     * payment agree, because {@code CubeBombPlan.declineArtifactFetch} calls
+     * the SAME method and refuses the cast when it returns null.</p>
+     *
+     * <p>Scope: {@link CubeBombPlan#ownsTinkerSacrifice} - a cube-combo seat,
+     * OUR OWN spell, v71's printed {@code tinkerShape}, a cost part with the same
+     * printed type and amount as that spell's own artifact sacrifice (NOT object
+     * identity - the payment is handed a COPY; see that method's Amendment 1),
+     * and the bomb plan's value floor passing, which is exactly the state in
+     * which that plan's veto path examined this cast and let it through. Gated
+     * on {@code CubeComboAi.enabled} first, so the Default arm is byte-identical.</p>
+     *
+     * <p>Own battlefield only; no opponent zone is read, and the payload test
+     * reads our own library exactly as {@code CubeBombPlan}'s v71 value floor
+     * already does.</p> */
+    private CardCollectionView preferSpareTinkerSacrifice(CostSacrifice cost, int amount, CardCollectionView ordinary) {
+        if (ordinary == null || ordinary.isEmpty() || !CubeComboAi.enabled(player)) return ordinary;
+        if (!CubeComboAi.probeIds(player, () -> CubeBombPlan.ownsTinkerSacrifice(player, ability, cost))) return ordinary;
+        CardCollectionView swapped = CubeComboAi.probeIds(player,
+                () -> CubeBombPlan.preferSpareArtifact(player, ability, cost, amount, isEffect(), ordinary));
+        // null: no admissible payment. Never a refusal here - see above.
+        // identity: the ordinary decision was already admissible and stands, so
+        // no receipt is printed and the log cannot move.
+        if (swapped == null || swapped == ordinary) return ordinary;
+        for (Card card : ordinary)
+            CubeComboAi.receipt("CUBE_COMBO_SACRIFICE kept=" + card.getName().replace(' ', '_')
+                    + " spent=" + swapped.getFirst().getName().replace(' ', '_')
+                    + " source=" + source.getName().replace(' ', '_'));
+        return swapped;
     }
 
     @Override

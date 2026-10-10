@@ -52,6 +52,7 @@ import java.util.Map;
 public class ControlGainAi extends SpellAbilityAi {
     @Override
     protected AiAbilityDecision canPlay(final Player ai, final SpellAbility sa) {
+        if (CubeComboAi.selectConscriptsSource(ai, sa)) return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         final List<String> lose = Lists.newArrayList();
 
         if (sa.hasParam("LoseControl")) {
@@ -258,6 +259,7 @@ public class ControlGainAi extends SpellAbilityAi {
 
     @Override
     protected AiAbilityDecision doTriggerNoCost(Player ai, SpellAbility sa, boolean mandatory) {
+        if (CubeComboAi.selectConscriptsSource(ai, sa)) return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         if (!sa.usesTargeting()) {
             if (mandatory) {
                 return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
@@ -286,6 +288,7 @@ public class ControlGainAi extends SpellAbilityAi {
 
     @Override
     public AiAbilityDecision chkDrawback(final Player ai, SpellAbility sa) {
+        if (CubeComboAi.selectConscriptsSource(ai, sa)) return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         final Game game = ai.getGame();
 
         // Special card logic that is processed elsewhere

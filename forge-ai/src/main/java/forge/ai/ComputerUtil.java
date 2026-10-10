@@ -79,6 +79,15 @@ import java.util.stream.Collectors;
 public class ComputerUtil {
 
     public static boolean handlePlayingSpellAbility(final Player ai, SpellAbility sa, Consumer<SpellAbility> chooseTargets) {
+        return handlePlayingSpellAbility(ai, sa, chooseTargets, ability -> AiCostDecision.forPayment(ai, ability, false));
+    }
+
+    /** Same rules execution with an explicit cost-decision provider. Default AI's
+     * existing entry point above is unchanged; external controllers need not adopt
+     * its strategic cost preferences to execute a selected legal action.
+     */
+    public static boolean handlePlayingSpellAbility(final Player ai, SpellAbility sa, Consumer<SpellAbility> chooseTargets,
+            java.util.function.Function<SpellAbility, CostDecisionMakerBase> costDecisions) {
         final Card source = sa.getHostCard();
         final Game game = source.getGame();
         final Card host = sa.getHostCard();
@@ -136,7 +145,7 @@ public class ComputerUtil {
         game.getStack().freezeStack(sa);
 
         final CostPayment pay = new CostPayment(cost, sa);
-        if (pay.payComputerCosts(AiCostDecision.forPayment(ai, sa, false))) {
+        if (pay.payComputerCosts(costDecisions.apply(sa))) {
             AiLegalActivation.logIfRefusedAfterPayment(game, sa);
             game.getStack().addAndUnfreeze(sa);
             if (sa.getSplicedCards() != null && !sa.getSplicedCards().isEmpty()) {

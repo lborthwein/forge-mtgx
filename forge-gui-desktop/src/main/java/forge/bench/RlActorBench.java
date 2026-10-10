@@ -141,7 +141,8 @@ public final class RlActorBench {
         int obsSchema = 1;
         /**
          * S1 (lane s1-search-1007; null = off, the default, and nothing changes): the look-ahead over the RL seats' own
-         * priority decisions ({@link RlSearch.Config}), eval and train modes, obs-v1 only.
+         * priority decisions ({@link RlSearch.Config}), eval and train modes, in the actor's observation schema (obs-v1,
+         * or obs-v2 since lane search-v2-1009; a spec {@code obs} pin must equal {@code obsSchema}).
          */
         RlSearch.Config search = null;
         /**
@@ -179,8 +180,8 @@ public final class RlActorBench {
         }
         if (o.has("search") && o.get("search").isJsonObject()) {
             c.search = RlSearch.Config.parse(o.getAsJsonObject("search"));
-            if (c.obsSchema != 1) {
-                throw new IllegalArgumentException("search needs obsSchema 1");
+            if (c.search.obs != 0 && c.search.obs != c.obsSchema) {
+                throw new IllegalArgumentException("search.obs " + c.search.obs + " != obsSchema " + c.obsSchema);
             }
         }
         if (o.has("k8") && !o.get("k8").isJsonNull()) {
@@ -437,7 +438,8 @@ public final class RlActorBench {
                     return out;
                 }
                 final List<String> shipped = forge.ai.AiProfileUtil.getAvailableProfiles();
-                if (!shipped.contains(aiProfileOf(ctl[s]))) {
+                // combo-ai-port-1009: a built-in profile (forge:CubeCombo, the cube combo policy) is accepted too
+                if (!forge.ai.AiProfileUtil.isKnownProfile(aiProfileOf(ctl[s]))) {
                     out.guardError = "controller " + ctl[s] + ": AI profile '" + aiProfileOf(ctl[s])
                             + "' is not shipped (available " + shipped + ")";
                     return out;
@@ -471,6 +473,25 @@ public final class RlActorBench {
         if (seeding != null && "eval".equals(mode)) {
             out.guardError = "seeding is a TRAIN curriculum: not allowed in eval mode";
             return out;
+        }
+        // r3-distill-1010 (R3-CM label games): the look-ahead for ONE seat (an RL seat), or -1 (absent: every RL seat)
+        final int searchSeat;
+        if (g.has("search_seat") && !g.get("search_seat").isJsonNull()) {
+            searchSeat = g.get("search_seat").getAsInt();
+            if (searchSeat != 0 && searchSeat != 1) {
+                out.guardError = "search_seat must be 0 or 1, not " + searchSeat;
+                return out;
+            }
+            if (cfg.search == null) {
+                out.guardError = "search_seat without the actor's search spec";
+                return out;
+            }
+            if (RlSeat.roleOf(ctl[searchSeat]) != RlSeat.Role.RL) {
+                out.guardError = "search_seat " + searchSeat + " is not an RL seat (" + ctl[searchSeat] + ")";
+                return out;
+            }
+        } else {
+            searchSeat = -1;
         }
 
         final JsonRpcChannel ch = new JsonRpcChannel(InputStream.nullInputStream(), OutputStream.nullOutputStream());
@@ -604,7 +625,9 @@ public final class RlActorBench {
             out.knowledge = know;
             if (cfg.search != null && !"replay".equals(mode) && !"record".equals(mode)) {
                 // S1: the look-ahead over the RL seats' own priority decisions (one per game; world seeds from the GAME seed)
-                search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId);
+                search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId, obsVersion);
+                search.searchSeat = searchSeat;     // r3-distill-1010: -1 unless the GAME names one
+                seat.searchSeat = searchSeat;
                 seat.search = search;
                 out.search = search;
             }
