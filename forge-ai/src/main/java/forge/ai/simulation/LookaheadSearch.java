@@ -37,6 +37,8 @@ import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -202,8 +204,11 @@ public final class LookaheadSearch {
         public int modelTimeoutMs = 2000;
         /**
          * Wall-clock budget per searched decision, in ms (0 = none, the default: reads and gates are
-         * unchanged). When a search runs past it, its play-outs stop at their next main-loop step and the
-         * seat plays Forge AI's own answer ("capped"). Timing-dependent by design (interactive play only).
+         * unchanged). When a search runs past it, its play-outs stop at their next main-loop step (a policy
+         * play-out seat also at its next service request, {@link FirstAction#overBudget}) and the seat plays
+         * Forge AI's own answer, or the policy's ("capped"). A hard wall bounds the wait for the play-outs at
+         * the budget plus {@link #WALL_GRACE_MS} (lane sc-wallguard-1009). Timing-dependent by design
+         * (interactive play only).
          */
         public long budgetMs = 0L;
         /** Interactive play: one JSON line per searched decision on stderr ({@code [lookahead-decision] {...}}). */
@@ -466,6 +471,12 @@ public final class LookaheadSearch {
         public long combatNanos;
         /** Wall budget: searched decisions that ran past it (and played Forge's answer); play-outs stopped by it. */
         public long capped, rolloutsAborted;
+        /**
+         * Hard wall (lane sc-wallguard-1009): searched decisions whose wait for their play-outs the wall cut short
+         * (budget + {@link #WALL_GRACE_MS}), and the play-outs still running at the cut (told to stop; their results are
+         * never read). Both 0 unless the wall fired.
+         */
+        public long wallCuts, wallStragglers;
         /** C1: priority decisions with a non-empty stack; of those, refused (by reason), searched, departed. */
         public long stackDecisions, stackUnsupported, stackSearched, stackDeparted;
         public final Map<String, Long> stackWhy = new TreeMap<>();
@@ -636,6 +647,11 @@ public final class LookaheadSearch {
             if (capped > 0 || rolloutsAborted > 0) {
                 o.addProperty("capped", capped);
                 o.addProperty("rolloutsAborted", rolloutsAborted);
+                if (wallCuts > 0) {
+                    // sc-wallguard-1009: only when the wall fired, so a capped game's JSON is otherwise unchanged
+                    o.addProperty("wallCuts", wallCuts);
+                    o.addProperty("wallStragglers", wallStragglers);
+                }
             }
             o.addProperty("attackDecisions", attackDecisions);
             o.addProperty("attackSearched", attackSearched);
@@ -993,8 +1009,16 @@ public final class LookaheadSearch {
     private int departuresThisTurn = 0;
     private final Map<String, Integer> departureCounts = new TreeMap<>();
     private boolean fidelityArmed = true;
-    /** The current searched decision's wall deadline (System.nanoTime), 0 = none. Read by play-outs on any thread. */
-    private volatile long deadline = 0L;
+    /**
+     * The current searched decision's wall budget (null = none: no budget, or no decision being searched). Each
+     * decision gets its own {@link Budget}; a play-out holds the one of the decision it belongs to.
+     */
+    private volatile Budget budget = null;
+    /**
+     * Tests only (null by default, and then nothing is called): run on the play-out's thread before each main-loop step
+     * of {@link #play}. A hook that blocks stands for a play-out stuck inside one step.
+     */
+    java.util.function.Consumer<Game> playoutStepHook = null;
     /** Forge AI's own time for the current decision (set by the controller before {@link #decide}), for the decision log. */
     private long forgeNanos = -1L;
 
@@ -1022,6 +1046,8 @@ public final class LookaheadSearch {
         public int candIndex = -1;
         public int world = -1;
         public boolean probe = false;
+        /** Lane sc-wallguard-1009: the budget of the decision this play-out belongs to (null = none). */
+        Budget budget;
 
         FirstAction(Cand c) {
             this.pass = c.pass;
@@ -1029,6 +1055,16 @@ public final class LookaheadSearch {
             this.desc = c.desc;
             this.land = c.land;
             this.schedule = c.schedule;
+        }
+
+        /**
+         * Lane sc-wallguard-1009: this play-out's decision is past its wall budget (or the wall stopped it). A policy
+         * play-out seat checks it before every service request and stops the play-out there (the play-out then counts
+         * as stopped by the budget); always false without a budget.
+         */
+        public boolean overBudget() {
+            final Budget b = budget;
+            return b != null && b.over();
         }
 
         /** The ability of {@code sa}'s menu entry is this action (host id, land flag, description). */
@@ -1252,8 +1288,52 @@ public final class LookaheadSearch {
     }
 
     private boolean pastDeadline() {
-        final long d = deadline;
-        return d != 0L && System.nanoTime() - d > 0;
+        final Budget b = budget;
+        return b != null && b.over();
+    }
+
+    /**
+     * The hard wall's grace (lane sc-wallguard-1009): with a budget (and a pool: threads > 1), the decision waits for
+     * its play-outs at most until the deadline plus this, then plays its default ("capped"). The cooperative stops (a
+     * play-out's next main-loop step, a policy seat's next service request) end a play-out within one step or one
+     * request of the deadline, so the wall acts only on a play-out that does neither for a second (a loop inside one
+     * Forge step that sends no request, or a service request that hangs). 1 s is ~40x the service's DECIDE p99 on the
+     * Studio (13-28 ms) and well above an ordinary step, so the cooperative stops end first in every case seen; and it
+     * keeps a player's worst wait for one searched decision at the budget + 1 s.
+     */
+    public static final long WALL_GRACE_MS = 1000L;
+
+    /**
+     * One searched decision's wall budget (lane sc-wallguard-1009): its deadline (System.nanoTime) and a stop flag the
+     * hard wall sets. Play-outs read the budget of their own decision, so a play-out still running after its decision
+     * was cut (a straggler) keeps seeing its own stop, never the next decision's budget.
+     */
+    public static final class Budget {
+        final long deadline;
+        private volatile boolean stopped = false;
+        /** Set by the decision thread when the wall cut its wait (read after the decision). */
+        volatile boolean wallCut = false;
+
+        Budget(long deadline) {
+            this.deadline = deadline;
+        }
+
+        /** Past the deadline, or stopped by the wall. */
+        public boolean over() {
+            return stopped || System.nanoTime() - deadline > 0;
+        }
+
+        void stop() {
+            stopped = true;
+        }
+    }
+
+    /**
+     * The current searched decision is past its wall budget (false without a budget or outside a decision). Play-outs
+     * read their own decision's budget instead ({@link FirstAction#overBudget}).
+     */
+    public boolean overBudget() {
+        return pastDeadline();
     }
 
     public void shutdown() {
@@ -1299,7 +1379,7 @@ public final class LookaheadSearch {
         }
 
         final long t0 = System.nanoTime();
-        deadline = cfg.budgetMs > 0 ? t0 + cfg.budgetMs * 1_000_000L : 0L;
+        budget = cfg.budgetMs > 0 ? new Budget(t0 + cfg.budgetMs * 1_000_000L) : null;
         try {
             return decideSearched(ctrl, def, live, me, index, onStack, ph, turn, t0);
         } catch (RuntimeException e) {
@@ -1314,7 +1394,7 @@ public final class LookaheadSearch {
             }
             return def;
         } finally {
-            deadline = 0L;
+            budget = null;
             forgeNanos = -1L;
         }
     }
@@ -1593,6 +1673,11 @@ public final class LookaheadSearch {
                 d.addProperty("forgeMs", Math.round(forgeNanos / 1e5) / 10.0);
             }
             d.addProperty("capped", overBudget);
+            final Budget wb = budget;
+            if (wb != null && wb.wallCut) {
+                // sc-wallguard-1009: only when the hard wall cut the wait, so the line is otherwise unchanged
+                d.addProperty("wall", true);
+            }
             d.addProperty("outcome", outcome);
             d.addProperty("departed", "departed".equals(outcome));
             d.addProperty("searched", stats.searched);
@@ -1659,6 +1744,8 @@ public final class LookaheadSearch {
          */
         public int[] macro = new int[0];
         public int chosenMacro = -1;
+        /** Lane sc-wallguard-1009: the hard wall cut this decision's wait for its play-outs (outcome "capped"). */
+        public boolean wall;
     }
 
     /**
@@ -1753,7 +1840,8 @@ public final class LookaheadSearch {
         // the decision's account: the pool threads' CPU and every Forge AI eval thread the decision starts (measurement)
         final java.util.concurrent.atomic.AtomicLong[] prevAcc = forge.ai.CpuAccount.get();
         forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
-        deadline = cfg.budgetMs > 0 ? t0 + cfg.budgetMs * 1_000_000L : 0L;
+        final Budget b = cfg.budgetMs > 0 ? new Budget(t0 + cfg.budgetMs * 1_000_000L) : null;
+        budget = b;
         boolean searched = false;
         try {
             searched = decideGiven0(live, me, given, Math.max(1, breadth), index, onStack, ph, turn, res, expander);
@@ -1766,7 +1854,10 @@ public final class LookaheadSearch {
                 e.printStackTrace();
             }
         } finally {
-            deadline = 0L;
+            budget = null;
+            if (b != null && b.wallCut) {
+                res.wall = true;
+            }
             poolCpu = null;
             forge.ai.CpuAccount.set(prevAcc);
             final long dt = System.nanoTime() - t0;
@@ -2528,6 +2619,20 @@ public final class LookaheadSearch {
         return a;
     }
 
+    /**
+     * sc-wallguard-1009: {@link #record} unless the decision's wall sealed its arrays (then nothing is written and false
+     * is returned: the play-out's decision was already cut).
+     */
+    private boolean record(double[][] values, Rollout[][] outs, boolean[] ok, int cc, int ww, Rollout r, boolean[] sealed) {
+        synchronized (values) {
+            if (sealed[0]) {
+                return false;
+            }
+            record(values, outs, ok, cc, ww, r);
+            return true;
+        }
+    }
+
     private void record(double[][] values, Rollout[][] outs, boolean[] ok, int cc, int ww, Rollout r) {
         synchronized (values) {
             values[cc][ww] = r.value;
@@ -2990,6 +3095,9 @@ public final class LookaheadSearch {
         }
         final List<Runnable> tasks = new ArrayList<>();
         final boolean keyed = cfg.dedup || cfg.dedupVerify;
+        // sc-wallguard-1009: once the hard wall cut the wait, a play-out still running (a straggler) never writes into
+        // this decision's arrays or the counters (set and read under the values lock)
+        final boolean[] sealed = {false};
         for (int w = 0; w < k; w++) {
             if (keyed) {
                 // One task per world: its candidates in index order, so which play-out may reuse which is fixed.
@@ -3000,7 +3108,9 @@ public final class LookaheadSearch {
                         final Rollout r = prep[cc][ww] != null ? play(prep[cc][ww], null, memo, cc)
                                 : outs[cc][ww] != null ? outs[cc][ww] : aborted();
                         prep[cc][ww] = null;
-                        record(values, outs, ok, cc, ww, r);
+                        if (!record(values, outs, ok, cc, ww, r, sealed)) {
+                            return;
+                        }
                     }
                 });
             } else {
@@ -3014,7 +3124,7 @@ public final class LookaheadSearch {
                     tasks.add(() -> {
                         Rollout r = play(prep[cc][ww], null);
                         prep[cc][ww] = null;
-                        record(values, outs, ok, cc, ww, r);
+                        record(values, outs, ok, cc, ww, r, sealed);
                     });
                 }
             }
@@ -3026,7 +3136,28 @@ public final class LookaheadSearch {
                 });
             }
         }
-        runAll(tasks);
+        final Budget wall = budget;
+        boolean waited = false;
+        try {
+            waited = runAll(tasks, wall);
+        } finally {
+            if (!waited && wall != null) {
+                // sc-wallguard-1009: the hard wall cut the wait (or, with a budget, a worker failed). Every play-out
+                // without a result is stopped by the budget (its decision is capped); from here on no straggler writes
+                // into these arrays or the counters.
+                wall.stop();
+                synchronized (values) {
+                    sealed[0] = true;
+                    for (int c = 0; c < n; c++) {
+                        for (int w = 0; w < k; w++) {
+                            if (outs[c][w] == null) {
+                                record(values, outs, ok, c, w, aborted());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         int aborted = 0;
         for (Rollout[] row : outs) {
             for (Rollout r : row) {
@@ -3138,15 +3269,36 @@ public final class LookaheadSearch {
     }
 
     private void runAll(List<Runnable> tasks) {
+        runAll(tasks, null);
+    }
+
+    /**
+     * Run the tasks (on the pool when threads > 1) and wait for them. With a {@code wall} budget and a pool
+     * (sc-wallguard-1009), the wait ends at the budget's deadline plus {@link #WALL_GRACE_MS} at the latest: then the
+     * budget is stopped (every play-out of the decision sees it at its next step or service request), the tasks not yet
+     * started are cancelled, and false is returned; the caller must not let a task that is still running write into what
+     * it reads. Before the wall (and always without a budget, or without a pool) it is the plain wait and returns true.
+     */
+    private boolean runAll(List<Runnable> tasks, Budget wall) {
         if (pool == null) {
             for (Runnable r : tasks) {
                 r.run();
             }
-            return;
+            return true;
         }
         List<Future<?>> fs = new ArrayList<>();
         final java.util.concurrent.atomic.AtomicLong[] acc = poolCpu == null ? null : forge.ai.CpuAccount.get();
-        for (Runnable r : tasks) {
+        // the wall only: how many tasks are running (to count the stragglers at a cut)
+        final AtomicInteger running = wall == null ? null : new AtomicInteger();
+        for (Runnable task : tasks) {
+            final Runnable r = running == null ? task : () -> {
+                running.incrementAndGet();
+                try {
+                    task.run();
+                } finally {
+                    running.decrementAndGet();
+                }
+            };
             if (acc == null) {
                 fs.add(pool.submit(r));
             } else {
@@ -3164,13 +3316,41 @@ public final class LookaheadSearch {
                 }));
             }
         }
-        for (Future<?> f : fs) {
+        if (wall == null) {
+            for (Future<?> f : fs) {
+                try {
+                    f.get();
+                } catch (Exception e) {
+                    throw new RuntimeException("look-ahead worker failed", e);
+                }
+            }
+            return true;
+        }
+        final long cut = wall.deadline + WALL_GRACE_MS * 1_000_000L;
+        for (int i = 0; i < fs.size(); i++) {
             try {
-                f.get();
+                fs.get(i).get(Math.max(0L, cut - System.nanoTime()), TimeUnit.NANOSECONDS);
+            } catch (TimeoutException e) {
+                wall.stop();
+                wall.wallCut = true;
+                for (int j = i; j < fs.size(); j++) {
+                    fs.get(j).cancel(false);
+                }
+                stats.wallCuts++;
+                stats.wallStragglers += running.get();
+                System.err.println("[lookahead] wall: the play-outs ran " + WALL_GRACE_MS + " ms past the budget; "
+                        + running.get() + " still running were told to stop, the decision is capped");
+                return false;
             } catch (Exception e) {
+                // a failed worker fails the decision (as without the wall); the others are told to stop first
+                wall.stop();
+                for (int j = i + 1; j < fs.size(); j++) {
+                    fs.get(j).cancel(false);
+                }
                 throw new RuntimeException("look-ahead worker failed", e);
             }
         }
+        return true;
     }
 
     // ------------------------------------------------------------------ candidates
@@ -4070,6 +4250,8 @@ public final class LookaheadSearch {
         Object hookCtx;
         FirstAction firstAction;
         long playoutSeed;
+        /** Lane sc-wallguard-1009: the wall budget of the decision this copy was made for (null = none). */
+        Budget budget;
     }
 
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
@@ -4085,6 +4267,7 @@ public final class LookaheadSearch {
      */
     Prepared prepare(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, TrajPoint carried) {
         final Prepared p = new Prepared();
+        p.budget = budget;
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
         final Object prevCache = AiCache.captureScope();
@@ -4129,6 +4312,7 @@ public final class LookaheadSearch {
                     // S1 policy play-out: the play-out seat takes the candidate itself (and chooses its targets); here
                     // only that the candidate exists in the copy. The seed is the world's: common random numbers.
                     p.firstAction = new FirstAction(c);
+                    p.firstAction.budget = p.budget;
                     p.playoutSeed = mix(worldSeed, 5);
                     if (!c.pass && locate(p.g, p.me, c) == null) {
                         p.failed = true;
@@ -4243,9 +4427,13 @@ public final class LookaheadSearch {
             // at most leafExtraSteps main-loop steps past its start.
             while (!g.isGameOver() && !(probe == null ? watch.reached : probe.done || watch.reached && extra >= cfg.leafExtraSteps)
                     && steps < cfg.maxSteps) {
-                if (pastDeadline()) {
+                if (p.budget != null && p.budget.over()) {
                     r.aborted = true;
                     break;
+                }
+                final java.util.function.Consumer<Game> hook = playoutStepHook;
+                if (hook != null) {
+                    hook.accept(g);
                 }
                 ph.mainLoopStep();
                 steps++;
@@ -4286,6 +4474,12 @@ public final class LookaheadSearch {
             r.rolloutNanos = System.nanoTime() - b;
             r.steps = steps;
             r.totalSteps = steps + (hit == null ? 0 : hit.remaining);
+            if (!r.aborted && seat != null && p.budget != null && p.budget.over() && seat.failure() != null) {
+                // sc-wallguard-1009: a policy seat that failed past the deadline (it stops at its next service request
+                // once the budget is out, ending its copy) was stopped by the budget: the decision is capped, as for a
+                // play-out stopped between steps
+                r.aborted = true;
+            }
             if (r.aborted) {
                 r.ok = false;
                 r.value = Double.NEGATIVE_INFINITY;
@@ -4340,6 +4534,10 @@ public final class LookaheadSearch {
         } catch (RuntimeException | StackOverflowError e) {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
+            if (p.budget != null && p.budget.over()) {
+                // sc-wallguard-1009: a play-out that failed past the deadline counts as stopped by the budget
+                r.aborted = true;
+            }
             System.err.println("[lookahead] rollout failed: " + e);
             if (FAILURE_TRACES.getAndIncrement() < 20) {
                 e.printStackTrace();

@@ -38,7 +38,9 @@ import forge.util.MyRandom;
  * {@code -Dforge.interactive.policySearch} is set). Its spec defaults are the S1 read's S-c arm; it binds only after a
  * pinned HELLO and otherwise falls back at boot; a whole game against Forge AI completes with it; a service that dies
  * mid-game degrades the seat to Forge AI plus the K8 look-ahead and the game still ends normally (never as the seat's
- * void, never stuck). Plays real Forge games: run inside a broker test lease, cwd = forge-gui with res/.
+ * void, never stuck). Lane sc-wallguard-1009: play-out seats whose service answers late keep searched decisions past
+ * their budget; each one is capped within the wall's bound, plays the policy's own choice, and the game ends normally.
+ * Plays real Forge games: run inside a broker test lease, cwd = forge-gui with res/.
  */
 public class RlLiveSeatTest {
     static final String SHA = "7f7d160785e58bd1da37435f8ed71e145d761fb34f9d45b40809880982388465";
@@ -244,6 +246,46 @@ public class RlLiveSeatTest {
                     "K8 decision lines after the degrade (" + k8Lines + ")");
             // the game was not ended by the seat (a bench seat ends a faulted game as a draw)
             Assert.assertNotEquals(g[0].getOutcome().getWinCondition(), forge.game.GameEndReason.Draw);
+        }
+    }
+
+    /**
+     * Lane sc-wallguard-1009 (the S-c path end to end): every DECIDE of a play-out seat takes 150 ms, so the play-outs
+     * run past a 600 ms budget; each such decision stops at its play-outs' next step or request (the endpoint's refusal
+     * itself: LookaheadBudgetTest.policyPlayoutEndpointRefusesRequestsPastTheBudget), is capped within the wall's bound,
+     * and plays the policy's own choice; the seat never degrades and the game ends normally.
+     */
+    @Test
+    public void playOutsPastTheBudgetAreStoppedAtTheirNextRequestAndThePolicyPlays() throws Exception {
+        final long budgetMs = 600;
+        try (FakeSearchService svc = new FakeSearchService(SHA)) {
+            svc.playoutDecideDelayMs = 150;
+            final RlLiveSeat live = RlLiveSeat.connect(spec(svc.address(), "worlds=2,threads=2,budgetMs=" + budgetMs), "t");
+            Assert.assertNotNull(live);
+            final Game[] g = new Game[1];
+            final String err = captureErr(() -> g[0] = play(live, 722159003L));
+            Assert.assertTrue(g[0].isGameOver());
+            Assert.assertNotNull(g[0].getOutcome());
+            Assert.assertFalse(live.degraded(), "slow play-outs never degrade the seat");
+            Assert.assertNotEquals(g[0].getOutcome().getWinCondition(), forge.game.GameEndReason.Draw);
+            int capped = 0, cooperative = 0;
+            for (String l : err.lines().filter(x -> x.startsWith("[lookahead-decision] {\"seat\":\"policy\""))
+                    .collect(java.util.stream.Collectors.toList())) {
+                final com.google.gson.JsonObject d = com.google.gson.JsonParser.parseString(
+                        l.substring("[lookahead-decision] ".length())).getAsJsonObject();
+                if (d.get("capped").getAsBoolean()) {
+                    capped++;
+                    final double ms = d.get("searchMs").getAsDouble();
+                    Assert.assertFalse(d.get("departed").getAsBoolean(), "a capped decision plays the policy's choice");
+                    // the wall's bound (plus scheduling slack on a loaded host)
+                    Assert.assertTrue(ms < budgetMs + LookaheadSearch.WALL_GRACE_MS + 1500, "bounded: " + l);
+                    if (!d.has("wall") && ms < budgetMs + LookaheadSearch.WALL_GRACE_MS) {
+                        cooperative++;
+                    }
+                }
+            }
+            Assert.assertTrue(capped > 0, "slow play-outs keep searches past the budget");
+            Assert.assertTrue(cooperative > 0, "capped decisions stopped by the play-outs themselves, before the wall");
         }
     }
 
