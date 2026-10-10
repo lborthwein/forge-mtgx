@@ -48,6 +48,9 @@ public final class CubeComboControl {
     private final CubeBombPlan bombPlan;
     private final CubeDrawOutPlan drawOutPlan; // v66 drawout
     private final CubeReanimatorPlan reanimatorPlan; // v73 reanimator
+    /** combo-ai-port-1009 additions (not in the v104 lineage): Natural Order -> Craterhoof, plain Brain Freeze storm. */
+    private final CubeNaturalOrderPlan naturalOrderPlan;
+    private final CubeBrainFreezePlan brainFreezePlan;
     private int comboSelectionChanges;
     private CubeComboAi.TutorPlan tutorPlan;
     private final CubeTopTutorPlan topTutorPlan;
@@ -117,6 +120,8 @@ public final class CubeComboControl {
         bombPlan = new CubeBombPlan(player);
         drawOutPlan = new CubeDrawOutPlan(player); // v66 drawout
         reanimatorPlan = new CubeReanimatorPlan(player); // v73 reanimator
+        naturalOrderPlan = new CubeNaturalOrderPlan(player);
+        brainFreezePlan = new CubeBrainFreezePlan(player);
     }
 
     // ------------------------------------------------------------------ combo-ai-port-1009: the seat's entry points
@@ -180,7 +185,7 @@ public final class CubeComboControl {
 
     private List<SpellAbility> chooseSpellAbilityToPlay0() {
         planAction = null;
-        if (tamiyoPlan.waitingForOwnSpell() || kikiSyrPlan.waitingForOwnSpell() || fastbondPlan.waitingForOwnSpell() || topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell()) return null; // v73 reanimator
+        if (tamiyoPlan.waitingForOwnSpell() || kikiSyrPlan.waitingForOwnSpell() || fastbondPlan.waitingForOwnSpell() || topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell() || naturalOrderPlan.waitingForOwnSpell() || brainFreezePlan.waitingForOwnSpell()) return null; // v73 reanimator
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
@@ -209,6 +214,10 @@ public final class CubeComboControl {
         // byte-identical, and a log gains exactly one decline line per
         // (turn, phase) at which the draw-out family also declined.
         if (action == null && (action = reanimatorPlan.nextAction()) != null) plan = "reanimator";
+        // combo-ai-port-1009: the two families the v104 lineage lacked, after every lineage plan, so that every
+        // lineage family keeps its selection order; each acts only on its own lethal forecast.
+        if (action == null && (action = naturalOrderPlan.nextAction()) != null) plan = "natural-order";
+        if (action == null && (action = brainFreezePlan.nextAction()) != null) plan = "brain-freeze";
         if (action == null && (action = emryPlan.nextAction()) != null) plan = "emry";
         if (action == null && (action = fastbondPlan.nextAction()) != null) plan = "fastbond";
         if (action == null && (action = kikiSyrPlan.nextAction()) != null) plan = "kiki-syr";
@@ -393,6 +402,8 @@ public final class CubeComboControl {
         if (bombPlan.owns(ability)) return bombPlan.play(ability);
         if (drawOutPlan.owns(ability)) return drawOutPlan.play(ability); // v66 drawout
         if (reanimatorPlan.owns(ability)) return reanimatorPlan.play(ability); // v73 reanimator
+        if (naturalOrderPlan.owns(ability)) return naturalOrderPlan.play(ability);
+        if (brainFreezePlan.owns(ability)) return brainFreezePlan.play(ability);
         return doomsdayPlan.withReservedDrawSource(ability, () -> live(() -> seat.nativePlayChosenSpellAbility(ability)));
     }
 
@@ -511,6 +522,20 @@ public final class CubeComboControl {
                     prompt, optional, decider));
             Card returned = reanimatorPlan.chooseGraveyardReturn(source, options);
             if (returned != null && returned != ordinary) return returned;
+            return ordinary;
+        }
+        if (destination == ZoneType.Battlefield && origin != null && origin.contains(ZoneType.Library)
+                && naturalOrderPlan.ownsSearch(source, decider)) {
+            // combo-ai-port-1009: our own Natural Order's search. The ordinary answer is computed first (same random
+            // stream as the native chooser) and replaced only by the Behemoth.
+            Card ordinary = live(() -> seat.nativeChooseSingleCardForZoneChange(destination, origin, source, choices,
+                    delayedReveal, prompt, optional, decider));
+            Card payoff = naturalOrderPlan.choosePayoff(choices);
+            if (payoff != null && payoff != ordinary) {
+                CubeComboAi.receipt("CUBE_NATURAL_ORDER_PLAN payoff=" + payoff.getName().replace(' ', '_') + " instead="
+                        + (ordinary == null ? "none" : ordinary.getName().replace(' ', '_')));
+                return payoff;
+            }
             return ordinary;
         }
         return live(() -> seat.nativeChooseSingleCardForZoneChange(destination, origin, source, choices, delayedReveal, prompt, optional, decider));
