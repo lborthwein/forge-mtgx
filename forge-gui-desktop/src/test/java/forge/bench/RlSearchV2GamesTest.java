@@ -173,6 +173,8 @@ public class RlSearchV2GamesTest {
         final RlFeaturizer liveFeat;
         final int version;
         int roots, leafEqual, copyEqual, copyFailed;
+        /** -Drl.parityDump=DIR: each root's live and copy leaf payloads (u32 length + DECIDE payload) for v(o) checks. */
+        static final String DUMP = System.getProperty("rl.parityDump");
         final Map<String, Integer> leafDiff = new TreeMap<>(), copyDiff = new TreeMap<>();
 
         CopyParity(final RlFeaturizer liveFeat, final int version) {
@@ -217,6 +219,10 @@ public class RlSearchV2GamesTest {
                     if (diff(frame, l2, copyDiff)) {
                         copyEqual++;
                     }
+                    if (DUMP != null) {
+                        dump("v" + version + "-live.bin", RlWire.encodeDecide(l1));
+                        dump("v" + version + "-copy.bin", RlWire.encodeDecide(l2));
+                    }
                 }
             } catch (RuntimeException e) {
                 copyFailed++;
@@ -225,6 +231,15 @@ public class RlSearchV2GamesTest {
                 forge.util.IdScope.install(prevIds);
                 AiCache.installScope(prevCache);
                 MyRandom.setThreadRandom(prev);
+            }
+        }
+
+        static synchronized void dump(final String name, final byte[] p) {
+            try (java.io.FileOutputStream o = new java.io.FileOutputStream(new java.io.File(DUMP, name), true)) {
+                o.write(java.nio.ByteBuffer.allocate(4).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(p.length).array());
+                o.write(p);
+            } catch (java.io.IOException e) {
+                throw new RuntimeException(e);
             }
         }
 
