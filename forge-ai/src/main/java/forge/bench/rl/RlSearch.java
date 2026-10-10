@@ -1,5 +1,8 @@
 package forge.bench.rl;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
@@ -13,6 +16,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.zip.GZIPOutputStream;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -68,6 +72,19 @@ import forge.game.spellability.SpellAbility;
  * order (or by joint prior: {@code choiceRank}) up to {@code choiceCap} searched candidates in all, are played out in the
  * same K worlds and compete in the same argmax and departZ gate. A macro departure plays its base action and installs its schedule in the live seat's window; a
  * scheduled live ask whose answer is not a candidate falls back to the policy (counted).
+ *
+ * <p><b>Label sink</b> (lane r3-distill-1010, R3-CM D2; spec key {@code labelSink}, set by the harness like
+ * {@code decisionLog}, never part of the teacher's spec; absent = off, and nothing below writes or calls anything): per
+ * searched decision a ROOT record (the DECIDE payload SCORE saw, the policy's prior, each candidate's pooled entry, every
+ * searched candidate's per-world values and mean, the macros, the teacher's choice), and after a macro departure a
+ * CHOICE record per scheduled live ask the schedule answered (the ask's frame re-encoded SINGLE as the probe scores it,
+ * SCORE's prior on it, the policy's own and the scheduled answer, each candidate's match to a searched answer). One
+ * gzip member of {@code MXL1} records per game, appended at game end ({@link #flushLog}); format
+ * {@code mtgx-rl-labelsink/1}, read by mtgx {@code tools/ml/rl/labels.py}. The sink only records: every decision is
+ * the same with it on or off.
+ *
+ * <p><b>Search seat</b> (r3-distill-1010): {@link #searchSeat} >= 0 (the GAME message's {@code search_seat}) limits the
+ * look-ahead to that seat (RlSeat checks it); the summary then echoes {@code seat}. -1 (the default) = every RL seat.
  */
 public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.SearchHooks, LookaheadSearch.ChoiceExpander {
 
@@ -101,6 +118,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public long seedSalt = 0x51L;
         /** One JSONL row per searched decision (this JVM appends; "{actor}" = the actor id), or null. */
         public String decisionLog;
+        /**
+         * R3-CM D2 (lane r3-distill-1010): the label sink file ("{actor}" = the actor id, "{pid}" = this JVM's pid), or
+         * null = off. Set by the harness, like {@link #decisionLog}; not in {@link #toJson}.
+         */
+        public String labelSink;
         /** The checkpoint the service must serve (HELLO_ACK policy_sha), or null = not checked. */
         public String policySha;
         /**
@@ -152,7 +174,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
-                "obs"));
+                "obs", "labelSink"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -194,6 +216,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("choiceRank")) c.choiceRank = o.get("choiceRank").getAsString();
             if (o.has("sameDepartures")) c.sameDepartures = o.get("sameDepartures").getAsInt();
             if (o.has("obs")) c.obs = o.get("obs").getAsInt();
+            if (o.has("labelSink") && !o.get("labelSink").isJsonNull()) c.labelSink = o.get("labelSink").getAsString();
             c.check();
             return c;
         }
@@ -316,12 +339,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final int baseGiven;
         final double jointPrior;
         final String label;
+        /** r3-distill-1010: the probe policy's own answer's identity at this ask (loose key), or null. */
+        final String ownLoose;
 
         MacroSpec(final List<ChoiceWindow.Entry> entries, final int baseGiven, final double jointPrior, final String label) {
+            this(entries, baseGiven, jointPrior, label, null);
+        }
+
+        MacroSpec(final List<ChoiceWindow.Entry> entries, final int baseGiven, final double jointPrior, final String label,
+                final String ownLoose) {
             this.entries = entries;
             this.baseGiven = baseGiven;
             this.jointPrior = jointPrior;
             this.label = label;
+            this.ownLoose = ownLoose;
         }
     }
 
@@ -343,6 +374,34 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private final ChoiceWindow.Counters playoutCounters = new ChoiceWindow.Counters();
     private int probeAsksTotal = 0, contestedAsks = 0, macroDecisions = 0, macrosSearched = 0, macroDepartures = 0,
             macroDefaultDepartures = 0;
+
+    // ---- the label sink (lane r3-distill-1010; untouched while cfg.labelSink == null)
+    /** The look-ahead's seat (the GAME's search_seat), or -1 = every RL seat. RlActorBench sets it. */
+    public int searchSeat = -1;
+    private final long gameSeed;
+    /** The checkpoint the service serves (its HELLO_ACK policy_sha), for the label records. */
+    private volatile String servedPolicySha;
+    /** This game's label records (encoded), written at game end. */
+    private final List<byte[]> labelRecs = new ArrayList<>();
+    /** The live macro departure whose schedule the seat answers (set by decide, read by scheduledAsk). */
+    private LiveMacro liveMacro = null;
+    private int labelRoots = 0, labelChoices = 0, labelFailures = 0;
+
+    /** A macro departure's context for its scheduled live asks' choice records. */
+    static final class LiveMacro {
+        final int rootDecIdx;
+        final int macro;
+        final List<MacroSpec> macros;
+
+        LiveMacro(final int rootDecIdx, final int macro, final List<MacroSpec> macros) {
+            this.rootDecIdx = rootDecIdx;
+            this.macro = macro;
+            this.macros = macros;
+        }
+    }
+
+    /** The sink record magic (format mtgx-rl-labelsink/1). */
+    static final byte[] LABEL_MAGIC = {'M', 'X', 'L', '1'};
 
     /**
      * One game's search for its RL seat. {@code gameSeed} fixes the world draws (decisions are a function of the
@@ -368,6 +427,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         this.obsVersion = obsVersion;
         this.cfg = cfg;
         this.uid = uid;
+        this.gameSeed = gameSeed;
         this.index = index;
         this.liveKnow = liveKnow;
         this.jarSha = jarSha;
@@ -425,6 +485,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             } catch (IOException e) {
                 c.close();
                 throw e;
+            }
+            if (c.ack != null && c.ack.has("policy_sha") && !c.ack.get("policy_sha").isJsonNull()) {
+                servedPolicySha = c.ack.get("policy_sha").getAsString();
             }
             if (cfg.policySha != null) {
                 final String got = c.ack.has("policy_sha") ? c.ack.get("policy_sha").getAsString() : null;
@@ -517,6 +580,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
         pendingWindow = null;
+        liveMacro = null;
         priorityAsks++;
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
@@ -528,8 +592,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final long t0 = System.nanoTime();
         final RlSearchClient.Scores sc;
+        final byte[] payload = RlWire.encodeDecide(frame);
         try {
-            sc = client().score(RlWire.encodeDecide(frame));
+            sc = client().score(payload);
         } catch (IOException | RuntimeException e) {
             drop();
             scoreFailures++;
@@ -633,6 +698,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final MacroSpec ms = macroList.get(r.chosenMacro);
             pendingWindow = ChoiceWindow.scheduled(ms.entries, liveCounters);
             macroDepartures++;
+            if (cfg.labelSink != null) {
+                liveMacro = new LiveMacro(frame.decIdx, r.chosenMacro, new ArrayList<>(macroList));
+            }
             if (r.chosen == 0) {
                 macroDefaultDepartures++;
                 departures++;
@@ -662,6 +730,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 hook.searched(g, r, by.size(), (System.nanoTime() - t0) / 1e6 - r.ms);
             } catch (RuntimeException e) {
                 System.err.println("[rlsearch] onSearched failed: " + e);
+            }
+        }
+        if (cfg.labelSink != null && r.givenIndex.length > 0) {
+            try {
+                labelRecs.add(labelRecord(rootHeader(g, m, frame, sc, greedy, menuObjs, entryOf, order, def, r, answer),
+                        payload));
+                labelRoots++;
+            } catch (RuntimeException e) {
+                labelFailures++;
+                System.err.println("[rlsearch] label root record failed: " + e);
             }
         }
         if (cfg.decisionLog != null || rowsWanted) {
@@ -770,6 +848,213 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return w;
     }
 
+    // ------------------------------------------------------------------------------------------------ the label sink
+
+    /** One sink record: "MXL1", u32le header length, the header's canonical JSON, u32le payload length, the payload. */
+    static byte[] labelRecord(final JsonObject header, final byte[] payload) {
+        final byte[] h = RlWire.canonicalString(header).getBytes(StandardCharsets.UTF_8);
+        final java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(4 + 4 + h.length + 4 + payload.length)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        b.put(LABEL_MAGIC).putInt(h.length).put(h).putInt(payload.length).put(payload);
+        return b.array();
+    }
+
+    /** Append one game's records to {@code path} as ONE gzip member (a crash mid-write tears only that member). */
+    static void appendGame(final String path, final List<byte[]> recs) throws IOException {
+        final File f = new File(path);
+        final File dir = f.getAbsoluteFile().getParentFile();
+        if (dir != null && !dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) {
+            throw new IOException("cannot create " + dir);
+        }
+        final ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        try (GZIPOutputStream z = new GZIPOutputStream(buf)) {
+            for (byte[] r : recs) {
+                z.write(r);
+            }
+        }
+        try (FileOutputStream out = new FileOutputStream(f, true)) {
+            out.write(buf.toByteArray());
+            out.getFD().sync();
+        }
+    }
+
+    private static JsonArray probsJson(final float[] p) {
+        final JsonArray a = new JsonArray();
+        for (float x : p) {
+            a.add((double) x);
+        }
+        return a;
+    }
+
+    private void provenance(final JsonObject h, final Game g, final RlWire.Decide frame, final long policyVersion) {
+        h.addProperty("game_uid", Long.toUnsignedString(uid));
+        h.addProperty("seed", gameSeed);
+        h.addProperty("seat", frame.seat);
+        h.addProperty("dec_idx", frame.decIdx);
+        h.addProperty("turn", g.getPhaseHandler().getTurn());
+        h.addProperty("obs", obsVersion);
+        h.addProperty("policy_sha", servedPolicySha);
+        h.addProperty("policy_version", policyVersion);
+        h.addProperty("jar_sha", jarSha);
+        h.addProperty("actor", actorId);
+    }
+
+    /** The ROOT record's header of one searched decision (schema mtgx-rl-labelsink/1; mtgx labels.py reads it). */
+    private JsonObject rootHeader(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final RlSearchClient.Scores sc, final int greedy, final List<SpellAbility> menuObjs,
+            final Map<String, Integer> entryOf, final List<Integer> order, final int def,
+            final LookaheadSearch.GivenResult r, final int answer) {
+        final JsonObject h = new JsonObject();
+        h.addProperty("kind", "root");
+        provenance(h, g, frame, sc.policyVersion);
+        h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        h.addProperty("C", m.C());
+        h.add("prior", probsJson(sc.probs));
+        final JsonArray ce = new JsonArray();
+        for (int i = 0; i < m.C(); i++) {
+            final int ch = m.cands.get(i).kind <= 0 ? -1 : choiceOf(m, i);
+            final Integer e = ch < 0 || ch > menuObjs.size() ? null
+                    : entryOf.get(actionKey(ch == 0 ? null : menuObjs.get(ch - 1)));
+            ce.add(e == null ? -1 : e);
+        }
+        h.add("cand_entry", ce);
+        h.addProperty("default_cand", greedy);
+        h.addProperty("default_entry", def);
+        final JsonArray se = new JsonArray();
+        for (int j = 0; j < r.givenIndex.length; j++) {
+            final JsonObject x = new JsonObject();
+            x.addProperty("entry", order.get(r.givenIndex[j]));
+            x.addProperty("macro", cfg.choices > 0 && j < r.macro.length ? r.macro[j] : -1);
+            if (j < r.ev.length && !Double.isNaN(r.ev[j]) && !Double.isInfinite(r.ev[j])) {
+                x.addProperty("ev", r.ev[j]);
+            } else {
+                x.add("ev", com.google.gson.JsonNull.INSTANCE);
+            }
+            final JsonArray w = new JsonArray();
+            if (j < r.values.length) {
+                for (double v : r.values[j]) {
+                    if (Double.isNaN(v) || Double.isInfinite(v)) {
+                        w.add(com.google.gson.JsonNull.INSTANCE);
+                    } else {
+                        w.add(v);
+                    }
+                }
+            }
+            x.add("values", w);
+            se.add(x);
+        }
+        h.add("searched", se);
+        final JsonArray ma = new JsonArray();
+        if (cfg.choices > 0) {
+            for (MacroSpec ms : macroList) {
+                final ChoiceWindow.Entry e = ms.entries.get(0);
+                final JsonObject x = new JsonObject();
+                x.addProperty("base_entry", order.get(ms.baseGiven));
+                x.addProperty("ask", e.ask);
+                x.addProperty("ordinal", e.ordinal);
+                x.addProperty("exact", e.exact);
+                x.addProperty("loose", e.loose);
+                x.addProperty("own_loose", ms.ownLoose);
+                x.addProperty("joint_prior", ms.jointPrior);
+                ma.add(x);
+            }
+        }
+        h.add("macros", ma);
+        h.addProperty("chosen_cand", answer >= 0 ? answer : greedy);
+        h.addProperty("chosen_entry", r.chosen <= 0 ? def : order.get(r.chosen));
+        h.addProperty("chosen_macro", r.chosenMacro);
+        h.addProperty("departed", r.chosen > 0 || r.chosenMacro >= 0);
+        h.addProperty("outcome", r.outcome);
+        h.addProperty("failed", r.failed);
+        h.addProperty("leaf_fallback", r.leafFallback);
+        return h;
+    }
+
+    /**
+     * The CHOICE record of a scheduled live ask (r3-distill-1010): called by the live seat after its window's schedule
+     * answered ask {@code askKey}#{@code ordinal} with {@code scheduled} (the policy's own answer was {@code mine}). Each
+     * candidate's {@code match}: m = macro m's answer at this ask (same ask, ordinal and base candidate as the departed
+     * macro), -2 = the policy's own (live) answer's identity (its value is the base candidate's: the base's play-out
+     * answered with the policy), -1 = unsearched. A candidate that is both a macro's answer and the policy's takes the
+     * macro (its value is that answer's, forced).
+     */
+    @Override
+    public void scheduledAsk(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final String askKey, final int ordinal, final int scheduled, final int mine) {
+        final LiveMacro lm = liveMacro;
+        if (cfg.labelSink == null || lm == null) {
+            return;
+        }
+        final int mo = frame.mode, mi = frame.minPick, ma = frame.maxPick;
+        final byte[] sp;
+        try {
+            frame.mode = RlSchema.M_SINGLE;
+            frame.minPick = 1;
+            frame.maxPick = 1;
+            sp = RlWire.encodeDecide(frame);
+        } finally {
+            frame.mode = mo;
+            frame.minPick = mi;
+            frame.maxPick = ma;
+        }
+        try {
+            final RlSearchClient.Scores ps;
+            try {
+                ps = client().score(sp);
+            } catch (IOException | RuntimeException e) {
+                drop();
+                throw new IOException(e);
+            }
+            if (ps.status != RlWire.ST_OK || ps.probs.length != m.C()) {
+                labelFailures++;
+                return;
+            }
+            final MacroSpec m0 = lm.macros.get(lm.macro);
+            // the policy's own live answer stands for the base candidate (its play-out answered with the policy)
+            final String own = mine >= 0 && mine < m.C() && m.cands.get(mine).kind > 0 ? ChoiceWindow.looseKey(m, mine, me)
+                    : null;
+            final JsonArray match = new JsonArray();
+            for (int i = 0; i < m.C(); i++) {
+                if (m.cands.get(i).kind <= 0) {
+                    match.add(-1);
+                    continue;
+                }
+                final String l = ChoiceWindow.looseKey(m, i, me);
+                int k = -1;
+                for (int q = 0; q < lm.macros.size(); q++) {
+                    final MacroSpec ms = lm.macros.get(q);
+                    final ChoiceWindow.Entry e = ms.entries.get(0);
+                    if (ms.baseGiven == m0.baseGiven && e.ordinal == ordinal && e.ask.equals(askKey) && e.loose.equals(l)
+                            && (k < 0 || q == lm.macro)) {
+                        k = q;
+                    }
+                }
+                if (k < 0 && own != null && own.equals(l)) {
+                    k = -2;
+                }
+                match.add(k);
+            }
+            final JsonObject h = new JsonObject();
+            h.addProperty("kind", "choice");
+            provenance(h, g, frame, ps.policyVersion);
+            h.addProperty("family", frame.family);
+            h.addProperty("ask", askKey);
+            h.addProperty("ordinal", ordinal);
+            h.addProperty("root_dec_idx", lm.rootDecIdx);
+            h.addProperty("macro", lm.macro);
+            h.addProperty("C", m.C());
+            h.add("prior", probsJson(ps.probs));
+            h.addProperty("policy_answer", mine);
+            h.addProperty("scheduled", scheduled);
+            h.add("match", match);
+            labelRecs.add(labelRecord(h, sp));
+            labelChoices++;
+        } catch (IOException | RuntimeException e) {
+            labelFailures++;
+            System.err.println("[rlsearch] label choice record failed: " + e);
+        }
+    }
+
     /**
      * S-t: the macro candidates of the current decision. Per searched candidate (its probe's asks in order), the first
      * {@code choices} expandable asks (an alternative exists; with {@code choiceMaxProb} < 1, also the largest prior below
@@ -809,7 +1094,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     final ChoiceWindow.Entry e = new ChoiceWindow.Entry(a.ask, a.ordinal, a.exact[alt], a.loose[alt]);
                     final int gi = givenIndex[c];
                     final double jp = (gi < givenPrior.length ? givenPrior[gi] : 0.0) * a.prior[alt];
-                    found.add(new MacroSpec(java.util.Collections.singletonList(e), gi, jp, e.label()));
+                    found.add(new MacroSpec(java.util.Collections.singletonList(e), gi, jp, e.label(),
+                            a.greedy >= 0 && a.greedy < a.C ? a.loose[a.greedy] : null));
                 }
             }
         }
@@ -894,6 +1180,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // search-v2-1009: only for an obs-v2 seat, so an S1 game's summary is unchanged
             o.addProperty("obs", obsVersion);
         }
+        if (searchSeat >= 0) {
+            // r3-distill-1010: only with a GAME search_seat, so every other game's summary is unchanged
+            o.addProperty("seat", searchSeat);
+        }
+        if (cfg.labelSink != null) {
+            // r3-distill-1010: only with the label sink on
+            final JsonObject lb = new JsonObject();
+            lb.addProperty("roots", labelRoots);
+            lb.addProperty("choices", labelChoices);
+            lb.addProperty("failures", labelFailures);
+            o.add("labels", lb);
+        }
         if (cfg.choices > 0) {
             // S-t (only when on, so an S1 game's summary is unchanged)
             final JsonObject st = new JsonObject();
@@ -917,8 +1215,24 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return o;
     }
 
-    /** Append the per-decision rows to {@code cfg.decisionLog} (one writer per JVM, synchronized). */
+    /**
+     * Append the per-decision rows to {@code cfg.decisionLog} (one writer per JVM, synchronized), and this game's label
+     * records to {@code cfg.labelSink} as one gzip member (r3-distill-1010).
+     */
     public void flushLog() {
+        if (cfg.labelSink != null && !labelRecs.isEmpty()) {
+            final String path = cfg.labelSink.replace("{actor}", actorId == null ? "actor" : actorId)
+                    .replace("{pid}", String.valueOf(ProcessHandle.current().pid()));
+            synchronized (RlSearch.class) {
+                try {
+                    appendGame(path, labelRecs);
+                } catch (IOException e) {
+                    labelFailures++;
+                    System.err.println("[rlsearch] label sink failed: " + e);
+                }
+            }
+            labelRecs.clear();
+        }
         if (cfg.decisionLog == null || rows.isEmpty()) {
             return;
         }

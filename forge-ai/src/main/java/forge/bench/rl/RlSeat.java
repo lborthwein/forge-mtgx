@@ -131,7 +131,22 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         default ChoiceWindow takeWindow() {
             return null;
         }
+
+        /**
+         * R3-CM D2 (lane r3-distill-1010): the seat's window answered a scheduled ask with {@code scheduled} (the policy's
+         * own answer was {@code mine}); the search's label sink records it. Called only for a live seat's scheduled hit;
+         * a no-op unless the sink is on. Never changes the answer.
+         */
+        default void scheduledAsk(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, String askKey, int ordinal,
+                int scheduled, int mine) {
+        }
     }
+
+    /**
+     * R3-CM (lane r3-distill-1010): the seat the search runs for (the GAME message's {@code search_seat}), or -1 = every RL
+     * seat (the default; nothing changes).
+     */
+    public int searchSeat = -1;
 
     /**
      * S-t (lane cm-choice-search-1009; null by default, and then nothing changes): the seat's current choice window, a
@@ -454,7 +469,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             endGame("server_error");
             return null;
         }
-        if (search != null && family == RlSchema.F_PRIORITY && d.status == RlWire.ST_OK && objs instanceof List) {
+        if (search != null && (searchSeat < 0 || seat == searchSeat) && family == RlSchema.F_PRIORITY
+                && d.status == RlWire.ST_OK && objs instanceof List) {
             // S1: the look-ahead over the policy's own priority decision (the policy's choice is its default)
             @SuppressWarnings("unchecked")
             final List<SpellAbility> menuObjs = (List<SpellAbility>) objs;
@@ -513,6 +529,10 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             if (forced >= 0 && forced != mine && m.validate(new short[] {(short) forced}) == null) {
                 d.steps = new short[] {(short) forced};
                 windowOverrides++;
+            }
+            if (forced >= 0 && search != null && m.validate(new short[] {(short) forced}) == null) {
+                // r3-distill-1010: the label sink's choice record (a no-op unless the sink is on)
+                search.scheduledAsk(g, player, m, frame, wAsk, wOrd, forced, mine);
             }
         }
         noteSent(seat, family, m, frame, d.steps);
