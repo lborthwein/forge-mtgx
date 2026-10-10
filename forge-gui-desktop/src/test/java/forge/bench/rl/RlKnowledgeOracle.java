@@ -30,6 +30,9 @@ import forge.game.zone.ZoneType;
  * "Did not see" is decided once Forge has finished the move (a foretold card is exiled face up, then turned face down):
  * at the next check or resolution, the moved card must be face up where the seat can see it.
  *
+ * <p>Looks (lane obsv2-oracle-1010): a seat's look hides the cards from the other seat only when they go back into a
+ * library (a rearrangement), as in RlKnowledge; other looks change nothing for the other seat.
+ *
  * <p>o_seen (lane obsv2-oracle-1010): an object put on the stack face up, where the seat can see it, was seen. A copy of
  * a spell (Krark, the Thumbless; storm; Twincast) is created on the stack and ceases to exist when it leaves, with no
  * zone change either way, so only the cast event shows it. This feeds {@link #everObserved} only.
@@ -148,7 +151,10 @@ public final class RlKnowledgeOracle implements BenchSession.KnowledgeObserver {
             for (int t = 0; t < 2; t++) {
                 if (t == s) {
                     observed[t].put(c.getId(), clock + 1);
-                } else {
+                } else if (dest == ZoneType.Library) {
+                    // only a rearrangement (cards put back into a library in an order the looker chose) hides them
+                    // from the other seat; a look that leaves them where they are (Sylvan Library's choice) or sends
+                    // them on (Wheel of Fortune's discard) does not: any move is a zone change, judged there
                     hidden[t].put(c.getId(), clock);
                 }
             }
