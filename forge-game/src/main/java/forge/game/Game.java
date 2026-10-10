@@ -1368,6 +1368,66 @@ public class Game {
         damageThisTurnLKI.clear();
     }
 
+    /**
+     * mtgx (lane copy-fidelity-1010): this game (a game copier's copy of {@code src}) takes {@code src}'s per-turn game
+     * records: the cards that left the battlefield and the graveyard this turn, the counters put and removed this turn,
+     * and the damage dealt this turn (every source's history, with the same damage records and their last-known source and
+     * target mapped). Cards are mapped by {@code m}; a history of a card the copy does not hold becomes a free-standing
+     * copy of it (it only answers the game's damage-this-turn queries). Call after the copied cards took their own state.
+     */
+    public void copyTurnStateFrom(final Game src, final TurnStateMap m) {
+        leftBattlefieldThisTurn = Lists.newArrayList();
+        for (Card c : src.leftBattlefieldThisTurn) {
+            leftBattlefieldThisTurn.add(m.card(c));
+        }
+        leftGraveyardThisTurn = Lists.newArrayList();
+        for (Card c : src.leftGraveyardThisTurn) {
+            leftGraveyardThisTurn.add(m.card(c));
+        }
+        // every walk in a fixed order (counter types by name, players by id, damage records in history order): mapping
+        // can build stand-in cards, whose ids and traits must be made in the same order in every run
+        final Comparator<CounterType> byName = Comparator.comparing(CounterType::getName);
+        countersAddedThisTurn = HashBasedTable.create();
+        final List<Table.Cell<CounterType, Player, List<Pair<Card, Integer>>>> added = Lists.newArrayList(src.countersAddedThisTurn.cellSet());
+        added.sort(Comparator.comparing((Table.Cell<CounterType, Player, List<Pair<Card, Integer>>> c) -> c.getRowKey().getName())
+                .thenComparingInt(c -> c.getColumnKey() == null ? -1 : c.getColumnKey().getId()));
+        for (Table.Cell<CounterType, Player, List<Pair<Card, Integer>>> cell : added) {
+            final List<Pair<Card, Integer>> l = Lists.newArrayList();
+            for (Pair<Card, Integer> p : cell.getValue()) {
+                l.add(Pair.of(m.card(p.getLeft()), p.getRight()));
+            }
+            countersAddedThisTurn.put(cell.getRowKey(), m.player(cell.getColumnKey()), l);
+        }
+        countersRemovedThisTurn = ArrayListMultimap.create();
+        final List<CounterType> removedTypes = Lists.newArrayList(src.countersRemovedThisTurn.keySet());
+        removedTypes.sort(byName);
+        for (CounterType t : removedTypes) {
+            for (Pair<GameEntity, Integer> v : src.countersRemovedThisTurn.get(t)) {
+                final GameEntity ge = m.entity(v.getLeft());
+                if (ge != null) {
+                    countersRemovedThisTurn.put(t, Pair.of(ge, v.getRight()));
+                }
+            }
+        }
+        globalDamageHistory = new FCollection<>();
+        damageThisTurnLKI = new IdentityHashMap<>();
+        for (CardDamageHistory h : src.globalDamageHistory) {
+            CardDamageHistory nh = m.history(h);
+            if (nh == null) {
+                nh = new CardDamageHistory();
+                nh.copyFrom(h, m);
+            }
+            globalDamageHistory.add(nh);
+            for (Pair<Integer, Boolean> dmg : h.getAllDmgInstances()) {
+                final Pair<Card, GameEntity> v = src.damageThisTurnLKI.get(dmg);
+                if (v != null && !damageThisTurnLKI.containsKey(dmg)) {
+                    damageThisTurnLKI.put(dmg, Pair.of(v.getLeft() == null ? null : m.card(v.getLeft()),
+                            v.getRight() == null ? null : m.entity(v.getRight())));
+                }
+            }
+        }
+    }
+
     public Pair<Card, GameEntity> getDamageLKI(Pair<Integer, Boolean> dmg) {
         return damageThisTurnLKI.get(dmg);
     }

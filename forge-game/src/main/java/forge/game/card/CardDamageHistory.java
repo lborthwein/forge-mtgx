@@ -308,4 +308,57 @@ public class CardDamageHistory {
         setCreatureBlockedThisCombat(false);
         setCreatureGotBlockedThisCombat(false);
     }
+
+    /**
+     * mtgx (lane copy-fidelity-1010): this history becomes {@code src}'s (a card of the game this game was copied from),
+     * every player and card mapped into this game (a card that is no longer in any zone of the copy is left out). The
+     * damage records are the same immutable pair objects, so the copy's damage-LKI table, copied with the same keys,
+     * still finds them.
+     */
+    public void copyFrom(final CardDamageHistory src, final forge.game.TurnStateMap m) {
+        attacksThisGame = src.attacksThisGame;
+        creatureAttackedThisCombat = src.creatureAttackedThisCombat;
+        creatureBlockedThisCombat = src.creatureBlockedThisCombat;
+        creatureGotBlockedThisCombat = src.creatureGotBlockedThisCombat;
+        attackedThisTurn = Lists.newArrayList();
+        for (GameEntity e : src.attackedThisTurn) {
+            final GameEntity me = inZone(m.entity(e));
+            if (me != null) {
+                attackedThisTurn.add(me);
+            }
+        }
+        attackedBattleThisTurn = src.attackedBattleThisTurn;
+        copyPlayers(src.creatureAttackedLastTurnOf, creatureAttackedLastTurnOf, m);
+        copyPlayers(src.NotAttackedSinceLastUpkeepOf, NotAttackedSinceLastUpkeepOf, m);
+        copyPlayers(src.NotBlockedSinceLastUpkeepOf, NotBlockedSinceLastUpkeepOf, m);
+        copyPlayers(src.NotBeenBlockedSinceLastUpkeepOf, NotBeenBlockedSinceLastUpkeepOf, m);
+        damageDoneThisTurn = Lists.newArrayList(src.damageDoneThisTurn);
+        copyPlayers(src.damagedThisCombat, damagedThisCombat, m);
+        damagedThisGame.clear();
+        for (GameEntity e : src.damagedThisGame) {
+            final GameEntity me = inZone(m.entity(e));
+            if (me != null) {
+                damagedThisGame.add(me);
+            }
+        }
+        hasdealtDamagetoAny = Sets.newHashSet(src.hasdealtDamagetoAny);
+    }
+
+    /** A player, or a card that is in a zone (newTurn reads a damaged card's zone); null otherwise. */
+    private static GameEntity inZone(final GameEntity e) {
+        if (e instanceof Card && ((Card) e).getZone() == null) {
+            return null;
+        }
+        return e;
+    }
+
+    private static void copyPlayers(final List<Player> from, final List<Player> to, final forge.game.TurnStateMap m) {
+        to.clear();
+        for (Player p : from) {
+            final Player mp = m.player(p);
+            if (mp != null) {
+                to.add(mp);
+            }
+        }
+    }
 }

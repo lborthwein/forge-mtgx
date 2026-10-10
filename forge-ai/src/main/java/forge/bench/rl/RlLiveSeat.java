@@ -122,6 +122,7 @@ public final class RlLiveSeat {
                     case "aiFixes0928": s.aiFixes0928 = AiFixes.Mode.parse(v); break;
                     case "log": s.log = !"0".equals(v); break;
                     case "obs": c.obs = Integer.parseInt(v); break;
+                    case "copyFidelity": c.copyFidelity = Integer.parseInt(v); break;
                     default: throw new IllegalArgumentException("policySearch: unknown key " + k);
                 }
             }

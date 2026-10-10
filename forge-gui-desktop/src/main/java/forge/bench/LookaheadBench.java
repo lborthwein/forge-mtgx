@@ -436,6 +436,7 @@ public final class LookaheadBench {
                     c.zeroX = AiFixes.Mode.parse(la.has("zeroX") ? la.get("zeroX").getAsString() : null);
                     c.crewNoop = AiFixes.Mode.parse(la.has("crewNoop") ? la.get("crewNoop").getAsString() : null);
                     c.copyEot = AiFixes.Mode.parse(la.has("copyEot") ? la.get("copyEot").getAsString() : null);
+                    c.copyFidelity = LookaheadSearch.Config.copyFidelityLevel(la.has("copyFidelity") ? la.get("copyFidelity").getAsInt() : 0);
                     c.departMedian = AiFixes.Mode.parse(la.has("departMedian") ? la.get("departMedian").getAsString() : null);
                     c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
                     c.resample = !la.has("resample") || la.get("resample").getAsBoolean();

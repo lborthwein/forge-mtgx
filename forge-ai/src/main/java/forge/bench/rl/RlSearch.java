@@ -170,13 +170,21 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * wire/2); 0 (the default) = the seat's. Set, it is a pin: a seat of another schema refuses the spec.
          */
         public int obs = 0;
+        /**
+         * Copy fidelity (lane copy-fidelity-1010; {@link LookaheadSearch.Config#copyFidelity}): 0 (the default) = the
+         * search's copies as before; 1 = they carry the live game's per-turn and history state (attacked this turn,
+         * activation counts, zone-entry turns, mulligans, spells cast this turn...), so a candidate legal only through it
+         * (a boast) is in the play-out's menu; 2 = as 0, and a decision where a searched candidate is missing from those
+         * copies is searched again on level-1 copies (the only decisions that can change).
+         */
+        public int copyFidelity = 0;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
-                "obs", "labelSink"));
+                "obs", "labelSink", "copyFidelity"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -219,6 +227,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("sameDepartures")) c.sameDepartures = o.get("sameDepartures").getAsInt();
             if (o.has("obs")) c.obs = o.get("obs").getAsInt();
             if (o.has("labelSink") && !o.get("labelSink").isJsonNull()) c.labelSink = o.get("labelSink").getAsString();
+            if (o.has("copyFidelity")) c.copyFidelity = o.get("copyFidelity").getAsInt();
             c.check();
             return c;
         }
@@ -247,6 +256,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (obs != 0 && obs != 1 && obs != 2) {
                 throw new IllegalArgumentException("search.obs must be 1 or 2 (or absent: the seat's), not " + obs);
+            }
+            if (copyFidelity < 0 || copyFidelity > 2) {
+                throw new IllegalArgumentException("search.copyFidelity must be 0, 1 or 2, not " + copyFidelity);
             }
             if (!"base".equals(choiceRank) && !"joint".equals(choiceRank)) {
                 throw new IllegalArgumentException("search.choiceRank must be base or joint, not " + choiceRank);
@@ -296,6 +308,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (obs != 0) {
                 // search-v2-1009: only when pinned, so an S1 spec's JSON is unchanged
                 o.addProperty("obs", obs);
+            }
+            if (copyFidelity != 0) {
+                // copy-fidelity-1010: only when on, so every other spec's JSON is unchanged
+                o.addProperty("copyFidelity", copyFidelity);
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -453,6 +469,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.stack = cfg.stack;
         lc.budgetMs = cfg.budgetMs;
         lc.maxSameDepartures = cfg.sameDepartures;
+        lc.copyFidelity = cfg.copyFidelity;
         this.ls = new LookaheadSearch(lc);
         ls.setHooks(this, "value".equals(cfg.leaf), "policy".equals(cfg.playout));
         this.choiceFams = cfg.choices > 0 ? (cfg.choiceFamilySet != null ? cfg.choiceFamilySet
@@ -679,6 +696,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             probeAsks.clear();
             probeWindows.clear();
             macroList = new ArrayList<>();
+            restartMark = new int[] {probeAsksTotal, contestedAsks};
             givenPrior = new double[order.size()];
             for (int i = 0; i < order.size(); i++) {
                 givenPrior[i] = by.get(order.get(i))[0];
@@ -1059,6 +1077,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /** Copy fidelity 2: the expander counters at this decision's start, restored when it is searched again. */
+    private int[] restartMark = new int[] {0, 0};
+
+    /** Copy fidelity 2 (copy-fidelity-1010): the decision is searched again; forget its probes and macros. */
+    @Override
+    public void restart() {
+        probeAsks.clear();
+        probeWindows.clear();
+        macroList = new ArrayList<>();
+        probeAsksTotal = restartMark[0];
+        contestedAsks = restartMark[1];
+    }
+
     /**
      * S-t: the macro candidates of the current decision. Per searched candidate (its probe's asks in order), the first
      * {@code choices} expandable asks (an alternative exists; with {@code choiceMaxProb} < 1, also the largest prior below
@@ -1373,17 +1404,37 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** The policy-piloted seat of one play-out: a bridged controller whose asks the search service answers. */
     static final class PlayoutController extends PlayerControllerBridge {
         private final LookaheadSearch.LeafProbe probe;
+        /**
+         * Copy fidelity (copy-fidelity-1010): the first priority (the searched candidate's) keeps a planeswalker
+         * ultimate in the menu ({@link forge.ai.ComputerUtilCost#setKeepPwUltimates}); false = as before.
+         */
+        private boolean keepUltimatesFirst;
 
         PlayoutController(final Game g, final Player p, final forge.LobbyPlayer lp, final BenchSession session,
                 final int seat, final LookaheadSearch.LeafProbe probe) {
+            this(g, p, lp, session, seat, probe, false);
+        }
+
+        PlayoutController(final Game g, final Player p, final forge.LobbyPlayer lp, final BenchSession session,
+                final int seat, final LookaheadSearch.LeafProbe probe, final boolean keepUltimatesFirst) {
             super(g, p, lp, session, BenchSession.Mode.BRIDGE, seat, new CallCounter());
             this.probe = probe;
+            this.keepUltimatesFirst = keepUltimatesFirst;
         }
 
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             if (probe != null) {
                 probe.onPriority(getGame(), getPlayer());
+            }
+            if (keepUltimatesFirst) {
+                keepUltimatesFirst = false;
+                forge.ai.ComputerUtilCost.setKeepPwUltimates(true);
+                try {
+                    return super.chooseSpellAbilityToPlay();
+                } finally {
+                    forge.ai.ComputerUtilCost.setKeepPwUltimates(false);
+                }
             }
             return super.chooseSpellAbilityToPlay();
         }
@@ -1400,6 +1451,37 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (first != null && first.overBudget()) {
             budgetStops.incrementAndGet();
             throw new IOException("budget: the search's wall budget ran out");
+        }
+    }
+
+    /**
+     * Lane copy-fidelity-1010 (diagnostics, appended to the failure): what the play-out's first menu offered from the
+     * searched candidate's card, and where the copy stood.
+     */
+    static String menuMiss(final Game g, final RlCandidates.Menu m, final List<SpellAbility> objs,
+            final LookaheadSearch.FirstAction first) {
+        try {
+            final StringBuilder sb = new StringBuilder("; wanted '");
+            sb.append(first.desc.length() > 50 ? first.desc.substring(0, 50) : first.desc).append("' of card ").append(first.hostId);
+            final forge.game.card.Card host = g.findById(first.hostId);
+            sb.append(host == null ? " (not in the copy)" : " (" + host.getName() + " in "
+                    + (host.getZone() == null ? "no zone" : host.getZone().getZoneType().name()) + ", counters "
+                    + host.getCounters() + ", pw activated " + host.getPlaneswalkerAbilityActivated() + ")");
+            sb.append(" turn ").append(g.getPhaseHandler().getTurn());
+            sb.append(" at ").append(g.getPhaseHandler().getPhase()).append(" stack ").append(g.getStack().size());
+            sb.append("; its entries [");
+            int n = 0;
+            for (int i = 0; i < m.C(); i++) {
+                final int ch = choiceOf(m, i);
+                if (ch > 0 && ch <= objs.size() && objs.get(ch - 1).getHostCard() != null
+                        && objs.get(ch - 1).getHostCard().getId() == first.hostId) {
+                    final String d = objs.get(ch - 1).getDescription();
+                    sb.append(n++ > 0 ? " | " : "").append(d.length() > 40 ? d.substring(0, 40) : d);
+                }
+            }
+            return sb.append(']').toString();
+        } catch (RuntimeException e) {
+            return "; (" + e + ")";
         }
     }
 
@@ -1454,8 +1536,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                         match.add(i);
                     }
                 }
+                if (match.isEmpty() && first.mayPlayLoose) {
+                    // copy fidelity: a may-play spell whose description differs only in its may-play suffix
+                    for (int i = 0; i < m.C(); i++) {
+                        final int ch = m.cands.get(i).kind <= 0 ? -1 : choiceOf(m, i);
+                        if (ch > 0 && ch <= objs.size() && first.matchesMayPlay(objs.get(ch - 1))) {
+                            match.add(i);
+                        }
+                    }
+                }
                 if (match.isEmpty()) {
-                    why[0] = "the searched candidate is not in the play-out's menu";
+                    why[0] = "the searched candidate is not in the play-out's menu" + menuMiss(gg, m, objs, first);
                     return -1;
                 }
                 if (match.size() == 1) {
@@ -1522,7 +1613,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         session.setLocalAnswerer(rs);
-        final PlayoutController pc = new PlayoutController(g, me, me.getController().getLobbyPlayer(), session, seat, probe);
+        final PlayoutController pc = new PlayoutController(g, me, me.getController().getLobbyPlayer(), session, seat, probe,
+                (cfg.copyFidelity == 1 || cfg.copyFidelity == 2 && ls.fidelityPass()) && !first.pass);
         return new LookaheadSearch.PlayoutSeat() {
             @Override
             public PlayerControllerAi controller() {
