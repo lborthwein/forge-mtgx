@@ -167,6 +167,13 @@ public final class CubeComboAi {
      */
     public static final boolean RECEIPTS = Boolean.getBoolean("forge.ai.cubeCombo.receipts");
 
+    /**
+     * combo-ai-port-1009: the two plans this port adds to the v104 lineage (Natural Order -> Craterhoof, plain Brain
+     * Freeze storm). On unless {@code -Dforge.ai.cubeCombo.additions=false}, which plays the lineage's families alone
+     * (a diagnostic arm: "what the port of v104 does by itself").
+     */
+    public static final boolean ADDITIONS = !"false".equals(System.getProperty("forge.ai.cubeCombo.additions"));
+
     public static void receipt(String line) {
         if (RECEIPTS) System.err.println(line);
     }
@@ -177,17 +184,19 @@ public final class CubeComboAi {
     }
 
     // ------------------------------------------------------------------ combo-ai-port-1009: id-neutral policy probes
-    /** First id of a cube combo seat's probe range; live ids (scoped from 1e9, or the small global counters) and
-     * look-ahead copies (scoped from 1e9) never get near it. */
-    static final int PROBE_ID_BASE = 1_500_000_000;
-    /** Per-seat stride, so two combo seats in one game never share an id. */
-    static final int PROBE_ID_STRIDE = 50_000_000;
+    /** First id of a cube combo seat's probe range: 100M above the start of a scoped live game's ids (IdScope from 1e9;
+     * a game allocates far fewer) and far above the global counters. Kept below 1.147e9 because the bench publishes a
+     * stack spell's target id as StateEncoder.SPELL_TARGET_ID_BASE (1e9) + its id, which must not overflow an int, and a
+     * plan's own action (an ability copy made in this range) can reach the stack. */
+    static final int PROBE_ID_BASE = 1_100_000_000;
+    /** Per-seat stride (seat id mod 2), so the two seats of a game never share an id. */
+    static final int PROBE_ID_STRIDE = 20_000_000;
 
     /** A seat's own id counters ({@link forge.util.IdScope#install}'s form), one per game and seat, monotonic. */
     static Object newProbeIdScope(Player player) {
         final java.util.concurrent.atomic.AtomicInteger[] counters =
                 new java.util.concurrent.atomic.AtomicInteger[forge.util.IdScope.Kind.values().length];
-        final int base = PROBE_ID_BASE + PROBE_ID_STRIDE * Math.floorMod(player.getId(), 8);
+        final int base = PROBE_ID_BASE + PROBE_ID_STRIDE * Math.floorMod(player.getId(), 2);
         for (int i = 0; i < counters.length; i++) counters[i] = new java.util.concurrent.atomic.AtomicInteger(base);
         return counters;
     }

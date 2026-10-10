@@ -125,17 +125,20 @@ public final class CubeComboControl {
     }
 
     // ------------------------------------------------------------------ combo-ai-port-1009: the seat's entry points
-    // Each runs the v104 method in this seat's probe id scope and its native fallbacks in the live scope
+    // Each DECISION runs the v104 method in this seat's probe id scope and its native fallbacks in the live scope
     // (CubeComboAi.probeIds / liveIds): object ids the policy's own probes allocate (ability copies, enumerations)
     // never advance the live game's counters, so a pass on which no plan acts leaves the game exactly as the native
-    // controller would. Ids that do reach the game (a plan's own action) come from this seat's range, unique.
+    // controller would. A plan's own action (a copy made in the probe range) keeps its unique id; executing it
+    // (playChosenSpellAbility) runs in the live scope.
 
     private <T> T live(java.util.function.Supplier<T> body) { return CubeComboAi.liveIds(player, body); }
     private void liveRun(Runnable body) { CubeComboAi.liveIds(player, () -> { body.run(); return null; }); }
     private <T> T probe(java.util.function.Supplier<T> body) { return CubeComboAi.probeIds(player, body); }
 
     public List<SpellAbility> chooseSpellAbilityToPlay() { return probe(this::chooseSpellAbilityToPlay0); }
-    public boolean playChosenSpellAbility(SpellAbility ability) { return probe(() -> playChosenSpellAbility0(ability)); }
+    /** Not in the probe scope: this EXECUTES (a plan's play or the native play puts a spell on the stack, allocating
+     * live stack-instance ids). Its own checks allocate nothing on an ordinary land play. */
+    public boolean playChosenSpellAbility(SpellAbility ability) { return playChosenSpellAbility0(ability); }
     public forge.game.mana.Mana chooseManaFromPool(List<forge.game.mana.Mana> offered) {
         return probe(() -> chooseManaFromPool0(offered));
     }
@@ -216,8 +219,8 @@ public final class CubeComboControl {
         if (action == null && (action = reanimatorPlan.nextAction()) != null) plan = "reanimator";
         // combo-ai-port-1009: the two families the v104 lineage lacked, after every lineage plan, so that every
         // lineage family keeps its selection order; each acts only on its own lethal forecast.
-        if (action == null && (action = naturalOrderPlan.nextAction()) != null) plan = "natural-order";
-        if (action == null && (action = brainFreezePlan.nextAction()) != null) plan = "brain-freeze";
+        if (CubeComboAi.ADDITIONS && action == null && (action = naturalOrderPlan.nextAction()) != null) plan = "natural-order";
+        if (CubeComboAi.ADDITIONS && action == null && (action = brainFreezePlan.nextAction()) != null) plan = "brain-freeze";
         if (action == null && (action = emryPlan.nextAction()) != null) plan = "emry";
         if (action == null && (action = fastbondPlan.nextAction()) != null) plan = "fastbond";
         if (action == null && (action = kikiSyrPlan.nextAction()) != null) plan = "kiki-syr";
