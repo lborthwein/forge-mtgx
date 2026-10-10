@@ -87,6 +87,35 @@ public class AiProfileUtil {
         for (String profile : availableProfiles) {
             loadedProfiles.put(profile, loadProfile(profile));
         }
+        registerBuiltInProfiles();
+    }
+
+    /**
+     * mtgx (lane combo-ai-port-1009): profiles defined in code as a shipped profile plus fixed keys. They need no file
+     * under res/ai, so a res directory shared with older jars never gains a key those jars cannot parse
+     * ({@code loadProfile} throws on an unknown key). Not in {@link #getAvailableProfiles()} (GUI lists and the random
+     * profile draw are unchanged); harnesses accept them through {@link #isKnownProfile}. A file of the same name, if a
+     * res directory ever ships one, wins.
+     */
+    public static final String CUBE_COMBO_PROFILE = "CubeCombo";
+
+    private static void registerBuiltInProfiles() {
+        final Map<AiProps, String> base = loadedProfiles.get("Default");
+        if (base != null && !loadedProfiles.containsKey(CUBE_COMBO_PROFILE)) {
+            final Map<AiProps, String> combo = new HashMap<>(base);
+            combo.put(AiProps.CUBE_COMBO_PLANS, "true");
+            loadedProfiles.put(CUBE_COMBO_PROFILE, combo);
+        }
+    }
+
+    /** A profile a seat may name: a shipped file, or a built-in profile (mtgx, {@link #registerBuiltInProfiles}). */
+    public static boolean isKnownProfile(final String profile) {
+        return getAvailableProfiles().contains(profile) || loadedProfiles.containsKey(profile);
+    }
+
+    /** True when this lobby player's AI profile turns on the cube combo policy ({@link AiProps#CUBE_COMBO_PLANS}). */
+    public static boolean cubeComboPlans(final LobbyPlayer p) {
+        return Boolean.parseBoolean(getAIProp(p, AiProps.CUBE_COMBO_PLANS));
     }
     
     /**

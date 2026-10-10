@@ -20,6 +20,21 @@ import java.util.Map;
 public class ChangeZoneAllAi extends SpellAbilityAi {
     @Override
     protected AiAbilityDecision canPlay(Player ai, SpellAbility sa) {
+        // v72 C2: the versioned cube policy holds OUR OWN graveyard-shuffling
+        // wheel - Echo of Eons, Timetwister, Time Spiral, recognised by the
+        // PRINTED ChangeZoneAll Graveyard -> Library/Exile shape and never by
+        // name - while a storm or Breach route whose gate pieces sit in our own
+        // graveyard is own-visibly reachable. The diagnosis measured the
+        // ordinary AI shuffling Tendrils of Agony and Yawgmoth's Will out of
+        // our graveyard one pass after the storm gate refused the only
+        // own-visible lethal in 32 games. The predicate refuses nothing else:
+        // any other clause failing leaves the ordinary cast untouched and
+        // prints no line. Gated on CubeComboAi.enabled(ai): the Default arm
+        // never reaches it.
+        if (CubeComboAi.enabled(ai) && CubeStormPlan.holdWheel(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         // Change Zone All, can be any type moving from one zone to another
         final Cost abCost = sa.getPayCosts();
         final Card source = sa.getHostCard();

@@ -83,10 +83,20 @@ public class LobbyPlayerAi extends LobbyPlayer implements IGameEntitiesFactory {
         return createControllerFor(slave);
     }
 
+    /**
+     * mtgx (lane combo-ai-port-1009): the cube combo policy's seat, for a profile that sets
+     * {@link AiProps#CUBE_COMBO_PLANS}; the seat's first controller only (a mind-slave controller stays native).
+     */
+    private PlayerControllerAi createCubeComboControllerFor(Player ai) {
+        PlayerControllerAi result = new CubeComboPlayerController(ai.getGame(), ai, this);
+        result.getAi().setUseSimulation(option);
+        return result;
+    }
+
     @Override
     public Player createIngamePlayer(Game game, final int id) {
         Player ai = new Player(getName(), game, id);
-        ai.setFirstController(createControllerFor(ai));
+        ai.setFirstController(AiProfileUtil.cubeComboPlans(this) ? createCubeComboControllerFor(ai) : createControllerFor(ai));
 
         if (rotateProfileEachGame) {
             setAiProfile(AiProfileUtil.getRandomProfile());

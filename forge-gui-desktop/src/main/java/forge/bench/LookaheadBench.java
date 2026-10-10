@@ -126,7 +126,8 @@ public final class LookaheadBench {
                 throw new IllegalStateException("game " + id + ": aiProfiles[" + i + "] is not a name");
             }
             final String name = p.getAsString();
-            if (!available.contains(name)) {
+            // combo-ai-port-1009: a built-in profile (CubeCombo, the cube combo policy) is accepted too
+            if (!available.contains(name) && !forge.ai.AiProfileUtil.isKnownProfile(name)) {
                 throw new IllegalStateException("game " + id + ": AI profile '" + name + "' is not shipped (available "
                         + available + ")");
             }
@@ -390,6 +391,15 @@ public final class LookaheadBench {
             final JsonArray decks = spec.getAsJsonArray("decks");
             final JsonArray seatModes = spec.getAsJsonArray("seats");
             final String[] profiles = seatProfiles(spec, availableProfiles); // "Default" x2 unless the game names them
+            for (int i = 0; i < 2; i++) {
+                // combo-ai-port-1009: the cube combo policy is a plain Forge AI seat's option; a look-ahead, ranker,
+                // policy or simulation seat would silently ignore it, so it is refused there
+                if (forge.ai.AiProfileUtil.CUBE_COMBO_PROFILE.equals(profiles[i])
+                        && !"default".equals(seatModes.get(i).getAsString())) {
+                    throw new IllegalStateException("game " + id + ": AI profile " + profiles[i]
+                            + " is for a \"default\" seat, not \"" + seatModes.get(i).getAsString() + "\"");
+                }
+            }
 
             final List<RegisteredPlayer> seats = new ArrayList<>();
             final List<LookaheadSearch> searches = new ArrayList<>();
