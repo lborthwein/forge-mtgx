@@ -137,7 +137,9 @@ public class RlObsV2GamesTest {
                 identityOnly[i] = true;
                 final int id = o.oSeenIds.get(j++);
                 if (!seen.contains(id) && (oracle == null || !oracle.everObserved(s, id))) {
-                    violation("o_seen card never seen face up: " + g.findById(id));
+                    final Card gone = g.findById(id);
+                    violation("o_seen card never seen face up: id " + id + " tok_card " + f.tokCard[i] + " "
+                            + (gone == null ? "(no longer in the game)" : gone + " in " + gone.getZone()));
                 }
                 final Card c = g.findById(id);
                 if (c != null && c.getOwner() == seat) {
@@ -171,12 +173,14 @@ public class RlObsV2GamesTest {
                     }
                 }
             }
-            // mutant (b): o_seen filled from the opponent's true hidden hand
+            // mutant (b): o_seen filled from the opponent's true hidden hand. Counted only in frames where that hand
+            // holds a hidden card the seat does not know now: when the seat knows the whole hand (a reveal it saw, e.g.
+            // Valki, God of Lies), the mutant leaks nothing and there is nothing to catch.
             final Player opp = RlFeaturizer.opponentOf(g, seat);
             if (oracle != null && opp != null && !opp.getCardsIn(ZoneType.Hand).isEmpty()) {
                 boolean any = false, caught = false;
                 for (Card c : opp.getCardsIn(ZoneType.Hand)) {
-                    if (c.getView().canBeShownTo(seat.getView())) {
+                    if (c.getView().canBeShownTo(seat.getView()) || oracle.justified(s, c)) {
                         continue;
                     }
                     any = true;
