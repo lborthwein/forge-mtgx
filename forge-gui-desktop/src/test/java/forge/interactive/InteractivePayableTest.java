@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
@@ -439,6 +440,29 @@ public class InteractivePayableTest extends AITest {
         assertEquals(flag(bears), Boolean.FALSE);
     }
 
+    /** A Spirit Guide in hand and Gemstone Mine count as one mana each instead of making every answer unknown. */
+    @Test
+    public void spiritGuideAndGemstoneMineAreSources() {
+        board();
+        lands(true, "Island", "Island");
+        hand("Simian Spirit Guide");
+        final Card bolt = hand("Lightning Bolt");
+        final Card counterspell = hand("Counterspell");
+        settle();
+        assertEquals(HumanManaAffordability.assess(me, spell(counterspell)), Assessment.UNKNOWN, "assess gives up");
+        assertEquals(flag(bolt), Boolean.TRUE, "{R} from exiling Simian Spirit Guide");
+        assertEquals(flag(counterspell), Boolean.FALSE, "{U}{U} cannot come from {R}");
+
+        board();
+        land("Gemstone Mine", false);
+        final Card brainstorm = hand("Brainstorm");
+        final Card counter2 = hand("Counterspell");
+        settle();
+        assertEquals(HumanManaAffordability.assess(me, spell(counter2)), Assessment.UNKNOWN, "assess gives up");
+        assertEquals(flag(brainstorm), Boolean.TRUE);
+        assertEquals(flag(counter2), Boolean.FALSE, "one Gemstone Mine is one mana");
+    }
+
     // ------------------------------------------------------------------ the price is a lower bound
 
     /**
@@ -486,6 +510,88 @@ public class InteractivePayableTest extends AITest {
             }
         }
         assertTrue(checked >= 100, "priced " + checked);
+    }
+
+    // ------------------------------------------------------------------ never a false "unpayable"
+
+    private static final String[] LANDS = {"Island", "Plains", "Mountain", "Swamp", "Forest", "Volcanic Island",
+        "City of Brass", "Ancient Tomb", "Scalding Tarn", "Mishra's Workshop", "Gemstone Mine"};
+    private static final String[] SOURCES = {"Sol Ring", "Mana Vault", "Izzet Signet", "Talisman of Progress",
+        "Mox Sapphire", "Lotus Petal", "Basalt Monolith", "Coalition Relic", "Grim Monolith", "Birds of Paradise",
+        "Llanowar Elves", "Simian Spirit Guide"};
+    private static final String[] MODIFIERS = {"Thalia, Guardian of Thraben", "Goblin Electromancer", "Trinisphere",
+        "Helm of Awakening", "Sphere of Resistance", "Zirda, the Dawnwaker", "Goblin Warchief"};
+    private static final String[] SPELLS = {"Lightning Bolt", "Counterspell", "Brainstorm", "Force of Will", "Daze",
+        "Mulldrifter", "Solitude", "Fury", "Subtlety", "Grief", "Endurance", "Lingering Souls", "Dismember",
+        "Gitaxian Probe", "Mental Misstep", "Gut Shot", "Stoke the Flames", "Reverse Engineer", "Treasure Cruise",
+        "Murktide Regent", "Gurmag Angler", "Walking Ballista", "Banefire", "Portal to Phyrexia", "Oust", "Snap",
+        "Fireblast", "Gush", "Thoughtcast", "Frogmite", "Myr Enforcer", "Pyrokinesis", "Misdirection", "Deep Analysis",
+        "Fact or Fiction", "Wrath of God", "Kolaghan's Command", "Lightning Helix", "Kitchen Finks", "Figure of Destiny",
+        "Reaper King", "Spectral Procession", "Thrun, the Last Troll", "Bloodbraid Elf", "Hogaak, Arisen Necropolis",
+        "Chord of Calling", "Hour of Revelation", "Dark Ritual", "Cabal Ritual", "Hangarback Walker",
+        "Stonecoil Serpent", "Emrakul, the Aeons Torn", "Show and Tell", "Zirda, the Dawnwaker", "Island", "Forest"};
+
+    private static String pick(final Random rng, final String[] names) {
+        return names[rng.nextInt(names.length)];
+    }
+
+    /**
+     * Soundness on random boards: whenever the flag says unpayable, Forge's own payment code says the same. Both
+     * seats here are AI, so ComputerUtilMana (the AI auto-payer, which is what Forge's desktop "Auto" button runs)
+     * prices and pays every offered ability of the card in test mode; it must find no way to pay the mana. The other
+     * direction is not asserted: the AI payer misses payments of its own, and the flag says payable when unsure.
+     */
+    @Test
+    public void unpayableNeverContradictsForgesPayer() {
+        final Random rng = new Random(1010);
+        int offeredCards = 0;
+        int unpayable = 0;
+        int glowing = 0;
+        for (int n = 0; n < 400; n++) {
+            board();
+            for (int i = rng.nextInt(7); i > 0; i--) land(pick(rng, LANDS), rng.nextInt(3) == 0);
+            for (int i = rng.nextInt(3); i > 0; i--) {
+                final String name = pick(rng, SOURCES);
+                if (name.equals("Simian Spirit Guide")) {
+                    hand(name);
+                    continue;
+                }
+                final Card source = rng.nextBoolean() ? permanent(name) : addCard(name, me);
+                source.setTapped(rng.nextInt(3) == 0);
+            }
+            if (rng.nextInt(3) == 0) permanent(pick(rng, MODIFIERS));
+            if (rng.nextInt(4) == 0) addCard(pick(rng, MODIFIERS), foe).setSickness(false);
+            if (rng.nextInt(4) == 0) {
+                final byte[] colors = {MagicColor.WHITE, MagicColor.BLUE, MagicColor.BLACK, MagicColor.RED, MagicColor.GREEN};
+                floating(colors[rng.nextInt(colors.length)]);
+            }
+            for (int i = 0; i < 5; i++) hand(pick(rng, SPELLS));
+            for (int i = rng.nextInt(9); i > 0; i--) addCardToZone(pick(rng, SPELLS), me, ZoneType.Graveyard);
+            for (int i = rng.nextInt(3); i > 0; i--) addCard("Grizzly Bears", me).setSickness(rng.nextBoolean());
+            me.setLife(1 + rng.nextInt(20), null);
+            settle();
+            for (Card card : new ArrayList<>(me.getCardsIn(ZoneType.Hand, ZoneType.Graveyard, ZoneType.Battlefield))) {
+                final List<SpellAbility> offered = offered(card);
+                if (offered.isEmpty()) continue;
+                offeredCards++;
+                if (InteractiveGuiGame.controlPayable(me, offered)) {
+                    // Still glowing although Forge's payer finds no way: unsure cases (or the payer's own misses).
+                    if (offered.stream().noneMatch(sa -> forge.ai.ComputerUtilMana.canPayManaCost(sa, me, 0, false))) glowing++;
+                    continue;
+                }
+                unpayable++;
+                for (SpellAbility sa : offered) {
+                    assertFalse(forge.ai.ComputerUtilMana.canPayManaCost(sa, me, 0, false),
+                            "board " + n + ": the flag says unpayable but Forge's payer pays " + sa + " of " + card
+                                    + " (life " + me.getLife() + ", pool " + me.getManaPool().totalMana() + ", battlefield "
+                                    + me.getCardsIn(ZoneType.Battlefield) + ")");
+                }
+            }
+        }
+        System.out.println("[castable-1010] fuzz: 400 boards, " + offeredCards + " offered cards, " + unpayable
+                + " unpayable, every one unpayable for Forge's payer too; " + glowing
+                + " still offered as payable that Forge's payer cannot pay");
+        assertTrue(unpayable >= 100, "the fuzz reaches unpayable cards: " + unpayable + " of " + offeredCards);
     }
 
     // ------------------------------------------------------------------ no side effects

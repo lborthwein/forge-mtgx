@@ -11,6 +11,8 @@ import forge.game.cost.CostPayLife;
 import forge.game.cost.CostSacrifice;
 import forge.game.cost.CostAdjustment;
 import forge.game.cost.CostAddMana;
+import forge.game.cost.CostExile;
+import forge.game.cost.CostRemoveCounter;
 import forge.game.cost.CostUntap;
 import forge.game.cost.CostUntapType;
 import forge.game.ability.ApiType;
@@ -192,6 +194,9 @@ public final class HumanManaAffordability {
      *   <li>{2/C} and snow shards count as one mana of any type.</li>
      *   <li>A tapped or summoning-sick source contributes nothing through its {T} abilities.
      *       Before, it made the whole answer unknown.</li>
+     *   <li>More source shapes count: a mana ability limited to once per card by sacrificing or
+     *       exiling the card itself (a Spirit Guide from the hand), a counter removed from the card
+     *       (Gemstone Mine, counters assumed present), and a source sacrificed afterwards.</li>
      * </ul></p>
      *
      * <p>Like {@link #assess}, this is a read. It runs no AI payment simulation, calls no
@@ -271,26 +276,35 @@ public final class HumanManaAffordability {
                 ZoneType.Exile, ZoneType.Command)) {
             if (card.isPhasedOut()) continue;
             int maxAmount = 0;
+            int sumAmount = 0;
+            boolean allTap = true;
             int colors = 0;
             for (SpellAbility source : card.getSpellAbilities()) {
                 if (!source.isManaAbility()) continue;
                 if (source.getRestrictions().getZone() != null
                         && !card.isInZone(source.getRestrictions().getZone())
                         && !source.hasParam("AdditionalActivationZone")) continue;
-                // A {T} ability of a tapped or summoning-sick permanent cannot be activated at all.
-                if (card.isInZone(ZoneType.Battlefield) && (card.isTapped() || card.isAbilitySick())
-                        && source.getPayCosts() != null && source.getPayCosts().hasTapCost()) continue;
-                if (!card.isInZone(ZoneType.Battlefield)) return Assessment.UNKNOWN;
-                if (source.getPayCosts() == null || source.getPayCosts().getCostParts().stream()
-                        .noneMatch(p -> p instanceof CostTap)) return Assessment.UNKNOWN;
-                if (source.getPayCosts().getCostParts().stream()
-                        .anyMatch(p -> !(p instanceof CostTap) && !(p instanceof CostPartMana)
-                                && !(p instanceof CostPayLife)
-                                && !(p instanceof CostSacrifice && p.payCostFromSource()))) return Assessment.UNKNOWN;
+                final forge.game.cost.Cost pay = source.getPayCosts();
+                if (pay == null) return Assessment.UNKNOWN;
+                final boolean tap = pay.hasTapCost();
+                // A {T} ability of a tapped or summoning-sick permanent, or of a card off the battlefield,
+                // cannot be activated at all.
+                if (tap && (!card.isInZone(ZoneType.Battlefield) || card.isTapped() || card.isAbilitySick())) continue;
+                // Cost shapes that make no mana themselves. Each activation is once per card: a tap, or
+                // sacrificing or exiling the card itself (Lotus Petal, a Spirit Guide from the hand).
+                // Counters a cost removes from the card are assumed present: that only adds mana.
+                if (pay.getCostParts().stream().anyMatch(p -> !(p instanceof CostTap) && !(p instanceof CostPartMana)
+                        && !(p instanceof CostPayLife)
+                        && !((p instanceof CostSacrifice || p instanceof CostExile || p instanceof CostRemoveCounter)
+                                && p.payCostFromSource()))) return Assessment.UNKNOWN;
+                if (!tap && pay.getCostParts().stream().noneMatch(p -> (p instanceof CostSacrifice
+                        || p instanceof CostExile) && p.payCostFromSource())) return Assessment.UNKNOWN;
                 if (source.getManaPart() == null) return Assessment.UNKNOWN;
                 if (source.hasParam("Each")) return Assessment.UNKNOWN;
                 for (SpellAbility tail = source.getSubAbility(); tail != null; tail = tail.getSubAbility()) {
-                    if (tail.getApi() != ApiType.DealDamage && tail.getApi() != ApiType.LoseLife) return Assessment.UNKNOWN;
+                    // Damage, life loss and sacrificing a source afterwards (Gemstone Mine) make no mana.
+                    if (tail.getApi() != ApiType.DealDamage && tail.getApi() != ApiType.LoseLife
+                            && tail.getApi() != ApiType.Sacrifice) return Assessment.UNKNOWN;
                 }
                 final String amountText = source.getParamOrDefault("Amount", "1");
                 final String produced = source.getManaPart().getOrigProduced();
@@ -300,13 +314,18 @@ public final class HumanManaAffordability {
                         : produced.startsWith("Combo ") ? produced.substring(6) : produced;
                 if (!simple.matches("[WUBRGC]( [WUBRGC])*")) return Assessment.UNKNOWN;
                 final String[] symbols = simple.split(" ");
-                maxAmount = Math.max(maxAmount, Integer.parseInt(amountText) * (choice ? 1 : symbols.length));
+                final int amount = Integer.parseInt(amountText) * (choice ? 1 : symbols.length);
+                maxAmount = Math.max(maxAmount, amount);
+                sumAmount += amount;
+                allTap &= tap;
                 for (String symbol : symbols) {
                     byte color = ManaAtom.fromName(symbol);
                     colors |= color | player.getManaPool().getPossibleColorUses(color);
                 }
             }
-            for (int i = 0; i < Math.min(maxAmount, shards.size()); i++) tokens.add(colors);
+            // Abilities that all need the one {T} share it; otherwise each may be activated once.
+            final int supply = allTap ? maxAmount : sumAmount;
+            for (int i = 0; i < Math.min(supply, shards.size()); i++) tokens.add(colors);
         }
         if (spell) {
             // CR 702.51a convoke: each creature tapped pays {1} or one mana of its colour, sick or not.
