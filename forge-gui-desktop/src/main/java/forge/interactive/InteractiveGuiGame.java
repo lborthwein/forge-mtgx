@@ -891,6 +891,17 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         });
     }
 
+    /**
+     * castable-1010: a priority card control's {@code payable} flag, over the abilities the control
+     * offers (canPlay, cast restrictions and the affordability filter already applied). True when
+     * some way to play the card can be paid for now; a card offered with no ability (a plain
+     * selection) has nothing to pay for.
+     */
+    static boolean controlPayable(final Player human, final List<SpellAbility> offered) {
+        return offered.isEmpty() || offered.stream()
+                .anyMatch(ability -> forge.player.HumanManaAffordability.payable(human, ability));
+    }
+
     private JsonArray buildStatefulControls(final Input input, final String kind,
                                             final Map<String, ControlBinding> bindings,
                                             final List<PreviewJob> previews) {
@@ -953,6 +964,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 // A land with a non-mana ability must still hold priority.
                 value.addProperty("manaOnly", !affordableAbilities.isEmpty()
                         && affordableAbilities.stream().allMatch(ability -> ability.isManaAbility()));
+                // castable-1010: whether some way to play this card can be paid for right now (the pool,
+                // untapped sources, Phyrexian life, convoke/improvise/delve; each alternative cost is its
+                // own ability here; X = 0). The client glows only payable cards and keeps the rest
+                // clickable. False is a proof (HumanManaAffordability.payable). It is a read, so the game,
+                // its random stream and the AI's memory are untouched. This seat only.
+                value.addProperty("payable", controlPayable(human, affordableAbilities));
                 if (previews != null) {
                     previews.add(new PreviewJob(card, value, possibleAbilities, priorityAbilities, affordableAbilities));
                 }

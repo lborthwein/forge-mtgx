@@ -10,6 +10,9 @@ import forge.game.cost.CostTap;
 import forge.game.cost.CostPayLife;
 import forge.game.cost.CostSacrifice;
 import forge.game.cost.CostAdjustment;
+import forge.game.cost.CostAddMana;
+import forge.game.cost.CostUntap;
+import forge.game.cost.CostUntapType;
 import forge.game.ability.ApiType;
 import forge.game.keyword.Keyword;
 import forge.game.player.Player;
@@ -153,6 +156,179 @@ public final class HumanManaAffordability {
             // Unioning alternatives and each token's colors overestimates mixed output,
             // ensuring that a failed matching is still a sound impossibility certificate.
             for (int i = 0; i < Math.min(maxAmount, shards.size()); i++) tokens.add(colors);
+        }
+        return canMatch(shards, tokens) ? Assessment.POTENTIALLY_AFFORDABLE : Assessment.PROVEN_UNAFFORDABLE;
+    }
+
+    /**
+     * The human priority control's {@code payable} flag (castable-1010): false only when
+     * {@link #assess} or {@link #assessPayable} proves that no mana can be found for this
+     * ability's cost right now. Both are impossibility certificates, so false is a proof and
+     * anything unsure says true.
+     */
+    public static boolean payable(final Player player, final SpellAbility ability) {
+        return assess(player, ability) != Assessment.PROVEN_UNAFFORDABLE
+                && assessPayable(player, ability) != Assessment.PROVEN_UNAFFORDABLE;
+    }
+
+    /**
+     * {@link #assess} for the {@code payable} flag, with more reach and the same soundness.
+     * It returns PROVEN_UNAFFORDABLE only when the cost's mana provably cannot come from the
+     * mana pool, the untapped mana sources and Phyrexian life. For a spell with the keyword it
+     * also counts creatures to convoke, artifacts to improvise and graveyard cards to delve.
+     * X counts as 0.
+     *
+     * <p>Where it reaches past {@link #assess}:
+     * <ul>
+     *   <li>The price is {@link CostAdjustment#presentationManaCostLowerBound}. A cost static
+     *       that cannot apply to this ability no longer makes the price unknown (Zirda, the
+     *       Dawnwaker: live reports 2026-10-10).</li>
+     *   <li>Non-mana cost parts are ignored. {@code canPlay} already checked them
+     *       ({@code CostPayment.canPayAdditionalCosts}), and ignoring what they use up can only
+     *       add mana. The exceptions are parts that could make mana themselves: untap costs and
+     *       add-mana costs. Alternative costs reach this check as their own abilities: Force of
+     *       Will's pitch, Daze's return, evoke, flashback, escape.</li>
+     *   <li>Convoke, improvise and delve count as mana.</li>
+     *   <li>{2/C} and snow shards count as one mana of any type.</li>
+     *   <li>A tapped or summoning-sick source contributes nothing through its {T} abilities.
+     *       Before, it made the whole answer unknown.</li>
+     * </ul></p>
+     *
+     * <p>Like {@link #assess}, this is a read. It runs no AI payment simulation, calls no
+     * controller and draws nothing from the random stream. It copies no ability, so it takes no
+     * ids. It taps nothing, chooses no X and leaves the mana pool alone. So it needs none of the
+     * observe-only isolation that the bench's priority menu needs around Forge's AI
+     * canPayCost (PlayerControllerBridge.observing).</p>
+     */
+    public static Assessment assessPayable(final Player player, final SpellAbility ability) {
+        if (player == null || ability == null || ability.isManaAbility() || ability.isLandAbility()
+                || ability.isTrigger() || ability.isReplacementAbility() || ability.isPowerUp()
+                || ability.getPayCosts() == null || ability.hasParam("ReduceCost")
+                || ability.hasParam("TapCreaturesForMana")
+                || (ability.hasParam("Announce") && !"X".equals(ability.getParam("Announce")))
+                || ability.getParamOrDefault("Cost", "").contains("\\")
+                || ability.hasSVar("NumTimes") || player.hasKeyword("PayLifeInsteadOf:B")) {
+            return Assessment.UNKNOWN;
+        }
+        final Card host = ability.getHostCard();
+        if (host == null) return Assessment.UNKNOWN;
+        final boolean spell = ability.isSpell();
+        if (spell && (ability.isOffering() || ability.isEmerge() || ability.isBestow()
+                || ability.isCastFaceDown() || host.hasKeyword(Keyword.ASSIST))) return Assessment.UNKNOWN;
+        // As assess: a may-play grant that converts what mana pays the cost (Thief of Sanity).
+        final CardPlayOption grant = ability.getMayPlayOption();
+        if (grant != null && (grant.isIgnoreManaCostType() || grant.isIgnoreManaCostColor()
+                || grant.isIgnoreSnowSourceManaCostColor())) {
+            return Assessment.UNKNOWN;
+        }
+        final CostPartMana part = ability.getPayCosts().getCostMana();
+        if (part != null && (part.isExiledCreatureCost() || part.isEnchantedCreatureCost()
+                || part.getMaxWaterbend() != null || part.getXMin() > 0)) return Assessment.UNKNOWN;
+        if (ability.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostUntap
+                || p instanceof CostUntapType || p instanceof CostAddMana)) return Assessment.UNKNOWN;
+        final ManaCost cost = CostAdjustment.presentationManaCostLowerBound(ability);
+        if (cost == null) return Assessment.UNKNOWN;
+        final List<ManaCostShard> shards = new ArrayList<>();
+        int phyrexian = 0;
+        for (ManaCostShard shard : cost) {
+            // X=0 is the lowest price; never choose or mutate the actual X.
+            if (shard == ManaCostShard.X) continue;
+            if (shard.isPhyrexian()) phyrexian++;
+            // {2/C} and snow shards stay: canBePaidWithManaOfColor takes any one mana for them.
+            shards.add(shard);
+        }
+        for (int i = 0; i < cost.getGenericCost(); i++) shards.add(ManaCostShard.GENERIC);
+        if (shards.isEmpty()) return Assessment.POTENTIALLY_AFFORDABLE;
+
+        // As assess: mana conversion, an optional cost or granted payment keyword, a mana
+        // replacement or a mana trigger in a public active zone makes the supply unknown.
+        for (Card card : player.getGame().getCardsInGame()) {
+            if (!card.isInZone(ZoneType.Battlefield) && !card.isInZone(ZoneType.Command)
+                    && !card.isInZone(ZoneType.Stack) && card != host) continue;
+            if (card.getStaticAbilities().stream().anyMatch(s -> s.checkMode(StaticAbilityMode.ManaConvert))) return Assessment.UNKNOWN;
+            if (spell && card.getStaticAbilities().stream().anyMatch(s ->
+                    s.checkMode(StaticAbilityMode.OptionalCost)
+                    || (s.hasParam("AddKeyword") && s.getParam("AddKeyword")
+                        .matches("(?s).*(Convoke|Delve|Improvise|Assist|Emerge|Offering|Harmonize|Waterbend|Affinity|Undaunted).*"))
+                    || (s.hasParam("AddKeyword") && s.getParamOrDefault("AffectedZone", "").contains("Stack")))) return Assessment.UNKNOWN;
+            if (card.getReplacementEffects().stream().filter(r -> r.zonesCheck(player.getGame().getZoneOf(card)))
+                    .anyMatch(r -> r.getMode() == ReplacementType.ProduceMana
+                    || r.getMode() == ReplacementType.PayLife || r.getMode() == ReplacementType.LifeReduced
+                    || r.getMode() == ReplacementType.DamageDone || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
+            if (card.getTriggers().stream().filter(t -> t.getSpawningAbility() != null
+                    || t.zonesCheck(player.getGame().getZoneOf(card)))
+                    .anyMatch(t -> t.getMode() == TriggerType.TapsForMana
+                    || t.getMode() == TriggerType.ManaAdded)) return Assessment.UNKNOWN;
+        }
+
+        final List<Integer> tokens = new ArrayList<>();
+        for (int i = 1; i <= phyrexian && player.canPayLife(2 * i, false, ability); i++) tokens.add(LIFE_PAYMENT);
+        for (var mana : player.getManaPool()) {
+            // Ignore spend restrictions optimistically; they can only remove payments.
+            tokens.add((int) (mana.getColor() | player.getManaPool().getPossibleColorUses(mana.getColor())));
+        }
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            if (card.isPhasedOut()) continue;
+            int maxAmount = 0;
+            int colors = 0;
+            for (SpellAbility source : card.getSpellAbilities()) {
+                if (!source.isManaAbility()) continue;
+                if (source.getRestrictions().getZone() != null
+                        && !card.isInZone(source.getRestrictions().getZone())
+                        && !source.hasParam("AdditionalActivationZone")) continue;
+                // A {T} ability of a tapped or summoning-sick permanent cannot be activated at all.
+                if (card.isInZone(ZoneType.Battlefield) && (card.isTapped() || card.isAbilitySick())
+                        && source.getPayCosts() != null && source.getPayCosts().hasTapCost()) continue;
+                if (!card.isInZone(ZoneType.Battlefield)) return Assessment.UNKNOWN;
+                if (source.getPayCosts() == null || source.getPayCosts().getCostParts().stream()
+                        .noneMatch(p -> p instanceof CostTap)) return Assessment.UNKNOWN;
+                if (source.getPayCosts().getCostParts().stream()
+                        .anyMatch(p -> !(p instanceof CostTap) && !(p instanceof CostPartMana)
+                                && !(p instanceof CostPayLife)
+                                && !(p instanceof CostSacrifice && p.payCostFromSource()))) return Assessment.UNKNOWN;
+                if (source.getManaPart() == null) return Assessment.UNKNOWN;
+                if (source.hasParam("Each")) return Assessment.UNKNOWN;
+                for (SpellAbility tail = source.getSubAbility(); tail != null; tail = tail.getSubAbility()) {
+                    if (tail.getApi() != ApiType.DealDamage && tail.getApi() != ApiType.LoseLife) return Assessment.UNKNOWN;
+                }
+                final String amountText = source.getParamOrDefault("Amount", "1");
+                final String produced = source.getManaPart().getOrigProduced();
+                if (!amountText.matches("[0-9]{1,3}")) return Assessment.UNKNOWN;
+                final boolean choice = "Any".equals(produced) || produced.startsWith("Combo ");
+                final String simple = "Any".equals(produced) ? "W U B R G"
+                        : produced.startsWith("Combo ") ? produced.substring(6) : produced;
+                if (!simple.matches("[WUBRGC]( [WUBRGC])*")) return Assessment.UNKNOWN;
+                final String[] symbols = simple.split(" ");
+                maxAmount = Math.max(maxAmount, Integer.parseInt(amountText) * (choice ? 1 : symbols.length));
+                for (String symbol : symbols) {
+                    byte color = ManaAtom.fromName(symbol);
+                    colors |= color | player.getManaPool().getPossibleColorUses(color);
+                }
+            }
+            for (int i = 0; i < Math.min(maxAmount, shards.size()); i++) tokens.add(colors);
+        }
+        if (spell) {
+            // CR 702.51a convoke: each creature tapped pays {1} or one mana of its colour, sick or not.
+            // CR 702.126a improvise: each artifact tapped pays {1}. Either way it must be untapped.
+            // CR 702.66a delve: each card exiled from the graveyard pays {1}; the spell is on the stack by then.
+            final boolean convoke = host.hasKeyword(Keyword.CONVOKE);
+            final boolean improvise = host.hasKeyword(Keyword.IMPROVISE);
+            if (convoke || improvise) {
+                for (Card permanent : player.getCardsIn(ZoneType.Battlefield)) {
+                    if (permanent.isPhasedOut() || permanent.isTapped()) continue;
+                    if (convoke && permanent.isCreature()) {
+                        tokens.add(permanent.getColor().getColor() | ManaAtom.COLORLESS);
+                    } else if (improvise && permanent.isArtifact()) {
+                        tokens.add((int) ManaAtom.COLORLESS);
+                    }
+                }
+            }
+            if (host.hasKeyword(Keyword.DELVE)) {
+                for (Card grave : player.getCardsIn(ZoneType.Graveyard)) {
+                    if (grave != host) tokens.add((int) ManaAtom.COLORLESS);
+                }
+            }
         }
         return canMatch(shards, tokens) ? Assessment.POTENTIALLY_AFFORDABLE : Assessment.PROVEN_UNAFFORDABLE;
     }
