@@ -246,6 +246,26 @@ public class Zone implements java.io.Serializable, Iterable<Card> {
         return Lists.newArrayList(cardsAdded.values());
     }
 
+    /**
+     * mtgx (lane copy-fidelity-1010): this zone (a game copier's copy's) takes {@code src}'s record of the cards put into
+     * it this turn and last turn, and where from (landfall and "entered this turn" counts, morbid, revolt-style checks),
+     * each card mapped by {@code m}.
+     */
+    public final void copyAddedThisTurnFrom(final Zone src, final forge.game.TurnStateMap m) {
+        cardsAddedThisTurn.clear();
+        for (Map.Entry<ZoneType, Card> e : src.cardsAddedThisTurn.entries()) {
+            cardsAddedThisTurn.put(e.getKey(), m.card(e.getValue()));
+        }
+        cardsAddedLastTurn.clear();
+        for (Map.Entry<ZoneType, Card> e : src.cardsAddedLastTurn.entries()) {
+            cardsAddedLastTurn.put(e.getKey(), m.card(e.getValue()));
+        }
+        enteredFromThisTurn.clear();
+        for (Map.Entry<Card, ZoneType> e : src.enteredFromThisTurn.entrySet()) {
+            enteredFromThisTurn.put(m.card(e.getKey()), e.getValue());
+        }
+    }
+
     public final void resetCardsAddedThisTurn() {
         cardsAddedLastTurn.clear();
         cardsAddedLastTurn.putAll(cardsAddedThisTurn);

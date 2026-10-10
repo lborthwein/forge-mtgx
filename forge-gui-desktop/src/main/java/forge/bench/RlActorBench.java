@@ -331,7 +331,7 @@ public final class RlActorBench {
     static final java.util.Set<String> K8_KEYS = Collections.unmodifiableSet(new java.util.TreeSet<>(
             java.util.Arrays.asList("worlds", "breadth", "horizonTurns", "threads", "reuse", "margin", "departZ",
                     "deadEtb", "zeroX", "crewNoop", "copyEot", "departMedian", "maxSteps", "budgetMs", "aiFixes0928",
-                    "fairNaming")));
+                    "fairNaming", "copyFidelity")));
 
     /**
      * The Forge AI profile of a seat: {@code forge:<Profile>} plays that shipped profile; {@code forge}, the K8 seat
@@ -364,6 +364,8 @@ public final class RlActorBench {
         c.departMedian = forge.ai.AiFixes.Mode.parse(la.has("departMedian") ? la.get("departMedian").getAsString() : null);
         c.maxSteps = la.has("maxSteps") ? la.get("maxSteps").getAsInt() : 5000;
         c.budgetMs = la.has("budgetMs") ? la.get("budgetMs").getAsLong() : 0L;
+        c.copyFidelity = forge.ai.simulation.LookaheadSearch.Config.copyFidelityLevel(
+                la.has("copyFidelity") ? la.get("copyFidelity").getAsInt() : 0);
         k8Mode(la, "aiFixes0928");
         k8Mode(la, "fairNaming");
         c.seed = seed;

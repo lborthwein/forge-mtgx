@@ -63,6 +63,12 @@ public class RlSearchV2GamesTest {
     /** obs-v2 games with the search on; every summary checked; returns the tapes. */
     static List<JsonObject> playV2(final FakeSearchService svc, final RlSearch.Config search, final int games,
             final int[] totals) throws Exception {
+        return playV2(svc, search, games, totals, null);
+    }
+
+    /** As above; each game's search summary into {@code searchOut} (copy-fidelity-1010). */
+    static List<JsonObject> playV2(final FakeSearchService svc, final RlSearch.Config search, final int games,
+            final int[] totals, final List<JsonObject> searchOut) throws Exception {
         final RlActorBench.Cfg cfg = RlActorBenchTest.cfg("eval");
         cfg.obsSchema = 2;
         cfg.search = search;
@@ -75,6 +81,9 @@ public class RlSearchV2GamesTest {
             Assert.assertTrue(p.end.get("void").isJsonNull(), "game " + i + " void " + p.end.get("void"));
             Assert.assertEquals(p.tape.get("schema_sha").getAsString(), RlSchemaV2.schemaSha(), "an obs-v2 tape");
             final JsonObject s = p.end.getAsJsonObject("search");
+            if (searchOut != null) {
+                searchOut.add(s);
+            }
             Assert.assertEquals(s.get("obs").getAsInt(), 2, "the search ran obs-v2");
             Assert.assertEquals(s.get("score_failures").getAsInt(), 0, "every SCORE answered");
             final JsonObject s1 = s.getAsJsonObject("lookahead").getAsJsonObject("s1");
@@ -150,6 +159,49 @@ public class RlSearchV2GamesTest {
         }
     }
 
+    /**
+     * copy-fidelity-1010: copy fidelity 2 ("repair") searches a decision again on fidelity copies only where a searched
+     * candidate was missing from the plain copies; a game with no such decision is the plain search's game exactly (same
+     * digest), and level 1 plays with no play-out failure.
+     */
+    @Test
+    public void copyFidelityLevelsPlayCleanAndLevelTwoRepairsOnly() throws Exception {
+        final int games = Integer.getInteger("rl.v2SearchGames", 3);
+        final List<JsonObject> plain, two, one, s0 = new ArrayList<>(), s2 = new ArrayList<>(), s1 = new ArrayList<>();
+        final int[] t0 = new int[4], t2 = new int[4], t1 = new int[4];
+        try (FakeSearchService svc = v2Service()) {
+            plain = playV2(svc, spec(svc.address(), ",\"obs\":2"), games, t0, s0);
+        }
+        try (FakeSearchService svc = v2Service()) {
+            two = playV2(svc, spec(svc.address(), ",\"obs\":2,\"copyFidelity\":2"), games, t2, s2);
+        }
+        try (FakeSearchService svc = v2Service()) {
+            one = playV2(svc, spec(svc.address(), ",\"obs\":2,\"copyFidelity\":1"), games, t1, s1);
+        }
+        int same = 0, redone = 0;
+        for (int i = 0; i < games; i++) {
+            Assert.assertFalse(s0.get(i).getAsJsonObject("lookahead").has("copyFidelity"), "level 0 reports no copyFidelity");
+            final JsonObject cf2 = s2.get(i).getAsJsonObject("lookahead").getAsJsonObject("copyFidelity");
+            Assert.assertEquals(cf2.get("level").getAsInt(), 2);
+            Assert.assertEquals(s1.get(i).getAsJsonObject("lookahead").getAsJsonObject("copyFidelity").get("level").getAsInt(), 1);
+            for (JsonObject s : new JsonObject[] {s0.get(i), s2.get(i), s1.get(i)}) {
+                Assert.assertTrue(s.getAsJsonObject("lookahead").has("playoutFailures"), "failure classes always reported");
+            }
+            if (cf2.get("redos").getAsLong() == 0) {
+                // no decision with a missing candidate: level 2 is level 0, decision for decision
+                Assert.assertEquals(two.get(i).get("digest"), plain.get(i).get("digest"), "level 2 without a redo = level 0");
+                same++;
+            } else {
+                redone++;
+            }
+        }
+        System.err.println("[copy-fidelity] level 2 vs level 0: " + same + " games without a redo, digest-identical; "
+                + redone + " with a redo; searched " + t0[0] + " / " + t2[0] + " / " + t1[0] + " (levels 0 / 2 / 1)");
+        Assert.assertTrue(t1[0] > 0, "level 1 searched");
+        replayWithoutSearch(one);
+        replayWithoutSearch(two);
+    }
+
     @Test
     public void anObsPinOfAnotherSchemaIsRefusedAtConfig() {
         final JsonObject c = JsonParser.parseString("{\"mode\":\"eval\",\"obsSchema\":1,\"search\":" + SC
@@ -173,9 +225,11 @@ public class RlSearchV2GamesTest {
         final RlFeaturizer liveFeat;
         final int version;
         int roots, leafEqual, copyEqual, copyFailed;
+        /** copy-fidelity-1010: the same counts for a copy with GameCopier copy fidelity 1. */
+        int copyEqual1, copyFailed1;
         /** -Drl.parityDump=DIR: each root's live and copy leaf payloads (u32 length + DECIDE payload) for v(o) checks. */
         static final String DUMP = System.getProperty("rl.parityDump");
-        final Map<String, Integer> leafDiff = new TreeMap<>(), copyDiff = new TreeMap<>();
+        final Map<String, Integer> leafDiff = new TreeMap<>(), copyDiff = new TreeMap<>(), copyDiff1 = new TreeMap<>();
 
         CopyParity(final RlFeaturizer liveFeat, final int version) {
             this.liveFeat = liveFeat;
@@ -232,6 +286,40 @@ public class RlSearchV2GamesTest {
                 AiCache.installScope(prevCache);
                 MyRandom.setThreadRandom(prev);
             }
+            // copy-fidelity-1010: the same with GameCopier copy fidelity 1 (its own scopes)
+            MyRandom.setThreadRandom(new Random(1));
+            AiCache.openScope();
+            forge.util.IdScope.open();
+            try {
+                synchronized (g) {
+                    final GameCopier copier = new GameCopier(g, true);
+                    copier.setCopyFidelity(1);
+                    final Game copy = copier.makeCopy();
+                    final Player me = (Player) copier.find(seat);
+                    final RlKnowledge k = live.forkFor(copy);
+                    k.attach();
+                    final RlFeaturizer f2 = new RlFeaturizer(RlActorBenchTest.index);
+                    f2.setVersion(version);
+                    f2.setKnowledge(k);
+                    final RlWire.Decide l2 = RlSearch.leafFrame(f2.observe(copy, me, 0, false, null), frame.gameUid,
+                            frame.seat, frame.turn);
+                    if (diff(frame, l2, copyDiff1)) {
+                        copyEqual1++;
+                    } else {
+                        tokenDiff(frame, l2, tokenDiff1);
+                    }
+                    if (DUMP != null) {
+                        dump("v" + version + "-copy-cf1.bin", RlWire.encodeDecide(l2));
+                    }
+                }
+            } catch (RuntimeException e) {
+                copyFailed1++;
+                copyDiff1.merge("copy failed: " + e.getClass().getSimpleName(), 1, Integer::sum);
+            } finally {
+                forge.util.IdScope.install(prevIds);
+                AiCache.installScope(prevCache);
+                MyRandom.setThreadRandom(prev);
+            }
         }
 
         static synchronized void dump(final String name, final byte[] p) {
@@ -240,6 +328,36 @@ public class RlSearchV2GamesTest {
                 o.write(p);
             } catch (java.io.IOException e) {
                 throw new RuntimeException(e);
+            }
+        }
+
+        /** copy-fidelity-1010 diagnostics: how a copy's token list differs (order only, or which zone:card entries). */
+        final Map<String, Integer> tokenDiff1 = new TreeMap<>();
+
+        static void tokenDiff(final RlWire.Decide a, final RlWire.Decide b, final Map<String, Integer> into) {
+            final Map<String, Integer> ma = new TreeMap<>(), mb = new TreeMap<>();
+            for (int i = 0; i < a.L; i++) {
+                ma.merge("z" + a.tokZone[i] + ":c" + a.tokCard[i], 1, Integer::sum);
+            }
+            for (int i = 0; i < b.L; i++) {
+                mb.merge("z" + b.tokZone[i] + ":c" + b.tokCard[i], 1, Integer::sum);
+            }
+            if (ma.equals(mb)) {
+                if (!(a.L == b.L && java.util.Arrays.equals(java.util.Arrays.copyOf(a.tokCard, a.L), java.util.Arrays.copyOf(b.tokCard, b.L))
+                        && java.util.Arrays.equals(java.util.Arrays.copyOf(a.tokZone, a.L), java.util.Arrays.copyOf(b.tokZone, b.L)))) {
+                    into.merge("order only", 1, Integer::sum);
+                }
+                return;
+            }
+            for (String k : ma.keySet()) {
+                if (mb.getOrDefault(k, 0) < ma.get(k)) {
+                    into.merge("live only " + k.replaceAll(":c.*", ""), 1, Integer::sum);
+                }
+            }
+            for (String k : mb.keySet()) {
+                if (ma.getOrDefault(k, 0) < mb.get(k)) {
+                    into.merge("copy only " + k.replaceAll(":c.*", ""), 1, Integer::sum);
+                }
             }
         }
 
@@ -325,12 +443,18 @@ public class RlSearchV2GamesTest {
             all.leafEqual += cp.leafEqual;
             all.copyEqual += cp.copyEqual;
             all.copyFailed += cp.copyFailed;
+            all.copyEqual1 += cp.copyEqual1;
+            all.copyFailed1 += cp.copyFailed1;
             cp.leafDiff.forEach((k, v) -> all.leafDiff.merge(k, v, Integer::sum));
             cp.copyDiff.forEach((k, v) -> all.copyDiff.merge(k, v, Integer::sum));
+            cp.copyDiff1.forEach((k, v) -> all.copyDiff1.merge(k, v, Integer::sum));
+            cp.tokenDiff1.forEach((k, v) -> all.tokenDiff1.merge(k, v, Integer::sum));
         }
         System.err.println("[search-v2-parity] obs-v" + version + ": roots " + all.roots + ", leaf = seat frame "
                 + all.leafEqual + ", copy leaf = seat frame " + all.copyEqual + ", copy failed " + all.copyFailed
                 + "; leaf diffs " + all.leafDiff + "; copy diffs " + all.copyDiff);
+        System.err.println("[copy-fidelity-parity] obs-v" + version + ": roots " + all.roots + ", copyFidelity 1 copy leaf = seat frame "
+                + all.copyEqual1 + ", copy failed " + all.copyFailed1 + "; copy diffs " + all.copyDiff1 + "; token diffs " + all.tokenDiff1);
         return all;
     }
 
@@ -344,6 +468,7 @@ public class RlSearchV2GamesTest {
         Assert.assertEquals(v1.leafEqual, v1.roots, "obs-v1 leaf vs seat frame: " + v1.leafDiff);
         Assert.assertEquals(v2.leafEqual, v2.roots, "obs-v2 leaf vs seat frame: " + v2.leafDiff);
         Assert.assertEquals(v2.copyFailed, 0, String.valueOf(v2.copyDiff));
+        Assert.assertEquals(v1.copyFailed1 + v2.copyFailed1, 0, "copy fidelity 1: " + v1.copyDiff1 + " " + v2.copyDiff1);
         // in the copy (forked knowledge): obs-v2 loses nothing the copy keeps under obs-v1, and every v2-only field
         // that differs is reported (Integer.getInteger("rl.parityStrict") makes any difference a failure)
         final double r1 = v1.copyEqual / (double) v1.roots, r2 = v2.copyEqual / (double) v2.roots;

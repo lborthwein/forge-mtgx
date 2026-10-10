@@ -33,6 +33,21 @@ import forge.util.TextUtil;
 
 public class ComputerUtilCost {
 
+    /**
+     * mtgx (lane copy-fidelity-1010): while set on this thread, {@link #canPayCost} skips the "try not to lose the
+     * planeswalker" refusal of a loyalty ability that costs all its loyalty (a 50 % coin flip on the thread's random
+     * stream when the opponent has creatures, always when not). The RL bridge builds its priority menu with canPayCost, so
+     * that coin decides whether the menu offers the ultimate: a look-ahead play-out could not take a searched ultimate the
+     * live menu offered in about half its worlds. Only a policy play-out seat's first priority (the searched candidate)
+     * sets it, and only with copy fidelity on. Off (the default) = unchanged.
+     */
+    private static final ThreadLocal<Boolean> KEEP_PW_ULTIMATES = ThreadLocal.withInitial(() -> Boolean.FALSE);
+
+    public static void setKeepPwUltimates(final boolean on) {
+        KEEP_PW_ULTIMATES.set(on);
+    }
+
+
     public static boolean checkExileFromGraveCost(final Cost cost, final Player payer, final SpellAbility sa) {
         CardCollection payingCards = new CardCollection();
         int needed = 0;
@@ -575,7 +590,7 @@ public class ComputerUtilCost {
             }
 
             // Try not to lose Planeswalker if not threatened
-            if (sa.isPwAbility()) {
+            if (sa.isPwAbility() && !KEEP_PW_ULTIMATES.get()) {
                 for (final CostPart part : cost.getCostParts()) {
                     if (part instanceof CostRemoveCounter) {
                         if (part.convertAmount() != null && part.convertAmount() == sa.getHostCard().getCurrentLoyalty()) {

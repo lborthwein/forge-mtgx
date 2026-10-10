@@ -2801,6 +2801,82 @@ public class Player extends GameEntity implements Comparable<Player> {
     }
 
     /**
+     * mtgx (lane copy-fidelity-1010): this player (a game copier's copy of {@code src}, in another game) takes the
+     * per-turn and history state the copier does not set: the turn number of its last turn, its mulligans, its draws,
+     * discards, sacrifices, explores, tokens, foretells, scries, surveils, investigations, ventures, rolls and flips this
+     * turn, the lands it played and cards it drew last turn, its spells cast this game and last turn and since its last
+     * turn began, the creatures it attacked with this turn (and whom), the players it attacked last turn and this combat,
+     * whether it was dealt combat damage since its last turn and tapped a land for mana this turn. Cards are mapped by
+     * {@code m} (a card that left the game becomes a stand-in object of the copy).
+     */
+    public void copyTurnStateFrom(final Player src, final forge.game.TurnStateMap m) {
+        lastTurnNr = src.lastTurnNr;
+        for (int i = stats.getMulliganCount(); i < src.stats.getMulliganCount(); i++) {
+            stats.notifyHasMulliganed();
+        }
+        lifeGainedTimesThisTurn = src.lifeGainedTimesThisTurn;
+        lifeGainedByTeamThisTurn = src.lifeGainedByTeamThisTurn;
+        numDrawnThisTurn = src.numDrawnThisTurn;
+        numExtraDrawnThisTurn = src.numExtraDrawnThisTurn;
+        numDrawnLastTurn = src.numDrawnLastTurn;
+        numDrawnThisDrawStep = src.numDrawnThisDrawStep;
+        numCardsInHandStartedThisTurnWith = src.numCardsInHandStartedThisTurnWith;
+        numExploredThisTurn = src.numExploredThisTurn;
+        numTokenCreatedThisTurn = src.numTokenCreatedThisTurn;
+        numForetoldThisTurn = src.numForetoldThisTurn;
+        landsPlayedLastTurn = src.landsPlayedLastTurn;
+        spellsCastThisGame = src.spellsCastThisGame;
+        spellsCastLastTurn = src.spellsCastLastTurn;
+        spellsCastSinceBeginningOfLastTurn = Lists.newArrayList();
+        for (Card c : src.spellsCastSinceBeginningOfLastTurn) {
+            spellsCastSinceBeginningOfLastTurn.add(m.card(c));
+        }
+        investigatedThisTurn = src.investigatedThisTurn;
+        scryThisTurn = src.scryThisTurn;
+        surveilThisTurn = src.surveilThisTurn;
+        numFlipsThisTurn = src.numFlipsThisTurn;
+        numRollsThisTurn = src.numRollsThisTurn;
+        diceRollsThisTurn = Lists.newArrayList(src.diceRollsThisTurn);
+        expentThisTurn = src.expentThisTurn;
+        venturedThisTurn = src.venturedThisTurn;
+        attractionsVisitedThisTurn = src.attractionsVisitedThisTurn;
+        discardedThisTurn = new ArrayList<>();
+        for (Card c : src.discardedThisTurn) {
+            discardedThisTurn.add(m.card(c));
+        }
+        sacrificedThisTurn = new ArrayList<>();
+        for (Card c : src.sacrificedThisTurn) {
+            sacrificedThisTurn.add(m.card(c));
+        }
+        attackedThisTurn = new HashMap<>();
+        for (Map.Entry<GameEntity, List<Card>> e : src.attackedThisTurn.entrySet()) {
+            final GameEntity k = m.entity(e.getKey());
+            if (k == null) {
+                continue;
+            }
+            final List<Card> l = attackedThisTurn.computeIfAbsent(k, x -> Lists.newArrayList());
+            for (Card c : e.getValue()) {
+                l.add(m.card(c));
+            }
+        }
+        attackedPlayersLastTurn = new ArrayList<>();
+        for (Player p : src.attackedPlayersLastTurn) {
+            if (p != null) {
+                attackedPlayersLastTurn.add(m.player(p));
+            }
+        }
+        attackedPlayersThisCombat = new ArrayList<>();
+        for (Player p : src.attackedPlayersThisCombat) {
+            if (p != null) {
+                attackedPlayersThisCombat.add(m.player(p));
+            }
+        }
+        beenDealtCombatDamageSinceLastTurn = src.beenDealtCombatDamageSinceLastTurn;
+        tappedLandForManaThisTurn = src.tappedLandForManaThisTurn;
+        elementalBendThisTurn = EnumSet.copyOf(src.elementalBendThisTurn);
+    }
+
+    /**
      * An effect card that was not part of the copy is left unset on the snapshot so its
      * lazy creation path stays consistent.
      *

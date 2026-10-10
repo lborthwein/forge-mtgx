@@ -92,6 +92,36 @@ public class GameCopier {
         this.copyUntilEot = on;
     }
 
+    /**
+     * Lane copy-fidelity-1010: the copy's fidelity level. 0 (the default) = the copier's original behaviour, byte for
+     * byte. 1 = the copy also carries the per-turn and history state the copier otherwise drops (see
+     * {@link #copyTurnState}): each card's zone-entry turn, damage history (attacked / blocked this turn: boast, raid-style
+     * conditions), activation and resolution counts (once-per-turn limits, boast, exhaust, trigger limits), chosen modes,
+     * per-turn flags and exile links (exiled with, plotted); each player's last turn, mulligans and per-turn counts
+     * (draws, discards, sacrifices, attacks, spells this game / last turn); the stack's spells cast and abilities
+     * activated this turn (storm) and last turn; every zone's cards put into it this turn and last turn; and the game's
+     * left-the-battlefield / graveyard, counters and damage records of this turn.
+     */
+    private int copyFidelity = 0;
+    private int fidelityLeftOut = 0, fidelityStandIns = 0;
+
+    public void setCopyFidelity(int level) {
+        if (level < 0 || level > 1) {
+            throw new IllegalArgumentException("copyFidelity must be 0 or 1, not " + level);
+        }
+        this.copyFidelity = level;
+    }
+
+    /** Copy fidelity: keyed records of the last copy that could not be mapped into it (left out). */
+    public int getFidelityLeftOut() {
+        return fidelityLeftOut;
+    }
+
+    /** Copy fidelity: stand-in objects the last copy made for cards of the original that it does not hold. */
+    public int getFidelityStandIns() {
+        return fidelityStandIns;
+    }
+
     /** Commands carried into the last copy, and commands left out because they could not be remapped. */
     public int getUntilCopied() {
         return untilCopied;
@@ -367,6 +397,16 @@ public class GameCopier {
                         if (o instanceof Card && ((Card)o).getZone() == null) {
                            continue;
                         }
+                        if (copyFidelity > 0 && o instanceof Card && !cardMap.containsKey(o)) {
+                            // Lane copy-fidelity-1010: a stale object of a card that has since changed zones (its zone
+                            // pointer still set, census unit sc-off 25: "Couldn't map Boo"): the copy's card of the same id,
+                            // or nothing, instead of failing the whole copy.
+                            final Card same = newGame.findById(((Card) o).getId());
+                            if (same != null) {
+                                c.addRemembered(same);
+                            }
+                            continue;
+                        }
                         c.addRemembered(find((GameObject) o));
                     } else {
                         System.err.println(c + " Remembered: " + o + "/" + o.getClass());
@@ -380,6 +420,11 @@ public class GameCopier {
                     sa.setActivatingPlayer(gameObjectMap.map(activatingPlayer));
                 }
             }
+        }
+
+        if (copyFidelity > 0) {
+            // Lane copy-fidelity-1010: per-turn and history state, before statics and state-based actions read it.
+            copyTurnState(newGame);
         }
 
         // Undo effects first before calculating them below, to avoid them applying twice.
@@ -417,6 +462,165 @@ public class GameCopier {
         }
 
         return newGame;
+    }
+
+    // ------------------------------------------------------------ per-turn and history state (lane copy-fidelity-1010)
+
+    /**
+     * Copy fidelity 1: every copied card, player, zone, the stack and the game take the original's per-turn and history
+     * state ({@code copyTurnStateFrom} / {@code copyAddedThisTurnFrom} in forge-game), in a fixed order (zones as
+     * {@link #copyGameState} walks them, then players in seat order). A card object the copy does not hold (a
+     * last-known-information copy, a token that has ceased to exist) maps to a stand-in: the LKI of the copy's card of
+     * the same id when there is one, else a card built as {@link #createCardCopy} builds one, in no zone.
+     */
+    private void copyTurnState(final Game newGame) {
+        fidelityLeftOut = 0;
+        fidelityStandIns = 0;
+        final Map<Integer, Card> byId = new java.util.HashMap<>();
+        for (Card c : cardMap.values()) {
+            byId.putIfAbsent(c.getId(), c);
+        }
+        final Map<Card, Card> memo = new java.util.IdentityHashMap<>();
+        final Map<forge.game.card.CardDamageHistory, forge.game.card.CardDamageHistory> hist = new java.util.IdentityHashMap<>();
+        for (Map.Entry<Card, Card> e : cardMap.entrySet()) {
+            hist.put(e.getKey().getDamageHistory(), e.getValue().getDamageHistory());
+        }
+        final TurnStateMap m = new TurnStateMap() {
+            @Override
+            public Player player(Player p) {
+                if (p == null) {
+                    return null;
+                }
+                Player r = playerMap.get(p);
+                if (r == null) {
+                    r = newGame.getPlayer(p.getId());
+                }
+                if (r == null) {
+                    throw new IllegalStateException("copy fidelity: no player for " + p);
+                }
+                return r;
+            }
+
+            @Override
+            public Card card(Card c) {
+                if (c == null) {
+                    return null;
+                }
+                Card r = memo.get(c);
+                if (r != null) {
+                    return r;
+                }
+                r = cardMap.get(c);
+                if (r == null) {
+                    final Card cur = byId.get(c.getId());
+                    if (cur != null) {
+                        final forge.card.CardStateName st = c.getCurrentStateName();
+                        if (c.isLKI() || st != cur.getCurrentStateName()) {
+                            // a last-known object, or a stale object in another state (an adventurer's effect source
+                            // is the card as its adventure: "... by Stomp"): an LKI of the copy's card in that state
+                            r = CardCopyService.getLKICopy(cur);
+                            if (st != null && st != r.getCurrentStateName() && r.hasState(st)) {
+                                r.setState(st, false);
+                            }
+                        } else {
+                            r = cur;
+                        }
+                    } else {
+                        r = standIn(newGame, c);
+                        fidelityStandIns++;
+                    }
+                }
+                memo.put(c, r);
+                return r;
+            }
+
+            @Override
+            public forge.game.card.CardDamageHistory history(forge.game.card.CardDamageHistory h) {
+                return hist.get(h);
+            }
+        };
+        for (ZoneType zone : ZONES) {
+            for (Card c : origGame.getCardsIn(zone)) {
+                final Card nc = cardMap.get(c);
+                if (nc == null || !c.isToken()) {
+                    continue;
+                }
+                // a token copy of a multi-faced card (census unit 56: a token Concealing Curtains): the copier builds a
+                // token from the current face only, and Forge's LKI copy of a transformable card without its back face
+                // throws when the token activates (Transform); the copy gets every face the original token has
+                boolean added = false;
+                for (forge.card.CardStateName st : c.getStates()) {
+                    if (!nc.hasState(st) && c.getState(st) != null) {
+                        nc.addAlternateState(st, false);
+                        nc.getState(st).copyFrom(c.getState(st), false);
+                        added = true;
+                    }
+                }
+                if (added && c.getCurrentStateName() != nc.getCurrentStateName() && nc.hasState(c.getCurrentStateName())) {
+                    nc.setState(c.getCurrentStateName(), false);
+                }
+            }
+        }
+        for (ZoneType zone : ZONES) {
+            for (Card c : origGame.getCardsIn(zone)) {
+                final Card nc = cardMap.get(c);
+                if (nc == null) {
+                    continue;
+                }
+                // the card's current state off the battlefield too (the copier sets it there only): an adventurer in
+                // exile stays its adventure ("... by Stomp", and isOnAdventure), a split or modal card its cast face
+                final forge.card.CardStateName st = c.getCurrentStateName();
+                if (zone != ZoneType.Battlefield && !c.isFaceDown() && st != null && st != nc.getCurrentStateName()
+                        && nc.hasState(st)) {
+                    nc.setState(st, false);
+                }
+            }
+        }
+        for (ZoneType zone : ZONES) {
+            for (Card c : origGame.getCardsIn(zone)) {
+                final Card nc = cardMap.get(c);
+                if (nc != null) {
+                    fidelityLeftOut += nc.copyTurnStateFrom(c, m);
+                }
+            }
+        }
+        for (Player op : origGame.getPlayers()) {
+            final Player np = playerMap.get(op);
+            np.copyTurnStateFrom(op, m);
+            for (ZoneType zone : ZONES) {
+                if (zone == ZoneType.Stack) {
+                    continue;
+                }
+                final forge.game.zone.Zone from = op.getZone(zone), to = np.getZone(zone);
+                if (from != null && to != null) {
+                    to.copyAddedThisTurnFrom(from, m);
+                }
+            }
+        }
+        newGame.getStackZone().copyAddedThisTurnFrom(origGame.getStackZone(), m);
+        fidelityLeftOut += newGame.getStack().copyTurnStateFrom(origGame.getStack(), m);
+        newGame.copyTurnStateFrom(origGame, m);
+    }
+
+    /** A card of the copy, in no zone, for a card object of the original the copy does not hold (copy fidelity). */
+    private Card standIn(final Game newGame, final Card c) {
+        Player owner = c.getOwner() == null ? null : playerMap.get(c.getOwner());
+        if (owner == null) {
+            owner = newGame.getPlayers().get(0);
+        }
+        Card r;
+        try {
+            r = createCardCopy(newGame, owner, c, null);
+        } catch (RuntimeException e) {
+            r = new Card(c.getId(), newGame);
+            r.setName(c.getName());
+            r.setOwner(owner);
+        }
+        final Player ctl = c.getController() == null ? null : playerMap.get(c.getController());
+        if (ctl != null && ctl != owner) {
+            r.setController(ctl, 0);
+        }
+        return r;
     }
 
     // ------------------------------------------------------------ until-end-of-turn commands (lane misplays-1005)

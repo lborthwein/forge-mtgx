@@ -986,6 +986,70 @@ public class MagicStack /* extends MyObservable */ implements Iterable<SpellAbil
         return thisTurnActivated;
     }
 
+    /**
+     * mtgx (lane copy-fidelity-1010): this stack (a game copier's copy's) takes {@code src}'s record of the spells cast
+     * and abilities activated this turn (the storm count, each player's spells this turn, "spells cast this turn" counts)
+     * and the spell cards cast last turn. Each record is rebuilt in this game: its host is {@code m}'s card for the
+     * original record's host (a last-known-information object stays one), its ability that host's ability of the same
+     * kind and description (else its first), its activator mapped, with no targets and nothing paid. A record whose host
+     * has no ability is left out. Returns the number of records left out.
+     */
+    public int copyTurnStateFrom(final MagicStack src, final TurnStateMap m) {
+        int left = 0;
+        thisTurnCast.clear();
+        for (SpellAbility sp : src.thisTurnCast) {
+            final SpellAbility r = turnRecord(sp, m);
+            if (r == null) {
+                left++;
+            } else {
+                thisTurnCast.add(r);
+            }
+        }
+        thisTurnActivated.clear();
+        for (SpellAbility sp : src.thisTurnActivated) {
+            final SpellAbility r = turnRecord(sp, m);
+            if (r == null) {
+                left++;
+            } else {
+                thisTurnActivated.add(r);
+            }
+        }
+        lastTurnCast = Lists.newArrayList();
+        for (Card c : src.lastTurnCast) {
+            lastTurnCast.add(m.card(c));
+        }
+        return left;
+    }
+
+    private static SpellAbility turnRecord(final SpellAbility sp, final TurnStateMap m) {
+        if (sp.getHostCard() == null) {
+            return null;
+        }
+        final Card host = m.card(sp.getHostCard());
+        SpellAbility base = null;
+        final String d = sp.getDescription();
+        for (SpellAbility sa : host.getAllSpellAbilities()) {
+            if (sa.isSpell() == sp.isSpell() && d.equals(sa.getDescription())) {
+                base = sa;
+                break;
+            }
+        }
+        if (base == null) {
+            base = host.getFirstSpellAbility();
+        }
+        if (base == null) {
+            return null;
+        }
+        final Player activator = sp.getActivatingPlayer() == null ? null : m.player(sp.getActivatingPlayer());
+        final SpellAbility r = base.copy(host, activator, true);
+        for (SpellAbility s = r; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting()) {
+                s.resetTargets();
+            }
+        }
+        return r;
+    }
+
     public final boolean hasSourceOnStack(final Card source, final Predicate<SpellAbility> pred) {
         if (source == null) {
             return false;

@@ -164,6 +164,27 @@ public final class LookaheadSearch {
          */
         public AiFixes.Mode copyEot = AiFixes.Mode.OFF;
         /**
+         * Copy fidelity (lane copy-fidelity-1010; 0 = off, the default: copies and decisions unchanged). 1 = every copy
+         * the search makes carries the live game's per-turn and history state the copier otherwise drops
+         * ({@link GameCopier#setCopyFidelity}): "attacked this turn" (boast), activation counts, zone-entry turns
+         * (foretell, plot), mulligans, spells cast this turn (storm), cards put into zones this turn, and so on. Without it a
+         * searched candidate that is legal only through that state (Usher of the Fallen's boast after it attacked) is not
+         * in the copy's menu and its play-outs fail.
+         * 2 ("repair", given-candidate searches only: S-c / S-t) = copies as at 0, and a decision where a searched
+         * candidate is missing from those copies (a play-out failed as candidate_not_in_menu, candidate_not_in_copy or
+         * copy_error) is searched again, every candidate in every world (the same seeds), on level-1 copies; every other
+         * decision is exactly level 0's. In the Forge-play-out search (K8) 2 is 0.
+         */
+        public int copyFidelity = 0;
+
+        /** A copy-fidelity level from a K8 spec: 0 or 1, else IllegalArgumentException. */
+        public static int copyFidelityLevel(int level) {
+            if (level != 0 && level != 1) {
+                throw new IllegalArgumentException("copyFidelity must be 0 or 1, not " + level);
+            }
+            return level;
+        }
+        /**
          * Median departure gate (lane misplays-1005; off|shadow|on, OFF by default: decisions unchanged). A candidate may
          * replace Forge's answer only if the LOWER MEDIAN of its paired differences to Forge's answer over the K worlds is
          * above zero, i.e. it is strictly better in more than half the worlds -- on top of departZ. The departZ test assumes roughly
@@ -368,6 +389,9 @@ public final class LookaheadSearch {
             if (copyEot != AiFixes.Mode.OFF) {
                 o.addProperty("copyEot", copyEot.key());
             }
+            if (copyFidelity != 0) {
+                o.addProperty("copyFidelity", copyFidelity);
+            }
             if (departMedian != AiFixes.Mode.OFF) {
                 o.addProperty("departMedian", departMedian.key());
             }
@@ -466,6 +490,45 @@ public final class LookaheadSearch {
         public String departMedianMode;
         public long departMedianGated, departMedianChanged;
         public long rollouts, rolloutFailures, rolloutCapped, candidatesDropped, steps;
+        /**
+         * Lane copy-fidelity-1010: the searched candidates' failed or stopped play-outs by class (always reported, whatever
+         * the options; the classes of the priority and combat searches sum to rolloutFailures + rolloutsAborted):
+         * candidate_not_in_menu (a policy play-out seat's first PRIORITY menu lacks the searched candidate),
+         * candidate_not_in_copy (the candidate's ability could not be found or set up in the copy), max_decisions (the
+         * play-out seat's decision cap), budget (the decision's wall budget stopped it, or the seat's CPU cap),
+         * copy_error (making the copy threw), exception (the play-out threw), other (anything else: a service error).
+         */
+        public static final String[] PLAYOUT_FAILURE_CLASSES = {"candidate_not_in_menu", "candidate_not_in_copy",
+                "max_decisions", "budget", "copy_error", "exception", "other"};
+        public final long[] playoutFailures = new long[PLAYOUT_FAILURE_CLASSES.length];
+        /** The same failures by "class kind host-card" (the first {@link #FAILURE_CANDS_CAP} keys; reported when any). */
+        public final Map<String, Long> playoutFailureCands = new TreeMap<>();
+        static final int FAILURE_CANDS_CAP = 32;
+        /** The last copy failure's detail (copy_error / candidate_not_in_copy; reported when any). */
+        public String playoutLastCopyFailure;
+        /**
+         * Copy fidelity (reported only when the option is on): its level; at level 2, the decisions searched again on
+         * level-1 copies and the play-outs of their first, discarded pass (their failures are not in playoutFailures).
+         */
+        public int copyFidelityLevel;
+        public long fidelityRedos, fidelityRedoRollouts;
+
+        void countPlayoutFailure(String cls, String cand) {
+            int k = PLAYOUT_FAILURE_CLASSES.length - 1;
+            for (int i = 0; i < PLAYOUT_FAILURE_CLASSES.length; i++) {
+                if (PLAYOUT_FAILURE_CLASSES[i].equals(cls)) {
+                    k = i;
+                    break;
+                }
+            }
+            playoutFailures[k]++;
+            if (cand != null) {
+                final String key = PLAYOUT_FAILURE_CLASSES[k] + " " + cand;
+                if (playoutFailureCands.containsKey(key) || playoutFailureCands.size() < FAILURE_CANDS_CAP) {
+                    playoutFailureCands.merge(key, 1L, Long::sum);
+                }
+            }
+        }
         public long searchNanos, maxSearchNanos;
         public long attackDecisions, attackSearched, attackDeparted, blockDecisions, blockSearched, blockDeparted;
         public long combatNanos;
@@ -639,6 +702,27 @@ public final class LookaheadSearch {
             o.addProperty("rollouts", rollouts);
             o.addProperty("rolloutFailures", rolloutFailures);
             o.addProperty("rolloutCapped", rolloutCapped);
+            // copy-fidelity-1010: always, so a smoke check can read every class
+            final JsonObject pf = new JsonObject();
+            for (int i = 0; i < PLAYOUT_FAILURE_CLASSES.length; i++) {
+                pf.addProperty(PLAYOUT_FAILURE_CLASSES[i], playoutFailures[i]);
+            }
+            o.add("playoutFailures", pf);
+            if (!playoutFailureCands.isEmpty()) {
+                final JsonObject pc = new JsonObject();
+                playoutFailureCands.forEach(pc::addProperty);
+                o.add("playoutFailureCands", pc);
+            }
+            if (playoutLastCopyFailure != null) {
+                o.addProperty("playoutLastCopyFailure", playoutLastCopyFailure);
+            }
+            if (copyFidelityLevel != 0) {
+                final JsonObject cf = new JsonObject();
+                cf.addProperty("level", copyFidelityLevel);
+                cf.addProperty("redos", fidelityRedos);
+                cf.addProperty("redoRollouts", fidelityRedoRollouts);
+                o.add("copyFidelity", cf);
+            }
             o.addProperty("candidatesDropped", candidatesDropped);
             o.addProperty("steps", steps);
             o.addProperty("searchMs", searchNanos / 1e6);
@@ -1048,6 +1132,8 @@ public final class LookaheadSearch {
         public boolean probe = false;
         /** Lane sc-wallguard-1009: the budget of the decision this play-out belongs to (null = none). */
         Budget budget;
+        /** Copy fidelity: a may-play spell may also match by its base description ({@link #matchesMayPlay}). */
+        public boolean mayPlayLoose = false;
 
         FirstAction(Cand c) {
             this.pass = c.pass;
@@ -1074,6 +1160,15 @@ public final class LookaheadSearch {
             }
             return !pass && sa.getHostCard() != null && sa.getHostCard().getId() == hostId && sa.isLandAbility() == land
                     && desc.equals(sa.getDescription());
+        }
+
+        /**
+         * Copy fidelity (only when {@link #mayPlayLoose}): {@code sa} is a may-play spell or land of the same card whose
+         * description differs only in the may-play suffix ({@link LookaheadSearch#sameMayPlay}).
+         */
+        public boolean matchesMayPlay(SpellAbility sa) {
+            return mayPlayLoose && sa != null && !pass && sa.getHostCard() != null && sa.getHostCard().getId() == hostId
+                    && sa.isLandAbility() == land && sameMayPlay(desc, sa);
         }
     }
 
@@ -1185,6 +1280,7 @@ public final class LookaheadSearch {
         if (cfg.copyEot != AiFixes.Mode.OFF) {
             stats.copyEotMode = cfg.copyEot.key();
         }
+        stats.copyFidelityLevel = cfg.copyFidelity;
         if (cfg.departMedian != AiFixes.Mode.OFF) {
             stats.departMedianMode = cfg.departMedian.key();
         }
@@ -1771,6 +1867,10 @@ public final class LookaheadSearch {
      */
     public interface ChoiceExpander {
         List<Macro> expand(int[] givenIndex);
+
+        /** Copy fidelity 2 (copy-fidelity-1010): the decision is searched again; forget this decision's probes and macros. */
+        default void restart() {
+        }
     }
 
     /** S-t: tag the policy play-outs' first actions (candidate index, world, probe), set only inside an expansion. */
@@ -1904,75 +2004,108 @@ public final class LookaheadSearch {
         }
         lastCandidates = cands;
         final int k = Math.max(1, cfg.worlds);
-        int n = cands.size();
-        double[][] values = new double[n][k];
-        Rollout[][] outs = new Rollout[n][k];
-        boolean[] ok = new boolean[n];
-        Arrays.fill(ok, true);
-        explainChoices = EXPLAIN ? new String[n] : null;
-        labelChoices = null;
-        labelTargets = null;
+        // copy-fidelity-1010, level 2: a first pass on level-0 copies; if a searched candidate was missing from them, the
+        // play-outs again (base candidates, probes, macros) on level-1 copies with the same seeds, the first pass's counts
+        // restored. Every other level plays one pass.
+        final List<Cand> baseCands = cands;
+        final List<Integer> baseAt = new ArrayList<>(at);
+        final StatsMark mark = cfg.copyFidelity == 2 ? new StatsMark(stats) : null;
+        int n;
+        double[][] values;
+        Rollout[][] outs;
+        boolean[] ok;
         int aborted;
-        int[] macroOf = null;
-        if (expander == null) {
-            aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
-        } else {
-            // S-t: the base candidates first (their world-0 play-outs record the choice asks), then the macros
-            choiceTag = true;
-            choiceProbe = true;
-            choiceIndexBase = 0;
-            try {
-                aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
-            } finally {
-                choiceTag = false;
-                choiceProbe = false;
-            }
-            final List<Macro> ms = aborted == 0 ? expander.expand(toArray(at)) : null;
-            if (ms != null && !ms.isEmpty()) {
-                final int nm = ms.size();
-                final List<Cand> mc = new ArrayList<>(nm);
-                for (Macro m : ms) {
-                    mc.add(new Cand(cands.get(m.base), m.schedule, m.label));
+        int[] macroOf;
+        try {
+            for (int pass = 0; ; pass++) {
+                cands = baseCands;
+                if (pass > 0) {
+                    at.clear();
+                    at.addAll(baseAt);
                 }
-                final double[][] mv = new double[nm][k];
-                final Rollout[][] mo = new Rollout[nm][k];
-                final boolean[] mok = new boolean[nm];
-                Arrays.fill(mok, true);
-                final String[] baseExplain = explainChoices;
-                explainChoices = EXPLAIN ? new String[nm] : null;
-                choiceTag = true;
-                choiceIndexBase = n;
-                try {
-                    aborted += playAll(live, me, mc, null, decisionSeed, new Carried[k], mv, mo, mok, null);
-                } finally {
-                    choiceTag = false;
-                    choiceIndexBase = 0;
-                }
-                if (EXPLAIN) {
-                    final String[] ex = Arrays.copyOf(baseExplain, n + nm);
-                    System.arraycopy(explainChoices, 0, ex, n, nm);
-                    explainChoices = ex;
-                }
-                final List<Cand> merged = new ArrayList<>(cands);
-                merged.addAll(mc);
-                cands = merged;
-                values = Arrays.copyOf(values, n + nm);
-                outs = Arrays.copyOf(outs, n + nm);
-                ok = Arrays.copyOf(ok, n + nm);
-                macroOf = new int[n + nm];
-                Arrays.fill(macroOf, -1);
-                for (int j = 0; j < nm; j++) {
-                    values[n + j] = mv[j];
-                    outs[n + j] = mo[j];
-                    ok[n + j] = mok[j];
-                    macroOf[n + j] = j;
-                    at.add(at.get(ms.get(j).base));
-                }
-                n += nm;
                 lastCandidates = cands;
-                stats.givenMacroDecisions++;
-                stats.givenMacros += nm;
+                n = cands.size();
+                values = new double[n][k];
+                outs = new Rollout[n][k];
+                ok = new boolean[n];
+                Arrays.fill(ok, true);
+                explainChoices = EXPLAIN ? new String[n] : null;
+                labelChoices = null;
+                labelTargets = null;
+                macroOf = null;
+                if (expander == null) {
+                    aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+                } else {
+                    // S-t: the base candidates first (their world-0 play-outs record the choice asks), then the macros
+                    choiceTag = true;
+                    choiceProbe = true;
+                    choiceIndexBase = 0;
+                    try {
+                        aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+                    } finally {
+                        choiceTag = false;
+                        choiceProbe = false;
+                    }
+                    final List<Macro> ms = aborted == 0 ? expander.expand(toArray(at)) : null;
+                    if (ms != null && !ms.isEmpty()) {
+                        final int nm = ms.size();
+                        final List<Cand> mc = new ArrayList<>(nm);
+                        for (Macro m : ms) {
+                            mc.add(new Cand(cands.get(m.base), m.schedule, m.label));
+                        }
+                        final double[][] mv = new double[nm][k];
+                        final Rollout[][] mo = new Rollout[nm][k];
+                        final boolean[] mok = new boolean[nm];
+                        Arrays.fill(mok, true);
+                        final String[] baseExplain = explainChoices;
+                        explainChoices = EXPLAIN ? new String[nm] : null;
+                        choiceTag = true;
+                        choiceIndexBase = n;
+                        try {
+                            aborted += playAll(live, me, mc, null, decisionSeed, new Carried[k], mv, mo, mok, null);
+                        } finally {
+                            choiceTag = false;
+                            choiceIndexBase = 0;
+                        }
+                        if (EXPLAIN) {
+                            final String[] ex = Arrays.copyOf(baseExplain, n + nm);
+                            System.arraycopy(explainChoices, 0, ex, n, nm);
+                            explainChoices = ex;
+                        }
+                        final List<Cand> merged = new ArrayList<>(cands);
+                        merged.addAll(mc);
+                        cands = merged;
+                        values = Arrays.copyOf(values, n + nm);
+                        outs = Arrays.copyOf(outs, n + nm);
+                        ok = Arrays.copyOf(ok, n + nm);
+                        macroOf = new int[n + nm];
+                        Arrays.fill(macroOf, -1);
+                        for (int j = 0; j < nm; j++) {
+                            values[n + j] = mv[j];
+                            outs[n + j] = mo[j];
+                            ok[n + j] = mok[j];
+                            macroOf[n + j] = j;
+                            at.add(at.get(ms.get(j).base));
+                        }
+                        n += nm;
+                        lastCandidates = cands;
+                        stats.givenMacroDecisions++;
+                        stats.givenMacros += nm;
+                    }
+                }
+                if (pass == 0 && mark != null && aborted == 0 && !pastDeadline() && candidateMissing(outs)) {
+                    mark.restore(stats);
+                    stats.fidelityRedos++;
+                    if (expander != null) {
+                        expander.restart();
+                    }
+                    forceFidelity = true;
+                    continue;
+                }
+                break;
             }
+        } finally {
+            forceFidelity = false;
         }
         // live-sc-1009: over the wall budget the default is played whatever the values say, so the leaf call is skipped
         // (aborted is always 0 without a budget: the S1 read's path is unchanged)
@@ -2623,18 +2756,25 @@ public final class LookaheadSearch {
      * sc-wallguard-1009: {@link #record} unless the decision's wall sealed its arrays (then nothing is written and false
      * is returned: the play-out's decision was already cut).
      */
-    private boolean record(double[][] values, Rollout[][] outs, boolean[] ok, int cc, int ww, Rollout r, boolean[] sealed) {
+    private boolean record(double[][] values, Rollout[][] outs, boolean[] ok, int cc, int ww, Rollout r, Cand cand,
+            boolean[] sealed) {
         synchronized (values) {
             if (sealed[0]) {
                 return false;
             }
-            record(values, outs, ok, cc, ww, r);
+            record(values, outs, ok, cc, ww, r, cand);
             return true;
         }
     }
 
-    private void record(double[][] values, Rollout[][] outs, boolean[] ok, int cc, int ww, Rollout r) {
+    private void record(double[][] values, Rollout[][] outs, boolean[] ok, int cc, int ww, Rollout r, Cand cand) {
         synchronized (values) {
+            if (!r.ok) {
+                stats.countPlayoutFailure(failureClass(r), failureName(cand));
+                if (r.failDetail != null) {
+                    stats.playoutLastCopyFailure = failureName(cand) + ": " + r.failDetail;
+                }
+            }
             values[cc][ww] = r.value;
             outs[cc][ww] = r;
             if (!r.ok) {
@@ -3108,7 +3248,7 @@ public final class LookaheadSearch {
                         final Rollout r = prep[cc][ww] != null ? play(prep[cc][ww], null, memo, cc)
                                 : outs[cc][ww] != null ? outs[cc][ww] : aborted();
                         prep[cc][ww] = null;
-                        if (!record(values, outs, ok, cc, ww, r, sealed)) {
+                        if (!record(values, outs, ok, cc, ww, r, cands.get(cc), sealed)) {
                             return;
                         }
                     }
@@ -3118,13 +3258,13 @@ public final class LookaheadSearch {
                     final int ww = w, cc = c;
                     if (prep[cc][ww] == null) {
                         // A reused value, or (budget) a play-out that never started.
-                        record(values, outs, ok, cc, ww, outs[cc][ww] != null ? outs[cc][ww] : aborted());
+                        record(values, outs, ok, cc, ww, outs[cc][ww] != null ? outs[cc][ww] : aborted(), cands.get(cc));
                         continue;
                     }
                     tasks.add(() -> {
                         Rollout r = play(prep[cc][ww], null);
                         prep[cc][ww] = null;
-                        record(values, outs, ok, cc, ww, r, sealed);
+                        record(values, outs, ok, cc, ww, r, cands.get(cc), sealed);
                     });
                 }
             }
@@ -3151,7 +3291,7 @@ public final class LookaheadSearch {
                     for (int c = 0; c < n; c++) {
                         for (int w = 0; w < k; w++) {
                             if (outs[c][w] == null) {
-                                record(values, outs, ok, c, w, aborted());
+                                record(values, outs, ok, c, w, aborted(), cands.get(c));
                             }
                         }
                     }
@@ -3693,7 +3833,49 @@ public final class LookaheadSearch {
         return out;
     }
 
+    /** Lane copy-fidelity-1010 (diagnostics): why {@link #locate} (or Forge's preparation) found no candidate in the copy. */
+    static String locateMiss(Game g, Player p, Cand c) {
+        try {
+            final Card host = g.findById(c.hostId);
+            if (host == null) {
+                return "no card " + c.hostId + " in the copy";
+            }
+            final StringBuilder sb = new StringBuilder(host.getName()).append(" in ")
+                    .append(host.getZone() == null ? "no zone" : host.getZone().getZoneType().name());
+            final SpellAbility sa = locate(g, p, c);
+            if (sa != null) {
+                return sb.append(": found, preparation failed").toString();
+            }
+            sb.append(" (").append(host.getCurrentStateName()).append("): no '").append(c.desc.length() > 100 ? c.desc.substring(0, 100) : c.desc)
+                    .append("' among [");
+            int n = 0;
+            for (SpellAbility x : ComputerUtilAbility.getSpellAbilities(new CardCollection(host), p)) {
+                if (n++ > 0) {
+                    sb.append(" | ");
+                }
+                final String d = x.getDescription();
+                sb.append(d.length() > 100 ? d.substring(0, 100) : d);
+                if (x.getMayPlay() != null && x.getMayPlay().getHostCard() != null) {
+                    final Card mh = x.getMayPlay().getHostCard();
+                    final Card es = mh.getEffectSource();
+                    sb.append(" {may-play host ").append(mh.getName()).append(mh.isImmutable() ? " effect" : "")
+                            .append(", source ").append(es == null ? "none" : es + "/" + es.getCurrentStateName()
+                                    + (es.getZone() == null ? " no zone" : " " + es.getZone().getZoneType()))
+                            .append(mh.getEffectSourceAbility() != null ? ", by ability" : "").append('}');
+                }
+            }
+            return sb.append(']').toString();
+        } catch (RuntimeException e) {
+            return "locate diagnostics failed: " + e;
+        }
+    }
+
     static SpellAbility locate(Game g, Player p, Cand c) {
+        return locate(g, p, c, false);
+    }
+
+    /** As {@link #locate(Game, Player, Cand)}; with {@code mayPlayLoose} (copy fidelity), last a may-play match. */
+    static SpellAbility locate(Game g, Player p, Cand c, boolean mayPlayLoose) {
         final Card host = g.findById(c.hostId);
         if (host == null) {
             return null;
@@ -3710,7 +3892,33 @@ public final class LookaheadSearch {
                 return sa;
             }
         }
+        if (mayPlayLoose) {
+            for (SpellAbility sa : all) {
+                if (sa.isLandAbility() == c.land && sameMayPlay(c.desc, sa)) {
+                    return sa;
+                }
+            }
+        }
         return null;
+    }
+
+    /**
+     * Copy fidelity: a may-play spell's description is its base description plus " by " and the effect's source as that
+     * card object printed when the menu was built (an adventurer's source prints as its adventure in the live game and as
+     * the creature in a copy: "... by Stomp (40) by Stomp (40)" against "... by Bonecrusher Giant (40)"). True when
+     * {@code sa} is a may-play ability and both descriptions are its base description followed by " by ".
+     */
+    static boolean sameMayPlay(String desc, SpellAbility sa) {
+        if (sa.getMayPlay() == null) {
+            return false;
+        }
+        final String d = sa.getDescription();
+        final int i = d.indexOf(" by ");
+        if (i <= 0) {
+            return false;
+        }
+        final String base = d.substring(0, i + 4);
+        return desc.startsWith(base) && !desc.equals(d);
     }
 
     /** Prepare a candidate's choices in a copy: Forge's answer copies its live choices, others ask Forge AI. */
@@ -4110,6 +4318,123 @@ public final class LookaheadSearch {
         boolean leafLate;
         /** S1 policy play-out: why its seat could not play it (the play-out failed), or null. */
         String seatFailure;
+        /** Lane copy-fidelity-1010: a failure's class when the play-out itself knows it ({@link #failureClass}), or null. */
+        String failClass;
+        /** Lane copy-fidelity-1010: a copy failure's detail (the copy's exception, or why the candidate was not found). */
+        String failDetail;
+    }
+
+    /**
+     * Lane copy-fidelity-1010, level 2: the play-out counters of a decision's first pass, restored when the decision is
+     * searched again on level-1 copies (so every count is the final pass's; the discarded play-outs are counted apart).
+     */
+    static final class StatsMark {
+        final long rollouts, steps, rolloutFailures, rolloutsAborted, rolloutCapped, leafLate, playoutSeatFailures,
+                givenMacroDecisions, givenMacros;
+        final long[] playoutFailures;
+        final Map<String, Long> playoutFailureCands;
+        final String playoutLastFailure, playoutLastCopyFailure;
+
+        StatsMark(Stats s) {
+            rollouts = s.rollouts;
+            steps = s.steps;
+            rolloutFailures = s.rolloutFailures;
+            rolloutsAborted = s.rolloutsAborted;
+            rolloutCapped = s.rolloutCapped;
+            leafLate = s.leafLate;
+            playoutSeatFailures = s.playoutSeatFailures;
+            givenMacroDecisions = s.givenMacroDecisions;
+            givenMacros = s.givenMacros;
+            playoutFailures = s.playoutFailures.clone();
+            playoutFailureCands = new TreeMap<>(s.playoutFailureCands);
+            playoutLastFailure = s.playoutLastFailure;
+            playoutLastCopyFailure = s.playoutLastCopyFailure;
+        }
+
+        void restore(Stats s) {
+            s.fidelityRedoRollouts += s.rollouts - rollouts;
+            s.rollouts = rollouts;
+            s.steps = steps;
+            s.rolloutFailures = rolloutFailures;
+            s.rolloutsAborted = rolloutsAborted;
+            s.rolloutCapped = rolloutCapped;
+            s.leafLate = leafLate;
+            s.playoutSeatFailures = playoutSeatFailures;
+            s.givenMacroDecisions = givenMacroDecisions;
+            s.givenMacros = givenMacros;
+            System.arraycopy(playoutFailures, 0, s.playoutFailures, 0, playoutFailures.length);
+            s.playoutFailureCands.clear();
+            s.playoutFailureCands.putAll(playoutFailureCands);
+            s.playoutLastFailure = playoutLastFailure;
+            s.playoutLastCopyFailure = playoutLastCopyFailure;
+        }
+    }
+
+    /**
+     * Lane copy-fidelity-1010: some searched candidate's play-out failed because the candidate was missing from its copy
+     * (not in the copy's menu, not found in the copy) or the copy itself could not be made.
+     */
+    static boolean candidateMissing(Rollout[][] outs) {
+        for (Rollout[] row : outs) {
+            for (Rollout r : row) {
+                if (r != null && !r.ok) {
+                    final String c = failureClass(r);
+                    if ("candidate_not_in_menu".equals(c) || "candidate_not_in_copy".equals(c) || "copy_error".equals(c)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Lane copy-fidelity-1010, level 2: this decision's second pass, on level-1 copies (decision thread only). */
+    private volatile boolean forceFidelity = false;
+
+    /** Copy fidelity: the current pass's copies carry the turn state (level 1, or level 2's second pass). */
+    public boolean fidelityPass() {
+        return cfg.copyFidelity == 1 || forceFidelity;
+    }
+
+    /** Lane copy-fidelity-1010: the class of a failed or stopped play-out ({@link Stats#PLAYOUT_FAILURE_CLASSES}). */
+    static String failureClass(Rollout r) {
+        if (r.aborted) {
+            return "budget";
+        }
+        if (r.failClass != null) {
+            return r.failClass;
+        }
+        final String f = r.seatFailure;
+        if (f != null) {
+            if (f.contains("the searched candidate is not in the play-out's menu")) {
+                return "candidate_not_in_menu";
+            }
+            if (f.equals("max_decisions")) {
+                return "max_decisions";
+            }
+            if (f.equals("cpu_cap")) {
+                return "budget";
+            }
+        }
+        return "other";
+    }
+
+    /** Lane copy-fidelity-1010: a candidate's name in the failure census: "kind host-card", or "pass". */
+    static String failureName(Cand c) {
+        if (c == null) {
+            return null;
+        }
+        if (c.pass) {
+            return "pass";
+        }
+        final int i = c.label.indexOf(" :: ");
+        String n = c.kind + " " + (i >= 0 ? c.label.substring(0, i) : c.label);
+        if (c.macro != null) {
+            n += " [macro]";
+        } else if (c.tgt != null) {
+            n += " [target variant]";
+        }
+        return n;
     }
 
     /**
@@ -4252,6 +4577,8 @@ public final class LookaheadSearch {
         long playoutSeed;
         /** Lane sc-wallguard-1009: the wall budget of the decision this copy was made for (null = none). */
         Budget budget;
+        /** Lane copy-fidelity-1010: why the candidate could not be found in the copy (diagnostics), or null. */
+        String missWhy;
     }
 
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
@@ -4313,14 +4640,17 @@ public final class LookaheadSearch {
                     // only that the candidate exists in the copy. The seed is the world's: common random numbers.
                     p.firstAction = new FirstAction(c);
                     p.firstAction.budget = p.budget;
+                    p.firstAction.mayPlayLoose = fidelityPass();
                     p.playoutSeed = mix(worldSeed, 5);
-                    if (!c.pass && locate(p.g, p.me, c) == null) {
+                    if (!c.pass && locate(p.g, p.me, c, fidelityPass()) == null) {
                         p.failed = true;
+                        p.missWhy = locateMiss(p.g, p.me, c);
                     }
                 } else if (!c.pass) {
                     SpellAbility sa = prepare(p.g, p.me, c, defSa, copier);
                     if (sa == null) {
                         p.failed = true;
+                        p.missWhy = locateMiss(p.g, p.me, c);
                     } else {
                         p.first = new ArrayList<>();
                         p.first.add(sa);
@@ -4348,6 +4678,9 @@ public final class LookaheadSearch {
         if (cfg.copyEot == AiFixes.Mode.ON) {
             c.setCopyUntilEot(true);
         }
+        if (cfg.copyFidelity == 1 || forceFidelity) {
+            c.setCopyFidelity(1);
+        }
         return c;
     }
 
@@ -4367,6 +4700,8 @@ public final class LookaheadSearch {
         if (p.failed) {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
+            r.failClass = p.error != null ? "copy_error" : "candidate_not_in_copy";
+            r.failDetail = p.error != null ? String.valueOf(p.error) : p.missWhy;
             if (p.error != null) {
                 System.err.println("[lookahead] rollout failed: " + p.error);
                 if (FAILURE_TRACES.getAndIncrement() < 20) {
@@ -4534,6 +4869,7 @@ public final class LookaheadSearch {
         } catch (RuntimeException | StackOverflowError e) {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
+            r.failClass = "exception";
             if (p.budget != null && p.budget.over()) {
                 // sc-wallguard-1009: a play-out that failed past the deadline counts as stopped by the budget
                 r.aborted = true;
@@ -5020,6 +5356,7 @@ public final class LookaheadSearch {
         } catch (RuntimeException | StackOverflowError e) {
             r.ok = false;
             r.value = Double.NEGATIVE_INFINITY;
+            r.failClass = "exception";
             System.err.println("[lookahead] combat rollout failed: " + e);
         } finally {
             AiCache.installScope(prevAiCache4);
@@ -5050,6 +5387,7 @@ public final class LookaheadSearch {
                         stats.steps += r.steps;
                         if (!r.ok) {
                             stats.rolloutFailures++;
+                            stats.countPlayoutFailure(failureClass(r), null);
                         }
                     }
                 });

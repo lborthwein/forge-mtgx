@@ -7941,6 +7941,194 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         numberTurnActivations.clear();
     }
 
+    /**
+     * mtgx (lane copy-fidelity-1010): this card (a game copier's copy of {@code src}, in another game) takes {@code src}'s
+     * per-turn and history state, every player and card mapped by {@code m}: the turn it entered its zone and its
+     * controller then, its damage history (attacked / blocked / dealt damage this turn and since upkeep), its activation
+     * and resolution counts this turn and this game (boast, "activate only once each turn", exhaust, trigger limits), its
+     * chosen modes, and the per-turn flags (drawn, fought, crewed, saddled, exerted, tapped, turned face up, discarded,
+     * surveilled, milled, targeted). Counts keyed by an ability are moved to this card's ability of the same description
+     * (a trigger's by its position); a count of an ability granted by a static ability, or of one this card does not have,
+     * is left out. Returns the number of keyed entries left out.
+     */
+    public int copyTurnStateFrom(final Card src, final forge.game.TurnStateMap m) {
+        turnInZone = src.turnInZone;
+        turnInController = src.turnInController == null ? null : m.player(src.turnInController);
+        drawnThisTurn = src.drawnThisTurn;
+        foughtThisTurn = src.foughtThisTurn;
+        enlistedThisCombat = src.enlistedThisCombat;
+        startedTheTurnUntapped = src.startedTheTurnUntapped;
+        tappedThisTurn = src.tappedThisTurn;
+        timesCrewedThisTurn = src.timesCrewedThisTurn;
+        timesSaddledThisTurn = src.timesSaddledThisTurn;
+        visitedThisTurn = src.visitedThisTurn;
+        turnedFaceUpThisTurn = src.turnedFaceUpThisTurn;
+        discarded = src.discarded;
+        surveilled = src.surveilled;
+        milled = src.milled;
+        exertThisTurn = src.exertThisTurn;
+        exertedByPlayer = new PlayerCollection();
+        for (Player p : src.exertedByPlayer) {
+            if (p != null) {
+                exertedByPlayer.add(m.player(p));
+            }
+        }
+        targetedFromThisTurn = new PlayerCollection();
+        for (Player p : src.targetedFromThisTurn) {
+            if (p != null) {
+                targetedFromThisTurn.add(m.player(p));
+            }
+        }
+        hasBeenDealtExcessDamageThisTurn = src.hasBeenDealtExcessDamageThisTurn;
+        excessDamageThisTurnAmount = src.excessDamageThisTurnAmount;
+        regeneratedThisTurn = src.regeneratedThisTurn;
+        blockedThisTurn = Lists.newArrayList();
+        for (Card c : src.blockedThisTurn) {
+            blockedThisTurn.add(m.card(c));
+        }
+        blockedByThisTurn = Lists.newArrayList();
+        for (Card c : src.blockedByThisTurn) {
+            blockedByThisTurn.add(m.card(c));
+        }
+        damageHistory.copyFrom(src.damageHistory, m);
+        // an effect card's source (the copier sets it on the battlefield only): a may-play ability's description names
+        // it ("... by Laelia, the Blade Reforged"), so without it the copy's ability has another description
+        if (getEffectSource() == null && src.getEffectSource() != null) {
+            effectSource = m.card(src.getEffectSource());
+        }
+        // command-zone objects: an emblem or boon stays one (the copier rebuilds effect cards without the flag)
+        if (src.isEmblem && !isEmblem) {
+            setEmblem(true);
+        }
+        if (src.isBoon && !isBoon) {
+            setBoon(true);
+        }
+        // exile links: plotted (castable on a later turn), exiled with / by (adventure, "cards exiled with")
+        plotted = src.plotted;
+        if (src.exiledWith != null) {
+            setExiledWith(m.card(src.exiledWith));
+        }
+        if (src.exiledBy != null) {
+            setExiledBy(m.player(src.exiledBy));
+        }
+        if (src.exiledCards != null) {
+            for (Card c : src.exiledCards) {
+                addExiledCard(m.card(c));
+            }
+        }
+        // linked cards (the copier carries "remembered" only): imprinted (Chrome Mox's mana, Isochron Scepter), chosen,
+        // encoded (cipher), devoured / exploited / delved counts, control-change targets, exiled-until-this-leaves
+        if (src.imprintedCards != null) {
+            for (Card c : src.imprintedCards) {
+                addImprintedCard(m.card(c));
+            }
+        }
+        if (src.chosenCards != null && !src.chosenCards.isEmpty()) {
+            final List<Card> l = Lists.newArrayList();
+            for (Card c : src.chosenCards) {
+                l.add(m.card(c));
+            }
+            setChosenCards(l);
+        }
+        if (src.encodedCards != null) {
+            for (Card c : src.encodedCards) {
+                addEncodedCard(m.card(c));
+            }
+        }
+        if (src.devouredCards != null) {
+            for (Card c : src.devouredCards) {
+                addDevoured(m.card(c));
+            }
+        }
+        if (src.exploitedCards != null) {
+            for (Card c : src.exploitedCards) {
+                addExploited(m.card(c));
+            }
+        }
+        if (src.delvedCards != null) {
+            for (Card c : src.delvedCards) {
+                addDelved(m.card(c));
+            }
+        }
+        if (src.gainControlTargets != null) {
+            for (Card c : src.gainControlTargets) {
+                addGainControlTarget(m.card(c));
+            }
+        }
+        for (Card c : src.untilLeavesBattlefield) {
+            addUntilLeavesBattlefield(m.card(c));
+        }
+        planeswalkerAbilityActivated = src.planeswalkerAbilityActivated;
+        planeswalkerActivationLimitUsed = src.planeswalkerActivationLimitUsed;
+        int left = 0;
+        left += copyActivations(src, src.numberTurnActivations, numberTurnActivations, m);
+        left += copyActivations(src, src.numberGameActivations, numberGameActivations, m);
+        left += copyActivations(src, src.numberAbilityResolved, numberAbilityResolved, m);
+        left += copyModes(src, src.chosenModesTurn, chosenModesTurn);
+        left += copyModes(src, src.chosenModesGame, chosenModesGame);
+        left += copyModes(src, src.chosenModesYourCombat, chosenModesYourCombat);
+        left += copyModes(src, src.chosenModesYourLastCombat, chosenModesYourLastCombat);
+        return left;
+    }
+
+    private int copyActivations(final Card src, final ActivationTable from, final ActivationTable to,
+            final forge.game.TurnStateMap m) {
+        to.clear();
+        int left = 0;
+        for (Table.Cell<SpellAbility, Optional<StaticAbility>, Multiset<Player>> cell : from.cellSet()) {
+            final SpellAbility mine = cell.getColumnKey().isPresent() ? null : abilityLike(src, cell.getRowKey());
+            if (mine == null) {
+                left++;
+                continue;
+            }
+            final Multiset<Player> who = HashMultiset.create();
+            for (Multiset.Entry<Player> e : cell.getValue().entrySet()) {
+                who.add(m.player(e.getElement()), e.getCount());
+            }
+            to.put(mine, Optional.empty(), who);
+        }
+        return left;
+    }
+
+    private int copyModes(final Card src, final Map<SpellAbility, List<String>> from, final Map<SpellAbility, List<String>> to) {
+        to.clear();
+        int left = 0;
+        for (Map.Entry<SpellAbility, List<String>> e : from.entrySet()) {
+            final SpellAbility mine = abilityLike(src, e.getKey());
+            if (mine == null) {
+                left++;
+                continue;
+            }
+            to.put(mine, Lists.newArrayList(e.getValue()));
+        }
+        return left;
+    }
+
+    /**
+     * This card's counterpart of an ability of {@code src} (the key of a count): a trigger's overriding ability maps to
+     * the overriding ability of this card's trigger at the same position with the same mode, any other ability to this
+     * card's first ability of the same kind (spell or not) and description; null when there is none.
+     */
+    private SpellAbility abilityLike(final Card src, final SpellAbility key) {
+        final List<Trigger> st = Lists.newArrayList(src.getTriggers());
+        for (int i = 0; i < st.size(); i++) {
+            if (st.get(i).getOverridingAbility() == key) {
+                final List<Trigger> mt = Lists.newArrayList(getTriggers());
+                if (i < mt.size() && mt.get(i).getMode() == st.get(i).getMode()) {
+                    return mt.get(i).getOverridingAbility();
+                }
+                return null;
+            }
+        }
+        final String d = key.getDescription();
+        for (SpellAbility sa : getAllSpellAbilities()) {
+            if (sa.isSpell() == key.isSpell() && d.equals(sa.getDescription())) {
+                return sa;
+            }
+        }
+        return null;
+    }
+
     public void addCanBlockAdditional(int n, long timestamp) {
         if (n <= 0) {
             return;
