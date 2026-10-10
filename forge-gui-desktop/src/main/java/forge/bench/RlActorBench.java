@@ -474,6 +474,25 @@ public final class RlActorBench {
             out.guardError = "seeding is a TRAIN curriculum: not allowed in eval mode";
             return out;
         }
+        // r3-distill-1010 (R3-CM label games): the look-ahead for ONE seat (an RL seat), or -1 (absent: every RL seat)
+        final int searchSeat;
+        if (g.has("search_seat") && !g.get("search_seat").isJsonNull()) {
+            searchSeat = g.get("search_seat").getAsInt();
+            if (searchSeat != 0 && searchSeat != 1) {
+                out.guardError = "search_seat must be 0 or 1, not " + searchSeat;
+                return out;
+            }
+            if (cfg.search == null) {
+                out.guardError = "search_seat without the actor's search spec";
+                return out;
+            }
+            if (RlSeat.roleOf(ctl[searchSeat]) != RlSeat.Role.RL) {
+                out.guardError = "search_seat " + searchSeat + " is not an RL seat (" + ctl[searchSeat] + ")";
+                return out;
+            }
+        } else {
+            searchSeat = -1;
+        }
 
         final JsonRpcChannel ch = new JsonRpcChannel(InputStream.nullInputStream(), OutputStream.nullOutputStream());
         final BenchSession session = new BenchSession(ch);
@@ -607,6 +626,8 @@ public final class RlActorBench {
             if (cfg.search != null && !"replay".equals(mode) && !"record".equals(mode)) {
                 // S1: the look-ahead over the RL seats' own priority decisions (one per game; world seeds from the GAME seed)
                 search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId, obsVersion);
+                search.searchSeat = searchSeat;     // r3-distill-1010: -1 unless the GAME names one
+                seat.searchSeat = searchSeat;
                 seat.search = search;
                 out.search = search;
             }
