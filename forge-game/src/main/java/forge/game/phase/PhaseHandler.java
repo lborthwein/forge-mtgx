@@ -1053,7 +1053,15 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
                 }
                 game.stashGameState();
 
+                // mtgx lane forge-bot-tables-1011: a host's priority-decision listeners (none unless one was added)
+                final boolean decisionListeners = game.hasPriorityDecisionListeners();
+                if (decisionListeners) {
+                    game.firePriorityDecisionBefore(pPlayerPriority);
+                }
                 chosenSa = pPlayerPriority.getController().chooseSpellAbilityToPlay();
+                if (decisionListeners) {
+                    game.firePriorityDecisionAfter(pPlayerPriority, chosenSa);
+                }
 
                 // this needs to come after chosenSa so it sees you conceding on own turn
                 if (playerTurn.hasLost() && pPlayerPriority.equals(playerTurn) && pFirstPriority.equals(playerTurn)) {
