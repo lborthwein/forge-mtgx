@@ -537,7 +537,7 @@ public final class RlReviewObserver {
         m.bind(obs, feat, human);
         final RlWire.Decide frame = decideFrame(m, obs);
         if (search == null) {
-            search = new RlSearch(searchSpec.search, seed, uid, index, know, "review", "review-" + humanSeat, obs);
+            search = new RlSearch(searchSpec.search, seed, uid, index, know, "review", "review-" + humanSeat, this.obs);
             search.rowsWanted = true;
         }
         final int before = search.rows().size();
