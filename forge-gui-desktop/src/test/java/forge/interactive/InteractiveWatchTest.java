@@ -494,8 +494,18 @@ public class InteractiveWatchTest extends AITest {
      */
     @Test
     public void theReviewObservesAnAiSeatAndItsPlanDoesNotMoveTheGame() throws Exception {
+        reviewCase("classic", 722160001L);
+    }
+
+    /** The same on a look-ahead seat (its own search, its caches): observing and searching from it move nothing. */
+    @Test
+    public void theReviewOnALookaheadSeatDoesNotMoveTheGame() throws Exception {
+        withProperty("forge.interactive.lookahead", CHEAP_LOOKAHEAD, () -> reviewCase("lookahead", 722160002L));
+    }
+
+    private void reviewCase(final String ai, final long seed) throws Exception {
         fixtures();
-        final String cfg = config(722160001L, "classic", "classic", "");
+        final String cfg = config(seed, ai, ai, "");
         final Path dir = Files.createTempDirectory("watch-review-");
         final Path pass1 = dir.resolve("pass1.jsonl");
         final Path pass2 = dir.resolve("pass2.jsonl");
@@ -601,7 +611,7 @@ public class InteractiveWatchTest extends AITest {
         assertEquals(dumps.get(0).get("requestId").getAsString(), "d0");
         assertTrue(dumps.get(0).has("text"), String.valueOf(dumps.get(0)));
         assertEquals(runs[2].withoutEvents(), runs[0].withoutEvents(), "the planned search does not change the game");
-        System.err.println("[watch-test] review: " + decisionFrames.size() + " decision frames, " + otherPriority
+        System.err.println("[watch-test] review " + ai + ": " + decisionFrames.size() + " decision frames, " + otherPriority
                 + " other-seat frames, searches " + searches + ", events equal "
                 + runs[2].text.equals(runs[0].text) + "/" + runs[1].text.equals(runs[0].text));
     }
