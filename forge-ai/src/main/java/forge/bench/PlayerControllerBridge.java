@@ -226,11 +226,20 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!observeOnly()) {
             return body.get();
         }
+        return isolated(getGame(), body);
+    }
+
+    /**
+     * The observe-only isolation above, for any caller that must read the live game without moving it (lane
+     * game-review-1010: the review observer's menus and observations of a human seat): a scratch random stream, a
+     * scratch AI cache scope, and both seats' AI card memory, express state and the IdScope counters put back after.
+     */
+    public static <T> T isolated(final Game game, final java.util.function.Supplier<T> body) {
         final java.util.Random live = forge.util.MyRandom.getThreadRandom();
         final int[] ids = IdSnap.take();
         final Object cache = forge.ai.AiCache.captureScope();
-        final List<Object[]> memory = memorySnapshot(getGame());
-        final List<Object[]> express = expressSnapshot(getGame());
+        final List<Object[]> memory = memorySnapshot(game);
+        final List<Object[]> express = expressSnapshot(game);
         forge.util.MyRandom.setThreadRandom(new java.util.Random(0x0B5E47EL));
         forge.ai.AiCache.openScope();
         try {
@@ -1464,7 +1473,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      * the menu offers e.g. a counterspell with an empty stack. Every entry we offer must be
      * an action the host can actually complete.
      */
-    private static boolean hasEnoughTargets(final SpellAbility root) {
+    public static boolean hasEnoughTargets(final SpellAbility root) {
         SpellAbility cur = root;
         while (cur != null) {
             if (cur.usesTargeting() && candidateCount(cur) < cur.getMinTargets()) {

@@ -110,6 +110,7 @@ public final class InteractiveMain {
         InteractiveGuiGame gui = null;
         boolean completedNormally = false;
         forge.bench.rl.RlLiveSeat policy = null;
+        forge.bench.rl.RlReviewObserver review = null;
         try {
             System.setProperty("java.util.Arrays.useLegacyMergeSort", "true");
             System.setProperty("sun.java2d.d3d", "false");
@@ -146,6 +147,12 @@ public final class InteractiveMain {
             bindLookahead(registered, game, config.seed());
             bindPolicy(registered, game, config.seed());
             countFairNaming(registered, game);
+            if (InteractiveReview.spec() != null) {
+                // lane game-review-1010 (off unless -Dforge.interactive.review is set): an offline replay's human seat,
+                // observed for the game's review; every decision is still the browser's (the journal's)
+                review = InteractiveReview.install(game, playerAtSeat(game, config.humanSeat()), config.humanSeat(),
+                        config.seed());
+            }
             final Player human = playerAtSeat(game, config.humanSeat());
             if (human == null || !(human.getController() instanceof PlayerControllerHuman humanController)) {
                 throw new IllegalStateException("configured human seat did not create PlayerControllerHuman");
@@ -154,6 +161,9 @@ public final class InteractiveMain {
             configureHumanPayment(humanController);
             gui = new InteractiveGuiGame(channel, config.humanSeat());
             gui.bind(game, human, humanController);
+            if (review != null) {
+                gui.setRequestObserver(review::onRequest);
+            }
             desktop.bind(gui);
             humanController.setGui(gui);
             gui.setGameView(null);
@@ -198,6 +208,9 @@ public final class InteractiveMain {
                 // may stop the JVM as soon as it has the terminal)
                 policy.finish();
             }
+            if (review != null) {
+                review.finish();
+            }
 
             if (!gui.hasFailed()) {
                 gui.emitFinalState();
@@ -222,6 +235,9 @@ public final class InteractiveMain {
             }
             if (policy != null) {
                 policy.finish();
+            }
+            if (review != null) {
+                review.finish();
             }
         }
         // Forge initializes Swing/FModel threads that can outlive a completed match.

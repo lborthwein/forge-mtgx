@@ -748,6 +748,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 requestContext.remove();
             }
             final ActiveRequest request = new ActiveRequest(requestId, kind, input, bindings);
+            observeRequest(requestId, kind);
             activeRequest.set(request);
             channel.send("request", body);
             if (table != null) {
@@ -1550,6 +1551,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
             activeRequest.set(null);
             lastInputFingerprint = "";
+            observeRequest(requestId, kind);
             channel.send("request", requestBody(requestId, kind, inputClass, title, message,
                     min, max, cancellable, controls));
             sent = true;
@@ -1733,6 +1735,28 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     private String nextRequestId() {
         return "r" + requestSequence.incrementAndGet();
+    }
+
+    /**
+     * Lane game-review-1010 (null unless an offline review installs it): told each request id and kind just before the
+     * request is sent, while Forge waits on it. A read only; it never decides and never changes what is sent.
+     */
+    private volatile java.util.function.BiConsumer<String, String> requestObserver;
+
+    void setRequestObserver(final java.util.function.BiConsumer<String, String> observer) {
+        this.requestObserver = observer;
+    }
+
+    private void observeRequest(final String requestId, final String kind) {
+        final java.util.function.BiConsumer<String, String> o = requestObserver;
+        if (o == null) {
+            return;
+        }
+        try {
+            o.accept(requestId, kind);
+        } catch (RuntimeException e) {
+            System.err.println("[review] request observer failed on " + requestId + ": " + e);
+        }
     }
 
     private InteractiveAbort unsupported(final String method, final String detail,
