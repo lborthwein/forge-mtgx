@@ -414,6 +414,12 @@ public final class RlReviewObserver {
         facts(o);
         busy = true;
         try {
+            if ("request".equals(what) && "priority".equals(kind) && game.getStack().isEmpty()) {
+                // the size of the priority menu the S-c search would see (mana abilities are not entries): a review
+                // flags only decisions with something to choose
+                o.addProperty("menu", PlayerControllerBridge.isolated(game, () -> IdScope.detached(
+                        () -> legalSpellAbilities(game, human).size())));
+            }
             final byte[] payload = PlayerControllerBridge.isolated(game, () -> IdScope.detached(() -> {
                 final RlFeaturizer.Obs obs = feat.observe(game, human, 0, false, null);
                 o.addProperty("trunc", obs.truncated);
