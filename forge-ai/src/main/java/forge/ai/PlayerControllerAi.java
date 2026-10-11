@@ -73,6 +73,23 @@ public class PlayerControllerAi extends PlayerController {
         return pilotsNonAggroDeck;
     }
 
+    /**
+     * mtgx lane forge-bot-tables-1011 (null unless a host sets one): what this AI seat is shown (reveals) and what it looks
+     * at to arrange (scry, surveil, an ordered move), reported before the AI's own handling, as the review's observed
+     * human controller reports them. The AI's decisions do not change; a game copy's controller never has a hook.
+     */
+    public interface KnowledgeHook {
+        void onReveal(List<Card> cards, ZoneType zone, Player owner);
+
+        void onLook(List<Card> cards, ZoneType destination);
+    }
+
+    private KnowledgeHook knowledgeHook = null;
+
+    public void setKnowledgeHook(final KnowledgeHook hook) {
+        this.knowledgeHook = hook;
+    }
+
     /** fairNaming memory ({@link FairNaming#observe}); filled only when this player's option is not off. */
     Set<String> getFairNamingSeen() {
         return fairNamingSeen;
@@ -506,6 +523,9 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addSuffix) {
+        if (knowledgeHook != null && cards != null) {
+            knowledgeHook.onReveal(Lists.newArrayList(cards), zone, owner);
+        }
         for (Card c : cards) {
             AiCardMemory.rememberCard(player, c, AiCardMemory.MemorySet.REVEALED_CARDS);
         }
@@ -514,6 +534,22 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public void reveal(List<CardView> cards, ZoneType zone, PlayerView owner, String messagePrefix, boolean addSuffix) {
+        if (knowledgeHook != null && cards != null) {
+            final List<Card> found = new ArrayList<>();
+            for (CardView cv : cards) {
+                final Card c = cv == null ? null : player.getGame().findByView(cv);
+                if (c != null) {
+                    found.add(c);
+                }
+            }
+            Player own = null;
+            for (Player p : player.getGame().getPlayers()) {
+                if (owner != null && p.getView() == owner) {
+                    own = p;
+                }
+            }
+            knowledgeHook.onReveal(found, zone, own);
+        }
         for (CardView cv : cards) {
             AiCardMemory.rememberCard(player, player.getGame().findByView(cv), AiCardMemory.MemorySet.REVEALED_CARDS);
         }
@@ -528,6 +564,9 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+        if (knowledgeHook != null && topN != null) {
+            knowledgeHook.onLook(Lists.newArrayList(topN), ZoneType.Library);
+        }
         CardCollection toBottom = new CardCollection();
         CardCollection toTop = new CardCollection();
 
@@ -549,6 +588,9 @@ public class PlayerControllerAi extends PlayerController {
      */
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+        if (knowledgeHook != null && topN != null) {
+            knowledgeHook.onLook(Lists.newArrayList(topN), ZoneType.Library);
+        }
         CardCollection toGraveyard = new CardCollection();
         CardCollection toTop = new CardCollection();
 
@@ -580,6 +622,9 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
+        if (knowledgeHook != null && cards != null) {
+            knowledgeHook.onLook(Lists.newArrayList(cards), destinationZone);
+        }
         //TODO Add more logic for AI ordering here
 
         if (cards.isEmpty()) {

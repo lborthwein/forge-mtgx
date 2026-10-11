@@ -19,11 +19,13 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import forge.ai.ComputerUtilAbility;
+import forge.ai.PlayerControllerAi;
 import forge.ai.ComputerUtilCost;
 import forge.bench.PlayerControllerBridge;
 import forge.bench.StateEncoder;
 import forge.game.Game;
 import forge.game.GameActionUtil;
+import forge.game.PriorityDecisionListener;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
 import forge.game.card.CardView;
@@ -72,8 +74,17 @@ import forge.util.IdScope;
  * <p><b>The game is not moved.</b> Every read runs in a fresh {@link IdScope} on a scratch random stream with the AI
  * caches and card memory put back ({@link PlayerControllerBridge#isolated}), so the replay of the journal stays the
  * live game (the journal's inputs still answer the same requests).
+ *
+ * <p><b>An AI seat</b> (lane forge-bot-tables-1011; {@link #attachWatch}, a watch table's {@code seat=} key): the
+ * observed seat is an AI, the game a replay of an AI-vs-AI table from its seed. Its frames are taken at each of the
+ * seat's priority decisions ({@link PriorityDecisionListener#beforeDecision}: {@code "at":"decision"}, request ids
+ * {@code d0, d1, ...}, kind {@code priority}), and after each one a {@code move} row says what the AI chose. Plan keys are
+ * those ids; a planned decision is searched before the AI decides, from the same position. The other seat's priority
+ * frames are as for a human seat. The seat's reveals and looks reach its knowledge through its AI controller's
+ * {@link PlayerControllerAi.KnowledgeHook}. The isolation above puts back every AI seat's card memory and the AI caches,
+ * the observed seat's included.
  */
-public final class RlReviewObserver {
+public final class RlReviewObserver implements PriorityDecisionListener, PlayerControllerAi.KnowledgeHook {
     private final Game game;
     private final Player human;
     private final int humanSeat;
@@ -96,10 +107,19 @@ public final class RlReviewObserver {
     private boolean busy = false;
     /** The seat's own library cards it knows (by id), as of the last frame: a draw of one of them is not luck. */
     private final java.util.Set<Integer> knownLibrary = new java.util.HashSet<>();
+    /** lane forge-bot-tables-1011: the observed seat is an AI (a watch table's replay), framed at its decisions. */
+    private final boolean aiSeat;
+    /** The AI seat's priority decisions so far (request ids d0, d1, ...). */
+    private int decisions = 0;
+    /** The AI seat's decision in progress (its request id and frame n), between beforeDecision and afterDecision. */
+    private String decisionId = null;
+    private int decisionN = -1;
 
     private RlReviewObserver(final Game game, final Player human, final int humanSeat, final long seed, final CardIndex index,
-            final Writer out, final Map<String, JsonObject> plan, final RlLiveSeat.Spec searchSpec, final int obs) {
+            final Writer out, final Map<String, JsonObject> plan, final RlLiveSeat.Spec searchSpec, final int obs,
+            final boolean aiSeat) {
         this.game = game;
+        this.aiSeat = aiSeat;
         this.human = human;
         this.humanSeat = humanSeat;
         this.seed = seed;
@@ -123,6 +143,48 @@ public final class RlReviewObserver {
      */
     public static RlReviewObserver attach(final Game game, final Player human, final int humanSeat, final long seed,
             final String spec, final String searchSpec) throws IOException {
+        if (seatOfSpec(spec) != null) {
+            throw new IllegalArgumentException("review: seat= is a watch-table key; this game's observed seat is its human seat");
+        }
+        return attach(game, human, humanSeat, seed, spec, searchSpec, false);
+    }
+
+    /**
+     * lane forge-bot-tables-1011: attach to the AI seat named by {@code spec}'s {@code seat=<0|1>} (required) of a watch
+     * table's game (created, not started): frames at that seat's priority decisions, a {@code move} row after each, and
+     * its AI controller's reveals and looks as its knowledge. Throws on a bad spec, as {@link #attach} does.
+     */
+    public static RlReviewObserver attachWatch(final Game game, final long seed, final String spec, final String searchSpec)
+            throws IOException {
+        final Integer seat = seatOfSpec(spec);
+        if (seat == null) {
+            throw new IllegalArgumentException("review: a watch table's review needs seat=<0|1>");
+        }
+        if (seat < 0 || seat >= game.getRegisteredPlayers().size()) {
+            throw new IllegalArgumentException("review: seat must be 0 or 1, not " + seat);
+        }
+        final Player ai = game.getRegisteredPlayers().get(seat);
+        final RlReviewObserver r = attach(game, ai, seat, seed, spec, searchSpec, true);
+        game.addPriorityDecisionListener(r);
+        if (ai.getController() instanceof PlayerControllerAi pca) {
+            pca.setKnowledgeHook(r);
+        }
+        return r;
+    }
+
+    /** The spec's {@code seat=} value, or null when it has none. */
+    private static Integer seatOfSpec(final String spec) {
+        for (String kv : spec.split(",")) {
+            final String[] p = kv.split("=", 2);
+            if (p.length == 2 && "seat".equals(p[0].trim())) {
+                return Integer.parseInt(p[1].trim());
+            }
+        }
+        return null;
+    }
+
+    private static RlReviewObserver attach(final Game game, final Player human, final int humanSeat, final long seed,
+            final String spec, final String searchSpec, final boolean aiSeat) throws IOException {
         String outPath = null, cardIndex = null, planPath = null;
         int obs = 1;
         for (String kv : spec.split(",")) {
@@ -135,6 +197,7 @@ public final class RlReviewObserver {
                 case "cardIndex": cardIndex = p[1].trim(); break;
                 case "plan": planPath = p[1].trim(); break;
                 case "obs": obs = Integer.parseInt(p[1].trim()); break;
+                case "seat": break;   // a watch table's observed seat (attachWatch)
                 default: throw new IllegalArgumentException("review: unknown key " + p[0]);
             }
         }
@@ -162,13 +225,16 @@ public final class RlReviewObserver {
         final Path op = Paths.get(outPath);
         final Writer w = Files.newBufferedWriter(op, StandardCharsets.UTF_8);
         final RlReviewObserver r = new RlReviewObserver(game, human, humanSeat, seed, CardIndex.load(Paths.get(cardIndex)),
-                w, plan, ss, obs);
+                w, plan, ss, obs, aiSeat);
         r.know.attach();
         game.subscribeToEvents(r);
         final JsonObject h = new JsonObject();
         h.addProperty("type", "header");
         h.addProperty("schema", "mtgx-review-frames/1");
         h.addProperty("humanSeat", humanSeat);
+        if (aiSeat) {
+            h.addProperty("aiSeat", true);
+        }
         h.addProperty("obs", obs);
         h.addProperty("obsSchemaSha", RlSearch.schemaSha(obs));
         h.addProperty("cardIndexSha", r.index.sha());
@@ -216,6 +282,11 @@ public final class RlReviewObserver {
             return;
         }
         sample("request", humanSeat, requestId, kind);
+        planned(requestId, kind);
+    }
+
+    /** The plan's work at the seat's request (or AI decision) {@code requestId}, just framed: a position dump, a search. */
+    private void planned(final String requestId, final String kind) {
         final JsonObject p = plan.get(requestId);
         if (p == null) {
             return;
@@ -226,6 +297,65 @@ public final class RlReviewObserver {
         if ("priority".equals(kind) && (p.has("card") || p.has("pass"))) {
             searchAt(requestId, p);
         }
+    }
+
+    /**
+     * lane forge-bot-tables-1011: the observed AI seat is about to decide at priority. Its frame ({@code "at":"decision"},
+     * request id {@code d<j>}), then the plan's work for {@code d<j>} (searched from this position, before the AI decides).
+     */
+    @Override
+    public void beforeDecision(final Player p) {
+        if (!aiSeat || ended || p != human) {
+            return;
+        }
+        final String requestId = "d" + decisions++;
+        sample("decision", humanSeat, requestId, "priority");
+        synchronized (this) {
+            decisionId = requestId;
+            decisionN = n - 1;
+        }
+        planned(requestId, "priority");
+    }
+
+    /**
+     * lane forge-bot-tables-1011: what the observed AI seat chose at the decision just framed, as a {@code move} row: a pass,
+     * or the first chosen spell ability's host card (the Forge card id a plan names), its label ({@code ability}, what a
+     * plan entry names), Forge's own text for it ({@code sa}), and whether it is a land play or a spell ({@code more}: how
+     * many more were chosen with it).
+     */
+    @Override
+    public synchronized void afterDecision(final Player p, final List<SpellAbility> chosen) {
+        if (!aiSeat || ended || p != human || decisionId == null) {
+            return;
+        }
+        final JsonObject row = new JsonObject();
+        row.addProperty("type", "move");
+        row.addProperty("requestId", decisionId);
+        row.addProperty("n", decisionN);
+        decisionId = null;
+        if (chosen == null || chosen.isEmpty()) {
+            row.addProperty("pass", true);
+        } else {
+            final SpellAbility sa = chosen.get(0);
+            busy = true;
+            try {
+                final Card h = sa.getHostCard();
+                row.addProperty("card", h == null ? -1 : h.getId());
+                row.addProperty("name", h == null ? "?" : h.getName());
+                row.addProperty("ability", label(sa));
+                row.addProperty("sa", String.valueOf(sa));
+                row.addProperty("land", sa.isLandAbility());
+                row.addProperty("spell", sa.isSpell());
+            } catch (RuntimeException ex) {
+                row.addProperty("error", String.valueOf(ex));
+            } finally {
+                busy = false;
+            }
+            if (chosen.size() > 1) {
+                row.addProperty("more", chosen.size() - 1);
+            }
+        }
+        write(row);
     }
 
     /**
@@ -630,6 +760,12 @@ public final class RlReviewObserver {
             return hits.get(0);
         }
         final String want = norm(played.get("ability").getAsString());
+        // lane forge-bot-tables-1011: an AI seat's plan names the ability by its move row's label, matched exactly first
+        for (int e : hits) {
+            if (norm(label(menu.get(e - 1))).equals(want)) {
+                return e;
+            }
+        }
         for (int e : hits) {
             final SpellAbility sa = menu.get(e - 1);
             if (norm(sa.toString()).equals(want) || norm(sa.getDescription()).equals(want)) {
