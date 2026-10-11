@@ -52,7 +52,7 @@ import forge.util.IdScope;
  *
  * <p><b>Frames.</b> At every request the human seat is asked ({@link #onRequest}) and at every priority the OTHER seat
  * receives ({@link GameEventPlayerPriority}), the human seat's own observation (the RL observation the live policy
- * reads, obs-v1, from the seat's own knowledge: never the opponent's hidden cards) is written as a v(o) leaf frame
+ * reads, obs-v1 or with {@code obs=2} obs-v2, from the seat's own knowledge: never the opponent's hidden cards) is written as a v(o) leaf frame
  * ({@link RlSearch#leafFrame}, a DECIDE payload with PASS as the only candidate) to the spec's {@code out=} JSONL file,
  * with the public events since the previous frame (casts, lands, resolutions, turns, attacks, blocks, shuffles, coins,
  * dice, library exits, what the seat was shown) and the seat-level facts the review prints (life, hand and library
@@ -85,6 +85,8 @@ public final class RlReviewObserver {
     private final long uid;
     private final Map<String, JsonObject> plan;
     private final RlLiveSeat.Spec searchSpec;
+    /** The observation schema (1, or 2 for an obs-v2 checkpoint such as R2_F). */
+    private final int obs;
     private RlSearch search;
     private int n = 0;
     private int searches = 0;
@@ -96,7 +98,7 @@ public final class RlReviewObserver {
     private final java.util.Set<Integer> knownLibrary = new java.util.HashSet<>();
 
     private RlReviewObserver(final Game game, final Player human, final int humanSeat, final long seed, final CardIndex index,
-            final Writer out, final Map<String, JsonObject> plan, final RlLiveSeat.Spec searchSpec) {
+            final Writer out, final Map<String, JsonObject> plan, final RlLiveSeat.Spec searchSpec, final int obs) {
         this.game = game;
         this.human = human;
         this.humanSeat = humanSeat;
@@ -105,10 +107,12 @@ public final class RlReviewObserver {
         this.out = out;
         this.plan = plan;
         this.searchSpec = searchSpec;
+        this.obs = obs;
         this.uid = RlSearch.splitmix(seed ^ 0x72657669L);
         this.know = new RlKnowledge(game);
+        know.v2 = obs == 2;
         this.feat = new RlFeaturizer(index);
-        feat.setVersion(1);
+        feat.setVersion(obs);
         feat.reset();
         feat.setKnowledge(know);
     }
@@ -120,6 +124,7 @@ public final class RlReviewObserver {
     public static RlReviewObserver attach(final Game game, final Player human, final int humanSeat, final long seed,
             final String spec, final String searchSpec) throws IOException {
         String outPath = null, cardIndex = null, planPath = null;
+        int obs = 1;
         for (String kv : spec.split(",")) {
             final String[] p = kv.split("=", 2);
             if (p.length != 2) {
@@ -129,11 +134,15 @@ public final class RlReviewObserver {
                 case "out": outPath = p[1].trim(); break;
                 case "cardIndex": cardIndex = p[1].trim(); break;
                 case "plan": planPath = p[1].trim(); break;
+                case "obs": obs = Integer.parseInt(p[1].trim()); break;
                 default: throw new IllegalArgumentException("review: unknown key " + p[0]);
             }
         }
         if (outPath == null || cardIndex == null) {
             throw new IllegalArgumentException("review needs out=<file> and cardIndex=<tsv>");
+        }
+        if (obs != 1 && obs != 2) {
+            throw new IllegalArgumentException("review: obs must be 1 or 2, not " + obs);
         }
         final Map<String, JsonObject> plan = new HashMap<>();
         if (planPath != null) {
@@ -147,18 +156,21 @@ public final class RlReviewObserver {
         if (!plan.isEmpty() && ss == null) {
             throw new IllegalArgumentException("review: a plan needs -Dforge.interactive.reviewSearch=<spec>");
         }
+        if (ss != null && ss.obs() != obs) {
+            throw new IllegalArgumentException("review: the search spec's obs=" + ss.obs() + " is not the review's obs=" + obs);
+        }
         final Path op = Paths.get(outPath);
         final Writer w = Files.newBufferedWriter(op, StandardCharsets.UTF_8);
         final RlReviewObserver r = new RlReviewObserver(game, human, humanSeat, seed, CardIndex.load(Paths.get(cardIndex)),
-                w, plan, ss);
+                w, plan, ss, obs);
         r.know.attach();
         game.subscribeToEvents(r);
         final JsonObject h = new JsonObject();
         h.addProperty("type", "header");
         h.addProperty("schema", "mtgx-review-frames/1");
         h.addProperty("humanSeat", humanSeat);
-        h.addProperty("obs", 1);
-        h.addProperty("obsSchemaSha", RlSchema.schemaSha());
+        h.addProperty("obs", obs);
+        h.addProperty("obsSchemaSha", RlSearch.schemaSha(obs));
         h.addProperty("cardIndexSha", r.index.sha());
         h.addProperty("planned", plan.size());
         if (ss != null) {
@@ -525,7 +537,7 @@ public final class RlReviewObserver {
         m.bind(obs, feat, human);
         final RlWire.Decide frame = decideFrame(m, obs);
         if (search == null) {
-            search = new RlSearch(searchSpec.search, seed, uid, index, know, "review", "review-" + humanSeat);
+            search = new RlSearch(searchSpec.search, seed, uid, index, know, "review", "review-" + humanSeat, obs);
             search.rowsWanted = true;
         }
         final int before = search.rows().size();
@@ -538,9 +550,9 @@ public final class RlReviewObserver {
         }
     }
 
-    /** The DECIDE frame of the seat's priority menu (RlSeat.frame, obs-v1). */
+    /** The DECIDE frame of the seat's priority menu (RlSeat.frame). */
     private RlWire.Decide decideFrame(final RlCandidates.Menu m, final RlFeaturizer.Obs o) {
-        final RlWire.Decide f = new RlWire.Decide();
+        final RlWire.Decide f = o.version == 2 ? RlWire.Decide.v2() : new RlWire.Decide();
         f.gameUid = uid;
         f.decIdx = n;
         f.seat = humanSeat;
@@ -571,6 +583,23 @@ public final class RlReviewObserver {
         f.candAbility = m.ability;
         f.candFlags = m.flagsA;
         f.slotTok = m.slotTok;
+        if (o.version == 2) {
+            f.R = o.R;
+            f.F = o.F;
+            f.Dr = o.Dr;
+            f.tokBits = o.tokBits;
+            f.relSrc = o.relSrc;
+            f.relDst = o.relDst;
+            f.relType = o.relType;
+            f.relArg = o.relArg;
+            f.relNum = o.relNum;
+            f.factTok = o.factTok;
+            f.factId = o.factId;
+            f.factArg = o.factArg;
+            f.factNum = o.factNum;
+            f.restCard = o.restCard;
+            f.restCnt = o.restCnt;
+        }
         return f;
     }
 
