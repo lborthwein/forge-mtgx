@@ -56,6 +56,16 @@ final class InteractiveReview {
         return observer;
     }
 
+    /**
+     * lane forge-bot-tables-1011: a watch table's review. The observer attaches to the AI seat the spec's {@code seat=}
+     * names (required here, refused for a human seat's review) and frames its priority decisions; its AI controller
+     * reports the seat's reveals and looks ({@link forge.ai.PlayerControllerAi.KnowledgeHook}). Every decision is still
+     * the AI's.
+     */
+    static RlReviewObserver installWatch(final Game game, final long seed) throws java.io.IOException {
+        return RlReviewObserver.attachWatch(game, seed, spec(), searchSpec());
+    }
+
     /** The human seat's controller, reporting reveals and looks to the review observer. */
     static final class Controller extends PlayerControllerHuman {
         private final RlReviewObserver observer;

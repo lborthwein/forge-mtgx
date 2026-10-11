@@ -1039,6 +1039,32 @@ public class Game {
         events.register(subscriber);
     }
 
+    /**
+     * mtgx lane forge-bot-tables-1011: the live game's priority-decision listeners ({@link PriorityDecisionListener}).
+     * Empty unless a host adds one; never copied to a game copy.
+     */
+    private final List<PriorityDecisionListener> priorityDecisionListeners = new ArrayList<>(0);
+
+    public void addPriorityDecisionListener(final PriorityDecisionListener listener) {
+        priorityDecisionListeners.add(Objects.requireNonNull(listener));
+    }
+
+    public boolean hasPriorityDecisionListeners() {
+        return !priorityDecisionListeners.isEmpty();
+    }
+
+    public void firePriorityDecisionBefore(final Player p) {
+        for (PriorityDecisionListener listener : priorityDecisionListeners) {
+            listener.beforeDecision(p);
+        }
+    }
+
+    public void firePriorityDecisionAfter(final Player p, final List<SpellAbility> chosen) {
+        for (PriorityDecisionListener listener : priorityDecisionListeners) {
+            listener.afterDecision(p, chosen);
+        }
+    }
+
     public GameRules getRules() {
         return rules;
     }

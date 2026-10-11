@@ -55,6 +55,72 @@ final class InteractiveState {
         return view;
     }
 
+    /**
+     * The view a seat's browser receives in a {@code state} message: {@link #encode} from {@code seatPlayer}'s information
+     * set, its {@code seat}, and each card's and stack entry's controller/owner as a seat ({@code controllerSeat},
+     * {@code ownerSeat}). The one helper for a human seat's GUI and a watch table's channels (lane forge-bot-tables-1011).
+     */
+    static JsonObject seatView(final Game game, final Player seatPlayer, final int seat) {
+        final JsonObject view = encode(game, seatPlayer);
+        view.addProperty("seat", seat);
+        normalizePlayerNamespaces(game, view);
+        return view;
+    }
+
+    private static void normalizePlayerNamespaces(final Game game, final JsonObject view) {
+        if (view.has("players") && view.get("players").isJsonArray()) {
+            for (JsonElement playerElement : view.getAsJsonArray("players")) {
+                if (!playerElement.isJsonObject()) {
+                    continue;
+                }
+                final JsonObject player = playerElement.getAsJsonObject();
+                for (String zone : java.util.List.of("hand", "battlefield", "graveyard", "exile", "command")) {
+                    addCardSeatFields(game, player.get(zone));
+                }
+            }
+        }
+        if (view.has("stack") && view.get("stack").isJsonArray()) {
+            for (JsonElement entry : view.getAsJsonArray("stack")) {
+                if (entry.isJsonObject()) {
+                    addSeatForRawPlayerId(game, entry.getAsJsonObject(), "controller", "controllerSeat");
+                }
+            }
+        }
+    }
+
+    private static void addCardSeatFields(final Game game, final JsonElement zone) {
+        if (zone == null || !zone.isJsonArray()) {
+            return;
+        }
+        for (JsonElement element : zone.getAsJsonArray()) {
+            if (element.isJsonObject()) {
+                addSeatForRawPlayerId(game, element.getAsJsonObject(), "controller", "controllerSeat");
+                addSeatForRawPlayerId(game, element.getAsJsonObject(), "owner", "ownerSeat");
+            }
+        }
+    }
+
+    private static void addSeatForRawPlayerId(final Game game, final JsonObject object, final String rawField,
+                                              final String seatField) {
+        if (!object.has(rawField) || !object.get(rawField).isJsonPrimitive()) {
+            return;
+        }
+        final int rawId;
+        try {
+            rawId = object.get(rawField).getAsInt();
+        } catch (RuntimeException ignored) {
+            return;
+        }
+        int seat = 0;
+        for (Player player : game.getRegisteredPlayers()) {
+            if (player.getId() == rawId) {
+                object.addProperty(seatField, seat);
+                return;
+            }
+            seat++;
+        }
+    }
+
     static boolean mayReceiveIdentity(final CardView card, final PlayerView viewer) {
         return card != null && card.canBeShownTo(viewer)
                 && (!card.isFaceDown() || card.canFaceDownBeShownTo(viewer));

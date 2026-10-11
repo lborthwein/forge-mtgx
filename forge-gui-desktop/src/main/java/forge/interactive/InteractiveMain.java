@@ -91,6 +91,11 @@ public final class InteractiveMain {
             return;
         }
 
+        if (config.isWatch()) {
+            // lane forge-bot-tables-1011: an AI-vs-AI watch table; stdin is not read again
+            System.exit(InteractiveWatch.run(config, protocolOut) ? 0 : 1);
+            return;
+        }
         if (config.isTable()) {
             System.exit(runTable(config, input, protocolOut) ? 0 : 1);
             return;
@@ -456,7 +461,7 @@ public final class InteractiveMain {
         return players;
     }
 
-    private static void initializeForge() {
+    static void initializeForge() {
         FModel.initialize(null, preferences -> {
             preferences.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
             preferences.setPref(FPref.UI_LANGUAGE, "en-US");
@@ -519,7 +524,7 @@ public final class InteractiveMain {
      * {@code aiFixes0928=on} (lane yardstick-0928; off by default) turns on the mtgx Forge AI fixes of 2026-09-28
      * ({@link forge.ai.AiFixes}) for the look-ahead seat's own Forge AI (and its play-out copies of that seat).
      */
-    private static String lookaheadSpec() {
+    static String lookaheadSpec() {
         final String v = System.getProperty("forge.interactive.lookahead");
         return v == null || v.isBlank() ? null : v;
     }
@@ -535,7 +540,7 @@ public final class InteractiveMain {
      * ({@link forge.ai.AiFixes}) for every plain Forge AI seat (the classic opponent). Unset = off = upstream Forge AI.
      * A look-ahead seat takes {@code aiFixes0928=on} in the look-ahead spec instead (see {@link #bindLookahead}).
      */
-    private static void bindAiFixes(final List<RegisteredPlayer> registered) {
+    static void bindAiFixes(final List<RegisteredPlayer> registered) {
         final String v = System.getProperty("forge.interactive.aiFixes0928");
         final forge.ai.AiFixes.Mode mode = forge.ai.AiFixes.Mode.parse(v);
         // -Dforge.interactive.fairNaming=on|shadow|off (lane ai-misplays-1006; off by default): every Forge AI seat, the
@@ -555,7 +560,7 @@ public final class InteractiveMain {
     }
 
     /** fairNaming (lane ai-misplays-1006): count each AI seat's naming decisions in this live game (only when not off). */
-    private static void countFairNaming(final List<RegisteredPlayer> registered, final Game game) {
+    static void countFairNaming(final List<RegisteredPlayer> registered, final Game game) {
         for (RegisteredPlayer rp : registered) {
             if (rp.getPlayer() instanceof forge.ai.LobbyPlayerAi lp && lp.getFairNaming() != forge.ai.AiFixes.Mode.OFF) {
                 forge.ai.FairNaming.count(lp, game);
@@ -583,7 +588,7 @@ public final class InteractiveMain {
     }
 
     /** {@code -Dforge.interactive.policySearch} (lane live-sc-1009; off unless set), see {@link forge.bench.rl.RlLiveSeat}. */
-    private static String policySpec() {
+    static String policySpec() {
         final String v = System.getProperty("forge.interactive.policySearch");
         return v == null || v.isBlank() ? null : v;
     }
@@ -592,7 +597,7 @@ public final class InteractiveMain {
      * lane live-sc-1009: bind the policy seat (if one was seated) to the live game. A degraded seat plays the live K8
      * look-ahead: this server's look-ahead spec with the seed and Forge AI fixes a look-ahead seat here would get.
      */
-    private static void bindPolicy(final List<RegisteredPlayer> registered, final Game game, final long seed) {
+    static void bindPolicy(final List<RegisteredPlayer> registered, final Game game, final long seed) {
         for (int i = 0; i < registered.size(); i++) {
             if (registered.get(i).getPlayer() instanceof forge.bench.rl.LobbyPlayerPolicy lp) {
                 final String spec = lookaheadSpec();
@@ -610,13 +615,13 @@ public final class InteractiveMain {
     }
 
     /** A look-ahead spec as {@link #bindLookahead} reads it. */
-    private static final class ParsedLookahead {
+    static final class ParsedLookahead {
         final forge.ai.simulation.LookaheadSearch.Config config = new forge.ai.simulation.LookaheadSearch.Config();
         forge.ai.AiFixes.Mode aiFixes = forge.ai.AiFixes.Mode.OFF;
         forge.ai.AiFixes.Mode fairNaming = null;
     }
 
-    private static ParsedLookahead parseLookahead(final String spec) {
+    static ParsedLookahead parseLookahead(final String spec) {
         final ParsedLookahead pl = new ParsedLookahead();
         final forge.ai.simulation.LookaheadSearch.Config c = pl.config;
         forge.ai.AiFixes.Mode aiFixes = forge.ai.AiFixes.Mode.OFF;
@@ -685,7 +690,7 @@ public final class InteractiveMain {
         controller.setDisableAutoTriggers(true);
     }
 
-    private static Player playerAtSeat(final Game game, final int wantedSeat) {
+    static Player playerAtSeat(final Game game, final int wantedSeat) {
         int seat = 0;
         for (Player player : game.getPlayers()) {
             if (seat++ == wantedSeat) {
@@ -695,7 +700,7 @@ public final class InteractiveMain {
         return null;
     }
 
-    private static boolean emitTerminal(final InteractiveProtocol.Channel channel,
+    static boolean emitTerminal(final InteractiveProtocol.Channel channel,
                                         final Game game,
                                         final List<RegisteredPlayer> registered)
             throws InteractiveProtocol.ProtocolException {
@@ -769,7 +774,7 @@ public final class InteractiveMain {
 
     /** DeckSerializer may omit an unknown card or substitute a fallback print.
      * Verify the exact requested main-deck multiset before dealing any cards. */
-    private static void validateLoadedDeck(final Path path, final Deck deck)
+    static void validateLoadedDeck(final Path path, final Deck deck)
             throws InteractiveProtocol.ProtocolException {
         final Map<String, Integer> expected = new HashMap<>();
         final Map<String, Integer> actual = new HashMap<>();
@@ -802,13 +807,13 @@ public final class InteractiveMain {
         }
     }
 
-    private static String forgeCommit() {
+    static String forgeCommit() {
         // Provenance must originate in the jar, not from a value supplied by its caller.
         // The host separately records and pins the jar digest.
         return PINNED_FORGE_COMMIT;
     }
 
-    private static String nonBlankVersion() {
+    static String nonBlankVersion() {
         final String version = BuildInfo.getVersionString();
         return version == null || version.isBlank() ? "Forge@" + forgeCommit() : version;
     }
