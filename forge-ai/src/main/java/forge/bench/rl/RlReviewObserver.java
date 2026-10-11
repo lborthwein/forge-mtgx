@@ -89,6 +89,8 @@ public final class RlReviewObserver {
     private boolean ended = false;
     /** True while this observer reads the game: events its own reads fire (LKI checks) are not the game's. */
     private boolean busy = false;
+    /** The seat's own library cards it knows (by id), as of the last frame: a draw of one of them is not luck. */
+    private final java.util.Set<Integer> knownLibrary = new java.util.HashSet<>();
 
     private RlReviewObserver(final Game game, final Player human, final int humanSeat, final long seed, final CardIndex index,
             final Writer out, final Map<String, JsonObject> plan, final RlLiveSeat.Spec searchSpec) {
@@ -170,15 +172,10 @@ public final class RlReviewObserver {
         try {
             know.onReveal(game, human, cards, zone, owner);
             if (owner != null && owner != human) {
+                // the opponent's hidden cards, shown to the seat: information it did not choose
                 final JsonObject e = ev("reveal");
                 e.addProperty("owner", seatOf(owner));
                 e.addProperty("zone", String.valueOf(zone));
-                e.addProperty("n", cards == null ? 0 : cards.size());
-                add(e);
-            } else if (zone == ZoneType.Library) {
-                final JsonObject e = ev("reveal");
-                e.addProperty("owner", humanSeat);
-                e.addProperty("zone", "Library");
                 e.addProperty("n", cards == null ? 0 : cards.size());
                 add(e);
             }
@@ -291,8 +288,20 @@ public final class RlReviewObserver {
             return;
         }
         final ZoneType to = ev.to() == null ? null : ev.to().zoneType();
+        final int seat = seatOf(player(ev.from().player()));
+        if (to == ZoneType.Hand) {
+            // a draw (or a tutor to hand): whether the seat knew the card is what separates a known pile from luck
+            final JsonObject e = ev("tohand");
+            e.addProperty("seat", seat);
+            if (seat == humanSeat) {
+                final Card c = ev.card() == null ? null : game.findByView(ev.card());
+                e.addProperty("known", c != null && knownLibrary.contains(c.getId()));
+            }
+            add(e);
+            return;
+        }
         final JsonObject e = ev("libout");
-        e.addProperty("seat", seatOf(player(ev.from().player())));
+        e.addProperty("seat", seat);
         e.addProperty("to", String.valueOf(to));
         add(e);
     }
@@ -363,6 +372,13 @@ public final class RlReviewObserver {
                 return RlWire.encodeDecide(RlSearch.leafFrame(obs, uid, humanSeat, game.getPhaseHandler().getTurn()));
             }));
             o.addProperty("payload", Base64.getEncoder().encodeToString(payload));
+            knownLibrary.clear();
+            for (Card c : human.getCardsIn(ZoneType.Library)) {
+                if (know.knows(humanSeat, c)) {
+                    knownLibrary.add(c.getId());
+                }
+            }
+            o.addProperty("knownLibrary", knownLibrary.size());
         } catch (RuntimeException ex) {
             o.addProperty("error", String.valueOf(ex));
         } finally {
