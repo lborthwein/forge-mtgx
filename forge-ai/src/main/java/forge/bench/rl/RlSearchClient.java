@@ -54,6 +54,9 @@ public final class RlSearchClient implements Closeable {
     private final OutputStream out;
     public JsonObject ack;
     public long calls, nanos;
+    /** The configured read timeout, and the one the socket has now (lane forge-continue-1011). */
+    private final int readTimeoutMs;
+    private int appliedReadTimeoutMs;
 
     public RlSearchClient(final String hostPort, final int connectTimeoutMs, final int readTimeoutMs) throws IOException {
         final int c = hostPort.lastIndexOf(':');
@@ -65,11 +68,21 @@ public final class RlSearchClient implements Closeable {
         socket.connect(new InetSocketAddress(hostPort.substring(0, c), Integer.parseInt(hostPort.substring(c + 1))),
                 connectTimeoutMs);
         socket.setSoTimeout(readTimeoutMs);
+        this.readTimeoutMs = readTimeoutMs;
+        this.appliedReadTimeoutMs = readTimeoutMs;
         in = new BufferedInputStream(socket.getInputStream(), 1 << 16);
         out = new BufferedOutputStream(socket.getOutputStream(), 1 << 16);
     }
 
     private void send(final int type, final int flags, final byte[] payload) throws IOException {
+        // lane forge-continue-1011: each call's read timeout as it binds now (forge.ai.WallClock): a "Continue from here"
+        // rebuild stretches it so a slow answer never degrades the seat differently from the original game. Live it is
+        // the configured one, and the socket is never touched again.
+        final int timeout = forge.ai.WallClock.readTimeoutMs(readTimeoutMs);
+        if (timeout != appliedReadTimeoutMs) {
+            socket.setSoTimeout(timeout);
+            appliedReadTimeoutMs = timeout;
+        }
         out.write(RlWire.frameBytes(type, flags, payload));
         out.flush();
     }

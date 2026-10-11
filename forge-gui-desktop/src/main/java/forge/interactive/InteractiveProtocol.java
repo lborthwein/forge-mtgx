@@ -64,8 +64,19 @@ final class InteractiveProtocol {
     /** The fixed requestId of a table seat's concession while it has no request of its own. */
     static final String SEAT_CONCEDE_REQUEST = "seat-concede";
 
+    /** A line from the host on a one-seat channel: an {@link InputMessage}, or (continuation mode) a {@link HandoverMessage}. */
+    sealed interface Incoming permits InputMessage, HandoverMessage {
+    }
+
     record InputMessage(String requestId, String inputId, String kind, JsonObject action,
-                        JsonObject original) {
+                        JsonObject original) implements Incoming {
+    }
+
+    /**
+     * Lane forge-continue-1011, "Continue from here": the host hands the rebuilt game over at {@code requestId}
+     * ({@link InteractiveContinuation}). {@code seed} is null when {@code reshuffle} is false and none was given.
+     */
+    record HandoverMessage(String requestId, boolean reshuffle, Long seed, boolean live) implements Incoming {
     }
 
     static final class ProtocolException extends Exception {
@@ -307,6 +318,15 @@ final class InteractiveProtocol {
 
         JsonObject hello(final String forgeCommit, final String forgeVersion, final String aiProfile,
                          final int humanSeat, final long seed) throws ProtocolException {
+            return hello(forgeCommit, forgeVersion, aiProfile, humanSeat, seed, null);
+        }
+
+        /**
+         * {@code extras} (or null): fields after the usual ones, e.g. {@code "continuation":"rebuild"} (lane
+         * forge-continue-1011). Null sends the hello every game has always had, byte for byte.
+         */
+        JsonObject hello(final String forgeCommit, final String forgeVersion, final String aiProfile,
+                         final int humanSeat, final long seed, final JsonObject extras) throws ProtocolException {
             if (sequence.get() != 0) {
                 throw new ProtocolException("engine", "hello must be the first protocol message");
             }
@@ -316,6 +336,14 @@ final class InteractiveProtocol {
             body.addProperty("aiProfile", aiProfile);
             body.addProperty("humanSeat", humanSeat);
             body.addProperty("seed", seed);
+            if (extras != null) {
+                for (Map.Entry<String, JsonElement> entry : extras.entrySet()) {
+                    if (body.has(entry.getKey())) {
+                        throw new ProtocolException("engine", "hello extra would replace " + entry.getKey());
+                    }
+                    body.add(entry.getKey(), entry.getValue());
+                }
+            }
             return send("hello", body);
         }
 
@@ -403,11 +431,64 @@ final class InteractiveProtocol {
         }
 
         InputMessage readInput() throws IOException, ProtocolException {
+            return inputOf(parseObject(nextLine(), "protocol_mismatch", "input"));
+        }
+
+        /**
+         * Lane forge-continue-1011: the next line of a "Continue from here" rebuild's one-seat channel, an input or a
+         * {@code handover}. Every other line is refused exactly as {@link #readInput} refuses it, and a table channel
+         * takes no handover (its handover line is refused as any non-input line).
+         */
+        Incoming readInputOrHandover() throws IOException, ProtocolException {
+            final JsonObject json = parseObject(nextLine(), "protocol_mismatch", "input");
+            if (seat == null && json.has("type") && json.get("type").isJsonPrimitive()
+                    && "handover".equals(json.get("type").getAsString())) {
+                return handoverOf(json);
+            }
+            return inputOf(json);
+        }
+
+        private String nextLine() throws IOException, ProtocolException {
             final String line = input.readLine();
             if (line == null) {
                 throw new ProtocolException("eof", "stdin closed while Forge was awaiting human input");
             }
-            final JsonObject json = parseObject(line, "protocol_mismatch", "input");
+            return line;
+        }
+
+        private HandoverMessage handoverOf(final JsonObject json) throws ProtocolException {
+            requireExactString(json, "protocol", VERSION, "protocol_mismatch");
+            requireExactString(json, "session", session, "protocol_mismatch");
+            if (json.has("seat") || json.has("seq")) {
+                throw new ProtocolException("protocol_mismatch", "handover must not carry seat or seq");
+            }
+            final String requestId = requireString(json, "requestId", "protocol_mismatch");
+            if (requestId.isBlank()) {
+                throw new ProtocolException("protocol_mismatch", "handover requestId must be non-blank");
+            }
+            final boolean reshuffle = requireBoolean(json, "reshuffle", "protocol_mismatch");
+            final boolean live = requireBoolean(json, "live", "protocol_mismatch");
+            Long seed = null;
+            if (json.has("seed") && !json.get("seed").isJsonNull()) {
+                if (!json.get("seed").isJsonPrimitive() || !json.getAsJsonPrimitive("seed").isNumber()) {
+                    throw new ProtocolException("protocol_mismatch", "handover seed must be an integer");
+                }
+                try {
+                    seed = new BigDecimal(json.get("seed").getAsString()).longValueExact();
+                } catch (RuntimeException e) {
+                    throw new ProtocolException("protocol_mismatch", "handover seed must be a 64-bit integer", e);
+                }
+                if (seed < 0) {
+                    throw new ProtocolException("protocol_mismatch", "handover seed must be non-negative");
+                }
+            }
+            if (reshuffle && seed == null) {
+                throw new ProtocolException("protocol_mismatch", "a reshuffling handover needs a seed");
+            }
+            return new HandoverMessage(requestId, reshuffle, seed, live);
+        }
+
+        private InputMessage inputOf(final JsonObject json) throws ProtocolException {
             requireExactString(json, "protocol", VERSION, "protocol_mismatch");
             requireExactString(json, "session", session, "protocol_mismatch");
             requireExactString(json, "type", "input", "protocol_mismatch");
@@ -580,6 +661,15 @@ final class InteractiveProtocol {
             throw new ProtocolException(code, field + " must be a string");
         }
         return json.get(field).getAsString();
+    }
+
+    private static boolean requireBoolean(final JsonObject json, final String field,
+                                          final String code) throws ProtocolException {
+        if (!json.has(field) || !json.get(field).isJsonPrimitive()
+                || !json.getAsJsonPrimitive(field).isBoolean()) {
+            throw new ProtocolException(code, field + " must be a boolean");
+        }
+        return json.get(field).getAsBoolean();
     }
 
     private static void requireExactString(final JsonObject json, final String field,

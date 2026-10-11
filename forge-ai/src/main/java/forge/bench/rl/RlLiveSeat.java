@@ -388,6 +388,10 @@ public final class RlLiveSeat {
         d.addProperty("searched", st.searched);
         d.addProperty("departedTotal", st.departed);
         d.addProperty("cappedTotal", st.capped);
+        if (forge.ai.WallClock.rebuilding()) {
+            // lane forge-continue-1011: a "Continue from here" rebuild's decision (wall clocks off); only then
+            d.addProperty("rebuild", true);
+        }
         System.err.println("[lookahead-decision] " + d);
     }
 

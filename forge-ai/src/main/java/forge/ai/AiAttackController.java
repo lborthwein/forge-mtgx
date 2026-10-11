@@ -961,7 +961,9 @@ public class AiAttackController {
                 });
             }
 
-            if (BENCH_SEQUENTIAL_AI) {
+            // lane forge-continue-1011: a "Continue from here" rebuild (WallClock) takes the deterministic path too, so its
+            // declaration does not depend on timing; a live game (and the game after the handover) is unchanged
+            if (BENCH_SEQUENTIAL_AI || WallClock.rebuilding()) {
                 // mtgx bench determinism: the same tasks on the calling thread, in attacker order, no wall-clock cut-off
                 executor.shutdownNow();
                 for (final Callable<Integer> task : tasks) {
