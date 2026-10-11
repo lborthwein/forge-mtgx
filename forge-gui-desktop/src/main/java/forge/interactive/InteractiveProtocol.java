@@ -39,16 +39,25 @@ final class InteractiveProtocol {
      */
     record Config(String session, int humanSeat, List<Path> decks, long seed, String aiProfile,
                   int startingChooser, int gameNumber, List<Integer> humanSeats, List<String> names,
-                  String frame) {
+                  String frame, List<Integer> watchSeats, List<String> seatAi) {
         Config {
             decks = List.copyOf(decks);
             humanSeats = humanSeats == null ? List.of(humanSeat) : List.copyOf(humanSeats);
             names = names == null ? List.of() : List.copyOf(names);
+            watchSeats = watchSeats == null ? null : List.copyOf(watchSeats);
+            seatAi = seatAi == null ? null : List.copyOf(seatAi);
         }
 
         Config(final String session, final int humanSeat, final List<Path> decks, final long seed,
                final String aiProfile, final int startingChooser, final int gameNumber) {
             this(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber, null, null, null);
+        }
+
+        Config(final String session, final int humanSeat, final List<Path> decks, final long seed,
+               final String aiProfile, final int startingChooser, final int gameNumber,
+               final List<Integer> humanSeats, final List<String> names, final String frame) {
+            this(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber, humanSeats, names, frame,
+                    null, null);
         }
 
         /**
@@ -59,7 +68,18 @@ final class InteractiveProtocol {
         boolean isTable() {
             return humanSeats.size() > 1;
         }
+
+        /**
+         * A WATCH table (lane forge-bot-tables-1011): both seats are AI ({@code seatAi}), nobody plays from the browser,
+         * and every seat has its own tagged output channel; the JVM reads no input after the config.
+         */
+        boolean isWatch() {
+            return watchSeats != null;
+        }
     }
+
+    /** A watch table's per-seat AI ({@code seatAi} entries). */
+    static final List<String> SEAT_AI = List.of("classic", "lookahead", "policy");
 
     /** The fixed requestId of a table seat's concession while it has no request of its own. */
     static final String SEAT_CONCEDE_REQUEST = "seat-concede";
@@ -212,8 +232,60 @@ final class InteractiveProtocol {
             }
             frame = json.get("frame").getAsString();
         }
+        // Optional (lane forge-bot-tables-1011): a WATCH table, both seats AI. watchSeats must be exactly [0,1]; seatAi
+        // names each seat's AI. Absent keeps every other mode exactly as it was; seatAi without watchSeats is refused.
+        List<Integer> watchSeats = null;
+        List<String> seatAi = null;
+        if (json.has("watchSeats") && !json.get("watchSeats").isJsonNull()) {
+            final JsonElement ws = json.get("watchSeats");
+            if (!ws.isJsonArray() || ws.getAsJsonArray().size() != 2
+                    || !isSeatNumber(ws.getAsJsonArray().get(0), 0) || !isSeatNumber(ws.getAsJsonArray().get(1), 1)) {
+                throw new ProtocolException("invalid_config", "watchSeats must be exactly [0,1]");
+            }
+            if (humanSeats != null) {
+                throw new ProtocolException("invalid_config", "a watch table (watchSeats) has no humanSeats");
+            }
+            if (frame != null) {
+                throw new ProtocolException("invalid_config", "a watch table (watchSeats) has no frame");
+            }
+            if (!json.has("seatAi") || !json.get("seatAi").isJsonArray()
+                    || json.getAsJsonArray("seatAi").size() != 2) {
+                throw new ProtocolException("invalid_config", "a watch table needs seatAi: two of "
+                        + String.join(", ", SEAT_AI));
+            }
+            seatAi = new ArrayList<>(2);
+            for (JsonElement value : json.getAsJsonArray("seatAi")) {
+                if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()
+                        || !SEAT_AI.contains(value.getAsString())) {
+                    throw new ProtocolException("invalid_config", "each seatAi entry must be one of "
+                            + String.join(", ", SEAT_AI));
+                }
+                final String ai = value.getAsString();
+                if ("lookahead".equals(ai) && isBlankProperty("forge.interactive.lookahead")) {
+                    throw new ProtocolException("invalid_config",
+                            "seatAi lookahead needs -Dforge.interactive.lookahead on this host");
+                }
+                if ("policy".equals(ai) && isBlankProperty("forge.interactive.policySearch")) {
+                    throw new ProtocolException("invalid_config",
+                            "seatAi policy needs -Dforge.interactive.policySearch on this host");
+                }
+                seatAi.add(ai);
+            }
+            watchSeats = List.of(0, 1);
+        } else if (json.has("seatAi") && !json.get("seatAi").isJsonNull()) {
+            throw new ProtocolException("invalid_config", "seatAi is a watch-table (watchSeats) option");
+        }
         return new Config(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber,
-                humanSeats, names, frame);
+                humanSeats, names, frame, watchSeats, seatAi);
+    }
+
+    private static boolean isSeatNumber(final JsonElement value, final int seat) {
+        return value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber() && value.getAsDouble() == seat;
+    }
+
+    private static boolean isBlankProperty(final String name) {
+        final String v = System.getProperty(name);
+        return v == null || v.isBlank();
     }
 
     static String bestEffortSession(final String line) {
@@ -289,6 +361,19 @@ final class InteractiveProtocol {
             final List<Channel> channels = new java.util.concurrent.CopyOnWriteArrayList<>();
             for (int seat : seats) {
                 channels.add(new Channel(demux.source(seat), output, session, seat, channels));
+            }
+            return List.copyOf(channels);
+        }
+
+        /**
+         * WATCH channels (lane forge-bot-tables-1011): one per seat of an AI-vs-AI game over the one stdout, tagged
+         * ({@code "to": seat}) and sequenced per seat exactly as a table's; a fatal reaches every seat. They read no
+         * input: nobody plays from the browser.
+         */
+        static List<Channel> watch(final PrintStream output, final String session, final List<Integer> seats) {
+            final List<Channel> channels = new java.util.concurrent.CopyOnWriteArrayList<>();
+            for (int seat : seats) {
+                channels.add(new Channel(() -> null, output, session, seat, channels));
             }
             return List.copyOf(channels);
         }

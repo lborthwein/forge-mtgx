@@ -1582,64 +1582,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     private JsonObject visibleState() {
-        final JsonObject view = InteractiveState.encode(game, human);
-        view.addProperty("seat", humanSeat);
-        normalizePlayerNamespaces(view);
-        return view;
-    }
-
-    private void normalizePlayerNamespaces(final JsonObject view) {
-        if (view.has("players") && view.get("players").isJsonArray()) {
-            for (JsonElement playerElement : view.getAsJsonArray("players")) {
-                if (!playerElement.isJsonObject()) {
-                    continue;
-                }
-                final JsonObject player = playerElement.getAsJsonObject();
-                for (String zone : List.of("hand", "battlefield", "graveyard", "exile", "command")) {
-                    addCardSeatFields(player.get(zone));
-                }
-            }
-        }
-        if (view.has("stack") && view.get("stack").isJsonArray()) {
-            for (JsonElement entry : view.getAsJsonArray("stack")) {
-                if (entry.isJsonObject()) {
-                    addSeatForRawPlayerId(entry.getAsJsonObject(), "controller", "controllerSeat");
-                }
-            }
-        }
-    }
-
-    private void addCardSeatFields(final JsonElement zone) {
-        if (zone == null || !zone.isJsonArray()) {
-            return;
-        }
-        for (JsonElement element : zone.getAsJsonArray()) {
-            if (element.isJsonObject()) {
-                addSeatForRawPlayerId(element.getAsJsonObject(), "controller", "controllerSeat");
-                addSeatForRawPlayerId(element.getAsJsonObject(), "owner", "ownerSeat");
-            }
-        }
-    }
-
-    private void addSeatForRawPlayerId(final JsonObject object, final String rawField,
-                                       final String seatField) {
-        if (!object.has(rawField) || !object.get(rawField).isJsonPrimitive()) {
-            return;
-        }
-        final int rawId;
-        try {
-            rawId = object.get(rawField).getAsInt();
-        } catch (RuntimeException ignored) {
-            return;
-        }
-        int seat = 0;
-        for (Player player : game.getRegisteredPlayers()) {
-            if (player.getId() == rawId) {
-                object.addProperty(seatField, seat);
-                return;
-            }
-            seat++;
-        }
+        return InteractiveState.seatView(game, human, humanSeat);
     }
 
     private void emitState(final String reason) {
