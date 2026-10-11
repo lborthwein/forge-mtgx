@@ -1475,7 +1475,9 @@ public final class LookaheadSearch {
         }
 
         final long t0 = System.nanoTime();
-        budget = cfg.budgetMs > 0 ? new Budget(t0 + cfg.budgetMs * 1_000_000L) : null;
+        // lane forge-continue-1011: a "Continue from here" rebuild (forge.ai.WallClock) stretches the deadline so it never
+        // binds; the budgeted/unbudgeted test here and every failure path stay the configured ones
+        budget = cfg.budgetMs > 0 ? new Budget(t0 + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
         try {
             return decideSearched(ctrl, def, live, me, index, onStack, ph, turn, t0);
         } catch (RuntimeException e) {
@@ -1779,6 +1781,11 @@ public final class LookaheadSearch {
             d.addProperty("searched", stats.searched);
             d.addProperty("departedTotal", stats.departed);
             d.addProperty("cappedTotal", stats.capped);
+            if (forge.ai.WallClock.rebuilding()) {
+                // lane forge-continue-1011: a "Continue from here" rebuild's decision (wall clocks off); only then, so a
+                // normal game's line is unchanged
+                d.addProperty("rebuild", true);
+            }
             System.err.println("[lookahead-decision] " + d);
         }
         if (labelSink != null) {
@@ -1940,7 +1947,8 @@ public final class LookaheadSearch {
         // the decision's account: the pool threads' CPU and every Forge AI eval thread the decision starts (measurement)
         final java.util.concurrent.atomic.AtomicLong[] prevAcc = forge.ai.CpuAccount.get();
         forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
-        final Budget b = cfg.budgetMs > 0 ? new Budget(t0 + cfg.budgetMs * 1_000_000L) : null;
+        // lane forge-continue-1011: as in decide, a rebuild's deadline never binds (forge.ai.WallClock); the test is unchanged
+        final Budget b = cfg.budgetMs > 0 ? new Budget(t0 + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
         budget = b;
         boolean searched = false;
         try {

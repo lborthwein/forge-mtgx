@@ -357,10 +357,34 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         return aborting.get() || channel.isEnded();
     }
 
+    /**
+     * Lane forge-continue-1011 (null unless {@code -Dforge.interactive.continuation=rebuild}): this one-seat game is a
+     * "Continue from here" rebuild, which takes a {@code handover} line until its live handover.
+     */
+    private volatile InteractiveContinuation continuation;
+
+    void setContinuation(final InteractiveContinuation continuation) {
+        if (table != null || readerThread != null) {
+            throw new IllegalStateException("a continuation is a one-seat game's, set before its reader starts");
+        }
+        this.continuation = continuation;
+    }
+
     private void readInputs() {
         try {
             while (!channel.isEnded()) {
-                acceptInput(channel.readInput());
+                final InteractiveContinuation rebuild = continuation;
+                if (rebuild == null || rebuild.isLive()) {
+                    // every normal game, and a continued one after its live handover: inputs only, as always
+                    acceptInput(channel.readInput());
+                } else {
+                    final InteractiveProtocol.Incoming line = channel.readInputOrHandover();
+                    if (line instanceof InteractiveProtocol.HandoverMessage handover) {
+                        acceptHandover(rebuild, handover);
+                    } else {
+                        acceptInput((InteractiveProtocol.InputMessage) line);
+                    }
+                }
             }
         } catch (InteractiveProtocol.ProtocolException e) {
             fail(e.code(), e.getMessage(), null, "readInput", null, e);
@@ -410,6 +434,72 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         } finally {
             engineGate.unlock();
         }
+    }
+
+    /**
+     * Lane forge-continue-1011: run a {@code handover} ({@link InteractiveContinuation#handover}) at a safe point and
+     * reply with its result. The safe point: this seat's engine gate is held (no request is published, no input claimed
+     * and no modal opened meanwhile) and Forge is parked on the handover's request with no answer to it running
+     * ({@link #parkedOn}). This reader thread is the only source of inputs, so none arrives while it waits. Until then
+     * it looks again every 20 ms, for up to 10 s, and then ends the session with {@code handover_timeout}. The request
+     * stays active; nothing is republished.
+     */
+    private void acceptHandover(final InteractiveContinuation rebuild,
+                                final InteractiveProtocol.HandoverMessage handover) {
+        final long deadline = System.nanoTime() + rebuild.safePointTimeoutMs() * 1_000_000L;
+        try {
+            while (!channel.isEnded()) {
+                if (engineGate.tryLock(InteractiveContinuation.SAFE_POINT_RETRY_MS,
+                        java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    try {
+                        if (parkedOn(handover.requestId())) {
+                            channel.send("handover", rebuild.handover(handover));
+                            return;
+                        }
+                    } finally {
+                        engineGate.unlock();
+                    }
+                }
+                if (System.nanoTime() - deadline > 0) {
+                    fail("handover_timeout", "Forge was not parked on " + handover.requestId() + " within "
+                            + rebuild.safePointTimeoutMs() + " ms", handover.requestId(), "handover", null, null);
+                    return;
+                }
+                Thread.sleep(InteractiveContinuation.SAFE_POINT_RETRY_MS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            fail("engine", "interrupted while awaiting the handover's safe point", handover.requestId(),
+                    "handover", null, e);
+        } catch (InteractiveProtocol.ProtocolException e) {
+            fail("eof", e.getMessage(), handover.requestId(), "handover", null, e);
+        } catch (RuntimeException e) {
+            fail("engine", "handover failed: " + safeThrowable(e), handover.requestId(), "handover", null, e);
+        }
+    }
+
+    /**
+     * Lane forge-continue-1011, with {@link #engineGate} held: Forge is parked on {@code requestId} and no answer to it
+     * is running. An input request: it is the active request, unclaimed, and its input is Forge's current input and not
+     * in flight. A modal: it is the open modal, unclaimed and unanswered.
+     *
+     * <p>Another input may still be in flight: the outer input whose action is suspended inside this very request (a
+     * dual land's colour asked while paying, a cost's choice), which cannot resume while the gate is held and this
+     * thread does not answer; or an action that has just returned and is settling, which runs no Forge code. Requiring
+     * no input in flight at all would make every such nested request one that can never be handed over.</p>
+     */
+    private boolean parkedOn(final String requestId) {
+        if (game == null || controller == null || game.isGameOver()) {
+            return false;
+        }
+        final ModalRequest modal = modalRequest.get();
+        if (modal != null) {
+            return modal.requestId.equals(requestId) && !modal.claimed.get() && !modal.answer.isDone();
+        }
+        final ActiveRequest request = activeRequest.get();
+        return request != null && request.requestId.equals(requestId) && !request.claimed.get()
+                && request.input == controller.getInputProxy().getInput()
+                && !inFlightInputs.contains(request.input);
     }
 
     private void claimActiveRequest(final InteractiveProtocol.InputMessage input,

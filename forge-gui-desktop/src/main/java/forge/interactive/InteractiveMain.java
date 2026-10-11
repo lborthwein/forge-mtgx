@@ -96,11 +96,26 @@ public final class InteractiveMain {
             return;
         }
 
+        // lane forge-continue-1011 (off unless -Dforge.interactive.continuation=rebuild): this game is a "Continue from
+        // here" rebuild (InteractiveContinuation). No AI wall clock binds until the host's live handover, and the hello
+        // says so; without the property nothing below changes.
+        final boolean rebuild;
+        try {
+            rebuild = InteractiveContinuation.requested();
+        } catch (InteractiveProtocol.ProtocolException e) {
+            InteractiveProtocol.writeBootFatal(protocolOut, config.session(), e.code(), e.getMessage());
+            System.exit(2);
+            return;
+        }
+        if (rebuild) {
+            InteractiveContinuation.beginRebuild();
+        }
+
         final InteractiveProtocol.Channel channel =
                 new InteractiveProtocol.Channel(input, protocolOut, config.session());
         try {
             channel.hello(forgeCommit(), nonBlankVersion(), config.aiProfile(),
-                    config.humanSeat(), config.seed());
+                    config.humanSeat(), config.seed(), rebuild ? InteractiveContinuation.helloExtras() : null);
         } catch (InteractiveProtocol.ProtocolException e) {
             channel.fatal(e.code(), e.getMessage(), null, "hello", null);
             System.exit(2);
@@ -143,6 +158,8 @@ public final class InteractiveMain {
 
             final Match match = new Match(rules, registered, "Browser vs Default Forge");
             final Game game = match.createGame();
+            // lane forge-continue-1011: a rebuild remembers the live AI_TIMEOUT for its handover and runs at 600 s
+            final InteractiveContinuation continuation = rebuild ? InteractiveContinuation.forGame(game) : null;
             bindAiFixes(registered);
             bindLookahead(registered, game, config.seed());
             bindPolicy(registered, game, config.seed());
@@ -161,6 +178,9 @@ public final class InteractiveMain {
             configureHumanPayment(humanController);
             gui = new InteractiveGuiGame(channel, config.humanSeat());
             gui.bind(game, human, humanController);
+            if (continuation != null) {
+                gui.setContinuation(continuation);
+            }
             if (review != null) {
                 gui.setRequestObserver(review::onRequest);
             }
