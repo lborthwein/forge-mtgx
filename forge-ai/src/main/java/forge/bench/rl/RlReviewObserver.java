@@ -66,6 +66,9 @@ import forge.util.IdScope;
  * service and settings are {@code -Dforge.interactive.reviewSearch=<spec>} ({@link RlLiveSeat.Spec}'s format; a review
  * passes {@code budgetMs=0,threads=0}: no wall budget, worlds in order, so the answer does not depend on the host).
  *
+ * <p><b>Positions.</b> At a planned request with {@code "state": true}, Forge's own position dump ({@code state} row): the
+ * start of a mined puzzle, in the format the puzzle suite installs ({@code GameState}).
+ *
  * <p><b>The game is not moved.</b> Every read runs in a fresh {@link IdScope} on a scratch random stream with the AI
  * caches and card memory put back ({@link PlayerControllerBridge#isolated}), so the replay of the journal stays the
  * live game (the journal's inputs still answer the same requests).
@@ -202,9 +205,42 @@ public final class RlReviewObserver {
         }
         sample("request", humanSeat, requestId, kind);
         final JsonObject p = plan.get(requestId);
-        if (p != null && "priority".equals(kind)) {
+        if (p == null) {
+            return;
+        }
+        if (p.has("state") && p.get("state").getAsBoolean()) {
+            dumpState(requestId);
+        }
+        if ("priority".equals(kind) && (p.has("card") || p.has("pass"))) {
             searchAt(requestId, p);
         }
+    }
+
+    /**
+     * Forge's own position dump ({@link forge.game.GameState}, the puzzle format's {@code [state]} body) at a planned
+     * request: the start of a mined puzzle. The full position, both seats' hidden cards included, as a puzzle needs it;
+     * like every GameState dump it leaves out the stack, continuous effects and the seats' knowledge.
+     */
+    private synchronized void dumpState(final String requestId) {
+        final JsonObject row = new JsonObject();
+        row.addProperty("type", "state");
+        row.addProperty("requestId", requestId);
+        row.addProperty("n", n - 1);
+        row.addProperty("stack", game.getStack().size());
+        busy = true;
+        try {
+            final String text = PlayerControllerBridge.isolated(game, () -> IdScope.detached(() -> {
+                final forge.game.GameState gs = new forge.game.GameState();
+                gs.initFromGame(game);
+                return gs.toString();
+            }));
+            row.addProperty("text", text);
+        } catch (RuntimeException ex) {
+            row.addProperty("error", String.valueOf(ex));
+        } finally {
+            busy = false;
+        }
+        write(row);
     }
 
     @Subscribe
