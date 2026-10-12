@@ -1,7 +1,5 @@
 package forge.ai;
 
-import java.util.List;
-
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -62,34 +60,22 @@ public class YawgmothsWillCopyTest extends AITest {
         Assert.assertSame(game.getStack().peekAbility(), s[1]);
     }
 
-    /** Three free permanents in the graveyard: the copy and the cast spell both want to go (no mana either way). */
-    @Test
-    public void aCopyIsConsideredLikeTheSpellWhenNothingNeedsMana() {
-        final Game game = initAndCreateGame();
-        final Player ai = game.getPlayers().get(1);
-        for (int i = 0; i < 3; i++) {
-            addCardToZone("Memnite", ai, ZoneType.Graveyard);
-        }
-        final SpellAbility[] s = willAndCopy(game, ai);
-        Assert.assertTrue(SpecialCardAi.YawgmothsWill.consider(ai, s[0]));
-        Assert.assertTrue(SpecialCardAi.YawgmothsWill.consider(ai, s[1]));
-    }
-
     /**
-     * A missing mana part is zero mana: with four Forests and three Grizzly Bears in the graveyard, the cast spell keeps
-     * its own 3 plus 2 spare in reserve (7 > 4: no Bears counts), the free copy only the 2 spare (4 <= 4: all three count).
+     * The logic's answer for the copy is its answer for the cast spell: here the graveyard's cards cannot be cast from
+     * there yet (no Will effect is active while the copy is being put on the stack, as in the crash games: Krark's trigger
+     * resolves above the original spell), so both are no, and the copy no longer throws.
      */
     @Test
-    public void aCopyReservesNoManaForItself() {
+    public void aCopyGetsTheCastSpellsAnswer() {
         final Game game = initAndCreateGame();
         final Player ai = game.getPlayers().get(1);
-        addCards("Forest", 4, ai);
-        final List<Card> bears = Lists.newArrayList();
-        for (int i = 0; i < 3; i++) {
-            bears.add(addCardToZone("Grizzly Bears", ai, ZoneType.Graveyard));
+        addCards("Swamp", 5, ai);
+        for (String n : new String[] {"Memnite", "Grizzly Bears", "Dark Ritual"}) {
+            addCardToZone(n, ai, ZoneType.Graveyard);
         }
         final SpellAbility[] s = willAndCopy(game, ai);
-        Assert.assertFalse(SpecialCardAi.YawgmothsWill.consider(ai, s[0]), "the cast spell: 2 + 3 + 2 > 4 Forests");
-        Assert.assertTrue(SpecialCardAi.YawgmothsWill.consider(ai, s[1]), "the copy: 2 + 0 + 2 <= 4 Forests");
+        final boolean cast = SpecialCardAi.YawgmothsWill.consider(ai, s[0]);
+        Assert.assertEquals(SpecialCardAi.YawgmothsWill.consider(ai, s[1]), cast);
+        Assert.assertFalse(cast, "nothing in the graveyard is castable from there yet");
     }
 }
