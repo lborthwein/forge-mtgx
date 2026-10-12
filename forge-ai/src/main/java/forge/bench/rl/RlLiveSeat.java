@@ -61,6 +61,12 @@ public final class RlLiveSeat {
         public int seatTimeoutMs = 5000;
         public int capActions = 40;
         public int maxDecisions = 3000;
+        /**
+         * The "Cancel Search?" loop guard (lane forge-live-fixes-1012; 0 = off, the default): after K no-answers in a row
+         * to the confirm that follows the same card ask answered with no card, the seat answers the next one yes itself
+         * ({@link RlLoopGuard}). Live only: no bench seat sets it.
+         */
+        public int loopGuard = 0;
         /** The seat's own Forge AI (asks the policy leaves to Forge): off, as for the read's RL seat. */
         public AiFixes.Mode aiFixes0928 = AiFixes.Mode.OFF;
         /** One {@code [lookahead-decision]} line per searched decision. */
@@ -119,6 +125,7 @@ public final class RlLiveSeat {
                     case "seatTimeoutMs": s.seatTimeoutMs = Integer.parseInt(v); break;
                     case "capActions": s.capActions = Integer.parseInt(v); break;
                     case "maxDecisions": s.maxDecisions = Integer.parseInt(v); break;
+                    case "loopGuard": s.loopGuard = Integer.parseInt(v); break;
                     case "aiFixes0928": s.aiFixes0928 = AiFixes.Mode.parse(v); break;
                     case "log": s.log = !"0".equals(v); break;
                     case "obs": c.obs = Integer.parseInt(v); break;
@@ -131,6 +138,9 @@ public final class RlLiveSeat {
             }
             if (s.seatTimeoutMs < 1) {
                 throw new IllegalArgumentException("policySearch: seatTimeoutMs >= 1");
+            }
+            if (s.loopGuard < 0) {
+                throw new IllegalArgumentException("policySearch: loopGuard >= 0 (0 = off)");
             }
             c.check();
             AiFixes.Mode.parse(c.departMedian);
@@ -221,6 +231,9 @@ public final class RlLiveSeat {
             }
             o.addProperty("server", spec.search.server);
             o.addProperty("budgetMs", spec.search.budgetMs);
+            if (spec.loopGuard > 0) {
+                o.addProperty("loopGuard", spec.loopGuard); // forge-live-fixes-1012: only when on, so the line is otherwise unchanged
+            }
             o.addProperty("helloMs", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
             o.add("search", spec.search.toJson());
             line(o);
@@ -287,6 +300,7 @@ public final class RlLiveSeat {
         sc.mode = "eval";
         sc.capActions = spec.capActions;
         sc.maxDecisions = spec.maxDecisions;
+        sc.loopGuard = spec.loopGuard;
         final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
@@ -418,6 +432,9 @@ public final class RlLiveSeat {
                 final JsonObject fd = new JsonObject();
                 seat.forgeDecidedExtra.forEach(fd::addProperty);
                 o.add("forgeDecidedExtra", fd);
+                if (spec.loopGuard > 0) {
+                    o.addProperty("loopGuardHits", seat.loopGuardHits()); // forge-live-fixes-1012: only when on
+                }
             }
             final long calls = seatClient.calls - seatCalls0;
             o.addProperty("seatCalls", calls);

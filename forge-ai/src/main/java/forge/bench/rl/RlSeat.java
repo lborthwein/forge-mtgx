@@ -55,6 +55,11 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         public String mode = "train";
         public int capActions = 40;
         public int maxDecisions = 3000;
+        /**
+         * Live play (lane forge-live-fixes-1012; 0 = off, the default, and then nothing changes): the "Cancel Search?"
+         * loop guard's K ({@link RlLoopGuard}). Set only by the live seat ({@link RlLiveSeat.Spec#loopGuard}).
+         */
+        public int loopGuard = 0;
     }
 
     /** Thrown out of the game thread's answer path never; the runner reads {@link #fatal} instead. */
@@ -66,6 +71,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     private final Role[] roles;
     private final boolean priv;
     private Game game;
+    /** Live play (lane forge-live-fixes-1012): the loop guard, null unless {@link Config#loopGuard} > 0. */
+    private final RlLoopGuard loopGuard;
 
     // ---- per-game record
     private int decIdx = 0;
@@ -213,6 +220,7 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         this.uid = uid;
         this.controllers = controllers.clone();
         this.priv = priv;
+        this.loopGuard = cfg != null && cfg.loopGuard > 0 ? new RlLoopGuard(cfg.loopGuard) : null;
         this.roles = new Role[controllers.length];
         for (int s = 0; s < controllers.length; s++) {
             roles[s] = roleOf(controllers[s]);
@@ -325,6 +333,60 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
 
     @Override
     public JsonObject answer(final Game g, final Player player, final String method, final String kind,
+            final JsonObject body, final Object objs) {
+        if (loopGuard == null) {
+            return answer0(g, player, method, kind, body, objs);
+        }
+        return guarded(g, player, method, kind, body, objs);
+    }
+
+    /** Times the loop guard answered a "Cancel Search?" confirm yes (0 without the guard). */
+    public int loopGuardHits() {
+        return loopGuard == null ? 0 : loopGuard.hits;
+    }
+
+    /**
+     * Live play (lane forge-live-fixes-1012): {@link #answer0} under the loop guard ({@link RlLoopGuard}). The guard sees
+     * every ask of this game; it answers only the "Cancel Search?" confirm that follows the K+1-th identical card ask the
+     * RL seat answered with no card, after K no-answers to that confirm in a row: yes, here, never sent. Every other ask
+     * is answered by {@link #answer0} exactly as without the guard.
+     */
+    private JsonObject guarded(final Game g, final Player player, final String method, final String kind,
+            final JsonObject body, final Object objs) {
+        if (g != game) {
+            return answer0(g, player, method, kind, body, objs);
+        }
+        final int seat = seatOf(g, player);
+        final boolean rl = !g.isGameOver() && voidReason == null && seat >= 0 && seat < roles.length
+                && roles[seat] == Role.RL;
+        if (rl && loopGuard.fires(method, kind, body)) {
+            lastAnswered.remove(method);
+            lastAnswered2.remove(method);
+            c(RlSchema.F_CONFIRM).asks++;
+            lastAnswered.put(method, -1);
+            lastFamily.put(method, RlSchema.F_CONFIRM);
+            ok(method);
+            final JsonObject o = new JsonObject();
+            o.addProperty("seat", seat);
+            o.addProperty("turn", g.getPhaseHandler().getTurn());
+            o.addProperty("source", loopGuard.lastHost);
+            o.addProperty("prompt", body.has("message") ? body.get("message").getAsString() : "");
+            o.addProperty("cards", loopGuard.lastCards);
+            o.addProperty("cycles", loopGuard.lastCycles);
+            o.addProperty("answer", "yes");
+            o.addProperty("decisions", decIdx);
+            o.addProperty("hits", loopGuard.hits);
+            System.err.println("[loop-guard] " + o);
+            final JsonObject yes = new JsonObject();
+            yes.addProperty("yes", true);
+            return yes;
+        }
+        final JsonObject ans = answer0(g, player, method, kind, body, objs);
+        loopGuard.saw(rl, method, kind, body, objs, ans);
+        return ans;
+    }
+
+    private JsonObject answer0(final Game g, final Player player, final String method, final String kind,
             final JsonObject body, final Object objs) {
         if (g != game || g.isGameOver() || voidReason != null) {
             return null;
