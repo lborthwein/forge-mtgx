@@ -32,6 +32,7 @@ import forge.game.card.*;
 import forge.game.combat.Combat;
 import forge.game.combat.CombatUtil;
 import forge.game.cost.CostPart;
+import forge.game.cost.CostPartMana;
 import forge.game.cost.CostSacrifice;
 import forge.game.keyword.Keyword;
 import forge.game.mana.ManaCostBeingPaid;
@@ -2123,7 +2124,11 @@ public class SpecialCardAi {
             int minManaAdj = 2; // we want the AI to have some spare mana for possible other spells to cast
             float minCastableInGY = 3.0f; // we want the AI to have several castable cards in GY before attempting this effect
             List<SpellAbility> saList = ComputerUtilAbility.getSpellAbilities(cardsInGY, ai);
-            int selfCMC = sa.getPayCosts().getCostMana().getMana().getCMC();
+            // A spell copy has no mana part (CardFactory.copySpellAbilityAndPossiblyHost removes all costs: a copy is not
+            // cast, CR 707.10), so a Krark or Twincast copy of this spell reaches here with getCostMana() == null. No mana
+            // part means no mana to pay for it: its own cost counts as 0 (lane forge-live-fixes-1012).
+            final CostPartMana selfMana = sa.getPayCosts() == null ? null : sa.getPayCosts().getCostMana();
+            int selfCMC = selfMana == null ? 0 : selfMana.getMana().getCMC();
 
             float numCastable = 0.0f;
             for (SpellAbility ab : saList) {
