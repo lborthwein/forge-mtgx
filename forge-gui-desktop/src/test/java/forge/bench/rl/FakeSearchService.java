@@ -58,6 +58,11 @@ public final class FakeSearchService implements Closeable {
     public volatile java.util.function.ToDoubleFunction<byte[]> leafValue = null;
     /** Lane sc-wallguard-1009: delay of every DECIDE answer on a play-out connection, in ms (0 = none, the default). */
     public volatile long playoutDecideDelayMs = 0;
+    /**
+     * Lane forge-live-fixes-1012: a scripted policy (null = random legal steps, the default): the steps of a DECIDE, or
+     * null for the random legal steps.
+     */
+    public volatile java.util.function.Function<RlWire.Decide, short[]> script = null;
     public final AtomicLong hellos = new AtomicLong(), scores = new AtomicLong(), decides = new AtomicLong(),
             leaves = new AtomicLong(), errors = new AtomicLong();
     private volatile boolean dead = false;
@@ -200,7 +205,10 @@ public final class FakeSearchService implements Closeable {
                     x.decIdx = d.decIdx;
                     x.status = RlWire.ST_OK;
                     x.policyVersion = 7;
-                    x.steps = FakeRlServer.randomSteps(d, new Random(FakeRlServer.mix(11, d.gameUid, d.decIdx)));
+                    final java.util.function.Function<RlWire.Decide, short[]> sc = script;
+                    final short[] scripted = sc == null ? null : sc.apply(d);
+                    x.steps = scripted != null ? scripted
+                            : FakeRlServer.randomSteps(d, new Random(FakeRlServer.mix(11, d.gameUid, d.decIdx)));
                     RlWire.writeFrame(out, RlWire.T_DECISION, 0, RlWire.encodeDecision(x));
                 } else if (f.type == RlSearchClient.T_LEAVES) {
                     final ByteBuffer p = ByteBuffer.wrap(f.payload).order(ByteOrder.LITTLE_ENDIAN);
