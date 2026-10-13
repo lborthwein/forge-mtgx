@@ -118,6 +118,18 @@ public class CubeComboBridgeController extends PlayerControllerBridge implements
     @Override public ImmutablePair<CardCollection, CardCollection> nativeArrangeForSurveil(CardCollection topN) {
         return super.arrangeForSurveil(topN);
     }
+    @Override public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+        return combo.arrangeForScry(topN);
+    }
+    @Override public ImmutablePair<CardCollection, CardCollection> nativeArrangeForScry(CardCollection topN) {
+        return super.arrangeForScry(topN);
+    }
+    @Override public void declareAttackers(Player attacker, forge.game.combat.Combat combat) {
+        combo.declareAttackers(attacker, combat);
+    }
+    @Override public void nativeDeclareAttackers(Player attacker, forge.game.combat.Combat combat) {
+        super.declareAttackers(attacker, combat);
+    }
     @Override public CardCollectionView nativeOrderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone,
             SpellAbility source) {
         return super.orderMoveToZoneList(cards, destinationZone, source);

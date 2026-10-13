@@ -94,6 +94,39 @@ public final class CubeComboControl {
     public CubeReanimatorPlan reanimatorPlan() { return reanimatorPlan; }
     Card emryUntapSource(SpellAbility sa) { return emryPlan.untapSource(sa); }
     public CubeDoomsdayPlan doomsdayPlan() { return doomsdayPlan; }
+
+    // ------------------------------------------------------------------ lane doomsday-solver-1012: the forced-win solver
+    /** Read once, on the seat's first decision: the solver (null = off, every existing profile) and the lineage flag. */
+    private boolean solverRead;
+    private forge.ai.simulation.ForcedWinSolver solver;
+    private boolean lineagePlans = true;
+
+    /** False for the "ForcedWin" profile: no lineage plan or hook acts (Forge AI plus the solver). */
+    public boolean lineage() {
+        forcedWin();
+        return lineagePlans;
+    }
+
+    /** The seat's forced-win solver, or null when its profile does not turn it on. */
+    public forge.ai.simulation.ForcedWinSolver forcedWin() {
+        if (!solverRead) {
+            solverRead = true;
+            final forge.LobbyPlayer lobby = seat.asController().getLobbyPlayer();
+            lineagePlans = !"false".equals(AiProfileUtil.getAIProp(lobby, AiProps.CUBE_COMBO_LINEAGE));
+            if ("true".equals(AiProfileUtil.getAIProp(lobby, AiProps.FORCED_WIN_SOLVER))) {
+                final String spec = System.getProperty("forge.ai.forcedWin.spec",
+                        AiProfileUtil.getAIProp(lobby, AiProps.FORCED_WIN_SPEC));
+                final java.util.Map<String, String> kv = new java.util.HashMap<>();
+                for (String part : spec == null ? new String[0] : spec.split(",")) {
+                    final int eq = part.indexOf('=');
+                    if (eq > 0) kv.put(part.substring(0, eq).trim(), part.substring(eq + 1).trim());
+                }
+                solver = new forge.ai.simulation.ForcedWinSolver(player,
+                        forge.ai.simulation.ForcedWinSolver.Config.fromProps(kv::get));
+            }
+        }
+        return solver;
+    }
     public int getComboSelectionChanges() { return comboSelectionChanges; }
     public int getComboTutorPlanCasts() { return comboTutorPlanCasts; }
     /** The policy state for one seat in one game (package forge.bench seats use this). */
@@ -166,6 +199,22 @@ public final class CubeComboControl {
             CardCollection offered) {
         return probe(() -> arrangeForSurveil0(offered));
     }
+    /** lane doomsday-solver-1012: the solver's alpha strike when its line attacks; otherwise the seat's native answer. */
+    public void declareAttackers(Player attacker, forge.game.combat.Combat combat) {
+        if (forcedWin() != null && probe(() -> solver.answerAttack(attacker, combat))) return;
+        seat.nativeDeclareAttackers(attacker, combat);
+    }
+    /** lane doomsday-solver-1012: scry keeps a line's known library in order; otherwise the seat's native answer. */
+    public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForScry(
+            CardCollection offered) {
+        return probe(() -> {
+            if (forcedWin() != null) {
+                final var kept = solver.answerLook(offered);
+                if (kept != null) return kept;
+            }
+            return live(() -> seat.nativeArrangeForScry(offered));
+        });
+    }
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destination, SpellAbility source) {
         return probe(() -> orderMoveToZoneList0(cards, destination, source));
     }
@@ -188,12 +237,26 @@ public final class CubeComboControl {
 
     private List<SpellAbility> chooseSpellAbilityToPlay0() {
         planAction = null;
+        final forge.ai.simulation.ForcedWinSolver fw = forcedWin();
+        if (fw != null) {
+            // lane doomsday-solver-1012: the solver first; it owns the seat's priority while it follows a line
+            final forge.ai.simulation.ForcedWinSolver.Decision d = fw.decide(player.getGame());
+            if (d.owned) {
+                planAction = d.action;
+                logDecision("forced-win", d.action, d.action == null ? null : List.of(d.action), false);
+                return d.action == null ? null : List.of(d.action);
+            }
+        }
+        if (!lineagePlans) {
+            return live(() -> seat.nativeChooseSpellAbilityToPlay());
+        }
         if (tamiyoPlan.waitingForOwnSpell() || kikiSyrPlan.waitingForOwnSpell() || fastbondPlan.waitingForOwnSpell() || topTutorPlan.waitingForOwnSpell() || emryPlan.waitingForOwnSpell() || doomsdayPlan.waitingForOwnSpell() || breachPlan.waitingForOwnSpell() || stormPlan.waitingForOwnSpell() || monolithPlan.waitingForOwnSpell() || kittenPlan.waitingForOwnSpell() || topPlan.waitingForOwnSpell() || thopterPlan.waitingForOwnSpell() || bombPlan.waitingForOwnSpell() || drawOutPlan.waitingForOwnSpell() || reanimatorPlan.waitingForOwnSpell() || naturalOrderPlan.waitingForOwnSpell() || brainFreezePlan.waitingForOwnSpell()) return null; // v73 reanimator
         // `plan` records which plan produced the action for the decision log
         // only; the selection order and every call below are unchanged.
         String plan = "none";
         boolean tutorConsulted = false;
-        SpellAbility action = doomsdayPlan.nextAction();
+        // lane doomsday-solver-1012: with the forced-win solver on, the lineage's Doomsday plan is not consulted
+        SpellAbility action = fw == null ? doomsdayPlan.nextAction() : null;
         if (action != null) plan = "doomsday";
         if (action == null && (action = breachPlan.nextAction()) != null) plan = "breach";
         if (action == null && (action = stormPlan.nextAction()) != null) plan = "storm";
@@ -360,6 +423,7 @@ public final class CubeComboControl {
      * whose rejection is silently non-fatal in PlayerControllerAi and therefore the
      * only class whose disagreement needs naming. */
     private boolean playChosenSpellAbility0(SpellAbility ability) {
+        if (!lineage()) return live(() -> seat.nativePlayChosenSpellAbility(ability));
         if (ability == planAction && !CubeComboAi.canPlayNative(ability, player)) {
             guardRejections++;
             CubeComboAi.receipt("CUBE_COMBO native-legality-rejected card=" + ability.getHostCard().getName());
@@ -411,20 +475,26 @@ public final class CubeComboControl {
     }
 
     private forge.game.mana.Mana chooseManaFromPool0(List<forge.game.mana.Mana> offered) {
+        if (!lineage()) return live(() -> seat.nativeChooseManaFromPool(offered));
         var selected = doomsdayPlan.chooseStarMana(offered);
         return selected == null ? live(() -> seat.nativeChooseManaFromPool(offered)) : selected;
     }
 
     private boolean confirmReplacementEffect0(forge.game.replacement.ReplacementEffect replacement, SpellAbility effect,
             forge.game.GameEntity affected, String question) {
+        if (!lineage()) return live(() -> seat.nativeConfirmReplacementEffect(replacement, effect, affected, question));
         return kikiSyrPlan.confirmClone(effect) || live(() -> seat.nativeConfirmReplacementEffect(replacement, effect, affected, question));
     }
 
-    private void orderAndPlaySimultaneousSa0(List<SpellAbility> abilities) {
+    private void orderAndPlaySimultaneousSa0(List<SpellAbility> abilities0) {
+        // lane doomsday-solver-1012: a solver line's forced trigger target is played first
+        final List<SpellAbility> abilities = forcedWin() == null ? abilities0 : solver.answerTriggers(abilities0);
+        if (!lineage()) { liveRun(() -> seat.nativeOrderAndPlaySimultaneousSa(abilities)); return; }
         tamiyoPlan.withTriggers(abilities, () -> liveRun(() -> seat.nativeOrderAndPlaySimultaneousSa(abilities)));
     }
 
     private boolean chooseTargetsFor0(SpellAbility ability) {
+        if (!lineage()) return live(() -> seat.nativeChooseTargetsFor(ability));
         return tamiyoPlan.chooseBlink(ability) || emryPlan.chooseBlink(ability) || kittenPlan.chooseBlink(ability) || topPlan.chooseKittenBlink(ability) || breachPlan.chooseCopyTarget(ability) || live(() -> seat.nativeChooseTargetsFor(ability));
     }
 
@@ -433,6 +503,7 @@ public final class CubeComboControl {
     private <T extends forge.game.GameEntity> T chooseSingleEntityForEffect0(forge.util.collect.FCollectionView<T> options,
             DelayedReveal delayedReveal, SpellAbility source, String title, boolean optional, Player targetedPlayer,
             java.util.Map<String, Object> params) {
+        if (!lineage()) return live(() -> seat.nativeChooseSingleEntityForEffect(options, delayedReveal, source, title, optional, targetedPlayer, params));
         T kikiChoice = kikiSyrPlan.choose(options, source);
         if (kikiChoice != null) return kikiChoice;
         if (topPlan.ownsKittenRecovery(source, targetedPlayer)) {
@@ -449,6 +520,14 @@ public final class CubeComboControl {
 
     private Card chooseSingleCardForZoneChange0(ZoneType destination, List<ZoneType> origin, SpellAbility source,
             CardCollection choices, DelayedReveal delayedReveal, String prompt, boolean optional, Player decider) {
+        if (forcedWin() != null) {
+            final Card answer = solver.answerPick(destination, origin, source, choices, decider);
+            if (answer != null) {
+                if (delayedReveal != null) seat.asController().reveal(delayedReveal);
+                return answer;
+            }
+        }
+        if (!lineage()) return live(() -> seat.nativeChooseSingleCardForZoneChange(destination, origin, source, choices, delayedReveal, prompt, optional, decider));
         if (decider == player && destination == ZoneType.Library) {
             if (doomsdayPlan.ownsPileDecision(source)) {
                 // Doomsday keeps priority on this API: no plan may steal another
@@ -611,6 +690,11 @@ public final class CubeComboControl {
     }
 
     private org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForSurveil0(CardCollection offered) {
+        if (forcedWin() != null) {
+            final var kept = solver.answerLook(offered);
+            if (kept != null) return kept;
+        }
+        if (!lineage()) return live(() -> seat.nativeArrangeForSurveil(offered));
         var ordinary = live(() -> seat.nativeArrangeForSurveil(offered));
         if (!breachPlan.ownsChannelerSurveil(offered)) return ordinary;
         if (!ordinary.getLeft().isEmpty())
@@ -619,6 +703,11 @@ public final class CubeComboControl {
     }
 
     private CardCollectionView orderMoveToZoneList0(CardCollectionView cards, ZoneType destination, SpellAbility source) {
+        if (forcedWin() != null) {
+            final CardCollectionView ordered = solver.answerOrder(cards, destination, source);
+            if (ordered != null) return ordered;
+        }
+        if (!lineage()) return live(() -> seat.nativeOrderMoveToZoneList(cards, destination, source));
         if (destination == ZoneType.Library && source != null && doomsdayPlan.ownsPileDecision(source))
             return doomsdayPlan.orderPile(cards);
         CardCollectionView ordinary = live(() -> seat.nativeOrderMoveToZoneList(cards, destination, source));
@@ -646,6 +735,16 @@ public final class CubeComboControl {
         return ordinary;
     }
 
+    /** lane doomsday-solver-1012: the "ForcedWin" seat's discard: the ordinary choice minus the solver line's cards. */
+    private CardCollection solverDiscardChoice(CardCollectionView validCards, CardCollection ordinary, String source) {
+        final CardCollection reserved = new CardCollection();
+        if (forcedWin() != null) {
+            final java.util.Set<Integer> ids = solver.reserved();
+            for (Card c : player.getCardsIn(ZoneType.Hand)) if (ids.contains(c.getId())) reserved.add(c);
+        }
+        return reserved.isEmpty() ? ordinary : ownDiscardChoice(validCards, ordinary, reserved, source);
+    }
+
     /** v49 discard ownership. Which cards in our own hand a plan is currently
      * relying on, from the plans' own stage/gate predicates - never a card-name
      * rule and never an always-preserve rule:
@@ -670,6 +769,12 @@ public final class CubeComboControl {
         CardCollection reserved = new CardCollection();
         reserved.addAll(CubeComboAi.kikiDiscardProtectedCards(player));
         reserved.addAll(doomsdayPlan.discardProtectedCards());
+        if (forcedWin() != null) {
+            // lane doomsday-solver-1012: the cards the solver's active line still needs
+            final java.util.Set<Integer> ids = solver.reserved();
+            if (!ids.isEmpty())
+                for (Card c : player.getCardsIn(ZoneType.Hand)) if (ids.contains(c.getId())) reserved.add(c);
+        }
         reserved.addAll(CubeBreachPlan.discardProtectedCards(player));
         reserved.addAll(CubeStormPlan.discardProtectedCards(player));
         return reserved;
@@ -708,9 +813,15 @@ public final class CubeComboControl {
      * hidden zone is read. */
     private CardCollection chooseCardsToDiscardFrom0(Player p, SpellAbility sa, CardCollection validCards, int min, int max,
             CardCollectionView visibleToChooser) {
+        if (forcedWin() != null) {
+            // lane doomsday-solver-1012: our discard effect on the opponent: take what stops their forced win
+            final CardCollection take = solver.answerDiscard(p, sa, validCards, min, max);
+            if (take != null) return take;
+        }
         CardCollection ordinary = live(() -> seat.nativeChooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser));
         if (p != player || sa == null || sa.getActivatingPlayer() != player
                 || ordinary == null || ordinary.isEmpty() || validCards == null) return ordinary;
+        if (!lineage()) return solverDiscardChoice(validCards, ordinary, sa.getHostCard().getName());
         CardCollection reserved = reservedDiscardCards();
         reserved.addAll(kittenPlan.resourceDiscardProtectedCards(sa));
         if (reserved.isEmpty()) return reanimatorDiscardChoice(validCards, ordinary, sa.getHostCard().getName());
@@ -750,6 +861,8 @@ public final class CubeComboControl {
     private CardCollectionView chooseCardsToDiscardToMaximumHandSize0(int numDiscard) {
         CardCollectionView ordinary = live(() -> seat.nativeChooseCardsToDiscardToMaximumHandSize(numDiscard));
         if (ordinary == null || ordinary.isEmpty()) return ordinary;
+        if (!lineage()) return solverDiscardChoice(new CardCollection(player.getCardsIn(ZoneType.Hand)),
+                new CardCollection(ordinary), "cleanup");
         CardCollection reserved = reservedDiscardCards();
         CardCollection hand = new CardCollection(player.getCardsIn(ZoneType.Hand));
         if (reserved.isEmpty()) return reanimatorDiscardChoice(hand, new CardCollection(ordinary), "cleanup");
@@ -765,6 +878,11 @@ public final class CubeComboControl {
      * confirmation this controller is asked is touched at all. */
     private boolean confirmAction0(SpellAbility ability, forge.game.player.PlayerActionConfirmMode mode, String message,
             List<String> options, Card cardToShow, java.util.Map<String, Object> params) {
+        if (forcedWin() != null) {
+            final Boolean answer = solver.answerConfirm(ability, message);
+            if (answer != null) return answer;
+        }
+        if (!lineage()) return live(() -> seat.nativeConfirmAction(ability, mode, message, options, cardToShow, params));
         Boolean owned = drawOutPlan.confirmDig(ability);
         if (owned != null) return owned;
         return live(() -> seat.nativeConfirmAction(ability, mode, message, options, cardToShow, params));
@@ -783,12 +901,19 @@ public final class CubeComboControl {
      *
      * <p>This method is the ONLY change v70 makes to this file.</p> */
     private boolean confirmTrigger0(forge.game.trigger.WrappedAbility wrapper) {
+        if (forcedWin() != null && solver.answerConfirmTrigger(wrapper)) return true;
+        if (!lineage()) return live(() -> seat.nativeConfirmTrigger(wrapper));
         Boolean owned = kittenPlan.confirmFamilyTrigger(wrapper.getWrappedAbility());
         if (owned != null) return owned;
         return live(() -> seat.nativeConfirmTrigger(wrapper));
     }
 
     private boolean chooseBinary0(SpellAbility ability, String question, forge.game.player.PlayerController.BinaryChoiceType choice, Boolean defaultValue) {
+        if (forcedWin() != null) {
+            final Boolean answer = solver.answerBinary(choice, defaultValue);
+            if (answer != null) return answer;
+        }
+        if (!lineage()) return live(() -> seat.nativeChooseBinary(ability, question, choice, defaultValue));
         if (choice == forge.game.player.PlayerController.BinaryChoiceType.TapOrUntap) {
             var source = CubeComboAi.untapSource(player, ability);
             if (source != null && ability.getTargets().getTargetCards().contains(source)) return false;

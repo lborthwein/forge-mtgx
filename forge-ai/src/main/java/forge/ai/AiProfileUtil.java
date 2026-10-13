@@ -99,12 +99,32 @@ public class AiProfileUtil {
      */
     public static final String CUBE_COMBO_PROFILE = "CubeCombo";
 
+    /**
+     * mtgx (lane doomsday-solver-1012): the cube combo seat with the general forced-win solver in front of its plans
+     * (the lineage's Doomsday plan is replaced by the solver), and Forge AI with the solver alone.
+     */
+    public static final String CUBE_COMBO_SOLVER_PROFILE = "CubeComboSolver";
+    public static final String FORCED_WIN_PROFILE = "ForcedWin";
+
     private static void registerBuiltInProfiles() {
         final Map<AiProps, String> base = loadedProfiles.get("Default");
         if (base != null && !loadedProfiles.containsKey(CUBE_COMBO_PROFILE)) {
             final Map<AiProps, String> combo = new HashMap<>(base);
             combo.put(AiProps.CUBE_COMBO_PLANS, "true");
             loadedProfiles.put(CUBE_COMBO_PROFILE, combo);
+        }
+        if (base != null && !loadedProfiles.containsKey(CUBE_COMBO_SOLVER_PROFILE)) {
+            final Map<AiProps, String> solver = new HashMap<>(base);
+            solver.put(AiProps.CUBE_COMBO_PLANS, "true");
+            solver.put(AiProps.FORCED_WIN_SOLVER, "true");
+            loadedProfiles.put(CUBE_COMBO_SOLVER_PROFILE, solver);
+        }
+        if (base != null && !loadedProfiles.containsKey(FORCED_WIN_PROFILE)) {
+            final Map<AiProps, String> alone = new HashMap<>(base);
+            alone.put(AiProps.CUBE_COMBO_PLANS, "true");
+            alone.put(AiProps.CUBE_COMBO_LINEAGE, "false");
+            alone.put(AiProps.FORCED_WIN_SOLVER, "true");
+            loadedProfiles.put(FORCED_WIN_PROFILE, alone);
         }
     }
 
