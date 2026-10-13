@@ -201,6 +201,8 @@ public final class ForcedWinPlanner {
         /** 1: this turn only; 2: this turn and our next turn. */
         int horizon = 2;
         int classes = 14;
+        /** POST-FREEZE 5: a wall-time budget (ms); late-game positions with large graveyards made keys slow. */
+        long ms = 1500;
     }
 
     static final class Result {
@@ -367,7 +369,10 @@ public final class ForcedWinPlanner {
         return r;
     }
 
+    private long deadline = Long.MAX_VALUE;
+
     Result run() {
+        deadline = System.nanoTime() + lim.ms * 1_000_000L;
         final S s = new S();
         s.sorcery = pos.sorcerySpeed;
         s.life = pos.life;
@@ -425,8 +430,11 @@ public final class ForcedWinPlanner {
             record(s);
             return;
         }
-        if (nodes >= lim.nodes || result.lines.size() >= lim.maxLines) {
-            result.exhausted |= nodes >= lim.nodes;
+        if (nodes >= lim.nodes || result.lines.size() >= lim.maxLines || (nodes & 63) == 0 && System.nanoTime() > deadline) {
+            result.exhausted |= nodes >= lim.nodes || System.nanoTime() > deadline;
+            if (System.nanoTime() > deadline) {
+                nodes = Math.max(nodes, lim.nodes);
+            }
             return;
         }
         if (depth >= lim.depth) {
