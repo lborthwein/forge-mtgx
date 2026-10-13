@@ -188,6 +188,42 @@ public class ForcedWinSolverTest extends AITest {
         Assert.assertTrue(st.probes > 5);
     }
 
+    @Test
+    public void probesLearnTutorsAndCantripCosts() {
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(
+                "Mystical Tutor;Demonic Tutor;Gush;Gitaxian Probe;Street Wraith;Ponder", "Swamp;Island;Island", 20, "",
+                "Island", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        // the library holds something to find
+        for (String n : new String[] {"Tendrils of Agony", "Dark Ritual"}) {
+            final Card c = createCard(n, me);
+            me.getZone(ZoneType.Library).add(c);
+        }
+        final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
+        final ACard mt = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Mystical Tutor"), 1, st);
+        Assert.assertTrue(mt.fromHand.get(0).has(EffKind.TUTOR_TOP), mt.fromHand.toString());
+        final ACard dt = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Demonic Tutor"), 1, st);
+        Assert.assertTrue(dt.fromHand.get(0).has(EffKind.TUTOR), dt.fromHand.toString());
+        final ACard gush = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Gush"), 1, st);
+        boolean returns = false;
+        for (Abil a : gush.fromHand) {
+            Assert.assertTrue(a.has(EffKind.DRAW), a.toString());
+            returns |= a.returnN == 2 && "Island".equals(a.returnType);
+        }
+        Assert.assertTrue(returns, gush.fromHand.toString());
+        final ACard probe = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Gitaxian Probe"), 1, st);
+        Assert.assertEquals(probe.fromHand.get(0).phyrexian[ForcedWinModel.U], 1, probe.fromHand.toString());
+        Assert.assertTrue(probe.fromHand.get(0).has(EffKind.DRAW), probe.fromHand.toString());
+        final ACard wraith = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Street Wraith"), 1, st);
+        boolean cycles = false;
+        for (Abil a : wraith.fromHand) {
+            cycles |= a.kind == AbilKind.CYCLE && a.life == 2 && a.has(EffKind.DRAW) && a.instant;
+        }
+        Assert.assertTrue(cycles, wraith.fromHand.toString());
+        final ACard ponder = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Ponder"), 1, st);
+        Assert.assertTrue(ponder.fromHand.get(0).has(EffKind.DRAW), ponder.fromHand.toString());
+    }
+
     // ------------------------------------------------------------------ offense: width search, engine, live seat
 
     @Test
