@@ -307,8 +307,16 @@ public final class ForcedWinSolver {
         }
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.nodes = cfg.nodes;
-        lim.horizon = cfg.horizon;
-        final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
+        // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
+        // before it reaches one); lines that pass the turn only when this turn has none
+        lim.horizon = 1;
+        ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
+        if (res.lines.isEmpty() && cfg.horizon >= 2) {
+            final int first = res.nodes;
+            lim.horizon = cfg.horizon;
+            res = ForcedWinPlanner.plan(pos, lim);
+            res.nodes += first;
+        }
         plannerNanos += System.nanoTime() - t0;
         lastPlannerNodes = res.nodes;
         if (res.lines.isEmpty()) {
