@@ -16,6 +16,7 @@ import forge.ai.PlayerControllerAi;
 import forge.ai.simulation.ForcedWinModel.ACard;
 import forge.ai.simulation.ForcedWinModel.Abil;
 import forge.ai.simulation.ForcedWinModel.AbilKind;
+import forge.ai.simulation.ForcedWinModel.Eff;
 import forge.ai.simulation.ForcedWinModel.EffKind;
 import forge.deck.Deck;
 import forge.game.Game;
@@ -192,7 +193,7 @@ public class ForcedWinSolverTest extends AITest {
     @Test
     public void probesLearnTutorsAndCantripCosts() {
         final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(
-                "Mystical Tutor;Demonic Tutor;Gush;Gitaxian Probe;Street Wraith;Ponder", "Swamp;Island;Island", 20, "",
+                "Mystical Tutor;Demonic Tutor;Gush;Gitaxian Probe;Street Wraith;Ponder;Timetwister", "Swamp;Island;Island", 20, "",
                 "Island", 20, "human"));
         final Player me = g.getPlayers().get(0);
         // the library holds something to find
@@ -203,6 +204,10 @@ public class ForcedWinSolverTest extends AITest {
         final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
         final ACard mt = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Mystical Tutor"), 1, st);
         Assert.assertTrue(mt.fromHand.get(0).has(EffKind.TUTOR_TOP), mt.fromHand.toString());
+        // search, shuffle, then put on top: the shuffle comes first, the chosen card ends on top (post-freeze 2 and 6)
+        final List<Eff> mtEffs = mt.fromHand.get(0).effects;
+        final int shuffleAt = indexOf(mtEffs, EffKind.SHUFFLE), topAt = indexOf(mtEffs, EffKind.TUTOR_TOP);
+        Assert.assertTrue(shuffleAt < 0 || shuffleAt < topAt, mtEffs.toString());
         final ACard dt = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Demonic Tutor"), 1, st);
         Assert.assertTrue(dt.fromHand.get(0).has(EffKind.TUTOR), dt.fromHand.toString());
         final ACard gush = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Gush"), 1, st);
@@ -223,6 +228,21 @@ public class ForcedWinSolverTest extends AITest {
         Assert.assertTrue(cycles, wraith.fromHand.toString());
         final ACard ponder = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Ponder"), 1, st);
         Assert.assertTrue(ponder.fromHand.get(0).has(EffKind.DRAW), ponder.fromHand.toString());
+        // a shuffle of hand and graveyard into the library is no put-back on top (post-freeze 2)
+        final ACard twister = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Timetwister"), 1, st);
+        Assert.assertTrue(twister.fromHand.get(0).has(EffKind.SHUFFLE), twister.fromHand.toString());
+        Assert.assertFalse(twister.fromHand.get(0).has(EffKind.PUTBACK), twister.fromHand.toString());
+        Assert.assertFalse(twister.fromHand.get(0).has(EffKind.TUTOR_TOP), twister.fromHand.toString());
+        Assert.assertTrue(twister.fromHand.get(0).has(EffKind.DRAW), twister.fromHand.toString());
+    }
+
+    private static int indexOf(List<Eff> effs, EffKind k) {
+        for (int i = 0; i < effs.size(); i++) {
+            if (effs.get(i).kind == k) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     // ------------------------------------------------------------------ offense: width search, engine, live seat

@@ -397,11 +397,9 @@ public final class ForcedWinProbe {
         String pendingAsk = null;
         EffKind last = null;
         int run = 0;
-        boolean shuffled = false;
         for (String line : o.trace) {
             if (line.equals("SHUFFLE")) {
                 // our library was shuffled: what is on top afterwards is unknown (a put-back before it is no put-back)
-                shuffled = true;
                 if (last != null) {
                     out.add(new Eff(last == EffKind.PUTBACK ? EffKind.SHUFFLE : last, last == EffKind.PUTBACK ? 0 : run, 0));
                     last = null;
@@ -465,7 +463,10 @@ public final class ForcedWinProbe {
         if (last != null) {
             out.add(new Eff(last, run, 0));
         }
-        if (pickToLibrary > 0 && !shuffled) {
+        // POST-FREEZE 6: a pick into our library still counts after a shuffle. "Search, shuffle, then put that card on
+        // top" (Mystical Tutor) shuffles before the card goes on top, so TUTOR_TOP comes after SHUFFLE here. Only a
+        // put-back from hand followed by a shuffle (Timetwister) is erased, above.
+        if (pickToLibrary > 0) {
             if (exiled > 0 && pickFromLibraryOrGy) {
                 out.add(0, new Eff(EffKind.PILE, pickToLibrary, 0));
             } else {
