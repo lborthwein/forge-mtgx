@@ -830,6 +830,23 @@ public final class ForcedWinPlanner {
                 out.add(s);
                 return;
             }
+            case SHUFFLE: {
+                // POST-FREEZE 2: our library is shuffled; every entry becomes an unseen card (known cards go back to
+                // the library's contents; a lazy pile position is no longer ours to choose)
+                final int size = s.lib.size();
+                for (int e2 : s.lib) {
+                    if (e2 >= 0) {
+                        s.libPool.add(e2);
+                    }
+                }
+                s.lib = new ArrayList<>();
+                for (int i = 0; i < size; i++) {
+                    s.lib.add(UNKNOWN);
+                }
+                s.remaining = new ArrayList<>();
+                resolve(s, effs, ei + 1, 0, ab, out);
+                return;
+            }
             default:
                 resolve(s, effs, ei + 1, 0, ab, out);
         }

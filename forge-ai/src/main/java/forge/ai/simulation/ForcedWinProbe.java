@@ -133,6 +133,13 @@ public final class ForcedWinProbe {
         }
 
         @Subscribe
+        public void on(forge.game.event.GameEventShuffle e) {
+            if (e.player() != null && e.player().getId() == me) {
+                trace.add("SHUFFLE");
+            }
+        }
+
+        @Subscribe
         public void on(GameEventCardChangeZone e) {
             if (e.card() == null) {
                 return;
@@ -390,7 +397,21 @@ public final class ForcedWinProbe {
         String pendingAsk = null;
         EffKind last = null;
         int run = 0;
+        boolean shuffled = false;
         for (String line : o.trace) {
+            if (line.equals("SHUFFLE")) {
+                // our library was shuffled: what is on top afterwards is unknown (a put-back before it is no put-back)
+                shuffled = true;
+                if (last != null) {
+                    out.add(new Eff(last == EffKind.PUTBACK ? EffKind.SHUFFLE : last, last == EffKind.PUTBACK ? 0 : run, 0));
+                    last = null;
+                    run = 0;
+                }
+                if (out.isEmpty() || out.get(out.size() - 1).kind != EffKind.SHUFFLE) {
+                    out.add(new Eff(EffKind.SHUFFLE, 0, 0));
+                }
+                continue;
+            }
             if (line.startsWith("ASK pick ")) {
                 pendingAsk = line;
                 // a pick INTO our library FROM our library or graveyard (not Brainstorm's put-back from hand)
@@ -444,7 +465,7 @@ public final class ForcedWinProbe {
         if (last != null) {
             out.add(new Eff(last, run, 0));
         }
-        if (pickToLibrary > 0) {
+        if (pickToLibrary > 0 && !shuffled) {
             if (exiled > 0 && pickFromLibraryOrGy) {
                 out.add(0, new Eff(EffKind.PILE, pickToLibrary, 0));
             } else {

@@ -56,7 +56,7 @@ public final class ForcedWinModel {
      * Observed effect kinds. PILE: "choose n cards of our library and graveyard, put them on top in any order, exile
      * the rest" (an ordered library choice). TUTOR / TUTOR_TOP: choose a library card to hand / to the top.
      */
-    enum EffKind { DRAW, MANA, PUTBACK, MILL, MILL_OPP, LIFE, DRAIN, DISCARD, PILE, TUTOR, TUTOR_TOP, WIN }
+    enum EffKind { DRAW, MANA, PUTBACK, MILL, MILL_OPP, LIFE, DRAIN, DISCARD, PILE, TUTOR, TUTOR_TOP, WIN, SHUFFLE }
 
     /** One effect of an ability's resolution, in observed order. */
     static final class Eff {
