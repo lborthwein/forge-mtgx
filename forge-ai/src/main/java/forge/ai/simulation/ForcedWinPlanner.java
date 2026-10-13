@@ -619,16 +619,20 @@ public final class ForcedWinPlanner {
             effs.addAll(ab.effects);
         } else {
             effs.addAll(ab.effects);
-            if (handIdx >= 0 && ab.kind == AbilKind.SPELL) {
-                s.gyPool.add(host);
-            }
         }
+        // an instant or sorcery goes to our graveyard after it resolves (not while it resolves: Doomsday's own pile)
+        final boolean toGraveyard = handIdx >= 0 && ab.kind == AbilKind.SPELL && !a.permanent;
         if (sacked != null) {
             // the ability's observed (or folded-in) effects already hold what the sacrifice itself causes
             s.bf.remove(sacked);
             s.gyPool.add(sacked.card);
         }
         resolve(s, effs, 0, 0, ab, out);
+        if (toGraveyard) {
+            for (S n : out) {
+                n.gyPool.add(host);
+            }
+        }
         return out;
     }
 

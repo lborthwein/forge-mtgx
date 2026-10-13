@@ -165,6 +165,7 @@ public class ForcedWinSolverTest extends AITest {
         Assert.assertEquals(b.effects.get(0).n, 3, b.toString());
         Assert.assertEquals(b.effects.get(1).kind, EffKind.PUTBACK, b.toString());
         Assert.assertEquals(b.effects.get(1).n, 2, b.toString());
+        Assert.assertFalse(b.has(EffKind.TUTOR_TOP), "a put-back from hand is not a tutor: " + b);
         Assert.assertTrue(b.instant);
 
         final ACard tendrils = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Tendrils of Agony"), 1, st);

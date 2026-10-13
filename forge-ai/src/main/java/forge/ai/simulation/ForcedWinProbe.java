@@ -393,7 +393,10 @@ public final class ForcedWinProbe {
         for (String line : o.trace) {
             if (line.startsWith("ASK pick ")) {
                 pendingAsk = line;
-                if (line.startsWith("ASK pick Library ")) {
+                // a pick INTO our library FROM our library or graveyard (not Brainstorm's put-back from hand)
+                final int lb = line.indexOf('['), rb = line.indexOf(']');
+                final String origins = lb >= 0 && rb > lb ? line.substring(lb, rb) : "";
+                if (line.startsWith("ASK pick Library ") && origins.contains("Library")) {
                     pickToLibrary++;
                     pickFromLibraryOrGy |= line.contains("Graveyard") && line.contains("Library, ")
                             || line.contains("[Graveyard, Library]") || line.contains("[Library, Graveyard]");
