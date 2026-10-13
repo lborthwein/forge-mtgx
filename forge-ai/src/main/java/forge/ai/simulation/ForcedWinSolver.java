@@ -408,7 +408,10 @@ public final class ForcedWinSolver {
             }
             final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
             lim.nodes = cfg.nodes / 2;
-            lim.horizon = 2;
+            // POST-FREEZE 3: when they cannot act at sorcery speed now (our turn, or their non-main step), their
+            // threat window is their next two turns (a setup spell next turn, the win the turn after: a
+            // pass-the-turn Doomsday pile); in their own main phase it is this turn and their next
+            lim.horizon = base.sorcerySpeed ? 2 : 3;
             final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
             if (!res.lines.isEmpty()) {
                 wins++;

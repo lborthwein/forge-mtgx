@@ -487,7 +487,7 @@ public final class ForcedWinPlanner {
         final List<S> out = new ArrayList<>(first);
         out.addAll(second);
         out.addAll(third);
-        if (s.turnIdx == 0 && lim.horizon >= 2 && !pending) {
+        if (s.turnIdx < lim.horizon - 1 && !pending) {
             final S n = s.copy();
             n.steps.add(Step.PASS);
             out.addAll(passTurn(n));
@@ -648,7 +648,7 @@ public final class ForcedWinPlanner {
         final List<S> out = new ArrayList<>();
         if (s.oppLib <= 0) {
             // the opponent loses drawing from an empty library in their draw step, before our next turn
-            s.turnIdx = 1;
+            s.turnIdx++;
             s.won = true;
             s.how = "opponent-decked";
             out.add(s);
