@@ -153,7 +153,20 @@ public enum AiProps {
      * this seat. OFF unless a profile sets it; no shipped profile file does (the built-in profile "CubeCombo" in
      * {@link AiProfileUtil} is Default plus this key), so every existing profile's seats are unchanged.
      */
-    CUBE_COMBO_PLANS("false");
+    CUBE_COMBO_PLANS("false"),
+    /**
+     * mtgx (lane doomsday-solver-1012): the cube combo seat's lineage plans (v104). True (every existing profile's
+     * behaviour); the built-in profile "ForcedWin" sets false, so its seat is Forge AI plus the forced-win solver.
+     */
+    CUBE_COMBO_LINEAGE("true"),
+    /**
+     * mtgx (lane doomsday-solver-1012): run the general forced-win solver ({@code forge.ai.simulation.ForcedWinSolver})
+     * on a cube combo seat. OFF unless a profile sets it; only the built-in profiles "CubeComboSolver" and "ForcedWin"
+     * do. With it on, the lineage's Doomsday plan is not consulted (the solver replaces it).
+     */
+    FORCED_WIN_SOLVER("false"),
+    /** mtgx (lane doomsday-solver-1012): the solver's spec, "worlds=6,top=3,threshold=0.5,..." (empty = defaults). */
+    FORCED_WIN_SPEC("");
     // Experimental features, must be promoted or removed after extensive testing and, ideally, defaulting
     // <-- There are no experimental options here -->
 
