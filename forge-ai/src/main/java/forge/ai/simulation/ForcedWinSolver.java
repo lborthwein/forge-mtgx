@@ -131,6 +131,16 @@ public final class ForcedWinSolver {
         }
     }
 
+    /** Receipts name the seat's deck (diagnostics: which deck a decision belongs to). */
+    private String tag() {
+        try {
+            return " deck=" + me.getRegisteredPlayer().getDeck().getName().replace(' ', '_') + " seat="
+                    + me.getGame().getRegisteredPlayers().indexOf(me.getRegisteredPlayer());
+        } catch (RuntimeException e) {
+            return " deck=?";
+        }
+    }
+
     static long mix(long a, long b) {
         return LookaheadSearch.mix(a, b);
     }
@@ -205,7 +215,7 @@ public final class ForcedWinSolver {
                 return Decision.PASS;
             }
             if (n.broken) {
-                receipt("FORCED_WIN broken turn=" + live.getPhaseHandler().getTurn() + " at=" + active.cursor + " "
+                receipt("FORCED_WIN broken" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " at=" + active.cursor + " "
                         + n.why);
                 replans++;
                 active = null;
@@ -276,7 +286,7 @@ public final class ForcedWinSolver {
         lastOutcome = "?";
         lastPlannerNodes = 0;
         final Line l = offense0(live, key);
-        receipt("FORCED_WIN cost turn=" + live.getPhaseHandler().getTurn() + " phase=" + live.getPhaseHandler().getPhase()
+        receipt("FORCED_WIN cost" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " phase=" + live.getPhaseHandler().getPhase()
                 + " outcome=" + lastOutcome + " ms=" + (System.nanoTime() - t0) / 1_000_000 + " plannerNodes="
                 + lastPlannerNodes + " engineNodes=" + (engineStats.nodes - eng0) + " copies="
                 + (copies + engineStats.copies - copies0) + " probes=" + (reader.probeStats.probes - probes0));
@@ -310,11 +320,11 @@ public final class ForcedWinSolver {
             }
             gated++;
             noLineKey = key;
-            receipt("FORCED_WIN gate turn=" + pos.turn + " none " + res.summary() + " probes=" + reader.probeStats.summary());
+            receipt("FORCED_WIN gate" + tag() + " turn=" + pos.turn + " none " + res.summary() + " probes=" + reader.probeStats.summary());
             return null;
         }
         evaluated++;
-        receipt("FORCED_WIN candidates turn=" + pos.turn + " " + res.summary() + " probes=" + reader.probeStats.summary()
+        receipt("FORCED_WIN candidates" + tag() + " turn=" + pos.turn + " " + res.summary() + " probes=" + reader.probeStats.summary()
                 + " best=" + res.lines.get(0));
         if (ForcedWinEngine.TRACE) {
             receipt("FW_POSITION " + pos.describe());
@@ -325,11 +335,11 @@ public final class ForcedWinSolver {
         if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0) {
             lastOutcome = "declined";
             noLineKey = key;
-            receipt("FORCED_WIN declined turn=" + pos.turn + " best=" + (best == null ? "none" : best)
+            receipt("FORCED_WIN declined" + tag() + " turn=" + pos.turn + " best=" + (best == null ? "none" : best)
                     + " ms=" + (System.nanoTime() - t0) / 1_000_000);
             return null;
         }
-        receipt("FORCED_WIN take turn=" + pos.turn + " " + best + " ms=" + (System.nanoTime() - t0) / 1_000_000
+        receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + best + " ms=" + (System.nanoTime() - t0) / 1_000_000
                 + " copies=" + copies);
         lastOutcome = "take";
         return best.line;
@@ -459,7 +469,7 @@ public final class ForcedWinSolver {
         final Threat countered = threat(live, opp, null, List.of(top.getHostCard()), false, cfg.defenseWorlds);
         final double delta = resolves.p - countered.p;
         final String verdict = delta >= cfg.counterDelta ? "counter" : countered.p >= cfg.counterDelta ? "hold" : "native";
-        receipt("FORCED_WIN defense turn=" + live.getPhaseHandler().getTurn() + " spell=" + top.getHostCard().getName()
+        receipt("FORCED_WIN defense" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " spell=" + top.getHostCard().getName()
                 + " resolves=" + resolves + " countered=" + countered + " -> " + verdict + " with=" + counter.getHostCard().getName()
                 + " ms=" + (System.nanoTime() - t0) / 1_000_000);
         if ("counter".equals(verdict)) {
@@ -572,7 +582,7 @@ public final class ForcedWinSolver {
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, t1 + cfg.engineMs * 1_000_000L,
                 mix(cfg.seed, 7_000_000L + index));
         engineNanos += System.nanoTime() - t1;
-        receipt("FORCED_WIN engine turn=" + pos.turn + " found=" + (line != null) + " " + engineStats.summary()
+        receipt("FORCED_WIN engine" + tag() + " turn=" + pos.turn + " found=" + (line != null) + " " + engineStats.summary()
                 + (line == null ? "" : " " + line));
         if (line == null) {
             return null;
@@ -584,7 +594,7 @@ public final class ForcedWinSolver {
         if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold) {
             return null;
         }
-        receipt("FORCED_WIN take turn=" + pos.turn + " " + e + " ms=" + (System.nanoTime() - t0) / 1_000_000);
+        receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms=" + (System.nanoTime() - t0) / 1_000_000);
         return line;
     }
 
