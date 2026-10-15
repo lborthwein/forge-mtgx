@@ -3624,9 +3624,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     // ---- the mana source of one shard (lane r4-payment-1015; ComputerUtilMana.ShardSourceChooser)
     /**
      * Payments by cost object (identity; a payment can nest another, e.g. a Signet's own {1} inside a spell's cost):
-     * those seen, those with a contested shard (census), and those handed to Forge AI by AUTO. Bounded: cleared past
-     * 64 entries (a payment is over long before).
+     * those seen, those with a contested shard (census), and those handed to Forge AI by AUTO (or by a refused pick).
+     * Bounded: cleared past 64 entries (a payment is over long before). {@code pickCost}: the payment of the last
+     * non-Forge source returned.
      */
+    private ManaCostBeingPaid pickCost = null;
     private final Set<ManaCostBeingPaid> paySeen = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<ManaCostBeingPaid> payContestedSet = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Set<ManaCostBeingPaid> payAutoSet = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -3647,7 +3649,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     public SpellAbility chooseShardSource(final ManaCostBeingPaid cost, final SpellAbility sa, final ManaCostShard toPay,
             final List<SpellAbility> candidates, final boolean checkCosts) {
         final boolean census = session.isPayCensus();
-        final boolean asks = session.isManaSourceAsk() && localAnswers();
+        final boolean asks = session.isManaSourceAsk(seat) && localAnswers();
         if (!census && !asks || !isLiveGame()) {
             return null;
         }
@@ -3709,13 +3711,18 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return null; // Forge AI's own source: its own choice, so the payment is Forge AI's to the byte
         }
         note("manaSource.other");
+        pickCost = cost;
         return a.options.get(i - 1).cand;
     }
 
+    /** Forge AI's checks refused the source this seat chose: Forge AI pays this shard and, as AUTO, the rest. */
     @Override
     public void shardSourceRefused(final SpellAbility pick) {
         counters.instrument("manaSource.refused");
         note("manaSource.refused");
+        if (pickCost != null) {
+            payAutoSet.add(pickCost);
+        }
     }
 
     // ---- 24 COLOR

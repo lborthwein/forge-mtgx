@@ -187,18 +187,18 @@ public final class BenchSession {
     }
 
     /**
-     * Lane r4-payment-1015 (false by default, and then nothing changes): the bridged seats are asked the source of
-     * each contested shard of their real payments (kind {@code manaSource}, obs-v3 family 25 MANA_SOURCE), through the
-     * local answerer. The RL actor sets it per game (its {@code manaSource} option).
+     * Lane r4-payment-1015 (null by default, and then nothing changes): the seats (by index) that are asked the source
+     * of each contested shard of their real payments (kind {@code manaSource}, obs-v3 family 25 MANA_SOURCE), through
+     * the local answerer. The RL actor sets it per game (its {@code manaSource} option and slot filter).
      */
-    private boolean manaSourceAsk = false;
+    private boolean[] manaSourceSeats = null;
 
-    public boolean isManaSourceAsk() {
-        return manaSourceAsk;
+    public boolean isManaSourceAsk(final int seat) {
+        return manaSourceSeats != null && seat >= 0 && seat < manaSourceSeats.length && manaSourceSeats[seat];
     }
 
-    public void setManaSourceAsk(final boolean manaSourceAsk) {
-        this.manaSourceAsk = manaSourceAsk;
+    public void setManaSourceSeats(final boolean[] seats) {
+        this.manaSourceSeats = seats == null ? null : seats.clone();
     }
     private forge.game.Game liveGame;
 
