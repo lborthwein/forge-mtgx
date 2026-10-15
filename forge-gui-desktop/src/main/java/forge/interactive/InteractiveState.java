@@ -15,10 +15,13 @@ import com.google.gson.JsonObject;
 import forge.bench.StateEncoder;
 import forge.game.Game;
 import forge.game.card.Card;
+import forge.game.card.CardCollectionView;
 import forge.game.card.CardView;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
+import forge.game.zone.ZoneType;
 
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -36,6 +39,9 @@ final class InteractiveState {
             "power", "toughness", "damage", "counters", "attachments", "attachedTo",
             "attachedToKind");
 
+    /** A player's field for the top card of their library, present only for a viewer who may see it. */
+    static final String LIBRARY_TOP = "libraryTop";
+
     private InteractiveState() {
     }
 
@@ -50,6 +56,7 @@ final class InteractiveState {
         view.add("life", life);
         final PlayerView viewer = human.getView();
         sanitizePlayerZones(view, game, viewer);
+        addVisibleLibraryTops(view, game, viewer);
         sanitizeStack(view, game, viewer);
         sanitizeCombat(view, game, viewer);
         return view;
@@ -76,6 +83,11 @@ final class InteractiveState {
                 final JsonObject player = playerElement.getAsJsonObject();
                 for (String zone : java.util.List.of("hand", "battlefield", "graveyard", "exile", "command")) {
                     addCardSeatFields(game, player.get(zone));
+                }
+                if (player.has(LIBRARY_TOP) && player.get(LIBRARY_TOP).isJsonObject()) {
+                    final JsonObject top = player.getAsJsonObject(LIBRARY_TOP);
+                    addSeatForRawPlayerId(game, top, "controller", "controllerSeat");
+                    addSeatForRawPlayerId(game, top, "owner", "ownerSeat");
                 }
             }
         }
@@ -158,6 +170,65 @@ final class InteractiveState {
                 sanitizeCardArray(object.get(zone), game, viewer);
             }
         }
+    }
+
+    /**
+     * The top card of each library, as {@code players[i].libraryTop}, for a viewer Forge lets see it (lane
+     * forge-top-card-reveal-1015). The owner's report 2026-10-14T04-17-09, with Courser of Kruphix in play: "I can't
+     * see the top card of my deck, but I have a card in play that says I can!" {@link StateEncoder} enumerates no
+     * library, so the browser was never told what Courser reveals.
+     *
+     * <p>Who may see it is Forge's own rule: the {@code MayLookAt$} of the granting static ability, which Forge keeps
+     * as the card's may-look set. {@code Player} (Courser of Kruphix, Oracle of Mul Daya, Future Sight, Magus of the
+     * Future: "play with the top card of your library revealed") reaches every seat; {@code You} (Bolas's Citadel,
+     * Mystic Forge, Augur of Autumn, Vizier of the Menagerie: "you may look at the top card of your library any
+     * time") reaches only its controller. A seat Forge does not let look gets no field at all, so not even the card's
+     * id leaves the JVM.</p>
+     *
+     * <p>The card's view must also say it is in the library. A card that moved while the tracker was frozen has no
+     * zone on its view yet, and {@link CardView#canBeShownTo} reads a zoneless card as visible to all.</p>
+     *
+     * <p>Only this browser payload carries the field. {@link StateEncoder} (the bench and RL observations) still
+     * enumerates no library, and the name is not {@code revealedTop}, which the bench decoders read.</p>
+     */
+    private static void addVisibleLibraryTops(final JsonObject view, final Game game, final PlayerView viewer) {
+        if (!view.has("players") || !view.get("players").isJsonArray()) {
+            return;
+        }
+        final List<Player> registered = game.getRegisteredPlayers();
+        for (JsonElement element : view.getAsJsonArray("players")) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            final JsonObject player = element.getAsJsonObject();
+            if (!player.has("index") || !player.get("index").isJsonPrimitive()) {
+                continue;
+            }
+            final int index;
+            try {
+                index = player.get("index").getAsInt();
+            } catch (RuntimeException ignored) {
+                continue;
+            }
+            if (index < 0 || index >= registered.size()) {
+                continue;
+            }
+            final Card top = libraryTop(registered.get(index));
+            if (top != null && mayReceiveLibraryTop(top.getView(), viewer)) {
+                player.add(LIBRARY_TOP, StateEncoder.encodeCardUnchecked(top));
+            }
+        }
+    }
+
+    /** The card a player would draw next, or null for an empty library. Index 0 is the top in Forge. */
+    static Card libraryTop(final Player owner) {
+        final CardCollectionView library = owner.getCardsIn(ZoneType.Library);
+        return library.isEmpty() ? null : library.get(0);
+    }
+
+    /** Forge's may-look rule for a library card, on a view that already knows the card is in the library. */
+    static boolean mayReceiveLibraryTop(final CardView card, final PlayerView viewer) {
+        return card != null && card.getZone() == ZoneType.Library && mayReceiveIdentity(card, viewer);
     }
 
     private static void sanitizeStack(final JsonObject view, final Game game,
