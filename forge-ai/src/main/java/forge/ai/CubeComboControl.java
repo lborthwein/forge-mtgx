@@ -113,7 +113,9 @@ public final class CubeComboControl {
             solverRead = true;
             final forge.LobbyPlayer lobby = seat.asController().getLobbyPlayer();
             lineagePlans = !"false".equals(AiProfileUtil.getAIProp(lobby, AiProps.CUBE_COMBO_LINEAGE));
-            if ("true".equals(AiProfileUtil.getAIProp(lobby, AiProps.FORCED_WIN_SOLVER))) {
+            final boolean forced = "true".equals(AiProfileUtil.getAIProp(lobby, AiProps.FORCED_WIN_SOLVER));
+            final boolean likelyOnly = "true".equals(AiProfileUtil.getAIProp(lobby, AiProps.LIKELY_WIN_LINES));
+            if (forced || likelyOnly) {
                 final String spec = System.getProperty("forge.ai.forcedWin.spec",
                         AiProfileUtil.getAIProp(lobby, AiProps.FORCED_WIN_SPEC));
                 final java.util.Map<String, String> kv = new java.util.HashMap<>();
@@ -121,8 +123,11 @@ public final class CubeComboControl {
                     final int eq = part.indexOf('=');
                     if (eq > 0) kv.put(part.substring(0, eq).trim(), part.substring(eq + 1).trim());
                 }
-                solver = new forge.ai.simulation.ForcedWinSolver(player,
-                        forge.ai.simulation.ForcedWinSolver.Config.fromProps(kv::get));
+                final forge.ai.simulation.ForcedWinSolver.Config cfg = forge.ai.simulation.ForcedWinSolver.Config.fromProps(kv::get);
+                // lane solver-gaps-1015, Part B: likely-win lines on their own, or added to the forced-win solver
+                cfg.forced = forced;
+                cfg.likely |= likelyOnly;
+                solver = new forge.ai.simulation.ForcedWinSolver(player, cfg);
             }
         }
         return solver;

@@ -355,6 +355,48 @@ public class ForcedWinSolverTest extends AITest {
         Assert.assertTrue(ForcedWinPlanner.plan(unknown, lim).lines.isEmpty(), unknown.describe());
     }
 
+    // ------------------------------------------------------------------ Part B (solver-gaps-1015): likely-win lines
+
+    @Test
+    public void likelyWinLinesAreOffByDefaultAndTheirOwnOption() {
+        Assert.assertEquals(AiProps.LIKELY_WIN_LINES.getDefault(), "false");
+        for (String p : AiProfileUtil.getAvailableProfiles()) {
+            final LobbyPlayerAi l = new LobbyPlayerAi("x", null);
+            l.setAiProfile(p);
+            Assert.assertEquals(AiProfileUtil.getAIProp(l, AiProps.LIKELY_WIN_LINES), "false", p);
+        }
+        final LobbyPlayerAi lw = new LobbyPlayerAi("l", null);
+        lw.setAiProfile(AiProfileUtil.LIKELY_WIN_PROFILE);
+        Assert.assertEquals(AiProfileUtil.getAIProp(lw, AiProps.LIKELY_WIN_LINES), "true");
+        Assert.assertEquals(AiProfileUtil.getAIProp(lw, AiProps.FORCED_WIN_SOLVER), "false");
+        final Game g = game(AiProfileUtil.LIKELY_WIN_PROFILE, AiProfileUtil.FORCED_WIN_PROFILE,
+                frame("", "Island", 20, "", "Island", 20, "human"));
+        final ForcedWinSolver likely = ((CubeComboPlayerController) g.getPlayers().get(0).getController()).cubeCombo().forcedWin();
+        Assert.assertNotNull(likely);
+        Assert.assertFalse(likely.config().forced);
+        Assert.assertTrue(likely.config().likely);
+        final ForcedWinSolver forced = ((CubeComboPlayerController) g.getPlayers().get(1).getController()).cubeCombo().forcedWin();
+        Assert.assertTrue(forced.config().forced);
+        Assert.assertFalse(forced.config().likely);
+    }
+
+    @Test
+    public void aLikelyLineIsPlayedWhenItBeatsTheSeatsOwnPlay() {
+        // at 2 life against an unblockable 2/2: the seat's own play loses next turn; Show and Tell for Sneak Attack, then
+        // Emrakul with haste (opponent at 30: no forced win) survives in the rollouts and is played
+        final Game g = game(AiProfileUtil.LIKELY_WIN_PROFILE, "Default", "[state]\nturn=7\nactiveplayer=human\n"
+                + "activephase=MAIN1\nhumanlife=2\nailife=30\nhumanlandsplayed=0\nailandsplayed=0\naihand=\nailibrary=" + LIB20
+                + "\naigraveyard=\naiexile=\naibattlefield=Forest;Forest;Forest;Forest;Grizzly Bears;Grizzly Bears;"
+                + "Invisible Stalker|Tapped|Counters:P1P1=1\nhumanhand=Show and Tell;Sneak Attack;Emrakul, the Aeons Torn\n"
+                + "humanbattlefield=Island;Island;Island;Volcanic Island\nhumangraveyard=\nhumanexile=\nhumanlibrary=" + OURLIB
+                + "\n");
+        play(g, 7);
+        final ForcedWinSolver s = ((CubeComboPlayerController) g.getPlayers().get(0).getController()).cubeCombo().forcedWin();
+        Assert.assertTrue(s.likelyRuns >= 1, s.summary());
+        Assert.assertTrue(s.likelyTaken >= 1, s.summary());
+        Assert.assertEquals(s.taken, s.likelyTaken, "no forced line here: " + s.summary());
+    }
+
     // ------------------------------------------------------------------ offense: width search, engine, live seat
 
     @Test

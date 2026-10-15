@@ -90,10 +90,32 @@ public final class ForcedWinSolver {
          * frame lost the seat's memory of it). Off by default; never on in natural games.
          */
         public boolean frameMemory;
+        /** The forced-win solver (width search, engine search, defense). False when only Part B is on. */
+        public boolean forced = true;
+        /**
+         * Part B (solver-gaps-1015): likely-win lines, off by default. Engine-search lines that are not forced are scored
+         * by P(win) over belief worlds against Forge AI rollouts of both seats, against the seat's own play.
+         */
+        public boolean likely;
+        public int likelyWorlds = 4;
+        public int likelyTop = 2;
+        /** The rollouts' horizon in turns (both seats' turns counted); a game still running there scores 0.5. */
+        public int likelyCapTurns = 16;
+        /**
+         * With Part B on, the engine search leaves this much of the decision budget (the same reserve as for its line's
+         * evaluation by default, so Part B does not shorten the forced-win search); the rollouts use what is left and
+         * stop at the budget.
+         */
+        public long likelyReserveMs = 2000;
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
             c.frameMemory = "true".equals(get.apply("frameMemory"));
+            c.likely = "true".equals(get.apply("likely"));
+            c.likelyWorlds = intOr(get.apply("likelyWorlds"), c.likelyWorlds);
+            c.likelyTop = intOr(get.apply("likelyTop"), c.likelyTop);
+            c.likelyCapTurns = intOr(get.apply("likelyCapTurns"), c.likelyCapTurns);
+            c.likelyReserveMs = intOr(get.apply("likelyReserveMs"), (int) c.likelyReserveMs);
             c.worlds = intOr(get.apply("worlds"), c.worlds);
             c.top = intOr(get.apply("top"), c.top);
             c.threshold = dblOr(get.apply("threshold"), c.threshold);
@@ -131,7 +153,8 @@ public final class ForcedWinSolver {
         public String toString() {
             return "worlds=" + worlds + " top=" + top + " threshold=" + threshold + " nodes=" + nodes + " horizon="
                     + horizon + " budgetMs=" + budgetMs + " adversary=" + adversary + " defense=" + defense + " engine=" + engine + " engineNodes="
-                + engineNodes + " engineMs=" + engineMs;
+                + engineNodes + " engineMs=" + engineMs + " forced=" + forced + " likely=" + likely + " likelyWorlds=" + likelyWorlds
+                + " likelyTop=" + likelyTop + " likelyCapTurns=" + likelyCapTurns;
         }
     }
 
@@ -409,8 +432,8 @@ public final class ForcedWinSolver {
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
         // before it reaches one); lines that pass the turn only when this turn has none
         lim.horizon = 1;
-        ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
-        if (res.lines.isEmpty() && cfg.horizon >= 2) {
+        ForcedWinPlanner.Result res = cfg.forced ? ForcedWinPlanner.plan(pos, lim) : new ForcedWinPlanner.Result();
+        if (res.lines.isEmpty() && cfg.horizon >= 2 && cfg.forced) {
             final int first = res.nodes;
             lim.horizon = cfg.horizon;
             res = ForcedWinPlanner.plan(pos, lim);
@@ -422,7 +445,9 @@ public final class ForcedWinSolver {
             lastOutcome = "gate";
             final Line engine = engineFallback(live, pos, index, t0);
             if (engine != null) {
-                lastOutcome = "engine-take";
+                if (!"likely-take".equals(lastOutcome)) {
+                    lastOutcome = "engine-take";
+                }
                 return engine;
             }
             gated++;
@@ -567,7 +592,7 @@ public final class ForcedWinSolver {
 
     /** Our counterspell for the opponent's spell on top when resolving it gives them a forced win; else no opinion. */
     private Decision defendCounter(Game live) {
-        if (!cfg.defense) {
+        if (!cfg.defense || !cfg.forced) {
             return Decision.NONE;
         }
         final SpellAbilityStackInstance si = live.getStack().peek();
@@ -631,8 +656,8 @@ public final class ForcedWinSolver {
      * changes the verdict, or they have no forced win anyway).
      */
     public CardCollection answerDiscard(Player p, SpellAbility sa, CardCollection valid, int min, int max) {
-        if (!cfg.defense || p == me || sa == null || sa.getActivatingPlayer() != me || valid == null || valid.isEmpty()
-                || max != 1) {
+        if (!cfg.defense || !cfg.forced || p == me || sa == null || sa.getActivatingPlayer() != me || valid == null
+                || valid.isEmpty() || max != 1) {
             return null;
         }
         final long t0 = System.nanoTime();
@@ -691,21 +716,29 @@ public final class ForcedWinSolver {
         if (!unmodeled && power < pos.oppLife) {
             return null;
         }
+        if (!cfg.forced && !cfg.likely) {
+            return null;
+        }
         engineTurn = pos.turn;
         engineRuns++;
         lastOutcome = "gate+engine";
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
         final long t1 = System.nanoTime();
-        final long engineDeadline = Math.max(t1 + cfg.engineMs * 1_000_000L,
-                t0 + (cfg.budgetMs - cfg.evalReserveMs) * 1_000_000L);
+        final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
+        final long engineDeadline = Math.max(t1 + Math.min(cfg.engineMs, cfg.budgetMs - reserve) * 1_000_000L,
+                t0 + (cfg.budgetMs - reserve) * 1_000_000L);
+        final List<Line> likelyCands = cfg.likely ? new ArrayList<>() : null;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
-                mix(cfg.seed, 7_000_000L + index));
+                mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
         engineNanos += System.nanoTime() - t1;
         receipt("FORCED_WIN engine" + tag() + " turn=" + pos.turn + " found=" + (line != null) + " " + engineStats.summary()
-                + (line == null ? "" : " " + line));
-        if (line == null) {
-            return null;
+                + (line == null ? "" : " " + line) + (likelyCands == null ? "" : " likelyCands=" + likelyCands.size()));
+        if (line == null || !cfg.forced) {
+            if (line != null) {
+                likelyCands.add(0, line);
+            }
+            return likely(live, likelyCands, index, t0);
         }
         engineFound++;
         evaluated++;
@@ -713,10 +746,151 @@ public final class ForcedWinSolver {
                 Math.max(t0 + cfg.budgetMs * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2));
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
         if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold) {
+            if (likelyCands != null) {
+                // not forced: a likely-win candidate like the others (Part B)
+                likelyCands.add(0, line);
+                return likely(live, likelyCands, index, t0);
+            }
             return null;
         }
         receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms=" + (System.nanoTime() - t0) / 1_000_000);
         return line;
+    }
+
+    // ------------------------------------------------------------------ Part B: likely-win lines (solver-gaps-1015)
+
+    public int likelyRuns, likelyTaken;
+
+    /**
+     * Part B: score the candidate lines and the seat's own play (Forge AI) by P(win) over the same belief worlds, each
+     * a rollout of both seats (Forge AI; ours follows the line first) to the game's end or the turn cap. The best line is
+     * returned only when it beats the seat's own play; no probability threshold. Null = no opinion.
+     */
+    Line likely(Game live, List<Line> cands, int index, long t0) {
+        if (cands == null || cands.isEmpty()) {
+            return null;
+        }
+        final long l0 = System.nanoTime();
+        final long deadline = t0 + cfg.budgetMs * 1_000_000L;
+        if (deadline - l0 < 300_000_000L) {
+            // no time left in the decision's budget for even one world
+            receipt("FORCED_WIN likely" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " no budget left");
+            return null;
+        }
+        likelyRuns++;
+        final int k = Math.min(cands.size(), cfg.likelyTop + 1);
+        final double[] sum = new double[k];
+        double alt = 0;
+        int worlds = 0;
+        for (int w = 1; w <= cfg.likelyWorlds; w++) {
+            if (System.nanoTime() > deadline) {
+                break;
+            }
+            final long ws = mix(cfg.seed, index * 1000L + 500 + w);
+            // a world counts only when every arm finished in it before the budget (paired worlds)
+            final double a = rollout(live, null, ws, w, deadline);
+            final double[] v = new double[k];
+            boolean complete = a >= 0;
+            for (int i = 0; i < k && complete; i++) {
+                v[i] = rollout(live, cands.get(i), ws, w, deadline);
+                complete = v[i] >= 0;
+            }
+            if (!complete) {
+                break;
+            }
+            alt += a;
+            for (int i = 0; i < k; i++) {
+                sum[i] += v[i];
+            }
+            worlds++;
+        }
+        if (worlds == 0) {
+            return null;
+        }
+        int best = -1;
+        final StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < k; i++) {
+            sb.append(String.format(" #%d P=%.2f %s;", i, sum[i] / worlds, cands.get(i).steps));
+            if (best < 0 || sum[i] > sum[best]) {
+                best = i;
+            }
+        }
+        final double pAlt = alt / worlds, pBest = sum[best] / worlds;
+        final boolean take = pBest > pAlt + 1e-9;
+        receipt("FORCED_WIN likely" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " worlds=" + worlds
+                + String.format(" P(own play)=%.2f P(best)=%.2f", pAlt, pBest) + " -> " + (take ? "take #" + best : "keep own play")
+                + " ms=" + (System.nanoTime() - l0) / 1_000_000 + sb);
+        if (!take) {
+            return null;
+        }
+        likelyTaken++;
+        lastOutcome = "likely-take";
+        return cands.get(best);
+    }
+
+    /**
+     * Part B: one rollout in a belief world (world w samples the opponent's hidden hand): our seat follows {@code line}
+     * (null = Forge AI's own play) and then plays on as Forge AI; the opponent is Forge AI. 1 = we win, 0 = we lose, 0.5
+     * = still running at the turn cap.
+     */
+    double rollout(Game live, Line line, long seed, int world, long deadline) {
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 1)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            final Player cm;
+            synchronized (live) {
+                final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyFidelity(1);
+                g = copier.makeCopy();
+                cm = (Player) copier.find(me);
+                copies++;
+                final Random rng = new Random(mix(seed, 2));
+                for (Player o : cm.getOpponents()) {
+                    hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
+                }
+                shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, rng);
+            }
+            MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
+            if (line != null) {
+                final LineAi ai = new LineAi(g, cm, cm.getController().getLobbyPlayer(), new Follower(line));
+                ai.continueAfter = true;
+                cm.dangerouslySetController(ai);
+            } else {
+                cm.dangerouslySetController(new LookaheadSearch.RolloutAi(g, cm, cm.getController().getLobbyPlayer()));
+            }
+            for (Player o : g.getPlayers()) {
+                if (o != cm) {
+                    o.dangerouslySetController(new LookaheadSearch.RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
+            final PhaseHandler ph = g.getPhaseHandler();
+            LookaheadSearch.givePriority(ph, cm);
+            final int last = ph.getTurn() + cfg.likelyCapTurns;
+            int steps = 0;
+            while (!g.isGameOver() && ph.getTurn() <= last && steps < 20 * cfg.maxSteps) {
+                ph.mainLoopStep();
+                steps++;
+                if ((steps & 31) == 0 && System.nanoTime() > deadline) {
+                    return -1; // out of budget: the world is dropped
+                }
+            }
+            if (cm.hasWon() || cm.getOpponents().stream().anyMatch(Player::hasLost)) {
+                return 1;
+            }
+            return cm.hasLost() ? 0 : 0.5;
+        } catch (RuntimeException | StackOverflowError ex) {
+            receipt("FORCED_WIN likely rollout error " + ex);
+            return 0.5;
+        } finally {
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
     }
 
     /** Read the position; the library's affordances are learned only when something we hold could use them. */
@@ -971,8 +1145,12 @@ public final class ForcedWinSolver {
      * rest in each world.
      */
     static void shuffleUnknownOwnLibrary(Player me, Line line, Random rng) {
+        shuffleUnknownOwnLibrary(me, line.knownTop, rng);
+    }
+
+    static void shuffleUnknownOwnLibrary(Player me, int knownTop, Random rng) {
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
-        final int k = Math.min(line.knownTop, lib.size());
+        final int k = Math.min(knownTop, lib.size());
         if (k >= lib.size()) {
             return;
         }
@@ -1541,6 +1719,8 @@ public final class ForcedWinSolver {
     static final class LineAi extends LookaheadSearch.RolloutAi {
         final Follower f;
         String protectedBy;
+        /** Part B rollouts: after the line our seat plays on as Forge AI (forced-win play-outs stop acting). */
+        boolean continueAfter;
 
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
@@ -1566,6 +1746,9 @@ public final class ForcedWinSolver {
                 if (n.broken) {
                     return null;
                 }
+            }
+            if (f.done && continueAfter) {
+                return super.chooseSpellAbilityToPlay();
             }
             if (f.done && !g.getStack().isEmpty()) {
                 return null;
@@ -1764,7 +1947,8 @@ public final class ForcedWinSolver {
     // ------------------------------------------------------------------ diagnostics
 
     public String summary() {
-        return "decisions=" + decisions + " gated=" + gated + " evaluated=" + evaluated + " taken=" + taken + " replans="
+        return "decisions=" + decisions + " gated=" + gated + " evaluated=" + evaluated + " taken=" + taken + " likelyRuns="
+                + likelyRuns + " likelyTaken=" + likelyTaken + " replans="
                 + replans + " plannerMs=" + plannerNanos / 1_000_000 + " engineMs=" + engineNanos / 1_000_000
                 + " copies=" + copies + " " + reader.probeStats.summary();
     }

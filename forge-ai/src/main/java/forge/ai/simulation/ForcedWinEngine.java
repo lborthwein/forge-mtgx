@@ -77,6 +77,26 @@ final class ForcedWinEngine {
     private final long seed;
     private final Set<String> seen = new HashSet<>();
     private int startTurn;
+    /**
+     * Part B (solver-gaps-1015): when not null, the search also keeps this turn's non-winning lines with the best static
+     * value of the position they reach (Forge's GameStateEvaluator), as likely-win candidates.
+     */
+    private List<Cand> collect;
+    private int keep;
+    private final GameStateEvaluator evaluator = new GameStateEvaluator();
+
+    /** A likely-win candidate: a path of this turn's moves and the static value of the position it reaches. */
+    static final class Cand {
+        final List<Step> path;
+        final int score;
+        final String key;
+
+        Cand(List<Step> path, int score, String key) {
+            this.path = path;
+            this.score = score;
+            this.key = key;
+        }
+    }
 
     private ForcedWinEngine(Limits lim, Stats st, long deadline, long seed) {
         this.lim = lim;
@@ -87,6 +107,15 @@ final class ForcedWinEngine {
 
     /** A this-turn win from the live position (our main-phase priority, empty stack), or null. Never throws. */
     static Line search(Game live, Player liveMe, Limits lim, Stats st, long deadline, long seed) {
+        return search(live, liveMe, lim, st, deadline, seed, null, 0);
+    }
+
+    /**
+     * As {@link #search(Game, Player, Limits, Stats, long, long)}; with {@code likelyOut} (Part B) also the best
+     * {@code keep} non-winning lines of this turn whose position values beat the root's, best first.
+     */
+    static Line search(Game live, Player liveMe, Limits lim, Stats st, long deadline, long seed, List<Line> likelyOut,
+            int keep) {
         final long t0 = System.nanoTime();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -96,6 +125,10 @@ final class ForcedWinEngine {
         forge.util.IdScope.open();
         try {
             final ForcedWinEngine e = new ForcedWinEngine(lim, st, deadline, seed);
+            if (likelyOut != null) {
+                e.collect = new ArrayList<>();
+                e.keep = Math.max(1, keep) * 3;
+            }
             final Node root = new Node();
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
@@ -125,6 +158,20 @@ final class ForcedWinEngine {
             }
             lim.passTurn = twoTurns;
             lim.nodes = nodeCap;
+            if (likelyOut != null && e.collect != null) {
+                final int rootScore = e.evaluator.getStaticScore(root.g, root.me).value;
+                e.collect.sort((x, y) -> Integer.compare(y.score, x.score));
+                final Set<String> keys = new HashSet<>();
+                for (Cand c : e.collect) {
+                    if (likelyOut.size() >= keep) {
+                        break;
+                    }
+                    if (c.score > rootScore && keys.add(c.key)) {
+                        final Line l = new Line(c.path, List.of(), 0, root.me.getLife(), 0, 0, List.of(), "likely");
+                        likelyOut.add(l);
+                    }
+                }
+            }
             if (win == null) {
                 return null;
             }
@@ -222,6 +269,21 @@ final class ForcedWinEngine {
                 final List<Step> path = new ArrayList<>(node.path);
                 path.add(mv);
                 return path;
+            }
+            if (collect != null && a.child != null && !node.passed && !mv.pass && a.child.turn == startTurn) {
+                // Part B: a this-turn position, valued statically
+                try {
+                    final int score = evaluator.getStaticScore(a.child.g, a.child.me).value;
+                    final List<Step> path = new ArrayList<>(node.path);
+                    path.add(mv);
+                    collect.add(new Cand(path, score, a.key));
+                    if (collect.size() > 4 * keep) {
+                        collect.sort((x, y) -> Integer.compare(y.score, x.score));
+                        collect.subList(keep, collect.size()).clear();
+                    }
+                } catch (RuntimeException ex) {
+                    // no value
+                }
             }
             if (a.child == null || !seen.add(a.key)) {
                 continue;
