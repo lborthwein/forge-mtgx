@@ -206,6 +206,28 @@ public class RlManaChoiceTest extends AITest {
         Assert.assertEquals(next[1], next[0], "the enumeration drew from the live random stream");
     }
 
+    /** A Triome's three abilities pay a generic shard alike: one option (it is a plain land; cycling is from hand). */
+    @Test
+    public void oneLandsAbilitiesAreOneOption() {
+        final Game game = initAndCreateGame();
+        final Player ai = game.getPlayers().get(1);
+        fillLibrary(ai, 5);
+        final Card tri = addCard("Ziatora's Proving Ground", ai);
+        final Card ring = addCardToZone("Sol Ring", ai, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        final Chooser ch = new Chooser(game, ai);
+        ai.dangerouslySetController(ch);
+        final SpellAbility sa = ring.getFirstSpellAbility();
+        sa.setActivatingPlayer(ai);
+        Assert.assertTrue(ComputerUtilMana.payManaCost(sa.getPayCosts(), ai, sa, false));
+        Assert.assertEquals(ch.asks.size(), 1);
+        final RlManaChoice.Ask a = ch.asks.get(0);
+        Assert.assertTrue(a.acceptable >= 3, "the Triome's three abilities can pay {1}: " + a.acceptable);
+        Assert.assertEquals(a.options.size(), 1, keys(a));
+        Assert.assertTrue(RlManaChoice.plainLand(tri));
+        Assert.assertFalse(a.contested());
+    }
+
     /** The rest-of-the-cost test: a source is a legal payment only if what is left can still be paid without it. */
     @Test
     public void restPayableSeesAStrandedCost() {

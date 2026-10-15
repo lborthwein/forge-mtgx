@@ -215,13 +215,37 @@ public final class RlManaChoice {
         return "N:" + c.getName() + "|" + ab;
     }
 
-    /** The paying ability's cost, product, amount and sub-abilities. */
+    /**
+     * The paying ability's cost, amount and sub-abilities, and its product only when it makes more than one mana (the
+     * rest floats, so its colours matter). A single mana pays this shard whatever its colour, so two abilities of one
+     * land (a Triome's three, a painland's free one vs another free one) that differ only in the colour are one.
+     */
     static String abilityText(final SpellAbility ma) {
         final StringBuilder sb = new StringBuilder();
         final Cost c = ma.getPayCosts();
         sb.append(c == null ? "" : c.toSimpleString()).append('>');
         final AbilityManaPart mp = ma.getManaPart();
-        sb.append(mp == null ? "" : mp.getOrigProduced());
+        final String prod = mp == null ? "" : mp.getOrigProduced();
+        final int symbols = mp == null || mp.isComboMana() || mp.isAnyMana() || prod.trim().isEmpty() ? 1
+                : prod.trim().split("\\s+").length;
+        final boolean several = ma.hasParam("Amount") || symbols > 1;
+        if (several || mp != null && mp.isSpecialMana()) {
+            sb.append(prod);
+        }
+        if (mp != null) {
+            // what the mana carries besides its colour: a spending restriction, "can't be countered" (Cavern of
+            // Souls), a trigger when spent
+            final String r = mp.getManaRestrictions();
+            if (r != null && !r.isEmpty()) {
+                sb.append("|r:").append(r);
+            }
+            if (mp.isCannotCounterPaidWith()) {
+                sb.append("|nocounter");
+            }
+            if (mp.getTriggersWhenSpent()) {
+                sb.append("|trig");
+            }
+        }
         if (ma.hasParam("Amount")) {
             sb.append('x').append(ma.getParam("Amount"));
         }
@@ -231,13 +255,20 @@ public final class RlManaChoice {
         return sb.toString();
     }
 
-    /** A land, not a creature, with no activated ability besides mana abilities. */
+    /**
+     * A land, not a creature, with no activated ability usable on the battlefield besides its mana abilities (cycling,
+     * activated from the hand, does not count).
+     */
     static boolean plainLand(final Card c) {
         if (c == null || !c.isLand() || c.isCreature()) {
             return false;
         }
         for (SpellAbility s : c.getNonManaAbilities()) {
-            if (s.isActivatedAbility()) {
+            if (!s.isActivatedAbility()) {
+                continue;
+            }
+            final forge.game.zone.ZoneType z = s.getRestrictions() == null ? null : s.getRestrictions().getZone();
+            if (z == null || z == forge.game.zone.ZoneType.Battlefield) {
                 return false;
             }
         }
