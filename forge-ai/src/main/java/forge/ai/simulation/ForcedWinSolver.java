@@ -135,7 +135,8 @@ public final class ForcedWinSolver {
     private String tag() {
         try {
             return " deck=" + me.getRegisteredPlayer().getDeck().getName().replace(' ', '_') + " seat="
-                    + me.getGame().getRegisteredPlayers().indexOf(me.getRegisteredPlayer());
+                    + me.getGame().getRegisteredPlayers().indexOf(me.getRegisteredPlayer()) + " thr="
+                    + Thread.currentThread().getId();
         } catch (RuntimeException e) {
             return " deck=?";
         }
@@ -343,6 +344,11 @@ public final class ForcedWinSolver {
         if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0) {
             lastOutcome = "declined";
             noLineKey = key;
+            if (best == null) {
+                // diagnostics (solver-gaps-1015): a width-model mismatch, with the position the width search saw
+                receipt("FORCED_WIN mismatch" + tag() + " turn=" + pos.turn + " phase=" + live.getPhaseHandler().getPhase()
+                        + " pos=" + pos.describe());
+            }
             receipt("FORCED_WIN declined" + tag() + " turn=" + pos.turn + " best=" + (best == null ? "none" : best)
                     + " ms=" + (System.nanoTime() - t0) / 1_000_000);
             return null;
@@ -601,7 +607,7 @@ public final class ForcedWinSolver {
         engineFound++;
         evaluated++;
         final Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999), System.nanoTime() + cfg.budgetMs * 1_000_000L);
-        receipt("FORCED_WIN eval engine " + e);
+        receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
         if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold) {
             return null;
         }
@@ -656,7 +662,7 @@ public final class ForcedWinSolver {
                 break;
             }
             final Eval e = evaluate(live, picked.get(i), mix(cfg.seed, index * 1000L + i), deadline);
-            receipt("FORCED_WIN eval #" + i + " " + e);
+            receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e);
             if (e.pUnopposed < 1.0) {
                 continue;
             }
@@ -795,6 +801,9 @@ public final class ForcedWinSolver {
                 out.why = f.broken ? "broken@" + f.cursor + ":" + f.why
                         : adv != null && adv.countered != null ? "countered:" + adv.countered
                         : g.isGameOver() ? "lost" : steps >= cfg.maxSteps ? "steps" : "no-win@" + f.cursor;
+                if (!f.broken) {
+                    out.why += " {" + endState(g, cm, f) + "}";
+                }
             }
         } catch (RuntimeException | StackOverflowError ex) {
             out.won = false;
@@ -846,6 +855,171 @@ public final class ForcedWinSolver {
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         Collections.shuffle(lib, rng);
         me.getZone(ZoneType.Library).setCards(lib);
+    }
+
+    // ------------------------------------------------------------------ diagnostics (solver-gaps-1015)
+
+    private static final String[] RESTRICTION_PARAMS = {"CheckSVar", "SVarCompare", "IsPresent", "PresentCompare",
+            "PresentZone", "Activation", "ActivationLimit", "ActivationPhases", "SorcerySpeed", "PlayerTurn",
+            "ActivationLifeTotal", "ActivationZone"};
+
+    private static String names(Game g, List<Integer> ids) {
+        final List<String> out = new ArrayList<>();
+        for (int id : ids) {
+            final Card c = id < 0 ? null : g.findById(id);
+            out.add(c == null ? "?" : c.getName());
+        }
+        return out.toString();
+    }
+
+    private static String cardNames(Iterable<Card> cs, int max) {
+        final List<String> out = new ArrayList<>();
+        for (Card c : cs) {
+            if (out.size() >= max) {
+                out.add("...");
+                break;
+            }
+            out.add(c.getName());
+        }
+        return out.toString();
+    }
+
+    /**
+     * Diagnostics only: why a line's step cannot be played in this game copy. Reports where the host card is, which
+     * check refuses the ability, and the width model's expected hand and library top before the step against the
+     * game's. Never changes the game (read-only checks on a copy of the ability).
+     */
+    static String diagnose(Game g, Player me, Step st) {
+        final StringBuilder sb = new StringBuilder();
+        try {
+            final PhaseHandler ph = g.getPhaseHandler();
+            sb.append("t").append(ph.getTurn()).append(' ').append(ph.getPhase());
+            final Card host = g.findById(st.hostId);
+            if (host == null) {
+                sb.append(" host=gone");
+            } else {
+                final ZoneType z = host.getZone() == null ? null : host.getZone().getZoneType();
+                sb.append(" host=").append(z);
+                if (z == ZoneType.Library) {
+                    sb.append('#').append(me.getCardsIn(ZoneType.Library).indexOf(host));
+                }
+                final boolean onBf = st.kind == AbilKind.ACTIVATE || st.kind == AbilKind.FLOAT;
+                if (onBf ? z == ZoneType.Battlefield : z == ZoneType.Hand || st.kind == AbilKind.ENGINE) {
+                    SpellAbility sa = null;
+                    if (st.kind == AbilKind.FLOAT) {
+                        for (SpellAbility m : host.getManaAbilities()) {
+                            if (st.desc.isEmpty() || st.desc.equals(m.getDescription())) {
+                                sa = m;
+                                break;
+                            }
+                        }
+                    } else if (st.kind == AbilKind.LAND) {
+                        sb.append(" landDrop=").append(me.getLandsPlayedThisTurn()).append('/').append(me.getMaxLandPlays());
+                    } else {
+                        sa = ForcedWinProbe.locate(host, me, st.desc, st.costKey, st.kind == AbilKind.ACTIVATE);
+                    }
+                    if (sa == null && st.kind != AbilKind.LAND) {
+                        sb.append(" abil=none");
+                    } else if (sa != null) {
+                        sa = sa.copy(me);
+                        sa.setActivatingPlayer(me);
+                        if (st.targetVariant != null && !ForcedWinProbe.setPlayerTargets(sa, me, st.targetVariant)) {
+                            sb.append(" target=no");
+                        } else if (!sa.canPlay()) {
+                            final forge.game.spellability.SpellAbilityRestriction r = sa.getRestrictions();
+                            sb.append(" canPlay=no");
+                            if (r != null) {
+                                sb.append(!sa.canCastTiming(host, me) ? ":timing" : "")
+                                        .append(!r.checkTimingRestrictions(host, sa) ? ":timingR" : "")
+                                        .append(!r.checkZoneRestrictions(host, sa) ? ":zone" : "")
+                                        .append(!r.checkActivatorRestrictions(host, sa) ? ":activator" : "")
+                                        .append(!r.checkOtherRestrictions(host, sa, me) ? ":other" : "");
+                            }
+                            for (String k : RESTRICTION_PARAMS) {
+                                if (sa.hasParam(k)) {
+                                    sb.append(' ').append(k).append('=').append(sa.getParam(k));
+                                }
+                            }
+                            sb.append(" activations=").append(sa.getActivationsThisTurn());
+                        } else if (!ComputerUtilCost.canPayCost(sa, me, false)) {
+                            sb.append(" pay=no");
+                        } else {
+                            sb.append(" playable");
+                        }
+                    }
+                }
+            }
+            final List<Integer> hand = new ArrayList<>();
+            for (Card c : me.getCardsIn(ZoneType.Hand)) {
+                hand.add(c.getId());
+            }
+            final List<Integer> lib = new ArrayList<>();
+            for (Card c : me.getCardsIn(ZoneType.Library)) {
+                if (lib.size() >= 6) {
+                    break;
+                }
+                lib.add(c.getId());
+            }
+            if (st.expHandIdx != null) {
+                final List<Integer> missing = new ArrayList<>(), extra = new ArrayList<>(hand);
+                int unseen = 0;
+                for (int id : st.expHand) {
+                    if (id < 0) {
+                        unseen++;
+                    } else if (!extra.remove(Integer.valueOf(id))) {
+                        missing.add(id);
+                    }
+                }
+                sb.append(" handMissing=").append(names(g, missing)).append(" handExtra=").append(names(g, extra))
+                        .append(" handUnseen=").append(unseen);
+                sb.append(" expLib=").append(names(g, st.expLib));
+            }
+            sb.append(" hand=").append(names(g, hand)).append(" lib=").append(names(g, lib)).append(" libSize=")
+                    .append(me.getCardsIn(ZoneType.Library).size());
+            final StringBuilder pool = new StringBuilder();
+            for (int i = 0; i < 6; i++) {
+                final int n = me.getManaPool().getAmountOfColor(ForcedWinModel.FORGE_COLOR[i]);
+                if (n > 0) {
+                    pool.append(n).append(ForcedWinModel.SHORT[i]);
+                }
+            }
+            final List<String> untapped = new ArrayList<>();
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                if (!c.isTapped() && !c.getManaAbilities().isEmpty()) {
+                    untapped.add(c.getName());
+                }
+            }
+            sb.append(" pool=").append(pool).append(" untappedSources=").append(untapped).append(" life=").append(me.getLife())
+                    .append(" storm=").append(g.getStack().getSpellsCastThisTurn().size()).append(" gy=")
+                    .append(me.getCardsIn(ZoneType.Graveyard).size());
+        } catch (RuntimeException e) {
+            sb.append(" diag-error=").append(e);
+        }
+        return sb.toString();
+    }
+
+    /** Diagnostics only: the play-out's end state when a line ran without breaking and did not win. */
+    static String endState(Game g, Player me, Follower f) {
+        final StringBuilder sb = new StringBuilder();
+        try {
+            final PhaseHandler ph = g.getPhaseHandler();
+            int devotion = me.getDevotionMod();
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                devotion += ForcedWinModel.bluePips(c);
+            }
+            sb.append("t").append(ph.getTurn()).append(' ').append(ph.getPhase()).append(" cursor=").append(f.cursor).append('/')
+                    .append(f.line.steps.size()).append(f.done ? " done" : "").append(f.attackPending ? " attackPending" : "")
+                    .append(" life=").append(me.getLife()).append(" libSize=").append(me.getCardsIn(ZoneType.Library).size())
+                    .append(" devotionU=").append(devotion).append(" hand=").append(cardNames(me.getCardsIn(ZoneType.Hand), 10))
+                    .append(" lib=").append(cardNames(me.getCardsIn(ZoneType.Library), 4));
+            for (Player o : me.getOpponents()) {
+                sb.append(" oppLife=").append(o.getLife()).append(" oppLib=").append(o.getCardsIn(ZoneType.Library).size());
+            }
+            sb.append(" stack=").append(g.getStack().size()).append(" over=").append(g.isGameOver());
+        } catch (RuntimeException e) {
+            sb.append(" diag-error=").append(e);
+        }
+        return sb.toString();
     }
 
     // ------------------------------------------------------------------ live answers (choice asks of the line)
@@ -983,7 +1157,7 @@ public final class ForcedWinSolver {
             final SpellAbility sa = locate(g, me, st);
             if (sa == null) {
                 broken = true;
-                why = "missing:" + st;
+                why = "missing:" + st + " {" + diagnose(g, me, st) + "}";
                 n.broken = true;
                 n.why = why;
                 return n;

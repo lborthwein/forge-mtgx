@@ -62,6 +62,12 @@ public final class ForcedWinPlanner {
         String triggerRef;
         /** ENGINE steps: the forced pick (by name) of the first search of our library this step makes (null = AI's). */
         String pickName;
+        /**
+         * Diagnostics (solver-gaps-1015): the width model's expected hand and library top (6 entries) before this step,
+         * as planner card indices (filled when the line is recorded into ids; -1 = an unseen card). Shared on copy.
+         */
+        int[] expHandIdx, expLibIdx;
+        List<Integer> expHand = List.of(), expLib = List.of();
 
         Step(AbilKind kind, ACard host, Abil ab, int floatColor) {
             this.kind = kind;
@@ -102,6 +108,10 @@ public final class ForcedWinPlanner {
             s.engineSpell = engineSpell;
             s.triggerRef = triggerRef;
             s.pickName = pickName;
+            s.expHandIdx = expHandIdx;
+            s.expLibIdx = expLibIdx;
+            s.expHand = expHand;
+            s.expLib = expLib;
             return s;
         }
 
@@ -567,6 +577,8 @@ public final class ForcedWinPlanner {
             }
         }
         final Step step = new Step(ab.kind, a, ab, -1);
+        step.expHandIdx = s0.hand.stream().mapToInt(Integer::intValue).toArray();
+        step.expLibIdx = s0.lib.subList(0, Math.min(6, s0.lib.size())).stream().mapToInt(Integer::intValue).toArray();
         if (!free && !pay(s, ab, self, step)) {
             return out;
         }
@@ -1083,21 +1095,31 @@ public final class ForcedWinPlanner {
         for (Step st : s.steps) {
             steps.add(st.copy());
         }
+        int[] slotCard = new int[0];
         if (s.pile != null && s.pileStep >= 0 && s.pileStep < steps.size()) {
             final List<Integer> left = new ArrayList<>(s.remaining);
             left.sort(Comparator.comparingInt((Integer r) -> -cards.get(r).order()).thenComparingInt(r -> cards.get(r).id));
             int li = 0;
             final Step ps = steps.get(s.pileStep);
             ps.pile.clear();
+            slotCard = new int[s.pile.length];
             for (int i = 0; i < s.pile.length; i++) {
                 int c = s.pile[i];
                 if (c < 0) {
                     c = li < left.size() ? left.get(li++) : -1;
                 }
+                slotCard[i] = c;
                 if (c >= 0) {
                     ps.pile.add(cards.get(c).id);
                     pileNames.add(cards.get(c).name);
                 }
+            }
+        }
+        // diagnostics: the expected hand and library top of each step, as card ids (-1 = unseen)
+        for (Step st : steps) {
+            if (st.expHandIdx != null) {
+                st.expHand = expIds(st.expHandIdx, slotCard);
+                st.expLib = expIds(st.expLibIdx, slotCard);
             }
         }
         int mana = 0;
@@ -1124,6 +1146,21 @@ public final class ForcedWinPlanner {
                 result.nextTurn = true;
             }
         }
+    }
+
+    private List<Integer> expIds(int[] idx, int[] slotCard) {
+        final List<Integer> out = new ArrayList<>(idx.length);
+        for (int e : idx) {
+            if (e == UNKNOWN || e == unknownCard) {
+                out.add(-1);
+            } else if (e >= 0) {
+                out.add(cards.get(e).id);
+            } else {
+                final int slot = LAZY - e;
+                out.add(slot < slotCard.length && slotCard[slot] >= 0 ? cards.get(slotCard[slot]).id : -1);
+            }
+        }
+        return out;
     }
 
     private void rank() {
