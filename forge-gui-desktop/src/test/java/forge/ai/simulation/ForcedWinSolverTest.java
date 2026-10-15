@@ -33,7 +33,8 @@ import forge.game.zone.ZoneType;
 
 /**
  * Lane doomsday-solver-1012: the general forced-win solver (off by default; the built-in profiles "ForcedWin" and
- * "CubeComboSolver" turn it on). Positions here are non-Doomsday families: Doomsday is the solver's held-out test.
+ * "CubeComboSolver" turn it on). solver-gaps-1015: Doomsday is no longer held out; that lane's held-out families are
+ * kitten and thopter-sword, which no test here uses.
  */
 public class ForcedWinSolverTest extends AITest {
 
@@ -243,6 +244,115 @@ public class ForcedWinSolverTest extends AITest {
             }
         }
         return -1;
+    }
+
+    // ------------------------------------------------------------------ solver-gaps-1015: model fixes, all probed
+
+    @Test
+    public void probesLearnConditionsEnteringOptionalCostsHybridAndLifeShares() {
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(
+                "Library of Alexandria;Xander's Lounge;Sicarian Infiltrator;Manamorphose;Doomsday", "Swamp;Island", 20, "",
+                "Island", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
+        // "draw a card: activate only if you have exactly seven cards in hand": legal at hand size 7 only
+        final ACard loa = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Library of Alexandria"), 1, st);
+        Abil draw = null;
+        for (Abil a : loa.onBattlefield) {
+            if (a.has(EffKind.DRAW)) {
+                draw = a;
+            }
+        }
+        Assert.assertNotNull(draw, loa.onBattlefield.toString());
+        Assert.assertFalse(draw.unplayable, draw.toString());
+        Assert.assertEquals(draw.handMask, 1 << 7, draw.toString());
+        // a land that enters tapped is learned by playing it
+        final ACard lounge = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Xander's Lounge"), 1, st);
+        Assert.assertTrue(lounge.entersTapped, lounge.note);
+        final ACard swamp = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Battlefield, "Swamp"), 1, st);
+        Assert.assertFalse(swamp.entersTapped);
+        // ... also when first seen in our library (a pile card)
+        final Card triome = createCard("Zagoth Triome", me);
+        me.getZone(ZoneType.Library).add(triome);
+        Assert.assertTrue(ForcedWinProbe.learn(g, me, triome, 1, st).entersTapped);
+        // squad is an optional additional cost: the probe pays the printed cost only (one draw, not one per copy)
+        final ACard sic = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Sicarian Infiltrator"), 1, st);
+        for (Abil a : sic.fromHand) {
+            if (a.has(EffKind.DRAW)) {
+                Assert.assertEquals(a.effects.stream().filter(e -> e.kind == EffKind.DRAW).mapToInt(e -> e.n).sum(), 1, a.toString());
+            }
+        }
+        // {R/G} is one red or green mana, not any mana
+        final ACard morph = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Manamorphose"), 1, st);
+        final Abil m = morph.fromHand.get(0);
+        Assert.assertEquals(m.hybrid, List.of((1 << ForcedWinModel.R) | (1 << ForcedWinModel.G)), m.toString());
+        Assert.assertEquals(m.generic, 1, m.toString());
+        // "lose half your life, rounded up" is a share of the life total, seen at two life totals
+        final ACard dd = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Doomsday"), 1, st);
+        Eff life = null;
+        for (Eff e : dd.fromHand.get(0).effects) {
+            if (e.kind == EffKind.LIFE) {
+                life = e;
+            }
+        }
+        Assert.assertNotNull(life, dd.fromHand.toString());
+        Assert.assertEquals(life.lifeChange(20), -10, life.toString());
+        Assert.assertEquals(life.lifeChange(9), -5, life.toString());
+    }
+
+    @Test
+    public void theWidthSearchKeepsLibraryOfAlexandriasHandCondition() {
+        // LoA on the battlefield, Thassa's Oracle next; with 7 cards in hand LoA draws it, with 6 it cannot
+        final String lib = "Thassa's Oracle;Island";
+        for (int handSize : new int[] {6, 7}) {
+            final StringBuilder hand = new StringBuilder();
+            for (int i = 0; i < handSize; i++) {
+                hand.append(i == 0 ? "" : ";").append("Grizzly Bears");
+            }
+            final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(hand.toString(),
+                    "Library of Alexandria;Island;Island", 20, "", "Island", 20, "human").replace(
+                    "humanlibrary=" + OURLIB, "humanlibrary=" + lib));
+            final Player me = g.getPlayers().get(0);
+            final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+            // the seat knows its top (it put it there): pile memory
+            s.notePlaced(me.getCardsIn(ZoneType.Library));
+            final ForcedWinModel.Position pos = s.readPosition(g, s.knownTop(g));
+            Assert.assertNotNull(pos.knownOrder, pos.describe());
+            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            lim.horizon = 1;
+            final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
+            Assert.assertEquals(!res.lines.isEmpty(), handSize == 7, handSize + " " + res.summary() + " " + pos.describe());
+        }
+    }
+
+    @Test
+    public void pileMemoryKnowsWhatTheSeatPutOnTopUntilAShuffle() {
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(
+                "Gitaxian Probe;Thassa's Oracle;Grizzly Bears", "Island;Island;Island", 20, "", "Island", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+        Assert.assertNull(s.knownTop(g), "an unknown library has no known top");
+        // put Thassa's Oracle back on top (a put-back of ours): the seat knows it is there
+        final Card oracle = inZone(me, ZoneType.Hand, "Thassa's Oracle");
+        g.getAction().moveToLibrary(oracle, 0, null);
+        final List<Integer> top = s.knownTop(g);
+        Assert.assertNotNull(top);
+        Assert.assertEquals(top.get(0).intValue(), oracle.getId());
+        // the width search plans on it: Gitaxian Probe draws the Oracle, which wins with a small library
+        for (Card c : new ArrayList<>(me.getCardsIn(ZoneType.Library))) {
+            if (c.getId() != oracle.getId() && me.getCardsIn(ZoneType.Library).size() > 2) {
+                g.getAction().exile(c, null, null);
+            }
+        }
+        final ForcedWinModel.Position pos = s.readPosition(g, s.knownTop(g));
+        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        lim.horizon = 1;
+        Assert.assertFalse(ForcedWinPlanner.plan(pos, lim).lines.isEmpty(), pos.describe());
+        // a shuffle of our library forgets it; the same position then has no line
+        me.shuffle(null);
+        Assert.assertNull(s.knownTop(g));
+        final ForcedWinModel.Position unknown = s.readPosition(g, s.knownTop(g));
+        Assert.assertTrue(ForcedWinPlanner.plan(unknown, lim).lines.isEmpty(), unknown.describe());
     }
 
     // ------------------------------------------------------------------ offense: width search, engine, live seat

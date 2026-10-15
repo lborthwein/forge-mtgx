@@ -77,11 +77,23 @@ public final class ForcedWinSolver {
         public double counterDelta = 0.25;
         public int engineNodes = 250;
         public long engineMs = 4000;
+        /**
+         * solver-gaps-1015: the engine search may run until the decision's 8 s budget minus this reserve for its line's
+         * evaluation (at least engineMs); the evaluation stops at the budget. A long storm loop (Underworld Breach, Brain
+         * Freeze) needed about 140 engine nodes, 6 s under a 4-thread load.
+         */
+        public long evalReserveMs = 2000;
         public int maxSteps = 4000;
         public long seed = 20261012L;
+        /**
+         * EVAL only (solver-gaps-1015): a frame that starts mid-pile hands the seat its library as built by the seat (the
+         * frame lost the seat's memory of it). Off by default; never on in natural games.
+         */
+        public boolean frameMemory;
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
+            c.frameMemory = "true".equals(get.apply("frameMemory"));
             c.worlds = intOr(get.apply("worlds"), c.worlds);
             c.top = intOr(get.apply("top"), c.top);
             c.threshold = dblOr(get.apply("threshold"), c.threshold);
@@ -95,6 +107,7 @@ public final class ForcedWinSolver {
             c.counterDelta = dblOr(get.apply("counterDelta"), c.counterDelta);
             c.engineNodes = intOr(get.apply("engineNodes"), c.engineNodes);
             c.engineMs = intOr(get.apply("engineMs"), (int) c.engineMs);
+            c.evalReserveMs = intOr(get.apply("evalReserveMs"), (int) c.evalReserveMs);
             return c;
         }
 
@@ -250,15 +263,100 @@ public final class ForcedWinSolver {
         return Decision.NONE;
     }
 
+    // ------------------------------------------------------------------ pile memory (solver-gaps-1015)
+
+    /**
+     * Ids of our library cards whose position the seat knows: cards that moved into our library (we put them back, a
+     * pile we chose, a card from a public zone) or whose order we chose. A shuffle of our library forgets them all.
+     */
+    final Set<Integer> placed = new HashSet<>();
+    private boolean watching;
+
+    /** Live-game listener (read-only): moves into our library and shuffles of it. */
+    public static final class LibraryWatch {
+        final ForcedWinSolver solver;
+
+        LibraryWatch(ForcedWinSolver solver) {
+            this.solver = solver;
+        }
+
+        @com.google.common.eventbus.Subscribe
+        public void on(forge.game.event.GameEventShuffle e) {
+            if (e.player() != null && e.player().getId() == solver.me.getId()) {
+                solver.placed.clear();
+            }
+        }
+
+        @com.google.common.eventbus.Subscribe
+        public void on(forge.game.event.GameEventCardChangeZone e) {
+            if (e.card() != null && e.to() != null && e.to().zoneType() == ZoneType.Library && e.to().player() != null
+                    && e.to().player().getId() == solver.me.getId()) {
+                solver.placed.add(e.card().getId());
+            }
+        }
+    }
+
+    /** Start watching our library (once; the seat's first decision). */
+    void watch(Game live) {
+        if (watching) {
+            return;
+        }
+        watching = true;
+        live.subscribeToEvents(new LibraryWatch(this));
+        if (cfg.frameMemory) {
+            // EVAL only (frames mined mid-pile): the seat built its library top before the frame began
+            for (Card c : me.getCardsIn(ZoneType.Library)) {
+                placed.add(c.getId());
+            }
+        }
+    }
+
+    /** Our seat chose the order of these cards going to our library (a pile, a put-back, a look at our top). */
+    public void notePlaced(Iterable<Card> cards) {
+        if (cards == null) {
+            return;
+        }
+        for (Card c : cards) {
+            if (c != null && c.getOwner() == me) {
+                placed.add(c.getId());
+            }
+        }
+    }
+
+    /** The known top of our library: the longest prefix whose cards the seat placed; null when none. */
+    List<Integer> knownTop(Game live) {
+        watch(live);
+        final List<Integer> out = new ArrayList<>();
+        for (Card c : me.getCardsIn(ZoneType.Library)) {
+            if (!placed.contains(c.getId())) {
+                break;
+            }
+            out.add(c.getId());
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    private int placedCount(Player p) {
+        int n = 0;
+        for (Card c : p.getCardsIn(ZoneType.Library)) {
+            if (!placed.contains(c.getId())) {
+                break;
+            }
+            n++;
+        }
+        return n;
+    }
+
     // ------------------------------------------------------------------ offense: width search, then engine
 
     /** The position key the width search's verdict is cached under (same key, same verdict). */
-    private static String positionKey(Game live, Player me) {
+    private String positionKey(Game live, Player me) {
         final StringBuilder sb = new StringBuilder();
         sb.append(live.getPhaseHandler().getTurn()).append(live.getPhaseHandler().getPhase()).append('|')
                 .append(me.getLife()).append('|').append(me.getManaPool().totalMana()).append('|')
                 .append(me.getLandsPlayedThisTurn()).append('|').append(live.getStack().getSpellsCastThisTurn().size())
                 .append('|').append(me.getCardsIn(ZoneType.Library).size()).append('h');
+        sb.append('k').append(placedCount(me)).append('|');
         for (Card c : me.getCardsIn(ZoneType.Hand)) {
             sb.append(c.getId()).append(',');
         }
@@ -301,7 +399,7 @@ public final class ForcedWinSolver {
         decisions++;
         final int index = decisionIndex++;
         final long t0 = System.nanoTime();
-        final Position pos = readPosition(live, null);
+        final Position pos = readPosition(live, knownTop(live));
         if (pos == null) {
             noLineKey = key;
             return null;
@@ -453,11 +551,14 @@ public final class ForcedWinSolver {
         p.hand.addAll(b.hand);
         p.battlefield.addAll(b.battlefield);
         p.tapped.addAll(b.tapped);
+        p.used.addAll(b.used);
+        p.oppPowers.addAll(b.oppPowers);
         p.devotionBlue = b.devotionBlue;
         p.emptyDrawWinLive = b.emptyDrawWinLive;
         p.library.addAll(b.library);
         p.graveyard.addAll(b.graveyard);
         p.knownOrder = b.knownOrder;
+        p.knownTop.addAll(b.knownTop);
         p.librarySize = b.librarySize;
         p.canDraw = b.canDraw;
         p.pendingId = b.pendingId;
@@ -596,7 +697,9 @@ public final class ForcedWinSolver {
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
         final long t1 = System.nanoTime();
-        final Line line = ForcedWinEngine.search(live, me, el, engineStats, t1 + cfg.engineMs * 1_000_000L,
+        final long engineDeadline = Math.max(t1 + cfg.engineMs * 1_000_000L,
+                t0 + (cfg.budgetMs - cfg.evalReserveMs) * 1_000_000L);
+        final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index));
         engineNanos += System.nanoTime() - t1;
         receipt("FORCED_WIN engine" + tag() + " turn=" + pos.turn + " found=" + (line != null) + " " + engineStats.summary()
@@ -606,7 +709,8 @@ public final class ForcedWinSolver {
         }
         engineFound++;
         evaluated++;
-        final Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999), System.nanoTime() + cfg.budgetMs * 1_000_000L);
+        final Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999),
+                Math.max(t0 + cfg.budgetMs * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2));
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
         if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold) {
             return null;
@@ -838,23 +942,45 @@ public final class ForcedWinSolver {
         }
         Collections.shuffle(pool, rng);
         final List<Card> newHand = new ArrayList<>(keep);
+        final List<Card> hidden = new ArrayList<>();
         if (!hide) {
             final int need = hand.size() - keep.size();
             newHand.addAll(pool.subList(0, need));
             pool.subList(0, need).clear();
+        } else {
+            // solver-gaps-1015: the hidden hand leaves the game (exile), not into their library: their library keeps its
+            // size (a milled-out opponent stays milled out in the unopposed world)
+            for (Card c : hand) {
+                if (!keep.contains(c)) {
+                    hidden.add(c);
+                    pool.remove(c);
+                }
+            }
         }
         opp.getZone(ZoneType.Hand).setCards(newHand);
         opp.getZone(ZoneType.Library).setCards(pool);
+        if (!hidden.isEmpty()) {
+            final List<Card> ex = new ArrayList<>(opp.getCardsIn(ZoneType.Exile));
+            ex.addAll(hidden);
+            opp.getZone(ZoneType.Exile).setCards(ex);
+        }
     }
 
-    /** Our library order is unknown to us unless the line built it: shuffle it in each world. */
+    /**
+     * Our library order is unknown to us except the top the seat put there (pile memory, solver-gaps-1015): shuffle the
+     * rest in each world.
+     */
     static void shuffleUnknownOwnLibrary(Player me, Line line, Random rng) {
-        if (line.knownLibrary) {
+        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+        final int k = Math.min(line.knownTop, lib.size());
+        if (k >= lib.size()) {
             return;
         }
-        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
-        Collections.shuffle(lib, rng);
-        me.getZone(ZoneType.Library).setCards(lib);
+        final List<Card> rest = new ArrayList<>(lib.subList(k, lib.size()));
+        Collections.shuffle(rest, rng);
+        final List<Card> out = new ArrayList<>(lib.subList(0, k));
+        out.addAll(rest);
+        me.getZone(ZoneType.Library).setCards(out);
     }
 
     // ------------------------------------------------------------------ diagnostics (solver-gaps-1015)
@@ -1026,10 +1152,18 @@ public final class ForcedWinSolver {
 
     public Card answerPick(ZoneType destination, List<ZoneType> origin, SpellAbility source, CardCollection choices,
             Player decider) {
-        return active == null || decider != me ? null : active.pick(source, choices);
+        final Card c = active == null || decider != me ? null : active.pick(source, choices);
+        if (c != null && destination == ZoneType.Library) {
+            notePlaced(List.of(c));
+        }
+        return c;
     }
 
     public CardCollectionView answerOrder(CardCollectionView cards, ZoneType destination, SpellAbility source) {
+        if (destination == ZoneType.Library) {
+            // pile memory: whichever order is chosen for our library, it is ours
+            notePlaced(cards);
+        }
         return active == null ? null : active.order(cards, destination, source);
     }
 
@@ -1118,6 +1252,11 @@ public final class ForcedWinSolver {
                 return n;
             }
             final PhaseHandler ph = g.getPhaseHandler();
+            if (passTurn < 0 && cursor < line.steps.size() && line.steps.get(cursor).pass) {
+                // solver-gaps-1015: a PASS ends the turn it is reached in, ours or theirs (a line taken at their end step
+                // starts with PASS: it means "to our next turn", not "skip our next turn")
+                passTurn = ph.getTurn();
+            }
             if (!ph.isPlayerTurn(me) || !(ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))) {
                 n.waiting = !done;
                 if (done) {
@@ -1177,17 +1316,19 @@ public final class ForcedWinSolver {
                 return null;
             }
             if (st.kind == AbilKind.FLOAT) {
+                // solver-gaps-1015: the colour the line spends it on (a returned land's float, or any-colour mana)
+                final int colour = st.floatColor >= 0 ? st.floatColor : firstColour(st.anyColors);
                 for (SpellAbility m : host.getManaAbilities()) {
                     final SpellAbility a = m.copy(me);
                     a.setActivatingPlayer(me);
                     if (!st.desc.isEmpty() && !st.desc.equals(a.getDescription())) {
                         continue;
                     }
-                    if (st.floatColor >= 0) {
-                        if (a.getManaPart() == null || !a.canProduce(ForcedWinModel.SHORT[st.floatColor])) {
+                    if (colour >= 0 && colour < 5) {
+                        if (a.getManaPart() == null || !a.canProduce(ForcedWinModel.SHORT[colour])) {
                             continue;
                         }
-                        a.setManaExpressChoice(ColorSet.fromMask(ForcedWinModel.FORGE_COLOR[st.floatColor]));
+                        a.setManaExpressChoice(ColorSet.fromMask(ForcedWinModel.FORGE_COLOR[colour]));
                     }
                     if (!a.canPlay() || !ComputerUtilCost.canPayCost(a, me, false)) {
                         continue;
@@ -1237,10 +1378,44 @@ public final class ForcedWinSolver {
             if (st.phyrexianLife && sa.hasParam("AIPhyrexianPayment")) {
                 sa.getMapParams().remove("AIPhyrexianPayment");
             }
+            directAnyMana(sa, st);
             if (!sa.canPlay() || !ComputerUtilCost.canPayCost(sa, me, false)) {
                 return null;
             }
             return sa;
+        }
+
+        /** The first coloured choice of a step's any-colour mana, or -1. */
+        static int firstColour(List<Integer> cols) {
+            for (int c : cols) {
+                if (c >= 0 && c < 5) {
+                    return c;
+                }
+            }
+            return -1;
+        }
+
+        /**
+         * solver-gaps-1015: make a step's any-colour mana (Manamorphose, a ritual of any colour) come out in the colours the
+         * line spends it on, through the mana part's express choice (as Forge AI's own payment does).
+         */
+        static void directAnyMana(SpellAbility sa, Step st) {
+            if (st.anyColors.isEmpty()) {
+                return;
+            }
+            final int first = firstColour(st.anyColors);
+            if (first < 0) {
+                return;
+            }
+            final StringBuilder sb = new StringBuilder();
+            for (int c : st.anyColors) {
+                sb.append(sb.length() == 0 ? "" : " ").append(ForcedWinModel.SHORT[c >= 0 && c < 5 ? c : first]);
+            }
+            for (SpellAbility l = sa; l != null; l = l.getSubAbility()) {
+                if (l.getManaPart() != null) {
+                    l.getManaPart().setExpressChoice(sb.toString());
+                }
+            }
         }
 
         /** A pick of a resolving step: its pile / tutor / put-back answer among the offered cards. */

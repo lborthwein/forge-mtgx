@@ -168,12 +168,21 @@ final class ForcedWinEngine {
             ForcedWinSolver.receipt("FW_ENGINE node depth=" + depth + " path=" + node.path + " moves=" + moves);
         }
         int tried = 0;
+        final Set<Step> variants = new HashSet<>();
         for (int mi = 0; mi < moves.size(); mi++) {
             final Step mv = moves.get(mi);
-            if (out() || tried >= lim.branching) {
-                break;
+            // solver-gaps-1015: the branching cap counts distinct moves only; the forced-answer variants of a move (its
+            // picks, its trigger targets) have their own cap and no longer crowd the other moves out (Natural Order's
+            // variants used every branch, so casting Llanowar Elves first was never tried)
+            if (out() || !variants.contains(mv) && tried >= lim.branching) {
+                if (out()) {
+                    break;
+                }
+                continue;
             }
-            tried++;
+            if (!variants.contains(mv)) {
+                tried++;
+            }
             st.moves++;
             final Applied a = apply(node, mv);
             if (TRACE) {
@@ -193,6 +202,7 @@ final class ForcedWinEngine {
                     final Step v = mv.copy();
                     v.pickName = name;
                     moves.add(mi + k, v);
+                    variants.add(v);
                 }
             }
             if (mv.triggerRef == null && !a.triggerCandidates.isEmpty()) {
@@ -205,6 +215,7 @@ final class ForcedWinEngine {
                     final Step v = mv.copy();
                     v.triggerRef = ref;
                     moves.add(mi + k, v);
+                    variants.add(v);
                 }
             }
             if (a.won) {
@@ -553,8 +564,9 @@ final class ForcedWinEngine {
     }
 
     /**
-     * The first search of our own library our ability makes in a step's window (a tutor, Natural Order): the distinct
-     * names offered are recorded, highest mana value first (the big payoffs), and a forced pick is taken by name.
+     * The first choice of one of our own cards our ability makes in a step's window (a tutor, Natural Order; since
+     * solver-gaps-1015 also a card from our hand or graveyard: Show and Tell, Sneak Attack): the distinct names offered are
+     * recorded, highest mana value first (the big payoffs), and a forced pick is taken by name.
      */
     static final class LibraryPicks {
         final String forced;
@@ -566,8 +578,12 @@ final class ForcedWinEngine {
         }
 
         Card pick(Player me, List<ZoneType> origin, SpellAbility sa, forge.game.card.CardCollection fetchList, Player decider) {
-            if (seen || decider != me || origin == null || !origin.contains(ZoneType.Library) || sa == null
-                    || sa.getActivatingPlayer() != me || fetchList == null || fetchList.isEmpty()) {
+            // solver-gaps-1015: any of our own zones (a creature put from our hand by Show and Tell or Sneak Attack, a
+            // card returned from our graveyard), not only our library
+            if (seen || decider != me || origin == null || !(origin.contains(ZoneType.Library) || origin.contains(ZoneType.Hand)
+                    || origin.contains(ZoneType.Graveyard)) || sa == null
+                    || sa.getActivatingPlayer() != me || fetchList == null || fetchList.isEmpty()
+                    || fetchList.stream().anyMatch(c -> c.getOwner() != me)) {
                 return null;
             }
             seen = true;
