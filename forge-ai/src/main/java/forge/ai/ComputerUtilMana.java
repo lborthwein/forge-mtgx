@@ -66,10 +66,11 @@ public class ComputerUtilMana {
          * @param toPay      the shard Forge AI pays next
          * @param candidates Forge AI's candidate abilities for the shard, in its order (a copy)
          * @param checkCosts the {@code checkCosts} flag Forge AI's own choice is made with
+         * @param effect     the payment is an effect's (not a spell's or ability's own cost)
          * @return one of {@code candidates}, or null for Forge AI's own choice
          */
         SpellAbility chooseShardSource(ManaCostBeingPaid cost, SpellAbility sa, ManaCostShard toPay,
-                List<SpellAbility> candidates, boolean checkCosts);
+                List<SpellAbility> candidates, boolean checkCosts, boolean effect);
 
         /** The ability last returned was refused by Forge AI's own checks; Forge AI chose instead. */
         default void shardSourceRefused(SpellAbility pick) {
@@ -719,7 +720,7 @@ public class ComputerUtilMana {
 
             saList.removeAll(saExcludeList);
 
-            SpellAbility saPayment = saList.isEmpty() ? null : chooseShardPayment(cost, sa, ai, toPay, saList, checkPlayable || !test, test);
+            SpellAbility saPayment = saList.isEmpty() ? null : chooseShardPayment(cost, sa, ai, toPay, saList, checkPlayable || !test, test, effect);
 
             if (saPayment != null && ComputerUtilCost.isSacrificeSelfCost(saPayment.getPayCosts()) && sa.isTargeting(saPayment.getHostCard())) {
                 // not a good idea to sac a card that you're targeting with the SA you're paying for
@@ -853,10 +854,11 @@ public class ComputerUtilMana {
      * {@link #chooseManaAbility} over that ability alone; null (or a pick it refuses) leaves Forge AI's choice.
      */
     private static SpellAbility chooseShardPayment(final ManaCostBeingPaid cost, final SpellAbility sa, final Player ai,
-            final ManaCostShard toPay, final Collection<SpellAbility> saList, final boolean checkCosts, final boolean test) {
+            final ManaCostShard toPay, final Collection<SpellAbility> saList, final boolean checkCosts, final boolean test,
+            final boolean effect) {
         if (!test && ai.getController() instanceof ShardSourceChooser) {
             final SpellAbility pick = ((ShardSourceChooser) ai.getController()).chooseShardSource(cost, sa, toPay,
-                    new ArrayList<>(saList), checkCosts);
+                    new ArrayList<>(saList), checkCosts, effect);
             if (pick != null && saList.contains(pick)) {
                 final SpellAbility paid = chooseManaAbility(cost, sa, ai, toPay, Lists.newArrayList(pick), checkCosts);
                 if (paid != null) {

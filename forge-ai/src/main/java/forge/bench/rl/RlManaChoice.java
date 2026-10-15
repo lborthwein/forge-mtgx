@@ -76,6 +76,8 @@ public final class RlManaChoice {
         public int candidates, acceptable;
         /** Distinct (name, ability) among the acceptable candidates: the naive count of choices. */
         public int names;
+        /** Options before the rest-of-the-cost test, and those it dropped (the rest could not be paid after them). */
+        public int optionsRaw, dropped;
 
         public boolean contested() {
             return options.size() >= 2 && forge >= 0;
@@ -88,6 +90,16 @@ public final class RlManaChoice {
      */
     public static Ask enumerate(final Game game, final Player ai, final ManaCostBeingPaid cost, final SpellAbility sa,
             final ManaCostShard toPay, final List<SpellAbility> candidates, final boolean checkCosts) {
+        return enumerate(game, ai, cost, sa, toPay, candidates, checkCosts, false, false);
+    }
+
+    /**
+     * As above; with {@code restCheck}, an option other than Forge AI's is kept only if the rest of the cost can still be
+     * paid after paying the shard with it ({@link #restPayable}): a legal payment, not one that strands the spell.
+     */
+    public static Ask enumerate(final Game game, final Player ai, final ManaCostBeingPaid cost, final SpellAbility sa,
+            final ManaCostShard toPay, final List<SpellAbility> candidates, final boolean checkCosts,
+            final boolean effect, final boolean restCheck) {
         final Ask ask = new Ask();
         ask.candidates = candidates.size();
         final Map<String, Option> byKey = new LinkedHashMap<>();
@@ -126,7 +138,54 @@ public final class RlManaChoice {
                 ask.forge = ask.options.size() - 1;
             }
         }
+        ask.optionsRaw = ask.options.size();
+        if (restCheck && ask.forge >= 0 && ask.options.size() >= 2) {
+            final Option f = ask.options.get(ask.forge);
+            ask.options.removeIf(o -> o != f && !restPayable(game, ai, cost, sa, toPay, o.ma, effect));
+            ask.dropped = ask.optionsRaw - ask.options.size();
+            ask.forge = ask.options.indexOf(f);
+        }
         return ask;
+    }
+
+    /**
+     * Whether the rest of the cost can still be paid after paying the shard with {@code ma}: Forge AI's own test payment
+     * ({@code canPayManaCost}) of the cost left once {@code ma}'s predicted mana is applied, with {@code ma}'s source
+     * tapped meanwhile (so it is not counted twice). Isolated; the source's tapped state is put back.
+     */
+    static boolean restPayable(final Game game, final Player ai, final ManaCostBeingPaid cost, final SpellAbility sa,
+            final ManaCostShard toPay, final SpellAbility ma, final boolean effect) {
+        return PlayerControllerBridge.isolated(game, () -> {
+            final ManaCostBeingPaid rest = new ManaCostBeingPaid(cost);
+            final String produced = ComputerUtilMana.predictMana(ma, ai, toPay);
+            for (String part : produced.split(" ")) {
+                if (part.isEmpty()) {
+                    continue;
+                }
+                if (part.chars().allMatch(Character::isDigit)) {
+                    for (int i = Integer.parseInt(part); i > 0; i--) {
+                        if (!rest.ai_payMana("1", ai.getManaPool())) {
+                            break;
+                        }
+                    }
+                } else {
+                    rest.ai_payMana(forge.card.MagicColor.toShortString(part), ai.getManaPool());
+                }
+            }
+            if (rest.isPaid()) {
+                return true;
+            }
+            final Card h = ma.getHostCard();
+            final boolean was = h.isTapped();
+            h.setTapped(true);
+            try {
+                return ComputerUtilMana.canPayManaCost(rest, sa, ai, effect);
+            } catch (RuntimeException e) {
+                return false;
+            } finally {
+                h.setTapped(was);
+            }
+        });
     }
 
     /**
@@ -263,6 +322,10 @@ public final class RlManaChoice {
         if (newPayment) {
             cc.instrument("pay.payments");
         }
+        if (a.optionsRaw >= 2 && a.forge >= 0) {
+            cc.instrument("pay.contestedRaw");
+        }
+        cc.instrument("pay.dropped", a.dropped);
         cc.instrument("pay.enumUs", (int) Math.min(Integer.MAX_VALUE, enumNanos / 1000));
         if (a.names >= 2) {
             cc.instrument("pay.names");

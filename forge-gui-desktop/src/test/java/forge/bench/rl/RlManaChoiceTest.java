@@ -37,6 +37,7 @@ public class RlManaChoiceTest extends AITest {
         final List<ManaCostShard> shards = new ArrayList<>();
         Function<RlManaChoice.Ask, SpellAbility> pick = a -> null;
         boolean enumerate = true;
+        boolean restCheck = true;
         int refused;
 
         Chooser(final Game g, final Player p) {
@@ -45,12 +46,13 @@ public class RlManaChoiceTest extends AITest {
 
         @Override
         public SpellAbility chooseShardSource(final ManaCostBeingPaid cost, final SpellAbility sa,
-                final ManaCostShard toPay, final List<SpellAbility> candidates, final boolean checkCosts) {
+                final ManaCostShard toPay, final List<SpellAbility> candidates, final boolean checkCosts,
+                final boolean effect) {
             if (!enumerate) {
                 return null;
             }
             final RlManaChoice.Ask a = RlManaChoice.enumerate(getGame(), getPlayer(), cost, sa, toPay, candidates,
-                    checkCosts);
+                    checkCosts, effect, restCheck);
             asks.add(a);
             shards.add(toPay);
             return pick.apply(a);
@@ -202,6 +204,33 @@ public class RlManaChoiceTest extends AITest {
         }
         Assert.assertEquals(states[1], states[0]);
         Assert.assertEquals(next[1], next[0], "the enumeration drew from the live random stream");
+    }
+
+    /** The rest-of-the-cost test: a source is a legal payment only if what is left can still be paid without it. */
+    @Test
+    public void restPayableSeesAStrandedCost() {
+        for (int islands = 1; islands <= 2; islands++) {
+            final Game game = initAndCreateGame();
+            final Player ai = game.getPlayers().get(1);
+            fillLibrary(ai, 5);
+            final List<Card> isl = addCards("Island", islands, ai);
+            addCard("Mountain", ai);
+            final Card cs = addCardToZone("Counterspell", ai, ZoneType.Hand);
+            game.getAction().checkStateEffects(true);
+            final SpellAbility sa = cs.getFirstSpellAbility();
+            sa.setActivatingPlayer(ai);
+            final ManaCostBeingPaid cost = new ManaCostBeingPaid(sa.getPayCosts().getTotalMana());
+            final SpellAbility ma = isl.get(0).getManaAbilities().get(0);
+            MyRandom.setThreadRandom(new Random(5));
+            try {
+                final boolean ok = RlManaChoice.restPayable(game, ai, cost, sa, ManaCostShard.BLUE, ma, false);
+                Assert.assertEquals(ok, islands == 2, islands + " Islands: the second U needs another Island");
+                Assert.assertEquals(MyRandom.getRandom().nextLong(), new Random(5).nextLong(), "isolated");
+            } finally {
+                MyRandom.setThreadRandom(null);
+            }
+            Assert.assertFalse(isl.get(0).isTapped(), "the source's tapped state is put back");
+        }
     }
 
     /** The MANA_SOURCE menu: AUTO first, then one candidate per option; AUTO and Forge AI's own source flagged. */

@@ -3811,7 +3811,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
      */
     @Override
     public SpellAbility chooseShardSource(final ManaCostBeingPaid cost, final SpellAbility sa, final ManaCostShard toPay,
-            final List<SpellAbility> candidates, final boolean checkCosts) {
+            final List<SpellAbility> candidates, final boolean checkCosts, final boolean effect) {
         final boolean census = session.isPayCensus();
         final boolean asks = session.isManaSourceAsk(seat) && localAnswers();
         if (!census && !asks || !isLiveGame()) {
@@ -3833,7 +3833,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         final forge.bench.rl.RlManaChoice.Ask a;
         try {
             final long t0 = System.nanoTime();
-            a = forge.bench.rl.RlManaChoice.enumerate(getGame(), getPlayer(), cost, sa, toPay, candidates, checkCosts);
+            a = forge.bench.rl.RlManaChoice.enumerate(getGame(), getPlayer(), cost, sa, toPay, candidates, checkCosts,
+                    effect, true);
             final long dt = System.nanoTime() - t0;
             if (census) {
                 forge.bench.rl.RlManaChoice.census(counters, a, sa, fresh,
