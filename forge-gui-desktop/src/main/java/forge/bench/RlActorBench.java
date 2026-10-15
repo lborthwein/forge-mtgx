@@ -150,6 +150,12 @@ public final class RlActorBench {
          */
         boolean manaSource = false;
         /**
+         * r4-payment-1015: with {@link #manaSource}, the RL seats asked are those whose slot ({@code rl:<slot>}) starts
+         * with one of these (e.g. ["M", "W", "eval"]: league snapshots keep Forge paying); null = every RL seat. A GAME's
+         * (a replayed tape's) own "mana_source_slots" wins.
+         */
+        List<String> manaSourceSlots = null;
+        /**
          * S1 (lane s1-search-1007; null = off, the default, and nothing changes): the look-ahead over the RL seats' own
          * priority decisions ({@link RlSearch.Config}), eval and train modes, in the actor's observation schema (obs-v1,
          * or obs-v2 since lane search-v2-1009; a spec {@code obs} pin must equal {@code obsSchema}).
@@ -202,6 +208,10 @@ public final class RlActorBench {
             }
         }
         if (o.has("manaSource")) c.manaSource = o.get("manaSource").getAsBoolean();
+        if (o.has("manaSourceSlots") && !o.get("manaSourceSlots").isJsonNull()) {
+            c.manaSourceSlots = new ArrayList<>();
+            for (JsonElement e : o.getAsJsonArray("manaSourceSlots")) c.manaSourceSlots.add(e.getAsString());
+        }
         if (c.manaSource && c.obsSchema != 3) {
             throw new IllegalArgumentException("manaSource needs obsSchema 3, not " + c.obsSchema);
         }
@@ -560,7 +570,18 @@ public final class RlActorBench {
             return out;
         }
         feat.setVersion(obsVersion);
-        session.setManaSourceAsk(manaSource);
+        // the seats asked: RL seats, filtered by slot (league snapshots may keep Forge paying), and recorder seats
+        // (record mode: Forge AI's source becomes a RECORD frame, the imitation fallback)
+        final List<String> manaSlots = manaSourceSlotsOf(g, cfg.manaSourceSlots);
+        final boolean[] manaSeats = new boolean[ctl.length];
+        boolean anyMana = false;
+        for (int s = 0; s < ctl.length; s++) {
+            final RlSeat.Role role = RlSeat.roleOf(ctl[s]);
+            manaSeats[s] = manaSource && (role == RlSeat.Role.RL && slotMatches(ctl[s], manaSlots)
+                    || role == RlSeat.Role.RECORD);
+            anyMana |= manaSeats[s];
+        }
+        session.setManaSourceSeats(anyMana ? manaSeats : null);
         final RlSeat seat = new RlSeat(feat, ep, sc, uid, ctl, priv);
         seat.listener = listener;
         feat.captureForgeState = cfg.debugForgeStateOut != null;
@@ -913,6 +934,11 @@ public final class RlActorBench {
         if (manaSource) {
             // r4-payment-1015: the mana-source asks as played (a replay re-applies them); no key when off
             t.addProperty("mana_source", true);
+            if (manaSlots != null) {
+                final JsonArray ms = new JsonArray();
+                for (String x : manaSlots) ms.add(x);
+                t.add("mana_source_slots", ms);
+            }
         }
         out.tape = t;
 
@@ -936,6 +962,30 @@ public final class RlActorBench {
             throw new IllegalArgumentException("loop_guard >= 0 (0 = off), not " + k);
         }
         return k;
+    }
+
+    /** r4-payment-1015: the GAME's (a tape's) "mana_source_slots", else the actor's; null = every RL seat. */
+    static List<String> manaSourceSlotsOf(final JsonObject g, final List<String> actorDefault) {
+        if (g == null || !g.has("mana_source_slots") || g.get("mana_source_slots").isJsonNull()) {
+            return actorDefault;
+        }
+        final List<String> out = new ArrayList<>();
+        for (JsonElement e : g.getAsJsonArray("mana_source_slots")) out.add(e.getAsString());
+        return out;
+    }
+
+    /** Whether an RL controller ({@code rl:<slot>}) is one of {@code slots} (by prefix); null = every slot. */
+    static boolean slotMatches(final String controller, final List<String> slots) {
+        if (slots == null) {
+            return true;
+        }
+        final String slot = controller.startsWith("rl:") ? controller.substring(3) : controller;
+        for (String p : slots) {
+            if (slot.startsWith(p)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Controller entry points that notify or plumb rather than decide; left out of forge_decided. */
@@ -1416,8 +1466,11 @@ public final class RlActorBench {
                 g.addProperty("priv", false);
                 g.addProperty("obs_schema", RlSchemaV3.versionOfSha(
                         t.has("schema_sha") ? t.get("schema_sha").getAsString() : null));
-                // r4-payment-1015: the mana-source asks it played (absent = off)
+                // r4-payment-1015: the mana-source asks it played (absent = off), and for which slots
                 g.addProperty("mana_source", t.has("mana_source") && t.get("mana_source").getAsBoolean());
+                if (t.has("mana_source_slots")) {
+                    g.add("mana_source_slots", t.get("mana_source_slots"));
+                }
                 // the deck guard of the tape's own mode; the seat's behaviour is the tape mode's
                 final String tmode = t.get("mode").getAsString();
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(

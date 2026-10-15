@@ -52,7 +52,8 @@ public class RlManaSourceGamesTest {
         final Pay pay;
         final int version;
         final Map<Long, Integer> otherIdx = new HashMap<>();
-        int manaFrames, manaOther, badMana;
+        int manaFrames, manaOther, badMana, manaRecords, manaRecordsForge;
+        final java.util.Set<Integer> manaSeats = new java.util.TreeSet<>();
         final List<String> problems = new ArrayList<>();
 
         Endpoint(final FakeRlServer checker, final Pay pay, final int layout) {
@@ -72,6 +73,7 @@ public class RlManaSourceGamesTest {
             x.policyVersion = 1;
             if (d.family == RlSchemaV3.F_MANA_SOURCE) {
                 manaFrames++;
+                manaSeats.add(d.seat);
                 checkMana(d);
                 x.steps = new short[] {(short) mana(d)};
             } else {
@@ -135,7 +137,17 @@ public class RlManaSourceGamesTest {
 
         @Override
         public void record(final byte[] p) {
-            checker.check(RlWire.decodeDecide(p, version), true);
+            final RlWire.Decide d = RlWire.decodeDecide(p, version);
+            checker.check(d, true);
+            if (d.family == RlSchemaV3.F_MANA_SOURCE) {
+                manaRecords++;
+                checkMana(d);
+                // the teacher is Forge AI's own source (flagged), never AUTO
+                if (d.teacher.length == 1 && d.teacher[0] > 0
+                        && (d.candFlags[d.teacher[0]] & RlSchemaV3.FLAG_FORGE_DEFAULT) != 0) {
+                    manaRecordsForge++;
+                }
+            }
         }
     }
 
@@ -247,6 +259,77 @@ public class RlManaSourceGamesTest {
             Assert.assertNull(r.seat.fatal, "replay error");
             Assert.assertEquals(r.end.get("digest"), t.get("digest"), "replay digest of " + t.get("game_uid"));
         }
+    }
+
+    /** The slot filter (league snapshots keep Forge paying) and its replay; record mode's RECORD frames. */
+    @Test
+    public void slotFilterAndRecordMode() throws Exception {
+        final FakeRlServer checker = new FakeRlServer(0, "train", 7, null, Collections.emptyList());
+        int asks = 0;
+        for (int i = 0; i < games; i++) {
+            final Endpoint ep = new Endpoint(checker, Pay.RANDOM, 2);
+            final RlActorBench.Cfg c = cfg(3, true);
+            c.manaSourceSlots = java.util.Arrays.asList("M");
+            final JsonObject g = RlActorBenchTest.game(i, i % 2 == 0 ? "rl:M" : "rl:snap-x",
+                    i % 2 == 0 ? "rl:snap-x" : "rl:M", false);
+            final RlActorBench.Played p = RlActorBench.play(c, "train", g, new RlFeaturizer(RlActorBenchTest.index),
+                    ep, null, "test");
+            Assert.assertNull(p.guardError);
+            asks += manaSent(p);
+            final int mSeat = i % 2 == 0 ? 0 : 1;
+            Assert.assertTrue(ep.manaSeats.isEmpty() || ep.manaSeats.equals(java.util.Collections.singleton(mSeat)),
+                    "asked seats " + ep.manaSeats + ", rl:M is seat " + mSeat);
+            Assert.assertEquals(p.tape.getAsJsonArray("mana_source_slots").get(0).getAsString(), "M");
+            if (p.tape.get("void").isJsonNull()) {
+                final JsonObject r = new JsonObject();
+                r.add("game_uid", p.tape.get("game_uid"));
+                r.add("seed", p.tape.get("seed"));
+                final JsonArray decks = new JsonArray(), shas = new JsonArray();
+                for (JsonElement d : p.tape.getAsJsonArray("decks")) {
+                    decks.add(d.getAsJsonObject().get("path"));
+                    shas.add(d.getAsJsonObject().get("sha"));
+                }
+                r.add("decks", decks);
+                r.add("deck_sha", shas);
+                r.add("controllers", p.tape.get("controllers"));
+                r.addProperty("priv", false);
+                r.addProperty("obs_schema", 3);
+                r.addProperty("mana_source", true);
+                r.add("mana_source_slots", p.tape.get("mana_source_slots"));
+                final RlActorBench.Played rp = RlActorBench.play(RlActorBenchTest.cfg("train"), "train", r,
+                        new RlFeaturizer(RlActorBenchTest.index), RlActorBench.tapeEndpoint(p.tape, RlWire.parseUid(
+                                p.tape.get("game_uid").getAsString())), null, "test");
+                Assert.assertNull(rp.seat.fatal, "replay error");
+                Assert.assertEquals(rp.end.get("digest"), p.tape.get("digest"), "replay of a slot-filtered game");
+            }
+        }
+        Assert.assertTrue(asks > 0, "the M seat was never asked");
+        // record mode: recorders delegate every MANA_SOURCE ask; Forge AI's source is the RECORD frame's teacher, and
+        // the games are the option-off games
+        final FakeRlServer rc = new FakeRlServer(0, "record", 7, null, Collections.emptyList());
+        int recs = 0, recsForge = 0;
+        for (int i = 0; i < games; i++) {
+            final Endpoint on = new Endpoint(rc, Pay.RANDOM, 2);
+            final Endpoint off = new Endpoint(rc, Pay.RANDOM, 2);
+            final RlActorBench.Cfg con = RlActorBenchTest.cfg("record");
+            con.obsSchema = 3;
+            con.manaSource = true;
+            final RlActorBench.Cfg coff = RlActorBenchTest.cfg("record");
+            coff.obsSchema = 3;
+            final RlActorBench.Played a = RlActorBench.play(con, "record", RlActorBenchTest.game(i, "record", "record",
+                    true), new RlFeaturizer(RlActorBenchTest.index), on, null, "test");
+            final RlActorBench.Played b = RlActorBench.play(coff, "record", RlActorBenchTest.game(i, "record",
+                    "record", true), new RlFeaturizer(RlActorBenchTest.index), off, null, "test");
+            Assert.assertEquals(a.end.get("digest"), b.end.get("digest"), "record game " + i);
+            Assert.assertEquals(on.badMana, 0, String.valueOf(on.problems));
+            recs += on.manaRecords;
+            recsForge += on.manaRecordsForge;
+        }
+        System.err.println("[mana-record] RECORD frames " + recs + ", teacher = Forge AI's source " + recsForge);
+        Assert.assertTrue(recs > 0, "no MANA_SOURCE RECORD frame");
+        Assert.assertEquals(recsForge, recs);
+        Assert.assertEquals(rc.badFrames.get(), 0L, String.valueOf(rc.problems));
+        Assert.assertEquals(rc.badTeachers.get(), 0L, String.valueOf(rc.problems));
     }
 
     @Test
