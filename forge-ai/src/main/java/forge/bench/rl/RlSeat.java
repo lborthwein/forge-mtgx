@@ -427,8 +427,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             note("targets." + m.origin + ".asks");
         }
         // S-t: a choice ask inside the seat's open window (null otherwise: nothing below reads these)
+        // (never a MANA_SOURCE ask: a payment inside the action, not one of its choices; lane r4-payment-1015)
         final String wAsk = window != null && window.isOpen() && roles[seat] == Role.RL && family != RlSchema.F_PRIORITY
-                && m != null ? ChoiceWindow.askKey(family, method, m, body) : null;
+                && family != RlSchemaV3.F_MANA_SOURCE && m != null ? ChoiceWindow.askKey(family, method, m, body) : null;
         final int wOrd = wAsk == null ? -1 : window.nextOrdinal(wAsk);
         if (m == null || m.unposable != null) {
             if (wAsk != null) {

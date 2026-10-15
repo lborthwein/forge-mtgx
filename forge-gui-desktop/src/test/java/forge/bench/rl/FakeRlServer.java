@@ -102,13 +102,14 @@ public final class FakeRlServer implements Closeable {
             final JsonObject hello = h.json();
             hellos.add(hello);
             String refuse = null;
-            // wire/1 with obs-v1, or wire/2 with obs-v2 (lane rl-obs-v2-1006)
+            // wire/1 with obs-v1, or wire/2 with obs-v2 (lane rl-obs-v2-1006) or obs-v3 (lane r4-payment-1015)
             final String proto = hello.get("proto").getAsString();
             final int version = RlWire.PROTO_V2.equals(proto) ? 2 : RlWire.PROTO.equals(proto) ? 1 : 0;
+            final String sha = hello.get("schema_sha").getAsString();
             if (version == 0) {
                 refuse = "proto";
-            } else if (!(version == 2 ? forge.bench.rl.RlSchemaV2.schemaSha() : RlSchema.schemaSha())
-                    .equals(hello.get("schema_sha").getAsString())) {
+            } else if (!(version == 2 ? forge.bench.rl.RlSchemaV2.schemaSha().equals(sha)
+                    || RlSchemaV3.schemaSha().equals(sha) : RlSchema.schemaSha().equals(sha))) {
                 refuse = "schema_sha";
             } else if (expectCardIndexSha != null
                     && !expectCardIndexSha.equals(hello.get("card_index_sha").getAsString())) {
@@ -325,6 +326,7 @@ public final class FakeRlServer implements Closeable {
             case RlSchema.F_OPTIONAL_TRIGGER:
             case RlSchema.F_PAY_TO_PREVENT:
             case RlSchema.F_NAME:
+            case RlSchemaV3.F_MANA_SOURCE:
                 return mode == RlSchema.M_SINGLE;
             case RlSchema.F_TARGETS:
             case RlSchema.F_MULLIGAN_BOTTOM:

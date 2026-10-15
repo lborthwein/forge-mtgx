@@ -101,9 +101,12 @@ public final class RlSchema {
         return family >= F_PRIORITY && family <= F_START_PLAYER;
     }
 
-    /** Families 1..24: every family the RL seat answers (Phase B, lane rl-r0-b4-1006). */
+    /**
+     * Families 1..24: every family the RL seat answers (Phase B, lane rl-r0-b4-1006); and obs-v3's 25 MANA_SOURCE
+     * (lane r4-payment-1015), which the bridge asks only with the mana-source option on.
+     */
     public static boolean isLearned(final int family) {
-        return family >= F_PRIORITY && family <= F_COLOR;
+        return family >= F_PRIORITY && family <= F_COLOR || family == RlSchemaV3.F_MANA_SOURCE;
     }
 
     /** The two-frame families (Appendix B.1): an ASSIGN frame, then a PERMUTE frame over the cards kept on top. */
@@ -112,6 +115,9 @@ public final class RlSchema {
     }
 
     public static String familyName(final int family) {
+        if (family == RlSchemaV3.F_MANA_SOURCE) {
+            return RlSchemaV3.MANA_SOURCE;
+        }
         return family > 0 && family <= N_FAMILIES ? FAMILIES.get(family) : "UNKNOWN";
     }
 
@@ -174,6 +180,9 @@ public final class RlSchema {
                 return F_NAME;
             case "color":
                 return F_COLOR;
+            // obs-v3 (lane r4-payment-1015): the mana source of one contested shard
+            case "manaSource":
+                return RlSchemaV3.F_MANA_SOURCE;
             default:
                 return 0;
         }
