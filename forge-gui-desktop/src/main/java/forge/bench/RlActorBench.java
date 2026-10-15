@@ -97,7 +97,8 @@ import forge.util.MyRandom;
  * cwd = forge-gui with res/. Config keys: {@code mode, server, actorId, threads, rlRoot, cardIndex, tapesDir,
  * capActions (40), gameTimeoutSec (300), maxDecisions (3000), jarSha, aiTimeoutSec (5), readTimeoutSec (120),
  * tapeRotate (1000), maxGames (0 = until stop), replay {tapes, lines [[fileIdx, line]], out}, k8 (the spec of a
- * {@code lookahead:K8} opponent seat, lane gen-check-1007)}. Opponent controllers besides {@code forge}:
+ * {@code lookahead:K8} opponent seat, lane gen-check-1007), loopGuard (0 = off; the live seat's "Cancel Search?" loop
+ * guard on the RL seats, lane exploit-panel-1015)}. Opponent controllers besides {@code forge}:
  * {@code forge:<Profile>} (Forge AI under a shipped {@code res/ai} profile; train and eval) and {@code lookahead:K8}
  * (Forge AI Default plus the look-ahead with the {@code k8} spec; eval only).
  * Exit codes: 0 done; 2 config / HELLO refused / deck guard; 3 a thread died on a transport or protocol error;
@@ -151,6 +152,13 @@ public final class RlActorBench {
          * (or a replayed tape's) own "k8" object takes precedence; the tape records the spec it played.
          */
         JsonObject k8 = null;
+        /**
+         * exploit-panel-1015 (0 = off, the default, and nothing changes): the RL seats' "Cancel Search?" loop guard
+         * ({@link RlSeat.Config#loopGuard}, fork #85), as the live policy seat sets it ({@code loopGuard=2} in the live
+         * spec). Without it a bench seat that answers Show and Tell's card ask with no card and the confirm with no
+         * repeats the pair until {@link #maxDecisions} voids the game; live, the guard answers yes after K cycles.
+         */
+        int loopGuard = 0;
     }
 
     static Cfg parse(final JsonObject o) {
@@ -165,6 +173,12 @@ public final class RlActorBench {
         if (o.has("capActions")) c.capActions = o.get("capActions").getAsInt();
         if (o.has("gameTimeoutSec")) c.gameTimeoutSec = o.get("gameTimeoutSec").getAsInt();
         if (o.has("maxDecisions")) c.maxDecisions = o.get("maxDecisions").getAsInt();
+        if (o.has("loopGuard")) {
+            c.loopGuard = o.get("loopGuard").getAsInt();
+            if (c.loopGuard < 0) {
+                throw new IllegalArgumentException("loopGuard >= 0 (0 = off), not " + c.loopGuard);
+            }
+        }
         if (o.has("jarSha")) c.jarSha = o.get("jarSha").getAsString();
         if (o.has("aiTimeoutSec")) c.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
         if (o.has("readTimeoutSec")) c.readTimeoutSec = o.get("readTimeoutSec").getAsInt();
@@ -503,6 +517,7 @@ public final class RlActorBench {
         sc.mode = mode;
         sc.capActions = cfg.capActions;
         sc.maxDecisions = cfg.maxDecisions;
+        sc.loopGuard = cfg.loopGuard; // exploit-panel-1015: 0 (the default) = no guard, as before
         // the observation schema: the actor's, or (replay) the tape's
         final int obsVersion = g.has("obs_schema") ? g.get("obs_schema").getAsInt() : cfg.obsSchema;
         feat.setVersion(obsVersion);
@@ -756,6 +771,9 @@ public final class RlActorBench {
         for (int d : seat.overridden) ov.add(d);
         end.add("overridden", ov);
         end.addProperty("cap_hits", seat.capHits);
+        if (cfg.loopGuard > 0) {
+            end.addProperty("loop_guard_hits", seat.loopGuardHits()); // exploit-panel-1015: only when on
+        }
         end.addProperty("digest", digest);
         if (digestLb != null) {
             end.addProperty("digest_lb", digestLb);
