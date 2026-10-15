@@ -90,6 +90,12 @@ public final class ForcedWinSolver {
          * frame lost the seat's memory of it). Off by default; never on in natural games.
          */
         public boolean frameMemory;
+        /**
+         * solver-gaps-1015 (off by default): the width search searches the payment of its own casts (a bounded set of
+         * payment orders: greedy, one-shot sources first, most flexible first, keep each colour, Phyrexian in life)
+         * instead of paying greedily.
+         */
+        public boolean paySearch;
         /** The forced-win solver (width search, engine search, defense). False when only Part B is on. */
         public boolean forced = true;
         /**
@@ -112,6 +118,7 @@ public final class ForcedWinSolver {
             final Config c = new Config();
             c.frameMemory = "true".equals(get.apply("frameMemory"));
             c.likely = "true".equals(get.apply("likely"));
+            c.paySearch = "true".equals(get.apply("paySearch"));
             c.likelyWorlds = intOr(get.apply("likelyWorlds"), c.likelyWorlds);
             c.likelyTop = intOr(get.apply("likelyTop"), c.likelyTop);
             c.likelyCapTurns = intOr(get.apply("likelyCapTurns"), c.likelyCapTurns);
@@ -154,7 +161,7 @@ public final class ForcedWinSolver {
             return "worlds=" + worlds + " top=" + top + " threshold=" + threshold + " nodes=" + nodes + " horizon="
                     + horizon + " budgetMs=" + budgetMs + " adversary=" + adversary + " defense=" + defense + " engine=" + engine + " engineNodes="
                 + engineNodes + " engineMs=" + engineMs + " forced=" + forced + " likely=" + likely + " likelyWorlds=" + likelyWorlds
-                + " likelyTop=" + likelyTop + " likelyCapTurns=" + likelyCapTurns;
+                + " likelyTop=" + likelyTop + " likelyCapTurns=" + likelyCapTurns + " paySearch=" + paySearch;
         }
     }
 
@@ -429,6 +436,8 @@ public final class ForcedWinSolver {
         }
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.nodes = cfg.nodes;
+        lim.payPolicies = 1;
+        boolean payOnly = false;
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
         // before it reaches one); lines that pass the turn only when this turn has none
         lim.horizon = 1;
@@ -438,6 +447,25 @@ public final class ForcedWinSolver {
             lim.horizon = cfg.horizon;
             res = ForcedWinPlanner.plan(pos, lim);
             res.nodes += first;
+        }
+        if (res.lines.isEmpty() && cfg.forced && cfg.paySearch) {
+            // solver-gaps-1015 payment search: only where the greedy payment found no line, search the payment orders
+            // (this turn, then by our next turn), within the planner's own node and time caps
+            final int before = res.nodes;
+            lim.payPolicies = ForcedWinPlanner.PAY_POLICIES;
+            lim.horizon = 1;
+            res = ForcedWinPlanner.plan(pos, lim);
+            if (res.lines.isEmpty() && cfg.horizon >= 2) {
+                final int first = res.nodes;
+                lim.horizon = cfg.horizon;
+                res = ForcedWinPlanner.plan(pos, lim);
+                res.nodes += first;
+            }
+            res.nodes += before;
+            if (!res.lines.isEmpty()) {
+                paySearchFound++;
+                payOnly = true;
+            }
         }
         plannerNanos += System.nanoTime() - t0;
         lastPlannerNodes = res.nodes;
@@ -462,7 +490,7 @@ public final class ForcedWinSolver {
             receipt("FW_POSITION " + pos.describe());
         }
         final long t1 = System.nanoTime();
-        final Eval best = evaluateTop(live, res.lines, index);
+        final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch ? t0 : System.nanoTime());
         engineNanos += System.nanoTime() - t1;
         if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0) {
             lastOutcome = "declined";
@@ -477,7 +505,7 @@ public final class ForcedWinSolver {
             return null;
         }
         receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + best + " ms=" + (System.nanoTime() - t0) / 1_000_000
-                + " copies=" + copies);
+                + " copies=" + copies + (payOnly ? " paySearch" : ""));
         lastOutcome = "take";
         return best.line;
     }
@@ -760,6 +788,8 @@ public final class ForcedWinSolver {
     // ------------------------------------------------------------------ Part B: likely-win lines (solver-gaps-1015)
 
     public int likelyRuns, likelyTaken;
+    /** Payment search: decisions where only the searched payment found width lines. */
+    public int paySearchFound;
 
     /**
      * Part B: score the candidate lines and the seat's own play (Forge AI) by P(win) over the same belief worlds, each
@@ -922,7 +952,12 @@ public final class ForcedWinSolver {
 
     /** Engine-evaluate up to {@code cfg.top} distinct candidates; the best, or null. */
     Eval evaluateTop(Game live, List<Line> lines, int index) {
-        final long deadline = System.nanoTime() + cfg.budgetMs * 1_000_000L;
+        return evaluateTop(live, lines, index, System.nanoTime());
+    }
+
+    /** As above; the evaluation's budget counts from {@code from} (the decision's start with the payment search on). */
+    Eval evaluateTop(Game live, List<Line> lines, int index, long from) {
+        final long deadline = from + cfg.budgetMs * 1_000_000L;
         final List<Line> picked = new ArrayList<>();
         final Set<String> shapes = new HashSet<>();
         for (Line l : lines) {

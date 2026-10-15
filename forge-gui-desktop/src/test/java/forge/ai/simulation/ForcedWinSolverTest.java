@@ -355,6 +355,27 @@ public class ForcedWinSolverTest extends AITest {
         Assert.assertTrue(ForcedWinPlanner.plan(unknown, lim).lines.isEmpty(), unknown.describe());
     }
 
+    @Test
+    public void thePaymentSearchKeepsTheColourALaterStepNeeds() {
+        // Underground Sea + Island, a 3-card library: Gitaxian Probe draws one, then Thassa's Oracle (UU) wins with 2
+        // cards left. The greedy payment pays Probe's U/P with the Island (its least flexible blue source) and leaves no
+        // UU for the Oracle; the payment search also pays the Phyrexian pip with life and finds the win.
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame("Gitaxian Probe;Thassa's Oracle",
+                "Underground Sea;Island", 20, "", "Island", 20, "human").replace("humanlibrary=" + OURLIB,
+                "humanlibrary=Island;Island;Island"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinModel.Position pos = new ForcedWinModel.Reader().read(g, me, null, true);
+        final ForcedWinPlanner.Limits greedy = new ForcedWinPlanner.Limits();
+        greedy.horizon = 1;
+        final ForcedWinPlanner.Limits search = new ForcedWinPlanner.Limits();
+        search.horizon = 1;
+        search.payPolicies = ForcedWinPlanner.PAY_POLICIES;
+        final ForcedWinPlanner.Result rg = ForcedWinPlanner.plan(pos, greedy), rs = ForcedWinPlanner.plan(pos, search);
+        Assert.assertTrue(rg.lines.isEmpty(), rg.summary() + " " + (rg.lines.isEmpty() ? "" : rg.lines.get(0)));
+        Assert.assertFalse(rs.lines.isEmpty(), rs.summary() + " " + pos.describe());
+        Assert.assertTrue(rs.lines.get(0).steps.stream().anyMatch(st -> st.phyrexianLife), rs.lines.get(0).toString());
+    }
+
     // ------------------------------------------------------------------ Part B (solver-gaps-1015): likely-win lines
 
     @Test

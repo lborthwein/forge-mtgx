@@ -221,7 +221,16 @@ public final class ForcedWinPlanner {
         int classes = 14;
         /** POST-FREEZE 5: a wall-time budget (ms); late-game positions with large graveyards made keys slow. */
         long ms = 1500;
+        /**
+         * solver-gaps-1015 (payment search, off by default): how many payment orders each cast is tried with. 1 = the
+         * greedy payment ("the way Forge AI pays"); {@link #PAY_POLICIES} = also one-shot sources first, most flexible
+         * sources first, keep each colour, Phyrexian pips with life.
+         */
+        int payPolicies = 1;
     }
+
+    /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
+    static final int PAY_POLICIES = 9;
 
     static final class Result {
         final List<Line> lines = new ArrayList<>();
@@ -599,9 +608,33 @@ public final class ForcedWinPlanner {
         final Step step = new Step(ab.kind, a, ab, -1);
         step.expHandIdx = s0.hand.stream().mapToInt(Integer::intValue).toArray();
         step.expLibIdx = s0.lib.subList(0, Math.min(6, s0.lib.size())).stream().mapToInt(Integer::intValue).toArray();
-        if (!free && !pay(s, ab, self, step)) {
+        if (free || lim.payPolicies <= 1) {
+            if (!free && !pay(s, ab, self, step)) {
+                return out;
+            }
+            afterPay(s, step, self, host, handIdx, a, ab, free, out);
             return out;
         }
+        // solver-gaps-1015: the bounded payment search: the same cast paid in each payment order, distinct results only
+        final int selfIdx = self == null ? -1 : s.bf.indexOf(self);
+        final Set<String> paid = new HashSet<>();
+        for (int pol = 0; pol < lim.payPolicies; pol++) {
+            final S v = s.copy();
+            final Step st = step.copy();
+            final Perm vSelf = selfIdx < 0 ? null : v.bf.get(selfIdx);
+            payPolicy = pol;
+            final boolean ok = pay(v, ab, vSelf, st);
+            payPolicy = 0;
+            if (!ok || !paid.add(v.key() + st.phyrexianLife)) {
+                continue;
+            }
+            afterPay(v, st, vSelf, host, handIdx, a, ab, false, out);
+        }
+        return out;
+    }
+
+    /** The rest of {@link #apply} once the cost is paid: the step is played and its effects resolve into {@code out}. */
+    private void afterPay(S s, Step step, Perm self, int host, int handIdx, ACard a, Abil ab, boolean free, List<S> out) {
         s.steps.add(step);
         if (handIdx >= 0) {
             s.hand.remove(Integer.valueOf(host));
@@ -615,10 +648,10 @@ public final class ForcedWinPlanner {
             // solver-gaps-1015: the life its entering cost (a shock land paid untapped), as observed
             s.life += Math.min(0, a.landLife);
             if (s.life <= 0) {
-                return out;
+                return;
             }
             out.add(s);
-            return out;
+            return;
         }
         if (ab.kind == AbilKind.SPELL && !free) {
             s.storm++;
@@ -651,7 +684,7 @@ public final class ForcedWinPlanner {
                 s.won = true;
                 s.how = "enters";
                 out.add(s);
-                return out;
+                return;
             }
             if (a.winIfLibraryAtMost >= 0) {
                 if (s.lib.size() <= a.winIfLibraryAtMost + (s.devotion - a.winDevotion)) {
@@ -659,7 +692,7 @@ public final class ForcedWinPlanner {
                     s.how = "enters(library<=" + (a.winIfLibraryAtMost + s.devotion - a.winDevotion) + ")";
                 }
                 out.add(s);
-                return out;
+                return;
             }
             effs.addAll(ab.effects);
         } else {
@@ -672,13 +705,13 @@ public final class ForcedWinPlanner {
             s.bf.remove(sacked);
             s.gyPool.add(sacked.card);
         }
+        final int before = out.size();
         resolve(s, effs, 0, 0, ab, out);
         if (toGraveyard) {
-            for (S n : out) {
-                n.gyPool.add(host);
+            for (int i = before; i < out.size(); i++) {
+                out.get(i).gyPool.add(host);
             }
         }
-        return out;
     }
 
     private static int bestFloatColour(int mask) {
@@ -1109,7 +1142,7 @@ public final class ForcedWinPlanner {
         }
         for (int col = 0; col < 6; col++) {
             for (int k = 0; k < ab.phyrexian[col]; k++) {
-                if (canPayColour(s, col, self)) {
+                if (canPayColour(s, col, self) && !(payPolicy == 8 && s.life > 2)) {
                     payColour(s, col, self);
                 } else {
                     if (s.life <= 2) {
@@ -1210,8 +1243,9 @@ public final class ForcedWinPlanner {
             return true;
         }
         int best = -1;
+        final int keep = payPolicy >= 3 && payPolicy <= 7 ? payPolicy - 3 : -1;
         for (int c = 0; c < 5; c++) {
-            if (s.pool[c] > 0 && (best < 0 || s.pool[c] > s.pool[best])) {
+            if (s.pool[c] > 0 && (best < 0 || best == keep && c != keep || (c != keep || best == keep) && s.pool[c] > s.pool[best])) {
                 best = c;
             }
         }
@@ -1235,6 +1269,28 @@ public final class ForcedWinPlanner {
         return true;
     }
 
+    /** The payment order in use (0 = greedy; the payment search tries the others). */
+    private int payPolicy;
+
+    /**
+     * A source's rank in the payment order (lower is tapped first). 0: least flexible first, one-shot sources last (the
+     * greedy order); 1: one-shot sources first; 2: most flexible first; 3..7: keep colour W/U/B/R/G (tap other sources
+     * first); 8: as 0 with Phyrexian pips paid in life.
+     */
+    private int sourceScore(ACard a) {
+        final int flex = Integer.bitCount(a.sourceColors), sac = a.sourceSac ? 1 : 0;
+        switch (payPolicy) {
+            case 1:
+                return (1 - sac) * 100 + flex * 10;
+            case 2:
+                return -flex * 10 + sac * 100;
+            case 3: case 4: case 5: case 6: case 7:
+                return ((a.sourceColors & (1 << (payPolicy - 3))) != 0 ? 1000 : 0) + flex * 10 + sac * 100;
+            default:
+                return flex * 10 + sac * 100;
+        }
+    }
+
     private Perm source(S s, int mask, Perm self) {
         Perm best = null;
         int bestScore = Integer.MAX_VALUE;
@@ -1246,7 +1302,7 @@ public final class ForcedWinPlanner {
             if ((a.sourceColors & mask) == 0 || a.sourceSick) {
                 continue;
             }
-            final int score = Integer.bitCount(a.sourceColors) * 10 + (a.sourceSac ? 100 : 0);
+            final int score = sourceScore(a);
             if (score < bestScore) {
                 bestScore = score;
                 best = p;
