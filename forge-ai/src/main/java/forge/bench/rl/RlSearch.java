@@ -635,7 +635,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** The HELLO's {@code schema_sha} for observation schema {@code v} (search-v2-1009; obs-v1: the S1 read's). */
     public static String schemaSha(final int v) {
-        return v == 2 ? RlSchemaV2.schemaSha() : RlSchema.schemaSha();
+        return RlSchemaV3.shaOf(v);
     }
 
     /**

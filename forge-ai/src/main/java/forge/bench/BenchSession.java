@@ -170,6 +170,36 @@ public final class BenchSession {
     public void setEncodeState(final boolean encodeState) {
         this.encodeState = encodeState;
     }
+
+    /**
+     * Lane r4-payment-1015 (false by default, and then nothing changes): the mana-payment census. Every bridged seat of
+     * the live game counts, per shard of each real payment, Forge AI's materially different source options (instruments
+     * {@code pay.*}); reads only (forge.bench.rl.RlManaChoice).
+     */
+    private boolean payCensus = false;
+
+    public boolean isPayCensus() {
+        return payCensus;
+    }
+
+    public void setPayCensus(final boolean payCensus) {
+        this.payCensus = payCensus;
+    }
+
+    /**
+     * Lane r4-payment-1015 (false by default, and then nothing changes): the bridged seats are asked the source of
+     * each contested shard of their real payments (kind {@code manaSource}, obs-v3 family 25 MANA_SOURCE), through the
+     * local answerer. The RL actor sets it per game (its {@code manaSource} option).
+     */
+    private boolean manaSourceAsk = false;
+
+    public boolean isManaSourceAsk() {
+        return manaSourceAsk;
+    }
+
+    public void setManaSourceAsk(final boolean manaSourceAsk) {
+        this.manaSourceAsk = manaSourceAsk;
+    }
     private forge.game.Game liveGame;
 
     /*
