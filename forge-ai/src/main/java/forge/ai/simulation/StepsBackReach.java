@@ -53,16 +53,21 @@ public final class StepsBackReach {
     }
 
     public static final class Config {
-        /** Fixing actions allowed (the distance being certified). */
-        public int maxFixes = 1;
+        /**
+         * Steps allowed: fixing actions plus passes. The search is breadth-first in steps, so the first reach found has
+         * the fewest steps: that count is the position's DISTANCE from a solver-proven win.
+         */
+        public int maxSteps = 2;
+        /** Fixing actions allowed (at most maxSteps). */
+        public int maxFixes = 2;
         /** Own turns in the horizon, this one included: the proof's win must come by our turn index maxOwnTurns-1. */
-        public int maxOwnTurns = 3;
+        public int maxOwnTurns = 4;
         public int nodes = 60;
         public long budgetMs = 120_000;
         public long seed = 20261016L;
         /** Library-search picks tried per tutor move beyond the pieces. */
         public int extraPicks = 1;
-        public int maxSteps = 3000;
+        public int loopSteps = 3000;
         public ForcedWinSolver.Config solver = new ForcedWinSolver.Config();
         /** The proven line's pieces (card names) the caller moved away: kept and searched for first. */
         public final Set<String> pieces = new HashSet<>();
@@ -150,8 +155,9 @@ public final class StepsBackReach {
             }
             root.ids = ForcedWinEngine.cloneScope(forge.util.IdScope.capture());
             root.turn = root.g.getPhaseHandler().getTurn();
-            final PriorityQueue<Node> open = new PriorityQueue<>(Comparator.<Node>comparingInt(n -> n.passes)
-                    .thenComparingInt(n -> n.fixes).thenComparingLong(n -> n.order));
+            // breadth-first in steps (fixes + passes); same-turn fixes before passes at equal steps
+            final PriorityQueue<Node> open = new PriorityQueue<>(Comparator.<Node>comparingInt(n -> n.passes + n.fixes)
+                    .thenComparingInt(n -> n.passes).thenComparingLong(n -> n.order));
             open.add(root);
             final Set<String> seen = new HashSet<>();
             long order = 1;
@@ -187,6 +193,9 @@ public final class StepsBackReach {
                     r.ownTurns = n.passes + proof.winTurn + 1;
                     r.label = label(n.classes);
                     break;
+                }
+                if (n.passes + n.fixes >= cfg.maxSteps) {
+                    continue;
                 }
                 r.expanded++;
                 final List<Move> moves = new ArrayList<>();
@@ -404,7 +413,7 @@ public final class StepsBackReach {
             LookaheadSearch.givePriority(ph, me);
             int steps = 0;
             final int lastTurn = mv.step.pass ? node.turn + 2 : node.turn;
-            while (!g.isGameOver() && !ai.rest && !ai.failed && ph.getTurn() <= lastTurn && steps < cfg.maxSteps) {
+            while (!g.isGameOver() && !ai.rest && !ai.failed && ph.getTurn() <= lastTurn && steps < cfg.loopSteps) {
                 ph.mainLoopStep();
                 steps++;
             }
