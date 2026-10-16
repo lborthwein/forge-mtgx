@@ -199,7 +199,7 @@ public final class ForcedWinSolver {
 
     private final Player me;
     private final Config cfg;
-    final ForcedWinModel.Reader reader = new ForcedWinModel.Reader();
+    final ForcedWinModel.Reader reader;
     private Follower active;
     private String noLineKey;
     private int decisionIndex;
@@ -209,9 +209,83 @@ public final class ForcedWinSolver {
     public int copies;
 
     public ForcedWinSolver(Player me, Config cfg) {
+        this(me, cfg, null);
+    }
+
+    /** steps-back-1016: a solver for another game's player that reuses an existing solver's affordance cache. */
+    ForcedWinSolver(Player me, Config cfg, ForcedWinModel.Reader shared) {
         this.me = me;
         this.cfg = cfg;
+        this.reader = shared != null ? shared : new ForcedWinModel.Reader();
         this.reader.seed = cfg.seed;
+    }
+
+    // ------------------------------------------------------------------ steps-back-1016: bench hooks and proofs
+
+    /**
+     * Bench-only observers (lane steps-back-1016; null = off, the default, and then nothing below runs). They read the
+     * live game and the solver's verdicts; they never change a decision unless {@link #beforeDecide} asks the seat to
+     * pass (a probe that ends the game).
+     */
+    public interface Hooks {
+        /** At the start of every live decision of a solver seat; true = the seat passes at once (no search). */
+        default boolean beforeDecide(Game live, Player me, ForcedWinSolver solver) {
+            return false;
+        }
+
+        /** The live seat took a line (a proven win: P(unopposed) = 1, P(belief) at or above the threshold). */
+        default void taken(Game live, Player me, Proof proof) {
+        }
+    }
+
+    public static volatile Hooks HOOKS = null;
+
+    /** A proven line, in plain terms (card ids of the game it was proven in). */
+    public static final class Proof {
+        public final String line;
+        public final int winTurn;
+        public final double pUnopposed, pBelief;
+        public final boolean engine;
+        /** The card ids the line's own steps play (casts, activations, land plays, floats), in step order. */
+        public final List<Integer> stepHostIds = new ArrayList<>();
+        public final List<String> stepHostNames = new ArrayList<>();
+        /** Library cards the line picks (tutor picks, pile picks), by id. */
+        public final List<Integer> libraryPickIds = new ArrayList<>();
+        public final List<String> steps = new ArrayList<>();
+
+        Proof(Line l, Eval e) {
+            line = l.toString();
+            winTurn = l.winTurn;
+            pUnopposed = e == null ? -1 : e.pUnopposed;
+            pBelief = e == null ? -1 : e.pBelief;
+            engine = "engine".equals(l.how);
+            for (Step s : l.steps) {
+                steps.add(s.toString());
+                if (s.pass || s.hostId < 0) {
+                    continue;
+                }
+                stepHostIds.add(s.hostId);
+                stepHostNames.add(s.hostName);
+                libraryPickIds.addAll(s.pile);
+                libraryPickIds.addAll(s.picks);
+            }
+        }
+    }
+
+    /** The last line offense took, with its engine evaluation. */
+    private Eval lastTake;
+
+    /**
+     * steps-back-1016: does the solver prove a win from {@code live} for its seat (exactly what the seat's offense would
+     * take here)? Fresh per call: no cached verdict, no active line. Null = no line taken.
+     */
+    public Proof prove(Game live) {
+        active = null;
+        noLineKey = null;
+        engineTurn = -1;
+        lastTake = null;
+        final Line l = offense(live);
+        return l == null ? null : new Proof(l, lastTake);
     }
 
     public Config config() {
@@ -248,6 +322,10 @@ public final class ForcedWinSolver {
     }
 
     private Decision decide0(Game live) {
+        final Hooks hooks = HOOKS;
+        if (hooks != null && hooks.beforeDecide(live, me, this)) {
+            return Decision.PASS;
+        }
         if (active != null && !active.done && !live.getStack().isEmpty()) {
             // a counter of our line's spell: counter it back when we can
             final SpellAbility guard = protect(live, me);
@@ -291,6 +369,9 @@ public final class ForcedWinSolver {
         }
         active = new Follower(line);
         taken++;
+        if (hooks != null) {
+            hooks.taken(live, me, new Proof(line, lastTake));
+        }
         final Follower.Next n = active.next(live, me);
         if (n.action != null) {
             return new Decision(true, n.action);
@@ -514,6 +595,7 @@ public final class ForcedWinSolver {
         receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + best + " ms=" + (System.nanoTime() - t0) / 1_000_000
                 + " copies=" + copies + (payOnly ? " paySearch" : ""));
         lastOutcome = "take";
+        lastTake = best;
         return best.line;
     }
 
@@ -790,6 +872,7 @@ public final class ForcedWinSolver {
             return null;
         }
         receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms=" + (System.nanoTime() - t0) / 1_000_000);
+        lastTake = e;
         return line;
     }
 
