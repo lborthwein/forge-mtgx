@@ -116,26 +116,38 @@ public final class RlFeaturizer {
     private RlKnowledge knowledge;
     /** Per (game, seat) deck arrays: constant through a game. */
     private final Map<Player, int[][]> deckCache = new java.util.IdentityHashMap<>();
-    /** Observation schema version: 1 (default, mtgx-rl-obs/1) or 2 (mtgx-rl-obs/2, RlObsV2). */
+    /**
+     * The observation's layout: 1 (default, mtgx-rl-obs/1) or 2 (mtgx-rl-obs/2, RlObsV2; also obs-v3's, whose frames
+     * are v2's).
+     */
     private int version = 1;
+    /** The observation schema: 1, 2 or 3 (mtgx-rl-obs/3 = v2's layout plus MANA_SOURCE; lane r4-payment-1015). */
+    private int schema = 1;
 
+    /** The frame layout, 1 or 2 (obs-v3 frames are layout 2). */
     public int version() {
         return version;
     }
 
+    /** The observation schema, 1, 2 or 3. */
+    public int schema() {
+        return schema;
+    }
+
     public void setVersion(final int v) {
-        if (v != 1 && v != 2) {
+        if (v != 1 && v != 2 && v != 3) {
             throw new IllegalArgumentException("observation schema version " + v);
         }
-        this.version = v;
+        this.schema = v;
+        this.version = RlSchemaV3.layoutOf(v);
     }
 
     public String schemaSha() {
-        return version == 2 ? RlSchemaV2.schemaSha() : RlSchema.schemaSha();
+        return RlSchemaV3.shaOf(schema);
     }
 
     public String proto() {
-        return version == 2 ? RlWire.PROTO_V2 : RlWire.PROTO;
+        return RlSchemaV3.protoOf(schema);
     }
 
     public RlFeaturizer(final CardIndex index) {
