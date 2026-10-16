@@ -534,6 +534,8 @@ public final class LookaheadSearch {
         public long combatNanos;
         /** Wall budget: searched decisions that ran past it (and played Forge's answer); play-outs stopped by it. */
         public long capped, rolloutsAborted;
+        /** search-bones-1015 (S-b): decisions over the budget decided on the worlds every candidate finished in. */
+        public long partialDecisions;
         /**
          * Hard wall (lane sc-wallguard-1009): searched decisions whose wait for their play-outs the wall cut short
          * (budget + {@link #WALL_GRACE_MS}), and the play-outs still running at the cut (told to stop; their results are
@@ -736,6 +738,10 @@ public final class LookaheadSearch {
                     o.addProperty("wallCuts", wallCuts);
                     o.addProperty("wallStragglers", wallStragglers);
                 }
+            }
+            if (partialDecisions > 0) {
+                // search-bones-1015: only when S-b decided a capped search on its finished worlds
+                o.addProperty("partialDecisions", partialDecisions);
             }
             o.addProperty("attackDecisions", attackDecisions);
             o.addProperty("attackSearched", attackSearched);
@@ -1894,6 +1900,8 @@ public final class LookaheadSearch {
         public int[] planBroken = new int[0];
         /** S-b: the choice was a proven win (no departZ gate, no loop guard). */
         public boolean proven;
+        /** S-b: over the budget, the number of worlds every candidate finished in that decided (0 = all, or capped). */
+        public int partialWorlds;
     }
 
     /**
@@ -2198,7 +2206,7 @@ public final class LookaheadSearch {
             stats.stackSearched++;
         }
         lastCandidates = cands;
-        final int k = Math.max(1, cfg.worlds);
+        int k = Math.max(1, cfg.worlds);
         // copy-fidelity-1010, level 2: a first pass on level-0 copies; if a searched candidate was missing from them, the
         // play-outs again (base candidates, probes, macros) on level-1 copies with the same seeds, the first pass's counts
         // restored. Every other level plays one pass.
@@ -2302,6 +2310,41 @@ public final class LookaheadSearch {
         } finally {
             forceFidelity = false;
         }
+        if (proof && aborted > 0) {
+            // search-bones-1015 (S-b): anytime. Over the budget, the worlds every candidate finished in decide (common
+            // random numbers kept), when there are at least two; otherwise the decision is capped as S-c's
+            final List<Integer> full = new ArrayList<>();
+            for (int w = 0; w < k; w++) {
+                boolean every = true;
+                for (int c = 0; c < n && every; c++) {
+                    every = outs[c][w] != null && !outs[c][w].aborted;
+                }
+                if (every) {
+                    full.add(w);
+                }
+            }
+            if (full.size() >= 2) {
+                final int k2 = full.size();
+                final double[][] v2 = new double[n][k2];
+                final Rollout[][] o2 = new Rollout[n][k2];
+                final boolean[] ok2 = new boolean[n];
+                for (int c = 0; c < n; c++) {
+                    ok2[c] = true;
+                    for (int j = 0; j < k2; j++) {
+                        v2[c][j] = values[c][full.get(j)];
+                        o2[c][j] = outs[c][full.get(j)];
+                        ok2[c] &= o2[c][j].ok;
+                    }
+                }
+                values = v2;
+                outs = o2;
+                ok = ok2;
+                k = k2;
+                aborted = 0;
+                stats.partialDecisions++;
+                res.partialWorlds = k2;
+            }
+        }
         // live-sc-1009: over the wall budget the default is played whatever the values say, so the leaf call is skipped
         // (aborted is always 0 without a budget: the S1 read's path is unchanged)
         if (hookLeaf && aborted == 0) {
@@ -2346,7 +2389,7 @@ public final class LookaheadSearch {
         final boolean[] provenWin = new boolean[n], provenLoss = new boolean[n];
         final int[] planBroken = new int[n];
         int provenPick = -1;
-        if (proof && !overBudget) {
+        if (proof && !overBudget && k >= Math.min(3, Math.max(1, cfg.worlds))) {
             for (int c = 0; c < n; c++) {
                 boolean win = ok[c], loss = ok[c];
                 for (int w = 0; w < k; w++) {
