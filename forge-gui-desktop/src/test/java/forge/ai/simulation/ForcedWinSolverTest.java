@@ -546,6 +546,35 @@ public class ForcedWinSolverTest extends AITest {
             + "humanexile=\nhumanlibrary=" + OURLIB + ";Island;Island;Island;Island;Island\n";
 
     @Test
+    public void theEngineDoesNotSeeOurRealLibraryOrderWhenHidden() {
+        // search-bones-1015 (solver leak): Opt draws the Lightning Bolt on top of our library, lethal at 3 life. On the
+        // real order the engine finds it; with ownKnownTop 0 (nothing placed by us) the root copy's library is
+        // shuffled below the known top, so the line is not found on the real order (and the seeds here do not put the
+        // Bolt back in the top two)
+        final String f = "[state]\nturn=7\nactiveplayer=human\nactivephase=MAIN1\nhumanlife=20\nailife=3\n"
+                + "humanlandsplayed=0\nailandsplayed=0\naihand=\nailibrary=" + LIB20 + "\naigraveyard=\naiexile=\n"
+                + "aibattlefield=Forest\nhumanhand=Opt\nhumanbattlefield=Island;Mountain\nhumangraveyard=\n"
+                + "humanexile=\nhumanlibrary=Lightning Bolt;" + OURLIB + ";" + OURLIB + "\n";
+        final Game g = game("Default", "Default", f);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Limits real = new ForcedWinEngine.Limits();
+        real.passTurn = false;
+        final ForcedWinPlanner.Line seen = ForcedWinEngine.search(g, me, real, new ForcedWinEngine.Stats(),
+                System.nanoTime() + 20_000_000_000L, 7L);
+        Assert.assertNotNull(seen, "on the real order Opt finds the Bolt");
+        int found = 0;
+        for (long seed = 1; seed <= 4; seed++) {
+            final ForcedWinEngine.Limits hid = new ForcedWinEngine.Limits();
+            hid.passTurn = false;
+            hid.ownKnownTop = 0;
+            found += ForcedWinEngine.search(g, me, hid, new ForcedWinEngine.Stats(), System.nanoTime() + 20_000_000_000L,
+                    seed) == null ? 0 : 1;
+        }
+        Assert.assertTrue(found <= 1, "hidden order: the Bolt line found in " + found + " of 4 shuffles");
+        Assert.assertEquals(me.getCardsIn(ZoneType.Library).get(0).getName(), "Lightning Bolt", "the live game unchanged");
+    }
+
+    @Test
     public void theBreachBrainFreezePetalLoopMillsThemOut() {
         // search-bones-1015 (c): the dev puzzle N-BRP: Breach, then Brain Freeze and Lotus Petal escaped again and again
         // (each Petal: storm + 1 and a mana; each Brain Freeze: mill 3 per storm copy) until their library is empty

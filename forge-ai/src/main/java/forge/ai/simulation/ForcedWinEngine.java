@@ -184,6 +184,11 @@ final class ForcedWinEngine {
         boolean cycles;
         /** (c): the most repetitions of a loop body one REPEAT move plays. */
         int repeatCap = 64;
+        /**
+         * search-bones-1015: our library's known top in the root copy (pile memory); the rest is shuffled there. -1 (the
+         * default) keeps the real order.
+         */
+        int ownKnownTop = -1;
     }
 
     /** A search node: a game copy at our priority, with its own id scope. */
@@ -499,6 +504,9 @@ final class ForcedWinEngine {
                 final Random rng = new Random(LookaheadSearch.mix(seed, 2));
                 for (Player o : root.me.getOpponents()) {
                     ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng);
+                }
+                if (lim.ownKnownTop >= 0) {
+                    ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, rng);
                 }
             }
             root.ids = cloneScope(forge.util.IdScope.capture());

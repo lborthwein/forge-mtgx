@@ -126,6 +126,12 @@ public final class ForcedWinSolver {
         public boolean act = true;
         /** search-bones-1015 (c), off by default: the engine search's cycle table and REPEAT moves. */
         public boolean cycles = false;
+        /**
+         * search-bones-1015, off by default: the engine search's root copy shuffles our library below the known top
+         * (pile memory), as the verification worlds do; without it the engine plays on our real library order, hidden
+         * information (a line that needs the top card was found on the real order and taken when the worlds agreed).
+         */
+        public boolean hideOwnLibrary = false;
         /** search-bones-1015: the width search's wall-time cap per call, ms (1500 = PF5's). */
         public long planMs = 1500;
         /**
@@ -162,6 +168,7 @@ public final class ForcedWinSolver {
             c.evalReserveMs = intOr(get.apply("evalReserveMs"), (int) c.evalReserveMs);
             c.act = !"false".equals(get.apply("act"));
             c.cycles = "true".equals(get.apply("cycles"));
+            c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
             return c;
@@ -884,6 +891,10 @@ public final class ForcedWinSolver {
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
         el.cycles = cfg.cycles;
+        if (cfg.hideOwnLibrary) {
+            final List<Integer> kt = knownTop(live);
+            el.ownKnownTop = kt == null ? 0 : kt.size();
+        }
         el.wall = decisionWall;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
