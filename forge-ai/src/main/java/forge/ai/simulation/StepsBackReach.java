@@ -174,11 +174,15 @@ public final class StepsBackReach {
                 r.nodes++;
                 forge.util.IdScope.install(ForcedWinEngine.cloneScope(n.ids));
                 LookaheadSearch.givePriority(n.g.getPhaseHandler(), n.me);
-                // the solver, exactly as a seat asks it (root included: the caller already knows the root's verdict,
-                // but a root proof here means the position is not a step back)
-                final ForcedWinSolver solver = new ForcedWinSolver(n.me, cfg.solver, reader);
-                r.proofs++;
-                final ForcedWinSolver.Proof proof = solver.prove(n.g);
+                // the solver, exactly as a seat asks it, at every node but the root: the root's verdict is the live
+                // seat's own (the caller's "immediate forced win gone"); a copy's root can differ from it (the engine
+                // search sees the copy's library order, and the verification worlds are sampled anew)
+                ForcedWinSolver.Proof proof = null;
+                if (n.passes + n.fixes > 0) {
+                    final ForcedWinSolver solver = new ForcedWinSolver(n.me, cfg.solver, reader);
+                    r.proofs++;
+                    proof = solver.prove(n.g);
+                }
                 forge.util.IdScope.install(ForcedWinEngine.cloneScope(n.ids));
                 if (proof != null && n.passes + proof.winTurn <= cfg.maxOwnTurns - 1) {
                     r.reached = true;
