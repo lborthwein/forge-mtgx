@@ -300,6 +300,7 @@ public final class StepsBackBench {
         if (rj != null && (p == null || rj.has("always") && rj.get("always").getAsBoolean())) {
             final StepsBackReach.Config rc = new StepsBackReach.Config();
             rc.solver = solver.config();
+            if (rj.has("maxSteps")) rc.maxSteps = rj.get("maxSteps").getAsInt();
             if (rj.has("maxFixes")) rc.maxFixes = rj.get("maxFixes").getAsInt();
             if (rj.has("maxOwnTurns")) rc.maxOwnTurns = rj.get("maxOwnTurns").getAsInt();
             if (rj.has("nodes")) rc.nodes = rj.get("nodes").getAsInt();

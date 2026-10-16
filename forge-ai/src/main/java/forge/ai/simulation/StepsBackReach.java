@@ -219,6 +219,9 @@ public final class StepsBackReach {
                     if (a == null) {
                         continue;
                     }
+                    if (a.child != null) {
+                        ForcedWinSolver.receipt("STEPS_BACK child " + n.path + " + " + mv + " -> turn " + a.child.turn);
+                    }
                     if (mv.pick == null && !a.pickCandidates.isEmpty()) {
                         // a library search: the pieces first, then a few others (Forge AI's own pick was this try)
                         final List<String> order2 = new ArrayList<>();
@@ -426,6 +429,8 @@ public final class StepsBackReach {
             a.pickCandidates = ai.picks.candidates;
             a.won = me.hasWon() || me.getOpponents().stream().anyMatch(Player::hasLost);
             if (a.won || !ai.rest || g.isGameOver()) {
+                ForcedWinSolver.receipt("STEPS_BACK apply " + mv + " from turn " + node.turn + ": won=" + a.won + " rest=" + ai.rest
+                        + " failed=" + ai.failed + " over=" + g.isGameOver() + " turn=" + ph.getTurn() + " steps=" + steps);
                 return a;
             }
             final Node child = new Node();
@@ -437,6 +442,7 @@ public final class StepsBackReach {
             a.key = PlayoutKeys.stateKey(g);
             return a;
         } catch (RuntimeException | StackOverflowError ex) {
+            ForcedWinSolver.receipt("STEPS_BACK apply " + mv + " from turn " + node.turn + ": error " + ex);
             return null;
         } finally {
             MyRandom.setThreadRandom(prev);
