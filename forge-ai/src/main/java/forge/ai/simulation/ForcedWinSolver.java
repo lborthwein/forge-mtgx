@@ -118,6 +118,23 @@ public final class ForcedWinSolver {
          * (nodes, worlds); a step already running is cut only at the wall (engine moves, verification play-outs).
          */
         public long wallGraceMs = 2000;
+        /**
+         * search-bones-1015 (true = as before): false = the solver never acts on its own; it follows a line it was handed
+         * ({@link #adopt}), counters back a counter of that line, answers the line's choice asks and proposes lines
+         * ({@link #propose}), but runs no offense or defence of its own at a priority.
+         */
+        public boolean act = true;
+        /** search-bones-1015 (c), off by default: the engine search's cycle table and REPEAT moves. */
+        public boolean cycles = false;
+        /** search-bones-1015: the width search's wall-time cap per call, ms (1500 = PF5's). */
+        public long planMs = 1500;
+        /**
+         * search-bones-1015 (d), off by default: lines are verified in the position as it stands (a search's world copy,
+         * where every hidden card is a sample): one world, nothing hidden or re-drawn, the adversary (the other seat)
+         * countering each of the line's spells in turn. P(unopposed) = the line wins with the other seat as Forge AI;
+         * P(belief) = the worst over the adversary's counters.
+         */
+        public boolean exact = false;
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -143,6 +160,10 @@ public final class ForcedWinSolver {
             c.engineNodes = intOr(get.apply("engineNodes"), c.engineNodes);
             c.engineMs = intOr(get.apply("engineMs"), (int) c.engineMs);
             c.evalReserveMs = intOr(get.apply("evalReserveMs"), (int) c.evalReserveMs);
+            c.act = !"false".equals(get.apply("act"));
+            c.cycles = "true".equals(get.apply("cycles"));
+            c.exact = "true".equals(get.apply("exact"));
+            c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
             return c;
         }
 
@@ -199,7 +220,7 @@ public final class ForcedWinSolver {
 
     private final Player me;
     private final Config cfg;
-    final ForcedWinModel.Reader reader = new ForcedWinModel.Reader();
+    final ForcedWinModel.Reader reader;
     private Follower active;
     private String noLineKey;
     private int decisionIndex;
@@ -209,8 +230,14 @@ public final class ForcedWinSolver {
     public int copies;
 
     public ForcedWinSolver(Player me, Config cfg) {
+        this(me, cfg, null);
+    }
+
+    /** search-bones-1015 (d): a solver whose affordance reader is shared (null = its own). */
+    ForcedWinSolver(Player me, Config cfg, ForcedWinModel.Reader shared) {
         this.me = me;
         this.cfg = cfg;
+        this.reader = shared != null ? shared : new ForcedWinModel.Reader();
         this.reader.seed = cfg.seed;
     }
 
@@ -274,6 +301,10 @@ public final class ForcedWinSolver {
                 // the line is played out: it has given up the turn or is waiting for its win to resolve
                 return n.waitingEnd ? Decision.PASS : Decision.NONE;
             }
+        }
+        if (!cfg.act) {
+            // search-bones-1015: a follower only (the search decides when to take a line)
+            return Decision.NONE;
         }
         final PhaseHandler ph = live.getPhaseHandler();
         if (!live.getStack().isEmpty()) {
@@ -443,6 +474,7 @@ public final class ForcedWinSolver {
         }
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.nodes = cfg.nodes;
+        lim.ms = cfg.planMs;
         lim.payPolicies = 1;
         boolean payOnly = false;
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
@@ -515,6 +547,98 @@ public final class ForcedWinSolver {
                 + " copies=" + copies + (payOnly ? " paySearch" : ""));
         lastOutcome = "take";
         return best.line;
+    }
+
+    // ------------------------------------------------------------------ search-bones-1015: lines as proposals
+
+    /** search-bones-1015: every line the current offense evaluated (null = not collecting). */
+    private List<Eval> evalSink;
+
+    /** A line the solver proposes to a search, with its own engine verification. */
+    public static final class Proposal {
+        /** The line (opaque outside this package): {@link #adopt} it to follow it. */
+        public final Object line;
+        public final double pUnopposed, pBelief;
+        public final int worldsRun, steps, winTurn;
+        public final boolean engine;
+        public final String text;
+        /** Our library's known top the line relies on (its play-outs keep that many cards in place). */
+        public final int knownTop;
+
+        Proposal(Eval e) {
+            this.line = e.line;
+            this.pUnopposed = e.pUnopposed;
+            this.pBelief = e.pBelief;
+            this.worldsRun = e.worldsRun;
+            this.steps = e.line.steps.size();
+            this.winTurn = e.line.winTurn;
+            this.engine = "engine".equals(e.line.how);
+            this.text = String.valueOf(e);
+            this.knownTop = e.line.knownTop;
+        }
+
+        /** Verified forced: won unopposed and in every belief world it ran (at least {@code minWorlds}), adversary on. */
+        public boolean proven(int minWorlds) {
+            return pUnopposed >= 1.0 && pBelief >= 1.0 && worldsRun >= minWorlds;
+        }
+    }
+
+    /**
+     * search-bones-1015: the offense's lines at this position, as proposals (each with the solver's own verification:
+     * P(unopposed) and P(belief) over its belief worlds with the adversary), whether or not one would be taken. Only
+     * lines that won unopposed are returned. Same gates and caches as the offense (our main phase or their end step,
+     * an empty stack, the position's no-line cache, the engine search once per turn in main phase 1). Never throws.
+     */
+    public List<Proposal> propose(Game live) {
+        final List<Proposal> out = new ArrayList<>();
+        final PhaseHandler ph = live.getPhaseHandler();
+        final boolean ourMain = ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
+        final boolean theirEnd = !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
+        if (!live.getStack().isEmpty() || !ourMain && !theirEnd || lineActive()) {
+            return out;
+        }
+        evalSink = new ArrayList<>();
+        try {
+            offense(live);
+            final Set<String> seen = new HashSet<>();
+            for (Eval e : evalSink) {
+                if (e.pUnopposed >= 1.0 && seen.add(String.valueOf(e.line))) {
+                    out.add(new Proposal(e));
+                }
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            receipt("FORCED_WIN propose error " + e);
+        } finally {
+            evalSink = null;
+        }
+        return out;
+    }
+
+    /** search-bones-1015: follow {@code line} (a {@link Proposal#line}) from the next priority on. */
+    public void adopt(Object line) {
+        active = new Follower((Line) line);
+        taken++;
+    }
+
+    /** search-bones-1015: the active line has been played to its end or broke (or none was adopted). */
+    public boolean lineDone() {
+        return active == null || active.done || active.broken;
+    }
+
+    /** search-bones-1015: the active line broke (a step could not be played). */
+    public boolean lineBroken() {
+        return active != null && active.broken;
+    }
+
+    /** search-bones-1015: our library's known top (pile memory) in the live game, as a card count. */
+    public int knownTopCount(Game live) {
+        final List<Integer> k = knownTop(live);
+        return k == null ? 0 : k.size();
+    }
+
+    /** search-bones-1015: a line's text for receipts. */
+    public static String describeLine(Object line) {
+        return String.valueOf(line);
     }
 
     // ------------------------------------------------------------------ defense: the same search from their seat
@@ -759,6 +883,7 @@ public final class ForcedWinSolver {
         lastOutcome = "gate+engine";
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
+        el.cycles = cfg.cycles;
         el.wall = decisionWall;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
@@ -781,6 +906,9 @@ public final class ForcedWinSolver {
         final Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999),
                 Math.max(t0 + cfg.budgetMs * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2));
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
+        if (evalSink != null) {
+            evalSink.add(e);
+        }
         if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold) {
             if (likelyCands != null) {
                 // not forced: a likely-win candidate like the others (Part B)
@@ -994,6 +1122,9 @@ public final class ForcedWinSolver {
             }
             final Eval e = evaluate(live, picked.get(i), mix(cfg.seed, index * 1000L + i), deadline);
             receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e);
+            if (evalSink != null) {
+                evalSink.add(e);
+            }
             if (e.pUnopposed < 1.0) {
                 continue;
             }
@@ -1012,6 +1143,9 @@ public final class ForcedWinSolver {
      * a play-out already running is cut only at the wall (the decision's, and at least the deadline plus the grace).
      */
     Eval evaluate(Game live, Line line, long seed, long deadline) {
+        if (cfg.exact) {
+            return evaluateExact(live, line, seed, deadline);
+        }
         final Eval e = new Eval(line);
         final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
         final Outcome u = playout(live, line, mix(seed, 0), 0, -1, wall);
@@ -1066,6 +1200,37 @@ public final class ForcedWinSolver {
         return e;
     }
 
+    /** search-bones-1015 (d): {@link Config#exact}'s evaluation (one world, the position as it stands). */
+    Eval evaluateExact(Game live, Line line, long seed, long deadline) {
+        final Eval e = new Eval(line);
+        final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
+        Outcome worst = playout(live, line, mix(seed, 0), -1, -1, wall);
+        e.pUnopposed = worst.won ? 1 : 0;
+        e.worldsRun = 1;
+        if (worst.won && cfg.adversary && worst.oppHasCounter) {
+            int spells = 0;
+            for (Step s : line.steps) {
+                if (s.isSpell()) {
+                    spells++;
+                }
+            }
+            for (int j = 0; j < spells && worst.won; j++) {
+                if (System.nanoTime() > wall) {
+                    worst = new Outcome();
+                    worst.why = "wall";
+                    break;
+                }
+                final Outcome o = playout(live, line, mix(seed, 0), -1, j, wall);
+                if (!o.won) {
+                    worst = o;
+                }
+            }
+        }
+        e.pBelief = worst.won ? 1 : 0;
+        e.failures = worst.won ? "" : worst.why;
+        return e;
+    }
+
     /** One play-out's result. */
     static final class Outcome {
         boolean won;
@@ -1098,11 +1263,14 @@ public final class ForcedWinSolver {
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
-                for (Player o : cm.getOpponents()) {
-                    final Player liveOpp = (Player) live.getPlayer(o.getId());
-                    hideOrSample(live, me, liveOpp, o, world == 0, rng);
+                if (world >= 0) {
+                    // search-bones-1015 (d): world -1 = the position as it stands (exact)
+                    for (Player o : cm.getOpponents()) {
+                        final Player liveOpp = (Player) live.getPlayer(o.getId());
+                        hideOrSample(live, me, liveOpp, o, world == 0, rng);
+                    }
+                    shuffleUnknownOwnLibrary(cm, line, rng);
                 }
-                shuffleUnknownOwnLibrary(cm, line, rng);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             final Follower f = new Follower(line);
@@ -1486,12 +1654,20 @@ public final class ForcedWinSolver {
         Set<Integer> reserved() {
             final Set<Integer> out = new HashSet<>();
             for (int i = cursor; i < line.steps.size(); i++) {
-                if (!line.steps.get(i).pass) {
-                    out.add(line.steps.get(i).hostId);
+                final Step s = line.steps.get(i);
+                if (s.kind == AbilKind.REPEAT) {
+                    for (Step b : s.body) {
+                        out.add(b.hostId);
+                    }
+                } else if (!s.pass) {
+                    out.add(s.hostId);
                 }
             }
             return out;
         }
+
+        /** search-bones-1015 (c): the position inside the current REPEAT step (repetition, body index). */
+        int repIter, repPos;
 
         Next next(Game g, Player me) {
             final Next n = new Next();
@@ -1530,7 +1706,10 @@ public final class ForcedWinSolver {
                 n.waitingEnd = false;
                 return n;
             }
-            final Step st = line.steps.get(cursor);
+            final Step st0 = line.steps.get(cursor);
+            // search-bones-1015 (c): a REPEAT step plays its body steps in order, its number of times
+            final boolean inRepeat = st0.kind == AbilKind.REPEAT;
+            final Step st = inRepeat ? st0.body.get(repPos) : st0;
             if (st.kind == AbilKind.ATTACK) {
                 if (!ph.is(PhaseType.MAIN1)) {
                     // the attack happened (or its chance passed): go on with the line in main phase 2
@@ -1550,7 +1729,19 @@ public final class ForcedWinSolver {
                 n.why = why;
                 return n;
             }
-            cursor++;
+            if (inRepeat) {
+                repPos++;
+                if (repPos >= st0.body.size()) {
+                    repPos = 0;
+                    repIter++;
+                    if (repIter >= st0.times) {
+                        repIter = 0;
+                        cursor++;
+                    }
+                }
+            } else {
+                cursor++;
+            }
             executed.put(st.hostId, st);
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);

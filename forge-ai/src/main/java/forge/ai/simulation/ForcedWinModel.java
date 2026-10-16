@@ -115,7 +115,8 @@ public final class ForcedWinModel {
     }
 
     /** ENGINE: a step found by the engine search (any legal action, targets recorded); ATTACK: attack with everything. */
-    enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK }
+    /** REPEAT (search-bones-1015): a loop body found by the engine search's cycle table, repeated a number of times. */
+    enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK, REPEAT }
 
     /** One executable ability of a card: its printed cost and its observed effects. */
     static final class Abil {
@@ -570,7 +571,8 @@ public final class ForcedWinModel {
         final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
         long seed = 20261012L;
 
-        ACard card(Game live, Player me, Card c) {
+        /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
+        synchronized ACard card(Game live, Player me, Card c) {
             ACard t = templates.get(c.getName());
             if (t == null) {
                 t = ForcedWinProbe.learn(live, me, c, seed, probeStats);

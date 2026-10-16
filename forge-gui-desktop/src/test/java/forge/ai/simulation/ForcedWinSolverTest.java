@@ -470,6 +470,141 @@ public class ForcedWinSolverTest extends AITest {
         Assert.assertFalse(d.isGameOver() && d.getPlayers().get(0).hasWon());
     }
 
+    // ------------------------------------------------------------------ search-bones-1015 (c): cycles with progress
+
+    static final String KIKI_BF = "Kiki-Jiki, Mirror Breaker;Volcanic Island;Volcanic Island;Mountain;Mountain";
+
+    @Test
+    public void progressAndTheCoarseKeyLeaveOutTokensAndCounters() {
+        final Game g = game("Default", "Default", frame("Pestermite", KIKI_BF, 20, "", "Forest", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final long[] a = ForcedWinEngine.progress(g, me);
+        final String k = ForcedWinEngine.coarseKey(g, me);
+        g.getPlayers().get(1).setLife(17, null);
+        final long[] b = ForcedWinEngine.progress(g, me);
+        Assert.assertEquals(ForcedWinEngine.coarseKey(g, me), k, "life is a counter, not part of the key");
+        Assert.assertTrue(ForcedWinEngine.progressed(b, a));
+        Assert.assertFalse(ForcedWinEngine.progressed(a, b));
+        Assert.assertTrue(ForcedWinEngine.dominates(b, a));
+        Assert.assertFalse(ForcedWinEngine.progressed(a, a), "no change is no progress");
+    }
+
+    @Test
+    public void aLoopWithProgressIsFastForwardedToTheKill() {
+        // search-bones-1015 (c): Kiki-Jiki + Pestermite against 20 life: each copy's trigger untaps Kiki-Jiki and adds a hasty
+        // 2/1; the two first repetitions made progress (a token each), so the engine plays the body on as one REPEAT move
+        // until the attack is lethal, within a node budget the step-by-step search does not reach it in
+        final Game g = game("Default", "Default", frame("Pestermite", KIKI_BF, 20, "", "Forest", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Limits lim = new ForcedWinEngine.Limits();
+        lim.cycles = true;
+        lim.nodes = 60;
+        lim.passTurn = false;
+        final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+        final ForcedWinPlanner.Line line = ForcedWinEngine.search(g, me, lim, st, System.nanoTime() + 20_000_000_000L, 7L);
+        Assert.assertNotNull(line, st.summary());
+        Assert.assertTrue(st.loops >= 1, st.summary());
+        boolean repeat = false;
+        for (ForcedWinPlanner.Step s : line.steps) {
+            repeat |= s.kind == AbilKind.REPEAT && s.times >= 5;
+        }
+        Assert.assertTrue(repeat, "a REPEAT step of 5 or more: " + line);
+        System.err.println("[cycles-test] " + st.summary() + " line=" + line);
+    }
+
+    @Test
+    public void aFastForwardStopsWhenTheAttackIsLethalPastBlockers() {
+        // search-bones-1015 (c): the same loop against three untapped Grizzly Bears: the fast-forward stops once the
+        // tokens' power, less the three strongest attackers, covers 20 life, and the attack is the next move (before
+        // the fix it ran to the 64-repetition cap and then attacked with every token, past the live wall)
+        final Game g = game("Default", "Default", frame("Pestermite", KIKI_BF, 20, "",
+                "Forest;Grizzly Bears;Grizzly Bears;Grizzly Bears", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Limits lim = new ForcedWinEngine.Limits();
+        lim.cycles = true;
+        lim.nodes = 60;
+        lim.passTurn = false;
+        final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+        final ForcedWinPlanner.Line line = ForcedWinEngine.search(g, me, lim, st, System.nanoTime() + 20_000_000_000L, 7L);
+        Assert.assertNotNull(line, st.summary());
+        int times = -1;
+        for (ForcedWinPlanner.Step s : line.steps) {
+            if (s.kind == AbilKind.REPEAT) {
+                times = s.times;
+            }
+        }
+        Assert.assertTrue(times >= 5 && times < 30, "a REPEAT step short of the cap: " + line + " " + st.summary());
+        Assert.assertEquals(line.steps.get(line.steps.size() - 1).kind, AbilKind.ATTACK, line.toString());
+        Assert.assertTrue(st.loopReps < 40, st.summary());
+        System.err.println("[cycles-test-blockers] " + st.summary() + " line=" + line);
+    }
+
+    static final String BRP = "[state]\nturn=7\nactiveplayer=human\nactivephase=MAIN1\nhumanlife=20\nailife=20\n"
+            + "humanlandsplayed=0\nailandsplayed=0\naihand=\nailibrary=" + LIB20 + "\naigraveyard=\naiexile=\n"
+            + "aibattlefield=Forest;Forest;Forest;Forest;Grizzly Bears\nhumanhand=Underworld Breach;Brain Freeze;Lotus Petal\n"
+            + "humanbattlefield=Volcanic Island;Volcanic Island;Island;Island\nhumangraveyard=" + OURLIB + ";Island;Island\n"
+            + "humanexile=\nhumanlibrary=" + OURLIB + ";Island;Island;Island;Island;Island\n";
+
+    @Test
+    public void theBreachBrainFreezePetalLoopMillsThemOut() {
+        // search-bones-1015 (c): the dev puzzle N-BRP: Breach, then Brain Freeze and Lotus Petal escaped again and again
+        // (each Petal: storm + 1 and a mana; each Brain Freeze: mill 3 per storm copy) until their library is empty
+        final Game g = game("Default", "Default", BRP);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Limits lim = new ForcedWinEngine.Limits();
+        lim.cycles = true;
+        final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+        final ForcedWinPlanner.Line line = ForcedWinEngine.search(g, me, lim, st, System.nanoTime() + 20_000_000_000L, 7L);
+        System.err.println("[cycles-test-brp] " + st.summary() + " line=" + line);
+        Assert.assertNotNull(line, st.summary());
+    }
+
+    @Test
+    public void theSolverSeatFollowsARepeatLineToTheWin() {
+        System.setProperty("forge.ai.forcedWin.spec", "cycles=true,engineNodes=60");
+        try {
+            final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame("Pestermite", KIKI_BF, 20, "",
+                    "Forest", 20, "human"));
+            play(g, 7);
+            final ForcedWinSolver s = ((CubeComboPlayerController) g.getPlayers().get(0).getController()).cubeCombo()
+                    .forcedWin();
+            Assert.assertTrue(g.isGameOver() && g.getPlayers().get(0).hasWon(), "no win on turn 7: " + s.summary());
+        } finally {
+            System.clearProperty("forge.ai.forcedWin.spec");
+        }
+    }
+
+    // ------------------------------------------------------------------ search-bones-1015 (d): their lines, verified exactly
+
+    static ForcedWinSolver.Config threatConfig() {
+        final ForcedWinSolver.Config c = ForcedWinSolver.Config.fromProps(k -> null);
+        c.horizon = 1;
+        c.engine = false;
+        c.nodes = 3000;
+        c.planMs = 1000;
+        c.budgetMs = 3000;
+        return c;
+    }
+
+    @Test
+    public void theirLineWinsUnlessWeHoldTheCounterForIt() {
+        // their main phase, we are at 3 life: their Lightning Bolt is a forced win; with Counterspell and UU up it is not
+        // (the exact verification plays our seat as an adversary that counters their spell)
+        final Game open = game("Default", "Default", frame("", "Island;Island", 3, "Lightning Bolt", "Mountain", 20, "ai"));
+        final ThreatCheck t1 = new ThreatCheck(threatConfig());
+        Assert.assertTrue(t1.theyWin(open, open.getPlayers().get(0)), t1.summary());
+        final Game held = game("Default", "Default", frame("Counterspell", "Island;Island", 3, "Lightning Bolt", "Mountain",
+                20, "ai"));
+        final ThreatCheck t2 = new ThreatCheck(threatConfig());
+        Assert.assertFalse(t2.theyWin(held, held.getPlayers().get(0)), t2.summary());
+        Assert.assertTrue(t2.found.get() >= 1, "the line is found, then refuted: " + t2.summary());
+        // tapped out: the counter cannot be cast, their line wins again
+        final Game tapped = game("Default", "Default", frame("Counterspell", "Island|Tapped;Island|Tapped", 3,
+                "Lightning Bolt", "Mountain", 20, "ai"));
+        final ThreatCheck t3 = new ThreatCheck(threatConfig());
+        Assert.assertTrue(t3.theyWin(tapped, tapped.getPlayers().get(0)), t3.summary());
+    }
+
     @Test(timeOut = 120000)
     public void anAttackTheRulesRefuseEndsAndGoesToForgeAi() {
         // exploit-panel-1015: the engine's "attack with everything" broke an attack requirement and the rules asked the same

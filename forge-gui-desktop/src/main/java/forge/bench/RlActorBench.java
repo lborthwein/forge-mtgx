@@ -656,6 +656,12 @@ public final class RlActorBench {
                 seat.searchSeat = searchSeat;
                 seat.search = search;
                 out.search = search;
+                // search-bones-1015: the plan hooks of the RL seats (no-op unless the spec sets forcedWin or plans)
+                final boolean[] rlSeats = new boolean[ctl.length];
+                for (int s = 0; s < ctl.length; s++) {
+                    rlSeats[s] = RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL;
+                }
+                search.attach(game, rlSeats, seat);
             }
             dg = new RlSimBench.Digest(game);
             game.subscribeToEvents(dg);
