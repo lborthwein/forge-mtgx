@@ -517,7 +517,16 @@ public final class RlActorBench {
         sc.mode = mode;
         sc.capActions = cfg.capActions;
         sc.maxDecisions = cfg.maxDecisions;
-        sc.loopGuard = cfg.loopGuard; // exploit-panel-1015: 0 (the default) = no guard, as before
+        // exploit-panel-1015: the actor's loopGuard (0, the default = no guard, as before); r4-design-1015: a GAME's
+        // (a replayed tape's) own "loop_guard" takes precedence, so a replay plays the guard its tape played
+        final int loopGuard;
+        try {
+            loopGuard = loopGuardOf(g, cfg.loopGuard);
+        } catch (RuntimeException e) {
+            out.guardError = "loop_guard: " + e.getMessage();
+            return out;
+        }
+        sc.loopGuard = loopGuard;
         // the observation schema: the actor's, or (replay) the tape's
         final int obsVersion = g.has("obs_schema") ? g.get("obs_schema").getAsInt() : cfg.obsSchema;
         feat.setVersion(obsVersion);
@@ -771,7 +780,7 @@ public final class RlActorBench {
         for (int d : seat.overridden) ov.add(d);
         end.add("overridden", ov);
         end.addProperty("cap_hits", seat.capHits);
-        if (cfg.loopGuard > 0) {
+        if (loopGuard > 0) {
             end.addProperty("loop_guard_hits", seat.loopGuardHits()); // exploit-panel-1015: only when on
         }
         end.addProperty("digest", digest);
@@ -858,12 +867,34 @@ public final class RlActorBench {
             t.add("seeding", seeding.spec()); // G3: the spec as played (a replay re-applies it) and its outcome
             t.add("seeded", end.get("seeded"));
         }
+        if (loopGuard > 0) {
+            // r4-design-1015: the guard as played (a replay re-applies it) and its hits; no key when off, so a guard-off
+            // tape is unchanged
+            t.addProperty("loop_guard", loopGuard);
+            t.addProperty("loop_guard_hits", seat.loopGuardHits());
+        }
         out.tape = t;
 
         AiCache.closeScope();
         IdScope.close();
         MyRandom.setThreadRandom(null);
         return out;
+    }
+
+    /**
+     * r4-design-1015: the RL seats' loop guard K for one game: the GAME's own {@code loop_guard} (a replayed tape's,
+     * or a server's) when present, else the actor's {@link Cfg#loopGuard}. 0 = off. A negative or non-integer value
+     * is refused.
+     */
+    static int loopGuardOf(final JsonObject g, final int actorDefault) {
+        if (g == null || !g.has("loop_guard") || g.get("loop_guard").isJsonNull()) {
+            return actorDefault;
+        }
+        final int k = g.get("loop_guard").getAsInt();
+        if (k < 0) {
+            throw new IllegalArgumentException("loop_guard >= 0 (0 = off), not " + k);
+        }
+        return k;
     }
 
     /** Controller entry points that notify or plumb rather than decide; left out of forge_decided. */
@@ -1309,7 +1340,7 @@ public final class RlActorBench {
         return unequal > 0 ? 4 : 0;
     }
 
-    private static JsonObject replayOne(final Cfg cfg, final Map<String, List<JsonObject>> cache, final int[] fl,
+    static JsonObject replayOne(final Cfg cfg, final Map<String, List<JsonObject>> cache, final int[] fl,
             final RlFeaturizer feat, final String jarSha) {
         final String f = cfg.replayTapes.get(fl[0]);
         final JsonObject row = new JsonObject();
@@ -1340,6 +1371,8 @@ public final class RlActorBench {
                 if (t.has("seeding")) {
                     g.add("seeding", t.get("seeding")); // cm-curriculum-1009: the seeding it played, re-applied
                 }
+                // r4-design-1015: the loop guard it played (absent = off), whatever the replay actor's own loopGuard
+                g.addProperty("loop_guard", t.has("loop_guard") ? t.get("loop_guard").getAsInt() : 0);
                 g.addProperty("priv", false);
                 g.addProperty("obs_schema", t.has("schema_sha") && forge.bench.rl.RlSchemaV2.schemaSha().equals(
                         t.get("schema_sha").getAsString()) ? 2 : 1);
