@@ -56,7 +56,14 @@ public final class ForcedWinModel {
      * Observed effect kinds. PILE: "choose n cards of our library and graveyard, put them on top in any order, exile
      * the rest" (an ordered library choice). TUTOR / TUTOR_TOP: choose a library card to hand / to the top.
      */
-    enum EffKind { DRAW, MANA, PUTBACK, MILL, MILL_OPP, LIFE, DRAIN, DISCARD, PILE, TUTOR, TUTOR_TOP, WIN, SHUFFLE }
+    enum EffKind {
+        DRAW, MANA, PUTBACK, MILL, MILL_OPP, LIFE, DRAIN, DISCARD, PILE, TUTOR, TUTOR_TOP, WIN, SHUFFLE,
+        /** solver-gaps-1015: our whole hand / graveyard goes into our library (Timetwister, Echo of Eons); our hand is exiled (Memory Jar). */
+        HAND_TO_LIBRARY, GRAVEYARD_TO_LIBRARY, EXILE_HAND
+    }
+
+    /** solver-gaps-1015: an effect count meaning "all of them" (a whole hand discarded, shuffled in or exiled). */
+    static final int ALL = 99;
 
     /** One effect of an ability's resolution, in observed order. */
     static final class Eff {
@@ -64,16 +71,46 @@ public final class ForcedWinModel {
         final int n;
         /** MANA: the colours it can make (bitmask over W U B R G C). */
         final int colors;
+        /**
+         * LIFE (solver-gaps-1015): 0 = a fixed change of {@code n}; otherwise the change is this share of our life total
+         * (observed at two life totals in the sandbox: "lose half your life, rounded up" is -0.5).
+         */
+        final double perLife;
+        /**
+         * TUTOR / TUTOR_TOP (solver-gaps-1015): the card names the engine offered in the sandbox (its search filter, as
+         * observed: Trinket Mage finds a small artifact, a landcycler a land); null = any card.
+         */
+        final java.util.Set<String> names;
 
         Eff(EffKind kind, int n, int colors) {
+            this(kind, n, colors, 0, null);
+        }
+
+        Eff(EffKind kind, int n, int colors, double perLife) {
+            this(kind, n, colors, perLife, null);
+        }
+
+        Eff(EffKind kind, int n, int colors, double perLife, java.util.Set<String> names) {
             this.kind = kind;
             this.n = n;
             this.colors = colors;
+            this.perLife = perLife;
+            this.names = names;
+        }
+
+        /** LIFE: the change at life total {@code life}. */
+        int lifeChange(int life) {
+            if (perLife == 0) {
+                return n;
+            }
+            final double x = perLife * life;
+            return (int) (x < 0 ? Math.floor(x) : Math.ceil(x));
         }
 
         @Override
         public String toString() {
-            return kind + "" + n + (kind == EffKind.MANA ? ":" + colorString(colors) : "");
+            return kind + "" + (perLife != 0 ? perLife + "*life" : n == ALL ? "all" : String.valueOf(n))
+                    + (kind == EffKind.MANA ? ":" + colorString(colors) : "") + (names == null ? "" : names.size() + "names");
         }
     }
 
@@ -88,6 +125,8 @@ public final class ForcedWinModel {
         String costKey = "";
         final int[] pips = new int[6];
         final int[] phyrexian = new int[6];
+        /** Hybrid pips (solver-gaps-1015): each a colour mask, paid by one mana of any colour in it. */
+        final List<Integer> hybrid = new ArrayList<>();
         int generic;
         boolean usesX;
         int life;
@@ -108,6 +147,11 @@ public final class ForcedWinModel {
         boolean storm;
         /** Observed: a counterspell (it needs a spell to target). */
         boolean counter;
+        /**
+         * Legal hand sizes (solver-gaps-1015): bit h set = the ability may be activated with h cards in our hand (bit 11:
+         * 11 or more); -1 = no hand-size condition. Observed by probing the ability's legality at each hand size.
+         */
+        int handMask = -1;
         /** The ability could not be played in the sandbox (illegal, unaffordable, or the probe failed). */
         boolean unplayable;
         String probeNote = "";
@@ -134,6 +178,9 @@ public final class ForcedWinModel {
                     sb.append(SHORT[i]).append("/P");
                 }
             }
+            for (int h : hybrid) {
+                sb.append('{').append(colorString(h)).append('}');
+            }
             if (life > 0) {
                 sb.append(" life").append(life);
             }
@@ -152,6 +199,9 @@ public final class ForcedWinModel {
             if (loyalty) {
                 sb.append(" loyalty").append(loyaltyDelta);
             }
+            if (handMask != -1) {
+                sb.append(" hand").append(Integer.toBinaryString(handMask));
+            }
             return sb.length() == 0 ? "0" : sb.toString().trim();
         }
 
@@ -162,6 +212,8 @@ public final class ForcedWinModel {
             a.costKey = costKey;
             System.arraycopy(pips, 0, a.pips, 0, 6);
             System.arraycopy(phyrexian, 0, a.phyrexian, 0, 6);
+            a.hybrid.addAll(hybrid);
+            a.handMask = handMask;
             a.generic = generic;
             a.usesX = usesX;
             a.life = life;
@@ -189,7 +241,9 @@ public final class ForcedWinModel {
         int id;
         String name;
         boolean land;
+        /** Observed (solver-gaps-1015): playing it as our land drop, it entered tapped; and the life that cost us. */
         boolean entersTapped;
+        int landLife;
         /** Subtypes, for returned-permanent costs (Gush returns Islands). */
         final List<String> subtypes = new ArrayList<>();
         /** Blue pips in its mana cost (printed): our devotion while it is on the battlefield. */
@@ -227,6 +281,7 @@ public final class ForcedWinModel {
             a.name = name;
             a.land = land;
             a.entersTapped = entersTapped;
+            a.landLife = landLife;
             a.subtypes.addAll(subtypes);
             a.bluePips = bluePips;
             a.permanent = permanent;
@@ -432,6 +487,15 @@ public final class ForcedWinModel {
                 ab.phyrexian[colour]++;
             } else if (n == 1 && !s.isOr2Generic()) {
                 ab.pips[colour]++;
+            } else if (n >= 2 && !s.isOr2Generic() && !s.isPhyrexian()) {
+                // solver-gaps-1015: a hybrid pip is one mana of one of its colours, not any mana
+                int mask = 0;
+                for (int i = 0; i < 5; i++) {
+                    if (s.isColor(FORGE_COLOR[i])) {
+                        mask |= 1 << i;
+                    }
+                }
+                ab.hybrid.add(mask);
             } else {
                 ab.generic += s.isOr2Generic() ? 2 : 1;
             }
@@ -461,13 +525,29 @@ public final class ForcedWinModel {
         final List<ACard> hand = new ArrayList<>();
         final List<ACard> battlefield = new ArrayList<>();
         final List<Boolean> tapped = new ArrayList<>();
+        /** solver-gaps-1015: a planeswalker that has already used its loyalty ability this turn (parallel to battlefield). */
+        final List<Boolean> used = new ArrayList<>();
+        /**
+         * solver-gaps-1015: the opponent's visible clock, their creatures' combat damage, largest first: a line that passes
+         * the turn must survive it (our creatures each block one attacker).
+         */
+        final List<Integer> oppPowers = new ArrayList<>();
         int devotionBlue;
         boolean emptyDrawWinLive;
-        /** Our library contents (ids sorted; for tutors and ordered library choices) and our graveyard. */
+        /**
+         * Our library contents (ids sorted; for tutors and ordered library choices) and our graveyard. solver-gaps-1015:
+         * the library list leaves out the known top ({@link #knownTop}).
+         */
         final List<ACard> library = new ArrayList<>();
         final List<ACard> graveyard = new ArrayList<>();
-        /** Our library order, top first, when the seat built it (null = unknown order). */
+        /** solver-gaps-1015: our graveyard's size (its cards are read only when something could choose them). */
+        int graveyardSize;
+        /**
+         * Our library's known top, top first (solver-gaps-1015: pile memory, a prefix of the library whose cards the seat
+         * put there or ordered itself); null = the whole order is unknown.
+         */
         List<Integer> knownOrder;
+        final List<ACard> knownTop = new ArrayList<>();
         int librarySize;
         boolean canDraw = true;
         /** Defense: the card of the spell on the stack whose resolution is asked about (cast and paid: free), or -1. */
@@ -476,7 +556,8 @@ public final class ForcedWinModel {
         String describe() {
             return "life=" + life + " opp=" + oppLife + " oppLib=" + oppLibrary + " landDrop=" + landDrop + " storm="
                     + storm + " devotion=" + devotionBlue + " pool=" + java.util.Arrays.toString(pool) + " hand=" + hand
-                    + " bf=" + battlefield + " lib=" + librarySize + "/" + library.size() + (knownOrder != null ? " known" : "")
+                    + " bf=" + battlefield + " lib=" + librarySize + "/" + library.size()
+                    + (knownOrder != null ? " knownTop=" + knownTop : "")
                     + " gy=" + graveyard.size();
         }
     }
@@ -527,6 +608,13 @@ public final class ForcedWinModel {
             }
             p.oppLife = opp.getLife();
             p.oppLibrary = opp.getCardsIn(ZoneType.Library).size();
+            for (Card c : opp.getCreaturesInPlay()) {
+                final int dmg = Math.max(0, c.getNetCombatDamage());
+                if (dmg > 0) {
+                    p.oppPowers.add(dmg);
+                }
+            }
+            p.oppPowers.sort(java.util.Collections.reverseOrder());
             p.turn = live.getPhaseHandler().getTurn();
             p.sorcerySpeed = me.canCastSorcery();
             p.landDrop = live.getPhaseHandler().isPlayerTurn(me) && me.getLandsPlayedThisTurn() < me.getMaxLandPlays();
@@ -559,18 +647,23 @@ public final class ForcedWinModel {
                 }
                 p.battlefield.add(a);
                 p.tapped.add(c.isTapped());
+                p.used.add(c.isPlaneswalker() && c.getPlaneswalkerAbilityActivated() > 0);
                 p.devotionBlue += a.bluePips;
                 p.emptyDrawWinLive |= a.emptyDrawWin;
             }
             final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
             p.librarySize = lib.size();
-            if (knownOrder != null) {
-                final List<Integer> ids = new ArrayList<>();
-                for (Card c : lib) {
-                    ids.add(c.getId());
+            if (knownOrder != null && !knownOrder.isEmpty() && knownOrder.size() <= lib.size()) {
+                // solver-gaps-1015: a known PREFIX of the library (the seat's pile memory)
+                boolean prefix = true;
+                for (int i = 0; i < knownOrder.size() && prefix; i++) {
+                    prefix = lib.get(i).getId() == knownOrder.get(i);
                 }
-                if (ids.equals(knownOrder)) {
+                if (prefix) {
                     p.knownOrder = new ArrayList<>(knownOrder);
+                    for (int i = 0; i < knownOrder.size(); i++) {
+                        p.knownTop.add(card(live, me, lib.get(i)));
+                    }
                 }
             }
             boolean chooses = false;
@@ -588,9 +681,10 @@ public final class ForcedWinModel {
                     chooses |= !ab.unplayable && (ab.has(EffKind.TUTOR) || ab.has(EffKind.TUTOR_TOP));
                 }
             }
-            if (p.knownOrder != null || libraryIfUseful && chooses) {
-                lib.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
-                for (Card c : lib) {
+            if (libraryIfUseful && chooses) {
+                final List<Card> rest = new ArrayList<>(lib.subList(p.knownTop.size(), lib.size()));
+                rest.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+                for (Card c : rest) {
                     p.library.add(card(live, me, c));
                 }
                 final List<Card> gy = new ArrayList<>(me.getCardsIn(ZoneType.Graveyard));
@@ -599,6 +693,7 @@ public final class ForcedWinModel {
                     p.graveyard.add(card(live, me, c));
                 }
             }
+            p.graveyardSize = me.getCardsIn(ZoneType.Graveyard).size();
             p.canDraw = me.canDraw();
             return p;
         }

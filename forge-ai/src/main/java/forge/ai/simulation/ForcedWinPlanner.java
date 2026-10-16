@@ -62,6 +62,18 @@ public final class ForcedWinPlanner {
         String triggerRef;
         /** ENGINE steps: the forced pick (by name) of the first search of our library this step makes (null = AI's). */
         String pickName;
+        /**
+         * Diagnostics (solver-gaps-1015): the width model's expected hand and library top (6 entries) before this step,
+         * as planner card indices (filled when the line is recorded into ids; -1 = an unseen card). Shared on copy.
+         */
+        int[] expHandIdx, expLibIdx;
+        List<Integer> expHand = List.of(), expLib = List.of();
+        /**
+         * solver-gaps-1015: the colours the line spent this step's any-colour mana on, in order (-1 = generic). The
+         * follower makes the step produce them (the engine otherwise lets Forge AI choose: Manamorphose made BB where the
+         * line needed UU).
+         */
+        final List<Integer> anyColors = new ArrayList<>();
 
         Step(AbilKind kind, ACard host, Abil ab, int floatColor) {
             this.kind = kind;
@@ -102,6 +114,11 @@ public final class ForcedWinPlanner {
             s.engineSpell = engineSpell;
             s.triggerRef = triggerRef;
             s.pickName = pickName;
+            s.expHandIdx = expHandIdx;
+            s.expLibIdx = expLibIdx;
+            s.expHand = expHand;
+            s.expLib = expLib;
+            s.anyColors.addAll(anyColors);
             return s;
         }
 
@@ -150,7 +167,8 @@ public final class ForcedWinPlanner {
                     + (pickName == null ? "" : " pick=" + pickName)
                     + (targetVariant != null ? "@" + targetVariant : "")
                     + (pile.isEmpty() ? "" : " pile" + pile) + (picks.isEmpty() ? "" : " pick" + picks)
-                    + (putBack.isEmpty() ? "" : " putBack" + putBack) + (phyrexianLife ? " phyLife" : "");
+                    + (putBack.isEmpty() ? "" : " putBack" + putBack) + (phyrexianLife ? " phyLife" : "")
+                    + (anyColors.isEmpty() ? "" : " as" + anyColors);
         }
     }
 
@@ -167,8 +185,8 @@ public final class ForcedWinPlanner {
         final List<String> protectionNames;
         final String how;
         int rank;
-        /** The play-outs keep our library order (the line was planned on a known order). */
-        boolean knownLibrary;
+        /** The play-outs keep this many cards on top of our library in place (the line was planned on a known top). */
+        int knownTop;
 
         Line(List<Step> steps, List<String> pileNames, int winTurn, int lifeLeft, int manaLeft, int protection,
                 List<String> protectionNames, String how) {
@@ -203,7 +221,16 @@ public final class ForcedWinPlanner {
         int classes = 14;
         /** POST-FREEZE 5: a wall-time budget (ms); late-game positions with large graveyards made keys slow. */
         long ms = 1500;
+        /**
+         * solver-gaps-1015 (payment search, off by default): how many payment orders each cast is tried with. 1 = the
+         * greedy payment ("the way Forge AI pays"); {@link #PAY_POLICIES} = also one-shot sources first, most flexible
+         * sources first, keep each colour, Phyrexian pips with life.
+         */
+        int payPolicies = 1;
     }
+
+    /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
+    static final int PAY_POLICIES = 9;
 
     static final class Result {
         final List<Line> lines = new ArrayList<>();
@@ -264,6 +291,8 @@ public final class ForcedWinPlanner {
         /** Cards known to be in the library (unordered unless entries say so), for tutors and piles. */
         List<Integer> libPool = new ArrayList<>();
         List<Integer> gyPool = new ArrayList<>();
+        /** solver-gaps-1015: graveyard cards the position did not read (they count when a graveyard is shuffled in). */
+        int gyExtra;
         /** The current ordered library choice: slot -> card (-1 unassigned) and its candidates. */
         int[] pile;
         List<Integer> remaining = new ArrayList<>();
@@ -272,6 +301,11 @@ public final class ForcedWinPlanner {
         boolean emptyDrawWin;
         boolean canDraw;
         List<Step> steps = new ArrayList<>();
+        /**
+         * solver-gaps-1015: each unit of floating multi-colour mana, oldest first: {producing step index, colour mask}
+         * (Waterlogged Grove's mana is green or blue, not any colour).
+         */
+        List<int[]> anyQueue = new ArrayList<>();
         boolean won;
         String how = "";
         boolean dead;
@@ -294,6 +328,7 @@ public final class ForcedWinPlanner {
             s.lib = new ArrayList<>(lib);
             s.libPool = new ArrayList<>(libPool);
             s.gyPool = new ArrayList<>(gyPool);
+            s.gyExtra = gyExtra;
             s.pile = pile == null ? null : pile.clone();
             s.remaining = new ArrayList<>(remaining);
             s.pileStep = pileStep;
@@ -304,6 +339,7 @@ public final class ForcedWinPlanner {
             for (Step st : steps) {
                 s.steps.add(st.copy());
             }
+            s.anyQueue = new ArrayList<>(anyQueue);
             s.won = won;
             s.how = how;
             s.dead = dead;
@@ -390,6 +426,7 @@ public final class ForcedWinPlanner {
             p.card = idx(pos.battlefield.get(i));
             p.tapped = pos.tapped.get(i);
             p.loyalty = pos.battlefield.get(i).startLoyalty;
+            p.activated = i < pos.used.size() && pos.used.get(i);
             s.bf.add(p);
         }
         s.devotion = pos.devotionBlue;
@@ -400,22 +437,19 @@ public final class ForcedWinPlanner {
         for (ACard a : pos.graveyard) {
             s.gyPool.add(idx(a));
         }
-        if (pos.knownOrder != null) {
-            for (int id : pos.knownOrder) {
-                s.lib.add(indexOfId.getOrDefault(id, unknownCard));
-            }
-        } else {
-            for (int i = 0; i < pos.librarySize; i++) {
-                s.lib.add(UNKNOWN);
-            }
+        s.gyExtra = Math.max(0, pos.graveyardSize - pos.graveyard.size());
+        // solver-gaps-1015: the known top (pile memory) is KNOWN entries, the rest of the library UNKNOWN
+        for (ACard a : pos.knownTop) {
+            s.lib.add(idx(a));
+        }
+        for (int i = pos.knownTop.size(); i < pos.librarySize; i++) {
+            s.lib.add(UNKNOWN);
         }
         dfs(s, 0);
         rank();
         result.nodes = nodes;
-        if (pos.knownOrder != null) {
-            for (Line l : result.lines) {
-                l.knownLibrary = true;
-            }
+        for (Line l : result.lines) {
+            l.knownTop = pos.knownTop.size();
         }
         return result;
     }
@@ -509,11 +543,16 @@ public final class ForcedWinPlanner {
                         || a.emptyDrawWin);
     }
 
+    /** solver-gaps-1015: an observed hand-size condition (Library of Alexandria's "exactly seven cards"). */
+    private static boolean handOk(S s, Abil ab) {
+        return ab.handMask == -1 || (ab.handMask >> Math.min(11, s.hand.size()) & 1) != 0;
+    }
+
     private boolean allowed(S s, ACard a, Abil ab) {
         if (ab.kind == AbilKind.LAND) {
             return s.landDrop && s.sorcery;
         }
-        if (!s.sorcery && !ab.instant) {
+        if (!s.sorcery && !ab.instant || !handOk(s, ab)) {
             return false;
         }
         if (ab.kind == AbilKind.SPELL && a.permanent) {
@@ -523,7 +562,7 @@ public final class ForcedWinPlanner {
     }
 
     private boolean allowedBf(S s, Perm p, Abil ab) {
-        if (!s.sorcery && !ab.instant && ab.kind != AbilKind.FLOAT) {
+        if (!s.sorcery && !ab.instant && ab.kind != AbilKind.FLOAT || !handOk(s, ab)) {
             return false;
         }
         if (ab.tapSelf && p.tapped) {
@@ -567,9 +606,35 @@ public final class ForcedWinPlanner {
             }
         }
         final Step step = new Step(ab.kind, a, ab, -1);
-        if (!free && !pay(s, ab, self, step)) {
+        step.expHandIdx = s0.hand.stream().mapToInt(Integer::intValue).toArray();
+        step.expLibIdx = s0.lib.subList(0, Math.min(6, s0.lib.size())).stream().mapToInt(Integer::intValue).toArray();
+        if (free || lim.payPolicies <= 1) {
+            if (!free && !pay(s, ab, self, step)) {
+                return out;
+            }
+            afterPay(s, step, self, host, handIdx, a, ab, free, out);
             return out;
         }
+        // solver-gaps-1015: the bounded payment search: the same cast paid in each payment order, distinct results only
+        final int selfIdx = self == null ? -1 : s.bf.indexOf(self);
+        final Set<String> paid = new HashSet<>();
+        for (int pol = 0; pol < lim.payPolicies; pol++) {
+            final S v = s.copy();
+            final Step st = step.copy();
+            final Perm vSelf = selfIdx < 0 ? null : v.bf.get(selfIdx);
+            payPolicy = pol;
+            final boolean ok = pay(v, ab, vSelf, st);
+            payPolicy = 0;
+            if (!ok || !paid.add(v.key() + st.phyrexianLife)) {
+                continue;
+            }
+            afterPay(v, st, vSelf, host, handIdx, a, ab, false, out);
+        }
+        return out;
+    }
+
+    /** The rest of {@link #apply} once the cost is paid: the step is played and its effects resolve into {@code out}. */
+    private void afterPay(S s, Step step, Perm self, int host, int handIdx, ACard a, Abil ab, boolean free, List<S> out) {
         s.steps.add(step);
         if (handIdx >= 0) {
             s.hand.remove(Integer.valueOf(host));
@@ -580,8 +645,13 @@ public final class ForcedWinPlanner {
             p.card = host;
             p.tapped = a.entersTapped;
             s.bf.add(p);
+            // solver-gaps-1015: the life its entering cost (a shock land paid untapped), as observed
+            s.life += Math.min(0, a.landLife);
+            if (s.life <= 0) {
+                return;
+            }
             out.add(s);
-            return out;
+            return;
         }
         if (ab.kind == AbilKind.SPELL && !free) {
             s.storm++;
@@ -614,7 +684,7 @@ public final class ForcedWinPlanner {
                 s.won = true;
                 s.how = "enters";
                 out.add(s);
-                return out;
+                return;
             }
             if (a.winIfLibraryAtMost >= 0) {
                 if (s.lib.size() <= a.winIfLibraryAtMost + (s.devotion - a.winDevotion)) {
@@ -622,7 +692,7 @@ public final class ForcedWinPlanner {
                     s.how = "enters(library<=" + (a.winIfLibraryAtMost + s.devotion - a.winDevotion) + ")";
                 }
                 out.add(s);
-                return out;
+                return;
             }
             effs.addAll(ab.effects);
         } else {
@@ -635,13 +705,13 @@ public final class ForcedWinPlanner {
             s.bf.remove(sacked);
             s.gyPool.add(sacked.card);
         }
+        final int before = out.size();
         resolve(s, effs, 0, 0, ab, out);
         if (toGraveyard) {
-            for (S n : out) {
-                n.gyPool.add(host);
+            for (int i = before; i < out.size(); i++) {
+                out.get(i).gyPool.add(host);
             }
         }
-        return out;
     }
 
     private static int bestFloatColour(int mask) {
@@ -651,9 +721,26 @@ public final class ForcedWinPlanner {
         return Integer.numberOfTrailingZeros(mask);
     }
 
-    /** Our turn ends; the opponent's turn is not modelled except their draw (a milled-out opponent loses); our turn. */
+    /**
+     * Our turn ends; the opponent's turn is modelled by their draw (a milled-out opponent loses) and, since
+     * solver-gaps-1015, their visible clock (their creatures attack; each of our creatures blocks one); our turn.
+     */
     private List<S> passTurn(S s) {
         final List<S> out = new ArrayList<>();
+        if (s.oppLib > 0 && !pos.oppPowers.isEmpty()) {
+            int blockers = 0;
+            for (Perm p : s.bf) {
+                blockers += cards.get(p.card).creature ? 1 : 0;
+            }
+            int damage = 0;
+            for (int i = blockers; i < pos.oppPowers.size(); i++) {
+                damage += pos.oppPowers.get(i);
+            }
+            if (damage >= s.life) {
+                return out;
+            }
+            s.life -= damage;
+        }
         if (s.oppLib <= 0) {
             // the opponent loses drawing from an empty library in their draw step, before our next turn
             s.turnIdx++;
@@ -667,6 +754,7 @@ public final class ForcedWinPlanner {
         Arrays.fill(s.pool, 0);
         s.landDrop = true;
         s.storm = 0;
+        s.anyQueue.clear();
         for (Perm p : s.bf) {
             p.tapped = false;
             p.activated = false;
@@ -746,6 +834,9 @@ public final class ForcedWinPlanner {
                     s.pool[Integer.numberOfTrailingZeros(e.colors)] += e.n;
                 } else {
                     s.pool[ForcedWinModel.ANY] += e.n;
+                    for (int i = 0; i < e.n; i++) {
+                        s.anyQueue.add(new int[] {s.steps.size() - 1, e.colors});
+                    }
                 }
                 resolve(s, effs, ei + 1, 0, ab, out);
                 return;
@@ -768,6 +859,11 @@ public final class ForcedWinPlanner {
             case PILE: {
                 // an ordered library choice: e.n cards of our library and graveyard, the rest exiled
                 final List<Integer> cands = new ArrayList<>(s.libPool);
+                for (int e2 : s.lib) {
+                    if (e2 >= 0) {
+                        cands.add(e2);
+                    }
+                }
                 cands.addAll(s.gyPool);
                 cands.sort(Integer::compare);
                 final int k = Math.min(e.n, cands.size());
@@ -786,8 +882,46 @@ public final class ForcedWinPlanner {
             }
             case TUTOR:
             case TUTOR_TOP: {
-                for (int c : classes(s.libPool)) {
+                final List<Integer> pool = new ArrayList<>(s.libPool);
+                for (int e2 : s.lib) {
+                    if (e2 >= 0) {
+                        pool.add(e2);
+                    }
+                }
+                if (e.names != null) {
+                    // solver-gaps-1015: only what the engine offered this tutor in the sandbox (its filter, observed)
+                    final List<Integer> eligible = new ArrayList<>();
+                    for (int c : pool) {
+                        if (e.names.contains(cards.get(c).name)) {
+                            eligible.add(c);
+                        }
+                    }
+                    if (eligible.isEmpty()) {
+                        resolve(s, effs, ei + 1, 0, ab, out);
+                        return;
+                    }
+                    for (int c : classes(eligible)) {
+                        final S n = s.copy();
+                        n.libPool = new ArrayList<>(pool);
+                        n.libPool.remove(Integer.valueOf(c));
+                        n.steps.get(n.steps.size() - 1).picks.add(cards.get(c).id);
+                        final int size = n.lib.size() - 1;
+                        n.lib = new ArrayList<>();
+                        if (e.kind == EffKind.TUTOR_TOP) {
+                            n.lib.add(c);
+                        } else {
+                            n.hand.add(c);
+                        }
+                        for (int i = 0; i < size; i++) {
+                            n.lib.add(UNKNOWN);
+                        }
+                        resolve(n, effs, ei + 1, 0, ab, out);
+                    }
+                    return;
+                }
+                for (int c : classes(pool)) {
                     final S n = s.copy();
+                    n.libPool = new ArrayList<>(pool);
                     n.libPool.remove(Integer.valueOf(c));
                     n.steps.get(n.steps.size() - 1).picks.add(cards.get(c).id);
                     final int size = n.lib.size() - 1;
@@ -805,7 +939,7 @@ public final class ForcedWinPlanner {
                 return;
             }
             case LIFE: {
-                s.life += e.n;
+                s.life += e.lifeChange(s.life);
                 if (s.life <= 0) {
                     return;
                 }
@@ -829,6 +963,36 @@ public final class ForcedWinPlanner {
                     s.hand.remove(Integer.valueOf(d));
                     s.gyPool.add(d);
                 }
+                resolve(s, effs, ei + 1, 0, ab, out);
+                return;
+            }
+            case HAND_TO_LIBRARY: {
+                // solver-gaps-1015: our hand goes into our library (a shuffle follows): known contents, unknown places
+                for (int h : s.hand) {
+                    if (h != unknownCard) {
+                        s.libPool.add(h);
+                    }
+                    s.lib.add(UNKNOWN);
+                }
+                s.hand.clear();
+                resolve(s, effs, ei + 1, 0, ab, out);
+                return;
+            }
+            case GRAVEYARD_TO_LIBRARY: {
+                for (int g : s.gyPool) {
+                    s.libPool.add(g);
+                    s.lib.add(UNKNOWN);
+                }
+                for (int i = 0; i < s.gyExtra; i++) {
+                    s.lib.add(UNKNOWN);
+                }
+                s.gyPool.clear();
+                s.gyExtra = 0;
+                resolve(s, effs, ei + 1, 0, ab, out);
+                return;
+            }
+            case EXILE_HAND: {
+                s.hand.clear();
                 resolve(s, effs, ei + 1, 0, ab, out);
                 return;
             }
@@ -971,9 +1135,14 @@ public final class ForcedWinPlanner {
                 }
             }
         }
+        for (int mask : ab.hybrid) {
+            if (!payHybrid(s, mask, self)) {
+                return false;
+            }
+        }
         for (int col = 0; col < 6; col++) {
             for (int k = 0; k < ab.phyrexian[col]; k++) {
-                if (canPayColour(s, col, self)) {
+                if (canPayColour(s, col, self) && !(payPolicy == 8 && s.life > 2)) {
                     payColour(s, col, self);
                 } else {
                     if (s.life <= 2) {
@@ -993,7 +1162,7 @@ public final class ForcedWinPlanner {
     }
 
     private boolean canPayColour(S s, int col, Perm self) {
-        return s.pool[col] > 0 || s.pool[ForcedWinModel.ANY] > 0 || source(s, 1 << col, self) != null;
+        return s.pool[col] > 0 || anyCan(s, col) || source(s, 1 << col, self) != null;
     }
 
     private boolean payColour(S s, int col, Perm self) {
@@ -1001,8 +1170,8 @@ public final class ForcedWinPlanner {
             s.pool[col]--;
             return true;
         }
-        if (s.pool[ForcedWinModel.ANY] > 0) {
-            s.pool[ForcedWinModel.ANY]--;
+        if (anyCan(s, col)) {
+            useAny(s, col);
             return true;
         }
         final Perm p = source(s, 1 << col, self);
@@ -1014,14 +1183,69 @@ public final class ForcedWinPlanner {
         return true;
     }
 
+    /** solver-gaps-1015: spend one floating any-colour mana as colour {@code col} (-1 generic); its step records it. */
+    private void useAny(S s, int col) {
+        s.pool[ForcedWinModel.ANY]--;
+        final int i = anyUnit(s, col);
+        if (i >= 0) {
+            final int at = s.anyQueue.remove(i)[0];
+            if (at >= 0 && at < s.steps.size()) {
+                s.steps.get(at).anyColors.add(col);
+            }
+        }
+    }
+
+    /** The latest floating multi-colour unit that can be colour {@code col} (-1: generic, any unit), or -1. */
+    private static int anyUnit(S s, int col) {
+        for (int i = s.anyQueue.size() - 1; i >= 0; i--) {
+            if (col < 0 || (s.anyQueue.get(i)[1] & (1 << col)) != 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean anyCan(S s, int col) {
+        return s.pool[ForcedWinModel.ANY] > 0 && (s.anyQueue.isEmpty() || anyUnit(s, col) >= 0);
+    }
+
+    /** solver-gaps-1015: one mana of any colour in {@code mask}: floating first (the most plentiful), then a source. */
+    private boolean payHybrid(S s, int mask, Perm self) {
+        int best = -1;
+        for (int c = 0; c < 5; c++) {
+            if ((mask & (1 << c)) != 0 && s.pool[c] > 0 && (best < 0 || s.pool[c] > s.pool[best])) {
+                best = c;
+            }
+        }
+        if (best >= 0) {
+            s.pool[best]--;
+            return true;
+        }
+        for (int c = 0; c < 5; c++) {
+            if ((mask & (1 << c)) != 0 && anyCan(s, c)) {
+                useAny(s, c);
+                return true;
+            }
+        }
+        final Perm p = source(s, mask, self);
+        if (p == null) {
+            return false;
+        }
+        final int col = Integer.numberOfTrailingZeros(cards.get(p.card).sourceColors & mask);
+        tapSource(s, p, col);
+        s.pool[col]--;
+        return true;
+    }
+
     private boolean payGeneric(S s, Perm self) {
         if (s.pool[ForcedWinModel.C] > 0) {
             s.pool[ForcedWinModel.C]--;
             return true;
         }
         int best = -1;
+        final int keep = payPolicy >= 3 && payPolicy <= 7 ? payPolicy - 3 : -1;
         for (int c = 0; c < 5; c++) {
-            if (s.pool[c] > 0 && (best < 0 || s.pool[c] > s.pool[best])) {
+            if (s.pool[c] > 0 && (best < 0 || best == keep && c != keep || (c != keep || best == keep) && s.pool[c] > s.pool[best])) {
                 best = c;
             }
         }
@@ -1030,7 +1254,7 @@ public final class ForcedWinPlanner {
             return true;
         }
         if (s.pool[ForcedWinModel.ANY] > 0) {
-            s.pool[ForcedWinModel.ANY]--;
+            useAny(s, -1);
             return true;
         }
         final Perm p = source(s, ForcedWinModel.ALL_COLORS, self);
@@ -1045,6 +1269,28 @@ public final class ForcedWinPlanner {
         return true;
     }
 
+    /** The payment order in use (0 = greedy; the payment search tries the others). */
+    private int payPolicy;
+
+    /**
+     * A source's rank in the payment order (lower is tapped first). 0: least flexible first, one-shot sources last (the
+     * greedy order); 1: one-shot sources first; 2: most flexible first; 3..7: keep colour W/U/B/R/G (tap other sources
+     * first); 8: as 0 with Phyrexian pips paid in life.
+     */
+    private int sourceScore(ACard a) {
+        final int flex = Integer.bitCount(a.sourceColors), sac = a.sourceSac ? 1 : 0;
+        switch (payPolicy) {
+            case 1:
+                return (1 - sac) * 100 + flex * 10;
+            case 2:
+                return -flex * 10 + sac * 100;
+            case 3: case 4: case 5: case 6: case 7:
+                return ((a.sourceColors & (1 << (payPolicy - 3))) != 0 ? 1000 : 0) + flex * 10 + sac * 100;
+            default:
+                return flex * 10 + sac * 100;
+        }
+    }
+
     private Perm source(S s, int mask, Perm self) {
         Perm best = null;
         int bestScore = Integer.MAX_VALUE;
@@ -1056,7 +1302,7 @@ public final class ForcedWinPlanner {
             if ((a.sourceColors & mask) == 0 || a.sourceSick) {
                 continue;
             }
-            final int score = Integer.bitCount(a.sourceColors) * 10 + (a.sourceSac ? 100 : 0);
+            final int score = sourceScore(a);
             if (score < bestScore) {
                 bestScore = score;
                 best = p;
@@ -1067,6 +1313,9 @@ public final class ForcedWinPlanner {
 
     private void tapSource(S s, Perm p, int col) {
         final ACard a = cards.get(p.card);
+        // solver-gaps-1015: the line floats exactly the sources the model paid with, in the colour it used, before the
+        // step (Forge AI's own payment chose other sources, or would not use a sacrifice source like Black Lotus)
+        s.steps.add(new Step(AbilKind.FLOAT, a, null, col));
         p.tapped = true;
         s.pool[col] += Math.max(1, a.sourceAmount);
         if (a.sourceSac) {
@@ -1083,21 +1332,31 @@ public final class ForcedWinPlanner {
         for (Step st : s.steps) {
             steps.add(st.copy());
         }
+        int[] slotCard = new int[0];
         if (s.pile != null && s.pileStep >= 0 && s.pileStep < steps.size()) {
             final List<Integer> left = new ArrayList<>(s.remaining);
             left.sort(Comparator.comparingInt((Integer r) -> -cards.get(r).order()).thenComparingInt(r -> cards.get(r).id));
             int li = 0;
             final Step ps = steps.get(s.pileStep);
             ps.pile.clear();
+            slotCard = new int[s.pile.length];
             for (int i = 0; i < s.pile.length; i++) {
                 int c = s.pile[i];
                 if (c < 0) {
                     c = li < left.size() ? left.get(li++) : -1;
                 }
+                slotCard[i] = c;
                 if (c >= 0) {
                     ps.pile.add(cards.get(c).id);
                     pileNames.add(cards.get(c).name);
                 }
+            }
+        }
+        // diagnostics: the expected hand and library top of each step, as card ids (-1 = unseen)
+        for (Step st : steps) {
+            if (st.expHandIdx != null) {
+                st.expHand = expIds(st.expHandIdx, slotCard);
+                st.expLib = expIds(st.expLibIdx, slotCard);
             }
         }
         int mana = 0;
@@ -1124,6 +1383,21 @@ public final class ForcedWinPlanner {
                 result.nextTurn = true;
             }
         }
+    }
+
+    private List<Integer> expIds(int[] idx, int[] slotCard) {
+        final List<Integer> out = new ArrayList<>(idx.length);
+        for (int e : idx) {
+            if (e == UNKNOWN || e == unknownCard) {
+                out.add(-1);
+            } else if (e >= 0) {
+                out.add(cards.get(e).id);
+            } else {
+                final int slot = LAZY - e;
+                out.add(slot < slotCard.length && slotCard[slot] >= 0 ? cards.get(slotCard[slot]).id : -1);
+            }
+        }
+        return out;
     }
 
     private void rank() {

@@ -33,7 +33,8 @@ import forge.game.zone.ZoneType;
 
 /**
  * Lane doomsday-solver-1012: the general forced-win solver (off by default; the built-in profiles "ForcedWin" and
- * "CubeComboSolver" turn it on). Positions here are non-Doomsday families: Doomsday is the solver's held-out test.
+ * "CubeComboSolver" turn it on). solver-gaps-1015: Doomsday is no longer held out; that lane's held-out families are
+ * kitten and thopter-sword, which no test here uses.
  */
 public class ForcedWinSolverTest extends AITest {
 
@@ -245,6 +246,178 @@ public class ForcedWinSolverTest extends AITest {
         return -1;
     }
 
+    // ------------------------------------------------------------------ solver-gaps-1015: model fixes, all probed
+
+    @Test
+    public void probesLearnConditionsEnteringOptionalCostsHybridAndLifeShares() {
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(
+                "Library of Alexandria;Xander's Lounge;Sicarian Infiltrator;Manamorphose;Doomsday", "Swamp;Island", 20, "",
+                "Island", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinProbe.Stats st = new ForcedWinProbe.Stats();
+        // "draw a card: activate only if you have exactly seven cards in hand": legal at hand size 7 only
+        final ACard loa = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Library of Alexandria"), 1, st);
+        Abil draw = null;
+        for (Abil a : loa.onBattlefield) {
+            if (a.has(EffKind.DRAW)) {
+                draw = a;
+            }
+        }
+        Assert.assertNotNull(draw, loa.onBattlefield.toString());
+        Assert.assertFalse(draw.unplayable, draw.toString());
+        Assert.assertEquals(draw.handMask, 1 << 7, draw.toString());
+        // a land that enters tapped is learned by playing it
+        final ACard lounge = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Xander's Lounge"), 1, st);
+        Assert.assertTrue(lounge.entersTapped, lounge.note);
+        final ACard swamp = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Battlefield, "Swamp"), 1, st);
+        Assert.assertFalse(swamp.entersTapped);
+        // ... also when first seen in our library (a pile card)
+        final Card triome = createCard("Zagoth Triome", me);
+        me.getZone(ZoneType.Library).add(triome);
+        Assert.assertTrue(ForcedWinProbe.learn(g, me, triome, 1, st).entersTapped);
+        // squad is an optional additional cost: the probe pays the printed cost only (one draw, not one per copy)
+        final ACard sic = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Sicarian Infiltrator"), 1, st);
+        for (Abil a : sic.fromHand) {
+            if (a.has(EffKind.DRAW)) {
+                Assert.assertEquals(a.effects.stream().filter(e -> e.kind == EffKind.DRAW).mapToInt(e -> e.n).sum(), 1, a.toString());
+            }
+        }
+        // {R/G} is one red or green mana, not any mana
+        final ACard morph = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Manamorphose"), 1, st);
+        final Abil m = morph.fromHand.get(0);
+        Assert.assertEquals(m.hybrid, List.of((1 << ForcedWinModel.R) | (1 << ForcedWinModel.G)), m.toString());
+        Assert.assertEquals(m.generic, 1, m.toString());
+        // "lose half your life, rounded up" is a share of the life total, seen at two life totals
+        final ACard dd = ForcedWinProbe.learn(g, me, inZone(me, ZoneType.Hand, "Doomsday"), 1, st);
+        Eff life = null;
+        for (Eff e : dd.fromHand.get(0).effects) {
+            if (e.kind == EffKind.LIFE) {
+                life = e;
+            }
+        }
+        Assert.assertNotNull(life, dd.fromHand.toString());
+        Assert.assertEquals(life.lifeChange(20), -10, life.toString());
+        Assert.assertEquals(life.lifeChange(9), -5, life.toString());
+    }
+
+    @Test
+    public void theWidthSearchKeepsLibraryOfAlexandriasHandCondition() {
+        // LoA on the battlefield, Thassa's Oracle next; with 7 cards in hand LoA draws it, with 6 it cannot
+        final String lib = "Thassa's Oracle;Island";
+        for (int handSize : new int[] {6, 7}) {
+            final StringBuilder hand = new StringBuilder();
+            for (int i = 0; i < handSize; i++) {
+                hand.append(i == 0 ? "" : ";").append("Grizzly Bears");
+            }
+            final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(hand.toString(),
+                    "Library of Alexandria;Island;Island", 20, "", "Island", 20, "human").replace(
+                    "humanlibrary=" + OURLIB, "humanlibrary=" + lib));
+            final Player me = g.getPlayers().get(0);
+            final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+            // the seat knows its top (it put it there): pile memory
+            s.notePlaced(me.getCardsIn(ZoneType.Library));
+            final ForcedWinModel.Position pos = s.readPosition(g, s.knownTop(g));
+            Assert.assertNotNull(pos.knownOrder, pos.describe());
+            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            lim.horizon = 1;
+            final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
+            Assert.assertEquals(!res.lines.isEmpty(), handSize == 7, handSize + " " + res.summary() + " " + pos.describe());
+        }
+    }
+
+    @Test
+    public void pileMemoryKnowsWhatTheSeatPutOnTopUntilAShuffle() {
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame(
+                "Gitaxian Probe;Thassa's Oracle;Grizzly Bears", "Island;Island;Island", 20, "", "Island", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinSolver s = ((CubeComboPlayerController) me.getController()).cubeCombo().forcedWin();
+        Assert.assertNull(s.knownTop(g), "an unknown library has no known top");
+        // put Thassa's Oracle back on top (a put-back of ours): the seat knows it is there
+        final Card oracle = inZone(me, ZoneType.Hand, "Thassa's Oracle");
+        g.getAction().moveToLibrary(oracle, 0, null);
+        final List<Integer> top = s.knownTop(g);
+        Assert.assertNotNull(top);
+        Assert.assertEquals(top.get(0).intValue(), oracle.getId());
+        // the width search plans on it: Gitaxian Probe draws the Oracle, which wins with a small library
+        for (Card c : new ArrayList<>(me.getCardsIn(ZoneType.Library))) {
+            if (c.getId() != oracle.getId() && me.getCardsIn(ZoneType.Library).size() > 2) {
+                g.getAction().exile(c, null, null);
+            }
+        }
+        final ForcedWinModel.Position pos = s.readPosition(g, s.knownTop(g));
+        final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+        lim.horizon = 1;
+        Assert.assertFalse(ForcedWinPlanner.plan(pos, lim).lines.isEmpty(), pos.describe());
+        // a shuffle of our library forgets it; the same position then has no line
+        me.shuffle(null);
+        Assert.assertNull(s.knownTop(g));
+        final ForcedWinModel.Position unknown = s.readPosition(g, s.knownTop(g));
+        Assert.assertTrue(ForcedWinPlanner.plan(unknown, lim).lines.isEmpty(), unknown.describe());
+    }
+
+    @Test
+    public void thePaymentSearchKeepsTheColourALaterStepNeeds() {
+        // Underground Sea + Island, a 3-card library: Gitaxian Probe draws one, then Thassa's Oracle (UU) wins with 2
+        // cards left. The greedy payment pays Probe's U/P with the Island (its least flexible blue source) and leaves no
+        // UU for the Oracle; the payment search also pays the Phyrexian pip with life and finds the win.
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame("Gitaxian Probe;Thassa's Oracle",
+                "Underground Sea;Island", 20, "", "Island", 20, "human").replace("humanlibrary=" + OURLIB,
+                "humanlibrary=Island;Island;Island"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinModel.Position pos = new ForcedWinModel.Reader().read(g, me, null, true);
+        final ForcedWinPlanner.Limits greedy = new ForcedWinPlanner.Limits();
+        greedy.horizon = 1;
+        final ForcedWinPlanner.Limits search = new ForcedWinPlanner.Limits();
+        search.horizon = 1;
+        search.payPolicies = ForcedWinPlanner.PAY_POLICIES;
+        final ForcedWinPlanner.Result rg = ForcedWinPlanner.plan(pos, greedy), rs = ForcedWinPlanner.plan(pos, search);
+        Assert.assertTrue(rg.lines.isEmpty(), rg.summary() + " " + (rg.lines.isEmpty() ? "" : rg.lines.get(0)));
+        Assert.assertFalse(rs.lines.isEmpty(), rs.summary() + " " + pos.describe());
+        Assert.assertTrue(rs.lines.get(0).steps.stream().anyMatch(st -> st.phyrexianLife), rs.lines.get(0).toString());
+    }
+
+    // ------------------------------------------------------------------ Part B (solver-gaps-1015): likely-win lines
+
+    @Test
+    public void likelyWinLinesAreOffByDefaultAndTheirOwnOption() {
+        Assert.assertEquals(AiProps.LIKELY_WIN_LINES.getDefault(), "false");
+        for (String p : AiProfileUtil.getAvailableProfiles()) {
+            final LobbyPlayerAi l = new LobbyPlayerAi("x", null);
+            l.setAiProfile(p);
+            Assert.assertEquals(AiProfileUtil.getAIProp(l, AiProps.LIKELY_WIN_LINES), "false", p);
+        }
+        final LobbyPlayerAi lw = new LobbyPlayerAi("l", null);
+        lw.setAiProfile(AiProfileUtil.LIKELY_WIN_PROFILE);
+        Assert.assertEquals(AiProfileUtil.getAIProp(lw, AiProps.LIKELY_WIN_LINES), "true");
+        Assert.assertEquals(AiProfileUtil.getAIProp(lw, AiProps.FORCED_WIN_SOLVER), "false");
+        final Game g = game(AiProfileUtil.LIKELY_WIN_PROFILE, AiProfileUtil.FORCED_WIN_PROFILE,
+                frame("", "Island", 20, "", "Island", 20, "human"));
+        final ForcedWinSolver likely = ((CubeComboPlayerController) g.getPlayers().get(0).getController()).cubeCombo().forcedWin();
+        Assert.assertNotNull(likely);
+        Assert.assertFalse(likely.config().forced);
+        Assert.assertTrue(likely.config().likely);
+        final ForcedWinSolver forced = ((CubeComboPlayerController) g.getPlayers().get(1).getController()).cubeCombo().forcedWin();
+        Assert.assertTrue(forced.config().forced);
+        Assert.assertFalse(forced.config().likely);
+    }
+
+    @Test
+    public void aLikelyLineIsPlayedWhenItBeatsTheSeatsOwnPlay() {
+        // at 2 life against an unblockable 2/2: the seat's own play loses next turn; Show and Tell for Sneak Attack, then
+        // Emrakul with haste (opponent at 30: no forced win) survives in the rollouts and is played
+        final Game g = game(AiProfileUtil.LIKELY_WIN_PROFILE, "Default", "[state]\nturn=7\nactiveplayer=human\n"
+                + "activephase=MAIN1\nhumanlife=2\nailife=30\nhumanlandsplayed=0\nailandsplayed=0\naihand=\nailibrary=" + LIB20
+                + "\naigraveyard=\naiexile=\naibattlefield=Forest;Forest;Forest;Forest;Grizzly Bears;Grizzly Bears;"
+                + "Invisible Stalker|Tapped|Counters:P1P1=1\nhumanhand=Show and Tell;Sneak Attack;Emrakul, the Aeons Torn\n"
+                + "humanbattlefield=Island;Island;Island;Volcanic Island\nhumangraveyard=\nhumanexile=\nhumanlibrary=" + OURLIB
+                + "\n");
+        play(g, 7);
+        final ForcedWinSolver s = ((CubeComboPlayerController) g.getPlayers().get(0).getController()).cubeCombo().forcedWin();
+        Assert.assertTrue(s.likelyRuns >= 1, s.summary());
+        Assert.assertTrue(s.likelyTaken >= 1, s.summary());
+        Assert.assertEquals(s.taken, s.likelyTaken, "no forced line here: " + s.summary());
+    }
+
     // ------------------------------------------------------------------ offense: width search, engine, live seat
 
     @Test
@@ -295,6 +468,45 @@ public class ForcedWinSolverTest extends AITest {
                 "Forest;Forest;Forest;Forest", 6, "human"));
         play(d, 7);
         Assert.assertFalse(d.isGameOver() && d.getPlayers().get(0).hasWon());
+    }
+
+    @Test(timeOut = 120000)
+    public void anAttackTheRulesRefuseEndsAndGoesToForgeAi() {
+        // exploit-panel-1015: the engine's "attack with everything" broke an attack requirement and the rules asked the same
+        // seat again for ever (two games, 110 min in updateCombatForView). Silent Arbiter lets one creature attack: the
+        // alpha strike of two is refused, the declaration goes to Forge AI (the unblockable one, lethal), and the search
+        // ends within its budget. On the pf6 code this test never ends (the timeOut fails it).
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame("",
+                "Grizzly Bears;Invisible Stalker;Forest", 20, "", "Silent Arbiter;Plains", 1, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+        final long t0 = System.nanoTime();
+        final ForcedWinPlanner.Line line = ForcedWinEngine.search(g, me, new ForcedWinEngine.Limits(), st,
+                t0 + 3_000_000_000L, 7L);
+        final long ms = (System.nanoTime() - t0) / 1_000_000;
+        Assert.assertTrue(st.refusedAttacks >= 1, st.summary());
+        Assert.assertTrue(ms < 5_000, "search took " + ms + " ms: " + st.summary());
+        Assert.assertNotNull(line, "Forge AI's legal attack wins: " + st.summary());
+        Assert.assertEquals(line.steps.get(0).kind, AbilKind.ATTACK, line.toString());
+    }
+
+    @Test(timeOut = 120000)
+    public void noStepOfAnEngineMoveRunsPastTheWall() {
+        // a move still running at the search's deadline is cut (its step loop and its seats' declarations check the
+        // wall); the guard ends a combat the rules refuse twice even with no wall
+        final ForcedWinEngine.AttackGuard guard = new ForcedWinEngine.AttackGuard();
+        final Game g = game("Default", "Default", frame("", "Grizzly Bears", 20, "", "Plains", 20, "human"));
+        final forge.game.combat.Combat combat = new forge.game.combat.Combat(g.getPlayers().get(0));
+        Assert.assertEquals(guard.next(combat, 0), 0);
+        Assert.assertEquals(guard.next(combat, 0), 1);
+        Assert.assertThrows(ForcedWinEngine.OutOfBudget.class, () -> guard.next(combat, 0));
+        Assert.assertEquals(guard.total, 1);
+        final forge.game.combat.Combat next = new forge.game.combat.Combat(g.getPlayers().get(0));
+        Assert.assertEquals(guard.next(next, 0), 0, "a new combat starts over");
+        Assert.assertThrows(ForcedWinEngine.OutOfBudget.class, () -> guard.next(next, System.nanoTime() - 1));
+        Assert.assertThrows(ForcedWinEngine.OutOfBudget.class, () -> ForcedWinEngine.checkWall(System.nanoTime() - 1, "t"));
+        ForcedWinEngine.checkWall(0, "no wall");
+        ForcedWinEngine.checkWall(System.nanoTime() + 60_000_000_000L, "far wall");
     }
 
     // ------------------------------------------------------------------ defense: the same search from their seat

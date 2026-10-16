@@ -68,6 +68,15 @@ public final class ForcedWinProbe {
         final int[] produced = new int[6];
         int stormBefore;
         int devotionAfter;
+        /** solver-gaps-1015: our life when the probed thing was played; the host's state after resolution. */
+        int lifeBefore;
+        boolean hostTapped;
+        /** Our library ended empty: a win then came from drawing an empty library, not from the probed ability. */
+        boolean libraryEmptied;
+        /** solver-gaps-1015: other cards moved in ways no effect kind expresses (onto the battlefield from a hand). */
+        int unmapped;
+        /** solver-gaps-1015: our hand (without the probed card) and graveyard sizes when it was played. */
+        int handBefore, gyBefore;
     }
 
     /** The sandbox's controller for our seat: passes, records choice asks, never shuffles a looked-at library. */
@@ -88,7 +97,11 @@ public final class ForcedWinProbe {
         public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
                 CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
                 Player decider) {
-            trace.add("ASK pick " + destination + " " + origin + " " + fetchList.size());
+            final StringBuilder names = new StringBuilder();
+            for (Card c : fetchList) {
+                names.append(names.length() == 0 ? "" : "|").append(c.getName());
+            }
+            trace.add("ASK pick " + destination + " " + origin + " " + fetchList.size() + " names=" + names);
             return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt,
                     isOptional, decider);
         }
@@ -107,6 +120,23 @@ public final class ForcedWinProbe {
                 return false;
             }
             return super.confirmAction(sa, mode, message, options, cardToShow, params);
+        }
+
+        /**
+         * solver-gaps-1015: the probe observes the ability at its printed cost only. Optional additional costs (squad,
+         * replicate, kicker) are declined: with the sandbox's rich floating mana Forge AI paid squad 31 times and the
+         * model learned that a 3-mana creature draws 32 cards.
+         */
+        @Override
+        public int chooseNumberForKeywordCost(SpellAbility sa, forge.game.cost.Cost cost,
+                forge.game.keyword.KeywordInterface keyword, String prompt, int max) {
+            return 0;
+        }
+
+        @Override
+        public List<forge.game.spellability.OptionalCostValue> chooseOptionalCosts(SpellAbility chosen,
+                List<forge.game.spellability.OptionalCostValue> optionalCostValues) {
+            return new ArrayList<>();
         }
     }
 
@@ -146,7 +176,13 @@ public final class ForcedWinProbe {
             }
             final String f = e.from() == null ? "-" : e.from().zoneType() + (e.from().player() == null ? "" : e.from().player().getId() == me ? "@me" : "@opp");
             final String t = e.to() == null ? "-" : e.to().zoneType() + (e.to().player() == null ? "" : e.to().player().getId() == me ? "@me" : "@opp");
-            trace.add("MOVE " + e.card().getId() + " " + f + " " + t);
+            boolean land = false;
+            try {
+                land = e.card().getCurrentState() != null && e.card().getCurrentState().isLand();
+            } catch (RuntimeException ex) {
+                land = false;
+            }
+            trace.add("MOVE " + e.card().getId() + " " + f + " " + t + (land ? " L" : ""));
         }
     }
 
@@ -210,9 +246,12 @@ public final class ForcedWinProbe {
                 opp = p;
             }
             final int life0 = me.getLife(), opp0 = opp == null ? 0 : opp.getLife();
+            o.lifeBefore = life0;
             o.stormBefore = g.getStack().getSpellsCastThisTurn().size();
             g.subscribeToEvents(new ZoneRec(o.trace, me.getId()));
             final int[] poolBefore = pool(me);
+            o.handBefore = me.getCardsIn(ZoneType.Hand).size() - (card.isInZone(ZoneType.Hand) ? 1 : 0);
+            o.gyBefore = me.getCardsIn(ZoneType.Graveyard).size();
             o.played = act.apply(g, me, card);
             if (!o.played) {
                 o.error = o.error == null ? "not played" : o.error;
@@ -227,8 +266,13 @@ public final class ForcedWinProbe {
             o.lifeDelta = me.getLife() - life0;
             o.oppLifeDelta = opp == null ? 0 : opp.getLife() - opp0;
             o.won = me.hasWon() || opp != null && opp.hasLost();
+            // solver-gaps-1015: a win reached by drawing from an empty library belongs to the permanent that turns it into
+            // a win (its own emptyDrawWin probe), not to the ability that drew
+            o.libraryEmptied = o.won && me.getCardsIn(ZoneType.Library).isEmpty();
             o.lost = me.hasLost();
             o.entered = card.getGame() == g && me.getCardsIn(ZoneType.Battlefield).stream().anyMatch(c -> c.getId() == cardId);
+            final Card after = g.findById(cardId);
+            o.hostTapped = after != null && after.isInPlay() && after.isTapped();
             int dev = me.getDevotionMod();
             for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
                 dev += ForcedWinModel.bluePips(c);
@@ -397,11 +441,13 @@ public final class ForcedWinProbe {
         String pendingAsk = null;
         EffKind last = null;
         int run = 0;
+        java.util.Set<String> tutorNames = null, topNames = null;
+        final int mark = out.size();
         for (String line : o.trace) {
             if (line.equals("SHUFFLE")) {
-                // our library was shuffled: what is on top afterwards is unknown (a put-back before it is no put-back)
+                // our library was shuffled: what is on top afterwards is unknown
                 if (last != null) {
-                    out.add(new Eff(last == EffKind.PUTBACK ? EffKind.SHUFFLE : last, last == EffKind.PUTBACK ? 0 : run, 0));
+                    out.add(new Eff(last, run, 0));
                     last = null;
                     run = 0;
                 }
@@ -412,13 +458,23 @@ public final class ForcedWinProbe {
             }
             if (line.startsWith("ASK pick ")) {
                 pendingAsk = line;
+                final int ni = line.indexOf(" names=");
+                if (ni > 0) {
+                    final java.util.Set<String> offered = new java.util.HashSet<>(java.util.Arrays.asList(line.substring(ni + 7).split("\\|")));
+                    if (line.startsWith("ASK pick Hand [Library")) {
+                        tutorNames = offered;
+                    } else if (line.startsWith("ASK pick Library [Library]")) {
+                        topNames = offered;
+                    }
+                }
                 // a pick INTO our library FROM our library or graveyard (not Brainstorm's put-back from hand)
-                final int lb = line.indexOf('['), rb = line.indexOf(']');
-                final String origins = lb >= 0 && rb > lb ? line.substring(lb, rb) : "";
-                if (line.startsWith("ASK pick Library ") && origins.contains("Library")) {
+                final String head = ni > 0 ? line.substring(0, ni) : line;
+                final int lb = head.indexOf('['), rb = head.indexOf(']');
+                final String origins = lb >= 0 && rb > lb ? head.substring(lb, rb) : "";
+                if (head.startsWith("ASK pick Library ") && origins.contains("Library")) {
                     pickToLibrary++;
-                    pickFromLibraryOrGy |= line.contains("Graveyard") && line.contains("Library, ")
-                            || line.contains("[Graveyard, Library]") || line.contains("[Library, Graveyard]");
+                    pickFromLibraryOrGy |= head.contains("Graveyard") && head.contains("Library, ")
+                            || head.contains("[Graveyard, Library]") || head.contains("[Library, Graveyard]");
                 }
                 continue;
             }
@@ -440,6 +496,10 @@ public final class ForcedWinProbe {
                 k = EffKind.MILL;
             } else if (from.equals("Hand@me") && to.equals("Graveyard@me")) {
                 k = EffKind.DISCARD;
+            } else if (from.equals("Graveyard@me") && to.equals("Library@me") && pendingAsk == null) {
+                k = EffKind.GRAVEYARD_TO_LIBRARY;
+            } else if (from.equals("Hand@me") && to.equals("Exile@me")) {
+                k = EffKind.EXILE_HAND;
             } else if (from.equals("Library@opp") && to.equals("Graveyard@opp")) {
                 k = EffKind.MILL_OPP;
             } else if ((from.equals("Library@me") || from.equals("Graveyard@me")) && to.equals("Exile@me")) {
@@ -448,6 +508,12 @@ public final class ForcedWinProbe {
             }
             pendingAsk = null;
             if (k == null) {
+                // solver-gaps-1015: a move the width model has no effect for (a creature put onto the battlefield from
+                // our hand or library, a token): the engine search must handle this card
+                final boolean landMove = p.length > 4 && "L".equals(p[4]);
+                if (!landMove && (to.startsWith("Battlefield") || from.startsWith("Hand@me") && !to.startsWith("Stack"))) {
+                    o.unmapped++;
+                }
                 continue;
             }
             if (k == last) {
@@ -463,6 +529,38 @@ public final class ForcedWinProbe {
         if (last != null) {
             out.add(new Eff(last, run, 0));
         }
+        // solver-gaps-1015: whole-hand and whole-graveyard effects, and tutors' observed choices
+        for (int i = mark; i < out.size(); i++) {
+            final Eff e = out.get(i);
+            boolean shuffleLater = false;
+            for (int j = i + 1; j < out.size(); j++) {
+                shuffleLater |= out.get(j).kind == EffKind.SHUFFLE;
+            }
+            if (e.kind == EffKind.PUTBACK && shuffleLater) {
+                // our hand into our library, then a shuffle: all of it (Timetwister), else no put-back on top (PF2)
+                if (e.n >= 2 && e.n == o.handBefore) {
+                    out.set(i, new Eff(EffKind.HAND_TO_LIBRARY, ForcedWinModel.ALL, 0));
+                } else {
+                    out.remove(i--);
+                }
+            } else if (e.kind == EffKind.GRAVEYARD_TO_LIBRARY) {
+                if (e.n >= 1 && e.n == o.gyBefore) {
+                    out.set(i, new Eff(EffKind.GRAVEYARD_TO_LIBRARY, ForcedWinModel.ALL, 0));
+                } else {
+                    out.remove(i--);
+                }
+            } else if (e.kind == EffKind.EXILE_HAND) {
+                if (e.n >= 2 && e.n == o.handBefore) {
+                    out.set(i, new Eff(EffKind.EXILE_HAND, ForcedWinModel.ALL, 0));
+                } else {
+                    out.remove(i--);
+                }
+            } else if (e.kind == EffKind.DISCARD && e.n >= 2 && e.n == o.handBefore) {
+                out.set(i, new Eff(EffKind.DISCARD, ForcedWinModel.ALL, 0));
+            } else if (e.kind == EffKind.TUTOR && tutorNames != null) {
+                out.set(i, new Eff(EffKind.TUTOR, e.n, 0, 0, tutorNames));
+            }
+        }
         // POST-FREEZE 6: a pick into our library still counts after a shuffle. "Search, shuffle, then put that card on
         // top" (Mystical Tutor) shuffles before the card goes on top, so TUTOR_TOP comes after SHUFFLE here. Only a
         // put-back from hand followed by a shuffle (Timetwister) is erased, above.
@@ -470,7 +568,7 @@ public final class ForcedWinProbe {
             if (exiled > 0 && pickFromLibraryOrGy) {
                 out.add(0, new Eff(EffKind.PILE, pickToLibrary, 0));
             } else {
-                out.add(new Eff(EffKind.TUTOR_TOP, pickToLibrary, 0));
+                out.add(new Eff(EffKind.TUTOR_TOP, pickToLibrary, 0, 0, topNames));
             }
         }
         // per-instance amounts for storm spells
@@ -485,10 +583,11 @@ public final class ForcedWinProbe {
         if (o.oppLifeDelta < 0) {
             out.add(new Eff(EffKind.DRAIN, Math.max(1, -o.oppLifeDelta / instances), 0));
         }
-        if (life != 0 && !o.won) {
+        final boolean won = o.won && !o.libraryEmptied;
+        if (life != 0 && !won) {
             out.add(new Eff(EffKind.LIFE, life, 0));
         }
-        if (o.won) {
+        if (won) {
             out.add(new Eff(EffKind.WIN, 1, 0));
         }
     }
@@ -569,13 +668,22 @@ public final class ForcedWinProbe {
                     // none
                 }
             }
+            // solver-gaps-1015: a legality condition on our hand size (engine restriction metadata says one may exist)
+            final int handMask = stateRestricted(sa0)
+                    ? legalHandMask(live, me, id, sa0.getDescription(), base.costKey, false, ForcedWinSolver.mix(seed, id * 41L + 3), st)
+                    : -1;
+            final int probeHand = handFor(handMask, me.getCardsIn(ZoneType.Hand).size() + (card.isInZone(ZoneType.Hand) ? 0 : 1));
             for (String v : variants) {
                 final String desc = sa0.getDescription(), costKey = base.costKey;
-                final Obs o = run(live, me, id, (g, m, c) -> {
+                final Setup inHand = (g, m, c) -> {
                     if (!c.isInZone(ZoneType.Hand)) {
                         g.getAction().moveToHand(c, null);
                     }
-                }, (g, m, c) -> {
+                    if (probeHand >= 0) {
+                        setHandSize(g, m, c, probeHand);
+                    }
+                };
+                final Obs o = run(live, me, id, inHand, (g, m, c) -> {
                     final SpellAbility sa = locate(c, m, desc, costKey, false);
                     if (sa == null) {
                         return false;
@@ -595,8 +703,33 @@ public final class ForcedWinProbe {
                 }, ForcedWinSolver.mix(seed, id * 31L + variant++), st);
                 final Abil ab = withEffects(base, o, id, sa0, v);
                 ab.cardTargets = v == null && targetsAnything(sa0);
+                ab.handMask = handMask;
+                if (!ab.unplayable && (o.unmapped > 0 || ab.effects.isEmpty() && !t.permanent)) {
+                    // solver-gaps-1015: it did something the width model cannot express (Show and Tell)
+                    t.unmodeled = true;
+                }
+                if (!ab.unplayable && ab.has(EffKind.LIFE)) {
+                    // solver-gaps-1015: the same play at another life total: a fixed change or a share of our life
+                    final int l2 = 2 * Math.max(1, o.lifeBefore) + 7;
+                    final Act replay = (g, m, c) -> {
+                        final SpellAbility sa = locate(c, m, desc, costKey, false);
+                        if (sa == null) {
+                            return false;
+                        }
+                        sa.setActivatingPlayer(m);
+                        if (v != null && !setPlayerTargets(sa, m, v)) {
+                            return false;
+                        }
+                        return play(g, m, sa);
+                    };
+                    final Obs o2 = run(live, me, id, (g, m, c) -> {
+                        inHand.apply(g, m, c);
+                        m.setLife(l2, null);
+                    }, replay, ForcedWinSolver.mix(seed, id * 31L + 500 + variant), st);
+                    fitLife(ab, o, o2, base.life);
+                }
                 t.fromHand.add(ab);
-                if (o.won && t.permanent) {
+                if (o.won && !o.libraryEmptied && t.permanent) {
                     t.winsOnEntry = true;
                 }
                 if (!ab.unplayable && ab.effects.isEmpty() && t.permanent && !t.creature && !t.land
@@ -626,6 +759,29 @@ public final class ForcedWinProbe {
             play.kind = AbilKind.LAND;
             play.desc = "land";
             t.fromHand.add(play);
+            // solver-gaps-1015: play it as our land drop in a sandbox: does it enter tapped, and what does that cost?
+            final Obs o = run(live, me, id, (g, m, c) -> {
+                if (!c.isInZone(ZoneType.Hand)) {
+                    g.getAction().moveToHand(c, null);
+                }
+                m.setLandsPlayedThisTurn(0);
+            }, (g, m, c) -> {
+                // the card object moved to our hand in setup (a zone change makes a new object): find it again
+                final Card hc = g.findById(c.getId());
+                if (hc == null) {
+                    return false;
+                }
+                for (SpellAbility sa : hc.getAllPossibleAbilities(m, true)) {
+                    if (sa.isLandAbility()) {
+                        return play(g, m, sa);
+                    }
+                }
+                return false;
+            }, ForcedWinSolver.mix(seed, id * 31L + 977), st);
+            if (o.played && o.error == null) {
+                t.entersTapped = o.hostTapped;
+                t.landLife = o.lifeDelta;
+            }
         }
         // ---- on the battlefield: mana sources (engine metadata), activated abilities (probed), sacrifice, wins
         if (t.permanent) {
@@ -685,9 +841,18 @@ public final class ForcedWinProbe {
                 } else {
                     variants.add(null);
                 }
+                final int handMask = stateRestricted(sa0)
+                        ? legalHandMask(live, me, id, sa0.getDescription(), base.costKey, true, ForcedWinSolver.mix(seed, id * 43L + 5), st)
+                        : -1;
+                final int probeHand = handFor(handMask, me.getCardsIn(ZoneType.Hand).size() - (card.isInZone(ZoneType.Hand) ? 1 : 0));
                 for (String v : variants) {
                     final String desc = sa0.getDescription(), costKey = base.costKey;
-                    final Obs o = run(live, me, id, (g, m, c) -> toBattlefield(g, m, c), (g, m, c) -> {
+                    final Obs o = run(live, me, id, (g, m, c) -> {
+                        toBattlefield(g, m, c);
+                        if (probeHand >= 0) {
+                            setHandSize(g, m, null, probeHand);
+                        }
+                    }, (g, m, c) -> {
                         final SpellAbility sa = locate(c, m, desc, costKey, true);
                         if (sa == null) {
                             return false;
@@ -700,6 +865,11 @@ public final class ForcedWinProbe {
                     }, ForcedWinSolver.mix(seed, id * 31L + variant++), st);
                     final Abil ab = withEffects(base, o, id, sa0, v);
                     ab.cardTargets = v == null && targetsAnything(sa0);
+                    ab.handMask = handMask;
+                    if (!ab.unplayable && o.unmapped > 0) {
+                        // solver-gaps-1015: an activation the width model cannot express (Sneak Attack)
+                        t.unmodeled = true;
+                    }
                     t.onBattlefield.add(ab);
                 }
             }
@@ -768,7 +938,139 @@ public final class ForcedWinProbe {
                     return true;
                 }, ForcedWinSolver.mix(seed, id * 37L + 7), st);
                 t.emptyDrawWin = o.won;
+                if (o.won) {
+                    // solver-gaps-1015: a control without the card (another permanent of ours may be the one that wins)
+                    final Obs ctl = run(live, me, id, (g, m, c) -> {
+                        g.getAction().exile(c, null, null);
+                        for (Card l : new ArrayList<>(m.getCardsIn(ZoneType.Library))) {
+                            g.getAction().exile(l, null, null);
+                        }
+                    }, (g, m, c) -> {
+                        m.drawCards(1);
+                        return true;
+                    }, ForcedWinSolver.mix(seed, id * 37L + 8), st);
+                    if (ctl.won) {
+                        t.emptyDrawWin = false;
+                        t.note += " emptyDrawWin:control-wins";
+                    }
+                }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ solver-gaps-1015 helpers
+
+    /** Engine metadata: the ability carries a state restriction (a count of cards present, an SVar check, threshold). */
+    static boolean stateRestricted(SpellAbility sa) {
+        return sa.hasParam("IsPresent") || sa.hasParam("CheckSVar") || sa.hasParam("Activation")
+                || sa.hasParam("PresentCompare");
+    }
+
+    /** The hand size to probe effects at: the current one when legal, else the nearest legal one; -1 = unchanged. */
+    static int handFor(int mask, int current) {
+        if (mask == -1 || mask == 0 || (mask >> Math.min(11, Math.max(0, current)) & 1) != 0) {
+            return -1;
+        }
+        int best = -1;
+        for (int h = 0; h <= 11; h++) {
+            if ((mask >> h & 1) != 0 && (best < 0 || Math.abs(h - current) < Math.abs(best - current))) {
+                best = h;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Set our hand to {@code h} cards in a sandbox: extra cards go to the bottom of our library, missing ones come from
+     * its top; {@code keep} stays in hand. False when the library cannot supply them.
+     */
+    static boolean setHandSize(Game g, Player m, Card keep, int h) {
+        List<Card> hand = new ArrayList<>(m.getCardsIn(ZoneType.Hand));
+        while (hand.size() > h) {
+            Card out = null;
+            for (int i = hand.size() - 1; i >= 0; i--) {
+                if (keep == null || hand.get(i).getId() != keep.getId()) {
+                    out = hand.get(i);
+                    break;
+                }
+            }
+            if (out == null) {
+                return false;
+            }
+            g.getAction().moveToLibrary(out, -1, null);
+            hand = new ArrayList<>(m.getCardsIn(ZoneType.Hand));
+        }
+        while (hand.size() < h) {
+            final List<Card> lib = new ArrayList<>(m.getCardsIn(ZoneType.Library));
+            if (lib.isEmpty()) {
+                return false;
+            }
+            g.getAction().moveToHand(lib.get(0), null);
+            hand = new ArrayList<>(m.getCardsIn(ZoneType.Hand));
+        }
+        return true;
+    }
+
+    /**
+     * The hand sizes 0..11 (bit 11: 11 or more) at which the ability is legal, probed in one sandbox by moving cards
+     * between our hand and library; -1 when its legality does not depend on our hand size.
+     */
+    static int legalHandMask(Game live, Player me, int id, String desc, String costKey, boolean battlefield, long seed,
+            Stats st) {
+        final int[] legal = {0, 0};
+        run(live, me, id, (g, m, c) -> {
+            if (battlefield) {
+                toBattlefield(g, m, c);
+            } else if (!c.isInZone(ZoneType.Hand)) {
+                g.getAction().moveToHand(c, null);
+            }
+        }, (g, m, c) -> {
+            final Card host = g.findById(c.getId());
+            final SpellAbility sa = host == null ? null : locate(host, m, desc, costKey, battlefield);
+            if (sa == null) {
+                return false;
+            }
+            sa.setActivatingPlayer(m);
+            for (int h = 0; h <= 11; h++) {
+                if (!setHandSize(g, m, battlefield ? null : host, h)) {
+                    continue;
+                }
+                legal[1] |= 1 << h;
+                if (sa.canPlay()) {
+                    legal[0] |= 1 << h;
+                }
+            }
+            return true;
+        }, seed, st);
+        if (legal[1] == 0 || legal[0] == legal[1] || legal[0] == 0) {
+            return -1;
+        }
+        return legal[0];
+    }
+
+    /**
+     * Our life change of an ability seen at two life totals: a fixed change, or (when the second observation is the
+     * first one's share of our life, rounded away from zero) a share of our life total.
+     */
+    static void fitLife(Abil ab, Obs o1, Obs o2, int costLife) {
+        if (o2.error != null || !o2.played || o1.lifeBefore <= 0) {
+            return;
+        }
+        for (int i = 0; i < ab.effects.size(); i++) {
+            final Eff e = ab.effects.get(i);
+            if (e.kind != EffKind.LIFE) {
+                continue;
+            }
+            final int d2 = o2.lifeDelta + costLife;
+            if (d2 == e.n) {
+                return;
+            }
+            final double ratio = (double) e.n / o1.lifeBefore;
+            final Eff prop = new Eff(EffKind.LIFE, e.n, 0, ratio);
+            if (prop.lifeChange(o2.lifeBefore) == d2) {
+                ab.effects.set(i, prop);
+            }
+            return;
         }
     }
 

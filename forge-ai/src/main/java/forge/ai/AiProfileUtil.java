@@ -105,6 +105,8 @@ public class AiProfileUtil {
      */
     public static final String CUBE_COMBO_SOLVER_PROFILE = "CubeComboSolver";
     public static final String FORCED_WIN_PROFILE = "ForcedWin";
+    /** mtgx (lane solver-gaps-1015, Part B): Forge AI with likely-win lines alone (no forced-win search or defense). */
+    public static final String LIKELY_WIN_PROFILE = "LikelyWin";
 
     private static void registerBuiltInProfiles() {
         final Map<AiProps, String> base = loadedProfiles.get("Default");
@@ -125,6 +127,13 @@ public class AiProfileUtil {
             alone.put(AiProps.CUBE_COMBO_LINEAGE, "false");
             alone.put(AiProps.FORCED_WIN_SOLVER, "true");
             loadedProfiles.put(FORCED_WIN_PROFILE, alone);
+        }
+        if (base != null && !loadedProfiles.containsKey(LIKELY_WIN_PROFILE)) {
+            final Map<AiProps, String> likely = new HashMap<>(base);
+            likely.put(AiProps.CUBE_COMBO_PLANS, "true");
+            likely.put(AiProps.CUBE_COMBO_LINEAGE, "false");
+            likely.put(AiProps.LIKELY_WIN_LINES, "true");
+            loadedProfiles.put(LIKELY_WIN_PROFILE, likely);
         }
     }
 

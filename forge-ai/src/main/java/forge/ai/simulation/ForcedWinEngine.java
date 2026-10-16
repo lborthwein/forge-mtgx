@@ -43,10 +43,118 @@ final class ForcedWinEngine {
 
     static final class Stats {
         int nodes, copies, moves;
+        /** solver-gaps-1015: moves cut at the wall (a step still running at the search's deadline, or a refused attack). */
+        int cut;
+        /** solver-gaps-1015: our attack declarations the rules refused (handed to Forge AI). */
+        int refusedAttacks;
         long nanos;
 
         String summary() {
-            return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000;
+            return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
+                    + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "");
+        }
+    }
+
+    // ------------------------------------------------------------------ the wall (solver-gaps-1015)
+
+    /**
+     * A step of a game loop the solver drives ran past its wall, or the rules refused a seat's attack declaration twice
+     * in one combat. Thrown from inside the rules engine's own loops (the seat's controller); the play-out that runs the
+     * step catches it and drops the play-out. No stack trace: it is control flow.
+     */
+    static final class OutOfBudget extends RuntimeException {
+        OutOfBudget(String why) {
+            super(why, null, false, false);
+        }
+    }
+
+    /** Throw {@link OutOfBudget} when {@code wall} (System.nanoTime(); 0 = none) has passed. */
+    static void checkWall(long wall, String where) {
+        if (wall != 0 && System.nanoTime() > wall) {
+            throw new OutOfBudget("wall: " + where);
+        }
+    }
+
+    /**
+     * One combat's attack declarations by a seat the solver drives. When the rules refuse a declaration (an attack
+     * restriction such as "no more than one creature can attack", or a requirement such as "attacks Gideon if able"
+     * broken by an attack at the player) they ask the same seat again with the same Combat, for ever if the answer does
+     * not change: exploit-panel-1015's games hung 110 minutes in the engine's alpha strike. The first refusal clears the
+     * declaration and hands it to Forge AI; a second ends the play-out.
+     */
+    static final class AttackGuard {
+        private Combat last;
+        private int refused;
+        /** Declarations the rules refused, over all combats. */
+        int total;
+
+        /** 0 = this combat's first declaration; 1 = the rules refused it (the combat is cleared). Throws after that. */
+        int next(Combat combat, long wall) {
+            checkWall(wall, "attack declaration");
+            if (combat == last) {
+                refused++;
+            } else {
+                last = combat;
+                refused = 0;
+            }
+            if (refused > 1) {
+                throw new OutOfBudget("attack declaration refused " + refused + " times");
+            }
+            if (refused == 1) {
+                combat.clearAttackers();
+                total++;
+            }
+            return refused;
+        }
+    }
+
+    /**
+     * Forge AI as a seat in the solver's play-outs, bounded: its attack declarations go through an {@link AttackGuard},
+     * and its declarations and priority answers check the wall. Subclasses script the first declaration of a combat.
+     */
+    static class GuardedAi extends LookaheadSearch.RolloutAi {
+        /** The wall (System.nanoTime()); 0 = none. */
+        long wall;
+        private final AttackGuard attackGuard = new AttackGuard();
+
+        GuardedAi(Game g, Player p, forge.LobbyPlayer lp) {
+            super(g, p, lp);
+        }
+
+        GuardedAi bounded(long wall) {
+            this.wall = wall;
+            return this;
+        }
+
+        /** Attack declarations of this seat the rules refused. */
+        int refusedAttacks() {
+            return attackGuard.total;
+        }
+
+        /** This combat's first attack declaration: Forge AI's, unless a subclass scripts it. */
+        void declareFirst(Player attacker, Combat combat) {
+            super.declareAttackers(attacker, combat);
+        }
+
+        @Override
+        public final void declareAttackers(Player attacker, Combat combat) {
+            if (attackGuard.next(combat, wall) == 0) {
+                declareFirst(attacker, combat);
+            } else {
+                super.declareAttackers(attacker, combat);
+            }
+        }
+
+        @Override
+        public void declareBlockers(Player defender, Combat combat) {
+            checkWall(wall, "block declaration");
+            super.declareBlockers(defender, combat);
+        }
+
+        @Override
+        public List<SpellAbility> chooseSpellAbilityToPlay() {
+            checkWall(wall, "priority");
+            return super.chooseSpellAbilityToPlay();
         }
     }
 
@@ -58,6 +166,12 @@ final class ForcedWinEngine {
         int maxSteps = 1500;
         /** Also search lines that pass the turn once (win by our next turn). */
         boolean passTurn = true;
+        /**
+         * solver-gaps-1015: the hard wall (System.nanoTime()) no step of a move may run past; 0 = the search's deadline.
+         * The deadline only stops new nodes, so a move begun before it may finish up to the wall (a Brain Freeze move
+         * that wins just after the deadline is kept).
+         */
+        long wall;
     }
 
     /** A search node: a game copy at our priority, with its own id scope. */
@@ -77,6 +191,26 @@ final class ForcedWinEngine {
     private final long seed;
     private final Set<String> seen = new HashSet<>();
     private int startTurn;
+    /**
+     * Part B (solver-gaps-1015): when not null, the search also keeps this turn's non-winning lines with the best static
+     * value of the position they reach (Forge's GameStateEvaluator), as likely-win candidates.
+     */
+    private List<Cand> collect;
+    private int keep;
+    private final GameStateEvaluator evaluator = new GameStateEvaluator();
+
+    /** A likely-win candidate: a path of this turn's moves and the static value of the position it reaches. */
+    static final class Cand {
+        final List<Step> path;
+        final int score;
+        final String key;
+
+        Cand(List<Step> path, int score, String key) {
+            this.path = path;
+            this.score = score;
+            this.key = key;
+        }
+    }
 
     private ForcedWinEngine(Limits lim, Stats st, long deadline, long seed) {
         this.lim = lim;
@@ -87,6 +221,15 @@ final class ForcedWinEngine {
 
     /** A this-turn win from the live position (our main-phase priority, empty stack), or null. Never throws. */
     static Line search(Game live, Player liveMe, Limits lim, Stats st, long deadline, long seed) {
+        return search(live, liveMe, lim, st, deadline, seed, null, 0);
+    }
+
+    /**
+     * As {@link #search(Game, Player, Limits, Stats, long, long)}; with {@code likelyOut} (Part B) also the best
+     * {@code keep} non-winning lines of this turn whose position values beat the root's, best first.
+     */
+    static Line search(Game live, Player liveMe, Limits lim, Stats st, long deadline, long seed, List<Line> likelyOut,
+            int keep) {
         final long t0 = System.nanoTime();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -96,6 +239,10 @@ final class ForcedWinEngine {
         forge.util.IdScope.open();
         try {
             final ForcedWinEngine e = new ForcedWinEngine(lim, st, deadline, seed);
+            if (likelyOut != null) {
+                e.collect = new ArrayList<>();
+                e.keep = Math.max(1, keep) * 3;
+            }
             final Node root = new Node();
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
@@ -125,6 +272,20 @@ final class ForcedWinEngine {
             }
             lim.passTurn = twoTurns;
             lim.nodes = nodeCap;
+            if (likelyOut != null && e.collect != null) {
+                final int rootScore = e.evaluator.getStaticScore(root.g, root.me).value;
+                e.collect.sort((x, y) -> Integer.compare(y.score, x.score));
+                final Set<String> keys = new HashSet<>();
+                for (Cand c : e.collect) {
+                    if (likelyOut.size() >= keep) {
+                        break;
+                    }
+                    if (c.score > rootScore && keys.add(c.key)) {
+                        final Line l = new Line(c.path, List.of(), 0, root.me.getLife(), 0, 0, List.of(), "likely");
+                        likelyOut.add(l);
+                    }
+                }
+            }
             if (win == null) {
                 return null;
             }
@@ -168,12 +329,21 @@ final class ForcedWinEngine {
             ForcedWinSolver.receipt("FW_ENGINE node depth=" + depth + " path=" + node.path + " moves=" + moves);
         }
         int tried = 0;
+        final Set<Step> variants = new HashSet<>();
         for (int mi = 0; mi < moves.size(); mi++) {
             final Step mv = moves.get(mi);
-            if (out() || tried >= lim.branching) {
-                break;
+            // solver-gaps-1015: the branching cap counts distinct moves only; the forced-answer variants of a move (its
+            // picks, its trigger targets) have their own cap and no longer crowd the other moves out (Natural Order's
+            // variants used every branch, so casting Llanowar Elves first was never tried)
+            if (out() || !variants.contains(mv) && tried >= lim.branching) {
+                if (out()) {
+                    break;
+                }
+                continue;
             }
-            tried++;
+            if (!variants.contains(mv)) {
+                tried++;
+            }
             st.moves++;
             final Applied a = apply(node, mv);
             if (TRACE) {
@@ -193,6 +363,7 @@ final class ForcedWinEngine {
                     final Step v = mv.copy();
                     v.pickName = name;
                     moves.add(mi + k, v);
+                    variants.add(v);
                 }
             }
             if (mv.triggerRef == null && !a.triggerCandidates.isEmpty()) {
@@ -205,12 +376,28 @@ final class ForcedWinEngine {
                     final Step v = mv.copy();
                     v.triggerRef = ref;
                     moves.add(mi + k, v);
+                    variants.add(v);
                 }
             }
             if (a.won) {
                 final List<Step> path = new ArrayList<>(node.path);
                 path.add(mv);
                 return path;
+            }
+            if (collect != null && a.child != null && !node.passed && !mv.pass && a.child.turn == startTurn) {
+                // Part B: a this-turn position, valued statically
+                try {
+                    final int score = evaluator.getStaticScore(a.child.g, a.child.me).value;
+                    final List<Step> path = new ArrayList<>(node.path);
+                    path.add(mv);
+                    collect.add(new Cand(path, score, a.key));
+                    if (collect.size() > 4 * keep) {
+                        collect.sort((x, y) -> Integer.compare(y.score, x.score));
+                        collect.subList(keep, collect.size()).clear();
+                    }
+                } catch (RuntimeException ex) {
+                    // no value
+                }
             }
             if (a.child == null || !seen.add(a.key)) {
                 continue;
@@ -553,8 +740,9 @@ final class ForcedWinEngine {
     }
 
     /**
-     * The first search of our own library our ability makes in a step's window (a tutor, Natural Order): the distinct
-     * names offered are recorded, highest mana value first (the big payoffs), and a forced pick is taken by name.
+     * The first choice of one of our own cards our ability makes in a step's window (a tutor, Natural Order; since
+     * solver-gaps-1015 also a card from our hand or graveyard: Show and Tell, Sneak Attack): the distinct names offered are
+     * recorded, highest mana value first (the big payoffs), and a forced pick is taken by name.
      */
     static final class LibraryPicks {
         final String forced;
@@ -566,8 +754,12 @@ final class ForcedWinEngine {
         }
 
         Card pick(Player me, List<ZoneType> origin, SpellAbility sa, forge.game.card.CardCollection fetchList, Player decider) {
-            if (seen || decider != me || origin == null || !origin.contains(ZoneType.Library) || sa == null
-                    || sa.getActivatingPlayer() != me || fetchList == null || fetchList.isEmpty()) {
+            // solver-gaps-1015: any of our own zones (a creature put from our hand by Show and Tell or Sneak Attack, a
+            // card returned from our graveyard), not only our library
+            if (seen || decider != me || origin == null || !(origin.contains(ZoneType.Library) || origin.contains(ZoneType.Hand)
+                    || origin.contains(ZoneType.Graveyard)) || sa == null
+                    || sa.getActivatingPlayer() != me || fetchList == null || fetchList.isEmpty()
+                    || fetchList.stream().anyMatch(c -> c.getOwner() != me)) {
                 return null;
             }
             seen = true;
@@ -609,6 +801,7 @@ final class ForcedWinEngine {
     private Applied apply(Node node, Step mv) {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, st.copies)));
+        final MoveAi[] held = new MoveAi[1];
         try {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
@@ -617,10 +810,14 @@ final class ForcedWinEngine {
             final Player me = (Player) copier.find(node.me);
             st.copies++;
             final MoveAi ai = new MoveAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn);
+            // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the wall
+            final long wall = lim.wall != 0 ? lim.wall : deadline;
+            ai.bounded(wall);
+            held[0] = ai;
             me.dangerouslySetController(ai);
             for (Player o : g.getPlayers()) {
                 if (o != me) {
-                    o.dangerouslySetController(new LookaheadSearch.RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                    o.dangerouslySetController(new GuardedAi(g, o, o.getController().getLobbyPlayer()).bounded(wall));
                 }
             }
             final PhaseHandler ph = g.getPhaseHandler();
@@ -628,6 +825,7 @@ final class ForcedWinEngine {
             int steps = 0;
             final int lastTurn = mv.pass ? node.turn + 2 : node.turn;
             while (!g.isGameOver() && !ai.rest && !ai.failed && ph.getTurn() <= lastTurn && steps < lim.maxSteps) {
+                checkWall(wall, "engine step");
                 ph.mainLoopStep();
                 steps++;
             }
@@ -647,6 +845,12 @@ final class ForcedWinEngine {
             a.child = child;
             a.key = PlayoutKeys.stateKey(g);
             return a;
+        } catch (OutOfBudget ex) {
+            // the move did not finish by the wall (or the rules refused its attack twice): dropped
+            st.cut++;
+            lastError = String.valueOf(ex);
+            ForcedWinSolver.receipt("FORCED_WIN engine cut move=" + mv + " " + ex.getMessage());
+            return null;
         } catch (RuntimeException | StackOverflowError ex) {
             lastError = String.valueOf(ex);
             if (TRACE) {
@@ -654,12 +858,15 @@ final class ForcedWinEngine {
             }
             return null;
         } finally {
+            if (held[0] != null) {
+                st.refusedAttacks += held[0].refusedAttacks();
+            }
             MyRandom.setThreadRandom(prev);
         }
     }
 
     /** Our seat while one move is played: the move, then pass until our next main-phase priority with an empty stack. */
-    static final class MoveAi extends LookaheadSearch.RolloutAi {
+    static final class MoveAi extends GuardedAi {
         final Step move;
         boolean acted, rest, failed, attacking;
         final TriggerTargets triggers;
@@ -731,8 +938,9 @@ final class ForcedWinEngine {
             return null;
         }
 
+        /** "Attack with everything" (if the rules refuse it, the guard hands the declaration to Forge AI). */
         @Override
-        public void declareAttackers(Player attacker, Combat combat) {
+        void declareFirst(Player attacker, Combat combat) {
             if (attacking) {
                 for (Card c : attacker.getCreaturesInPlay()) {
                     for (Player o : attacker.getOpponents()) {
@@ -744,7 +952,7 @@ final class ForcedWinEngine {
                 }
                 return;
             }
-            super.declareAttackers(attacker, combat);
+            super.declareFirst(attacker, combat);
         }
     }
 }
