@@ -43,8 +43,8 @@ public class RlPlanSearchTest {
                 ",\"plans\":{\"sample\":3}"));
         Assert.assertThrows(IllegalArgumentException.class, () -> RlChoiceSearchTest.spec("127.0.0.1:1",
                 ",\"plans\":{},\"forcedWin\":{}"));
-        Assert.assertThrows(IllegalArgumentException.class, () -> RlChoiceSearchTest.spec("127.0.0.1:1",
-                ",\"plans\":{},\"choices\":2"));
+        // (d): S-t's choice expansion of the given candidates is allowed with S-b (discard choices priced by the check)
+        Assert.assertEquals(RlChoiceSearchTest.spec("127.0.0.1:1", ",\"plans\":{\"opp\":true},\"choices\":2").choices, 2);
         Assert.assertThrows(IllegalArgumentException.class, () -> RlSearch.Config.parse(JsonParser.parseString(
                 "{\"server\":\"127.0.0.1:1\",\"playout\":\"forge\",\"plans\":{}}").getAsJsonObject()));
     }

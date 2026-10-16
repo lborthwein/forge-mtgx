@@ -282,8 +282,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (plans != null) {
                 // search-bones-1015: S-b plays plans with the policy seat; it is not combined with S-t, the label sink or
                 // the forced-win baseline
-                if (!"policy".equals(playout) || choices > 0 || labelSink != null || forcedWin != null) {
-                    throw new IllegalArgumentException("search.plans (S-b) needs playout=policy and no choices, labelSink "
+                if (!"policy".equals(playout) || labelSink != null || forcedWin != null) {
+                    throw new IllegalArgumentException("search.plans (S-b) needs playout=policy and no labelSink "
                             + "or forcedWin");
                 }
                 PlanSearch.Spec.parse(plans);
@@ -815,8 +815,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // S-b: every searched decision has the proof flags; a plan point also has its plans (and its budget counts
             // from the decision's start, the proposals included)
             final int kt = stage != null ? stage.knownTop : sb.knownTop(g);
-            r = stage != null ? ls.decideGivenPlans(g, me, given, cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat)
-                    : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat);
+            LookaheadSearch.ChoiceExpander ex = null;
+            if (cfg.choices > 0) {
+                // S-b with S-t's choice expansion of the given candidates (plans are not expanded)
+                probeAsks.clear();
+                probeWindows.clear();
+                macroList = new ArrayList<>();
+                restartMark = new int[] {probeAsksTotal, contestedAsks};
+                givenPrior = new double[order.size()];
+                for (int i = 0; i < order.size(); i++) {
+                    givenPrior[i] = by.get(order.get(i))[0];
+                }
+                expandLimit = order.size();
+                ex = this;
+            }
+            r = stage != null ? ls.decideGivenPlans(g, me, given, cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat, ex)
+                    : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat, ex);
         } else if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
             probeAsks.clear();
@@ -1301,10 +1315,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * than the policy's own answer, by prior). The first {@code choiceCap} minus the base count are kept, in the order
      * found ({@code choiceRank} base) or by joint prior (joint), ties in the order found.
      */
+    /** search-bones-1015: given indices at or past this are S-b's plans, never expanded (MAX = every candidate). */
+    private int expandLimit = Integer.MAX_VALUE;
+
     @Override
     public List<LookaheadSearch.Macro> expand(final int[] givenIndex) {
         final List<MacroSpec> found = new ArrayList<>();
         for (int c = 0; c < givenIndex.length; c++) {
+            if (givenIndex[c] >= expandLimit) {
+                continue; // search-bones-1015: an S-b plan candidate
+            }
             final List<ChoiceWindow.Ask> asks = probeAsks.get(c);
             if (asks == null) {
                 continue;

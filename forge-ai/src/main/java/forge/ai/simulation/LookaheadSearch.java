@@ -1979,6 +1979,15 @@ public final class LookaheadSearch {
     /** As above, with (d)'s opponent check in every play-out ({@code opp}; null = none). */
     public GivenResult decideGivenPlans(Game live, Player me, List<SpellAbility> given, int breadth, List<Object> plans,
             List<String> labels, int knownTop, long startNanos, OppCheck opp) {
+        return decideGivenPlans(live, me, given, breadth, plans, labels, knownTop, startNanos, opp, null);
+    }
+
+    /**
+     * As above, with S-t's choice expansion of the given (non-plan) candidates ({@code expander}; null = none): (d)'s
+     * discard choices, among others, are searched as macros and priced by the opponent check.
+     */
+    public GivenResult decideGivenPlans(Game live, Player me, List<SpellAbility> given, int breadth, List<Object> plans,
+            List<String> labels, int knownTop, long startNanos, OppCheck opp, ChoiceExpander expander) {
         pendingPlans = plans == null || plans.isEmpty() ? null : plans;
         pendingPlanLabels = labels;
         proof = true;
@@ -1986,7 +1995,7 @@ public final class LookaheadSearch {
         decisionStartNanos = startNanos;
         oppCheck = opp;
         try {
-            return decideGiven(live, me, given, breadth, null);
+            return decideGiven(live, me, given, breadth, expander);
         } finally {
             pendingPlans = null;
             pendingPlanLabels = null;
