@@ -787,7 +787,11 @@ final class ForcedWinEngine {
         out.addAll(spells);
         out.addAll(floats);
         out.addAll(lands);
-        if (!node.passed && lim.passTurn) {
+        if (!node.passed && lim.cycles && oppDecked(me)) {
+            // (c): an opponent with no library loses at their draw: passing is the first move, in the this-turn
+            // phase too (a mill loop's kill is the pass; the engine still plays their turn up to the draw)
+            out.add(0, Step.PASS);
+        } else if (!node.passed && lim.passTurn) {
             out.add(Step.PASS);
         }
         if (g.getPhaseHandler().is(PhaseType.MAIN1) && canAttack(me)) {
@@ -799,6 +803,15 @@ final class ForcedWinEngine {
             }
         }
         return out;
+    }
+
+    private static boolean oppDecked(Player me) {
+        for (Player o : me.getOpponents()) {
+            if (o.getCardsIn(ZoneType.Library).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean canAttack(Player me) {

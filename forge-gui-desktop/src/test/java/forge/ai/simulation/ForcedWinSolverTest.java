@@ -539,6 +539,26 @@ public class ForcedWinSolverTest extends AITest {
         System.err.println("[cycles-test-blockers] " + st.summary() + " line=" + line);
     }
 
+    static final String BRP = "[state]\nturn=7\nactiveplayer=human\nactivephase=MAIN1\nhumanlife=20\nailife=20\n"
+            + "humanlandsplayed=0\nailandsplayed=0\naihand=\nailibrary=" + LIB20 + "\naigraveyard=\naiexile=\n"
+            + "aibattlefield=Forest;Forest;Forest;Forest;Grizzly Bears\nhumanhand=Underworld Breach;Brain Freeze;Lotus Petal\n"
+            + "humanbattlefield=Volcanic Island;Volcanic Island;Island;Island\nhumangraveyard=" + OURLIB + ";Island;Island\n"
+            + "humanexile=\nhumanlibrary=" + OURLIB + ";Island;Island;Island;Island;Island\n";
+
+    @Test
+    public void theBreachBrainFreezePetalLoopMillsThemOut() {
+        // search-bones-1015 (c): the dev puzzle N-BRP: Breach, then Brain Freeze and Lotus Petal escaped again and again
+        // (each Petal: storm + 1 and a mana; each Brain Freeze: mill 3 per storm copy) until their library is empty
+        final Game g = game("Default", "Default", BRP);
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Limits lim = new ForcedWinEngine.Limits();
+        lim.cycles = true;
+        final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+        final ForcedWinPlanner.Line line = ForcedWinEngine.search(g, me, lim, st, System.nanoTime() + 20_000_000_000L, 7L);
+        System.err.println("[cycles-test-brp] " + st.summary() + " line=" + line);
+        Assert.assertNotNull(line, st.summary());
+    }
+
     @Test
     public void theSolverSeatFollowsARepeatLineToTheWin() {
         System.setProperty("forge.ai.forcedWin.spec", "cycles=true,engineNodes=60");
