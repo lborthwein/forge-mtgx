@@ -126,6 +126,15 @@ public final class ForcedWinSolver {
         public boolean act = true;
         /** search-bones-1015 (c), off by default: the engine search's cycle table and REPEAT moves. */
         public boolean cycles = false;
+        /** search-bones-1015: the width search's wall-time cap per call, ms (1500 = PF5's). */
+        public long planMs = 1500;
+        /**
+         * search-bones-1015 (d), off by default: lines are verified in the position as it stands (a search's world copy,
+         * where every hidden card is a sample): one world, nothing hidden or re-drawn, the adversary (the other seat)
+         * countering each of the line's spells in turn. P(unopposed) = the line wins with the other seat as Forge AI;
+         * P(belief) = the worst over the adversary's counters.
+         */
+        public boolean exact = false;
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -153,6 +162,8 @@ public final class ForcedWinSolver {
             c.evalReserveMs = intOr(get.apply("evalReserveMs"), (int) c.evalReserveMs);
             c.act = !"false".equals(get.apply("act"));
             c.cycles = "true".equals(get.apply("cycles"));
+            c.exact = "true".equals(get.apply("exact"));
+            c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
             return c;
         }
 
@@ -209,7 +220,7 @@ public final class ForcedWinSolver {
 
     private final Player me;
     private final Config cfg;
-    final ForcedWinModel.Reader reader = new ForcedWinModel.Reader();
+    final ForcedWinModel.Reader reader;
     private Follower active;
     private String noLineKey;
     private int decisionIndex;
@@ -219,8 +230,14 @@ public final class ForcedWinSolver {
     public int copies;
 
     public ForcedWinSolver(Player me, Config cfg) {
+        this(me, cfg, null);
+    }
+
+    /** search-bones-1015 (d): a solver whose affordance reader is shared (null = its own). */
+    ForcedWinSolver(Player me, Config cfg, ForcedWinModel.Reader shared) {
         this.me = me;
         this.cfg = cfg;
+        this.reader = shared != null ? shared : new ForcedWinModel.Reader();
         this.reader.seed = cfg.seed;
     }
 
@@ -457,6 +474,7 @@ public final class ForcedWinSolver {
         }
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.nodes = cfg.nodes;
+        lim.ms = cfg.planMs;
         lim.payPolicies = 1;
         boolean payOnly = false;
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
@@ -1125,6 +1143,9 @@ public final class ForcedWinSolver {
      * a play-out already running is cut only at the wall (the decision's, and at least the deadline plus the grace).
      */
     Eval evaluate(Game live, Line line, long seed, long deadline) {
+        if (cfg.exact) {
+            return evaluateExact(live, line, seed, deadline);
+        }
         final Eval e = new Eval(line);
         final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
         final Outcome u = playout(live, line, mix(seed, 0), 0, -1, wall);
@@ -1179,6 +1200,37 @@ public final class ForcedWinSolver {
         return e;
     }
 
+    /** search-bones-1015 (d): {@link Config#exact}'s evaluation (one world, the position as it stands). */
+    Eval evaluateExact(Game live, Line line, long seed, long deadline) {
+        final Eval e = new Eval(line);
+        final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
+        Outcome worst = playout(live, line, mix(seed, 0), -1, -1, wall);
+        e.pUnopposed = worst.won ? 1 : 0;
+        e.worldsRun = 1;
+        if (worst.won && cfg.adversary && worst.oppHasCounter) {
+            int spells = 0;
+            for (Step s : line.steps) {
+                if (s.isSpell()) {
+                    spells++;
+                }
+            }
+            for (int j = 0; j < spells && worst.won; j++) {
+                if (System.nanoTime() > wall) {
+                    worst = new Outcome();
+                    worst.why = "wall";
+                    break;
+                }
+                final Outcome o = playout(live, line, mix(seed, 0), -1, j, wall);
+                if (!o.won) {
+                    worst = o;
+                }
+            }
+        }
+        e.pBelief = worst.won ? 1 : 0;
+        e.failures = worst.won ? "" : worst.why;
+        return e;
+    }
+
     /** One play-out's result. */
     static final class Outcome {
         boolean won;
@@ -1211,11 +1263,14 @@ public final class ForcedWinSolver {
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
-                for (Player o : cm.getOpponents()) {
-                    final Player liveOpp = (Player) live.getPlayer(o.getId());
-                    hideOrSample(live, me, liveOpp, o, world == 0, rng);
+                if (world >= 0) {
+                    // search-bones-1015 (d): world -1 = the position as it stands (exact)
+                    for (Player o : cm.getOpponents()) {
+                        final Player liveOpp = (Player) live.getPlayer(o.getId());
+                        hideOrSample(live, me, liveOpp, o, world == 0, rng);
+                    }
+                    shuffleUnknownOwnLibrary(cm, line, rng);
                 }
-                shuffleUnknownOwnLibrary(cm, line, rng);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             final Follower f = new Follower(line);

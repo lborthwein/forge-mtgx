@@ -571,7 +571,8 @@ public final class ForcedWinModel {
         final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
         long seed = 20261012L;
 
-        ACard card(Game live, Player me, Card c) {
+        /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
+        synchronized ACard card(Game live, Player me, Card c) {
             ACard t = templates.get(c.getName());
             if (t == null) {
                 t = ForcedWinProbe.learn(live, me, c, seed, probeStats);

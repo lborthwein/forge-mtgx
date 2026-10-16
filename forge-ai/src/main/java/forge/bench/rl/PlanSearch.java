@@ -73,9 +73,16 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         public long recordMs = 1500;
         /** The solver's config (string values; {@link ForcedWinSolver.Config#fromProps}); act=false is forced. */
         public JsonObject solverCfg = new JsonObject();
+        /**
+         * (d), off by default: the opponent's lines priced in every play-out ({@link forge.ai.simulation.ThreatCheck}), and
+         * our responses to their spells searched (a stack decision with their spell on top and a counter in our menu).
+         */
+        public boolean opp = false;
+        /** (d): the opponent check's solver config (string values; exact, act=false, no defence are forced). */
+        public JsonObject oppCfg = new JsonObject();
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
-                "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg"));
+                "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -95,6 +102,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("minProvenWorlds")) s.minProvenWorlds = o.get("minProvenWorlds").getAsInt();
             if (o.has("recordMs")) s.recordMs = o.get("recordMs").getAsLong();
             if (o.has("solverCfg")) s.solverCfg = o.getAsJsonObject("solverCfg");
+            if (o.has("opp")) s.opp = o.get("opp").getAsBoolean();
+            if (o.has("oppCfg")) s.oppCfg = o.getAsJsonObject("oppCfg");
             if (s.samples < 0 || s.temperature <= 0 || s.maxSteps < 1 || s.maxLines < 0 || s.minProvenWorlds < 1) {
                 throw new IllegalArgumentException("plans: samples >= 0, temperature > 0, maxSteps >= 1, maxLines >= 0, "
                         + "minProvenWorlds >= 1");
@@ -115,6 +124,22 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 o.add(e.getKey(), e.getValue());
             }
             o.addProperty("act", "false");
+            return SolverDriver.config(o);
+        }
+
+        /** (d): the opponent check's config: a cheap same-turn width search, verified exactly; then the spec's keys. */
+        ForcedWinSolver.Config oppConfig() {
+            final JsonObject o = new JsonObject();
+            o.addProperty("budgetMs", "500");
+            o.addProperty("wallGraceMs", "300");
+            o.addProperty("nodes", "3000");
+            o.addProperty("planMs", "200");
+            o.addProperty("horizon", "1");
+            o.addProperty("engine", "false");
+            o.addProperty("top", "2");
+            for (Map.Entry<String, com.google.gson.JsonElement> e : oppCfg.entrySet()) {
+                o.add(e.getKey(), e.getValue());
+            }
             return SolverDriver.config(o);
         }
     }
@@ -361,6 +386,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     private String lastPointPhase = "";
     private boolean pointAgain;
     final ForcedWinSolver.Config followCfg;
+    /** (d): the opponent check (null = off). */
+    final forge.ai.simulation.ThreatCheck threat;
+    int respondPoints;
 
     // counters
     int planPoints, solverRuns, provenLinesTaken, lineCands, sampledPlans, recordings, recordFails, planDecisions,
@@ -376,6 +404,37 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final ForcedWinSolver.Config sc = spec.solverConfig();
         this.driver = new SolverDriver(me, sc);
         this.followCfg = sc;
+        this.threat = spec.opp ? new forge.ai.simulation.ThreatCheck(spec.oppConfig()) : null;
+    }
+
+    /**
+     * (d): a respond point: their spell on top of the stack and a counterspell in our menu. S-b searches it (S-c skips
+     * every stack decision) with the opponent check in its play-outs.
+     */
+    boolean respondPoint(final Game g, final List<SpellAbility> objs) {
+        if (threat == null || g.getStack().isEmpty()) {
+            return false;
+        }
+        final SpellAbility top = g.getStack().peekAbility();
+        if (top == null || top.getActivatingPlayer() == me || !top.isSpell()) {
+            return false;
+        }
+        for (SpellAbility sa : objs) {
+            if (isCounter(sa)) {
+                respondPoints++;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean isCounter(final SpellAbility sa) {
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.getApi() == forge.game.ability.ApiType.Counter) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------ the hook (live)
@@ -736,6 +795,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.add("pointMs", dist(pointMs));
         o.add("solverMs", dist(solverMs));
         o.add("driver", driver.summary());
+        if (threat != null) {
+            o.addProperty("respondPoints", respondPoints);
+            o.addProperty("threat", threat.summary());
+        }
         return o;
     }
 }

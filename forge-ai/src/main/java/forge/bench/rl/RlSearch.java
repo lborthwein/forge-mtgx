@@ -538,6 +538,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.budgetMs = cfg.budgetMs;
         lc.maxSameDepartures = cfg.sameDepartures;
         lc.copyFidelity = cfg.copyFidelity;
+        if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
+            // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)
+            lc.stack = true;
+        }
         this.ls = new LookaheadSearch(lc);
         ls.setHooks(this, "value".equals(cfg.leaf), "policy".equals(cfg.playout));
         this.choiceFams = cfg.choices > 0 ? (cfg.choiceFamilySet != null ? cfg.choiceFamilySet
@@ -693,11 +697,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             voided = "cpu_cap";
             return VOID;
         }
-        if (!cfg.stack && !g.getStack().isEmpty()) {
+        final PlanSearch sb = planSearches.isEmpty() ? null : planSearches.get(me.getId());
+        // search-bones-1015 (d): S-b searches a respond point (their spell on top, a counter in our menu)
+        final boolean respond = sb != null && !g.getStack().isEmpty() && sb.respondPoint(g, menuObjs);
+        if (!cfg.stack && !g.getStack().isEmpty() && !respond) {
             searchStackSkipped++;
             return -1;
         }
-        final PlanSearch sb = planSearches.isEmpty() ? null : planSearches.get(me.getId());
         if (sb != null) {
             // search-bones-1015 (S-b): the live policy plan's next step, no search
             final int f = sb.follow(g, me, m, menuObjs);
@@ -773,6 +779,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final int k = Double.compare(by.get(y)[0], by.get(x)[0]);
             return k != 0 ? k : Integer.compare(x, y);
         });
+        if (respond) {
+            // (d): the counters right after the default, so the breadth holds them
+            final List<Integer> counters = new ArrayList<>();
+            for (int ch : rest) {
+                if (ch > 0 && PlanSearch.isCounter(menuObjs.get(ch - 1))) {
+                    counters.add(ch);
+                }
+            }
+            rest.removeAll(counters);
+            rest.addAll(0, counters);
+        }
         if (cfg.includePass && def != 0 && by.containsKey(0)) {
             // K8's candidate shape: the default, then pass, then the prior's next entries
             order.remove(Integer.valueOf(0));
@@ -798,8 +815,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // S-b: every searched decision has the proof flags; a plan point also has its plans (and its budget counts
             // from the decision's start, the proposals included)
             final int kt = stage != null ? stage.knownTop : sb.knownTop(g);
-            r = stage != null ? ls.decideGivenPlans(g, me, given, cfg.breadth, stage.plans, stage.labels, kt, t0)
-                    : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L);
+            r = stage != null ? ls.decideGivenPlans(g, me, given, cfg.breadth, stage.plans, stage.labels, kt, t0, sb.threat)
+                    : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L, sb.threat);
         } else if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
             probeAsks.clear();

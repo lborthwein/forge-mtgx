@@ -1927,6 +1927,21 @@ public final class LookaheadSearch {
 
     // ------------------------------------------------------------------ search-bones-1015 (S-b): turn-plans
 
+    /**
+     * S-b (d): a check inside a play-out, at the opponent's first main-phase priority with an empty stack: does the
+     * opponent have a line that wins there? Yes = the play-out is a proven loss for our candidate (value 0).
+     */
+    public interface OppCheck {
+        boolean theyWin(Game g, Player me);
+    }
+
+    /** S-b (d): the check of the decision in progress (null = none: S-c's play-outs). */
+    private volatile OppCheck oppCheck = null;
+
+    /** S-b (d): play-outs the opponent check ended as losses, and checks made (per game). */
+    public final java.util.concurrent.atomic.AtomicLong oppChecks = new java.util.concurrent.atomic.AtomicLong(),
+            oppLosses = new java.util.concurrent.atomic.AtomicLong();
+
     /** S-b: the plan candidates of the decision in progress ({@link #decideGivenPlans}; null otherwise). */
     private List<Object> pendingPlans = null;
     private List<String> pendingPlanLabels = null;
@@ -1950,11 +1965,18 @@ public final class LookaheadSearch {
      */
     public GivenResult decideGivenPlans(Game live, Player me, List<SpellAbility> given, int breadth, List<Object> plans,
             List<String> labels, int knownTop, long startNanos) {
+        return decideGivenPlans(live, me, given, breadth, plans, labels, knownTop, startNanos, null);
+    }
+
+    /** As above, with (d)'s opponent check in every play-out ({@code opp}; null = none). */
+    public GivenResult decideGivenPlans(Game live, Player me, List<SpellAbility> given, int breadth, List<Object> plans,
+            List<String> labels, int knownTop, long startNanos, OppCheck opp) {
         pendingPlans = plans == null || plans.isEmpty() ? null : plans;
         pendingPlanLabels = labels;
         proof = true;
         ownKnownTop = Math.max(0, knownTop);
         decisionStartNanos = startNanos;
+        oppCheck = opp;
         try {
             return decideGiven(live, me, given, breadth, null);
         } finally {
@@ -1963,6 +1985,7 @@ public final class LookaheadSearch {
             proof = false;
             ownKnownTop = 0;
             decisionStartNanos = 0L;
+            oppCheck = null;
         }
     }
 
@@ -4988,6 +5011,9 @@ public final class LookaheadSearch {
                 r.keys = new ArrayList<>();
             }
             WorldMemo.Entry hit = null;
+            // search-bones-1015 (d): the opponent check of this play-out (once, at their first main-phase priority)
+            final OppCheck oc = recording ? null : oppCheck;
+            boolean oppDone = oc == null, oppWon = false;
             // Without a probe: to the start of the horizon turn (K8). With one: on to the seat's first priority in it,
             // at most leafExtraSteps main-loop steps past its start.
             while (!g.isGameOver() && !(probe == null ? watch.reached : probe.done || watch.reached && extra >= cfg.leafExtraSteps)
@@ -4999,6 +5025,17 @@ public final class LookaheadSearch {
                 final java.util.function.Consumer<Game> hook = playoutStepHook;
                 if (hook != null) {
                     hook.accept(g);
+                }
+                if (!oppDone && !ph.isPlayerTurn(me) && g.getStack().isEmpty()
+                        && (ph.is(forge.game.phase.PhaseType.MAIN1) || ph.is(forge.game.phase.PhaseType.MAIN2))
+                        && ph.getPriorityPlayer() != null && ph.getPriorityPlayer() != me) {
+                    oppDone = true;
+                    oppChecks.incrementAndGet();
+                    if (oc.theyWin(g, me)) {
+                        oppWon = true;
+                        oppLosses.incrementAndGet();
+                        break;
+                    }
                 }
                 ph.mainLoopStep();
                 steps++;
@@ -5050,7 +5087,12 @@ public final class LookaheadSearch {
                 r.value = Double.NEGATIVE_INFINITY;
                 return r;
             }
-            if (hit != null) {
+            if (oppWon) {
+                // search-bones-1015 (d): the opponent's verified line wins this world: a terminal loss for the candidate
+                r.capped = false;
+                r.value = -TERMINAL;
+                r.pTerminal = 0.0;
+            } else if (hit != null) {
                 // Same position as an earlier candidate of this world (exact key): its continuation is this one's.
                 final Rollout src = hit.src;
                 r.dedupFrom = hit.cand;
