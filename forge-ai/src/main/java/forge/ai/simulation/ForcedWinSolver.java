@@ -113,6 +113,11 @@ public final class ForcedWinSolver {
          * stop at the budget.
          */
         public long likelyReserveMs = 2000;
+        /**
+         * solver-gaps-1015: the decision's hard wall = its budget plus this grace. The budget's deadlines stop new work
+         * (nodes, worlds); a step already running is cut only at the wall (engine moves, verification play-outs).
+         */
+        public long wallGraceMs = 2000;
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -123,6 +128,7 @@ public final class ForcedWinSolver {
             c.likelyTop = intOr(get.apply("likelyTop"), c.likelyTop);
             c.likelyCapTurns = intOr(get.apply("likelyCapTurns"), c.likelyCapTurns);
             c.likelyReserveMs = intOr(get.apply("likelyReserveMs"), (int) c.likelyReserveMs);
+            c.wallGraceMs = intOr(get.apply("wallGraceMs"), (int) c.wallGraceMs);
             c.worlds = intOr(get.apply("worlds"), c.worlds);
             c.top = intOr(get.apply("top"), c.top);
             c.threshold = dblOr(get.apply("threshold"), c.threshold);
@@ -429,6 +435,7 @@ public final class ForcedWinSolver {
         decisions++;
         final int index = decisionIndex++;
         final long t0 = System.nanoTime();
+        decisionWall = t0 + (cfg.budgetMs + cfg.wallGraceMs) * 1_000_000L;
         final Position pos = readPosition(live, knownTop(live));
         if (pos == null) {
             noLineKey = key;
@@ -752,6 +759,7 @@ public final class ForcedWinSolver {
         lastOutcome = "gate+engine";
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
+        el.wall = decisionWall;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
         final long engineDeadline = Math.max(t1 + Math.min(cfg.engineMs, cfg.budgetMs - reserve) * 1_000_000L,
@@ -790,6 +798,8 @@ public final class ForcedWinSolver {
     public int likelyRuns, likelyTaken;
     /** solver-gaps-1015: play-outs and rollouts cut at their wall (or after an attack the rules refused twice). */
     public int wallCuts;
+    /** solver-gaps-1015: the current offense decision's hard wall (System.nanoTime()): its budget plus the grace. */
+    private long decisionWall;
     /** Payment search: decisions where only the searched payment found width lines. */
     public int paySearchFound;
 
@@ -997,10 +1007,14 @@ public final class ForcedWinSolver {
         return best;
     }
 
-    /** P(win | unopposed) and P(win | belief worlds, adversarial counters) of one line. */
+    /**
+     * P(win | unopposed) and P(win | belief worlds, adversarial counters) of one line. {@code deadline} stops new worlds;
+     * a play-out already running is cut only at the wall (the decision's, and at least the deadline plus the grace).
+     */
     Eval evaluate(Game live, Line line, long seed, long deadline) {
         final Eval e = new Eval(line);
-        final Outcome u = playout(live, line, mix(seed, 0), 0, -1, deadline);
+        final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
+        final Outcome u = playout(live, line, mix(seed, 0), 0, -1, wall);
         e.pUnopposed = u.won ? 1 : 0;
         if (!u.won) {
             e.failures = "unopposed:" + u.why;
@@ -1021,13 +1035,13 @@ public final class ForcedWinSolver {
                 break;
             }
             final long ws = mix(seed, w);
-            Outcome worst = playout(live, line, ws, w, -1, deadline);
+            Outcome worst = playout(live, line, ws, w, -1, wall);
             if (worst.protectedBy != null) {
                 prot.add(worst.protectedBy);
             }
             if (worst.won && cfg.adversary && worst.oppHasCounter) {
                 for (int j = 0; j < spells && worst.won; j++) {
-                    final Outcome o = playout(live, line, ws, w, j, deadline);
+                    final Outcome o = playout(live, line, ws, w, j, wall);
                     if (o.protectedBy != null) {
                         prot.add(o.protectedBy);
                     }

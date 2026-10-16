@@ -166,6 +166,12 @@ final class ForcedWinEngine {
         int maxSteps = 1500;
         /** Also search lines that pass the turn once (win by our next turn). */
         boolean passTurn = true;
+        /**
+         * solver-gaps-1015: the hard wall (System.nanoTime()) no step of a move may run past; 0 = the search's deadline.
+         * The deadline only stops new nodes, so a move begun before it may finish up to the wall (a Brain Freeze move
+         * that wins just after the deadline is kept).
+         */
+        long wall;
     }
 
     /** A search node: a game copy at our priority, with its own id scope. */
@@ -804,13 +810,14 @@ final class ForcedWinEngine {
             final Player me = (Player) copier.find(node.me);
             st.copies++;
             final MoveAi ai = new MoveAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn);
-            // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the search's deadline
-            ai.bounded(deadline);
+            // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the wall
+            final long wall = lim.wall != 0 ? lim.wall : deadline;
+            ai.bounded(wall);
             held[0] = ai;
             me.dangerouslySetController(ai);
             for (Player o : g.getPlayers()) {
                 if (o != me) {
-                    o.dangerouslySetController(new GuardedAi(g, o, o.getController().getLobbyPlayer()).bounded(deadline));
+                    o.dangerouslySetController(new GuardedAi(g, o, o.getController().getLobbyPlayer()).bounded(wall));
                 }
             }
             final PhaseHandler ph = g.getPhaseHandler();
@@ -818,7 +825,7 @@ final class ForcedWinEngine {
             int steps = 0;
             final int lastTurn = mv.pass ? node.turn + 2 : node.turn;
             while (!g.isGameOver() && !ai.rest && !ai.failed && ph.getTurn() <= lastTurn && steps < lim.maxSteps) {
-                checkWall(deadline, "engine step");
+                checkWall(wall, "engine step");
                 ph.mainLoopStep();
                 steps++;
             }
@@ -839,7 +846,7 @@ final class ForcedWinEngine {
             a.key = PlayoutKeys.stateKey(g);
             return a;
         } catch (OutOfBudget ex) {
-            // the move did not finish within the search's deadline (or the rules refused its attack twice): dropped
+            // the move did not finish by the wall (or the rules refused its attack twice): dropped
             st.cut++;
             lastError = String.valueOf(ex);
             ForcedWinSolver.receipt("FORCED_WIN engine cut move=" + mv + " " + ex.getMessage());
