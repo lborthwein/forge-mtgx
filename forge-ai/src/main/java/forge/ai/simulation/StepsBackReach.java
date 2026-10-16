@@ -38,10 +38,11 @@ import forge.util.MyRandom;
  * <p>Question: from a position whose immediate forced win is gone (the solver proves nothing here), can a solver-proven
  * win still be reached within a horizon of our own turns, through at most {@code maxFixes} fixing actions and passes?
  * A fixing action is one of our playable abilities whose PROBED affordance ({@link ForcedWinProbe}) draws, digs,
- * tutors or puts back (DRAW, PILE, PUTBACK = "cantrip-dig"; TUTOR, TUTOR_TOP = "tutor"). A pass plays nothing more
- * this turn; our next turn's draw step happens ("draw-step"). Nothing here names a card.</p>
+ * tutors or puts back (DRAW, PILE, PUTBACK = "cantrip-dig"; TUTOR, TUTOR_TOP = "tutor"). A pass makes this turn's land
+ * drop (a land that is not a piece, when there is one) and plays nothing else; our next turn's draw step happens
+ * ("draw-step"). Nothing here names a card.</p>
  *
- * <p>The search runs on Forge game copies of the position, best-first by (passes, fixes). The opponent acts only
+ * <p>The search runs on Forge game copies of the position, breadth-first in steps. The opponent acts only
  * through its visible board (its hidden hand removed, as the solver's world 0): this is an existence check on the
  * actual position, so our library keeps its real order. Our seat, while a move is played, keeps the line's pieces
  * (named by the caller): a library search offers them first, put-backs, discards and library orders avoid them. At
@@ -468,7 +469,10 @@ public final class StepsBackReach {
             if (!acted) {
                 acted = true;
                 if (move.step.pass) {
-                    return null;
+                    // a turn passes: this turn's land drop is made first (a land that is not a piece, else any), as a
+                    // player does before passing; nothing else is played
+                    final SpellAbility land = landDrop(getPlayer(), keep);
+                    return land == null ? null : capped(List.of(land));
                 }
                 final SpellAbility sa = ForcedWinSolver.Follower.locate(g, getPlayer(), move.step);
                 if (sa == null) {
@@ -483,6 +487,28 @@ public final class StepsBackReach {
                 rest = true;
             }
             return null;
+        }
+
+        /** A playable land from our hand for this turn's drop: not a piece when we can help it; null = none. */
+        static SpellAbility landDrop(Player me, Set<String> keep) {
+            SpellAbility piece = null;
+            for (Card c : me.getCardsIn(ZoneType.Hand)) {
+                if (!c.isLand()) {
+                    continue;
+                }
+                for (SpellAbility sa : c.getAllPossibleAbilities(me, true)) {
+                    if (!sa.isLandAbility() || !sa.canPlay()) {
+                        continue;
+                    }
+                    if (!keep.contains(c.getName())) {
+                        return sa;
+                    }
+                    if (piece == null) {
+                        piece = sa;
+                    }
+                }
+            }
+            return piece;
         }
 
         @Override
