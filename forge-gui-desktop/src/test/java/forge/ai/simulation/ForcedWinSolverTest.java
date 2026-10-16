@@ -527,6 +527,37 @@ public class ForcedWinSolverTest extends AITest {
         }
     }
 
+    // ------------------------------------------------------------------ search-bones-1015 (d): their lines, verified exactly
+
+    static ForcedWinSolver.Config threatConfig() {
+        final ForcedWinSolver.Config c = ForcedWinSolver.Config.fromProps(k -> null);
+        c.horizon = 1;
+        c.engine = false;
+        c.nodes = 3000;
+        c.planMs = 1000;
+        c.budgetMs = 3000;
+        return c;
+    }
+
+    @Test
+    public void theirLineWinsUnlessWeHoldTheCounterForIt() {
+        // their main phase, we are at 3 life: their Lightning Bolt is a forced win; with Counterspell and UU up it is not
+        // (the exact verification plays our seat as an adversary that counters their spell)
+        final Game open = game("Default", "Default", frame("", "Island;Island", 3, "Lightning Bolt", "Mountain", 20, "ai"));
+        final ThreatCheck t1 = new ThreatCheck(threatConfig());
+        Assert.assertTrue(t1.theyWin(open, open.getPlayers().get(0)), t1.summary());
+        final Game held = game("Default", "Default", frame("Counterspell", "Island;Island", 3, "Lightning Bolt", "Mountain",
+                20, "ai"));
+        final ThreatCheck t2 = new ThreatCheck(threatConfig());
+        Assert.assertFalse(t2.theyWin(held, held.getPlayers().get(0)), t2.summary());
+        Assert.assertTrue(t2.found.get() >= 1, "the line is found, then refuted: " + t2.summary());
+        // tapped out: the counter cannot be cast, their line wins again
+        final Game tapped = game("Default", "Default", frame("Counterspell", "Island|Tapped;Island|Tapped", 3,
+                "Lightning Bolt", "Mountain", 20, "ai"));
+        final ThreatCheck t3 = new ThreatCheck(threatConfig());
+        Assert.assertTrue(t3.theyWin(tapped, tapped.getPlayers().get(0)), t3.summary());
+    }
+
     @Test(timeOut = 120000)
     public void anAttackTheRulesRefuseEndsAndGoesToForgeAi() {
         // exploit-panel-1015: the engine's "attack with everything" broke an attack requirement and the rules asked the same
