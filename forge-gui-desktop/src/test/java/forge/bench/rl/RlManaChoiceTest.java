@@ -255,7 +255,7 @@ public class RlManaChoiceTest extends AITest {
         }
     }
 
-    /** The MANA_SOURCE menu: AUTO first, then one candidate per option; AUTO and Forge AI's own source flagged. */
+    /** The MANA_SOURCE menu: AUTO first, then one candidate per option; AUTO alone flagged forge_default. */
     @Test
     public void manaSourceMenu() {
         final Pos p = position(true, true, true);
@@ -279,7 +279,7 @@ public class RlManaChoiceTest extends AITest {
             Assert.assertEquals(c.host, a.options.get(i).cand.getHostCard());
             Assert.assertEquals(c.num, RlSchemaV3.SH_U);
             Assert.assertEquals(c.tgt1, p.spell);
-            Assert.assertEquals(c.flags, i == a.forge ? RlSchemaV3.FLAG_FORGE_DEFAULT : 0);
+            Assert.assertEquals(c.flags, 0, "no source carries forge_default (the bonus is AUTO's alone)");
             Assert.assertEquals(m.fragment(i + 1).getAsJsonObject().get("choice").getAsInt(), i + 1);
         }
         Assert.assertEquals(m.fragment(0).getAsJsonObject().get("choice").getAsInt(), 0);
