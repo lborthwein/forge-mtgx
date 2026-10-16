@@ -509,6 +509,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return driver.binary(kind, defaultVal);
     }
 
+    @Override
+    public boolean forgeCosts() {
+        return driver.forgeCosts();
+    }
+
     // ------------------------------------------------------------------ the decision (from RlSearch.decide)
 
     /** Our library's known top (pile memory) for this seat's worlds. */
@@ -753,6 +758,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             @Override
             public Boolean binary(final BinaryChoiceType kind, final Boolean defaultVal) {
                 return d.binary(kind, defaultVal);
+            }
+
+            @Override
+            public boolean forgeCosts() {
+                return d.forgeCosts();
             }
         };
     }

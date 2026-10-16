@@ -124,9 +124,26 @@ public final class SolverDriver implements PlayerControllerBridge.PlanHook {
             return null;
         }
         actions++;
+        final forge.game.phase.PhaseHandler ph = me.getGame().getPhaseHandler();
+        actTurn = ph.getTurn();
+        actPhase = ph.getPhase();
         final List<SpellAbility> out = new ArrayList<>();
         out.add(d.action);
         return out;
+    }
+
+    /** The turn and phase of the solver's last action (its costs are paid right after the hook returns it). */
+    private int actTurn = -1;
+    private forge.game.phase.PhaseType actPhase;
+
+    /**
+     * True in a phase where the solver played an action: the card choices of costs (Underworld Breach's escape exile,
+     * a sacrifice, a discard) are Forge AI's, as in the engine's copies the line was found and verified on.
+     */
+    @Override
+    public boolean forgeCosts() {
+        final forge.game.phase.PhaseHandler ph = me.getGame().getPhaseHandler();
+        return ph.getTurn() == actTurn && ph.getPhase() == actPhase;
     }
 
     @Override

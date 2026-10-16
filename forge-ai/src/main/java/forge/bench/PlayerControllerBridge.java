@@ -182,6 +182,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         default Boolean binary(BinaryChoiceType kind, Boolean defaultVal) {
             return null;
         }
+
+        /** True = the card choices of costs are Forge AI's own, not the seat's (a solver line is being played). */
+        default boolean forgeCosts() {
+            return false;
+        }
     }
 
     /** {@link PlanHook#priority}'s "no opinion" (compared by identity). */
@@ -3466,7 +3471,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     private CardCollectionView askCostCards(final CardCollectionView pool, final SpellAbility sa,
             final CostPartWithList cpl, final int amount, final boolean optional, final String prompt,
             final java.util.function.Supplier<CardCollectionView> forge) {
-        if (!localAnswers() || pool == null || pool.isEmpty() || amount <= 0) {
+        if (!localAnswers() || pool == null || pool.isEmpty() || amount <= 0
+                || planHook != null && planHook.forgeCosts()) {
             return forge.get();
         }
         final int min = optional ? 0 : amount;
