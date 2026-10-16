@@ -394,6 +394,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     int planPoints, solverRuns, provenLinesTaken, lineCands, sampledPlans, recordings, recordFails, planDecisions,
             planDepartures, lineDepartures, policyPlanDepartures, provenPicks, liveSteps, liveBreaks, liveDone, lineHookActs;
     final List<Double> proposeMs = new ArrayList<>();
+    /** The game turns of each live departure by kind (attribution of wins to solver lines vs sampled plans). */
+    final List<Integer> provenTurns = new ArrayList<>(), lineTurns = new ArrayList<>(), planTurns = new ArrayList<>();
     final List<Double> pointMs = new ArrayList<>();
     final List<Double> solverMs = new ArrayList<>();
 
@@ -590,6 +592,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 solver.adopt(proven.line);
                 handoff = true;
                 provenLinesTaken++;
+                provenTurns.add(g.getPhaseHandler().getTurn());
                 st.hook = true;
                 st.note = "proven-line " + proven.text;
                 st.ms = (System.nanoTime() - t0) / 1e6;
@@ -674,6 +677,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             driver.solver().adopt(((LinePlan) plan).line);
             handoff = true;
             lineDepartures++;
+            lineTurns.add(g.getPhaseHandler().getTurn());
             return RlSeat.PrioritySearch.HOOK;
         }
         final PolicyPlan pp = (PolicyPlan) plan;
@@ -682,6 +686,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             return -2;
         }
         policyPlanDepartures++;
+        planTurns.add(g.getPhaseHandler().getTurn());
         live = new Cursor(pp, null, 1);
         if (!live.active()) {
             live = null;
@@ -773,6 +778,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         return o;
     }
 
+    static JsonArray ints(final List<Integer> xs) {
+        final JsonArray a = new JsonArray();
+        for (int x : xs) {
+            a.add(x);
+        }
+        return a;
+    }
+
     public JsonObject summary() {
         final JsonObject o = new JsonObject();
         o.addProperty("planPoints", planPoints);
@@ -791,6 +804,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.addProperty("liveBreaks", liveBreaks);
         o.addProperty("liveDone", liveDone);
         o.addProperty("lineHookActs", lineHookActs);
+        o.add("provenTurns", ints(provenTurns));
+        o.add("lineTurns", ints(lineTurns));
+        o.add("planTurns", ints(planTurns));
         o.add("proposeMs", dist(proposeMs));
         o.add("pointMs", dist(pointMs));
         o.add("solverMs", dist(solverMs));
