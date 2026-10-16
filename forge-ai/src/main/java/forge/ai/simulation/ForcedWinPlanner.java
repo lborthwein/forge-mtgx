@@ -119,6 +119,10 @@ public final class ForcedWinPlanner {
             s.expHand = expHand;
             s.expLib = expLib;
             s.anyColors.addAll(anyColors);
+            if (body != null) {
+                s.body = new ArrayList<>(body);
+                s.times = times;
+            }
             return s;
         }
 
@@ -149,6 +153,35 @@ public final class ForcedWinPlanner {
 
         /** ENGINE steps: the ability is a spell (the adversary's counter targets). */
         boolean engineSpell;
+        /**
+         * REPEAT steps (search-bones-1015, the engine search's cycles with progress): the loop body, played {@link #times}
+         * times in order; null for every other step.
+         */
+        List<Step> body;
+        int times;
+
+        /** A REPEAT step: {@code body} (engine steps) played {@code times} times. */
+        static Step repeat(List<Step> body, int times) {
+            final Step s = new Step(AbilKind.REPEAT, -1, "repeat", "repeat", "", null, List.of(), -1);
+            s.body = new ArrayList<>(body);
+            s.times = times;
+            for (Step b : body) {
+                s.engineSpell |= b.isSpell();
+            }
+            return s;
+        }
+
+        /** The step's identity for loop detection: kind, host, ability, cost, targets and forced answers. */
+        String loopKey() {
+            if (pass) {
+                return "PASS";
+            }
+            if (kind == AbilKind.REPEAT) {
+                return "REPEAT" + times + body;
+            }
+            return kind + "|" + hostId + "|" + desc + "|" + costKey + "|" + targetRefs + "|" + triggerRef + "|" + pickName
+                    + "|" + floatColor + "|" + targetVariant;
+        }
 
         boolean isSpell() {
             return kind == AbilKind.SPELL || engineSpell;
@@ -161,6 +194,9 @@ public final class ForcedWinPlanner {
             }
             if (kind == AbilKind.ATTACK) {
                 return "ATTACK";
+            }
+            if (kind == AbilKind.REPEAT) {
+                return "REPEAT" + times + "x" + body;
             }
             return kind + ":" + hostName + (floatColor >= 0 ? "->" + ForcedWinModel.SHORT[floatColor] : "")
                     + (targetRefs.isEmpty() ? "" : "->" + targetRefs) + (triggerRef == null ? "" : " trigger->" + triggerRef)

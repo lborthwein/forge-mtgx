@@ -124,6 +124,8 @@ public final class ForcedWinSolver {
          * ({@link #propose}), but runs no offense or defence of its own at a priority.
          */
         public boolean act = true;
+        /** search-bones-1015 (c), off by default: the engine search's cycle table and REPEAT moves. */
+        public boolean cycles = false;
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -150,6 +152,7 @@ public final class ForcedWinSolver {
             c.engineMs = intOr(get.apply("engineMs"), (int) c.engineMs);
             c.evalReserveMs = intOr(get.apply("evalReserveMs"), (int) c.evalReserveMs);
             c.act = !"false".equals(get.apply("act"));
+            c.cycles = "true".equals(get.apply("cycles"));
             return c;
         }
 
@@ -862,6 +865,7 @@ public final class ForcedWinSolver {
         lastOutcome = "gate+engine";
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
+        el.cycles = cfg.cycles;
         el.wall = decisionWall;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
@@ -1595,12 +1599,20 @@ public final class ForcedWinSolver {
         Set<Integer> reserved() {
             final Set<Integer> out = new HashSet<>();
             for (int i = cursor; i < line.steps.size(); i++) {
-                if (!line.steps.get(i).pass) {
-                    out.add(line.steps.get(i).hostId);
+                final Step s = line.steps.get(i);
+                if (s.kind == AbilKind.REPEAT) {
+                    for (Step b : s.body) {
+                        out.add(b.hostId);
+                    }
+                } else if (!s.pass) {
+                    out.add(s.hostId);
                 }
             }
             return out;
         }
+
+        /** search-bones-1015 (c): the position inside the current REPEAT step (repetition, body index). */
+        int repIter, repPos;
 
         Next next(Game g, Player me) {
             final Next n = new Next();
@@ -1639,7 +1651,10 @@ public final class ForcedWinSolver {
                 n.waitingEnd = false;
                 return n;
             }
-            final Step st = line.steps.get(cursor);
+            final Step st0 = line.steps.get(cursor);
+            // search-bones-1015 (c): a REPEAT step plays its body steps in order, its number of times
+            final boolean inRepeat = st0.kind == AbilKind.REPEAT;
+            final Step st = inRepeat ? st0.body.get(repPos) : st0;
             if (st.kind == AbilKind.ATTACK) {
                 if (!ph.is(PhaseType.MAIN1)) {
                     // the attack happened (or its chance passed): go on with the line in main phase 2
@@ -1659,7 +1674,19 @@ public final class ForcedWinSolver {
                 n.why = why;
                 return n;
             }
-            cursor++;
+            if (inRepeat) {
+                repPos++;
+                if (repPos >= st0.body.size()) {
+                    repPos = 0;
+                    repIter++;
+                    if (repIter >= st0.times) {
+                        repIter = 0;
+                        cursor++;
+                    }
+                }
+            } else {
+                cursor++;
+            }
             executed.put(st.hostId, st);
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);

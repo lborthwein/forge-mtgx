@@ -115,7 +115,8 @@ public final class ForcedWinModel {
     }
 
     /** ENGINE: a step found by the engine search (any legal action, targets recorded); ATTACK: attack with everything. */
-    enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK }
+    /** REPEAT (search-bones-1015): a loop body found by the engine search's cycle table, repeated a number of times. */
+    enum AbilKind { SPELL, CYCLE, LAND, ACTIVATE, FLOAT, ENGINE, ATTACK, REPEAT }
 
     /** One executable ability of a card: its printed cost and its observed effects. */
     static final class Abil {

@@ -470,6 +470,63 @@ public class ForcedWinSolverTest extends AITest {
         Assert.assertFalse(d.isGameOver() && d.getPlayers().get(0).hasWon());
     }
 
+    // ------------------------------------------------------------------ search-bones-1015 (c): cycles with progress
+
+    static final String KIKI_BF = "Kiki-Jiki, Mirror Breaker;Volcanic Island;Volcanic Island;Mountain;Mountain";
+
+    @Test
+    public void progressAndTheCoarseKeyLeaveOutTokensAndCounters() {
+        final Game g = game("Default", "Default", frame("Pestermite", KIKI_BF, 20, "", "Forest", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final long[] a = ForcedWinEngine.progress(g, me);
+        final String k = ForcedWinEngine.coarseKey(g, me);
+        g.getPlayers().get(1).setLife(17, null);
+        final long[] b = ForcedWinEngine.progress(g, me);
+        Assert.assertEquals(ForcedWinEngine.coarseKey(g, me), k, "life is a counter, not part of the key");
+        Assert.assertTrue(ForcedWinEngine.progressed(b, a));
+        Assert.assertFalse(ForcedWinEngine.progressed(a, b));
+        Assert.assertTrue(ForcedWinEngine.dominates(b, a));
+        Assert.assertFalse(ForcedWinEngine.progressed(a, a), "no change is no progress");
+    }
+
+    @Test
+    public void aLoopWithProgressIsFastForwardedToTheKill() {
+        // search-bones-1015 (c): Kiki-Jiki + Pestermite against 20 life: each copy's trigger untaps Kiki-Jiki and adds a hasty
+        // 2/1; the two first repetitions made progress (a token each), so the engine plays the body on as one REPEAT move
+        // until the attack is lethal, within a node budget the step-by-step search does not reach it in
+        final Game g = game("Default", "Default", frame("Pestermite", KIKI_BF, 20, "", "Forest", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Limits lim = new ForcedWinEngine.Limits();
+        lim.cycles = true;
+        lim.nodes = 60;
+        lim.passTurn = false;
+        final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+        final ForcedWinPlanner.Line line = ForcedWinEngine.search(g, me, lim, st, System.nanoTime() + 20_000_000_000L, 7L);
+        Assert.assertNotNull(line, st.summary());
+        Assert.assertTrue(st.loops >= 1, st.summary());
+        boolean repeat = false;
+        for (ForcedWinPlanner.Step s : line.steps) {
+            repeat |= s.kind == AbilKind.REPEAT && s.times >= 5;
+        }
+        Assert.assertTrue(repeat, "a REPEAT step of 5 or more: " + line);
+        System.err.println("[cycles-test] " + st.summary() + " line=" + line);
+    }
+
+    @Test
+    public void theSolverSeatFollowsARepeatLineToTheWin() {
+        System.setProperty("forge.ai.forcedWin.spec", "cycles=true,engineNodes=60");
+        try {
+            final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame("Pestermite", KIKI_BF, 20, "",
+                    "Forest", 20, "human"));
+            play(g, 7);
+            final ForcedWinSolver s = ((CubeComboPlayerController) g.getPlayers().get(0).getController()).cubeCombo()
+                    .forcedWin();
+            Assert.assertTrue(g.isGameOver() && g.getPlayers().get(0).hasWon(), "no win on turn 7: " + s.summary());
+        } finally {
+            System.clearProperty("forge.ai.forcedWin.spec");
+        }
+    }
+
     @Test(timeOut = 120000)
     public void anAttackTheRulesRefuseEndsAndGoesToForgeAi() {
         // exploit-panel-1015: the engine's "attack with everything" broke an attack requirement and the rules asked the same
