@@ -176,7 +176,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         observeReveal(cards, zone, own);
     }
 
-    private void observeLook(final Iterable<Card> cards, final ZoneType destination) {
+    protected void observeLook(final Iterable<Card> cards, final ZoneType destination) {
         final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
         if (o == null || !isLiveGame() || cards == null) {
             return;
