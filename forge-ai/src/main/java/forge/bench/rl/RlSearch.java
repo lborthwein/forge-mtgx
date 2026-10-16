@@ -178,13 +178,24 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * copies is searched again on level-1 copies (the only decisions that can change).
          */
         public int copyFidelity = 0;
+        /**
+         * Lane search-bones-1015, the baseline "S-c + ForcedWin" (null = off, the default, and then nothing changes): the
+         * forced-win solver in front of the RL seat ({@link SolverDriver}), configured by these keys (string values, the
+         * keys of {@link forge.ai.simulation.ForcedWinSolver.Config#fromProps}; {} = the solver's defaults).
+         */
+        public JsonObject forcedWin = null;
+        /**
+         * Lane search-bones-1015, S-b (null = off, the default, and then nothing changes): turn-plans over S-c
+         * ({@link PlanSearch.Spec}).
+         */
+        public JsonObject plans = null;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
-                "obs", "labelSink", "copyFidelity"));
+                "obs", "labelSink", "copyFidelity", "forcedWin", "plans"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -228,6 +239,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("obs")) c.obs = o.get("obs").getAsInt();
             if (o.has("labelSink") && !o.get("labelSink").isJsonNull()) c.labelSink = o.get("labelSink").getAsString();
             if (o.has("copyFidelity")) c.copyFidelity = o.get("copyFidelity").getAsInt();
+            if (o.has("forcedWin") && !o.get("forcedWin").isJsonNull()) c.forcedWin = o.getAsJsonObject("forcedWin");
+            if (o.has("plans") && !o.get("plans").isJsonNull()) c.plans = o.getAsJsonObject("plans");
             c.check();
             return c;
         }
@@ -265,6 +278,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (choices > 0 && !"policy".equals(playout)) {
                 throw new IllegalArgumentException("search.choices (S-t) needs playout=policy");
+            }
+            if (plans != null) {
+                // search-bones-1015: S-b plays plans with the policy seat; it is not combined with S-t, the label sink or
+                // the forced-win baseline
+                if (!"policy".equals(playout) || choices > 0 || labelSink != null || forcedWin != null) {
+                    throw new IllegalArgumentException("search.plans (S-b) needs playout=policy and no choices, labelSink "
+                            + "or forcedWin");
+                }
+                PlanSearch.Spec.parse(plans);
             }
             choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
@@ -313,6 +335,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 // copy-fidelity-1010: only when on, so every other spec's JSON is unchanged
                 o.addProperty("copyFidelity", copyFidelity);
             }
+            if (forcedWin != null) {
+                // search-bones-1015: only when on, so every other spec's JSON is unchanged
+                o.add("forcedWin", forcedWin);
+            }
+            if (plans != null) {
+                o.add("plans", plans);
+            }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
                 o.addProperty("choices", choices);
@@ -350,6 +379,45 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private final List<RlSearchClient> clients = Collections.synchronizedList(new ArrayList<>());
     private final List<JsonObject> rows = new ArrayList<>();
     public String voided;
+
+    // ---- search-bones-1015 (untouched while cfg.forcedWin and cfg.plans are null)
+    /** The forced-win solver in front of each RL seat (the S-c + ForcedWin baseline), by player id. */
+    private final Map<Integer, SolverDriver> solverDrivers = new TreeMap<>();
+    /** S-b: the turn-plan search of each RL seat, by player id. */
+    private final Map<Integer, PlanSearch> planSearches = new TreeMap<>();
+
+    /**
+     * Lane search-bones-1015: install the plan hooks on the RL seats' bridged controllers (the search seat, or every RL
+     * seat): the forced-win solver in front ({@code forcedWin}) and S-b ({@code plans}). A no-op unless one of the two
+     * keys is set, so every other spec's game is unchanged.
+     */
+    public void attach(final Game g, final boolean[] rlSeat, final RlSeat seat) {
+        if (cfg.forcedWin == null && cfg.plans == null) {
+            return;
+        }
+        final List<Player> ps = g.getRegisteredPlayers();
+        for (int s = 0; s < ps.size() && s < rlSeat.length; s++) {
+            if (!rlSeat[s] || searchSeat >= 0 && s != searchSeat) {
+                continue;
+            }
+            final Player p = ps.get(s);
+            if (!(p.getController() instanceof forge.bench.PlayerControllerBridge)) {
+                continue;
+            }
+            final forge.bench.PlayerControllerBridge b = (forge.bench.PlayerControllerBridge) p.getController();
+            SolverDriver d = null;
+            if (cfg.forcedWin != null) {
+                d = new SolverDriver(p, SolverDriver.config(cfg.forcedWin));
+                solverDrivers.put(p.getId(), d);
+                b.planHook = d;
+            }
+            if (cfg.plans != null) {
+                final PlanSearch ps1 = new PlanSearch(PlanSearch.Spec.parse(cfg.plans), this, p, seat, d);
+                planSearches.put(p.getId(), ps1);
+                b.planHook = ps1;
+            }
+        }
+    }
 
     // ---- S-t (lane cm-choice-search-1009; untouched while cfg.choices == 0)
     /** One macro candidate's forced answers, and the counts of its schedule across its play-outs. */
@@ -476,6 +544,24 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 : ChoiceWindow.parseFamilies(cfg.choiceFamilies)) : null;
         this.cpu0 = TMX.getCurrentThreadCpuTime();
         this.gameAcc = forge.ai.CpuAccount.get();
+    }
+
+    /** search-bones-1015: the look-ahead (S-b's recordings and play-outs). */
+    LookaheadSearch ls() {
+        return ls;
+    }
+
+    /** search-bones-1015: the S-b solver's follower config (copies follow lines with it). */
+    forge.ai.simulation.ForcedWinSolver.Config followConfig() {
+        for (PlanSearch ps1 : planSearches.values()) {
+            return ps1.followCfg;
+        }
+        return PlanSearch.Spec.parse(cfg.plans).solverConfig();
+    }
+
+    /** search-bones-1015: the decision budget, ms (0 = none). */
+    long budgetMs() {
+        return cfg.budgetMs;
     }
 
     static long splitmix(long z) {
@@ -611,6 +697,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             searchStackSkipped++;
             return -1;
         }
+        final PlanSearch sb = planSearches.isEmpty() ? null : planSearches.get(me.getId());
+        if (sb != null) {
+            // search-bones-1015 (S-b): the live policy plan's next step, no search
+            final int f = sb.follow(g, me, m, menuObjs);
+            if (f >= 0) {
+                return f;
+            }
+        }
         final long t0 = System.nanoTime();
         final RlSearchClient.Scores sc;
         final byte[] payload = RlWire.encodeDecide(frame);
@@ -691,7 +785,22 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             given.add(ch == 0 ? null : menuObjs.get(ch - 1));
         }
         final LookaheadSearch.GivenResult r;
-        if (cfg.choices > 0) {
+        PlanSearch.Stage stage = null;
+        if (sb != null && sb.planPoint(g)) {
+            // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
+            stage = sb.propose(g, me, m, menuObjs, t0);
+            if (stage.hook) {
+                planRow(g, frame, stage, null, order, -1, t0);
+                return RlSeat.PrioritySearch.HOOK;
+            }
+        }
+        if (sb != null) {
+            // S-b: every searched decision has the proof flags; a plan point also has its plans (and its budget counts
+            // from the decision's start, the proposals included)
+            final int kt = stage != null ? stage.knownTop : sb.knownTop(g);
+            r = stage != null ? ls.decideGivenPlans(g, me, given, cfg.breadth, stage.plans, stage.labels, kt, t0)
+                    : ls.decideGivenPlans(g, me, given, cfg.breadth, null, null, kt, 0L);
+        } else if (cfg.choices > 0) {
             // S-t: the given candidates' priors (the expander's joint prior), then the search with the expander
             probeAsks.clear();
             probeWindows.clear();
@@ -711,7 +820,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             searchedAsks++;
             searchCpuMs += r.cpuMs;
         }
-        if (r.chosen > 0) {
+        if (stage != null) {
+            final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6);
+            planRow(g, frame, stage, r, order, pa, t0);
+            if (pa != -2) {
+                departures++;
+                return pa;
+            }
+        }
+        if (r.chosen > 0 && r.chosen < order.size()) {
             answer = (int) by.get(order.get(r.chosen))[1];
             departures++;
         }
@@ -777,6 +894,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final JsonArray ix = new JsonArray();
             final JsonArray ev = new JsonArray();
             for (int j = 0; j < r.givenIndex.length; j++) {
+                if (r.givenIndex[j] >= order.size()) {
+                    // search-bones-1015: a plan candidate (no menu entry of its own)
+                    pr.add(0.0);
+                    ix.add(-1 - (r.givenIndex[j] - order.size()));
+                    ev.add(Double.isNaN(r.ev[j]) ? null : r.ev[j]);
+                    continue;
+                }
                 final int ch = order.get(r.givenIndex[j]);
                 pr.add(Math.round(by.get(ch)[0] * 1e5) / 1e5);
                 ix.add(ch);
@@ -851,8 +975,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 row.add("probe_seen", ps);
             }
             row.addProperty("p_default", Math.round(by.get(def)[0] * 1e5) / 1e5);
+            final SolverDriver sd = solverDrivers.get(me.getId());
+            if (sd != null) {
+                // search-bones-1015: the solver's time at this priority, before the search (it had no opinion)
+                row.addProperty("fw_ms", Math.round(sd.lastMs * 10) / 10.0);
+            }
             row.addProperty("outcome", r.outcome);
-            row.addProperty("chosen", r.chosen <= 0 ? 0 : order.get(r.chosen));
+            row.addProperty("chosen", r.chosen <= 0 ? 0 : r.chosen < order.size() ? order.get(r.chosen) : -1);
             row.addProperty("failed", r.failed);
             row.addProperty("leaf_fallback", r.leafFallback);
             row.addProperty("ms", Math.round(r.ms * 10) / 10.0);
@@ -861,6 +990,58 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             rows.add(row);
         }
         return answer;
+    }
+
+    /** search-bones-1015: one JSON row per S-b plan point (decision log / rows, as the S-c rows). */
+    private void planRow(final Game g, final RlWire.Decide frame, final PlanSearch.Stage st,
+            final LookaheadSearch.GivenResult r, final List<Integer> order, final int answer, final long t0) {
+        if (cfg.decisionLog == null && !rowsWanted) {
+            return;
+        }
+        final JsonObject row = new JsonObject();
+        row.addProperty("game_uid", Long.toUnsignedString(uid));
+        row.addProperty("dec_idx", frame.decIdx);
+        row.addProperty("turn", g.getPhaseHandler().getTurn());
+        row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        row.addProperty("kind", "plan");
+        row.addProperty("propose_ms", Math.round(st.ms * 10) / 10.0);
+        row.addProperty("note", st.note);
+        final JsonArray labels = new JsonArray();
+        for (String l : st.labels) {
+            labels.add(l);
+        }
+        row.add("plans", labels);
+        row.addProperty("known_top", st.knownTop);
+        if (r != null) {
+            row.addProperty("outcome", r.outcome);
+            row.addProperty("proven", r.proven);
+            row.addProperty("chosen_given", r.chosen);
+            row.addProperty("given", order.size());
+            final JsonArray ev = new JsonArray();
+            final JsonArray pw = new JsonArray();
+            final JsonArray pl = new JsonArray();
+            final JsonArray br = new JsonArray();
+            for (int j = 0; j < r.givenIndex.length; j++) {
+                ev.add(Double.isNaN(r.ev[j]) ? null : Math.round(r.ev[j] * 1e4) / 1e4);
+                pw.add(j < r.provenWin.length && r.provenWin[j]);
+                pl.add(j < r.provenLoss.length && r.provenLoss[j]);
+                br.add(j < r.planBroken.length ? r.planBroken[j] : 0);
+            }
+            row.add("ev", ev);
+            row.add("proven_win", pw);
+            row.add("proven_loss", pl);
+            row.add("plan_broken", br);
+            final JsonArray gi = new JsonArray();
+            for (int x : r.givenIndex) {
+                gi.add(x);
+            }
+            row.add("searched", gi);
+            row.addProperty("failed", r.failed);
+            row.addProperty("search_ms", Math.round(r.ms * 10) / 10.0);
+        }
+        row.addProperty("answer", answer);
+        row.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
+        rows.add(row);
     }
 
     @Override
@@ -1251,6 +1432,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             o.add("st", st);
         }
         o.add("lookahead", ls.getStats().toJson());
+        if (!solverDrivers.isEmpty()) {
+            // search-bones-1015: only with forcedWin on
+            final JsonObject fw = new JsonObject();
+            solverDrivers.forEach((id, d) -> fw.add(String.valueOf(id), d.summary()));
+            o.add("fw", fw);
+        }
+        if (!planSearches.isEmpty()) {
+            final JsonObject pl = new JsonObject();
+            planSearches.forEach((id, d) -> pl.add(String.valueOf(id), d.summary()));
+            o.add("plans", pl);
+        }
         return o;
     }
 
@@ -1517,12 +1709,42 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             public void record(final byte[] p) throws IOException {
                 throw new IOException("a play-out seat never records");
             }
+
+            @Override
+            public RlWire.Decision decideSampled(final byte[] p, final RlWire.Decide frame) throws IOException {
+                // search-bones-1015 (S-b proposals): the recorder samples from the policy's SCORE distribution
+                if (!(first.recorder instanceof PlanSearch.Recorder)) {
+                    return decide(p);
+                }
+                budgetStop(first);
+                final RlSearchClient.Scores s;
+                try {
+                    s = client().score(p);
+                } catch (IOException | RuntimeException e) {
+                    drop();
+                    throw e;
+                }
+                if (s.status != RlWire.ST_OK || s.probs.length == 0) {
+                    return decide(p);
+                }
+                return ((PlanSearch.Recorder) first.recorder).sample(frame, s);
+            }
         };
         final RlSeat rs = new RlSeat(cc.feat, ep, sc, seed, ctl, false);
         rs.setGame(g);
         rs.seenNames = cc.know::opponentSeen;
         final String[] why = {null};
-        rs.playoutFirst = new RlSeat.PlayoutFirst() {
+        // search-bones-1015 (S-b): a recording play-out or a plan candidate has no forced first action
+        final boolean planned = first.recorder != null || first.plan != null;
+        if (first.recorder instanceof PlanSearch.Recorder) {
+            final PlanSearch.Recorder rec = (PlanSearch.Recorder) first.recorder;
+            rec.seatPlayer = me;
+            rs.sampleIf = rec::sampleIf;
+            rs.priorityTrace = rec;
+        } else if (first.plan instanceof PlanSearch.PolicyPlan) {
+            rs.planCursor = new PlanSearch.Cursor((PlanSearch.PolicyPlan) first.plan, first, 0);
+        }
+        if (!planned) rs.playoutFirst = new RlSeat.PlayoutFirst() {
             @Override
             public int choose(final Game gg, final Player p, final RlCandidates.Menu m, final List<SpellAbility> objs,
                     final java.util.function.Supplier<RlWire.Decide> frame) {
@@ -1614,7 +1836,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         session.setLocalAnswerer(rs);
         final PlayoutController pc = new PlayoutController(g, me, me.getController().getLobbyPlayer(), session, seat, probe,
-                (cfg.copyFidelity == 1 || cfg.copyFidelity == 2 && ls.fidelityPass()) && !first.pass);
+                (cfg.copyFidelity == 1 || cfg.copyFidelity == 2 && ls.fidelityPass()) && !first.pass && !planned);
+        if (first.plan instanceof PlanSearch.LinePlan) {
+            // search-bones-1015 (S-b): the solver line's follower in front of the copy's policy seat
+            pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first);
+        }
         return new LookaheadSearch.PlayoutSeat() {
             @Override
             public PlayerControllerAi controller() {

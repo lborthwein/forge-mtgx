@@ -123,6 +123,73 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         return counters;
     }
 
+    // ------------------------------------------------------------------ search-bones-1015: the plan hook
+
+    /**
+     * Lane search-bones-1015 (null by default, and then nothing below changes): a plan follower in front of the bridged
+     * seat, the way {@code CubeComboControl} puts the forced-win solver in front of Forge AI. Each method answers or
+     * returns null ("no opinion": the ask goes on to the seat as before). Used for the steps a turn-plan takes that the
+     * seat's menus cannot name (a one-shot mana float, a solver line's pile, pick, order, trigger target or alpha
+     * strike), and for the solver's defence answers. Answers given here are not on the seat's tape.
+     */
+    public interface PlanHook {
+        /** {@link #NO_OPINION} (identity) = ask the seat; null = pass; otherwise the actions to play. */
+        List<SpellAbility> priority(PlayerControllerBridge c);
+
+        /**
+         * True once, right after the seat's search handed the current priority to this hook (the seat then gave no
+         * answer): the bridge asks {@link #priority} again instead of delegating to Forge AI.
+         */
+        default boolean handoff() {
+            return false;
+        }
+
+        /** True = this hook declared the attack. */
+        default boolean attack(Player attacker, Combat combat) {
+            return false;
+        }
+
+        default ImmutablePair<CardCollection, CardCollection> look(CardCollection topN) {
+            return null;
+        }
+
+        /** The abilities still to be ordered and played (the hook may have played some itself); null = all of them. */
+        default List<SpellAbility> triggers(List<SpellAbility> abilities) {
+            return null;
+        }
+
+        default Card pick(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection choices,
+                Player decider) {
+            return null;
+        }
+
+        default CardCollectionView order(CardCollectionView cards, ZoneType destination, SpellAbility source) {
+            return null;
+        }
+
+        default CardCollection discard(Player p, SpellAbility sa, CardCollection valid, int min, int max) {
+            return null;
+        }
+
+        default Boolean confirm(SpellAbility sa, String message) {
+            return null;
+        }
+
+        default boolean confirmTrigger(WrappedAbility w) {
+            return false;
+        }
+
+        default Boolean binary(BinaryChoiceType kind, Boolean defaultVal) {
+            return null;
+        }
+    }
+
+    /** {@link PlanHook#priority}'s "no opinion" (compared by identity). */
+    public static final List<SpellAbility> NO_OPINION = Collections.unmodifiableList(new ArrayList<>());
+
+    /** Lane search-bones-1015: the plan hook, or null (the default: every ask goes to the seat as before). */
+    public PlanHook planHook;
+
     public BenchSession.Mode getMode() {
         return mode;
     }
@@ -825,6 +892,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!bridged()) {
             return super.chooseSpellAbilityToPlay();
         }
+        if (planHook != null) {
+            // search-bones-1015: the plan follower first (its answer is played, never asked)
+            final List<SpellAbility> p = planHook.priority(this);
+            if (p != NO_OPINION) {
+                return p;
+            }
+        }
         final int[] diag = new int[DIAG_LEN];
         final List<SpellAbility> menu = new ArrayList<>();
         final JsonObject body = envelope(true);
@@ -846,6 +920,14 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         });
         recordMenuCensus(diag, menu.size());
         final JsonObject ans = ask("chooseSpellAbilityToPlay", "priority", body, menu);
+        if (ans == null && planHook != null && planHook.handoff()) {
+            // search-bones-1015: the seat's search handed this priority to the plan hook
+            final List<SpellAbility> p = planHook.priority(this);
+            if (p != NO_OPINION) {
+                takeEcho();
+                return p;
+            }
+        }
         if (ans == null) {
             final Echo e = takeEcho();
             final List<SpellAbility> out = super.chooseSpellAbilityToPlay();
@@ -1490,6 +1572,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!bridged()) {
             super.declareAttackers(attacker, combat);
             return;
+        }
+        if (planHook != null && planHook.attack(attacker, combat)) {
+            return; // search-bones-1015: the plan's attack
         }
         final CardCollection possible = new CardCollection();
         for (Card c : attacker.getCreaturesInPlay()) {
@@ -2451,6 +2536,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!bridged()) {
             return super.confirmAction(sa, mode0, message, options, cardToShow, params);
         }
+        if (planHook != null) {
+            final Boolean h = planHook.confirm(sa, message);
+            if (h != null) {
+                return h; // search-bones-1015
+            }
+        }
         final JsonObject body = envelope(true);
         body.addProperty("mode", String.valueOf(mode0));
         body.addProperty("message", String.valueOf(message));
@@ -2482,6 +2573,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!bridged()) {
             return super.chooseBinary(sa, question, kindOfChoice, defaultChoice);
         }
+        if (planHook != null) {
+            final Boolean h = planHook.binary(kindOfChoice, defaultChoice);
+            if (h != null) {
+                return h; // search-bones-1015
+            }
+        }
         final JsonObject body = envelope(true);
         body.addProperty("message", String.valueOf(question));
         body.addProperty("binaryKind", String.valueOf(kindOfChoice));
@@ -2509,6 +2606,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         observeLook(topN, ZoneType.Library);
         if (!bridged() || topN == null || topN.isEmpty()) {
             return super.arrangeForScry(topN);
+        }
+        if (planHook != null) {
+            final ImmutablePair<CardCollection, CardCollection> h = planHook.look(topN);
+            if (h != null) {
+                return h; // search-bones-1015
+            }
         }
         final JsonObject body = envelope(true);
         body.add("menu", StateEncoder.encodeCards(topN));
@@ -2707,7 +2810,17 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) { if (!quietOrder) { count("orderSimultaneousSa"); } return super.orderSimultaneousSa(activePlayerSAs); }
     @Override
-    public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) { count("orderAndPlaySimultaneousSa"); bridgedOrderAndPlay(activePlayerSAs); }
+    public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        count("orderAndPlaySimultaneousSa");
+        if (planHook != null && bridged()) {
+            // search-bones-1015: a plan's forced trigger target is played by the hook; the rest go on as before
+            final List<SpellAbility> rest = planHook.triggers(activePlayerSAs);
+            if (rest != null) {
+                activePlayerSAs = rest;
+            }
+        }
+        bridgedOrderAndPlay(activePlayerSAs);
+    }
     @Override
     public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) { count("playTrigger"); return bridgedPlayTrigger(host, wrapperAbility, isMandatory); }
     @Override
@@ -2745,7 +2858,13 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public boolean confirmStaticApplication(Card hostCard, PlayerActionConfirmMode mode, String message, String logic) { count("confirmStaticApplication"); return super.confirmStaticApplication(hostCard, mode, message, logic); }
     @Override
-    public boolean confirmTrigger(WrappedAbility sa) { count("confirmTrigger"); return bridgedConfirmTrigger(sa); }
+    public boolean confirmTrigger(WrappedAbility sa) {
+        count("confirmTrigger");
+        if (planHook != null && bridged() && planHook.confirmTrigger(sa)) {
+            return true; // search-bones-1015: the trigger whose target the plan forced
+        }
+        return bridgedConfirmTrigger(sa);
+    }
     @Override
     public List<Card> exertAttackers(List<Card> attackers) { count("exertAttackers"); return super.exertAttackers(attackers); }
     @Override
@@ -2761,13 +2880,42 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     @Override
     public void notifyOfValue(SpellAbility saSource, GameObject realtedTarget, String value) { count("notifyOfValue"); super.notifyOfValue(saSource, realtedTarget, value); }
     @Override
-    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) { count("arrangeForSurveil"); observeLook(topN, ZoneType.Library); return bridgedArrangeForSurveil(topN); }
+    public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+        count("arrangeForSurveil");
+        observeLook(topN, ZoneType.Library);
+        if (planHook != null && bridged()) {
+            final ImmutablePair<CardCollection, CardCollection> h = planHook.look(topN);
+            if (h != null) {
+                return h; // search-bones-1015
+            }
+        }
+        return bridgedArrangeForSurveil(topN);
+    }
     @Override
     public boolean willPutCardOnTop(Card c) { count("willPutCardOnTop"); return bridgedWillPutCardOnTop(c); }
     @Override
-    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) { count("orderMoveToZoneList"); observeLook(cards, destinationZone); return bridgedOrderMoveToZoneList(cards, destinationZone, source); }
+    public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
+        count("orderMoveToZoneList");
+        observeLook(cards, destinationZone);
+        if (planHook != null && bridged()) {
+            final CardCollectionView h = planHook.order(cards, destinationZone, source);
+            if (h != null) {
+                return h; // search-bones-1015
+            }
+        }
+        return bridgedOrderMoveToZoneList(cards, destinationZone, source);
+    }
     @Override
-    public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) { count("chooseCardsToDiscardFrom"); return bridgedDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser); }
+    public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
+        count("chooseCardsToDiscardFrom");
+        if (planHook != null && bridged()) {
+            final CardCollection h = planHook.discard(playerDiscard, sa, validCards, min, max);
+            if (h != null) {
+                return h; // search-bones-1015
+            }
+        }
+        return bridgedDiscardFrom(playerDiscard, sa, validCards, min, max, visibleToChooser);
+    }
     @Override
     public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String[] unlessTypes, SpellAbility sa) { count("chooseCardsToDiscardUnlessType"); return super.chooseCardsToDiscardUnlessType(min, hand, unlessTypes, sa); }
     @Override
@@ -2912,6 +3060,16 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!bridged() || decider != getPlayer() || fetchList == null || fetchList.isEmpty()) {
             return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
                     selectPrompt, isOptional, decider);
+        }
+        if (planHook != null) {
+            final Card h = planHook.pick(destination, origin, sa, fetchList, decider);
+            if (h != null) {
+                // search-bones-1015: the plan's pick (the reveal is honoured as on the asked path)
+                if (delayedReveal != null) {
+                    reveal(delayedReveal);
+                }
+                return h;
+            }
         }
         final int changeNum = zoneChangeNum(sa);
         final int chosen = zoneChangeProgress(sa, changeNum);
