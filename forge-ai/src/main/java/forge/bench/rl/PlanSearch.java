@@ -314,6 +314,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             final double[] w = new double[s.probs.length];
             double tot = 0;
             for (int i = 0; i < w.length; i++) {
+                if (f.candKind != null && i < f.candKind.length && f.candKind[i] <= 0) {
+                    continue; // not a candidate the seat can answer with
+                }
                 final double p = Math.max(0, s.probs[i]);
                 w[i] = p <= 0 ? 0 : Math.pow(p, 1.0 / temperature);
                 tot += w[i];
