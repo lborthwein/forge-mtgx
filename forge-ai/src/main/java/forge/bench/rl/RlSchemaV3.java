@@ -11,7 +11,7 @@ import forge.card.mana.ManaCostShard;
  *   <li>family 25 MANA_SOURCE (SINGLE): which source pays one contested shard of a real payment; candidate 0 is AUTO
  *       (Forge AI pays the rest of this cost), then one candidate per materially different source
  *       ({@link RlManaChoice});</li>
- *   <li>cand_flags bit 4 {@link #FLAG_FORGE_DEFAULT}: the candidate does what Forge AI would do.</li>
+ *   <li>cand_flags bit 4 {@link #FLAG_FORGE_DEFAULT}: the candidate does what Forge AI would do (MANA_SOURCE: AUTO).</li>
  * </ul>
  */
 public final class RlSchemaV3 {
@@ -26,7 +26,7 @@ public final class RlSchemaV3 {
 
     public static final int F_MANA_SOURCE = 25;
     public static final String MANA_SOURCE = "MANA_SOURCE";
-    /** cand_flags bit 4: the candidate does what Forge AI would do (AUTO, and Forge AI's own source). */
+    /** cand_flags bit 4: the candidate does what Forge AI would do (MANA_SOURCE: AUTO, "Forge AI pays the rest"). */
     public static final int FLAG_FORGE_DEFAULT = 16;
 
     /** cand_num codes of a source candidate: the shard being paid (obs-v3.json {@code mana_shards}). */

@@ -27,7 +27,7 @@ import forge.bench.rl.RlWire;
  * Plays real Forge games: run inside a broker test lease; cwd = forge-gui with res/.
  * <ul>
  *   <li>Option off: obs-v3 without the ask plays the obs-v2 games byte for byte (equal digests).</li>
- *   <li>Option on, answered as Forge AI would (AUTO, or Forge AI's own source): the games are Forge's (equal digests),
+ *   <li>Option on, answered as Forge AI would (AUTO): the games are Forge's (equal digests),
  *       and asks were posed.</li>
  *   <li>Option on, random sources: tapes replay to equal digests, and every MANA_SOURCE frame is well formed.</li>
  * </ul>
@@ -44,7 +44,7 @@ public class RlManaSourceGamesTest {
         games = Integer.getInteger("rl.manaGames", 8);
     }
 
-    enum Pay { RANDOM, FORGE, AUTO, FORGE_OR_AUTO }
+    enum Pay { RANDOM, AUTO }
 
     /** In-process server: MANA_SOURCE by {@link Pay}; every other family uniform, keyed by its own decision count. */
     static final class Endpoint implements RlSeat.Endpoint {
@@ -84,27 +84,14 @@ public class RlManaSourceGamesTest {
         }
 
         int mana(final RlWire.Decide d) {
-            int forgeSrc = -1;
-            for (int i = 1; i < d.C; i++) {
-                if ((d.candFlags[i] & RlSchemaV3.FLAG_FORGE_DEFAULT) != 0) {
-                    forgeSrc = i;
-                }
+            if (pay == Pay.AUTO) {
+                return 0;
             }
-            switch (pay) {
-                case AUTO:
-                    return 0;
-                case FORGE:
-                    return forgeSrc;
-                case FORGE_OR_AUTO:
-                    return d.decIdx % 2 == 0 ? 0 : forgeSrc;
-                default: {
-                    final int c = new Random(FakeRlServer.mix(11, d.gameUid, d.decIdx)).nextInt(d.C);
-                    if (c != 0 && c != forgeSrc) {
-                        manaOther++;
-                    }
-                    return c;
-                }
+            final int c = new Random(FakeRlServer.mix(11, d.gameUid, d.decIdx)).nextInt(d.C);
+            if (c != 0) {
+                manaOther++;      // a source (Forge AI's own among them: it is unflagged since decision 10-15)
             }
+            return c;
         }
 
         void checkMana(final RlWire.Decide d) {
@@ -123,8 +110,8 @@ public class RlManaSourceGamesTest {
                         flagged++;
                     }
                 }
-                if (bad == null && flagged != 1) {
-                    bad = flagged + " sources flagged as Forge AI's";
+                if (bad == null && flagged != 0) {
+                    bad = flagged + " sources flagged forge_default (the bonus is AUTO's alone)";
                 }
             }
             if (bad != null) {
@@ -142,9 +129,8 @@ public class RlManaSourceGamesTest {
             if (d.family == RlSchemaV3.F_MANA_SOURCE) {
                 manaRecords++;
                 checkMana(d);
-                // the teacher is Forge AI's own source (flagged), never AUTO
-                if (d.teacher.length == 1 && d.teacher[0] > 0
-                        && (d.candFlags[d.teacher[0]] & RlSchemaV3.FLAG_FORGE_DEFAULT) != 0) {
+                // the teacher is Forge AI's own source (a source, never AUTO)
+                if (d.teacher.length == 1 && d.teacher[0] > 0 && d.teacher[0] < d.C) {
                     manaRecordsForge++;
                 }
             }
@@ -200,7 +186,7 @@ public class RlManaSourceGamesTest {
         int asks = 0;
         for (int i = 0; i < games; i++) {
             final RlActorBench.Played off = play(i, 3, false, new Endpoint(checker, Pay.RANDOM, 2));
-            final Endpoint ep = new Endpoint(checker, Pay.FORGE_OR_AUTO, 2);
+            final Endpoint ep = new Endpoint(checker, Pay.AUTO, 2);
             final RlActorBench.Played on = play(i, 3, true, ep);
             asks += manaSent(on);
             final String line = "game " + i + ": off " + off.end.get("digest") + " on " + on.end.get("digest")

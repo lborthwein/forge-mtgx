@@ -1681,8 +1681,8 @@ public final class RlCandidates {
      * 25 MANA_SOURCE (obs-v3; lane r4-payment-1015): SINGLE over AUTO (kind NONE: Forge AI pays the rest of this cost;
      * cand_num = the mana still unpaid, capped 15) and one candidate per materially different source of the shard
      * (kind ACTIVATE on the source permanent; cand_ability = the ability's index among its mana abilities; cand_num =
-     * the shard's code). cand_tgt[1] = the card whose spell or ability is being paid for. AUTO and Forge AI's own source
-     * carry {@link RlSchemaV3#FLAG_FORGE_DEFAULT}. objs = {RlManaChoice.Ask, SpellAbility paid for, ManaCostShard,
+     * the shard's code). cand_tgt[1] = the card whose spell or ability is being paid for. AUTO alone carries
+     * {@link RlSchemaV3#FLAG_FORGE_DEFAULT} (the warm start's bonus is AUTO's; orchestrator decision 10-15). objs = {RlManaChoice.Ask, SpellAbility paid for, ManaCostShard,
      * Integer unpaid}; the answer is {@code {"choice": i}}.
      */
     private static void manaSource(final Menu m, final Object objs) {
@@ -1714,7 +1714,7 @@ public final class RlCandidates {
             c.ability = src == null ? 0 : Math.max(0, src.getManaAbilities().indexOf(op.cand));
             c.num = code;
             c.tgt1 = paidFor;
-            c.flags = i == a.forge ? RlSchemaV3.FLAG_FORGE_DEFAULT : 0;
+            c.flags = 0; // the forge_default bonus is AUTO's alone (decision 10-15); Forge AI's own source is unflagged
             c.frag = kv("choice", new JsonPrimitive(i + 1));
             c.key = "pay:" + (i + 1);
             m.cands.add(c);
