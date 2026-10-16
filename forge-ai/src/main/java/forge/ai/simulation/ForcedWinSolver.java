@@ -788,6 +788,8 @@ public final class ForcedWinSolver {
     // ------------------------------------------------------------------ Part B: likely-win lines (solver-gaps-1015)
 
     public int likelyRuns, likelyTaken;
+    /** solver-gaps-1015: play-outs and rollouts cut at their wall (or after an attack the rules refused twice). */
+    public int wallCuts;
     /** Payment search: decisions where only the searched payment found width lines. */
     public int paySearchFound;
 
@@ -801,7 +803,9 @@ public final class ForcedWinSolver {
             return null;
         }
         final long l0 = System.nanoTime();
-        final long deadline = t0 + cfg.budgetMs * 1_000_000L;
+        // stop the rollouts half a second before the decision's budget: measured at the full budget, Part B decisions
+        // ended at 8.0-8.4 s (a rollout in flight, the line's set-up)
+        final long deadline = t0 + (cfg.budgetMs - 500) * 1_000_000L;
         if (deadline - l0 < 300_000_000L) {
             // no time left in the decision's budget for even one world
             receipt("FORCED_WIN likely" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " no budget left");
@@ -889,13 +893,14 @@ public final class ForcedWinSolver {
             if (line != null) {
                 final LineAi ai = new LineAi(g, cm, cm.getController().getLobbyPlayer(), new Follower(line));
                 ai.continueAfter = true;
+                ai.bounded(deadline);
                 cm.dangerouslySetController(ai);
             } else {
-                cm.dangerouslySetController(new LookaheadSearch.RolloutAi(g, cm, cm.getController().getLobbyPlayer()));
+                cm.dangerouslySetController(new ForcedWinEngine.GuardedAi(g, cm, cm.getController().getLobbyPlayer()).bounded(deadline));
             }
             for (Player o : g.getPlayers()) {
                 if (o != cm) {
-                    o.dangerouslySetController(new LookaheadSearch.RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                    o.dangerouslySetController(new ForcedWinEngine.GuardedAi(g, o, o.getController().getLobbyPlayer()).bounded(deadline));
                 }
             }
             final PhaseHandler ph = g.getPhaseHandler();
@@ -913,6 +918,9 @@ public final class ForcedWinSolver {
                 return 1;
             }
             return cm.hasLost() ? 0 : 0.5;
+        } catch (ForcedWinEngine.OutOfBudget ex) {
+            wallCuts++;
+            return -1; // cut at the wall: the world is dropped
         } catch (RuntimeException | StackOverflowError ex) {
             receipt("FORCED_WIN likely rollout error " + ex);
             return 0.5;
@@ -992,7 +1000,7 @@ public final class ForcedWinSolver {
     /** P(win | unopposed) and P(win | belief worlds, adversarial counters) of one line. */
     Eval evaluate(Game live, Line line, long seed, long deadline) {
         final Eval e = new Eval(line);
-        final Outcome u = playout(live, line, mix(seed, 0), 0, -1);
+        final Outcome u = playout(live, line, mix(seed, 0), 0, -1, deadline);
         e.pUnopposed = u.won ? 1 : 0;
         if (!u.won) {
             e.failures = "unopposed:" + u.why;
@@ -1013,13 +1021,13 @@ public final class ForcedWinSolver {
                 break;
             }
             final long ws = mix(seed, w);
-            Outcome worst = playout(live, line, ws, w, -1);
+            Outcome worst = playout(live, line, ws, w, -1, deadline);
             if (worst.protectedBy != null) {
                 prot.add(worst.protectedBy);
             }
             if (worst.won && cfg.adversary && worst.oppHasCounter) {
                 for (int j = 0; j < spells && worst.won; j++) {
-                    final Outcome o = playout(live, line, ws, w, j);
+                    final Outcome o = playout(live, line, ws, w, j, deadline);
                     if (o.protectedBy != null) {
                         prot.add(o.protectedBy);
                     }
@@ -1027,6 +1035,9 @@ public final class ForcedWinSolver {
                         worst = o;
                     }
                 }
+            }
+            if ("wall".equals(worst.why)) {
+                break; // solver-gaps-1015: a world cut at the wall is dropped, not counted as a loss
             }
             sum += worst.won ? 1 : 0;
             n++;
@@ -1052,8 +1063,10 @@ public final class ForcedWinSolver {
     /**
      * Play {@code line} in a copy of the live game: world 0 removes the opponent's hidden hand; world w > 0 samples it
      * from their deck remainder. {@code counterAt}: the adversary counters our spell of that index (-1: Forge AI only).
+     * {@code wall} (System.nanoTime(); 0 = none, solver-gaps-1015): no step of the play-out, combat declarations
+     * included, runs past it; a play-out cut there is not a win.
      */
-    Outcome playout(Game live, Line line, long seed, int world, int counterAt) {
+    Outcome playout(Game live, Line line, long seed, int world, int counterAt, long wall) {
         final Outcome out = new Outcome();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -1080,11 +1093,13 @@ public final class ForcedWinSolver {
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             final Follower f = new Follower(line);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
+            lineAi.bounded(wall);
             cm.dangerouslySetController(lineAi);
             AdversaryAi adv = null;
             for (Player o : g.getPlayers()) {
                 if (o != cm) {
                     adv = new AdversaryAi(g, o, o.getController().getLobbyPlayer(), cm, counterAt);
+                    adv.bounded(wall);
                     o.dangerouslySetController(adv);
                     out.oppHasCounter |= AdversaryAi.holdsCounter(o);
                 }
@@ -1095,6 +1110,7 @@ public final class ForcedWinSolver {
             g.subscribeToEvents(watch);
             int steps = 0;
             while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
+                ForcedWinEngine.checkWall(wall, "play-out step");
                 ph.mainLoopStep();
                 steps++;
             }
@@ -1118,6 +1134,12 @@ public final class ForcedWinSolver {
                     out.why += " {" + endState(g, cm, f) + "}";
                 }
             }
+        } catch (ForcedWinEngine.OutOfBudget ex) {
+            // a step still running at the wall, or an attack the rules refused twice: not a win
+            out.won = false;
+            out.why = "wall";
+            wallCuts++;
+            receipt("FORCED_WIN playout cut world=" + world + " " + ex.getMessage());
         } catch (RuntimeException | StackOverflowError ex) {
             out.won = false;
             out.why = "error:" + ex.getClass().getSimpleName();
@@ -1751,7 +1773,7 @@ public final class ForcedWinSolver {
     // ------------------------------------------------------------------ play-out controllers
 
     /** Our seat in a play-out: the line, our counterspells against counters of it, Forge AI for the rest. */
-    static final class LineAi extends LookaheadSearch.RolloutAi {
+    static final class LineAi extends ForcedWinEngine.GuardedAi {
         final Follower f;
         String protectedBy;
         /** Part B rollouts: after the line our seat plays on as Forge AI (forced-win play-outs stop acting). */
@@ -1839,15 +1861,16 @@ public final class ForcedWinSolver {
             return f.triggers.confirms(wrapper) || super.confirmTrigger(wrapper);
         }
 
+        /** The line's alpha strike (if the rules refuse it, the guard hands the declaration to Forge AI). */
         @Override
-        public void declareAttackers(Player attacker, forge.game.combat.Combat combat) {
+        void declareFirst(Player attacker, forge.game.combat.Combat combat) {
             if (f.attackPending && !f.done) {
                 alphaStrike(attacker, combat);
                 f.attackPending = false;
                 f.cursor++;
                 return;
             }
-            super.declareAttackers(attacker, combat);
+            super.declareFirst(attacker, combat);
         }
 
         @Override
@@ -1875,12 +1898,24 @@ public final class ForcedWinSolver {
         }
     }
 
+    /** The combat of the live seat's last alpha strike (solver-gaps-1015: the rules may refuse it and ask again). */
+    private forge.game.combat.Combat alphaCombat;
+
     /** The live seat's attack: the line's alpha strike when it is waiting for one; null = not ours. */
     public boolean answerAttack(Player attacker, forge.game.combat.Combat combat) {
+        if (combat == alphaCombat) {
+            // solver-gaps-1015: asked again in the same combat = the rules refused the alpha strike (an attack restriction
+            // or requirement); clear it and let the seat declare natively, or the rules ask for ever
+            alphaCombat = null;
+            combat.clearAttackers();
+            receipt("FORCED_WIN attack refused turn=" + me.getGame().getPhaseHandler().getTurn() + " -> native declaration");
+            return false;
+        }
         if (active == null || active.done || !active.attackPending || attacker != me) {
             return false;
         }
         alphaStrike(attacker, combat);
+        alphaCombat = combat;
         active.attackPending = false;
         active.cursor++;
         receipt("FORCED_WIN attack turn=" + me.getGame().getPhaseHandler().getTurn() + " attackers=" + combat.getAttackers().size());
@@ -1911,7 +1946,7 @@ public final class ForcedWinSolver {
     }
 
     /** The opponent in a play-out: Forge AI, plus (when asked) a counter of our spell number {@code counterAt}. */
-    static final class AdversaryAi extends LookaheadSearch.RolloutAi {
+    static final class AdversaryAi extends ForcedWinEngine.GuardedAi {
         final Player victim;
         final int counterAt;
         final Set<Integer> seenSpells = new HashSet<>();

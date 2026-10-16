@@ -470,6 +470,45 @@ public class ForcedWinSolverTest extends AITest {
         Assert.assertFalse(d.isGameOver() && d.getPlayers().get(0).hasWon());
     }
 
+    @Test(timeOut = 120000)
+    public void anAttackTheRulesRefuseEndsAndGoesToForgeAi() {
+        // exploit-panel-1015: the engine's "attack with everything" broke an attack requirement and the rules asked the same
+        // seat again for ever (two games, 110 min in updateCombatForView). Silent Arbiter lets one creature attack: the
+        // alpha strike of two is refused, the declaration goes to Forge AI (the unblockable one, lethal), and the search
+        // ends within its budget. On the pf6 code this test never ends (the timeOut fails it).
+        final Game g = game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame("",
+                "Grizzly Bears;Invisible Stalker;Forest", 20, "", "Silent Arbiter;Plains", 1, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+        final long t0 = System.nanoTime();
+        final ForcedWinPlanner.Line line = ForcedWinEngine.search(g, me, new ForcedWinEngine.Limits(), st,
+                t0 + 3_000_000_000L, 7L);
+        final long ms = (System.nanoTime() - t0) / 1_000_000;
+        Assert.assertTrue(st.refusedAttacks >= 1, st.summary());
+        Assert.assertTrue(ms < 5_000, "search took " + ms + " ms: " + st.summary());
+        Assert.assertNotNull(line, "Forge AI's legal attack wins: " + st.summary());
+        Assert.assertEquals(line.steps.get(0).kind, AbilKind.ATTACK, line.toString());
+    }
+
+    @Test(timeOut = 120000)
+    public void noStepOfAnEngineMoveRunsPastTheWall() {
+        // a move still running at the search's deadline is cut (its step loop and its seats' declarations check the
+        // wall); the guard ends a combat the rules refuse twice even with no wall
+        final ForcedWinEngine.AttackGuard guard = new ForcedWinEngine.AttackGuard();
+        final Game g = game("Default", "Default", frame("", "Grizzly Bears", 20, "", "Plains", 20, "human"));
+        final forge.game.combat.Combat combat = new forge.game.combat.Combat(g.getPlayers().get(0));
+        Assert.assertEquals(guard.next(combat, 0), 0);
+        Assert.assertEquals(guard.next(combat, 0), 1);
+        Assert.assertThrows(ForcedWinEngine.OutOfBudget.class, () -> guard.next(combat, 0));
+        Assert.assertEquals(guard.total, 1);
+        final forge.game.combat.Combat next = new forge.game.combat.Combat(g.getPlayers().get(0));
+        Assert.assertEquals(guard.next(next, 0), 0, "a new combat starts over");
+        Assert.assertThrows(ForcedWinEngine.OutOfBudget.class, () -> guard.next(next, System.nanoTime() - 1));
+        Assert.assertThrows(ForcedWinEngine.OutOfBudget.class, () -> ForcedWinEngine.checkWall(System.nanoTime() - 1, "t"));
+        ForcedWinEngine.checkWall(0, "no wall");
+        ForcedWinEngine.checkWall(System.nanoTime() + 60_000_000_000L, "far wall");
+    }
+
     // ------------------------------------------------------------------ defense: the same search from their seat
 
     @Test

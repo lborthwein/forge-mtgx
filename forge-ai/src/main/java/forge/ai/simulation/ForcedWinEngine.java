@@ -43,10 +43,118 @@ final class ForcedWinEngine {
 
     static final class Stats {
         int nodes, copies, moves;
+        /** solver-gaps-1015: moves cut at the wall (a step still running at the search's deadline, or a refused attack). */
+        int cut;
+        /** solver-gaps-1015: our attack declarations the rules refused (handed to Forge AI). */
+        int refusedAttacks;
         long nanos;
 
         String summary() {
-            return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000;
+            return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
+                    + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "");
+        }
+    }
+
+    // ------------------------------------------------------------------ the wall (solver-gaps-1015)
+
+    /**
+     * A step of a game loop the solver drives ran past its wall, or the rules refused a seat's attack declaration twice
+     * in one combat. Thrown from inside the rules engine's own loops (the seat's controller); the play-out that runs the
+     * step catches it and drops the play-out. No stack trace: it is control flow.
+     */
+    static final class OutOfBudget extends RuntimeException {
+        OutOfBudget(String why) {
+            super(why, null, false, false);
+        }
+    }
+
+    /** Throw {@link OutOfBudget} when {@code wall} (System.nanoTime(); 0 = none) has passed. */
+    static void checkWall(long wall, String where) {
+        if (wall != 0 && System.nanoTime() > wall) {
+            throw new OutOfBudget("wall: " + where);
+        }
+    }
+
+    /**
+     * One combat's attack declarations by a seat the solver drives. When the rules refuse a declaration (an attack
+     * restriction such as "no more than one creature can attack", or a requirement such as "attacks Gideon if able"
+     * broken by an attack at the player) they ask the same seat again with the same Combat, for ever if the answer does
+     * not change: exploit-panel-1015's games hung 110 minutes in the engine's alpha strike. The first refusal clears the
+     * declaration and hands it to Forge AI; a second ends the play-out.
+     */
+    static final class AttackGuard {
+        private Combat last;
+        private int refused;
+        /** Declarations the rules refused, over all combats. */
+        int total;
+
+        /** 0 = this combat's first declaration; 1 = the rules refused it (the combat is cleared). Throws after that. */
+        int next(Combat combat, long wall) {
+            checkWall(wall, "attack declaration");
+            if (combat == last) {
+                refused++;
+            } else {
+                last = combat;
+                refused = 0;
+            }
+            if (refused > 1) {
+                throw new OutOfBudget("attack declaration refused " + refused + " times");
+            }
+            if (refused == 1) {
+                combat.clearAttackers();
+                total++;
+            }
+            return refused;
+        }
+    }
+
+    /**
+     * Forge AI as a seat in the solver's play-outs, bounded: its attack declarations go through an {@link AttackGuard},
+     * and its declarations and priority answers check the wall. Subclasses script the first declaration of a combat.
+     */
+    static class GuardedAi extends LookaheadSearch.RolloutAi {
+        /** The wall (System.nanoTime()); 0 = none. */
+        long wall;
+        private final AttackGuard attackGuard = new AttackGuard();
+
+        GuardedAi(Game g, Player p, forge.LobbyPlayer lp) {
+            super(g, p, lp);
+        }
+
+        GuardedAi bounded(long wall) {
+            this.wall = wall;
+            return this;
+        }
+
+        /** Attack declarations of this seat the rules refused. */
+        int refusedAttacks() {
+            return attackGuard.total;
+        }
+
+        /** This combat's first attack declaration: Forge AI's, unless a subclass scripts it. */
+        void declareFirst(Player attacker, Combat combat) {
+            super.declareAttackers(attacker, combat);
+        }
+
+        @Override
+        public final void declareAttackers(Player attacker, Combat combat) {
+            if (attackGuard.next(combat, wall) == 0) {
+                declareFirst(attacker, combat);
+            } else {
+                super.declareAttackers(attacker, combat);
+            }
+        }
+
+        @Override
+        public void declareBlockers(Player defender, Combat combat) {
+            checkWall(wall, "block declaration");
+            super.declareBlockers(defender, combat);
+        }
+
+        @Override
+        public List<SpellAbility> chooseSpellAbilityToPlay() {
+            checkWall(wall, "priority");
+            return super.chooseSpellAbilityToPlay();
         }
     }
 
@@ -687,6 +795,7 @@ final class ForcedWinEngine {
     private Applied apply(Node node, Step mv) {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, st.copies)));
+        final MoveAi[] held = new MoveAi[1];
         try {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
@@ -695,10 +804,13 @@ final class ForcedWinEngine {
             final Player me = (Player) copier.find(node.me);
             st.copies++;
             final MoveAi ai = new MoveAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn);
+            // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the search's deadline
+            ai.bounded(deadline);
+            held[0] = ai;
             me.dangerouslySetController(ai);
             for (Player o : g.getPlayers()) {
                 if (o != me) {
-                    o.dangerouslySetController(new LookaheadSearch.RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                    o.dangerouslySetController(new GuardedAi(g, o, o.getController().getLobbyPlayer()).bounded(deadline));
                 }
             }
             final PhaseHandler ph = g.getPhaseHandler();
@@ -706,6 +818,7 @@ final class ForcedWinEngine {
             int steps = 0;
             final int lastTurn = mv.pass ? node.turn + 2 : node.turn;
             while (!g.isGameOver() && !ai.rest && !ai.failed && ph.getTurn() <= lastTurn && steps < lim.maxSteps) {
+                checkWall(deadline, "engine step");
                 ph.mainLoopStep();
                 steps++;
             }
@@ -725,6 +838,12 @@ final class ForcedWinEngine {
             a.child = child;
             a.key = PlayoutKeys.stateKey(g);
             return a;
+        } catch (OutOfBudget ex) {
+            // the move did not finish within the search's deadline (or the rules refused its attack twice): dropped
+            st.cut++;
+            lastError = String.valueOf(ex);
+            ForcedWinSolver.receipt("FORCED_WIN engine cut move=" + mv + " " + ex.getMessage());
+            return null;
         } catch (RuntimeException | StackOverflowError ex) {
             lastError = String.valueOf(ex);
             if (TRACE) {
@@ -732,12 +851,15 @@ final class ForcedWinEngine {
             }
             return null;
         } finally {
+            if (held[0] != null) {
+                st.refusedAttacks += held[0].refusedAttacks();
+            }
             MyRandom.setThreadRandom(prev);
         }
     }
 
     /** Our seat while one move is played: the move, then pass until our next main-phase priority with an empty stack. */
-    static final class MoveAi extends LookaheadSearch.RolloutAi {
+    static final class MoveAi extends GuardedAi {
         final Step move;
         boolean acted, rest, failed, attacking;
         final TriggerTargets triggers;
@@ -809,8 +931,9 @@ final class ForcedWinEngine {
             return null;
         }
 
+        /** "Attack with everything" (if the rules refuse it, the guard hands the declaration to Forge AI). */
         @Override
-        public void declareAttackers(Player attacker, Combat combat) {
+        void declareFirst(Player attacker, Combat combat) {
             if (attacking) {
                 for (Card c : attacker.getCreaturesInPlay()) {
                     for (Player o : attacker.getOpponents()) {
@@ -822,7 +945,7 @@ final class ForcedWinEngine {
                 }
                 return;
             }
-            super.declareAttackers(attacker, combat);
+            super.declareFirst(attacker, combat);
         }
     }
 }
