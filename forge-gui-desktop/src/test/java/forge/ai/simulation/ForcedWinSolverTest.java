@@ -513,6 +513,33 @@ public class ForcedWinSolverTest extends AITest {
     }
 
     @Test
+    public void aFastForwardStopsWhenTheAttackIsLethalPastBlockers() {
+        // search-bones-1015 (c): the same loop against three untapped Grizzly Bears: the fast-forward stops once the
+        // tokens' power, less the three strongest attackers, covers 20 life, and the attack is the next move (before
+        // the fix it ran to the 64-repetition cap and then attacked with every token, past the live wall)
+        final Game g = game("Default", "Default", frame("Pestermite", KIKI_BF, 20, "",
+                "Forest;Grizzly Bears;Grizzly Bears;Grizzly Bears", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Limits lim = new ForcedWinEngine.Limits();
+        lim.cycles = true;
+        lim.nodes = 60;
+        lim.passTurn = false;
+        final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+        final ForcedWinPlanner.Line line = ForcedWinEngine.search(g, me, lim, st, System.nanoTime() + 20_000_000_000L, 7L);
+        Assert.assertNotNull(line, st.summary());
+        int times = -1;
+        for (ForcedWinPlanner.Step s : line.steps) {
+            if (s.kind == AbilKind.REPEAT) {
+                times = s.times;
+            }
+        }
+        Assert.assertTrue(times >= 5 && times < 30, "a REPEAT step short of the cap: " + line + " " + st.summary());
+        Assert.assertEquals(line.steps.get(line.steps.size() - 1).kind, AbilKind.ATTACK, line.toString());
+        Assert.assertTrue(st.loopReps < 40, st.summary());
+        System.err.println("[cycles-test-blockers] " + st.summary() + " line=" + line);
+    }
+
+    @Test
     public void theSolverSeatFollowsARepeatLineToTheWin() {
         System.setProperty("forge.ai.forcedWin.spec", "cycles=true,engineNodes=60");
         try {

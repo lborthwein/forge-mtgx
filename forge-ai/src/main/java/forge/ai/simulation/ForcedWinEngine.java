@@ -410,6 +410,11 @@ final class ForcedWinEngine {
             }
             cur = next;
             reps++;
+            if (lethalPastBlockers(cur)) {
+                // enough attackers for the opponent's life past their blockers: stop here, so the next node's first
+                // move is the attack (its own lethal check), not 64 repetitions and a slow combat with every token
+                break;
+            }
         }
         // the node after the last repetition that progressed: a REPEAT move to go on from
         final Node n = new Node();
@@ -805,6 +810,42 @@ final class ForcedWinEngine {
             }
         }
         return false;
+    }
+
+    /**
+     * (c): our attackers' power, less the strongest few that the opponent's untapped creatures could block, covers the
+     * opponent's life (in our first main phase). Used to end a loop's fast-forward, not to order moves.
+     */
+    private static boolean lethalPastBlockers(Node n) {
+        final Player me = n.me;
+        if (!n.g.getPhaseHandler().is(PhaseType.MAIN1)) {
+            return false;
+        }
+        Player opp = null;
+        for (Player o : me.getOpponents()) {
+            opp = o;
+        }
+        if (opp == null) {
+            return false;
+        }
+        final List<Integer> pw = new ArrayList<>();
+        for (Card c : me.getCreaturesInPlay()) {
+            if (CombatUtil.canAttack(c, opp)) {
+                pw.add(Math.max(0, c.getNetCombatDamage()));
+            }
+        }
+        int blockers = 0;
+        for (Card c : opp.getCreaturesInPlay()) {
+            if (!c.isTapped()) {
+                blockers++;
+            }
+        }
+        pw.sort(java.util.Collections.reverseOrder());
+        int power = 0;
+        for (int i = blockers; i < pw.size(); i++) {
+            power += pw.get(i);
+        }
+        return power >= opp.getLife();
     }
 
     private static boolean lethalOnBoard(Player me) {
