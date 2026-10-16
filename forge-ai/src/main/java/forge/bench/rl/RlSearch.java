@@ -1001,6 +1001,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("chosen", r.chosen <= 0 ? 0 : r.chosen < order.size() ? order.get(r.chosen) : -1);
             row.addProperty("failed", r.failed);
             row.addProperty("leaf_fallback", r.leafFallback);
+            if (r.partialWorlds > 0 || r.proven) {
+                // search-bones-1015 (S-b only)
+                row.addProperty("partial_worlds", r.partialWorlds);
+                row.addProperty("proven", r.proven);
+            }
             row.addProperty("ms", Math.round(r.ms * 10) / 10.0);
             row.addProperty("cpu_ms", Math.round(r.cpuMs * 10) / 10.0);
             row.addProperty("score_ms", Math.round((System.nanoTime() - t0) / 1e5 - r.ms * 10) / 10.0);
@@ -1054,6 +1059,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             row.add("searched", gi);
             row.addProperty("failed", r.failed);
+            row.addProperty("partial_worlds", r.partialWorlds);
             row.addProperty("search_ms", Math.round(r.ms * 10) / 10.0);
         }
         row.addProperty("answer", answer);
