@@ -547,21 +547,22 @@ public class ForcedWinSolverTest extends AITest {
 
     @Test
     public void theEngineDoesNotSeeOurRealLibraryOrderWhenHidden() {
-        // search-bones-1015 (solver leak): Opt draws the Lightning Bolt on top of our library, lethal at 3 life. On the
+        // search-bones-1015 (solver leak): Gitaxian Probe draws the Lightning Bolt on top of our library, lethal at 3 life. On the
         // real order the engine finds it; with ownKnownTop 0 (nothing placed by us) the root copy's library is
         // shuffled below the known top, so the line is not found on the real order (and the seeds here do not put the
         // Bolt back in the top two)
         final String f = "[state]\nturn=7\nactiveplayer=human\nactivephase=MAIN1\nhumanlife=20\nailife=3\n"
                 + "humanlandsplayed=0\nailandsplayed=0\naihand=\nailibrary=" + LIB20 + "\naigraveyard=\naiexile=\n"
-                + "aibattlefield=Forest\nhumanhand=Opt\nhumanbattlefield=Island;Mountain\nhumangraveyard=\n"
+                + "aibattlefield=Forest\nhumanhand=Gitaxian Probe\nhumanbattlefield=Island;Mountain\nhumangraveyard=\n"
                 + "humanexile=\nhumanlibrary=Lightning Bolt;" + OURLIB + ";" + OURLIB + "\n";
         final Game g = game("Default", "Default", f);
         final Player me = g.getPlayers().get(0);
+        Assert.assertEquals(me.getCardsIn(ZoneType.Library).get(0).getName(), "Lightning Bolt", "the frame's top card");
         final ForcedWinEngine.Limits real = new ForcedWinEngine.Limits();
         real.passTurn = false;
         final ForcedWinPlanner.Line seen = ForcedWinEngine.search(g, me, real, new ForcedWinEngine.Stats(),
                 System.nanoTime() + 20_000_000_000L, 7L);
-        Assert.assertNotNull(seen, "on the real order Opt finds the Bolt");
+        Assert.assertNotNull(seen, "on the real order the Probe finds the Bolt");
         int found = 0;
         for (long seed = 1; seed <= 4; seed++) {
             final ForcedWinEngine.Limits hid = new ForcedWinEngine.Limits();
