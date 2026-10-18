@@ -80,6 +80,41 @@ public class RlLabelSinkTest {
         Assert.assertThrows(IllegalArgumentException.class, () -> cfg(",\"labelSinc\":\"x\""));
     }
 
+    /**
+     * Lane r5-prereq-1018: S-b and the label sink work together (R5 labels); the fixing-path key needs both and, like
+     * the sink, is harness-only (the teacher's spec JSON is unchanged).
+     */
+    @Test
+    public void sbWithTheSinkAndTheFixingPathKey() {
+        final String sb = ",\"plans\":{\"samples\":2}";
+        final RlSearch.Config plain = cfg(sb);
+        final RlSearch.Config on = cfg(sb + ",\"labelSink\":\"/tmp/x/{actor}.mxl.gz\"");
+        Assert.assertNotNull(on.plans);
+        Assert.assertEquals(on.labelSink, "/tmp/x/{actor}.mxl.gz");
+        final RlSearch.Config fix = cfg(sb + ",\"labelSink\":\"/tmp/x/{actor}.mxl.gz\",\"fixPaths\":{\"worlds\":3,"
+                + "\"need\":2,\"budgetMs\":1000}");
+        Assert.assertEquals(fix.fixPaths.get("need").getAsInt(), 2);
+        Assert.assertEquals(RlWire.canonicalString(fix.toJson()), RlWire.canonicalString(plain.toJson()),
+                "the teacher's spec JSON is the same with the sink and the fixing-path key on");
+        Assert.assertThrows(IllegalArgumentException.class, () -> cfg(sb + ",\"fixPaths\":{}"));
+        Assert.assertThrows(IllegalArgumentException.class, () -> cfg(",\"labelSink\":\"x\",\"fixPaths\":{}"));
+        Assert.assertThrows(IllegalArgumentException.class, () -> cfg(sb + ",\"labelSink\":\"x\",\"fixPaths\":{\"need\":4}"));
+        Assert.assertThrows(IllegalArgumentException.class, () -> cfg(sb + ",\"labelSink\":\"x\",\"fixPaths\":{\"world\":3}"));
+        final RlSearch.FixSpec d = RlSearch.FixSpec.parse(new JsonObject());
+        Assert.assertEquals(d.worlds, 3);
+        Assert.assertEquals(d.need, 2);
+        // no game, no sink records: the v2 summary keys appear only with S-b
+        final RlSearch s = new RlSearch(on, 1L, 2L, null, null, "jar", "t", 1);
+        final JsonObject lb = s.summary().getAsJsonObject("labels");
+        Assert.assertEquals(lb.get("plan_steps").getAsInt(), 0);
+        Assert.assertEquals(lb.get("fix_steps").getAsInt(), 0);
+        Assert.assertFalse(lb.has("fix"));
+        s.close();
+        final RlSearch st = new RlSearch(cfg(",\"labelSink\":\"x\""), 1L, 2L, null, null, "jar", "t", 1);
+        Assert.assertFalse(st.summary().getAsJsonObject("labels").has("plan_steps"), "an S-t sink summary is unchanged");
+        st.close();
+    }
+
     @Test
     public void recordLayout() {
         final JsonObject h = new JsonObject();

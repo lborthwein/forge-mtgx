@@ -774,6 +774,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final List<SpellAbility> r = driver.priority(c);
         if (r != PlayerControllerBridge.NO_OPINION) {
             lineHookActs++;
+            // r5-prereq-1018: the label sink's plan-step rows (a no-op unless the sink is on)
+            rs.hookActed(c.getGame(), c.getPlayer(), r);
         }
         if (driver.solver().lineDone()) {
             pointAgain = true;
@@ -898,6 +900,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         int knownTop;
         double ms;
         String note = "";
+        /** r5-prereq-1018: the proven line a short-circuit adopted (null otherwise). */
+        Object provenLine;
     }
 
     /** The proposals at a plan point (solver lines, policy samples), in the decision's budget from {@code t0}. */
@@ -924,6 +928,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 // (b) a proven node: take it, no play-outs
                 solver.adopt(proven.line);
                 handoff = true;
+                st.provenLine = proven.line;
                 provenLinesTaken++;
                 provenTurns.add(g.getPhaseHandler().getTurn());
                 st.hook = true;

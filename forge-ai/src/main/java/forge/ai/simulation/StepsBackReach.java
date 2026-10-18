@@ -72,6 +72,15 @@ public final class StepsBackReach {
         public ForcedWinSolver.Config solver = new ForcedWinSolver.Config();
         /** The proven line's pieces (card names) the caller moved away: kept and searched for first. */
         public final Set<String> pieces = new HashSet<>();
+        /**
+         * Lane r5-prereq-1018 (labels; false = the steps-back existence check, unchanged): the search's root copy (and
+         * so every node) has our library shuffled below its first {@link #knownTop} cards (the seat's pile memory) with
+         * {@link #worldSeed}, as {@code ForcedWinSolver.shuffleUnknownOwnLibrary} does for the solver's worlds: the
+         * reach no longer sees our real library order. The caller also sets the solver's {@code hideOwnLibrary}.
+         */
+        public boolean hideOwnLibrary = false;
+        public int knownTop = 0;
+        public long worldSeed = 0L;
     }
 
     public static final class Result {
@@ -81,6 +90,8 @@ public final class StepsBackReach {
         public long ms;
         /** The reaching path: one entry per move, "class:card" or "pass". */
         public final List<String> path = new ArrayList<>();
+        /** The reaching path's moves (opaque: {@link #replay} them, {@link #isPass}, {@link #describe}). */
+        public final List<Object> moves = new ArrayList<>();
         /** Per move: tutor, cantrip-dig, draw-step. */
         public final List<String> classes = new ArrayList<>();
         public int fixes, passes;
@@ -110,6 +121,7 @@ public final class StepsBackReach {
         long order;
         final List<String> path = new ArrayList<>();
         final List<String> classes = new ArrayList<>();
+        final List<Move> moves = new ArrayList<>();
     }
 
     /** One candidate move: a fixing ability (with its forced pick) or a pass. */
@@ -153,6 +165,11 @@ public final class StepsBackReach {
                 for (Player o : root.me.getOpponents()) {
                     ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng);
                 }
+                if (cfg.hideOwnLibrary) {
+                    // r5-prereq-1018: our library order below the known top is hidden from the reach
+                    ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, cfg.knownTop,
+                            new Random(LookaheadSearch.mix(cfg.worldSeed, 3)));
+                }
             }
             root.ids = ForcedWinEngine.cloneScope(forge.util.IdScope.capture());
             root.turn = root.g.getPhaseHandler().getTurn();
@@ -188,6 +205,7 @@ public final class StepsBackReach {
                 if (proof != null && n.passes + proof.winTurn <= cfg.maxOwnTurns - 1) {
                     r.reached = true;
                     r.path.addAll(n.path);
+                    r.moves.addAll(n.moves);
                     r.classes.addAll(n.classes);
                     r.fixes = n.fixes;
                     r.passes = n.passes;
@@ -247,6 +265,8 @@ public final class StepsBackReach {
                         r.reached = true;
                         r.path.addAll(n.path);
                         r.path.add(mv.toString());
+                        r.moves.addAll(n.moves);
+                        r.moves.add(mv);
                         r.classes.addAll(n.classes);
                         r.classes.add(mv.cls);
                         r.fixes = n.fixes + (mv.step.pass ? 0 : 1);
@@ -266,6 +286,8 @@ public final class StepsBackReach {
                     c.fixes = n.fixes + (mv.step.pass ? 0 : 1);
                     c.path.addAll(n.path);
                     c.path.add(mv.toString());
+                    c.moves.addAll(n.moves);
+                    c.moves.add(mv);
                     c.classes.addAll(n.classes);
                     c.classes.add(mv.cls);
                     c.order = order++;
@@ -410,21 +432,9 @@ public final class StepsBackReach {
             copier.setCopyFidelity(1);
             final Game g = copier.makeCopy();
             final Player me = (Player) copier.find(node.me);
-            final ReachAi ai = new ReachAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn, cfg.pieces);
-            me.dangerouslySetController(ai);
-            for (Player o : g.getPlayers()) {
-                if (o != me) {
-                    o.dangerouslySetController(new LookaheadSearch.RolloutAi(g, o, o.getController().getLobbyPlayer()));
-                }
-            }
+            final ReachAi ai = drive(g, me, mv, node.turn, cfg, null, -1);
             final PhaseHandler ph = g.getPhaseHandler();
-            LookaheadSearch.givePriority(ph, me);
-            int steps = 0;
-            final int lastTurn = mv.step.pass ? node.turn + 2 : node.turn;
-            while (!g.isGameOver() && !ai.rest && !ai.failed && ph.getTurn() <= lastTurn && steps < cfg.loopSteps) {
-                ph.mainLoopStep();
-                steps++;
-            }
+            final int steps = ai.loopSteps;
             final Applied a = new Applied();
             a.pickCandidates = ai.picks.candidates;
             a.won = me.hasWon() || me.getOpponents().stream().anyMatch(Player::hasLost);
@@ -450,6 +460,161 @@ public final class StepsBackReach {
     }
 
     /**
+     * One move played on {@code g} in place: our seat a {@link ReachAi} for the move (with {@code tap}, null = none),
+     * every other seat Forge AI's roll-out seat, until our next main-phase priority with an empty stack (for a pass: the
+     * next turn's), the game's end, or the step cap.
+     */
+    private static ReachAi drive(Game g, Player me, Move mv, int fromTurn, Config cfg, ReplayTap tap, int idx) {
+        final ReachAi ai = new ReachAi(g, me, me.getController().getLobbyPlayer(), mv, fromTurn, cfg.pieces);
+        ai.tap = tap;
+        ai.idx = idx;
+        me.dangerouslySetController(ai);
+        for (Player o : g.getPlayers()) {
+            if (o != me) {
+                o.dangerouslySetController(new LookaheadSearch.RolloutAi(g, o, o.getController().getLobbyPlayer()));
+            }
+        }
+        final PhaseHandler ph = g.getPhaseHandler();
+        LookaheadSearch.givePriority(ph, me);
+        int steps = 0;
+        final int lastTurn = mv.step.pass ? fromTurn + 2 : fromTurn;
+        while (!g.isGameOver() && !ai.rest && !ai.failed && ph.getTurn() <= lastTurn && steps < cfg.loopSteps) {
+            ph.mainLoopStep();
+            steps++;
+        }
+        ai.loopSteps = steps;
+        return ai;
+    }
+
+    // ------------------------------------------------------------------ r5-prereq-1018: replay on a hidden library
+
+    /** Told about a replay's root copy and each action our seat plays in it (fixing-path label frames). */
+    public interface ReplayTap {
+        /** The replay's root copy (opponent and library already re-drawn), before any move. */
+        void onRoot(Game copy, Player me);
+
+        /**
+         * Our seat plays one action of move {@code move} at this priority (empty stack, our main phase): {@code sa}, or
+         * a pass (null). Called before the action is played; the game must be left as it is.
+         */
+        void onAct(int move, Game g, Player me, SpellAbility sa);
+    }
+
+    /** One replay of a path in one world. */
+    public static final class ReplayResult {
+        /** The path reached a proof inside the horizon (or won during a move). */
+        public boolean proved;
+        /** Moves played to their end. */
+        public int played;
+        public int winTurn = -1;
+        public String why = "";
+        public long ms;
+
+        @Override
+        public String toString() {
+            return (proved ? "PROVED" : "NO") + " played=" + played + " " + why + " ms=" + ms;
+        }
+    }
+
+    /** A move of a path is a pass (a turn passes: the land drop, then nothing). */
+    public static boolean isPass(Object move) {
+        return ((Move) move).step.pass;
+    }
+
+    public static String describe(Object move) {
+        return String.valueOf(move);
+    }
+
+    /**
+     * The first action move {@code move} plays from {@code g} (our priority): the located ability of a fixing move, the
+     * land drop of a pass (null = a pass with no land), or null when a fixing move cannot be located. Read only; call
+     * it inside the caller's isolation.
+     */
+    public static SpellAbility firstAction(Game g, Player me, Object move, Set<String> keep) {
+        final Move mv = (Move) move;
+        if (mv.step.pass) {
+            return ReachAi.landDrop(me, keep);
+        }
+        return ForcedWinSolver.Follower.locate(g, me, mv.step);
+    }
+
+    /**
+     * Replays {@code moves} (a {@link Result#moves} path) in one world of {@code live}: a copy whose opponents' hidden
+     * hands are removed (as the search's: {@code sampleOpp} false) or re-drawn from their unknown cards (true), and whose
+     * library is shuffled below {@code cfg.knownTop} with {@code worldSeed}; each move played in place as the search
+     * plays it (its pick by name, the pieces kept), then the solver asked exactly as at a search node. Proved = a proof
+     * whose win falls inside the horizon (passes + winTurn &lt;= maxOwnTurns - 1), or a win during a move. The live game
+     * is not touched (random stream, ids and AI caches are this call's own). Never throws.
+     */
+    public static ReplayResult replay(Game live, Player liveMe, Config cfg, List<Object> moves, long worldSeed,
+            boolean sampleOpp, ReplayTap tap) {
+        final ReplayResult r = new ReplayResult();
+        final long t0 = System.nanoTime();
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(worldSeed, 5)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final ForcedWinModel.Reader reader = new ForcedWinModel.Reader();
+            reader.seed = cfg.solver.seed;
+            final Game g;
+            final Player me;
+            synchronized (live) {
+                final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyFidelity(1);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+                final Random rng = new Random(LookaheadSearch.mix(worldSeed, 2));
+                for (Player o : me.getOpponents()) {
+                    ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, !sampleOpp, rng);
+                }
+                ForcedWinSolver.shuffleUnknownOwnLibrary(me, cfg.knownTop, new Random(LookaheadSearch.mix(worldSeed, 3)));
+            }
+            if (tap != null) {
+                tap.onRoot(g, me);
+            }
+            final PhaseHandler ph = g.getPhaseHandler();
+            int turn = ph.getTurn();
+            int passes = 0;
+            for (int i = 0; i < moves.size(); i++) {
+                final Move mv = (Move) moves.get(i);
+                MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(worldSeed, 100 + i)));
+                final ReachAi ai = drive(g, me, mv, turn, cfg, tap, i);
+                if (me.hasWon() || me.getOpponents().stream().anyMatch(Player::hasLost)) {
+                    r.proved = true;
+                    r.played = i + 1;
+                    r.winTurn = 0;
+                    r.why = "won during move " + i;
+                    return r;
+                }
+                if (!ai.rest || g.isGameOver()) {
+                    r.why = "move " + i + " " + mv + (ai.failed ? ": not located" : ": did not reach our main phase");
+                    return r;
+                }
+                passes += mv.step.pass ? 1 : 0;
+                turn = ph.getTurn();
+                r.played = i + 1;
+            }
+            LookaheadSearch.givePriority(ph, me);
+            final ForcedWinSolver.Proof proof = new ForcedWinSolver(me, cfg.solver, reader).prove(g);
+            r.proved = proof != null && passes + proof.winTurn <= cfg.maxOwnTurns - 1;
+            r.winTurn = proof == null ? -1 : proof.winTurn;
+            r.why = proof == null ? "no proof" : (r.proved ? "proof " : "proof past the horizon ") + proof.line;
+        } catch (RuntimeException | StackOverflowError ex) {
+            r.proved = false;
+            r.why = "error:" + ex;
+        } finally {
+            r.ms = (System.nanoTime() - t0) / 1_000_000;
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+        return r;
+    }
+
+    /**
      * Our seat while one move is played: the move (its pick forced when given), then pass until our next main-phase
      * priority with an empty stack (for a pass: the next turn's). It keeps the pieces: put-backs, discards, scry and
      * library orders avoid them; otherwise it answers as Forge AI.
@@ -460,6 +625,11 @@ public final class StepsBackReach {
         final Set<String> keep;
         boolean acted, rest, failed;
         final ForcedWinEngine.LibraryPicks picks;
+        /** r5-prereq-1018 (null = none): told each action of the move before it is played. */
+        ReplayTap tap;
+        int idx = -1;
+        int loopSteps;
+        private boolean landPlayed, passTapped;
 
         ReachAi(Game g, Player p, forge.LobbyPlayer lp, Move move, int fromTurn, Set<String> keep) {
             super(g, p, lp);
@@ -478,6 +648,11 @@ public final class StepsBackReach {
                     // a turn passes: this turn's land drop is made first (a land that is not a piece, else any), as a
                     // player does before passing; nothing else is played
                     final SpellAbility land = landDrop(getPlayer(), keep);
+                    if (tap != null) {
+                        tap.onAct(idx, g, getPlayer(), land);
+                    }
+                    landPlayed = land != null;
+                    passTapped = land == null;
                     return land == null ? null : capped(List.of(land));
                 }
                 final SpellAbility sa = ForcedWinSolver.Follower.locate(g, getPlayer(), move.step);
@@ -485,9 +660,19 @@ public final class StepsBackReach {
                     failed = true;
                     return null;
                 }
+                if (tap != null) {
+                    tap.onAct(idx, g, getPlayer(), sa);
+                }
                 return capped(List.of(sa));
             }
             final PhaseHandler ph = g.getPhaseHandler();
+            if (tap != null && move.step.pass && landPlayed && !passTapped && g.getStack().isEmpty()
+                    && ph.isPlayerTurn(getPlayer()) && ph.getTurn() == fromTurn
+                    && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))) {
+                // the pass after the land drop
+                passTapped = true;
+                tap.onAct(idx, g, getPlayer(), null);
+            }
             if (g.getStack().isEmpty() && ph.isPlayerTurn(getPlayer()) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))
                     && (!move.step.pass || ph.getTurn() > fromTurn && ph.is(PhaseType.MAIN1))) {
                 rest = true;

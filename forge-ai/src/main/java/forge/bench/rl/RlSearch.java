@@ -86,7 +86,8 @@ import forge.game.spellability.SpellAbility;
  * <p><b>Search seat</b> (r3-distill-1010): {@link #searchSeat} >= 0 (the GAME message's {@code search_seat}) limits the
  * look-ahead to that seat (RlSeat checks it); the summary then echoes {@code seat}. -1 (the default) = every RL seat.
  */
-public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.SearchHooks, LookaheadSearch.ChoiceExpander {
+public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.SearchHooks, LookaheadSearch.ChoiceExpander,
+        PlayerControllerBridge.LabelTap {
 
     /** The arm's search spec (RlActorBench config key {@code search}). */
     public static final class Config {
@@ -190,13 +191,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * ({@link PlanSearch.Spec}).
          */
         public JsonObject plans = null;
+        /**
+         * Lane r5-prereq-1018 (R5 fixing-path labels; null = off, the default): the reach search on a hidden library
+         * order at a curriculum start ({@link FixSpec}), set by the harness like {@link #labelSink} (not in
+         * {@link #toJson}: it only records). Needs {@code plans} and {@code labelSink}; a game runs it only when its GAME
+         * names {@code fix_reach}.
+         */
+        public JsonObject fixPaths = null;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
-                "obs", "labelSink", "copyFidelity", "forcedWin", "plans"));
+                "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "fixPaths"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -242,6 +250,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("copyFidelity")) c.copyFidelity = o.get("copyFidelity").getAsInt();
             if (o.has("forcedWin") && !o.get("forcedWin").isJsonNull()) c.forcedWin = o.getAsJsonObject("forcedWin");
             if (o.has("plans") && !o.get("plans").isJsonNull()) c.plans = o.getAsJsonObject("plans");
+            if (o.has("fixPaths") && !o.get("fixPaths").isJsonNull()) c.fixPaths = o.getAsJsonObject("fixPaths");
             c.check();
             return c;
         }
@@ -281,13 +290,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 throw new IllegalArgumentException("search.choices (S-t) needs playout=policy");
             }
             if (plans != null) {
-                // search-bones-1015: S-b plays plans with the policy seat; it is not combined with S-t, the label sink or
-                // the forced-win baseline
-                if (!"policy".equals(playout) || labelSink != null || forcedWin != null) {
-                    throw new IllegalArgumentException("search.plans (S-b) needs playout=policy and no labelSink "
-                            + "or forcedWin");
+                // search-bones-1015: S-b plays plans with the policy seat; it is not combined with the forced-win
+                // baseline. r5-prereq-1018: the label sink records S-b's decisions (root, plan-step, line-choice rows)
+                if (!"policy".equals(playout) || forcedWin != null) {
+                    throw new IllegalArgumentException("search.plans (S-b) needs playout=policy and no forcedWin");
                 }
                 PlanSearch.Spec.parse(plans);
+            }
+            if (fixPaths != null) {
+                if (plans == null || labelSink == null) {
+                    throw new IllegalArgumentException("search.fixPaths (R5 fixing-path labels) needs plans and labelSink");
+                }
+                FixSpec.parse(fixPaths);
             }
             choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
@@ -356,6 +370,46 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /**
+     * Lane r5-prereq-1018: the fixing-path labels' spec ({@code fixPaths}). The reach search
+     * ({@link forge.ai.simulation.StepsBackReach}) runs once per game, at the searched seat's first main-phase-1
+     * priority with an empty stack, on a world whose library is shuffled below the seat's known top (and the solver's
+     * {@code hideOwnLibrary}); the path it finds is then replayed in {@code worlds} fresh hidden-library worlds (opponents'
+     * hidden hands removed, as the search's), and kept iff it reaches a proof in at least {@code need} of them. A kept
+     * path's actions become hard-target rows: the first at the live frame, the rest on a copy replaying the path in the
+     * first world that proved it (opponents' hands re-drawn from their unknown cards).
+     */
+    public static final class FixSpec {
+        public int worlds = 3;
+        public int need = 2;
+        public int maxSteps = 3;
+        public int nodes = 60;
+        public long budgetMs = 60_000L;
+        public int extraPicks = 1;
+
+        static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "need",
+                "maxSteps", "nodes", "budgetMs", "extraPicks"));
+
+        public static FixSpec parse(final JsonObject o) {
+            final FixSpec f = new FixSpec();
+            for (String k : o.keySet()) {
+                if (!KEYS.contains(k)) {
+                    throw new IllegalArgumentException("fixPaths: unknown key " + k);
+                }
+            }
+            if (o.has("worlds")) f.worlds = o.get("worlds").getAsInt();
+            if (o.has("need")) f.need = o.get("need").getAsInt();
+            if (o.has("maxSteps")) f.maxSteps = o.get("maxSteps").getAsInt();
+            if (o.has("nodes")) f.nodes = o.get("nodes").getAsInt();
+            if (o.has("budgetMs")) f.budgetMs = o.get("budgetMs").getAsLong();
+            if (o.has("extraPicks")) f.extraPicks = o.get("extraPicks").getAsInt();
+            if (f.worlds < 1 || f.need < 1 || f.need > f.worlds || f.maxSteps < 1 || f.nodes < 1 || f.budgetMs < 1) {
+                throw new IllegalArgumentException("fixPaths: worlds >= need >= 1, maxSteps >= 1, nodes >= 1, budgetMs >= 1");
+            }
+            return f;
+        }
+    }
+
     private static final ThreadMXBean TMX = ManagementFactory.getThreadMXBean();
 
     private final Config cfg;
@@ -416,6 +470,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 final PlanSearch ps1 = new PlanSearch(PlanSearch.Spec.parse(cfg.plans), this, p, seat, d);
                 planSearches.put(p.getId(), ps1);
                 b.planHook = ps1;
+                if (cfg.labelSink != null) {
+                    // r5-prereq-1018: the frames of the asks the hook answers (it only records)
+                    b.labelTap = this;
+                    liveSeat = seat;
+                }
             }
         }
     }
@@ -475,6 +534,42 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** The live macro departure whose schedule the seat answers (set by decide, read by scheduledAsk). */
     private LiveMacro liveMacro = null;
     private int labelRoots = 0, labelChoices = 0, labelFailures = 0;
+
+    // ---- R5 labels (lane r5-prereq-1018; untouched while cfg.labelSink == null)
+    /** The plan the live seat follows, for its plan-step and line-choice rows (null = none). */
+    static final class LabelPlan {
+        final String id;
+        /** "line" (a solver line, played by the hook) or "policy" (a sampled policy plan, played through the seat). */
+        final String kind;
+        final boolean proven;
+        /** The plan's root advantage, Q(plan) - Q(default) (NaN at a proven short-circuit). */
+        final double adv;
+        int step;
+        int choices;
+        /** A line: its first menu-named action is the root row's target (not a plan-step row). */
+        boolean rootTaken;
+
+        LabelPlan(final String id, final String kind, final boolean proven, final double adv) {
+            this.id = id;
+            this.kind = kind;
+            this.proven = proven;
+            this.adv = adv;
+        }
+    }
+
+    private LabelPlan curPlan = null;
+    /** The live seat (frames of the asks a plan hook answered), set by {@link #attach} with the sink on. */
+    private RlSeat liveSeat = null;
+    private int labelPlanSteps = 0, labelLineChoices = 0, labelMana = 0, labelFix = 0, labelFloats = 0,
+            labelHookMiss = 0, labelMultiStep = 0, labelUnposed = 0;
+    private final Map<String, Integer> labelUnlabelled = new TreeMap<>();
+    /** The GAME's fix_reach (pieces, maxSteps), or null: this game runs no reach search. RlActorBench sets it. */
+    public JsonObject fixReach = null;
+    private boolean fixDone = false;
+    private JsonObject fixSummary = null;
+    /** A kept fixing path's first action, to label at the live frame of the decision that ran the reach. */
+    private Object[] fixFirst = null;
+    private JsonObject fixInfo = null;
 
     /** A macro departure's context for its scheduled live asks' choice records. */
     static final class LiveMacro {
@@ -703,6 +798,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             return VOID;
         }
         final PlanSearch sb = planSearches.isEmpty() ? null : planSearches.get(me.getId());
+        if (cfg.labelSink != null && curPlan != null && "line".equals(curPlan.kind)) {
+            curPlan = null;     // r5-prereq-1018: the seat is asked again, so the hook's line has ended
+        }
         // search-bones-1015 (d): S-b searches a respond point (their spell on top, a counter in our menu)
         final boolean respond = sb != null && !g.getStack().isEmpty() && sb.respondPoint(g, menuObjs);
         if (!cfg.stack && !g.getStack().isEmpty() && !respond) {
@@ -713,7 +811,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // search-bones-1015 (S-b): the live policy plan's next step, no search
             final int f = sb.follow(g, me, m, menuObjs);
             if (f >= 0) {
+                if (cfg.labelSink != null && curPlan != null && "policy".equals(curPlan.kind)) {
+                    labelSeatStep(g, m, frame, f);
+                }
                 return f;
+            }
+            if (curPlan != null && "policy".equals(curPlan.kind)) {
+                curPlan = null;
+            }
+        }
+        if (cfg.fixPaths != null && fixReach != null && !fixDone && sb != null && g.getStack().isEmpty()
+                && g.getPhaseHandler().isPlayerTurn(me) && g.getPhaseHandler().is(forge.game.phase.PhaseType.MAIN1)) {
+            // r5-prereq-1018: the fixing-path reach on a hidden library, once per game, before the decision's clock
+            fixDone = true;
+            try {
+                runFix(g, me, sb);
+            } catch (RuntimeException e) {
+                labelFailures++;
+                fixFirst = null;
+                System.err.println("[rlsearch] fixing-path reach failed: " + e);
             }
         }
         final long t0 = System.nanoTime();
@@ -733,6 +849,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (sc.status != RlWire.ST_OK || sc.probs.length != c) {
             scoreFailures++;
             return -1;
+        }
+        if (fixFirst != null) {
+            // r5-prereq-1018: a kept fixing path's first action, labelled at this (the live) frame
+            labelFixFirst(g, m, frame, payload, sc, menuObjs);
+            fixFirst = null;
         }
         // Pool the candidates into entries: X variants of one menu entry, and menu entries that are the same action
         // (the same card name, zone, land flag and ability text: three Islands in hand are one land play). An entry's
@@ -813,6 +934,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             stage = sb.propose(g, me, m, menuObjs, t0);
             if (stage.hook) {
                 planRow(g, frame, stage, null, order, -1, t0);
+                if (cfg.labelSink != null) {
+                    labelShortCircuit(g, m, frame, payload, sc, greedy, menuObjs, entryOf, order, def, stage);
+                }
                 return RlSeat.PrioritySearch.HOOK;
             }
         }
@@ -860,6 +984,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             final int pa = sb.apply(stage, r, order.size(), m, menuObjs, g, (System.nanoTime() - t0) / 1e6);
             planRow(g, frame, stage, r, order, pa, t0);
             if (pa != -2) {
+                if (cfg.labelSink != null && r.givenIndex.length > 0) {
+                    labelPlanRoot(g, m, frame, payload, sc, greedy, menuObjs, entryOf, order, def, r, stage, pa);
+                }
                 departures++;
                 return pa;
             }
@@ -909,8 +1036,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         if (cfg.labelSink != null && r.givenIndex.length > 0) {
             try {
-                labelRecs.add(labelRecord(rootHeader(g, m, frame, sc, greedy, menuObjs, entryOf, order, def, r, answer),
-                        payload));
+                final JsonObject h = rootHeader(g, m, frame, sc, greedy, menuObjs, entryOf, order, def, r, answer, stage);
+                if (sb != null) {
+                    // r5-prereq-1018: a proven pick of a menu candidate is a hard target on it
+                    h.addProperty("target_cand", r.proven && r.chosen < order.size() ? (answer >= 0 ? answer : greedy) : -1);
+                }
+                labelRecs.add(labelRecord(h, payload));
                 labelRoots++;
             } catch (RuntimeException e) {
                 labelFailures++;
@@ -1050,6 +1181,35 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final PlanSearch.LivePay[] lp = {null};
         final int policy = steps.length > 0 ? steps[0] : -1;
         final int over = sb == null ? -1 : sb.livePayAnswer(g, objs, policy, lp);
+        if (cfg.labelSink != null) {
+            // r5-prereq-1018: the payment ask as a label row (its label is the policy's own distribution at round 1;
+            // the packer keeps it beside the training stream with zero weight, for a later payment teacher)
+            try {
+                final byte[] payload = RlWire.encodeDecide(frame);
+                final RlSearchClient.Scores pr = labelPrior(payload, m.C());
+                if (pr != null) {
+                    final JsonObject h = new JsonObject();
+                    h.addProperty("kind", "mana_source");
+                    provenance(h, g, frame, pr.policyVersion);
+                    h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+                    h.addProperty("family", frame.family);
+                    h.addProperty("C", m.C());
+                    h.add("prior", probsJson(pr.probs));
+                    h.addProperty("answer", over >= 0 ? over : policy);
+                    if (over >= 0) {
+                        h.addProperty("teacher", "plan");   // a plans.pay variant answered (off in R5)
+                    }
+                    if (curPlan != null) {
+                        h.addProperty("plan_id", curPlan.id);
+                    }
+                    emit(h, payload);
+                    labelMana++;
+                }
+            } catch (RuntimeException e) {
+                labelFailures++;
+                System.err.println("[rlsearch] label mana_source failed: " + e);
+            }
+        }
         if (cfg.decisionLog == null && !rowsWanted) {
             return over;
         }
@@ -1219,7 +1379,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     private JsonObject rootHeader(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame,
             final RlSearchClient.Scores sc, final int greedy, final List<SpellAbility> menuObjs,
             final Map<String, Integer> entryOf, final List<Integer> order, final int def,
-            final LookaheadSearch.GivenResult r, final int answer) {
+            final LookaheadSearch.GivenResult r, final int answer, final PlanSearch.Stage stage) {
         final JsonObject h = new JsonObject();
         h.addProperty("kind", "root");
         provenance(h, g, frame, sc.policyVersion);
@@ -1237,9 +1397,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         h.addProperty("default_cand", greedy);
         h.addProperty("default_entry", def);
         final JsonArray se = new JsonArray();
+        final boolean sbOn = cfg.plans != null;
         for (int j = 0; j < r.givenIndex.length; j++) {
             final JsonObject x = new JsonObject();
-            x.addProperty("entry", order.get(r.givenIndex[j]));
+            final int gi = r.givenIndex[j];
+            if (gi >= order.size()) {
+                // r5-prereq-1018: an S-b plan candidate counts for the entry of its first step (-1: none the menu names)
+                final Object plan = stage == null ? null : stage.plans.get(gi - order.size());
+                x.addProperty("entry", entryOfCand(planFirstCand(plan, m, menuObjs), m, menuObjs, entryOf));
+                x.addProperty("plan", gi - order.size());
+                x.addProperty("plan_kind", plan instanceof PlanSearch.LinePlan ? "line" : "policy");
+            } else {
+                x.addProperty("entry", order.get(gi));
+                if (sbOn) {
+                    x.addProperty("plan", -1);
+                }
+            }
+            if (sbOn) {
+                x.addProperty("proven_win", j < r.provenWin.length && r.provenWin[j]);
+                x.addProperty("proven_loss", j < r.provenLoss.length && r.provenLoss[j]);
+                x.addProperty("plan_broken", j < r.planBroken.length ? r.planBroken[j] : 0);
+            }
             x.addProperty("macro", cfg.choices > 0 && j < r.macro.length ? r.macro[j] : -1);
             if (j < r.ev.length && !Double.isNaN(r.ev[j]) && !Double.isInfinite(r.ev[j])) {
                 x.addProperty("ev", r.ev[j]);
@@ -1277,13 +1455,549 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         h.add("macros", ma);
         h.addProperty("chosen_cand", answer >= 0 ? answer : greedy);
-        h.addProperty("chosen_entry", r.chosen <= 0 ? def : order.get(r.chosen));
+        h.addProperty("chosen_entry", r.chosen <= 0 ? def : r.chosen < order.size() ? order.get(r.chosen)
+                : entryOfCand(answer, m, menuObjs, entryOf));
         h.addProperty("chosen_macro", r.chosenMacro);
         h.addProperty("departed", r.chosen > 0 || r.chosenMacro >= 0);
         h.addProperty("outcome", r.outcome);
         h.addProperty("failed", r.failed);
         h.addProperty("leaf_fallback", r.leafFallback);
+        if (sbOn) {
+            // r5-prereq-1018 (label rows v2): S-b's proof and the chosen candidate's mean value (z_mix's search half)
+            h.addProperty("sb", true);
+            h.addProperty("proven", r.proven);
+            final int cj = searchedIndexOf(r, r.chosen <= 0 ? 0 : r.chosen);
+            h.addProperty("chosen_plan", r.chosen >= order.size() ? r.chosen - order.size() : -1);
+            if (cj >= 0 && cj < r.ev.length && !Double.isNaN(r.ev[cj]) && !Double.isInfinite(r.ev[cj])) {
+                h.addProperty("chosen_ev", r.ev[cj]);
+            } else {
+                h.add("chosen_ev", com.google.gson.JsonNull.INSTANCE);
+            }
+            if (stage != null) {
+                h.addProperty("known_top", stage.knownTop);
+            }
+        }
         return h;
+    }
+
+    // ------------------------------------------------------------------------------------------------ R5 labels
+
+    /** The searched index j of given index {@code gi} (-1 = not searched). */
+    static int searchedIndexOf(final LookaheadSearch.GivenResult r, final int gi) {
+        for (int j = 0; j < r.givenIndex.length; j++) {
+            if (r.givenIndex[j] == gi) {
+                return j;
+            }
+        }
+        return -1;
+    }
+
+    /** The pooled entry of candidate {@code c} (as cand_entry), or -1. */
+    private static int entryOfCand(final int c, final RlCandidates.Menu m, final List<SpellAbility> objs,
+            final Map<String, Integer> entryOf) {
+        if (c < 0 || c >= m.C()) {
+            return -1;
+        }
+        final int ch = choiceOf(m, c);
+        if (ch < 0 || ch > objs.size()) {
+            return -1;
+        }
+        final Integer e = entryOf.get(actionKey(ch == 0 ? null : objs.get(ch - 1)));
+        return e == null ? -1 : e;
+    }
+
+    /** The menu candidate of an S-b plan's first step (a line: its first step past its mana floats), or -1. */
+    static int planFirstCand(final Object plan, final RlCandidates.Menu m, final List<SpellAbility> objs) {
+        if (plan instanceof PlanSearch.PolicyPlan) {
+            return PlanSearch.match(m, objs, ((PlanSearch.PolicyPlan) plan).steps.get(0));
+        }
+        if (plan instanceof PlanSearch.LinePlan) {
+            return lineFirstCand(((PlanSearch.LinePlan) plan).line, m, objs);
+        }
+        return -1;
+    }
+
+    static int lineFirstCand(final Object line, final RlCandidates.Menu m, final List<SpellAbility> objs) {
+        final Object[] st = forge.ai.simulation.ForcedWinSolver.firstMenuStep(line);
+        if (st == null) {
+            return -1;
+        }
+        if ((Boolean) st[3]) {
+            return candOfAction(m, objs, null);
+        }
+        final int host = (Integer) st[0];
+        final boolean land = (Boolean) st[2];
+        final String desc = (String) st[1];
+        for (int c = 0; c < m.C(); c++) {
+            final int ch = m.cands.get(c).kind <= 0 ? -1 : choiceOf(m, c);
+            if (ch <= 0 || ch > objs.size()) {
+                continue;
+            }
+            final SpellAbility sa = objs.get(ch - 1);
+            if (sa.getHostCard() != null && sa.getHostCard().getId() == host && sa.isLandAbility() == land
+                    && (land || desc.equals(sa.getDescription()))) {
+                return c;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * The menu candidate that plays {@code sa} (null = pass): the same host card, land flag and ability text (the first
+     * such candidate: an X spell's first variant), or -1.
+     */
+    static int candOfAction(final RlCandidates.Menu m, final List<SpellAbility> objs, final SpellAbility sa) {
+        for (int c = 0; c < m.C(); c++) {
+            final int ch = m.cands.get(c).kind <= 0 ? -1 : choiceOf(m, c);
+            if (ch < 0 || ch > objs.size()) {
+                continue;
+            }
+            if (sa == null) {
+                if (ch == 0) {
+                    return c;
+                }
+                continue;
+            }
+            if (ch == 0) {
+                continue;
+            }
+            final SpellAbility x = objs.get(ch - 1);
+            if (x.getHostCard() != null && sa.getHostCard() != null && x.getHostCard().getId() == sa.getHostCard().getId()
+                    && x.isLandAbility() == sa.isLandAbility()
+                    && String.valueOf(x.getDescription()).equals(String.valueOf(sa.getDescription()))) {
+                return c;
+            }
+        }
+        return -1;
+    }
+
+    private void emit(final JsonObject h, final byte[] payload) {
+        labelRecs.add(labelRecord(h, payload));
+    }
+
+    /** SCORE of a label frame (null on any failure; counted). Never changes a decision. */
+    private RlSearchClient.Scores labelPrior(final byte[] payload, final int c) {
+        try {
+            final RlSearchClient.Scores ps;
+            try {
+                ps = client().score(payload);
+            } catch (IOException | RuntimeException e) {
+                drop();
+                throw new IOException(e);
+            }
+            if (ps.status != RlWire.ST_OK || ps.probs.length != c) {
+                labelFailures++;
+                return null;
+            }
+            return ps;
+        } catch (IOException e) {
+            labelFailures++;
+            return null;
+        }
+    }
+
+    private String planId(final RlWire.Decide frame, final String kind) {
+        return Long.toUnsignedString(uid) + ":" + frame.decIdx + ":" + kind;
+    }
+
+    private static void planFields(final JsonObject h, final LabelPlan lp) {
+        h.addProperty("plan_id", lp.id);
+        h.addProperty("plan_kind", lp.kind);
+        h.addProperty("proven", lp.proven);
+        if (Double.isNaN(lp.adv) || Double.isInfinite(lp.adv)) {
+            h.add("adv", com.google.gson.JsonNull.INSTANCE);
+        } else {
+            h.addProperty("adv", lp.adv);
+        }
+    }
+
+    /** S-b's short-circuit (a proven solver line taken before any play-out): a root row whose target is its first step. */
+    private void labelShortCircuit(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame, final byte[] payload,
+            final RlSearchClient.Scores sc, final int greedy, final List<SpellAbility> menuObjs,
+            final Map<String, Integer> entryOf, final List<Integer> order, final int def, final PlanSearch.Stage stage) {
+        try {
+            final LookaheadSearch.GivenResult r0 = new LookaheadSearch.GivenResult();
+            r0.outcome = "proven-line";
+            r0.proven = true;
+            final int t = stage.provenLine == null ? -1 : lineFirstCand(stage.provenLine, m, menuObjs);
+            final JsonObject h = rootHeader(g, m, frame, sc, greedy, menuObjs, entryOf, order, def, r0, t, stage);
+            h.addProperty("chosen_entry", entryOfCand(t, m, menuObjs, entryOf));
+            h.addProperty("departed", t >= 0 && t != greedy);
+            h.addProperty("short_circuit", true);
+            h.addProperty("target_cand", t);
+            curPlan = new LabelPlan(planId(frame, "line"), "line", true, Double.NaN);
+            planFields(h, curPlan);
+            emit(h, payload);
+            labelRoots++;
+        } catch (RuntimeException e) {
+            labelFailures++;
+            System.err.println("[rlsearch] label short-circuit root failed: " + e);
+        }
+    }
+
+    /** A plan departure (a policy plan or a solver line chosen by the play-outs): its root row and the plan to follow. */
+    private void labelPlanRoot(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame, final byte[] payload,
+            final RlSearchClient.Scores sc, final int greedy, final List<SpellAbility> menuObjs,
+            final Map<String, Integer> entryOf, final List<Integer> order, final int def,
+            final LookaheadSearch.GivenResult r, final PlanSearch.Stage stage, final int pa) {
+        try {
+            if (r.chosen < order.size()) {
+                return;
+            }
+            final Object plan = stage.plans.get(r.chosen - order.size());
+            final int j = searchedIndexOf(r, r.chosen), j0 = searchedIndexOf(r, 0);
+            final boolean proven = j >= 0 && j < r.provenWin.length && r.provenWin[j];
+            final double adv = j >= 0 && j0 >= 0 ? r.ev[j] - r.ev[j0] : Double.NaN;
+            final int first = pa >= 0 ? pa : planFirstCand(plan, m, menuObjs);
+            final JsonObject h = rootHeader(g, m, frame, sc, greedy, menuObjs, entryOf, order, def, r, first, stage);
+            h.addProperty("target_cand", proven ? first : -1);
+            final String kind = plan instanceof PlanSearch.LinePlan ? "line" : "policy";
+            curPlan = new LabelPlan(planId(frame, kind), kind, proven, adv);
+            planFields(h, curPlan);
+            emit(h, payload);
+            labelRoots++;
+        } catch (RuntimeException e) {
+            labelFailures++;
+            System.err.println("[rlsearch] label plan root failed: " + e);
+        }
+    }
+
+    /** A followed policy plan's later step, played through the seat (its live frame). */
+    private void labelSeatStep(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame, final int f) {
+        try {
+            final byte[] payload = RlWire.encodeDecide(frame);
+            final RlSearchClient.Scores pr = labelPrior(payload, m.C());
+            if (pr == null) {
+                return;
+            }
+            curPlan.step++;
+            final JsonObject h = new JsonObject();
+            h.addProperty("kind", "plan_step");
+            provenance(h, g, frame, pr.policyVersion);
+            h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+            h.addProperty("C", m.C());
+            h.add("prior", probsJson(pr.probs));
+            h.addProperty("target_cand", f);
+            h.addProperty("step", curPlan.step);
+            h.addProperty("source", "seat");
+            planFields(h, curPlan);
+            emit(h, payload);
+            labelPlanSteps++;
+        } catch (RuntimeException e) {
+            labelFailures++;
+            System.err.println("[rlsearch] label plan step failed: " + e);
+        }
+    }
+
+    /**
+     * The seat's priority frame at {@code g} and the candidate playing {@code act} (null = pass), built in isolation
+     * (the live game, or a copy with its own featurizer {@code f}); null when the seat would not pose it.
+     */
+    private RlSeat.LabelFrame priorityFrame(final Game g, final Player me, final RlFeaturizer f, final SpellAbility act,
+            final int[] target) {
+        return PlayerControllerBridge.isolated(g, () -> forge.util.IdScope.detached(() -> {
+            final List<SpellAbility> menu = RlReviewObserver.legalSpellAbilities(g, me);
+            final JsonObject body = new JsonObject();
+            final JsonArray items = new JsonArray();
+            items.add(forge.bench.StateEncoder.encodeSpellAbility(null));
+            for (SpellAbility sa : menu) {
+                items.add(forge.bench.StateEncoder.encodeSpellAbility(sa));
+            }
+            body.add("menu", items);
+            final RlSeat.LabelFrame lf = liveSeat.labelFrame(g, me, "chooseSpellAbilityToPlay", "priority", body, menu, f);
+            target[0] = lf == null ? -1 : candOfAction(lf.menu, menu, act);
+            return lf;
+        }));
+    }
+
+    /**
+     * The plan hook played {@code acts} (null or empty = a pass) at the live seat's priority: a solver line's step. The
+     * line's first menu-named action is its root row's target; each later one (and each pass of our own turn at an
+     * empty stack) is a plan-step row on the frame the seat would have been sent. Mana floats are not menu entries
+     * (counted). Only records.
+     */
+    void hookActed(final Game g, final Player me, final List<SpellAbility> acts) {
+        if (cfg.labelSink == null || curPlan == null || !"line".equals(curPlan.kind) || liveSeat == null) {
+            return;
+        }
+        try {
+            final SpellAbility sa = acts == null || acts.isEmpty() ? null : acts.get(0);
+            if (sa != null && sa.isManaAbility()) {
+                labelFloats++;
+                return;
+            }
+            if (sa == null && (!g.getStack().isEmpty() || !g.getPhaseHandler().isPlayerTurn(me))) {
+                return;     // waiting for the line's spell to resolve, or their turn
+            }
+            if (!curPlan.rootTaken) {
+                curPlan.rootTaken = true;
+                return;
+            }
+            final int[] t = {-1};
+            final RlSeat.LabelFrame lf = priorityFrame(g, me, null, sa, t);
+            if (lf == null) {
+                labelUnposed++;     // the seat would not pose it (a trivial menu: only one legal answer)
+                return;
+            }
+            if (t[0] < 0) {
+                labelHookMiss++;
+                return;
+            }
+            final byte[] payload = RlWire.encodeDecide(lf.frame);
+            final RlSearchClient.Scores pr = labelPrior(payload, lf.menu.C());
+            if (pr == null) {
+                return;
+            }
+            curPlan.step++;
+            final JsonObject h = new JsonObject();
+            h.addProperty("kind", "plan_step");
+            provenance(h, g, lf.frame, pr.policyVersion);
+            h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+            h.addProperty("C", lf.menu.C());
+            h.add("prior", probsJson(pr.probs));
+            h.addProperty("target_cand", t[0]);
+            h.addProperty("step", curPlan.step);
+            h.addProperty("source", "hook");
+            planFields(h, curPlan);
+            emit(h, payload);
+            labelPlanSteps++;
+        } catch (RuntimeException e) {
+            labelFailures++;
+            System.err.println("[rlsearch] label hook step failed: " + e);
+        }
+    }
+
+    /** {@link PlayerControllerBridge.LabelTap}: a forced answer of the followed line (a choice row on the seat's frame). */
+    @Override
+    public void hookChoice(final PlayerControllerBridge c, final String method, final String kind, final JsonObject body,
+            final Object objs, final JsonObject answer) {
+        if (cfg.labelSink == null || curPlan == null || !"line".equals(curPlan.kind) || liveSeat == null) {
+            return;
+        }
+        try {
+            final Game g = c.getGame();
+            final Player me = c.getPlayer();
+            final RlSeat.LabelFrame lf = PlayerControllerBridge.isolated(g, () -> forge.util.IdScope.detached(
+                    () -> liveSeat.labelFrame(g, me, method, kind, body, objs, null)));
+            if (lf == null) {
+                labelUnlabelled.merge(method + ":unposed", 1, Integer::sum);
+                return;
+            }
+            final short[] st = lf.menu.fromEcho(answer);
+            if (st == null || st.length == 0) {
+                labelHookMiss++;
+                return;
+            }
+            final RlWire.Decide f = lf.frame;
+            f.mode = RlSchema.M_SINGLE;     // as the S-t probe scores an ask (one pick: conditional on picking)
+            f.minPick = 1;
+            f.maxPick = 1;
+            final byte[] payload = RlWire.encodeDecide(f);
+            final RlSearchClient.Scores pr = labelPrior(payload, lf.menu.C());
+            if (pr == null) {
+                return;
+            }
+            curPlan.choices++;
+            final JsonObject h = new JsonObject();
+            h.addProperty("kind", "line_choice");
+            provenance(h, g, f, pr.policyVersion);
+            h.addProperty("family", lf.menu.family);
+            h.addProperty("method", method);
+            h.addProperty("C", lf.menu.C());
+            h.add("prior", probsJson(pr.probs));
+            final JsonArray ts = new JsonArray();
+            for (short x : st) {
+                ts.add(x);
+            }
+            h.add("target_steps", ts);
+            h.addProperty("target_cand", st.length == 1 ? st[0] : -1);
+            if (st.length != 1) {
+                labelMultiStep++;
+            }
+            h.addProperty("ordinal", curPlan.choices);
+            h.addProperty("step", curPlan.step);
+            planFields(h, curPlan);
+            emit(h, payload);
+            labelLineChoices++;
+        } catch (RuntimeException e) {
+            labelFailures++;
+            System.err.println("[rlsearch] label line choice failed: " + e);
+        }
+    }
+
+    @Override
+    public void hookUnlabelled(final String method) {
+        if (cfg.labelSink != null && curPlan != null && "line".equals(curPlan.kind)) {
+            labelUnlabelled.merge(method, 1, Integer::sum);
+        }
+    }
+
+    /**
+     * The fixing-path reach (r5-prereq-1018; {@link FixSpec}): the search on a hidden library world, the path replayed
+     * in {@code worlds} fresh hidden worlds, kept iff it proves in {@code need}. A kept path's first action waits for the
+     * live frame ({@link #labelFixFirst}); its later actions are labelled now, on a copy replaying it. Only records.
+     */
+    private void runFix(final Game g, final Player me, final PlanSearch sb) {
+        final FixSpec fs = FixSpec.parse(cfg.fixPaths);
+        final forge.ai.simulation.StepsBackReach.Config rc = new forge.ai.simulation.StepsBackReach.Config();
+        final int steps = fixReach.has("maxSteps") ? fixReach.get("maxSteps").getAsInt() : fs.maxSteps;
+        rc.maxSteps = steps;
+        rc.maxFixes = steps;
+        rc.maxOwnTurns = steps + 2;
+        rc.nodes = fs.nodes;
+        rc.budgetMs = fs.budgetMs;
+        rc.extraPicks = fs.extraPicks;
+        rc.seed = splitmix(gameSeed ^ 0xF1A5L);
+        rc.solver = new forge.ai.simulation.ForcedWinSolver.Config();
+        rc.solver.hideOwnLibrary = true;
+        if (fixReach.has("pieces")) {
+            for (JsonElement e : fixReach.getAsJsonArray("pieces")) {
+                rc.pieces.add(e.getAsString());
+            }
+        }
+        rc.hideOwnLibrary = true;
+        rc.knownTop = sb.knownTop(g);
+        rc.worldSeed = splitmix(rc.seed ^ 0x51L);
+        final JsonObject sum = new JsonObject();
+        fixSummary = sum;
+        sum.addProperty("known_top", rc.knownTop);
+        sum.addProperty("max_steps", steps);
+        final forge.ai.simulation.StepsBackReach.Result res = forge.ai.simulation.StepsBackReach.search(g, me, rc);
+        sum.addProperty("reached", res.reached);
+        sum.addProperty("why", res.why);
+        sum.addProperty("nodes", res.nodes);
+        sum.addProperty("ms", res.ms);
+        final JsonArray path = new JsonArray();
+        for (String x : res.path) {
+            path.add(x);
+        }
+        sum.add("path", path);
+        sum.addProperty("label", res.label);
+        if (!res.reached || res.moves.isEmpty()) {
+            return;
+        }
+        int k = 0;
+        long okSeed = 0L;
+        final JsonArray ws = new JsonArray();
+        for (int w = 1; w <= fs.worlds; w++) {
+            final long seed = splitmix(rc.worldSeed + w);
+            final forge.ai.simulation.StepsBackReach.ReplayResult rr = forge.ai.simulation.StepsBackReach.replay(g, me, rc,
+                    res.moves, seed, false, null);
+            ws.add(rr.toString());
+            if (rr.proved) {
+                if (k == 0) {
+                    okSeed = seed;
+                }
+                k++;
+            }
+        }
+        sum.add("worlds", ws);
+        sum.addProperty("proven_worlds", k);
+        final boolean kept = k >= fs.need;
+        sum.addProperty("kept", kept);
+        if (!kept) {
+            return;
+        }
+        final JsonObject info = new JsonObject();
+        info.addProperty("path_id", Long.toUnsignedString(uid) + ":fix");
+        info.add("path", path);
+        info.addProperty("label", res.label);
+        info.addProperty("worlds", fs.worlds);
+        info.addProperty("proven_worlds", k);
+        info.addProperty("need", fs.need);
+        fixInfo = info;
+        final SpellAbility first = PlayerControllerBridge.isolated(g, () -> forge.util.IdScope.detached(
+                () -> forge.ai.simulation.StepsBackReach.firstAction(g, me, res.moves.get(0), rc.pieces)));
+        if (first == null && !forge.ai.simulation.StepsBackReach.isPass(res.moves.get(0))) {
+            sum.addProperty("first", "not located");
+            return;
+        }
+        fixFirst = new Object[] {first};
+        // the later actions on a copy replaying the path in the first world that proved it (opponents' hands re-drawn)
+        final CopyCtx[] ctx = {null};
+        final int[] act = {0};
+        final List<Object[]> later = new ArrayList<>();
+        final forge.ai.simulation.StepsBackReach.ReplayResult er = forge.ai.simulation.StepsBackReach.replay(g, me, rc,
+                res.moves, okSeed, true, new forge.ai.simulation.StepsBackReach.ReplayTap() {
+                    @Override
+                    public void onRoot(final Game copy, final Player cme) {
+                        ctx[0] = (CopyCtx) onCopy(copy, cme);
+                    }
+
+                    @Override
+                    public void onAct(final int move, final Game cg, final Player cme, final SpellAbility sa) {
+                        if (act[0]++ == 0) {
+                            return;     // the first action is labelled at the live frame
+                        }
+                        final int[] t = {-1};
+                        final RlSeat.LabelFrame lf = priorityFrame(cg, cme, ctx[0].feat, sa, t);
+                        if (lf == null) {
+                            labelUnposed++;
+                            return;
+                        }
+                        if (t[0] < 0) {
+                            labelHookMiss++;
+                            return;
+                        }
+                        later.add(new Object[] {lf, t[0], move, act[0] - 1, String.valueOf(cg.getPhaseHandler().getPhase()),
+                                cg.getPhaseHandler().getTurn()});
+                    }
+                });
+        sum.addProperty("emission", er.toString());
+        for (Object[] x : later) {
+            final RlSeat.LabelFrame lf = (RlSeat.LabelFrame) x[0];
+            final byte[] payload = RlWire.encodeDecide(lf.frame);
+            final RlSearchClient.Scores pr = labelPrior(payload, lf.menu.C());
+            if (pr == null) {
+                continue;
+            }
+            final JsonObject h = new JsonObject();
+            h.addProperty("kind", "fix_step");
+            provenance(h, g, lf.frame, pr.policyVersion);
+            h.addProperty("turn", (Integer) x[5]);
+            h.addProperty("phase", (String) x[4]);
+            h.addProperty("C", lf.menu.C());
+            h.add("prior", probsJson(pr.probs));
+            h.addProperty("target_cand", (Integer) x[1]);
+            h.addProperty("move", (Integer) x[2]);
+            h.addProperty("action", (Integer) x[3]);
+            h.addProperty("source", "copy");
+            for (Map.Entry<String, JsonElement> e : fixInfo.entrySet()) {
+                h.add(e.getKey(), e.getValue());
+            }
+            emit(h, payload);
+            labelFix++;
+        }
+    }
+
+    /** A kept fixing path's first action at the live frame of the decision that ran the reach. */
+    private void labelFixFirst(final Game g, final RlCandidates.Menu m, final RlWire.Decide frame, final byte[] payload,
+            final RlSearchClient.Scores sc, final List<SpellAbility> menuObjs) {
+        try {
+            final int t = candOfAction(m, menuObjs, (SpellAbility) fixFirst[0]);
+            if (t < 0) {
+                labelHookMiss++;
+                return;
+            }
+            final JsonObject h = new JsonObject();
+            h.addProperty("kind", "fix_step");
+            provenance(h, g, frame, sc.policyVersion);
+            h.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+            h.addProperty("C", m.C());
+            h.add("prior", probsJson(sc.probs));
+            h.addProperty("target_cand", t);
+            h.addProperty("move", 0);
+            h.addProperty("action", 0);
+            h.addProperty("source", "live");
+            for (Map.Entry<String, JsonElement> e : fixInfo.entrySet()) {
+                h.add(e.getKey(), e.getValue());
+            }
+            emit(h, payload);
+            labelFix++;
+        } catch (RuntimeException e) {
+            labelFailures++;
+            System.err.println("[rlsearch] label fix first failed: " + e);
+        }
     }
 
     /**
@@ -1533,6 +2247,23 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lb.addProperty("roots", labelRoots);
             lb.addProperty("choices", labelChoices);
             lb.addProperty("failures", labelFailures);
+            if (cfg.plans != null || manaAsks > 0) {
+                // r5-prereq-1018 (label rows v2): only with S-b or payment asks, so an S-t sink summary is unchanged
+                lb.addProperty("plan_steps", labelPlanSteps);
+                lb.addProperty("line_choices", labelLineChoices);
+                lb.addProperty("mana_source", labelMana);
+                lb.addProperty("fix_steps", labelFix);
+                lb.addProperty("floats", labelFloats);
+                lb.addProperty("hook_miss", labelHookMiss);
+                lb.addProperty("unposed", labelUnposed);
+                lb.addProperty("multi_step", labelMultiStep);
+                final JsonObject un = new JsonObject();
+                labelUnlabelled.forEach(un::addProperty);
+                lb.add("unlabelled", un);
+                if (fixSummary != null) {
+                    lb.add("fix", fixSummary);
+                }
+            }
             o.add("labels", lb);
         }
         if (cfg.choices > 0) {

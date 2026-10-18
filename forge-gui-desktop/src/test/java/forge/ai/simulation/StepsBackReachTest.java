@@ -89,4 +89,56 @@ public class StepsBackReachTest extends AITest {
         Assert.assertEquals(r.passes, 1, r.toString());
         Assert.assertEquals(r.label, "draw-step", r.toString());
     }
+
+    /**
+     * Lane r5-prereq-1018 (R5 fixing-path labels): the reach on a HIDDEN library order. Doomsday on top and no cantrip:
+     * the real order reaches a proof by our draw step (the steps-back existence check), but our seat does not know its
+     * library order, so that path proves only when the draw happens to be Doomsday (1 card in 13). Replayed in fresh
+     * worlds whose library is shuffled below the known top, it fails the keep rule (at least 2 of 3 worlds); with every
+     * library card a Doomsday the order does not matter and it proves in every world. The real order (known top = the
+     * whole library) replays to the proof.
+     */
+    @Test
+    public void aHiddenLibraryOrderDropsALuckyDrawStep() {
+        final Game g = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame("Thassa's Oracle",
+                "Brazen Borrower;Brazen Borrower;" + BOARD, "Doomsday;" + ISLANDS));
+        final Player me = g.getPlayers().get(0);
+        final StepsBackReach.Result real = StepsBackReach.search(g, me, cfg(1));
+        Assert.assertTrue(real.reached, real.toString());
+        Assert.assertEquals(real.moves.size(), 1, real.toString());
+        Assert.assertTrue(StepsBackReach.isPass(real.moves.get(0)));
+        final StepsBackReach.Config known = cfg(1);
+        known.knownTop = 13;
+        final StepsBackReach.ReplayResult rk = StepsBackReach.replay(g, me, known, real.moves, 11L, false, null);
+        Assert.assertTrue(rk.proved, "the real order replays to the proof: " + rk);
+        final StepsBackReach.Config hid = cfg(1);
+        hid.hideOwnLibrary = true;
+        hid.knownTop = 0;
+        hid.solver.hideOwnLibrary = true;
+        int proved = 0;
+        final StringBuilder sb = new StringBuilder();
+        for (int w = 1; w <= 3; w++) {
+            final StepsBackReach.ReplayResult r = StepsBackReach.replay(g, me, hid, real.moves, LookaheadSearch.mix(77L, w),
+                    false, null);
+            proved += r.proved ? 1 : 0;
+            sb.append(r).append("; ");
+        }
+        Assert.assertTrue(proved < 2, "a lucky draw step is not kept on a hidden library: " + sb);
+        // the search itself on a hidden world: the draw is not Doomsday in this world, so no path within one step
+        hid.worldSeed = 5L;
+        final StepsBackReach.Result h = StepsBackReach.search(g, me, hid);
+        Assert.assertTrue(!h.reached || h.moves.size() == 1, h.toString());
+        System.err.println("[reach-test] hidden search " + h + " | replays " + sb);
+        // the order does not matter: every library card a Doomsday
+        final Game g2 = ForcedWinSolverTest.game(AiProfileUtil.FORCED_WIN_PROFILE, "Default", frame("Thassa's Oracle",
+                "Brazen Borrower;Brazen Borrower;" + BOARD, String.join(";", java.util.Collections.nCopies(13, "Doomsday"))));
+        final Player me2 = g2.getPlayers().get(0);
+        final StepsBackReach.Result r2 = StepsBackReach.search(g2, me2, hid);
+        Assert.assertTrue(r2.reached, r2.toString());
+        int proved2 = 0;
+        for (int w = 1; w <= 3; w++) {
+            proved2 += StepsBackReach.replay(g2, me2, hid, r2.moves, LookaheadSearch.mix(77L, w), false, null).proved ? 1 : 0;
+        }
+        Assert.assertEquals(proved2, 3, "an order-free path proves in every hidden world");
+    }
 }
