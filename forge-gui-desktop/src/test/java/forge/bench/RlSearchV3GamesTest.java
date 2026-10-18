@@ -51,6 +51,10 @@ public class RlSearchV3GamesTest {
         cfg.obsSchema = obs;
         cfg.manaSource = mana;
         cfg.search = RlSearchV2GamesTest.spec(svc.address(), "");
+        // the decision log on (its rows, incl. the mana_source rows, are kept in memory too)
+        final java.io.File log = java.io.File.createTempFile("search-v3-decisions-", ".jsonl");
+        log.deleteOnExit();
+        cfg.search.decisionLog = log.getPath();
         final List<RlActorBench.Played> out = new ArrayList<>();
         for (int i = 0; i < games; i++) {
             final RlActorBenchTest.LocalEndpoint ep = RlSearchV2GamesTest.endpoint(2);   // obs-v3 frames are layout 2

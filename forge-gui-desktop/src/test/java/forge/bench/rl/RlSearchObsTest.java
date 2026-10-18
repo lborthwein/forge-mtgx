@@ -246,7 +246,9 @@ public class RlSearchObsTest {
         Assert.assertEquals(v2.obs(), 2);
         Assert.assertEquals(v2.search.toJson().get("obs").getAsInt(), 2);
         Assert.assertEquals(RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "obs=1")).obs(), 1);
-        Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "obs=3")));
+        // r4-payment-1015 (R5): obs-v3 is a schema the search speaks (v2's frames; the live seat is never asked payments)
+        Assert.assertEquals(RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "obs=3")).obs(), 3);
+        Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "obs=4")));
         Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "obs=v2")));
     }
 
