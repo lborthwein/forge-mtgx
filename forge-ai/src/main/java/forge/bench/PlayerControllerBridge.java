@@ -1616,6 +1616,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return;
         }
         if (planHook != null && planHook.attack(attacker, combat)) {
+            if (labelTap != null) {
+                labelTap.hookUnlabelled("declareAttackers");   // r5-prereq-1018: counted, no frame built
+            }
             return; // search-bones-1015: the plan's attack
         }
         final CardCollection possible = new CardCollection();
