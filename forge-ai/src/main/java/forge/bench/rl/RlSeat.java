@@ -879,6 +879,46 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
     }
 
+    /** Lane r5-prereq-1018 (labels): an ask's menu and the DECIDE frame the seat would send for it (never sent). */
+    public static final class LabelFrame {
+        public final RlCandidates.Menu menu;
+        public final RlWire.Decide frame;
+
+        LabelFrame(final RlCandidates.Menu menu, final RlWire.Decide frame) {
+            this.menu = menu;
+            this.frame = frame;
+        }
+    }
+
+    /**
+     * Lane r5-prereq-1018 (labels): the menu and frame this seat would build for an ask it is NOT asked (a plan hook
+     * answered it: a solver line's step or forced answer; or a fixing path's step on a copy), with {@code f} (null =
+     * this seat's featurizer; a copy's own featurizer otherwise), the frame's dec_idx the seat's next one. Nothing is
+     * counted, sent or answered. Null when the seat would not pose the ask (a mechanical family, an unposable or
+     * trivial menu, over the caps). The caller isolates the game (building a menu is not a pure read:
+     * {@code PlayerControllerBridge.isolated}).
+     */
+    public LabelFrame labelFrame(final Game g, final Player player, final String method, final String kind,
+            final JsonObject body, final Object objs, final RlFeaturizer f) {
+        final int seat = g.getRegisteredPlayers().indexOf(player);
+        if (seat < 0 || seat >= roles.length) {
+            return null;
+        }
+        final int family = RlSchema.familyOf(kind, method);
+        if (!RlSchema.isLearned(family)) {
+            return null;
+        }
+        final RlCandidates.Menu m = RlCandidates.build(g, player, method, kind, body, objs,
+                family == RlSchema.F_NAME ? seen(g, player, seat) : null);
+        if (m == null || m.unposable != null || m.trivial || m.C() > RlSchema.C_MAX || m.S() > RlSchema.S_MAX) {
+            return null;
+        }
+        final RlFeaturizer ff = f != null ? f : feat;
+        final RlFeaturizer.Obs obs = ff.observe(g, player, m.mullK, false, m);
+        m.bind(obs, ff, player);
+        return new LabelFrame(m, frame(seat, g, m, obs));
+    }
+
     private RlWire.Decide frame(final int seat, final Game g, final RlCandidates.Menu m, final RlFeaturizer.Obs o) {
         final RlWire.Decide f = o.version == 2 ? RlWire.Decide.v2() : new RlWire.Decide();
         f.gameUid = uid;

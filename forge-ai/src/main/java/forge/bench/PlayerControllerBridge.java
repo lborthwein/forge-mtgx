@@ -212,6 +212,26 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     /** Lane r4-payment-1015 (R5): see {@link ManaPick}; null = off. */
     public ManaPick manaPick;
 
+    /**
+     * Lane r5-prereq-1018 (R5 labels; null by default, and then nothing below changes): told each choice ask the plan
+     * hook answered instead of the seat (a solver line's forced answers), with the ask's body as the seat would have
+     * been sent it (built inside {@link #isolated}) and the hook's answer in the seat's answer JSON, so the label sink
+     * can record the frame the seat would have seen. It only records: the hook's answer is played either way.
+     */
+    public interface LabelTap {
+        void hookChoice(PlayerControllerBridge c, String method, String kind, JsonObject body, Object objs,
+                JsonObject answer);
+
+        /** The hook answered an ask whose label frame is not built here (an order, look, trigger or discard): counted. */
+        default void hookUnlabelled(String method) {
+        }
+    }
+
+    public LabelTap labelTap;
+    /** r5-prereq-1018: the label tap's own count of the hook's picks of one zone-change resolution (the seat's is untouched). */
+    private SpellAbility labelPickRun = null;
+    private int labelPickChosen = 0;
+
     public BenchSession.Mode getMode() {
         return mode;
     }
@@ -2561,6 +2581,23 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (planHook != null) {
             final Boolean h = planHook.confirm(sa, message);
             if (h != null) {
+                if (labelTap != null) {
+                    // r5-prereq-1018: the frame the seat would have seen (the body as below, built in isolation)
+                    final JsonObject lb = isolated(getGame(), () -> {
+                        final JsonObject b = envelope(true);
+                        b.addProperty("mode", String.valueOf(mode0));
+                        b.addProperty("message", String.valueOf(message));
+                        if (sa != null) {
+                            b.add("ability", StateEncoder.encodeSpellAbility(sa));
+                        }
+                        if (cardToShow != null) {
+                            b.add("card", StateEncoder.encodeCardUnchecked(cardToShow));
+                        }
+                        return b;
+                    });
+                    labelTap.hookChoice(this, "confirmAction", "confirm", lb, new Object[] {sa, cardToShow},
+                            echoBool("yes", h));
+                }
                 return h; // search-bones-1015
             }
         }
@@ -2598,6 +2635,18 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (planHook != null) {
             final Boolean h = planHook.binary(kindOfChoice, defaultChoice);
             if (h != null) {
+                if (labelTap != null) {
+                    final JsonObject lb = isolated(getGame(), () -> {
+                        final JsonObject b = envelope(true);
+                        b.addProperty("message", String.valueOf(question));
+                        b.addProperty("binaryKind", String.valueOf(kindOfChoice));
+                        if (sa != null) {
+                            b.add("ability", StateEncoder.encodeSpellAbility(sa));
+                        }
+                        return b;
+                    });
+                    labelTap.hookChoice(this, "chooseBinary", "confirm", lb, new Object[] {sa, null}, echoBool("yes", h));
+                }
                 return h; // search-bones-1015
             }
         }
@@ -2632,6 +2681,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (planHook != null) {
             final ImmutablePair<CardCollection, CardCollection> h = planHook.look(topN);
             if (h != null) {
+                if (labelTap != null) {
+                    labelTap.hookUnlabelled("arrangeForScry");
+                }
                 return h; // search-bones-1015
             }
         }
@@ -2838,6 +2890,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             // search-bones-1015: a plan's forced trigger target is played by the hook; the rest go on as before
             final List<SpellAbility> rest = planHook.triggers(activePlayerSAs);
             if (rest != null) {
+                if (labelTap != null && rest.size() != activePlayerSAs.size()) {
+                    labelTap.hookUnlabelled("orderAndPlaySimultaneousSa");
+                }
                 activePlayerSAs = rest;
             }
         }
@@ -2908,6 +2963,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (planHook != null && bridged()) {
             final ImmutablePair<CardCollection, CardCollection> h = planHook.look(topN);
             if (h != null) {
+                if (labelTap != null) {
+                    labelTap.hookUnlabelled("arrangeForSurveil");
+                }
                 return h; // search-bones-1015
             }
         }
@@ -2922,6 +2980,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (planHook != null && bridged()) {
             final CardCollectionView h = planHook.order(cards, destinationZone, source);
             if (h != null) {
+                if (labelTap != null) {
+                    labelTap.hookUnlabelled("orderMoveToZoneList");
+                }
                 return h; // search-bones-1015
             }
         }
@@ -2933,6 +2994,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (planHook != null && bridged()) {
             final CardCollection h = planHook.discard(playerDiscard, sa, validCards, min, max);
             if (h != null) {
+                if (labelTap != null) {
+                    labelTap.hookUnlabelled("chooseCardsToDiscardFrom");
+                }
                 return h; // search-bones-1015
             }
         }
@@ -3086,6 +3150,22 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (planHook != null) {
             final Card h = planHook.pick(destination, origin, sa, fetchList, decider);
             if (h != null) {
+                if (labelTap != null) {
+                    // r5-prereq-1018: the zoneChange frame the seat would have seen (its own pick count is untouched)
+                    final int cn = zoneChangeNum(sa);
+                    if (sa != labelPickRun || labelPickChosen >= cn) {
+                        labelPickRun = sa;
+                        labelPickChosen = 0;
+                    }
+                    final int done = labelPickChosen++;
+                    final JsonObject lb = isolated(getGame(), () -> zoneChangeBody(destination, origin, sa, fetchList,
+                            isOptional ? 0 : 1, 1, selectPrompt, cn, done, true));
+                    final JsonObject ans = new JsonObject();
+                    final JsonArray ids = new JsonArray();
+                    ids.add(h.getId());
+                    ans.add("choices", ids);
+                    labelTap.hookChoice(this, "chooseSingleCardForZoneChange", "zoneChange", lb, fetchList, ans);
+                }
                 // search-bones-1015: the plan's pick (the reveal is honoured as on the asked path)
                 if (delayedReveal != null) {
                     reveal(delayedReveal);
@@ -3199,6 +3279,19 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             final List<ZoneType> origin, final SpellAbility sa, final CardCollection fetchList,
             final int min, final int max, final String title, final int changeNum, final int chosen,
             final boolean single) {
+        final JsonObject body = zoneChangeBody(destination, origin, sa, fetchList, min, max, title, changeNum, chosen,
+                single);
+        final JsonObject ans = ask(method, "zoneChange", body, fetchList);
+        if (ans == null) {
+            return null;
+        }
+        return zoneChangePicked(method, ans, fetchList, min, max);
+    }
+
+    /** The {@code zoneChange} ask's body (r5-prereq-1018: shared with the label tap, byte for byte as before). */
+    private JsonObject zoneChangeBody(final ZoneType destination, final List<ZoneType> origin, final SpellAbility sa,
+            final CardCollection fetchList, final int min, final int max, final String title, final int changeNum,
+            final int chosen, final boolean single) {
         final JsonObject body = envelope(true);
         body.addProperty("title", String.valueOf(title));
         body.addProperty("min", min);
@@ -3221,10 +3314,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (sa != null) {
             body.add("ability", StateEncoder.encodeSpellAbility(sa));
         }
-        final JsonObject ans = ask(method, "zoneChange", body, fetchList);
-        if (ans == null) {
-            return null;
-        }
+        return body;
+    }
+
+    private CardCollection zoneChangePicked(final String method, final JsonObject ans, final CardCollection fetchList,
+            final int min, final int max) {
         final List<Integer> ids = optIntList(ans, "choices");
         if (ids == null) {
             refuse(method, "missing/!array 'choices'");

@@ -537,6 +537,19 @@ public final class RlActorBench {
         } else {
             searchSeat = -1;
         }
+        // r5-prereq-1018 (R5 fixing-path labels): the GAME's fix_reach (pieces, maxSteps) for the spec's fixPaths
+        JsonObject fixReach = null;
+        if (g.has("fix_reach") && !g.get("fix_reach").isJsonNull()) {
+            if (cfg.search == null || cfg.search.fixPaths == null) {
+                out.guardError = "fix_reach without the search spec's fixPaths";
+                return out;
+            }
+            if (searchSeat < 0) {
+                out.guardError = "fix_reach needs a search_seat";
+                return out;
+            }
+            fixReach = g.getAsJsonObject("fix_reach");
+        }
 
         final JsonRpcChannel ch = new JsonRpcChannel(InputStream.nullInputStream(), OutputStream.nullOutputStream());
         final BenchSession session = new BenchSession(ch);
@@ -704,6 +717,7 @@ public final class RlActorBench {
                 search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId, obsVersion);
                 search.searchSeat = searchSeat;     // r3-distill-1010: -1 unless the GAME names one
                 search.manaSeats = anyMana ? manaSeats.clone() : null;   // R5: the seats asked MANA_SOURCE (plans.pay)
+                search.fixReach = fixReach;         // r5-prereq-1018: null unless the GAME names one
                 seat.searchSeat = searchSeat;
                 seat.search = search;
                 out.search = search;
