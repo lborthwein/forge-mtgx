@@ -565,10 +565,8 @@ public final class RlActorBench {
             out.guardError = "mana_source needs observation schema 3, not " + obsVersion;
             return out;
         }
-        if (obsVersion == 3 && cfg.search != null && !"replay".equals(mode) && !"record".equals(mode)) {
-            out.guardError = "the look-ahead (search) supports observation schemas 1 and 2, not 3";
-            return out;
-        }
+        // (obs-v3 with the look-ahead: RlSearch runs on v3; a payment is never a search branch: play-outs let Forge AI
+        // pay, and the searched seat's own payment asks are the policy's; lane r4-payment-1015, R5)
         feat.setVersion(obsVersion);
         // the seats asked: RL seats, filtered by slot (league snapshots may keep Forge paying), and recorder seats
         // (record mode: Forge AI's source becomes a RECORD frame, the imitation fallback)
@@ -671,7 +669,7 @@ public final class RlActorBench {
             }
             // observation v1: what each seat has observed (reveals, its own looks, public moves, the stack tail)
             final RlKnowledge know = new RlKnowledge(game);
-            know.v2 = obsVersion >= 2;
+            know.v2 = RlKnowledge.v2For(obsVersion);
             know.attach();
             final java.util.function.Function<Game, RlKnowledge.Log> logF = KNOWLEDGE_LOG;
             if (logF != null) {

@@ -3851,6 +3851,12 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         if (!asks || payAuto || !a.contested()) {
             return null;
         }
+        if (planHook != null && planHook.forgeCosts()) {
+            // a solver line is being played (search-bones-1015): Forge AI pays, as the line's verification did (= AUTO;
+            // R5, r4-payment-1015), as for its cost cards
+            note("manaSource.planAuto");
+            return null;
+        }
         count("chooseShardSource");
         final int unpaid = Math.min(15, Math.max(0, cost.getConvertedManaCost()));
         final JsonObject ans = isolated(getGame(), () -> ask("chooseShardSource", "manaSource", envelope(false),

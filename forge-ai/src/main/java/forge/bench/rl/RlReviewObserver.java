@@ -130,7 +130,7 @@ public final class RlReviewObserver implements PriorityDecisionListener, PlayerC
         this.obs = obs;
         this.uid = RlSearch.splitmix(seed ^ 0x72657669L);
         this.know = new RlKnowledge(game);
-        know.v2 = obs == 2;
+        know.v2 = RlKnowledge.v2For(obs);
         this.feat = new RlFeaturizer(index);
         feat.setVersion(obs);
         feat.reset();

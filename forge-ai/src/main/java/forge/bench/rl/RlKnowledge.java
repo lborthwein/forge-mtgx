@@ -123,6 +123,14 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
 
     /** Observation v2 (lane rl-obs-v2-1006): keep the v2 extras (seen ids, tail facts and targets). Off for v1. */
     public boolean v2 = false;
+
+    /**
+     * Whether a seat of observation schema {@code obs} keeps the v2 extras: obs-v2 and obs-v3 (whose frames are v2's;
+     * lane r4-payment-1015: the live seat and the search set it for obs == 2 only, so obs-v3 recorded no seen ids).
+     */
+    public static boolean v2For(final int obs) {
+        return obs >= 2;
+    }
     /** v2: per seat, the opponent cards it has seen face up, by id, with {name, full name} as seen (zone o_seen). */
     @SuppressWarnings("unchecked")
     private final java.util.LinkedHashMap<Integer, String[]>[] seenIds = new java.util.LinkedHashMap[] {

@@ -167,7 +167,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         java.util.Set<Integer> choiceFamilySet = null;
         /**
          * The observation schema the search's policy speaks (lane search-v2-1009): 1 (obs-v1, wire/1) or 2 (obs-v2,
-         * wire/2); 0 (the default) = the seat's. Set, it is a pin: a seat of another schema refuses the spec.
+         * wire/2), or 3 (obs-v3 = v2's frames plus family 25 MANA_SOURCE; lane r4-payment-1015); 0 (the default) = the
+         * seat's. Set, it is a pin: a seat of another schema refuses the spec.
          */
         public int obs = 0;
         /**
@@ -267,8 +268,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (sameDepartures < 1) {
                 throw new IllegalArgumentException("search.sameDepartures >= 1");
             }
-            if (obs != 0 && obs != 1 && obs != 2) {
-                throw new IllegalArgumentException("search.obs must be 1 or 2 (or absent: the seat's), not " + obs);
+            if (obs != 0 && obs != 1 && obs != 2 && obs != 3) {
+                throw new IllegalArgumentException("search.obs must be 1, 2 or 3 (or absent: the seat's), not " + obs);
             }
             if (copyFidelity < 0 || copyFidelity > 2) {
                 throw new IllegalArgumentException("search.copyFidelity must be 0, 1 or 2, not " + copyFidelity);
@@ -501,12 +502,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /**
-     * As above for a seat of observation schema {@code obsVersion} (1 or 2; lane search-v2-1009). A spec that pins
-     * another schema ({@link Config#obs}) is refused.
+     * As above for a seat of observation schema {@code obsVersion} (1 or 2, lane search-v2-1009; or 3, lane
+     * r4-payment-1015). A spec that pins another schema ({@link Config#obs}) is refused.
+     * <p>obs-v3 (MANA_SOURCE, family 25) is not a search branch: the play-outs' policy seats are never asked a payment
+     * (their sessions name no mana-source seats, so Forge AI pays, = AUTO), and the live seat's own payment asks are
+     * answered by the policy (the server's greedy pick in eval mode), as any other non-PRIORITY ask; a solver line being
+     * played pays as Forge AI (AUTO), as its verification did. See {@link #policyAsk} for the decision log.
      */
     public RlSearch(final Config cfg, final long gameSeed, final long uid, final CardIndex index, final RlKnowledge liveKnow,
             final String jarSha, final String actorId, final int obsVersion) {
-        if (obsVersion != 1 && obsVersion != 2) {
+        if (obsVersion != 1 && obsVersion != 2 && obsVersion != 3) {
             throw new IllegalArgumentException("search: observation schema " + obsVersion);
         }
         if (cfg.obs != 0 && cfg.obs != obsVersion) {
@@ -1028,6 +1033,47 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return answer;
     }
 
+    /**
+     * Lane r4-payment-1015 (obs-v3): the searched seat's MANA_SOURCE ask, answered by the policy (not searched). With
+     * the decision log (or rows) on, one row of kind {@code mana_source}: the answer and the policy's distribution over
+     * the candidates (a SCORE of the same frame; candidate 0 = AUTO), the label of this decision. Nothing else changes.
+     */
+    @Override
+    public void policyAsk(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] steps) {
+        manaAsks++;
+        if (cfg.decisionLog == null && !rowsWanted) {
+            return;
+        }
+        final JsonObject row = new JsonObject();
+        row.addProperty("game_uid", Long.toUnsignedString(uid));
+        row.addProperty("dec_idx", frame.decIdx);
+        row.addProperty("turn", g.getPhaseHandler().getTurn());
+        row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        row.addProperty("kind", "mana_source");
+        row.addProperty("family", frame.family);
+        row.addProperty("C", m.C());
+        row.addProperty("answer", steps.length > 0 ? steps[0] : -1);
+        try {
+            final RlSearchClient.Scores sc = client().score(RlWire.encodeDecide(frame));
+            if (sc.status == RlWire.ST_OK) {
+                final JsonArray pr = new JsonArray();
+                for (float x : sc.probs) {
+                    pr.add(Math.round(x * 1e5) / 1e5);
+                }
+                row.add("probs", pr);
+            } else {
+                row.addProperty("score_status", sc.status);
+            }
+        } catch (IOException | RuntimeException e) {
+            row.addProperty("score_failed", String.valueOf(e));
+        }
+        rows.add(row);
+    }
+
+    /** MANA_SOURCE asks of the searched seat (r4-payment-1015; summary key only when > 0). */
+    private int manaAsks = 0;
+
     /** search-bones-1015: one JSON row per S-b plan point (decision log / rows, as the S-c rows). */
     private void planRow(final Game g, final RlWire.Decide frame, final PlanSearch.Stage st,
             final LookaheadSearch.GivenResult r, final List<Integer> order, final int answer, final long t0) {
@@ -1443,6 +1489,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // search-v2-1009: only for an obs-v2 seat, so an S1 game's summary is unchanged
             o.addProperty("obs", obsVersion);
         }
+        if (manaAsks > 0) {
+            // r4-payment-1015: only with obs-v3 payment asks, so every other summary is unchanged
+            o.addProperty("mana_source_asks", manaAsks);
+        }
         if (searchSeat >= 0) {
             // r3-distill-1010: only with a GAME search_seat, so every other game's summary is unchanged
             o.addProperty("seat", searchSeat);
@@ -1540,7 +1590,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final RlKnowledge k;
         if (liveKnow == null) {
             k = new RlKnowledge(copy);
-            k.v2 = obsVersion == 2;
+            k.v2 = RlKnowledge.v2For(obsVersion);
         } else {
             k = liveKnow.forkFor(copy);   // carries the live tracker's v2 extras (seen ids, tail facts and targets)
         }

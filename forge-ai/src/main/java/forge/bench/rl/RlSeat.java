@@ -137,6 +137,13 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
          */
         int decide(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, int greedy, List<SpellAbility> menuObjs);
 
+        /**
+         * Lane r4-payment-1015 (obs-v3): the searched seat answered a MANA_SOURCE ask with the policy's own decision
+         * ({@code steps}); not a search branch. The search may log it (its decision log); it never changes the answer.
+         */
+        default void policyAsk(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, short[] steps) {
+        }
+
         int VOID = -2;
 
         /**
@@ -619,6 +626,11 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 window = w;
                 window.open(g.getPhaseHandler().getTurn());
             }
+        }
+        if (search != null && (searchSeat < 0 || seat == searchSeat) && family == RlSchemaV3.F_MANA_SOURCE
+                && d.status == RlWire.ST_OK) {
+            // r4-payment-1015: the payment is the policy's (no search branch); the search logs it with its distribution
+            search.policyAsk(g, player, m, frame, d.steps);
         }
         if (wAsk != null && !(d.status == RlWire.ST_OK && d.steps.length <= 1)) {
             window.saw(family, d.status == RlWire.ST_OK ? "multiStep" : "delegated");

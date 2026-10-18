@@ -42,7 +42,8 @@ public class RlSearchObsTest {
         Assert.assertFalse(off.toJson().has("obs"), "an S1 spec's JSON carries no obs key");
         Assert.assertEquals(cfg(",\"obs\":2").toJson().get("obs").getAsInt(), 2);
         Assert.assertEquals(cfg(",\"obs\":1").obs, 1);
-        Assert.assertThrows(IllegalArgumentException.class, () -> cfg(",\"obs\":3"));
+        Assert.assertEquals(cfg(",\"obs\":3").obs, 3, "obs-v3 (r4-payment-1015, R5)");
+        Assert.assertThrows(IllegalArgumentException.class, () -> cfg(",\"obs\":4"));
         Assert.assertThrows(IllegalArgumentException.class, () -> cfg(",\"obs\":-1"));
     }
 
@@ -53,7 +54,16 @@ public class RlSearchObsTest {
         Assert.assertThrows(IllegalArgumentException.class,
                 () -> new RlSearch(cfg(",\"obs\":1"), 1L, 2L, null, null, "jar", "t", 2));
         Assert.assertThrows(IllegalArgumentException.class,
-                () -> new RlSearch(cfg(""), 1L, 2L, null, null, "jar", "t", 3));
+                () -> new RlSearch(cfg(""), 1L, 2L, null, null, "jar", "t", 4));
+        Assert.assertThrows(IllegalArgumentException.class,
+                () -> new RlSearch(cfg(",\"obs\":2"), 1L, 2L, null, null, "jar", "t", 3));
+        // r4-payment-1015 (R5): the search runs on an obs-v3 seat; its HELLO names obs-v3's sha
+        final RlSearch v3 = new RlSearch(cfg(""), 1L, 2L, null, null, "jar", "t", 3);
+        Assert.assertEquals(v3.obsVersion(), 3);
+        Assert.assertEquals(v3.summary().get("obs").getAsInt(), 3);
+        Assert.assertFalse(v3.summary().has("mana_source_asks"), "no payment ask, no key");
+        v3.close();
+        Assert.assertEquals(RlSearch.schemaSha(3), RlSchemaV3.SCHEMA_SHA);
         final RlSearch v2 = new RlSearch(cfg(""), 1L, 2L, null, null, "jar", "t", 2);
         Assert.assertEquals(v2.obsVersion(), 2);
         Assert.assertEquals(v2.summary().get("obs").getAsInt(), 2, "an obs-v2 game's summary says so");
@@ -64,6 +74,14 @@ public class RlSearchObsTest {
         v1.close();
         final RlSearch p2 = new RlSearch(cfg(",\"obs\":2"), 1L, 2L, null, null, "jar", "t", 2);
         p2.close();
+    }
+
+    /** r4-payment-1015: the seat knowledge keeps the v2 extras (seen ids, tail facts) for obs-v2 AND obs-v3. */
+    @Test
+    public void knowledgeKeepsV2ExtrasForObsV3() {
+        Assert.assertFalse(RlKnowledge.v2For(1));
+        Assert.assertTrue(RlKnowledge.v2For(2));
+        Assert.assertTrue(RlKnowledge.v2For(3), "obs-v3 frames are v2's: the seen ids must be recorded");
     }
 
     @Test
