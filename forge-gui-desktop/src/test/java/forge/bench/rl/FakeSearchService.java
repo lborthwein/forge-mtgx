@@ -72,7 +72,7 @@ public final class FakeSearchService implements Closeable {
     }
 
     public FakeSearchService(final String policySha, final int obs) throws IOException {
-        if (obs != 1 && obs != 2) {
+        if (obs != 1 && obs != 2 && obs != 3) {   // 3: obs-v3, v2's frames (r4-payment-1015)
             throw new IllegalArgumentException("obs " + obs);
         }
         this.ss = new ServerSocket(0, 64, InetAddress.getLoopbackAddress());
@@ -120,7 +120,7 @@ public final class FakeSearchService implements Closeable {
                 return;
             }
             final JsonObject hello = h.json();
-            final String want = obs == 2 ? RlSchemaV2.schemaSha() : RlSchema.schemaSha();
+            final String want = RlSchemaV3.shaOf(obs);
             if (!hello.has("schema_sha") || !want.equals(hello.get("schema_sha").getAsString())) {
                 // as search_server.py: another schema's HELLO is answered ERROR and the connection closed
                 refusedHellos.incrementAndGet();
@@ -249,7 +249,7 @@ public final class FakeSearchService implements Closeable {
     /** This service's decode of a DECIDE payload, or null (counted) when it is not a frame of its schema. */
     private RlWire.Decide decode(final byte[] p) {
         try {
-            return RlWire.decodeDecide(p, obs);
+            return RlWire.decodeDecide(p, RlSchemaV3.layoutOf(obs));
         } catch (RuntimeException e) {
             badFrames.incrementAndGet();
             errors.incrementAndGet();

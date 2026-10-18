@@ -67,8 +67,10 @@ public class LobbyPlayerBridge extends LobbyPlayerAi {
     }
 
     private PlayerControllerBridge createControllerFor(final Player p) {
-        final PlayerControllerBridge result =
-                new PlayerControllerBridge(p.getGame(), p, this, session, mode, seat, counters);
+        // steps-back-1016 (EVAL only, off by default): an RL seat with the forced-win solver in front ("S-c + ForcedWin")
+        final PlayerControllerBridge result = mode == BenchSession.Mode.BRIDGE && ForcedWinPolicyController.enabled()
+                ? new ForcedWinPolicyController(p.getGame(), p, this, session, seat, counters)
+                : new PlayerControllerBridge(p.getGame(), p, this, session, mode, seat, counters);
         result.getAi().setUseSimulation(option);
         return result;
     }

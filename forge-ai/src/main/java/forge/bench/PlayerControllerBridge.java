@@ -85,7 +85,8 @@ import java.util.function.Predicate;
  * <em>refusal</em>: the call falls through to {@code super} and is counted separately from
  * an answer that explicitly asked to delegate.
  */
-public class PlayerControllerBridge extends PlayerControllerAi implements AiCostDecision.PaymentDecisions {
+public class PlayerControllerBridge extends PlayerControllerAi implements AiCostDecision.PaymentDecisions,
+        ComputerUtilMana.ShardSourceChooser {
 
     private final BenchSession session;
     private final BenchSession.Mode mode;
@@ -195,6 +196,22 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     /** Lane search-bones-1015: the plan hook, or null (the default: every ask goes to the seat as before). */
     public PlanHook planHook;
 
+    /**
+     * Lane r4-payment-1015 (R5, S-b payment variants; null by default, and then nothing changes): answers this seat's
+     * contested MANA_SOURCE asks without asking the seat (a search play-out's schedule or probe).
+     */
+    public interface ManaPick {
+        /**
+         * @param a  the shard's options (contested)
+         * @param sa the spell or ability being paid for
+         * @return 0 = AUTO (Forge AI pays the rest of this cost), i = option i - 1, or -1 = no opinion (ask as usual)
+         */
+        int pick(forge.bench.rl.RlManaChoice.Ask a, SpellAbility sa, ManaCostShard toPay);
+    }
+
+    /** Lane r4-payment-1015 (R5): see {@link ManaPick}; null = off. */
+    public ManaPick manaPick;
+
     public BenchSession.Mode getMode() {
         return mode;
     }
@@ -248,7 +265,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         observeReveal(cards, zone, own);
     }
 
-    private void observeLook(final Iterable<Card> cards, final ZoneType destination) {
+    protected void observeLook(final Iterable<Card> cards, final ZoneType destination) {
         final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
         if (o == null || !isLiveGame() || cards == null) {
             return;
@@ -3781,6 +3798,136 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return f != null && (cpp == null || cpp.test(f));
         } catch (RuntimeException e) {
             return false;
+        }
+    }
+
+    // ---- the mana source of one shard (lane r4-payment-1015; ComputerUtilMana.ShardSourceChooser)
+    /**
+     * Payments by cost object (identity; a payment can nest another, e.g. a Signet's own {1} inside a spell's cost):
+     * those seen, those with a contested shard (census), and those handed to Forge AI by AUTO (or by a refused pick).
+     * Bounded: cleared past 64 entries (a payment is over long before). {@code pickCost}: the payment of the last
+     * non-Forge source returned.
+     */
+    private ManaCostBeingPaid pickCost = null;
+    private final Set<ManaCostBeingPaid> paySeen = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<ManaCostBeingPaid> payContestedSet = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<ManaCostBeingPaid> payAutoSet = Collections.newSetFromMap(new IdentityHashMap<>());
+
+    /**
+     * Called by Forge AI's real payments only, once per shard paid from a source. Off (the default: no census, no ask)
+     * it returns null at once, and the payment is Forge AI's to the byte.
+     * <ul>
+     *   <li>The census counts the shard's materially different options (RlManaChoice) in this seat's instruments.</li>
+     *   <li>The ask (obs-v3 MANA_SOURCE, {@link BenchSession#isManaSourceAsk}): when the shard is contested (two or more
+     *       materially different options), the local answerer chooses: AUTO (Forge AI pays the rest of this cost, and
+     *       this seat is not asked again for it), Forge AI's own source (then Forge AI chooses, to the byte), or another
+     *       source, which is returned. The ask runs isolated (random stream, ids, AI memory and colour choices put
+     *       back), so asking never moves the game; only a different source does.</li>
+     * </ul>
+     */
+    @Override
+    public SpellAbility chooseShardSource(final ManaCostBeingPaid cost, final SpellAbility sa, final ManaCostShard toPay,
+            final List<SpellAbility> candidates, final boolean checkCosts, final boolean effect) {
+        final boolean census = session.isPayCensus();
+        final boolean asks = session.isManaSourceAsk(seat) && localAnswers();
+        final ManaPick picker = manaPick;
+        if (!census && !asks && picker == null || !isLiveGame()) {
+            return null;
+        }
+        if (paySeen.size() > 64) {
+            paySeen.clear();
+            payContestedSet.clear();
+            payAutoSet.clear();
+        }
+        final boolean fresh = paySeen.add(cost);
+        final boolean payAuto = payAutoSet.contains(cost);
+        if (payAuto && !census) {
+            return null; // AUTO: Forge AI pays the rest of this cost
+        }
+        if (!census && forge.bench.rl.RlManaChoice.oneOption(candidates)) {
+            return null; // one option whatever Forge AI accepts: never contested, so no enumeration
+        }
+        final forge.bench.rl.RlManaChoice.Ask a;
+        try {
+            final long t0 = System.nanoTime();
+            a = forge.bench.rl.RlManaChoice.enumerate(getGame(), getPlayer(), cost, sa, toPay, candidates, checkCosts,
+                    effect, true);
+            final long dt = System.nanoTime() - t0;
+            if (census) {
+                forge.bench.rl.RlManaChoice.census(counters, a, sa, fresh,
+                        a.contested() && !payContestedSet.contains(cost), dt);
+            }
+            if (a.contested()) {
+                payContestedSet.add(cost);
+            }
+        } catch (RuntimeException e) {
+            counters.instrument("pay.failed");
+            JsonRpcChannel.logErr("payment enumeration failed", e);
+            return null;
+        }
+        if (!asks && picker == null || payAuto || !a.contested()) {
+            return null;
+        }
+        if (picker != null) {
+            // R5: a search play-out's schedule (or probe) answers; no ask, no server call
+            final int i = picker.pick(a, sa, toPay);
+            if (i >= 0 && i <= a.options.size()) {
+                if (i == 0) {
+                    payAutoSet.add(cost);
+                    return null;
+                }
+                if (i - 1 == a.forge) {
+                    return null;
+                }
+                pickCost = cost;
+                return a.options.get(i - 1).cand;
+            }
+            if (!asks) {
+                return null;
+            }
+        }
+        if (planHook != null && planHook.forgeCosts()) {
+            // a solver line is being played (search-bones-1015): Forge AI pays, as the line's verification did (= AUTO;
+            // R5, r4-payment-1015), as for its cost cards
+            note("manaSource.planAuto");
+            return null;
+        }
+        count("chooseShardSource");
+        final int unpaid = Math.min(15, Math.max(0, cost.getConvertedManaCost()));
+        final JsonObject ans = isolated(getGame(), () -> ask("chooseShardSource", "manaSource", envelope(false),
+                new Object[] {a, sa, toPay, unpaid}));
+        if (ans == null) {
+            // delegated (a recorder seat): Forge AI's own source, echoed as its candidate (AUTO is 0)
+            final Echo e = takeEcho();
+            echo(e, echoInt("choice", a.forge + 1));
+            return null;
+        }
+        final Integer i = optInt(ans, "choice");
+        if (i == null || i < 0 || i > a.options.size()) {
+            refuse("chooseShardSource", "source " + i + " not offered");
+            return null;
+        }
+        if (i == 0) {
+            payAutoSet.add(cost);
+            note("manaSource.auto");
+            return null;
+        }
+        if (i - 1 == a.forge) {
+            note("manaSource.forge");
+            return null; // Forge AI's own source: its own choice, so the payment is Forge AI's to the byte
+        }
+        note("manaSource.other");
+        pickCost = cost;
+        return a.options.get(i - 1).cand;
+    }
+
+    /** Forge AI's checks refused the source this seat chose: Forge AI pays this shard and, as AUTO, the rest. */
+    @Override
+    public void shardSourceRefused(final SpellAbility pick) {
+        counters.instrument("manaSource.refused");
+        note("manaSource.refused");
+        if (pickCost != null) {
+            payAutoSet.add(pickCost);
         }
     }
 

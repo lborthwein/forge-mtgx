@@ -51,6 +51,32 @@ import java.util.stream.Collectors;
 public class ComputerUtilMana {
     private final static boolean DEBUG_MANA_PAYMENT = false;
 
+    /**
+     * mtgx lane r4-payment-1015: a player controller that implements this may choose the mana ability that pays one
+     * shard of a REAL payment (never a test payment: {@code canPayManaCost} and every other {@code test} path skip it).
+     * Called once per shard Forge AI pays from a mana source, just before Forge AI's own choice
+     * ({@link #chooseManaAbility}). Returning null leaves that choice, and the payment, exactly as without the hook.
+     * A returned ability is applied through {@link #chooseManaAbility} over that ability alone (Forge AI's own checks
+     * and side effects); if those refuse it, Forge AI chooses as usual.
+     */
+    public interface ShardSourceChooser {
+        /**
+         * @param cost       the cost being paid (one object per payment)
+         * @param sa         the spell or ability being paid for
+         * @param toPay      the shard Forge AI pays next
+         * @param candidates Forge AI's candidate abilities for the shard, in its order (a copy)
+         * @param checkCosts the {@code checkCosts} flag Forge AI's own choice is made with
+         * @param effect     the payment is an effect's (not a spell's or ability's own cost)
+         * @return one of {@code candidates}, or null for Forge AI's own choice
+         */
+        SpellAbility chooseShardSource(ManaCostBeingPaid cost, SpellAbility sa, ManaCostShard toPay,
+                List<SpellAbility> candidates, boolean checkCosts, boolean effect);
+
+        /** The ability last returned was refused by Forge AI's own checks; Forge AI chose instead. */
+        default void shardSourceRefused(SpellAbility pick) {
+        }
+    }
+
     public static boolean canPayManaCost(ManaCostBeingPaid cost, final SpellAbility sa, final Player ai, final boolean effect) {
         //check copy of cost so it doesn't modify the exist cost being paid
         cost = new ManaCostBeingPaid(cost);
@@ -694,7 +720,7 @@ public class ComputerUtilMana {
 
             saList.removeAll(saExcludeList);
 
-            SpellAbility saPayment = saList.isEmpty() ? null : chooseManaAbility(cost, sa, ai, toPay, saList, checkPlayable || !test);
+            SpellAbility saPayment = saList.isEmpty() ? null : chooseShardPayment(cost, sa, ai, toPay, saList, checkPlayable || !test, test, effect);
 
             if (saPayment != null && ComputerUtilCost.isSacrificeSelfCost(saPayment.getPayCosts()) && sa.isTargeting(saPayment.getHostCard())) {
                 // not a good idea to sac a card that you're targeting with the SA you're paying for
@@ -820,6 +846,28 @@ public class ComputerUtilMana {
         }
 
         return paymentList;
+    }
+
+    /**
+     * Forge AI's choice of the source for one shard ({@link #chooseManaAbility}), unless the payer's controller is a
+     * {@link ShardSourceChooser} that picks one on a real payment (mtgx r4-payment-1015). A pick is applied through
+     * {@link #chooseManaAbility} over that ability alone; null (or a pick it refuses) leaves Forge AI's choice.
+     */
+    private static SpellAbility chooseShardPayment(final ManaCostBeingPaid cost, final SpellAbility sa, final Player ai,
+            final ManaCostShard toPay, final Collection<SpellAbility> saList, final boolean checkCosts, final boolean test,
+            final boolean effect) {
+        if (!test && ai.getController() instanceof ShardSourceChooser) {
+            final SpellAbility pick = ((ShardSourceChooser) ai.getController()).chooseShardSource(cost, sa, toPay,
+                    new ArrayList<>(saList), checkCosts, effect);
+            if (pick != null && saList.contains(pick)) {
+                final SpellAbility paid = chooseManaAbility(cost, sa, ai, toPay, Lists.newArrayList(pick), checkCosts);
+                if (paid != null) {
+                    return paid;
+                }
+                ((ShardSourceChooser) ai.getController()).shardSourceRefused(pick);
+            }
+        }
+        return chooseManaAbility(cost, sa, ai, toPay, saList, checkCosts);
     }
 
     private static void resetPayment(List<SpellAbility> payments) {

@@ -316,7 +316,7 @@ public final class RlLiveSeat {
         session.setLiveGame(g);
         rs.setGame(g);
         final RlKnowledge know = new RlKnowledge(g);
-        know.v2 = spec.obs() == 2;
+        know.v2 = RlKnowledge.v2For(spec.obs());
         know.attach();
         session.setKnowledgeObserver(know);
         feat.setKnowledge(know);

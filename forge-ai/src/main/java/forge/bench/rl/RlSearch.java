@@ -167,7 +167,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         java.util.Set<Integer> choiceFamilySet = null;
         /**
          * The observation schema the search's policy speaks (lane search-v2-1009): 1 (obs-v1, wire/1) or 2 (obs-v2,
-         * wire/2); 0 (the default) = the seat's. Set, it is a pin: a seat of another schema refuses the spec.
+         * wire/2), or 3 (obs-v3 = v2's frames plus family 25 MANA_SOURCE; lane r4-payment-1015); 0 (the default) = the
+         * seat's. Set, it is a pin: a seat of another schema refuses the spec.
          */
         public int obs = 0;
         /**
@@ -267,8 +268,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (sameDepartures < 1) {
                 throw new IllegalArgumentException("search.sameDepartures >= 1");
             }
-            if (obs != 0 && obs != 1 && obs != 2) {
-                throw new IllegalArgumentException("search.obs must be 1 or 2 (or absent: the seat's), not " + obs);
+            if (obs != 0 && obs != 1 && obs != 2 && obs != 3) {
+                throw new IllegalArgumentException("search.obs must be 1, 2 or 3 (or absent: the seat's), not " + obs);
             }
             if (copyFidelity < 0 || copyFidelity > 2) {
                 throw new IllegalArgumentException("search.copyFidelity must be 0, 1 or 2, not " + copyFidelity);
@@ -501,12 +502,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     /**
-     * As above for a seat of observation schema {@code obsVersion} (1 or 2; lane search-v2-1009). A spec that pins
-     * another schema ({@link Config#obs}) is refused.
+     * As above for a seat of observation schema {@code obsVersion} (1 or 2, lane search-v2-1009; or 3, lane
+     * r4-payment-1015). A spec that pins another schema ({@link Config#obs}) is refused.
+     * <p>obs-v3 (MANA_SOURCE, family 25) is not a search branch: the play-outs' policy seats are never asked a payment
+     * (their sessions name no mana-source seats, so Forge AI pays, = AUTO), and the live seat's own payment asks are
+     * answered by the policy (the server's greedy pick in eval mode), as any other non-PRIORITY ask; a solver line being
+     * played pays as Forge AI (AUTO), as its verification did. See {@link #policyAsk} for the decision log.
      */
     public RlSearch(final Config cfg, final long gameSeed, final long uid, final CardIndex index, final RlKnowledge liveKnow,
             final String jarSha, final String actorId, final int obsVersion) {
-        if (obsVersion != 1 && obsVersion != 2) {
+        if (obsVersion != 1 && obsVersion != 2 && obsVersion != 3) {
             throw new IllegalArgumentException("search: observation schema " + obsVersion);
         }
         if (cfg.obs != 0 && cfg.obs != obsVersion) {
@@ -635,7 +640,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** The HELLO's {@code schema_sha} for observation schema {@code v} (search-v2-1009; obs-v1: the S1 read's). */
     public static String schemaSha(final int v) {
-        return v == 2 ? RlSchemaV2.schemaSha() : RlSchema.schemaSha();
+        return RlSchemaV3.shaOf(v);
     }
 
     /**
@@ -1027,6 +1032,77 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         return answer;
     }
+
+    /**
+     * Lane r4-payment-1015 (obs-v3): the searched seat's MANA_SOURCE ask, answered by the policy, unless an S-b payment
+     * variant ({@code plans.pay}, R5) was adopted at the plan point and this is its ask: then the variant's option (the
+     * return value; -1 = the policy's answer stands). With the decision log (or rows) on, one row of kind
+     * {@code mana_source}: the answer and the policy's distribution over the candidates (a SCORE of the same frame;
+     * candidate 0 = AUTO); a variant's row also carries {@code teacher: "plan"}, its {@code target}, whether it was
+     * proven or won on a departZ value edge, and its values.
+     */
+    @Override
+    public int policyAsk(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] steps, final Object objs) {
+        manaAsks++;
+        // R5: an adopted payment variant answers its ask (the plan teacher); otherwise the policy's answer stands
+        final PlanSearch sb = planSearches.isEmpty() ? null : planSearches.get(me.getId());
+        final PlanSearch.LivePay[] lp = {null};
+        final int policy = steps.length > 0 ? steps[0] : -1;
+        final int over = sb == null ? -1 : sb.livePayAnswer(g, objs, policy, lp);
+        if (cfg.decisionLog == null && !rowsWanted) {
+            return over;
+        }
+        final JsonObject row = new JsonObject();
+        row.addProperty("game_uid", Long.toUnsignedString(uid));
+        row.addProperty("dec_idx", frame.decIdx);
+        row.addProperty("turn", g.getPhaseHandler().getTurn());
+        row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        row.addProperty("kind", "mana_source");
+        row.addProperty("family", frame.family);
+        row.addProperty("C", m.C());
+        row.addProperty("answer", over >= 0 ? over : policy);
+        if (over >= 0 && lp[0] != null) {
+            // the plan teacher's hard target: the searched variant that won (proven, or a departZ value edge)
+            row.addProperty("teacher", "plan");
+            row.addProperty("target", over);
+            row.addProperty("policy_answer", policy);
+            row.addProperty("proven", lp[0].proven);
+            row.addProperty("ev", Double.isNaN(lp[0].ev) ? null : Math.round(lp[0].ev * 1e4) / 1e4);
+            row.addProperty("ev_default", Double.isNaN(lp[0].evDefault) ? null : Math.round(lp[0].evDefault * 1e4) / 1e4);
+            row.addProperty("variant", lp[0].plan.label);
+        }
+        try {
+            final RlSearchClient.Scores sc = client().score(RlWire.encodeDecide(frame));
+            if (sc.status == RlWire.ST_OK) {
+                final JsonArray pr = new JsonArray();
+                for (float x : sc.probs) {
+                    pr.add(Math.round(x * 1e5) / 1e5);
+                }
+                row.add("probs", pr);
+            } else {
+                row.addProperty("score_status", sc.status);
+            }
+        } catch (IOException | RuntimeException e) {
+            row.addProperty("score_failed", String.valueOf(e));
+        }
+        rows.add(row);
+        return over;
+    }
+
+    /**
+     * R5 (r4-payment-1015): the seats of this game that are asked MANA_SOURCE (set by the actor; null = none). S-b's
+     * payment variants ({@code plans.pay}) are searched only for such a seat: elsewhere no ask could carry them out.
+     */
+    public boolean[] manaSeats = null;
+
+    boolean manaAsked(final Game g, final Player p) {
+        final int s = g.getRegisteredPlayers().indexOf(p);
+        return manaSeats != null && s >= 0 && s < manaSeats.length && manaSeats[s];
+    }
+
+    /** MANA_SOURCE asks of the searched seat (r4-payment-1015; summary key only when > 0). */
+    private int manaAsks = 0;
 
     /** search-bones-1015: one JSON row per S-b plan point (decision log / rows, as the S-c rows). */
     private void planRow(final Game g, final RlWire.Decide frame, final PlanSearch.Stage st,
@@ -1443,6 +1519,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // search-v2-1009: only for an obs-v2 seat, so an S1 game's summary is unchanged
             o.addProperty("obs", obsVersion);
         }
+        if (manaAsks > 0) {
+            // r4-payment-1015: only with obs-v3 payment asks, so every other summary is unchanged
+            o.addProperty("mana_source_asks", manaAsks);
+        }
         if (searchSeat >= 0) {
             // r3-distill-1010: only with a GAME search_seat, so every other game's summary is unchanged
             o.addProperty("seat", searchSeat);
@@ -1540,7 +1620,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final RlKnowledge k;
         if (liveKnow == null) {
             k = new RlKnowledge(copy);
-            k.v2 = obsVersion == 2;
+            k.v2 = RlKnowledge.v2For(obsVersion);
         } else {
             k = liveKnow.forkFor(copy);   // carries the live tracker's v2 extras (seen ids, tail facts and targets)
         }
@@ -1786,6 +1866,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             rs.priorityTrace = rec;
         } else if (first.plan instanceof PlanSearch.PolicyPlan) {
             rs.planCursor = new PlanSearch.Cursor((PlanSearch.PolicyPlan) first.plan, first, 0);
+        } else if (first.plan instanceof PlanSearch.PayPlan) {
+            // R5 (r4-payment-1015): a payment variant: its root step, then the policy; its payment by the schedule below
+            rs.planCursor = new PlanSearch.Cursor(((PlanSearch.PayPlan) first.plan).base, first, 0);
         }
         if (!planned) rs.playoutFirst = new RlSeat.PlayoutFirst() {
             @Override
@@ -1880,6 +1963,23 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         session.setLocalAnswerer(rs);
         final PlayoutController pc = new PlayoutController(g, me, me.getController().getLobbyPlayer(), session, seat, probe,
                 (cfg.copyFidelity == 1 || cfg.copyFidelity == 2 && ls.fidelityPass()) && !first.pass && !planned);
+        if (first.recorder instanceof PlanSearch.LineProbe) {
+            // R5 measurement (plans.pay.lineProbe): a solver line in a world-0 copy, its payments AUTO or one variant's
+            final PlanSearch.LineProbe lpr = (PlanSearch.LineProbe) first.recorder;
+            lpr.me = me;
+            lpr.fa = first;
+            pc.planHook = PlanSearch.copyLineHook(me, followConfig(), lpr.line, first);
+            pc.manaPick = lpr.pick(g, g.getPhaseHandler().getTurn());
+        }
+        if (first.plan instanceof PlanSearch.PayPlan) {
+            final PlanSearch.PayPlan vp = (PlanSearch.PayPlan) first.plan;
+            pc.manaPick = new PlanSearch.PaySched(vp, vp.base.turn, g);
+        } else if (first.recorder instanceof PlanSearch.Recorder && ((PlanSearch.Recorder) first.recorder).payProbe != null) {
+            final PlanSearch.PayProbe payProbe = ((PlanSearch.Recorder) first.recorder).payProbe;
+            payProbe.g = g;
+            payProbe.me = me;
+            pc.manaPick = payProbe;
+        }
         if (first.plan instanceof PlanSearch.LinePlan) {
             // search-bones-1015 (S-b): the solver line's follower in front of the copy's policy seat
             pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first);

@@ -56,7 +56,7 @@ import forge.bench.rl.CardIndex;
 import forge.bench.rl.RlClient;
 import forge.bench.rl.RlFeaturizer;
 import forge.bench.rl.RlKnowledge;
-import forge.bench.rl.RlSchema;
+import forge.bench.rl.RlSchemaV3;
 import forge.bench.rl.RlSearch;
 import forge.bench.rl.RlSeat;
 import forge.bench.rl.RlTape;
@@ -138,8 +138,23 @@ public final class RlActorBench {
         String replayDir = null;
         int replaySample = 0;
         long replaySampleSeed = 1005L;
-        /** Observation schema: 1 (mtgx-rl-obs/1, wire/1; the default) or 2 (mtgx-rl-obs/2, wire/2; lane rl-obs-v2-1006). */
+        /**
+         * Observation schema: 1 (mtgx-rl-obs/1, wire/1; the default), 2 (mtgx-rl-obs/2, wire/2; lane rl-obs-v2-1006) or
+         * 3 (mtgx-rl-obs/3: v2's frames plus the MANA_SOURCE family; lane r4-payment-1015).
+         */
         int obsSchema = 1;
+        /**
+         * r4-payment-1015 (false = off, the default, and nothing changes): the RL seats choose the source of each
+         * contested shard of their real payments (family 25 MANA_SOURCE; obsSchema 3 only). A GAME's (a replayed
+         * tape's) own "mana_source" takes precedence.
+         */
+        boolean manaSource = false;
+        /**
+         * r4-payment-1015: with {@link #manaSource}, the RL seats asked are those whose slot ({@code rl:<slot>}) starts
+         * with one of these (e.g. ["M", "W", "eval"]: league snapshots keep Forge paying); null = every RL seat. A GAME's
+         * (a replayed tape's) own "mana_source_slots" wins.
+         */
+        List<String> manaSourceSlots = null;
         /**
          * S1 (lane s1-search-1007; null = off, the default, and nothing changes): the look-ahead over the RL seats' own
          * priority decisions ({@link RlSearch.Config}), eval and train modes, in the actor's observation schema (obs-v1,
@@ -188,9 +203,17 @@ public final class RlActorBench {
         if (o.has("debugForgeStateOut")) c.debugForgeStateOut = o.get("debugForgeStateOut").getAsString();
         if (o.has("obsSchema")) {
             c.obsSchema = o.get("obsSchema").getAsInt();
-            if (c.obsSchema != 1 && c.obsSchema != 2) {
-                throw new IllegalArgumentException("obsSchema must be 1 or 2, not " + c.obsSchema);
+            if (c.obsSchema != 1 && c.obsSchema != 2 && c.obsSchema != 3) {
+                throw new IllegalArgumentException("obsSchema must be 1, 2 or 3, not " + c.obsSchema);
             }
+        }
+        if (o.has("manaSource")) c.manaSource = o.get("manaSource").getAsBoolean();
+        if (o.has("manaSourceSlots") && !o.get("manaSourceSlots").isJsonNull()) {
+            c.manaSourceSlots = new ArrayList<>();
+            for (JsonElement e : o.getAsJsonArray("manaSourceSlots")) c.manaSourceSlots.add(e.getAsString());
+        }
+        if (c.manaSource && c.obsSchema != 3) {
+            throw new IllegalArgumentException("manaSource needs obsSchema 3, not " + c.obsSchema);
         }
         if (o.has("search") && o.get("search").isJsonObject()) {
             c.search = RlSearch.Config.parse(o.getAsJsonObject("search"));
@@ -424,6 +447,11 @@ public final class RlActorBench {
         final String[] shas = {shaJ.get(0).getAsString(), shaJ.get(1).getAsString()};
         final String[] ctl = {ctlJ.get(0).getAsString(), ctlJ.get(1).getAsString()};
         final boolean trainSide = "train".equals(mode) || "record".equals(mode);
+        if (ForcedWinPolicyController.enabled() && !"eval".equals(mode)) {
+            // steps-back-1016: the solver in front of an RL seat is an EVAL arm only; it never answers for a learning seat
+            out.guardError = "-D" + ForcedWinPolicyController.PROPERTY + " is for eval mode only, not " + mode;
+            return out;
+        }
         final boolean priv = trainSide && g.has("priv") && g.get("priv").getAsBoolean();
         for (int s = 0; s < 2; s++) {
             final String why = deckGuard(mode, cfg.rlRoot, decks[s], shas[s]);
@@ -529,7 +557,29 @@ public final class RlActorBench {
         sc.loopGuard = loopGuard;
         // the observation schema: the actor's, or (replay) the tape's
         final int obsVersion = g.has("obs_schema") ? g.get("obs_schema").getAsInt() : cfg.obsSchema;
+        // r4-payment-1015: the RL seats' mana-source asks (MANA_SOURCE, obs-v3): the GAME's (a replayed tape's) own
+        // "mana_source", else the actor's; off = no ask, no enumeration, the game as before
+        final boolean manaSource = g.has("mana_source") && !g.get("mana_source").isJsonNull()
+                ? g.get("mana_source").getAsBoolean() : cfg.manaSource;
+        if (manaSource && obsVersion != 3) {
+            out.guardError = "mana_source needs observation schema 3, not " + obsVersion;
+            return out;
+        }
+        // (obs-v3 with the look-ahead: RlSearch runs on v3; a payment is never a search branch: play-outs let Forge AI
+        // pay, and the searched seat's own payment asks are the policy's; lane r4-payment-1015, R5)
         feat.setVersion(obsVersion);
+        // the seats asked: RL seats, filtered by slot (league snapshots may keep Forge paying), and recorder seats
+        // (record mode: Forge AI's source becomes a RECORD frame, the imitation fallback)
+        final List<String> manaSlots = manaSourceSlotsOf(g, cfg.manaSourceSlots);
+        final boolean[] manaSeats = new boolean[ctl.length];
+        boolean anyMana = false;
+        for (int s = 0; s < ctl.length; s++) {
+            final RlSeat.Role role = RlSeat.roleOf(ctl[s]);
+            manaSeats[s] = manaSource && (role == RlSeat.Role.RL && slotMatches(ctl[s], manaSlots)
+                    || role == RlSeat.Role.RECORD);
+            anyMana |= manaSeats[s];
+        }
+        session.setManaSourceSeats(anyMana ? manaSeats : null);
         final RlSeat seat = new RlSeat(feat, ep, sc, uid, ctl, priv);
         seat.listener = listener;
         feat.captureForgeState = cfg.debugForgeStateOut != null;
@@ -619,7 +669,7 @@ public final class RlActorBench {
             }
             // observation v1: what each seat has observed (reveals, its own looks, public moves, the stack tail)
             final RlKnowledge know = new RlKnowledge(game);
-            know.v2 = obsVersion == 2;
+            know.v2 = RlKnowledge.v2For(obsVersion);
             know.attach();
             final java.util.function.Function<Game, RlKnowledge.Log> logF = KNOWLEDGE_LOG;
             if (logF != null) {
@@ -653,6 +703,7 @@ public final class RlActorBench {
                 // S1: the look-ahead over the RL seats' own priority decisions (one per game; world seeds from the GAME seed)
                 search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId, obsVersion);
                 search.searchSeat = searchSeat;     // r3-distill-1010: -1 unless the GAME names one
+                search.manaSeats = anyMana ? manaSeats.clone() : null;   // R5: the seats asked MANA_SOURCE (plans.pay)
                 seat.searchSeat = searchSeat;
                 seat.search = search;
                 out.search = search;
@@ -879,6 +930,15 @@ public final class RlActorBench {
             t.addProperty("loop_guard", loopGuard);
             t.addProperty("loop_guard_hits", seat.loopGuardHits());
         }
+        if (manaSource) {
+            // r4-payment-1015: the mana-source asks as played (a replay re-applies them); no key when off
+            t.addProperty("mana_source", true);
+            if (manaSlots != null) {
+                final JsonArray ms = new JsonArray();
+                for (String x : manaSlots) ms.add(x);
+                t.add("mana_source_slots", ms);
+            }
+        }
         out.tape = t;
 
         AiCache.closeScope();
@@ -901,6 +961,30 @@ public final class RlActorBench {
             throw new IllegalArgumentException("loop_guard >= 0 (0 = off), not " + k);
         }
         return k;
+    }
+
+    /** r4-payment-1015: the GAME's (a tape's) "mana_source_slots", else the actor's; null = every RL seat. */
+    static List<String> manaSourceSlotsOf(final JsonObject g, final List<String> actorDefault) {
+        if (g == null || !g.has("mana_source_slots") || g.get("mana_source_slots").isJsonNull()) {
+            return actorDefault;
+        }
+        final List<String> out = new ArrayList<>();
+        for (JsonElement e : g.getAsJsonArray("mana_source_slots")) out.add(e.getAsString());
+        return out;
+    }
+
+    /** Whether an RL controller ({@code rl:<slot>}) is one of {@code slots} (by prefix); null = every slot. */
+    static boolean slotMatches(final String controller, final List<String> slots) {
+        if (slots == null) {
+            return true;
+        }
+        final String slot = controller.startsWith("rl:") ? controller.substring(3) : controller;
+        for (String p : slots) {
+            if (slot.startsWith(p)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Controller entry points that notify or plumb rather than decide; left out of forge_decided. */
@@ -983,8 +1067,8 @@ public final class RlActorBench {
 
     /** Replay: RL seats answer from the tape's {@code dec} rows, asserting family and C at each dec_idx. */
     static RlSeat.Endpoint tapeEndpoint(final JsonObject line, final long uid) {
-        final int version = line.has("schema_sha")
-                && forge.bench.rl.RlSchemaV2.schemaSha().equals(line.get("schema_sha").getAsString()) ? 2 : 1;
+        final int version = RlSchemaV3.layoutOf(RlSchemaV3.versionOfSha(
+                line.has("schema_sha") ? line.get("schema_sha").getAsString() : null));
         final Map<Integer, JsonArray> rows = new HashMap<>();
         for (JsonElement e : line.getAsJsonArray("dec")) {
             final JsonArray r = e.getAsJsonArray();
@@ -1163,9 +1247,8 @@ public final class RlActorBench {
         try {
             cl = RlClient.connect(cfg.server, 10_000, cfg.readTimeoutSec * 1000);
             final JsonObject hello = new JsonObject();
-            hello.addProperty("proto", cfg.obsSchema == 2 ? RlWire.PROTO_V2 : RlWire.PROTO);
-            hello.addProperty("schema_sha", cfg.obsSchema == 2 ? forge.bench.rl.RlSchemaV2.schemaSha()
-                    : RlSchema.schemaSha());
+            hello.addProperty("proto", RlSchemaV3.protoOf(cfg.obsSchema));
+            hello.addProperty("schema_sha", RlSchemaV3.shaOf(cfg.obsSchema));
             hello.addProperty("card_index_sha", index.sha());
             hello.addProperty("jar_sha", jarSha);
             hello.addProperty("actor_id", cfg.actorId);
@@ -1380,8 +1463,13 @@ public final class RlActorBench {
                 // r4-design-1015: the loop guard it played (absent = off), whatever the replay actor's own loopGuard
                 g.addProperty("loop_guard", t.has("loop_guard") ? t.get("loop_guard").getAsInt() : 0);
                 g.addProperty("priv", false);
-                g.addProperty("obs_schema", t.has("schema_sha") && forge.bench.rl.RlSchemaV2.schemaSha().equals(
-                        t.get("schema_sha").getAsString()) ? 2 : 1);
+                g.addProperty("obs_schema", RlSchemaV3.versionOfSha(
+                        t.has("schema_sha") ? t.get("schema_sha").getAsString() : null));
+                // r4-payment-1015: the mana-source asks it played (absent = off), and for which slots
+                g.addProperty("mana_source", t.has("mana_source") && t.get("mana_source").getAsBoolean());
+                if (t.has("mana_source_slots")) {
+                    g.add("mana_source_slots", t.get("mana_source_slots"));
+                }
                 // the deck guard of the tape's own mode; the seat's behaviour is the tape mode's
                 final String tmode = t.get("mode").getAsString();
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(

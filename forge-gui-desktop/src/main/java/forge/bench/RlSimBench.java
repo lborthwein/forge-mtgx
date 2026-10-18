@@ -135,6 +135,9 @@ public final class RlSimBench {
         int maxActionsPerTurn = 0;
         /** Copies carry pending until-end-of-turn / end-of-combat commands (GameCopier.setCopyUntilEot; default off). */
         boolean copyEot = false;
+        /** Lane r4-payment-1015 (default false: nothing changes): the mana-payment census (BenchSession#setPayCensus);
+         *  each row gets {@code pay}, the {@code pay.*} instruments of seat 0 and seat 1. */
+        boolean payCensus = false;
         String out = null;
     }
 
@@ -166,6 +169,7 @@ public final class RlSimBench {
         if (o.has("out")) c.out = o.get("out").getAsString();
         if (o.has("maxActionsPerTurn")) c.maxActionsPerTurn = o.get("maxActionsPerTurn").getAsInt();
         if (o.has("copyEot")) c.copyEot = o.get("copyEot").getAsBoolean();
+        if (o.has("payCensus")) c.payCensus = o.get("payCensus").getAsBoolean();
         return c;
     }
 
@@ -953,6 +957,7 @@ public final class RlSimBench {
             session.setLocalAnswerer(pol);
         }
         session.setEncodeState(cfg.encodeState);
+        session.setPayCensus(cfg.payCensus);
         final List<RegisteredPlayer> seats = new ArrayList<>();
         final List<LobbyPlayerBridge> lps = new ArrayList<>();
         for (int s = 0; s < 2; s++) {
@@ -1067,6 +1072,23 @@ public final class RlSimBench {
             row.addProperty("controllerCalls", calls);
             row.addProperty("refused", refused);
             row.addProperty("delegatedCalls", delegated);
+            if (cfg.payCensus) {
+                // r4-payment-1015: per seat, the payment census and the payManaCost calls
+                final JsonArray pay = new JsonArray();
+                for (LobbyPlayerBridge lp : lps) {
+                    final JsonObject cj = lp.getCounters().toJson();
+                    final JsonObject ps = new JsonObject();
+                    for (Map.Entry<String, JsonElement> e : cj.getAsJsonObject("instruments").entrySet()) {
+                        if (e.getKey().startsWith("pay")) {
+                            ps.add(e.getKey(), e.getValue());
+                        }
+                    }
+                    final JsonObject calls0 = cj.getAsJsonObject("calls");
+                    ps.addProperty("payManaCost", calls0.has("payManaCost") ? calls0.get("payManaCost").getAsInt() : 0);
+                    pay.add(ps);
+                }
+                row.add("pay", pay);
+            }
         }
         AiCache.closeScope();
         IdScope.close();

@@ -128,6 +128,8 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     public PrioritySearch search;
     /** S1: priority decisions whose candidate the search replaced. */
     public int searchDepartures = 0;
+    /** R5 (r4-payment-1015): MANA_SOURCE answers an adopted S-b payment variant set (0 unless plans.pay is on). */
+    public int payOverrides = 0;
 
     /** S1: the search hook (implemented by {@link RlSearch}). */
     public interface PrioritySearch {
@@ -136,6 +138,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
          *         (the search's CPU cap)
          */
         int decide(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, int greedy, List<SpellAbility> menuObjs);
+
+        /**
+         * Lane r4-payment-1015 (obs-v3): the searched seat answered a MANA_SOURCE ask with the policy's own decision
+         * ({@code steps}); not a search branch. The search may log it (its decision log); it never changes the answer.
+         */
+        default int policyAsk(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, short[] steps, Object objs) {
+            return -1;
+        }
 
         int VOID = -2;
 
@@ -462,8 +472,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             note("targets." + m.origin + ".asks");
         }
         // S-t: a choice ask inside the seat's open window (null otherwise: nothing below reads these)
+        // (never a MANA_SOURCE ask: a payment inside the action, not one of its choices; lane r4-payment-1015)
         final String wAsk = window != null && window.isOpen() && roles[seat] == Role.RL && family != RlSchema.F_PRIORITY
-                && m != null ? ChoiceWindow.askKey(family, method, m, body) : null;
+                && family != RlSchemaV3.F_MANA_SOURCE && m != null ? ChoiceWindow.askKey(family, method, m, body) : null;
         final int wOrd = wAsk == null ? -1 : window.nextOrdinal(wAsk);
         if (m == null || m.unposable != null) {
             if (wAsk != null) {
@@ -617,6 +628,16 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 }
                 window = w;
                 window.open(g.getPhaseHandler().getTurn());
+            }
+        }
+        if (search != null && (searchSeat < 0 || seat == searchSeat) && family == RlSchemaV3.F_MANA_SOURCE
+                && d.status == RlWire.ST_OK) {
+            // r4-payment-1015: the payment is the policy's, unless an adopted S-b payment variant answers this ask (R5);
+            // the search logs it with the policy's distribution (and the plan teacher's target)
+            final int over = search.policyAsk(g, player, m, frame, d.steps, objs);
+            if (over >= 0 && (d.steps.length != 1 || over != d.steps[0]) && m.validate(new short[] {(short) over}) == null) {
+                d.steps = new short[] {(short) over};
+                payOverrides++;
             }
         }
         if (wAsk != null && !(d.status == RlWire.ST_OK && d.steps.length <= 1)) {
