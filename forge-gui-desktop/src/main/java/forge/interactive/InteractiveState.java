@@ -19,9 +19,12 @@ import forge.game.card.CardCollectionView;
 import forge.game.card.CardView;
 import forge.game.player.Player;
 import forge.game.player.PlayerView;
+import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.zone.ZoneType;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -71,6 +74,7 @@ final class InteractiveState {
         final JsonObject view = encode(game, seatPlayer);
         view.addProperty("seat", seat);
         normalizePlayerNamespaces(game, view);
+        view.addProperty(InteractiveCardFacts.FIELD, InteractiveCardFacts.VERSION);
         return view;
     }
 
@@ -133,8 +137,9 @@ final class InteractiveState {
         }
     }
 
+    // CardView treats a missing zone as public; a frozen tracker must instead fail closed.
     static boolean mayReceiveIdentity(final CardView card, final PlayerView viewer) {
-        return card != null && card.canBeShownTo(viewer)
+        return card != null && card.getZone() != null && card.canBeShownTo(viewer)
                 && (!card.isFaceDown() || card.canFaceDownBeShownTo(viewer));
     }
 
@@ -167,7 +172,7 @@ final class InteractiveState {
             }
             final JsonObject object = player.getAsJsonObject();
             for (String zone : ListNames.CARD_ZONES) {
-                sanitizeCardArray(object.get(zone), game, viewer);
+                sanitizeCardArray(object.get(zone), game, viewer, zone);
             }
         }
     }
@@ -214,8 +219,10 @@ final class InteractiveState {
                 continue;
             }
             final Card top = libraryTop(registered.get(index));
-            if (top != null && mayReceiveLibraryTop(top.getView(), viewer)) {
-                player.add(LIBRARY_TOP, StateEncoder.encodeCardUnchecked(top));
+            if (top != null && !top.isFaceDown() && mayReceiveLibraryTop(top.getView(), viewer)) {
+                final JsonObject shown = StateEncoder.encodeCardUnchecked(top);
+                InteractiveCardFacts.addTokenAndCopy(shown, top);
+                player.add(LIBRARY_TOP, shown);
             }
         }
     }
@@ -236,14 +243,24 @@ final class InteractiveState {
         if (!view.has("stack") || !view.get("stack").isJsonArray()) {
             return;
         }
+        final Map<Integer, SpellAbilityStackInstance> instances = new HashMap<>();
+        for (SpellAbilityStackInstance si : game.getStack()) {
+            instances.put(si.getId(), si);
+        }
         for (JsonElement element : view.getAsJsonArray("stack")) {
             if (!element.isJsonObject()) {
                 continue;
             }
             final JsonObject entry = element.getAsJsonObject();
-            boolean renderedTextSafe = identityVisibleForFid(entry, "fid", game, viewer);
+            final Card source = visibleCardForFid(entry, "fid", game, viewer);
+            boolean renderedTextSafe = source != null;
             if (!renderedTextSafe) {
                 entry.addProperty("name", "Face-down spell or ability");
+            } else if (!source.isFaceDown()) {
+                // Facts exclude face-down sources even when their owner may inspect their identity.
+                final SpellAbilityStackInstance si = instanceOf(entry, instances);
+                InteractiveCardFacts.addOwnerTokenAndCopy(entry, game, source,
+                        si == null ? null : si.getSpellAbility());
             }
 
             // Forge's TargetChoices#toString and stack description contain raw engine names.
@@ -301,19 +318,30 @@ final class InteractiveState {
     }
 
     private static void sanitizeCardArray(final JsonElement value, final Game game,
-                                          final PlayerView viewer) {
+                                          final PlayerView viewer, final String zone) {
         if (value == null || !value.isJsonArray()) {
             return;
         }
-        for (JsonElement element : value.getAsJsonArray()) {
+        for (var entries = value.getAsJsonArray().iterator(); entries.hasNext();) {
+            final JsonElement element = entries.next();
             if (!element.isJsonObject()) {
                 continue;
             }
             final JsonObject cardObject = element.getAsJsonObject();
-            if (!identityVisibleForFid(cardObject, "fid", game, viewer)) {
+            final Card card = visibleCardForFid(cardObject, "fid", game, viewer);
+            if (card == null) {
+                // A hidden-zone entry cannot even expose an id when visibility is unverified.
+                if ("hand".equals(zone) || "exile".equals(zone)) {
+                    entries.remove();
+                    continue;
+                }
                 redactPrivateCard(cardObject);
             } else {
                 addNamedCards(cardObject, game);
+                // Looking at an owned face-down card does not authorize the new provenance facts.
+                if (!card.isFaceDown()) {
+                    InteractiveCardFacts.addTokenAndCopy(cardObject, card);
+                }
             }
         }
     }
@@ -366,14 +394,35 @@ final class InteractiveState {
 
     private static boolean identityVisibleForFid(final JsonObject object, final String field,
                                                  final Game game, final PlayerView viewer) {
+        return visibleCardForFid(object, field, game, viewer) != null;
+    }
+
+    /** The card {@code object[field]} names, when the viewer may receive its identity; otherwise null. */
+    private static Card visibleCardForFid(final JsonObject object, final String field,
+                                          final Game game, final PlayerView viewer) {
         if (!object.has(field) || !object.get(field).isJsonPrimitive()) {
-            return false;
+            return null;
         }
         try {
             final Card card = game.findById(object.get(field).getAsInt());
-            return card != null && mayReceiveIdentity(card.getView(), viewer);
+            return card != null && card.getZone() != null
+                    && card.getView().getZone() == card.getZone().getZoneType()
+                    && mayReceiveIdentity(card.getView(), viewer) ? card : null;
         } catch (RuntimeException e) {
-            return false;
+            return null;
+        }
+    }
+
+    /** The stack instance a {@code stack[]} entry's {@code id} names, or null. */
+    private static SpellAbilityStackInstance instanceOf(final JsonObject entry,
+                                                        final Map<Integer, SpellAbilityStackInstance> instances) {
+        if (!entry.has("id") || !entry.get("id").isJsonPrimitive()) {
+            return null;
+        }
+        try {
+            return instances.get(entry.get("id").getAsInt());
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 
