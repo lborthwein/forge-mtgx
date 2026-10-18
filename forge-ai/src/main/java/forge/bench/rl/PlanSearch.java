@@ -80,9 +80,14 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         public boolean opp = false;
         /** (d): the opponent check's solver config (string values; exact, act=false, no defence are forced). */
         public JsonObject oppCfg = new JsonObject();
+        /**
+         * Lane r4-payment-1015 (R5; null = off, the default, and then nothing changes): payment variants of the policy's
+         * greedy plan ({@link PaySpec}), searched as plan candidates; a chosen one sets the root's MANA_SOURCE answer.
+         */
+        public PaySpec pay = null;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
-                "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg"));
+                "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "pay"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -104,6 +109,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("solverCfg")) s.solverCfg = o.getAsJsonObject("solverCfg");
             if (o.has("opp")) s.opp = o.get("opp").getAsBoolean();
             if (o.has("oppCfg")) s.oppCfg = o.getAsJsonObject("oppCfg");
+            if (o.has("pay") && !o.get("pay").isJsonNull()) s.pay = PaySpec.parse(o.getAsJsonObject("pay"));
             if (s.samples < 0 || s.temperature <= 0 || s.maxSteps < 1 || s.maxLines < 0 || s.minProvenWorlds < 1) {
                 throw new IllegalArgumentException("plans: samples >= 0, temperature > 0, maxSteps >= 1, maxLines >= 0, "
                         + "minProvenWorlds >= 1");
@@ -141,6 +147,177 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 o.add(e.getKey(), e.getValue());
             }
             return SolverDriver.config(o);
+        }
+    }
+
+    /**
+     * Lane r4-payment-1015 (R5): payment variants. At a plan point whose greedy recording (world 0) posed contested
+     * MANA_SOURCE asks of our seat in this turn, up to {@code variants} candidates "the greedy root action, the policy
+     * plays on, ask k paid with option o (every other ask AUTO)" join the plan candidates (round robin over the asks in
+     * order, AUTO and Forge AI's own source left out). {@code when}: "contested" (every such plan point) or "lines" (only
+     * where the solver proposed a line too).
+     */
+    public static final class PaySpec {
+        public int variants = 4;
+        public String when = "contested";
+
+        static PaySpec parse(final JsonObject o) {
+            final PaySpec p = new PaySpec();
+            for (String k : o.keySet()) {
+                if (!"variants".equals(k) && !"when".equals(k)) {
+                    throw new IllegalArgumentException("plans.pay: unknown key " + k);
+                }
+            }
+            if (o.has("variants")) p.variants = o.get("variants").getAsInt();
+            if (o.has("when")) p.when = o.get("when").getAsString();
+            if (p.variants < 1 || !("contested".equals(p.when) || "lines".equals(p.when))) {
+                throw new IllegalArgumentException("plans.pay: variants >= 1, when contested|lines");
+            }
+            return p;
+        }
+    }
+
+    /** An option's identity across copies: its host card's id and its class key ({@link RlManaChoice.Option#key}). */
+    static String optKey(final RlManaChoice.Option o) {
+        final Card h = o.cand.getHostCard();
+        return (h == null ? -1 : h.getId()) + "|" + o.key;
+    }
+
+    /** What a payment is for, across copies: the paid spell's host id and description. */
+    static String payForKey(final SpellAbility sa) {
+        if (sa == null) {
+            return "?";
+        }
+        final Card h = sa.getHostCard();
+        return (h == null ? -1 : h.getId()) + "|" + sa.getDescription();
+    }
+
+    /** One contested ask a probe saw: its ordinal in the plan's turn, what it paid for, its options, Forge AI's. */
+    static final class PayAsk {
+        final int ordinal;
+        final String payFor;
+        final String paidName;
+        final List<String> opts = new ArrayList<>();
+        final List<String> optNames = new ArrayList<>();
+        final int forge;
+
+        PayAsk(final int ordinal, final RlManaChoice.Ask a, final SpellAbility sa) {
+            this.ordinal = ordinal;
+            this.payFor = payForKey(sa);
+            this.paidName = sa == null || sa.getHostCard() == null ? "?" : sa.getHostCard().getName();
+            for (RlManaChoice.Option o : a.options) {
+                opts.add(optKey(o));
+                optNames.add(o.cand.getHostCard() == null ? "?" : o.cand.getHostCard().getName());
+            }
+            this.forge = a.forge;
+        }
+    }
+
+    /** The greedy recording's probe: records our contested asks in the plan's turn, answers AUTO (Forge AI's payment). */
+    static final class PayProbe implements PlayerControllerBridge.ManaPick {
+        final int turn;
+        Player me;
+        Game g;
+        final List<PayAsk> asks = new ArrayList<>();
+
+        PayProbe(final int turn) {
+            this.turn = turn;
+        }
+
+        @Override
+        public int pick(final RlManaChoice.Ask a, final SpellAbility sa, final forge.card.mana.ManaCostShard toPay) {
+            if (g != null && g.getPhaseHandler().getTurn() == turn && asks.size() < 16) {
+                asks.add(new PayAsk(asks.size(), a, sa));
+            }
+            return 0;
+        }
+    }
+
+    /** A payment variant: the greedy root step (then the policy plays on), and ask {@code ordinal} paid with option {@code opt}. */
+    public static final class PayPlan {
+        final PolicyPlan base;
+        final int ordinal;
+        final String payFor;
+        final String opt;
+        final String label;
+        /** Copies whose schedule played the variant's payment / found its ask different (diagnostics). */
+        final java.util.concurrent.atomic.AtomicInteger[] copyStats;
+
+        PayPlan(final PolicyPlan base, final PayAsk ask, final int optIndex,
+                final java.util.concurrent.atomic.AtomicInteger[] copyStats) {
+            this.copyStats = copyStats;
+            this.base = base;
+            this.ordinal = ask.ordinal;
+            this.payFor = ask.payFor;
+            this.opt = ask.opts.get(optIndex);
+            this.label = "pay#" + ask.ordinal + " " + ask.paidName + " <- " + ask.optNames.get(optIndex) + " (" + opt + ")";
+        }
+
+        /** The menu answer (1-based option) of ask {@code ord} for this variant, 0 = AUTO, -1 = it does not match. */
+        int answer(final int ord, final RlManaChoice.Ask a, final SpellAbility sa) {
+            if (ord != ordinal) {
+                return 0;
+            }
+            if (!payFor.equals(payForKey(sa))) {
+                return -1;
+            }
+            for (int i = 0; i < a.options.size(); i++) {
+                if (opt.equals(optKey(a.options.get(i)))) {
+                    return i + 1;
+                }
+            }
+            return -1;
+        }
+    }
+
+    /** A variant's schedule inside a play-out copy: the k-th contested ask in the plan's turn as the variant, else AUTO. */
+    static final class PaySched implements PlayerControllerBridge.ManaPick {
+        final PayPlan plan;
+        final int turn;
+        final Game g;
+        int ord = 0;
+        boolean applied, missed;
+
+        PaySched(final PayPlan plan, final int turn, final Game g) {
+            this.plan = plan;
+            this.turn = turn;
+            this.g = g;
+        }
+
+        @Override
+        public int pick(final RlManaChoice.Ask a, final SpellAbility sa, final forge.card.mana.ManaCostShard toPay) {
+            if (g.getPhaseHandler().getTurn() != turn) {
+                return 0;
+            }
+            final int i = plan.answer(ord++, a, sa);
+            if (i > 0) {
+                applied = true;
+                plan.copyStats[0].incrementAndGet();
+                return i;
+            }
+            if (i < 0) {
+                missed = true;
+                plan.copyStats[1].incrementAndGet();
+            }
+            return 0;
+        }
+    }
+
+    /** The adopted variant, live: the root's MANA_SOURCE asks in its turn, counted as in the copies. */
+    static final class LivePay {
+        final PayPlan plan;
+        final int turn;
+        final boolean proven;
+        final double ev, evDefault;
+        int ord = 0;
+        boolean done;
+
+        LivePay(final PayPlan plan, final int turn, final boolean proven, final double ev, final double evDefault) {
+            this.plan = plan;
+            this.turn = turn;
+            this.proven = proven;
+            this.ev = ev;
+            this.evDefault = evDefault;
         }
     }
 
@@ -306,6 +483,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final int maxSteps;
         final List<PStep> steps = new ArrayList<>();
         Player seatPlayer;
+        /** R5: the payment probe of the greedy recording (null = none). */
+        PayProbe payProbe;
 
         Recorder(final int turn, final long seed, final double temperature, final boolean sampled, final int maxSteps) {
             this.turn = turn;
@@ -398,6 +577,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     final List<Integer> provenTurns = new ArrayList<>(), lineTurns = new ArrayList<>(), planTurns = new ArrayList<>();
     final List<Double> pointMs = new ArrayList<>();
     final List<Double> solverMs = new ArrayList<>();
+    /** R5 payment variants (counters only with spec.pay). */
+    int payPoints, payVariants, payDepartures, payProven, payLiveApplied, payLiveMissed, payLiveDropped;
+    LivePay livePay;
+    /** Variant play-outs: payments applied / asks that did not match (every world, every variant). */
+    final java.util.concurrent.atomic.AtomicInteger[] payCopy = {new java.util.concurrent.atomic.AtomicInteger(),
+            new java.util.concurrent.atomic.AtomicInteger()};
 
     PlanSearch(final Spec spec, final RlSearch rs, final Player me, final RlSeat seat, final SolverDriver unused) {
         this.spec = spec;
@@ -622,6 +807,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     t0 + Math.max(1000L, rs.budgetMs() / 2) * 1_000_000L);
             final List<Object> recs = new ArrayList<>();
             final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps);
+            if (spec.pay != null && rs.manaAsked(g, p)) {
+                greedy.payProbe = new PayProbe(ph.getTurn());   // R5: the greedy turn's contested payments (AUTO)
+            }
             recs.add(greedy);
             final long seed0 = rs.ls().nextWorld0Seed();
             for (int i = 0; i < spec.samples; i++) {
@@ -655,10 +843,98 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 st.labels.add("sample#" + i + " " + pp.label());
                 sampledPlans++;
             }
+            if (greedy.payProbe != null && ok[0] && !greedy.steps.isEmpty() && !greedy.steps.get(0).pass
+                    && !greedy.payProbe.asks.isEmpty() && match(m, objs, greedy.steps.get(0)) >= 0
+                    && ("contested".equals(spec.pay.when) || hasLine(st))) {
+                payVariants(st, new PolicyPlan(ph.getTurn(), new ArrayList<>(greedy.steps.subList(0, 1))),
+                        greedy.payProbe.asks);
+            }
             proposeMs.add((System.nanoTime() - a) / 1e6);
         }
         st.ms = (System.nanoTime() - t0) / 1e6;
         return st;
+    }
+
+    static boolean hasLine(final Stage st) {
+        for (Object o : st.plans) {
+            if (o instanceof LinePlan) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** R5: up to spec.pay.variants single-payment variants of the greedy root step, round robin over the asks in order. */
+    void payVariants(final Stage st, final PolicyPlan base, final List<PayAsk> asks) {
+        payPoints++;
+        int n = 0;
+        for (int round = 0; n < spec.pay.variants; round++) {
+            boolean any = false;
+            for (PayAsk ask : asks) {
+                if (n >= spec.pay.variants) {
+                    break;
+                }
+                // the round-th option of this ask that is neither AUTO nor Forge AI's own source
+                int seen = -1;
+                for (int o = 0; o < ask.opts.size(); o++) {
+                    if (o == ask.forge) {
+                        continue;
+                    }
+                    if (++seen == round) {
+                        final PayPlan pp = new PayPlan(base, ask, o, payCopy);
+                        st.plans.add(pp);
+                        st.labels.add(pp.label);
+                        payVariants++;
+                        n++;
+                        any = true;
+                        break;
+                    }
+                }
+            }
+            if (!any) {
+                break;
+            }
+        }
+    }
+
+    /**
+     * R5: the live seat's MANA_SOURCE ask (the search's {@code policyAsk}): the adopted variant's answer at its ask, or
+     * -1 (the policy's answer stands). {@code policyAnswer} is the policy's own; a non-AUTO answer before the variant's
+     * ask drops it (the copies' ordinals assumed AUTO). The returned LivePay (in {@code out[0]}) labels the row.
+     */
+    int livePayAnswer(final Game g, final Object objs, final int policyAnswer, final LivePay[] out) {
+        final LivePay lp = livePay;
+        if (lp == null || lp.done) {
+            return -1;
+        }
+        if (g.getPhaseHandler().getTurn() != lp.turn || !(objs instanceof Object[])) {
+            lp.done = true;
+            livePay = null;
+            payLiveDropped++;
+            return -1;
+        }
+        final Object[] o = (Object[]) objs;
+        final RlManaChoice.Ask a = (RlManaChoice.Ask) o[0];
+        final SpellAbility sa = (SpellAbility) o[1];
+        final int ord = lp.ord++;
+        if (ord < lp.plan.ordinal) {
+            if (policyAnswer != 0) {
+                lp.done = true;
+                livePay = null;
+                payLiveDropped++;
+            }
+            return -1;
+        }
+        lp.done = true;
+        livePay = null;
+        final int i = lp.plan.answer(ord, a, sa);
+        if (i <= 0) {
+            payLiveMissed++;
+            return -1;
+        }
+        payLiveApplied++;
+        out[0] = lp;
+        return i;
     }
 
     /**
@@ -684,6 +960,29 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             lineDepartures++;
             lineTurns.add(g.getPhaseHandler().getTurn());
             return RlSeat.PrioritySearch.HOOK;
+        }
+        if (plan instanceof PayPlan) {
+            // R5: the variant's root step now; its payment at the variant's ask (livePayAnswer)
+            final PayPlan vp = (PayPlan) plan;
+            final int vi = match(m, objs, vp.base.steps.get(0));
+            if (vi < 0) {
+                return -2;
+            }
+            payDepartures++;
+            if (r.proven) {
+                payProven++;
+            }
+            int c = -1;
+            for (int j = 0; j < r.givenIndex.length; j++) {
+                if (r.givenIndex[j] == r.chosen) {
+                    c = j;
+                }
+            }
+            livePay = new LivePay(vp, g.getPhaseHandler().getTurn(), r.proven,
+                    c >= 0 && c < r.ev.length ? r.ev[c] : Double.NaN, r.ev.length > 0 ? r.ev[0] : Double.NaN);
+            planTurns.add(g.getPhaseHandler().getTurn());
+            pointAgain = true;
+            return vi;
         }
         final PolicyPlan pp = (PolicyPlan) plan;
         final int idx = match(m, objs, pp.steps.get(0));
@@ -821,6 +1120,19 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.add("pointMs", dist(pointMs));
         o.add("solverMs", dist(solverMs));
         o.add("driver", driver.summary());
+        if (spec.pay != null) {
+            final JsonObject p = new JsonObject();
+            p.addProperty("points", payPoints);
+            p.addProperty("variants", payVariants);
+            p.addProperty("departures", payDepartures);
+            p.addProperty("proven", payProven);
+            p.addProperty("liveApplied", payLiveApplied);
+            p.addProperty("liveMissed", payLiveMissed);
+            p.addProperty("liveDropped", payLiveDropped);
+            p.addProperty("copyApplied", payCopy[0].get());
+            p.addProperty("copyMissed", payCopy[1].get());
+            o.add("pay", p);
+        }
         if (threat != null) {
             o.addProperty("respondPoints", respondPoints);
             o.addProperty("threat", threat.summary());

@@ -196,6 +196,22 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     /** Lane search-bones-1015: the plan hook, or null (the default: every ask goes to the seat as before). */
     public PlanHook planHook;
 
+    /**
+     * Lane r4-payment-1015 (R5, S-b payment variants; null by default, and then nothing changes): answers this seat's
+     * contested MANA_SOURCE asks without asking the seat (a search play-out's schedule or probe).
+     */
+    public interface ManaPick {
+        /**
+         * @param a  the shard's options (contested)
+         * @param sa the spell or ability being paid for
+         * @return 0 = AUTO (Forge AI pays the rest of this cost), i = option i - 1, or -1 = no opinion (ask as usual)
+         */
+        int pick(forge.bench.rl.RlManaChoice.Ask a, SpellAbility sa, ManaCostShard toPay);
+    }
+
+    /** Lane r4-payment-1015 (R5): see {@link ManaPick}; null = off. */
+    public ManaPick manaPick;
+
     public BenchSession.Mode getMode() {
         return mode;
     }
@@ -3814,7 +3830,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             final List<SpellAbility> candidates, final boolean checkCosts, final boolean effect) {
         final boolean census = session.isPayCensus();
         final boolean asks = session.isManaSourceAsk(seat) && localAnswers();
-        if (!census && !asks || !isLiveGame()) {
+        final ManaPick picker = manaPick;
+        if (!census && !asks && picker == null || !isLiveGame()) {
             return null;
         }
         if (paySeen.size() > 64) {
@@ -3848,7 +3865,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             JsonRpcChannel.logErr("payment enumeration failed", e);
             return null;
         }
-        if (!asks || payAuto || !a.contested()) {
+        if (!asks && picker == null || payAuto || !a.contested()) {
             return null;
         }
         if (planHook != null && planHook.forgeCosts()) {
@@ -3856,6 +3873,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             // R5, r4-payment-1015), as for its cost cards
             note("manaSource.planAuto");
             return null;
+        }
+        if (picker != null) {
+            // R5: a search play-out's schedule (or probe) answers; no ask, no server call
+            final int i = picker.pick(a, sa, toPay);
+            if (i >= 0 && i <= a.options.size()) {
+                if (i == 0) {
+                    payAutoSet.add(cost);
+                    return null;
+                }
+                if (i - 1 == a.forge) {
+                    return null;
+                }
+                pickCost = cost;
+                return a.options.get(i - 1).cand;
+            }
+            if (!asks) {
+                return null;
+            }
         }
         count("chooseShardSource");
         final int unpaid = Math.min(15, Math.max(0, cost.getConvertedManaCost()));
