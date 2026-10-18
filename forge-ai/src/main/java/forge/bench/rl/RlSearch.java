@@ -561,7 +561,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     /** The live seat (frames of the asks a plan hook answered), set by {@link #attach} with the sink on. */
     private RlSeat liveSeat = null;
     private int labelPlanSteps = 0, labelLineChoices = 0, labelMana = 0, labelFix = 0, labelFloats = 0,
-            labelHookMiss = 0, labelMultiStep = 0;
+            labelHookMiss = 0, labelMultiStep = 0, labelUnposed = 0;
     private final Map<String, Integer> labelUnlabelled = new TreeMap<>();
     /** The GAME's fix_reach (pieces, maxSteps), or null: this game runs no reach search. RlActorBench sets it. */
     public JsonObject fixReach = null;
@@ -1735,7 +1735,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             final int[] t = {-1};
             final RlSeat.LabelFrame lf = priorityFrame(g, me, null, sa, t);
-            if (lf == null || t[0] < 0) {
+            if (lf == null) {
+                labelUnposed++;     // the seat would not pose it (a trivial menu: only one legal answer)
+                return;
+            }
+            if (t[0] < 0) {
                 labelHookMiss++;
                 return;
             }
@@ -1927,7 +1931,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                         }
                         final int[] t = {-1};
                         final RlSeat.LabelFrame lf = priorityFrame(cg, cme, ctx[0].feat, sa, t);
-                        if (lf == null || t[0] < 0) {
+                        if (lf == null) {
+                            labelUnposed++;
+                            return;
+                        }
+                        if (t[0] < 0) {
                             labelHookMiss++;
                             return;
                         }
@@ -2247,6 +2255,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 lb.addProperty("fix_steps", labelFix);
                 lb.addProperty("floats", labelFloats);
                 lb.addProperty("hook_miss", labelHookMiss);
+                lb.addProperty("unposed", labelUnposed);
                 lb.addProperty("multi_step", labelMultiStep);
                 final JsonObject un = new JsonObject();
                 labelUnlabelled.forEach(un::addProperty);
