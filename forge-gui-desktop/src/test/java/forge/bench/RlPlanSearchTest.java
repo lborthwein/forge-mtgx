@@ -116,7 +116,8 @@ public class RlPlanSearchTest {
         try (FakeSearchService svc = new FakeSearchService("0".repeat(64))) {
             svc.leafValue = RlChoiceSearchTest::hashValue;
             final RlActorBench.Cfg cfg = RlActorBenchTest.cfg("eval");
-            cfg.search = RlChoiceSearchTest.spec(svc.address(), ",\"plans\":{\"samples\":3,\"opp\":true}");
+            // horizon 2 (the live spec's): a play-out from our turn reaches their main phase, where the check runs
+            cfg.search = RlChoiceSearchTest.spec(svc.address(), ",\"horizon\":2,\"plans\":{\"samples\":3,\"opp\":true}");
             long checks = 0;
             for (int i = 0; i < Integer.getInteger("rl.sbGames", 2); i++) {
                 final JsonObject la = play(cfg, i).getAsJsonObject("lookahead");
