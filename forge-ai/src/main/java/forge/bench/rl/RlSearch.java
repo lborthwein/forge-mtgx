@@ -1963,6 +1963,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         session.setLocalAnswerer(rs);
         final PlayoutController pc = new PlayoutController(g, me, me.getController().getLobbyPlayer(), session, seat, probe,
                 (cfg.copyFidelity == 1 || cfg.copyFidelity == 2 && ls.fidelityPass()) && !first.pass && !planned);
+        if (first.recorder instanceof PlanSearch.LineProbe) {
+            // R5 measurement (plans.pay.lineProbe): a solver line in a world-0 copy, its payments AUTO or one variant's
+            final PlanSearch.LineProbe lpr = (PlanSearch.LineProbe) first.recorder;
+            lpr.me = me;
+            lpr.fa = first;
+            pc.planHook = PlanSearch.copyLineHook(me, followConfig(), lpr.line, first);
+            pc.manaPick = lpr.pick(g, g.getPhaseHandler().getTurn());
+        }
         if (first.plan instanceof PlanSearch.PayPlan) {
             final PlanSearch.PayPlan vp = (PlanSearch.PayPlan) first.plan;
             pc.manaPick = new PlanSearch.PaySched(vp, vp.base.turn, g);

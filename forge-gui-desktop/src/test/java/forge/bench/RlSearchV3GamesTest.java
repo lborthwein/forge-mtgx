@@ -263,6 +263,9 @@ public class RlSearchV3GamesTest {
                 .parseString("{\"pay\":{\"variants\":2,\"when\":\"lines\"}}").getAsJsonObject());
         Assert.assertEquals(s.pay.variants, 2);
         Assert.assertEquals(s.pay.when, "lines");
+        Assert.assertFalse(s.pay.lineProbe, "the line probe (measurement) is off by default");
+        Assert.assertTrue(forge.bench.rl.PlanSearch.Spec.parse(com.google.gson.JsonParser.parseString(
+                "{\"pay\":{\"lineProbe\":true}}").getAsJsonObject()).pay.lineProbe);
         Assert.assertThrows(IllegalArgumentException.class, () -> forge.bench.rl.PlanSearch.Spec.parse(
                 com.google.gson.JsonParser.parseString("{\"pay\":{\"variants\":0}}").getAsJsonObject()));
         Assert.assertThrows(IllegalArgumentException.class, () -> forge.bench.rl.PlanSearch.Spec.parse(

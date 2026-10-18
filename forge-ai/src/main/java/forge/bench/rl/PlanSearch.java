@@ -160,16 +160,23 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     public static final class PaySpec {
         public int variants = 4;
         public String when = "contested";
+        /**
+         * Measurement only (false by default): at an adopted proven solver line, replay the line in world-0 copies with
+         * Forge AI's payments and with each single-payment variant (<= variants), and record whether each still wins
+         * this turn and what it leaves untapped. Never changes a decision.
+         */
+        public boolean lineProbe = false;
 
         static PaySpec parse(final JsonObject o) {
             final PaySpec p = new PaySpec();
             for (String k : o.keySet()) {
-                if (!"variants".equals(k) && !"when".equals(k)) {
+                if (!"variants".equals(k) && !"when".equals(k) && !"lineProbe".equals(k)) {
                     throw new IllegalArgumentException("plans.pay: unknown key " + k);
                 }
             }
             if (o.has("variants")) p.variants = o.get("variants").getAsInt();
             if (o.has("when")) p.when = o.get("when").getAsString();
+            if (o.has("lineProbe")) p.lineProbe = o.get("lineProbe").getAsBoolean();
             if (p.variants < 1 || !("contested".equals(p.when) || "lines".equals(p.when))) {
                 throw new IllegalArgumentException("plans.pay: variants >= 1, when contested|lines");
             }
@@ -300,6 +307,139 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 plan.copyStats[1].incrementAndGet();
             }
             return 0;
+        }
+    }
+
+    /**
+     * Measurement (pay.lineProbe): one world-0 copy playing a solver line with a payment probe (AUTO) or one variant's
+     * schedule, to the end of our turn; its end state is read after the play-out.
+     */
+    public static final class LineProbe {
+        final LinePlan line;
+        final PayPlan variant;   // null = Forge AI's payments (the probe)
+        final PayProbe probe;
+        Game g;
+        Player me;
+        PaySched sched;
+        LookaheadSearch.FirstAction fa;
+
+        LineProbe(final LinePlan line, final PayPlan variant, final int turn) {
+            this.line = line;
+            this.variant = variant;
+            this.probe = variant == null ? new PayProbe(turn) : null;
+        }
+
+        PlayerControllerBridge.ManaPick pick(final Game copy, final int turn) {
+            g = copy;
+            if (variant == null) {
+                probe.g = copy;
+                return probe;
+            }
+            sched = new PaySched(variant, turn, copy);
+            return sched;
+        }
+
+        /** {won, lineState, untapped mana sources, colours they make} at the end of the play-out. */
+        JsonObject end() {
+            final JsonObject o = new JsonObject();
+            if (g == null || me == null) {
+                o.addProperty("ran", false);
+                return o;
+            }
+            boolean won = g.isGameOver();
+            for (Player x : g.getRegisteredPlayers()) {
+                if (x != me && !x.hasLost()) {
+                    won = false;
+                }
+            }
+            won &= !me.hasLost();
+            o.addProperty("won", won);
+            o.addProperty("line", fa == null ? -1 : fa.planState);
+            int untapped = 0;
+            final java.util.TreeSet<Character> cols = new java.util.TreeSet<>();
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                if (c.isTapped() || c.getManaAbilities().isEmpty()) {
+                    continue;
+                }
+                untapped++;
+                for (char ch : RlManaChoice.colours(c).toCharArray()) {
+                    cols.add(ch);
+                }
+            }
+            o.addProperty("untapped", untapped);
+            final StringBuilder sb = new StringBuilder();
+            for (char ch : cols) {
+                sb.append(ch);
+            }
+            o.addProperty("colours", sb.toString());
+            if (sched != null) {
+                o.addProperty("applied", sched.applied);
+                o.addProperty("missed", sched.missed);
+            }
+            return o;
+        }
+    }
+
+    /** pay.lineProbe results (measurement only), at most 40 kept in full. */
+    final List<JsonObject> lineProbes = new ArrayList<>();
+    int lineProbeRuns, lineProbeContested, lineProbeAltWins, lineProbeAltBetter;
+
+    /** Measurement (pay.lineProbe): the adopted proven line, with Forge AI's payments and each single-payment variant. */
+    void probeLine(final Game g, final Player p, final ForcedWinSolver.Proposal proven, final int knownTop, final long t0) {
+        final int turn = g.getPhaseHandler().getTurn();
+        final LinePlan lp = new LinePlan(proven);
+        final long deadline = t0 + Math.max(1000L, rs.budgetMs() / 2) * 1_000_000L;
+        final LineProbe base = new LineProbe(lp, null, turn);
+        final List<Object> one = new ArrayList<>();
+        one.add(base);
+        rs.ls().recordPlans(g, p, one, knownTop, deadline);
+        lineProbeRuns++;
+        final JsonObject rec = new JsonObject();
+        rec.addProperty("turn", turn);
+        rec.addProperty("line", proven.text);
+        final JsonObject b = base.end();
+        rec.add("auto", b);
+        rec.addProperty("asks", base.probe.asks.size());
+        if (!base.probe.asks.isEmpty()) {
+            lineProbeContested++;
+            final Stage tmp = new Stage();
+            final int before = payVariants;
+            payVariants(tmp, null, base.probe.asks);
+            payVariants = before;   // measurement: not counted as searched variants
+            payPoints--;
+            final List<Object> alts = new ArrayList<>();
+            for (Object o : tmp.plans) {
+                alts.add(new LineProbe(lp, (PayPlan) o, turn));
+            }
+            if (!alts.isEmpty() && System.nanoTime() < deadline) {
+                rs.ls().recordPlans(g, p, alts, knownTop, deadline);
+            }
+            final JsonArray va = new JsonArray();
+            boolean anyWin = false, anyBetter = false;
+            for (Object o : alts) {
+                final LineProbe x = (LineProbe) o;
+                final JsonObject e = x.end();
+                e.addProperty("variant", x.variant.label);
+                final boolean w = e.has("won") && e.get("won").getAsBoolean();
+                final boolean bw = b.has("won") && b.get("won").getAsBoolean();
+                final boolean better = w == bw && w && e.has("untapped") && b.has("untapped")
+                        && (e.get("untapped").getAsInt() > b.get("untapped").getAsInt()
+                        || e.get("colours").getAsString().length() > b.get("colours").getAsString().length());
+                e.addProperty("keeps_win_more_left", better);
+                anyWin |= w && bw;
+                anyBetter |= better;
+                va.add(e);
+            }
+            rec.add("variants", va);
+            if (anyWin) {
+                lineProbeAltWins++;
+            }
+            if (anyBetter) {
+                lineProbeAltBetter++;
+            }
+        }
+        if (lineProbes.size() < 40) {
+            lineProbes.add(rec);
         }
     }
 
@@ -777,6 +917,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                     proven = pr;
                 }
             }
+            if (proven != null && spec.pay != null && spec.pay.lineProbe && rs.manaAsked(g, p)) {
+                probeLine(g, p, proven, st.knownTop, t0);   // measurement only: the decision below is unchanged
+            }
             if (proven != null) {
                 // (b) a proven node: take it, no play-outs
                 solver.adopt(proven.line);
@@ -1131,6 +1274,17 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             p.addProperty("liveDropped", payLiveDropped);
             p.addProperty("copyApplied", payCopy[0].get());
             p.addProperty("copyMissed", payCopy[1].get());
+            if (spec.pay.lineProbe) {
+                p.addProperty("lineProbeRuns", lineProbeRuns);
+                p.addProperty("lineProbeContested", lineProbeContested);
+                p.addProperty("lineProbeAltWins", lineProbeAltWins);
+                p.addProperty("lineProbeAltBetter", lineProbeAltBetter);
+                final JsonArray lpa = new JsonArray();
+                for (JsonObject x : lineProbes) {
+                    lpa.add(x);
+                }
+                p.add("lineProbes", lpa);
+            }
             o.add("pay", p);
         }
         if (threat != null) {
