@@ -304,6 +304,8 @@ final class InteractiveWatch {
         private final Game game;
         private final List<InteractiveProtocol.Channel> channels;
         private final Player[] seats;
+        /** Where cards entered the battlefield from, for {@code land_played}'s {@code fromZone} (lane bridgemeta-1018). */
+        private final InteractiveGameEvents.Moves moves = new InteractiveGameEvents.Moves();
         private int decisions = 0;
         private volatile boolean failed = false;
 
@@ -344,7 +346,7 @@ final class InteractiveWatch {
                         continue;
                     }
                     final JsonObject body = new JsonObject();
-                    body.add("event", InteractiveGameEvents.encode(event, game, seats[i].getView()));
+                    body.add("event", InteractiveGameEvents.encode(event, game, seats[i].getView(), moves));
                     channel.send("event", body);
                 }
             } catch (InteractiveProtocol.ProtocolException e) {

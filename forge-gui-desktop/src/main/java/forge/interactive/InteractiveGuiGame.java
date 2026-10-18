@@ -98,6 +98,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private final ConcurrentHashMap<String, PendingInput> inputIds = new ConcurrentHashMap<>();
     private final Set<Input> inFlightInputs = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean aborting = new AtomicBoolean();
+    /** Where cards entered the battlefield from, for {@code land_played}'s {@code fromZone} (lane bridgemeta-1018). */
+    private final InteractiveGameEvents.Moves eventMoves = new InteractiveGameEvents.Moves();
     private final ExecutorService actions;
     /**
      * Forge's model is single-threaded: {@code Card#getAllPossibleAbilities} is not a
@@ -337,7 +339,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         try {
             final JsonObject body = new JsonObject();
-            final JsonObject event = InteractiveGameEvents.encode(engineEvent, game, human.getView());
+            final JsonObject event = InteractiveGameEvents.encode(engineEvent, game, human.getView(), eventMoves);
             body.add("event", event);
             channel.send("event", body);
         } catch (InteractiveProtocol.ProtocolException e) {

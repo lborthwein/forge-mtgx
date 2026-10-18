@@ -354,7 +354,7 @@ public class InteractiveContinuationTest extends AITest {
     // ---- the wire: hello and the handover line
 
     @Test
-    public void aNormalHelloIsUnchangedAndARebuildsSaysSo() throws Exception {
+    public void aNormalHelloDeclaresItsCardFactsAndARebuildsSaysSo() throws Exception {
         final ByteArrayOutputStream normal = new ByteArrayOutputStream();
         new InteractiveProtocol.Channel(new BufferedReader(new StringReader("")),
                 new PrintStream(normal, true, StandardCharsets.UTF_8), "s")
@@ -362,7 +362,7 @@ public class InteractiveContinuationTest extends AITest {
         assertEquals(normal.toString(StandardCharsets.UTF_8).trim(),
                 "{\"protocol\":\"mtgx-forge-interactive/1\",\"session\":\"s\",\"seq\":1,\"type\":\"hello\","
                         + "\"forgeCommit\":\"c0ffee\",\"forgeVersion\":\"v1\",\"aiProfile\":\"Default\","
-                        + "\"humanSeat\":0,\"seed\":42}");
+                        + "\"humanSeat\":0,\"seed\":42,\"publicCardFacts\":1}");
 
         final ByteArrayOutputStream rebuild = new ByteArrayOutputStream();
         new InteractiveProtocol.Channel(new BufferedReader(new StringReader("")),
@@ -371,7 +371,7 @@ public class InteractiveContinuationTest extends AITest {
         assertEquals(rebuild.toString(StandardCharsets.UTF_8).trim(),
                 "{\"protocol\":\"mtgx-forge-interactive/1\",\"session\":\"s\",\"seq\":1,\"type\":\"hello\","
                         + "\"forgeCommit\":\"c0ffee\",\"forgeVersion\":\"v1\",\"aiProfile\":\"Default\","
-                        + "\"humanSeat\":0,\"seed\":42,\"continuation\":\"rebuild\"}");
+                        + "\"humanSeat\":0,\"seed\":42,\"publicCardFacts\":1,\"continuation\":\"rebuild\"}");
     }
 
     @Test

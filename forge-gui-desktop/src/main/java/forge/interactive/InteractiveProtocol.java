@@ -408,7 +408,8 @@ final class InteractiveProtocol {
 
         /**
          * {@code extras} (or null): fields after the usual ones, e.g. {@code "continuation":"rebuild"} (lane
-         * forge-continue-1011). Null sends the hello every game has always had, byte for byte.
+         * forge-continue-1011). Null sends the plain hello, which since lane bridgemeta-1018 ends with
+         * {@code publicCardFacts}.
          */
         JsonObject hello(final String forgeCommit, final String forgeVersion, final String aiProfile,
                          final int humanSeat, final long seed, final JsonObject extras) throws ProtocolException {
@@ -421,6 +422,9 @@ final class InteractiveProtocol {
             body.addProperty("aiProfile", aiProfile);
             body.addProperty("humanSeat", humanSeat);
             body.addProperty("seed", seed);
+            // Lane bridgemeta-1018: this jar's public card facts (InteractiveCardFacts). A host that reads no such
+            // field ignores it; absent means a jar without them.
+            body.addProperty(InteractiveCardFacts.FIELD, InteractiveCardFacts.VERSION);
             if (extras != null) {
                 for (Map.Entry<String, JsonElement> entry : extras.entrySet()) {
                     if (body.has(entry.getKey())) {
