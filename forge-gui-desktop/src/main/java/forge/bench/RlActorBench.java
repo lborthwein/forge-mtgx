@@ -424,6 +424,11 @@ public final class RlActorBench {
         final String[] shas = {shaJ.get(0).getAsString(), shaJ.get(1).getAsString()};
         final String[] ctl = {ctlJ.get(0).getAsString(), ctlJ.get(1).getAsString()};
         final boolean trainSide = "train".equals(mode) || "record".equals(mode);
+        if (ForcedWinPolicyController.enabled() && !"eval".equals(mode)) {
+            // steps-back-1016: the solver in front of an RL seat is an EVAL arm only; it never answers for a learning seat
+            out.guardError = "-D" + ForcedWinPolicyController.PROPERTY + " is for eval mode only, not " + mode;
+            return out;
+        }
         final boolean priv = trainSide && g.has("priv") && g.get("priv").getAsBoolean();
         for (int s = 0; s < 2; s++) {
             final String why = deckGuard(mode, cfg.rlRoot, decks[s], shas[s]);
