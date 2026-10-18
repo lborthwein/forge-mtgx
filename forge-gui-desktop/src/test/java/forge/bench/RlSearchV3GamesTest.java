@@ -14,7 +14,6 @@ import forge.bench.rl.FakeRlServer;
 import forge.bench.rl.FakeSearchService;
 import forge.bench.rl.RlFeaturizer;
 import forge.bench.rl.RlSchemaV3;
-import forge.bench.rl.RlSearch;
 import forge.bench.rl.RlWire;
 
 /**

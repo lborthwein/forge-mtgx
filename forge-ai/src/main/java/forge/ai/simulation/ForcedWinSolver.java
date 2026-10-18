@@ -720,6 +720,31 @@ public final class ForcedWinSolver {
         return k == null ? 0 : k.size();
     }
 
+    /**
+     * Lane r5-prereq-1018 (R5 labels): the first step of {@code line} (a {@link Proposal#line}) our priority menu can
+     * name, skipping its mana floats: {@code {hostId (Integer), description (String), land (Boolean), pass (Boolean)}},
+     * or null when the line starts with a repeat (no menu entry). A line that attacks first passes this priority (main
+     * phase 1 moves on to combat, where the line's attack is declared): its first step is a pass. Read only.
+     */
+    public static Object[] firstMenuStep(Object line) {
+        for (ForcedWinPlanner.Step st : ((Line) line).steps) {
+            if (st.pass) {
+                return new Object[] {-1, "", Boolean.FALSE, Boolean.TRUE};
+            }
+            if (st.kind == ForcedWinModel.AbilKind.FLOAT) {
+                continue;
+            }
+            if (st.kind == ForcedWinModel.AbilKind.ATTACK) {
+                return new Object[] {-1, "", Boolean.FALSE, Boolean.TRUE};
+            }
+            if (st.kind == ForcedWinModel.AbilKind.REPEAT) {
+                return null;
+            }
+            return new Object[] {st.hostId, st.desc, st.kind == ForcedWinModel.AbilKind.LAND, Boolean.FALSE};
+        }
+        return null;
+    }
+
     /** search-bones-1015: a line's text for receipts. */
     public static String describeLine(Object line) {
         return String.valueOf(line);
