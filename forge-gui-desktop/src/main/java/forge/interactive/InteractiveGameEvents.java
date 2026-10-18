@@ -44,7 +44,7 @@ final class InteractiveGameEvents {
         } else if (event instanceof GameEventLandPlayed e) {
             kind(result, "land_played");
             seat(result, game, e.player());
-            result.addProperty("card", label(e.land(), viewer));
+            result.addProperty("card", label(e.land(), game, viewer));
             final Card land = publicIn(game, e.land(), ZoneType.Battlefield, viewer);
             if (land != null) {
                 facts(result, game, land, null);
@@ -57,7 +57,7 @@ final class InteractiveGameEvents {
             kind(result, e.sa().isSpell() ? "spell_cast"
                     : e.si().isTrigger() ? "ability_triggered" : "ability_activated");
             seat(result, game, e.si().getActivatingPlayer());
-            result.addProperty("card", label(e.sa().getHostCard(), viewer));
+            result.addProperty("card", label(e.sa().getHostCard(), game, viewer));
             if (e.sa().isSpell()) {
                 castFrom(result, game, e.sa().getHostCard());
                 final Card spell = publicIn(game, e.sa().getHostCard(), ZoneType.Stack, viewer);
@@ -79,7 +79,7 @@ final class InteractiveGameEvents {
         } else if (event instanceof GameEventPlayerDamaged e) {
             kind(result, "player_damaged");
             seat(result, game, e.target());
-            result.addProperty("source", label(e.source(), viewer));
+            result.addProperty("source", label(e.source(), game, viewer));
             result.addProperty("amount", e.amount());
             result.addProperty("combat", e.combat());
             result.addProperty("infect", e.infect());
@@ -88,7 +88,7 @@ final class InteractiveGameEvents {
             seat(result, game, e.player());
             final JsonArray cards = new JsonArray();
             for (CardView card : e.attackersMap().values()) {
-                cards.add(label(card, viewer));
+                cards.add(label(card, game, viewer));
             }
             result.add("cards", cards);
         } else if (event instanceof GameEventBlockersDeclared e) {
@@ -103,8 +103,8 @@ final class InteractiveGameEvents {
                         continue;
                     }
                     final JsonObject block = new JsonObject();
-                    block.addProperty("attacker", label(assignment.getKey(), viewer));
-                    block.addProperty("blocker", label(assignment.getValue(), viewer));
+                    block.addProperty("attacker", label(assignment.getKey(), game, viewer));
+                    block.addProperty("blocker", label(assignment.getValue(), game, viewer));
                     blocks.add(block);
                 }
             }
@@ -268,7 +268,7 @@ final class InteractiveGameEvents {
         }
     }
 
-    private static String label(final CardView card, final PlayerView viewer) {
+    private static String label(final CardView card, final Game game, final PlayerView viewer) {
         if (card == null) {
             return "a card";
         }
@@ -277,7 +277,7 @@ final class InteractiveGameEvents {
         if (card.isFaceDown()) {
             return "a face-down card";
         }
-        if (!InteractiveState.mayReceiveIdentity(card, viewer)) {
+        if (publicIn(game, card, card.getZone(), viewer) == null) {
             return "a card";
         }
         final String name = card.getCurrentState().getName();

@@ -94,6 +94,17 @@ public class InteractiveLibraryTopTest extends AITest {
         assertEquals(top.get("controllerSeat").getAsInt(), ownerSeat);
     }
 
+    @Test
+    public void faceDownLibraryTopGainsNoFactsEvenWithLookPermission() {
+        final Table t = table("Ainok Tracker", "Counterspell");
+        addCard("Courser of Kruphix", t.seat0);
+        settle(t);
+        t.top0.turnFaceDown(true);
+        for (Player viewer : List.of(t.seat0, t.seat1)) {
+            assertNull(libraryTopSeenBy(t, viewer, t.seat0));
+        }
+    }
+
     // ------------------------------------------------------------------------------------- nobody may look
 
     @Test(timeOut = 900000)

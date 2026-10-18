@@ -137,8 +137,9 @@ final class InteractiveState {
         }
     }
 
+    // CardView treats a missing zone as public; a frozen tracker must instead fail closed.
     static boolean mayReceiveIdentity(final CardView card, final PlayerView viewer) {
-        return card != null && card.canBeShownTo(viewer)
+        return card != null && card.getZone() != null && card.canBeShownTo(viewer)
                 && (!card.isFaceDown() || card.canFaceDownBeShownTo(viewer));
     }
 
@@ -171,7 +172,7 @@ final class InteractiveState {
             }
             final JsonObject object = player.getAsJsonObject();
             for (String zone : ListNames.CARD_ZONES) {
-                sanitizeCardArray(object.get(zone), game, viewer);
+                sanitizeCardArray(object.get(zone), game, viewer, zone);
             }
         }
     }
@@ -218,7 +219,7 @@ final class InteractiveState {
                 continue;
             }
             final Card top = libraryTop(registered.get(index));
-            if (top != null && mayReceiveLibraryTop(top.getView(), viewer)) {
+            if (top != null && !top.isFaceDown() && mayReceiveLibraryTop(top.getView(), viewer)) {
                 final JsonObject shown = StateEncoder.encodeCardUnchecked(top);
                 InteractiveCardFacts.addTokenAndCopy(shown, top);
                 player.add(LIBRARY_TOP, shown);
@@ -255,8 +256,8 @@ final class InteractiveState {
             boolean renderedTextSafe = source != null;
             if (!renderedTextSafe) {
                 entry.addProperty("name", "Face-down spell or ability");
-            } else {
-                // Public card facts (lane bridgemeta-1018): only on an entry whose identity the viewer may receive.
+            } else if (!source.isFaceDown()) {
+                // Facts exclude face-down sources even when their owner may inspect their identity.
                 final SpellAbilityStackInstance si = instanceOf(entry, instances);
                 InteractiveCardFacts.addOwnerTokenAndCopy(entry, game, source,
                         si == null ? null : si.getSpellAbility());
@@ -317,22 +318,30 @@ final class InteractiveState {
     }
 
     private static void sanitizeCardArray(final JsonElement value, final Game game,
-                                          final PlayerView viewer) {
+                                          final PlayerView viewer, final String zone) {
         if (value == null || !value.isJsonArray()) {
             return;
         }
-        for (JsonElement element : value.getAsJsonArray()) {
+        for (var entries = value.getAsJsonArray().iterator(); entries.hasNext();) {
+            final JsonElement element = entries.next();
             if (!element.isJsonObject()) {
                 continue;
             }
             final JsonObject cardObject = element.getAsJsonObject();
             final Card card = visibleCardForFid(cardObject, "fid", game, viewer);
             if (card == null) {
+                // A hidden-zone entry cannot even expose an id when visibility is unverified.
+                if ("hand".equals(zone) || "exile".equals(zone)) {
+                    entries.remove();
+                    continue;
+                }
                 redactPrivateCard(cardObject);
             } else {
                 addNamedCards(cardObject, game);
-                // Public card facts (lane bridgemeta-1018). A redacted entry above gets none of them.
-                InteractiveCardFacts.addTokenAndCopy(cardObject, card);
+                // Looking at an owned face-down card does not authorize the new provenance facts.
+                if (!card.isFaceDown()) {
+                    InteractiveCardFacts.addTokenAndCopy(cardObject, card);
+                }
             }
         }
     }
@@ -396,7 +405,9 @@ final class InteractiveState {
         }
         try {
             final Card card = game.findById(object.get(field).getAsInt());
-            return card != null && mayReceiveIdentity(card.getView(), viewer) ? card : null;
+            return card != null && card.getZone() != null
+                    && card.getView().getZone() == card.getZone().getZoneType()
+                    && mayReceiveIdentity(card.getView(), viewer) ? card : null;
         } catch (RuntimeException e) {
             return null;
         }

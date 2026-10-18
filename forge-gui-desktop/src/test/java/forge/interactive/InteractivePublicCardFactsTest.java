@@ -393,6 +393,109 @@ public class InteractivePublicCardFactsTest extends AITest {
         assertNoIdentityFacts(seen1.get(1));
     }
 
+
+    @Test
+    public void zonelessHandIsOmittedForBothSeats() {
+        newGame();
+        game.getAction().checkStateEffects(true);
+        game.getTracker().freeze();
+        try {
+            final Card hidden = addCardToZone("Ancestral Recall", seat1, ZoneType.Hand);
+            final Card exiled = addCardToZone("Time Walk", seat1, ZoneType.Exile);
+            assertNull(hidden.getView().getZone());
+            for (Player viewer : List.of(seat0, seat1)) {
+                assertNull(zoneEntry(viewer, hidden.getId()));
+                assertNull(zoneEntry(viewer, exiled.getId()));
+                assertFalse(InteractiveState.mayReceiveIdentity(hidden.getView(), viewer.getView()));
+            }
+        } finally {
+            game.getTracker().unfreeze();
+        }
+    }
+
+    @Test
+    public void zonelessStackAndAbilitySourcesHaveNoIdentityOrFacts() {
+        for (boolean spell : List.of(true, false)) {
+            newGame();
+            game.getAction().checkStateEffects(true);
+            game.getTracker().freeze();
+            try {
+                final Card source = spell ? createCard("Grizzly Bears", seat0) : addCard("Grizzly Bears", seat0);
+                if (spell) {
+                    game.getStackZone().add(source);
+                }
+                final SpellAbility sa = spell ? source.getFirstSpellAbility()
+                        : forge.game.ability.AbilityFactory.getAbility(
+                                "AB$ Draw | Cost$ 0 | NumCards$ 1 | SpellDescription$ Grizzly Bears draws.", source);
+                sa.setActivatingPlayer(seat0);
+                final Recorder events = new Recorder(game, seat0, seat1);
+                game.getStack().add(sa);
+                assertNull(source.getView().getZone());
+                for (Player viewer : List.of(seat0, seat1)) {
+                    final JsonObject entry = stackEntry(viewer, source.getId());
+                    assertNotNull(entry);
+                    assertEquals(entry.get("name").getAsString(), "Face-down spell or ability");
+                    assertEquals(entry.get("description").getAsString(), "Hidden spell or ability");
+                    for (String field : List.of("ownerSeat", "isToken", "isCopy")) {
+                        assertFalse(entry.has(field), entry.toString());
+                    }
+                    assertFalse(events.wire(StateEncoder.playerIndex(game, viewer)).contains("Grizzly Bears"));
+                }
+            } finally {
+                game.getTracker().unfreeze();
+            }
+        }
+    }
+
+    @Test
+    public void staleZoneCannotAuthorizeIdentityOrEventLabels() {
+        newGame();
+        final Card source = addCard("Grizzly Bears", seat1);
+        game.getAction().checkStateEffects(true);
+        game.getTracker().freeze();
+        try {
+            seat1.getZone(ZoneType.Battlefield).remove(source);
+            seat1.getZone(ZoneType.Hand).add(source);
+            assertEquals(source.getView().getZone(), ZoneType.Battlefield);
+            assertEquals(source.getZone().getZoneType(), ZoneType.Hand);
+            for (Player viewer : List.of(seat0, seat1)) {
+                assertNull(zoneEntry(viewer, source.getId()));
+                final JsonObject event = InteractiveGameEvents.encode(
+                        new forge.game.event.GameEventLandPlayed(seat1.getView(), source.getView()),
+                        game, viewer.getView());
+                assertFalse(event.toString().contains("Grizzly Bears"), event.toString());
+            }
+        } finally {
+            game.getTracker().unfreeze();
+        }
+    }
+
+    @Test
+    public void faceDownZoneAndStackFactsAreAbsentForBothSeats() {
+        newGame();
+        final Card morph = addCard("Ainok Tracker", seat0);
+        morph.turnFaceDown(true);
+        final Card spell = createCard("Ainok Tracker", seat0);
+        game.getStackZone().add(spell);
+        final SpellAbility sa = spell.getFirstSpellAbility();
+        sa.setActivatingPlayer(seat0);
+        game.getStack().add(sa);
+        spell.turnFaceDown(true);
+        assertTrue(spell.isFaceDown());
+        game.getAction().checkStateEffects(true);
+        for (Player viewer : List.of(seat0, seat1)) {
+            final JsonObject zone = zoneEntry(viewer, morph.getId());
+            final JsonObject stack = stackEntry(viewer, spell.getId());
+            assertNotNull(zone);
+            assertNotNull(stack);
+            for (String field : List.of("isToken", "isCopy")) {
+                assertFalse(zone.has(field), zone.toString());
+                assertFalse(stack.has(field), stack.toString());
+            }
+            assertFalse(stack.has("ownerSeat"), stack.toString());
+        }
+    }
+
     // ----------------------------------------------------------------------------------- the version
 
     @Test(timeOut = 900000)
