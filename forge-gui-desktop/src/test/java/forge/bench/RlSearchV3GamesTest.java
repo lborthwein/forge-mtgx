@@ -166,6 +166,111 @@ public class RlSearchV3GamesTest {
         }
     }
 
+    /** R5: S-b games (obs-v3, MANA_SOURCE on) with or without payment variants ({@code plans.pay}). */
+    static List<RlActorBench.Played> playSb(final FakeSearchService svc, final boolean mana, final String plans,
+            final int games) throws Exception {
+        final RlActorBench.Cfg cfg = RlActorBenchTest.cfg("eval");
+        cfg.obsSchema = 3;
+        cfg.manaSource = mana;
+        cfg.search = RlSearchV2GamesTest.spec(svc.address(), ",\"plans\":" + plans);
+        final java.io.File log = java.io.File.createTempFile("search-v3-pay-", ".jsonl");
+        log.deleteOnExit();
+        cfg.search.decisionLog = log.getPath();
+        final List<RlActorBench.Played> out = new ArrayList<>();
+        for (int i = 0; i < games; i++) {
+            final RlActorBench.Played p = RlActorBench.play(cfg, "eval", RlActorBenchOpponentTest.evalGame(i,
+                    i % 2 == 0 ? "rl:M" : "forge", i % 2 == 0 ? "forge" : "rl:M"),
+                    new RlFeaturizer(RlActorBenchTest.index), RlSearchV2GamesTest.endpoint(2), null, "test");
+            Assert.assertNull(p.guardError, "guard");
+            Assert.assertNull(p.seat.fatal, "fatal");
+            Assert.assertTrue(p.end.get("void").isJsonNull(), "game " + i + " void " + p.end.get("void"));
+            final JsonObject s1 = p.end.getAsJsonObject("search").getAsJsonObject("lookahead").getAsJsonObject("s1");
+            Assert.assertEquals(s1.get("playoutSeatFailures").getAsInt(), 0, String.valueOf(s1.get("playoutLastFailure")));
+            out.add(p);
+        }
+        return out;
+    }
+
+    /**
+     * R5: payment variants. With MANA_SOURCE off the pay key changes nothing (the S-b games are the games without it);
+     * on, variants are searched, an adopted one answers its ask (a {@code teacher: plan} row whose answer is its target),
+     * and the tapes replay without the search.
+     */
+    @Test
+    public void payVariantsAreSearchedAndAdoptedOnesReplay() throws Exception {
+        final int games = Integer.getInteger("rl.v3PayGames", 6);
+        final String sb = "{\"samples\":1,\"solver\":false}";
+        final String pay = "{\"samples\":1,\"solver\":false,\"pay\":{\"variants\":4}}";
+        final List<RlActorBench.Played> offA, offB, on;
+        try (FakeSearchService svc = service(3)) {
+            svc.leafValue = RlChoiceSearchTest::hashValue;
+            offA = playSb(svc, false, sb, games);
+        }
+        try (FakeSearchService svc = service(3)) {
+            offB = playSb(svc, false, pay, games);
+        }
+        for (int i = 0; i < games; i++) {
+            Assert.assertEquals(offB.get(i).end.get("digest"), offA.get(i).end.get("digest"),
+                    "game " + i + ": the pay key without MANA_SOURCE asks changes nothing");
+        }
+        try (FakeSearchService svc = service(3)) {
+            on = playSb(svc, true, pay, games);
+            Assert.assertEquals(svc.errors.get(), 0L, "the service refused a request");
+        }
+        int variants = 0, departures = 0, teacher = 0, overrides = 0;
+        for (RlActorBench.Played p : on) {
+            final JsonObject pl = p.end.getAsJsonObject("search").getAsJsonObject("plans");
+            for (String k : pl.keySet()) {
+                final JsonObject py = pl.getAsJsonObject(k).getAsJsonObject("pay");
+                Assert.assertNotNull(py, "the pay block");
+                variants += py.get("variants").getAsInt();
+                System.err.println("[search-v3-pay] seat " + k + " " + py);
+                departures += py.get("departures").getAsInt();
+            }
+            overrides += p.seat.payOverrides;
+            for (JsonObject r : p.search.rows()) {
+                if ("mana_source".equals(r.has("kind") ? r.get("kind").getAsString() : "") && r.has("teacher")) {
+                    teacher++;
+                    Assert.assertEquals(r.get("teacher").getAsString(), "plan");
+                    Assert.assertEquals(r.get("answer").getAsInt(), r.get("target").getAsInt(), String.valueOf(r));
+                    Assert.assertTrue(r.get("target").getAsInt() > 0, "a variant's target is a source, not AUTO");
+                    Assert.assertTrue(r.has("proven") && r.has("variant"), String.valueOf(r));
+                }
+            }
+        }
+        System.err.println("[search-v3-pay] variants " + variants + ", adopted " + departures + ", teacher rows " + teacher
+                + ", live overrides " + overrides);
+        Assert.assertTrue(variants > 0, "no payment variant was searched");
+        Assert.assertTrue(teacher <= departures, "a teacher row without an adopted variant");
+        for (RlActorBench.Played p : on) {
+            final JsonObject g = RlChoiceSearchTest.replayGame(p.tape);
+            g.addProperty("obs_schema", 3);
+            g.addProperty("mana_source", true);
+            final RlActorBench.Played r = RlActorBench.play(RlActorBenchTest.cfg("eval"), "eval", g,
+                    new RlFeaturizer(RlActorBenchTest.index),
+                    RlActorBench.tapeEndpoint(p.tape, RlWire.parseUid(p.tape.get("game_uid").getAsString())), null, "test");
+            Assert.assertNull(r.seat.fatal, "replay error");
+            Assert.assertEquals(r.end.get("digest"), p.tape.get("digest"), "replay of an S-b pay game");
+        }
+    }
+
+    @Test
+    public void payKeyParses() {
+        Assert.assertNull(forge.bench.rl.PlanSearch.Spec.parse(com.google.gson.JsonParser.parseString("{}")
+                .getAsJsonObject()).pay);
+        final forge.bench.rl.PlanSearch.Spec s = forge.bench.rl.PlanSearch.Spec.parse(com.google.gson.JsonParser
+                .parseString("{\"pay\":{\"variants\":2,\"when\":\"lines\"}}").getAsJsonObject());
+        Assert.assertEquals(s.pay.variants, 2);
+        Assert.assertEquals(s.pay.when, "lines");
+        Assert.assertFalse(s.pay.lineProbe, "the line probe (measurement) is off by default");
+        Assert.assertTrue(forge.bench.rl.PlanSearch.Spec.parse(com.google.gson.JsonParser.parseString(
+                "{\"pay\":{\"lineProbe\":true}}").getAsJsonObject()).pay.lineProbe);
+        Assert.assertThrows(IllegalArgumentException.class, () -> forge.bench.rl.PlanSearch.Spec.parse(
+                com.google.gson.JsonParser.parseString("{\"pay\":{\"variants\":0}}").getAsJsonObject()));
+        Assert.assertThrows(IllegalArgumentException.class, () -> forge.bench.rl.PlanSearch.Spec.parse(
+                com.google.gson.JsonParser.parseString("{\"pay\":{\"when\":\"always\"}}").getAsJsonObject()));
+    }
+
     @Test
     public void obsV3WithTheSearchIsNoLongerRefusedAtConfig() {
         final JsonObject c = com.google.gson.JsonParser.parseString("{\"mode\":\"eval\",\"obsSchema\":3,"

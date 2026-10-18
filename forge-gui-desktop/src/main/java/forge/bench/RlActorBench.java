@@ -703,6 +703,7 @@ public final class RlActorBench {
                 // S1: the look-ahead over the RL seats' own priority decisions (one per game; world seeds from the GAME seed)
                 search = new RlSearch(cfg.search, seed, uid, feat.index(), know, jarSha, cfg.actorId, obsVersion);
                 search.searchSeat = searchSeat;     // r3-distill-1010: -1 unless the GAME names one
+                search.manaSeats = anyMana ? manaSeats.clone() : null;   // R5: the seats asked MANA_SOURCE (plans.pay)
                 seat.searchSeat = searchSeat;
                 seat.search = search;
                 out.search = search;
