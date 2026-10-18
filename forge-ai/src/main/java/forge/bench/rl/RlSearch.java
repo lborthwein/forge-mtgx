@@ -1524,7 +1524,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             st.add("playout", playoutCounters.toJson());
             o.add("st", st);
         }
-        o.add("lookahead", ls.getStats().toJson());
+        final JsonObject la = ls.getStats().toJson();
+        if (ls.oppChecks.get() > 0) {
+            // search-bones-1015 (d): only when plans.opp ran the opponent check, so other games' JSON is unchanged
+            la.addProperty("oppChecks", ls.oppChecks.get());
+            la.addProperty("oppLosses", ls.oppLosses.get());
+        }
+        o.add("lookahead", la);
         if (!solverDrivers.isEmpty()) {
             // search-bones-1015: only with forcedWin on
             final JsonObject fw = new JsonObject();

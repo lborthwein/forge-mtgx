@@ -108,4 +108,28 @@ public class RlPlanSearchTest {
             Assert.assertEquals(svc.errors.get(), 0L, "the service refused a request");
         }
     }
+
+    @Test
+    public void sbOppGamesExportTheOpponentCheckCounters() throws Exception {
+        // R5 (search-bones-1015 / r5-prereq-1018): with plans.opp the game summary's lookahead block carries the
+        // opponent check's counters (oppChecks, oppLosses); without plans.opp the block has neither key
+        try (FakeSearchService svc = new FakeSearchService("0".repeat(64))) {
+            svc.leafValue = RlChoiceSearchTest::hashValue;
+            final RlActorBench.Cfg cfg = RlActorBenchTest.cfg("eval");
+            cfg.search = RlChoiceSearchTest.spec(svc.address(), ",\"plans\":{\"samples\":3,\"opp\":true}");
+            long checks = 0;
+            for (int i = 0; i < Integer.getInteger("rl.sbGames", 2); i++) {
+                final JsonObject la = play(cfg, i).getAsJsonObject("lookahead");
+                if (la.has("oppChecks")) {
+                    final long c = la.get("oppChecks").getAsLong(), l = la.get("oppLosses").getAsLong();
+                    Assert.assertTrue(l >= 0 && l <= c, "oppLosses " + l + " > oppChecks " + c);
+                    checks += c;
+                }
+            }
+            Assert.assertTrue(checks > 0, "no opponent check counted in an S-b3 game");
+            cfg.search = RlChoiceSearchTest.spec(svc.address(), ",\"plans\":{\"samples\":3}");
+            Assert.assertFalse(play(cfg, 0).getAsJsonObject("lookahead").has("oppChecks"), "S-b2 game has oppChecks");
+            Assert.assertEquals(svc.errors.get(), 0L, "the service refused a request");
+        }
+    }
 }
