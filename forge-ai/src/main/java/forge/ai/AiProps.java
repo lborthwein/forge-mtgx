@@ -153,7 +153,28 @@ public enum AiProps {
      * this seat. OFF unless a profile sets it; no shipped profile file does (the built-in profile "CubeCombo" in
      * {@link AiProfileUtil} is Default plus this key), so every existing profile's seats are unchanged.
      */
-    CUBE_COMBO_PLANS("false");
+    CUBE_COMBO_PLANS("false"),
+    /**
+     * mtgx (lane doomsday-solver-1012): the cube combo seat's lineage plans (v104). True (every existing profile's
+     * behaviour); the built-in profile "ForcedWin" sets false, so its seat is Forge AI plus the forced-win solver.
+     */
+    CUBE_COMBO_LINEAGE("true"),
+    /**
+     * mtgx (lane doomsday-solver-1012): run the general forced-win solver ({@code forge.ai.simulation.ForcedWinSolver})
+     * on a cube combo seat. OFF unless a profile sets it; only the built-in profiles "CubeComboSolver" and "ForcedWin"
+     * do. With it on, the lineage's Doomsday plan is not consulted (the solver replaces it).
+     */
+    FORCED_WIN_SOLVER("false"),
+    /** mtgx (lane doomsday-solver-1012): the solver's spec, "worlds=6,top=3,threshold=0.5,..." (empty = defaults). */
+    FORCED_WIN_SPEC(""),
+    /**
+     * mtgx (lane solver-gaps-1015, Part B): likely-win lines. Lines the solver's engine search generates that are not
+     * forced (a creature cheat the opponent could chump, remove or race) are scored by P(win) over belief worlds with
+     * an interacting opponent (Forge AI rollouts of both seats) and played only when they beat the seat's own play
+     * under the same worlds. OFF unless a profile sets it (the built-in profile "LikelyWin": Forge AI with likely-win
+     * lines alone) or the solver spec says likely=true. Independent of FORCED_WIN_SOLVER.
+     */
+    LIKELY_WIN_LINES("false");
     // Experimental features, must be promoted or removed after extensive testing and, ideally, defaulting
     // <-- There are no experimental options here -->
 

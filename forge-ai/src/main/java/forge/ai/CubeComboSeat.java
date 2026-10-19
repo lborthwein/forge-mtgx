@@ -56,6 +56,12 @@ public interface CubeComboSeat {
 
     ImmutablePair<CardCollection, CardCollection> nativeArrangeForSurveil(CardCollection topN);
 
+    /** lane doomsday-solver-1012. */
+    ImmutablePair<CardCollection, CardCollection> nativeArrangeForScry(CardCollection topN);
+
+    /** lane doomsday-solver-1012. */
+    void nativeDeclareAttackers(Player attacker, forge.game.combat.Combat combat);
+
     CardCollectionView nativeOrderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source);
 
     CardCollection nativeChooseCardsToDiscardFrom(Player p, SpellAbility sa, CardCollection validCards, int min, int max,

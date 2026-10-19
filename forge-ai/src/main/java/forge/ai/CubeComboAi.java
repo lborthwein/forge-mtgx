@@ -157,7 +157,8 @@ public final class CubeComboAi {
     }
 
     public static boolean enabled(Player player) {
-        return player.getController() instanceof CubeComboSeat;
+        // lane doomsday-solver-1012: the "ForcedWin" profile's seat is a cube combo seat with every lineage hook off
+        return player.getController() instanceof CubeComboSeat seat && seat.cubeCombo().lineage();
     }
 
     /**
