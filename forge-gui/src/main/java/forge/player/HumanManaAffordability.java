@@ -37,6 +37,17 @@ public final class HumanManaAffordability {
     public enum Assessment { PROVEN_UNAFFORDABLE, POTENTIALLY_AFFORDABLE, UNKNOWN }
     private HumanManaAffordability() {}
 
+    /**
+     * A DamageDone replacement that only prevents the damage ({@code Prevent$ True}, nothing put in its place): a
+     * player's or permanent's protection keyword card (The Rhinegold's "protection from everything until your next turn"
+     * puts one in the command zone), a Fog. Preventing damage never changes the mana a player can make or pay with, so it
+     * does not make the proof UNKNOWN (castable-glow-1019: it made every card glow for a turn cycle).
+     */
+    static boolean preventsDamageOnly(final forge.game.replacement.ReplacementEffect r) {
+        return r.getMode() == ReplacementType.DamageDone && "True".equals(r.getParam("Prevent"))
+                && !r.hasParam("ReplaceWith");
+    }
+
     public static boolean mayAfford(final Player player, final SpellAbility ability) {
         return assess(player, ability) != Assessment.PROVEN_UNAFFORDABLE;
     }
@@ -100,7 +111,8 @@ public final class HumanManaAffordability {
             if (card.getReplacementEffects().stream().filter(r -> r.zonesCheck(player.getGame().getZoneOf(card)))
                     .anyMatch(r -> r.getMode() == ReplacementType.ProduceMana
                     || r.getMode() == ReplacementType.PayLife || r.getMode() == ReplacementType.LifeReduced
-                    || r.getMode() == ReplacementType.DamageDone || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
+                    || r.getMode() == ReplacementType.DamageDone && !preventsDamageOnly(r)
+                    || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
             if (card.getTriggers().stream().filter(t -> t.getSpawningAbility() != null
                     || t.zonesCheck(player.getGame().getZoneOf(card)))
                     .anyMatch(t -> t.getMode() == TriggerType.TapsForMana
@@ -259,7 +271,8 @@ public final class HumanManaAffordability {
             if (card.getReplacementEffects().stream().filter(r -> r.zonesCheck(player.getGame().getZoneOf(card)))
                     .anyMatch(r -> r.getMode() == ReplacementType.ProduceMana
                     || r.getMode() == ReplacementType.PayLife || r.getMode() == ReplacementType.LifeReduced
-                    || r.getMode() == ReplacementType.DamageDone || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
+                    || r.getMode() == ReplacementType.DamageDone && !preventsDamageOnly(r)
+                    || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
             if (card.getTriggers().stream().filter(t -> t.getSpawningAbility() != null
                     || t.zonesCheck(player.getGame().getZoneOf(card)))
                     .anyMatch(t -> t.getMode() == TriggerType.TapsForMana
