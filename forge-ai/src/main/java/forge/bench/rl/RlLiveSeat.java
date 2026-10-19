@@ -40,6 +40,15 @@ import forge.game.Game;
  * play-out drops its candidate; a failed leaf call keeps the static leaf for that decision; a failed SCORE keeps the
  * policy's choice), as in the read.
  *
+ * <p><b>S-b</b> (lane sb-live-1018; off unless the spec has a {@code plans.} key, and then the seat is S-c byte for byte):
+ * the search-bones-1015 turn-plan search over S-c ({@link PlanSearch}: the forced-win solver's lines and policy-sampled
+ * plans as candidates, proven backups, the solver's cycles), keyed flat in the spec string:
+ * {@code plans.<key>=<value>} for {@link PlanSearch.Spec}'s {@link Spec#LIVE_PLAN_KEYS} and
+ * {@code plans.solverCfg.<key>=<value>} for {@link Spec#LIVE_SOLVER_KEYS} (string values, as the bench's S-b2h.json).
+ * Live refuses (d) ({@code plans.opp}, {@code plans.oppCfg.*}), payment search ({@code plans.pay},
+ * {@code plans.solverCfg.paySearch}) and every other key, and requires {@code plans.solverCfg.hideOwnLibrary=true}: the
+ * solver must not search on our real library order, which a player does not see.
+ *
  * <p><b>Wall</b> (lane sc-wallguard-1009). A searched decision past its budget plays the policy's own choice
  * ("capped"): its policy play-outs stop at their next service request or main-loop step, and the wait for them ends at
  * the budget plus {@link LookaheadSearch#WALL_GRACE_MS} at the latest (then the decision line carries
@@ -72,6 +81,58 @@ public final class RlLiveSeat {
         /** One {@code [lookahead-decision]} line per searched decision. */
         public boolean log = true;
         public String raw;
+
+        /** sb-live-1018: the {@code plans.<key>} keys live accepts (numbers, or true/false for {@code solver}). */
+        public static final java.util.Set<String> LIVE_PLAN_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
+                "samples", "temperature", "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs"));
+        /** sb-live-1018: the {@code plans.solverCfg.<key>} keys live accepts (the solver's sizes, its wall, cycles, the leak fix). */
+        public static final java.util.Set<String> LIVE_SOLVER_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList(
+                "budgetMs", "engineMs", "evalReserveMs", "wallGraceMs", "planMs", "nodes", "engineNodes", "worlds", "top",
+                "horizon", "cycles", "hideOwnLibrary"));
+
+        /** sb-live-1018: one {@code plans.} entry into {@code c.plans} (created on the first), or an error. */
+        private static void planKey(final RlSearch.Config c, final String k, final String v) {
+            if (c.plans == null) {
+                c.plans = new JsonObject();
+            }
+            final String sub = k.substring("plans.".length());
+            if (sub.startsWith("solverCfg.")) {
+                final String sk = sub.substring("solverCfg.".length());
+                if (!LIVE_SOLVER_KEYS.contains(sk)) {
+                    throw new IllegalArgumentException("policySearch: " + k + " is not supported live (plans.solverCfg keys "
+                            + String.join("|", LIVE_SOLVER_KEYS) + ")");
+                }
+                if (("cycles".equals(sk) || "hideOwnLibrary".equals(sk)) ? !v.matches("true|false") : !v.matches("\\d+(\\.\\d+)?")) {
+                    throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want a number, or true|false)");
+                }
+                if (!c.plans.has("solverCfg")) {
+                    c.plans.add("solverCfg", new JsonObject());
+                }
+                final JsonObject sc = c.plans.getAsJsonObject("solverCfg");
+                if (sc.has(sk)) {
+                    throw new IllegalArgumentException("policySearch: " + k + " twice");
+                }
+                sc.addProperty(sk, v);
+                return;
+            }
+            if (!LIVE_PLAN_KEYS.contains(sub)) {
+                throw new IllegalArgumentException("policySearch: " + k + " is not supported live (plans keys "
+                        + String.join("|", LIVE_PLAN_KEYS) + ", plans.solverCfg.<key>; (d) plans.opp and payment search are off live)");
+            }
+            if (c.plans.has(sub)) {
+                throw new IllegalArgumentException("policySearch: " + k + " twice");
+            }
+            if ("solver".equals(sub)) {
+                if (!v.matches("true|false")) {
+                    throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want true|false)");
+                }
+                c.plans.addProperty(sub, Boolean.parseBoolean(v));
+            } else if ("temperature".equals(sub)) {
+                c.plans.addProperty(sub, Double.parseDouble(v));
+            } else {
+                c.plans.addProperty(sub, Long.parseLong(v));
+            }
+        }
 
         public static Spec parse(final String raw) {
             final Spec s = new Spec();
@@ -130,7 +191,12 @@ public final class RlLiveSeat {
                     case "log": s.log = !"0".equals(v); break;
                     case "obs": c.obs = Integer.parseInt(v); break;
                     case "copyFidelity": c.copyFidelity = Integer.parseInt(v); break;
-                    default: throw new IllegalArgumentException("policySearch: unknown key " + k);
+                    default:
+                        if (k.startsWith("plans.")) {
+                            planKey(c, k, v); // sb-live-1018: S-b, flat keys
+                            break;
+                        }
+                        throw new IllegalArgumentException("policySearch: unknown key " + k);
                 }
             }
             if (c.server == null || s.cardIndex == null || c.policySha == null || !c.policySha.matches("[0-9a-f]{64}")) {
@@ -141,6 +207,13 @@ public final class RlLiveSeat {
             }
             if (s.loopGuard < 0) {
                 throw new IllegalArgumentException("policySearch: loopGuard >= 0 (0 = off)");
+            }
+            if (c.plans != null) {
+                // sb-live-1018: live S-b never searches on our real library order (the r6 leak fix)
+                final JsonObject sc = c.plans.has("solverCfg") ? c.plans.getAsJsonObject("solverCfg") : null;
+                if (sc == null || !sc.has("hideOwnLibrary") || !"true".equals(sc.get("hideOwnLibrary").getAsString())) {
+                    throw new IllegalArgumentException("policySearch: plans needs plans.solverCfg.hideOwnLibrary=true live");
+                }
             }
             c.check();
             AiFixes.Mode.parse(c.departMedian);
@@ -174,6 +247,8 @@ public final class RlLiveSeat {
     private int degradeTurn = -1;
     private int searchedLines = 0;
     private long seatCalls0 = 0;
+    /** sb-live-1018: the seat's controller carrying S-b's plan hook (null without plans); cleared at a degrade. */
+    private volatile forge.bench.PlayerControllerBridge planBridge;
 
     private RlLiveSeat(final Spec spec, final CardIndex index, final String jarSha, final String actorId,
             final RlSearchClient seatClient, final JsonObject ack) {
@@ -233,6 +308,9 @@ public final class RlLiveSeat {
             o.addProperty("budgetMs", spec.search.budgetMs);
             if (spec.loopGuard > 0) {
                 o.addProperty("loopGuard", spec.loopGuard); // forge-live-fixes-1012: only when on, so the line is otherwise unchanged
+            }
+            if (spec.search.plans != null) {
+                o.addProperty("plans", true); // sb-live-1018: S-b on (the spec is in search.plans); absent otherwise
             }
             o.addProperty("helloMs", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
             o.add("search", spec.search.toJson());
@@ -327,6 +405,25 @@ public final class RlLiveSeat {
             s.onSearched = this::searched;
         }
         rs.search = s;
+        if (spec.search.plans != null) {
+            // sb-live-1018: S-b's plan hook on this seat's bridged controller (RlSearch.attach, as the bench's RL seat)
+            final boolean[] rl = new boolean[ctl.length];
+            rl[seatIndex] = true;
+            s.attach(g, rl, rs);
+            final forge.game.player.PlayerController pc = g.getRegisteredPlayers().get(seatIndex).getController();
+            if (pc instanceof forge.bench.PlayerControllerBridge && ((forge.bench.PlayerControllerBridge) pc).planHook != null) {
+                planBridge = (forge.bench.PlayerControllerBridge) pc;
+            } else {
+                // never seen: the seat would play S-c; say so (the boot line already said plans:true)
+                final JsonObject o = new JsonObject();
+                o.addProperty("plans", false);
+                o.addProperty("reason", "no bridged controller for the plan hook");
+                line(o);
+            }
+            if (spec.log) {
+                s.onPlanDecided = this::planDecided;
+            }
+        }
         this.seat = rs;
         this.search = s;
         this.seatCalls0 = seatClient.calls;
@@ -356,6 +453,11 @@ public final class RlLiveSeat {
         degradeTurn = game == null ? -1 : game.getPhaseHandler().getTurn();
         session.setLocalAnswerer(null);
         session.getChannel().close();
+        final forge.bench.PlayerControllerBridge pb = planBridge;
+        if (pb != null) {
+            pb.planHook = null; // sb-live-1018: after a degrade Forge AI (and K8) decide alone, no plan follower
+            planBridge = null;
+        }
         if (lobby != null) {
             lobby.setAiFixes0928(k8AiFixes);
         }
@@ -404,6 +506,49 @@ public final class RlLiveSeat {
         d.addProperty("cappedTotal", st.capped);
         if (forge.ai.WallClock.rebuilding()) {
             // lane forge-continue-1011: a "Continue from here" rebuild's decision (wall clocks off); only then
+            d.addProperty("rebuild", true);
+        }
+        if (search.lastProposeMs >= 0) {
+            // sb-live-1018: an S-b plan point that S-c's choice decided (its proposals are inside scoreMs); only then
+            d.addProperty("plan", "searched");
+            d.addProperty("proposeMs", Math.round(search.lastProposeMs * 10) / 10.0);
+        }
+        System.err.println("[lookahead-decision] " + d);
+    }
+
+    /**
+     * sb-live-1018 (S-b only): one {@code [lookahead-decision]} line for a plan point decided without an S-c line: a
+     * proven solver line taken at once ({@code r} null: no play-outs) or a plan / line adopted after them. searchMs is
+     * the whole decision (SCORE, proposals, play-outs), so the host's latency and cap counts cover every decision.
+     */
+    private void planDecided(final Game g, final LookaheadSearch.GivenResult r, final String note, final int plans,
+            final double ms) {
+        final LookaheadSearch.Stats st = search.lookaheadStats();
+        final JsonObject d = new JsonObject();
+        d.addProperty("seat", "policy");
+        d.addProperty("decision", searchedLines++);
+        d.addProperty("turn", g.getPhaseHandler().getTurn());
+        d.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        d.addProperty("stack", g.getStack().size());
+        d.addProperty("candidates", r == null ? 0 : r.givenIndex.length);
+        d.addProperty("worlds", r == null ? 0 : r.worlds);
+        d.addProperty("searchMs", Math.round(ms * 10) / 10.0);
+        d.addProperty("capped", r != null && "capped".equals(r.outcome));
+        if (r != null && r.wall) {
+            d.addProperty("wall", true);
+        }
+        d.addProperty("outcome", r == null ? "proven" : r.outcome);
+        d.addProperty("departed", true);
+        d.addProperty("plan", r == null ? "proven" : "adopted");
+        d.addProperty("plans", plans);
+        if (r != null) {
+            d.addProperty("failed", r.failed);
+            d.addProperty("leafFallback", r.leafFallback);
+        }
+        d.addProperty("searched", st.searched);
+        d.addProperty("departedTotal", st.departed);
+        d.addProperty("cappedTotal", st.capped);
+        if (forge.ai.WallClock.rebuilding()) {
             d.addProperty("rebuild", true);
         }
         System.err.println("[lookahead-decision] " + d);

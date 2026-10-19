@@ -112,6 +112,85 @@ public class RlLiveSeatTest {
         Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "leaf=magic")));
     }
 
+    // ------------------------------------------------------------------------------------------------ S-b (sb-live-1018)
+
+    /** The live S-b2h keys (search-bones-1015's specs/S-b2h.json `plans`, flat). */
+    static final String SB2H = "plans.samples=4,plans.solverCfg.budgetMs=6000,plans.solverCfg.cycles=true,"
+            + "plans.solverCfg.engineMs=4000,plans.solverCfg.evalReserveMs=1500,plans.solverCfg.hideOwnLibrary=true";
+
+    @Test
+    public void specWithoutPlanKeysIsScAndItsJsonIsUnchanged() {
+        final RlLiveSeat.Spec s = RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "budgetMs=8000,threads=8,obs=2,maxDecisions=1000,loopGuard=2"));
+        Assert.assertNull(s.search.plans, "no plans. key: S-b is off");
+        Assert.assertNull(s.search.forcedWin);
+        Assert.assertFalse(s.search.toJson().has("plans"), "the boot line's search JSON is S-c's");
+    }
+
+    @Test
+    public void specSb2hKeysAreTheBenchSpecsPlans() {
+        final RlLiveSeat.Spec s = RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "budgetMs=8000,threads=8,obs=2," + SB2H));
+        final com.google.gson.JsonObject want = com.google.gson.JsonParser.parseString("{\"samples\":4,\"solverCfg\":"
+                + "{\"budgetMs\":\"6000\",\"cycles\":\"true\",\"engineMs\":\"4000\",\"evalReserveMs\":\"1500\","
+                + "\"hideOwnLibrary\":\"true\"}}").getAsJsonObject();
+        Assert.assertEquals(s.search.plans, want, "S-b2h.json's plans");
+        Assert.assertEquals(s.search.toJson().getAsJsonObject("plans"), want);
+        final forge.bench.rl.PlanSearch.Spec ps = forge.bench.rl.PlanSearch.Spec.parse(s.search.plans);
+        Assert.assertEquals(ps.samples, 4);
+        Assert.assertFalse(ps.opp, "(d) off");
+        Assert.assertEquals(s.search.budgetMs, 8000L);
+        Assert.assertEquals(s.search.worlds, 8);
+        Assert.assertEquals(s.search.breadth, 4);
+    }
+
+    @Test
+    public void specRefusesTheSbKeysLiveDoesNotSupport() {
+        final String hide = ",plans.solverCfg.hideOwnLibrary=true";
+        for (String bad : new String[] {"plans.opp=true" + hide, "plans.oppCfg.budgetMs=500" + hide, "plans.pay=on" + hide,
+                "plans.solverCfg.paySearch=true" + hide, "plans.solverCfg.act=true" + hide,
+                "plans.solverCfg.defense=true" + hide, "plans.solverCfg.likely=true" + hide, "plans.wat=1" + hide,
+                "plans.samples=4", "plans.samples=4,plans.solverCfg.hideOwnLibrary=false",
+                "plans.samples=four" + hide, "plans.solverCfg.cycles=yes" + hide, "plans.solverCfg.budgetMs=6s" + hide,
+                "plans.samples=4,plans.samples=2" + hide, "plans.solver=1" + hide}) {
+            Assert.assertThrows(bad, IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("127.0.0.1:1", bad)));
+        }
+    }
+
+    @Test
+    public void aWholeGameCompletesWithSbOn() throws Exception {
+        try (FakeSearchService svc = new FakeSearchService(SHA)) {
+            final RlLiveSeat live = RlLiveSeat.connect(spec(svc.address(), "worlds=2,threads=2,budgetMs=4000,"
+                    + "plans.samples=2,plans.solverCfg.cycles=true,plans.solverCfg.hideOwnLibrary=true"), "t");
+            Assert.assertNotNull(live);
+            final Game[] g = new Game[1];
+            final String err = captureErr(() -> g[0] = play(live, 722159001L));
+            Assert.assertTrue(g[0].isGameOver());
+            Assert.assertNotNull(g[0].getOutcome());
+            Assert.assertFalse(live.degraded(), "a healthy service never degrades the S-b seat");
+            Assert.assertNotEquals(g[0].getOutcome().getWinCondition(), forge.game.GameEndReason.Draw);
+            Assert.assertFalse(err.contains("\"plans\":false"), "the plan hook was installed");
+            Assert.assertTrue(err.contains("[lookahead-decision] {\"seat\":\"policy\""), "decision lines for the host");
+            Assert.assertTrue(err.contains("\"plan\":"), "S-b plan points are on the decision lines");
+            final String end = err.lines().filter(l -> l.startsWith("[policy-seat] {\"end\":true")).findFirst().orElse("");
+            Assert.assertTrue(end.contains("\"plans\":{"), "the end summary carries S-b's counters: " + end);
+        }
+    }
+
+    @Test
+    public void anSbSeatWhoseServiceDiesDegradesToK8AndTheGameStillEnds() throws Exception {
+        try (FakeSearchService svc = new FakeSearchService(SHA)) {
+            svc.failAfterDecides = 150;
+            final RlLiveSeat live = RlLiveSeat.connect(spec(svc.address(), "worlds=2,threads=2,budgetMs=4000,"
+                    + "plans.samples=2,plans.solverCfg.hideOwnLibrary=true"), "t");
+            Assert.assertNotNull(live);
+            final Game[] g = new Game[1];
+            final String err = captureErr(() -> g[0] = play(live, 722159002L));
+            Assert.assertTrue(g[0].isGameOver());
+            Assert.assertTrue(live.degraded(), "the seat degrades when its service goes away");
+            Assert.assertTrue(err.contains("\"fallback\":\"k8\""), "the degraded seat plays the K8 look-ahead");
+            Assert.assertNotEquals(g[0].getOutcome().getWinCondition(), forge.game.GameEndReason.Draw);
+        }
+    }
+
     // ------------------------------------------------------------------------------------------------ boot
 
     @Test

@@ -48,10 +48,14 @@ final class ForcedWinEngine {
         /** solver-gaps-1015: our attack declarations the rules refused (handed to Forge AI). */
         int refusedAttacks;
         long nanos;
+        /** search-bones-1015 (c): nodes pruned by the progress table, loops found, body repetitions applied. */
+        int pruned, loops, loopReps, loopWins;
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
-                    + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "");
+                    + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "")
+                    + (loops > 0 || pruned > 0 ? " pruned=" + pruned + " loops=" + loops + " loopReps=" + loopReps
+                            + " loopWins=" + loopWins : "");
         }
     }
 
@@ -172,6 +176,19 @@ final class ForcedWinEngine {
          * that wins just after the deadline is kept).
          */
         long wall;
+        /**
+         * search-bones-1015 (c), off by default: the transposition table keys a node by its state with the monotone
+         * counters taken out ({@link #coarseKey}) and keeps their vector ({@link #progress}); a node that a seen one
+         * dominates is pruned, and a move sequence that repeats with progress is fast-forwarded as one REPEAT move.
+         */
+        boolean cycles;
+        /** (c): the most repetitions of a loop body one REPEAT move plays. */
+        int repeatCap = 64;
+        /**
+         * search-bones-1015: our library's known top in the root copy (pile memory); the rest is shuffled there. -1 (the
+         * default) keeps the real order.
+         */
+        int ownKnownTop = -1;
     }
 
     /** A search node: a game copy at our priority, with its own id scope. */
@@ -183,6 +200,240 @@ final class ForcedWinEngine {
         int turn;
         boolean passed;
         final List<Step> path = new ArrayList<>();
+        /** search-bones-1015 (c): the node this one was reached from, and this node's progress vector. */
+        Node parent;
+        long[] pv;
+    }
+
+    // ------------------------------------------------------------------ (c) cycles with progress (search-bones-1015)
+
+    /**
+     * The monotone counters of a position, each "more is better for us": the opponents' life, library and hand taken
+     * negative, their poison, our tokens on the battlefield, the storm count, our life. A loop with progress raises one
+     * and lowers none.
+     */
+    static long[] progress(Game g, Player me) {
+        long oppLife = 0, oppLib = 0, oppHand = 0, poison = 0;
+        for (Player o : me.getOpponents()) {
+            oppLife += o.getLife();
+            oppLib += o.getCardsIn(ZoneType.Library).size();
+            oppHand += o.getCardsIn(ZoneType.Hand).size();
+            poison += o.getPoisonCounters();
+        }
+        int tokens = 0;
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (c.isToken()) {
+                tokens++;
+            }
+        }
+        return new long[] {-oppLife, -oppLib, -oppHand, poison, tokens, g.getStack().getSpellsCastThisTurn().size(),
+                me.getLife(), me.getManaPool().totalMana(), me.getCardsIn(ZoneType.Hand).size()};
+    }
+
+    /** The first this-many entries of {@link #progress} are progress; the rest (mana in pool, hand size) are resources. */
+    static final int PROGRESS = 7;
+
+    /** a >= b in every progress counter and > in one. */
+    static boolean progressed(long[] a, long[] b) {
+        boolean more = false;
+        for (int i = 0; i < PROGRESS; i++) {
+            if (a[i] < b[i]) {
+                return false;
+            }
+            more |= a[i] > b[i];
+        }
+        return more;
+    }
+
+    /** a >= b in every entry (progress and resources): a position b is no better than a. */
+    static boolean dominates(long[] a, long[] b) {
+        for (int i = 0; i < a.length; i++) {
+            if (a[i] < b[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * A position's key with the monotone counters and the tokens taken out: the turn and phase, each player's hand (ours
+     * by name, theirs by size), battlefield non-token permanents by name with their tapped, sick and counter state,
+     * graveyard and exile by name, and the top seven of our library in order. Ids and timestamps are left out, so a
+     * loop that returns to the same board with more tokens, less opponent life or a higher storm count has one key.
+     */
+    static String coarseKey(Game g, Player me) {
+        final StringBuilder sb = new StringBuilder(1024);
+        final PhaseHandler ph = g.getPhaseHandler();
+        sb.append(ph.getTurn()).append(ph.getPhase()).append('|');
+        for (Player p : g.getPlayers()) {
+            sb.append(p == me ? "me" : "op").append('|');
+            if (p == me) {
+                names(sb, p.getCardsIn(ZoneType.Hand), false);
+            } else {
+                sb.append("h").append(p.getCardsIn(ZoneType.Hand).size());
+            }
+            sb.append("|b");
+            names(sb, p.getCardsIn(ZoneType.Battlefield), true);
+            sb.append("|g");
+            names(sb, p.getCardsIn(ZoneType.Graveyard), false);
+            sb.append("|x");
+            names(sb, p.getCardsIn(ZoneType.Exile), false);
+            if (p == me) {
+                sb.append("|l");
+                int n = 0;
+                for (Card c : p.getCardsIn(ZoneType.Library)) {
+                    if (n++ >= 7) {
+                        break;
+                    }
+                    sb.append(c.getName()).append(',');
+                }
+            }
+            sb.append(';');
+        }
+        return sb.toString();
+    }
+
+    private static void names(StringBuilder sb, Iterable<Card> cards, boolean state) {
+        final List<String> xs = new ArrayList<>();
+        for (Card c : cards) {
+            if (state && c.isToken()) {
+                continue;
+            }
+            xs.add(state ? c.getName() + (c.isTapped() ? "T" : "") + (c.isSick() ? "s" : "") + c.getCounters()
+                    + (c.getEntityAttachedTo() == null ? "" : "@" + c.getEntityAttachedTo().getName()) : c.getName());
+        }
+        java.util.Collections.sort(xs);
+        sb.append(xs);
+    }
+
+    /** (c) the transposition table: coarse key -> the counter vectors seen. */
+    private final java.util.Map<String, List<long[]>> table = new java.util.HashMap<>();
+
+    /** (c): true when a seen node dominates this one (it is pruned); else the node is recorded. */
+    private boolean seenDominated(Node n) {
+        final String k = coarseKey(n.g, n.me);
+        final List<long[]> xs = table.computeIfAbsent(k, x -> new ArrayList<>());
+        for (long[] v : xs) {
+            if (dominates(v, n.pv)) {
+                return true;
+            }
+        }
+        xs.removeIf(v -> dominates(n.pv, v));
+        xs.add(n.pv);
+        return false;
+    }
+
+    /** The k-th ancestor of a node (0 = itself), or null. */
+    private static Node ancestor(Node n, int k) {
+        Node a = n;
+        for (int i = 0; i < k && a != null; i++) {
+            a = a.parent;
+        }
+        return a;
+    }
+
+    /**
+     * (c): the loop body that ends at {@code child}: its last L moves (L <= 3) repeat the L before them, each repetition
+     * made progress, and the body has no pass, attack or REPEAT. Null when there is none.
+     */
+    private static List<Step> loopBody(Node child) {
+        final List<Step> p = child.path;
+        for (int len = 1; len <= 3; len++) {
+            if (p.size() < 2 * len) {
+                break;
+            }
+            boolean same = true;
+            for (int i = 0; i < len && same; i++) {
+                final Step a = p.get(p.size() - len + i), b = p.get(p.size() - 2 * len + i);
+                same = !a.pass && a.kind != AbilKind.ATTACK && a.kind != AbilKind.REPEAT && a.loopKey().equals(b.loopKey());
+            }
+            if (!same) {
+                continue;
+            }
+            final Node a1 = ancestor(child, len), a2 = ancestor(child, 2 * len);
+            if (a1 != null && a2 != null && a1.pv != null && a2.pv != null && progressed(child.pv, a1.pv)
+                    && progressed(a1.pv, a2.pv)) {
+                return new ArrayList<>(p.subList(p.size() - len, p.size()));
+            }
+        }
+        return null;
+    }
+
+    /** The result of fast-forwarding a loop: a win (its path), or the node after the last repetition that progressed. */
+    static final class Forward {
+        List<Step> win;
+        Node node;
+    }
+
+    /**
+     * (c): play {@code body} again and again from {@code from} (which ends two repetitions already played) until we win,
+     * a body step cannot be played or the game would end otherwise, a repetition makes no progress, the cap, or the
+     * budget. The path becomes prefix + REPEAT(body, repetitions) (+ the steps of a winning partial repetition).
+     */
+    private Forward fastForward(Node from, List<Step> body) {
+        st.loops++;
+        final int len = body.size();
+        final List<Step> prefix = new ArrayList<>(from.path.subList(0, from.path.size() - 2 * len));
+        int reps = 2;
+        Node cur = from;
+        final Forward f = new Forward();
+        while (reps < lim.repeatCap && !out()) {
+            Node next = cur;
+            final List<Step> partial = new ArrayList<>();
+            boolean failed = false;
+            for (Step b : body) {
+                final Applied a = apply(next, b);
+                st.loopReps++;
+                if (a == null) {
+                    failed = true;
+                    break;
+                }
+                partial.add(b);
+                if (a.won) {
+                    final List<Step> win = new ArrayList<>(prefix);
+                    win.add(Step.repeat(body, reps));
+                    if (partial.size() == len) {
+                        win.set(win.size() - 1, Step.repeat(body, reps + 1));
+                    } else {
+                        win.addAll(partial);
+                    }
+                    st.loopWins++;
+                    f.win = win;
+                    return f;
+                }
+                if (a.child == null) {
+                    failed = true;
+                    break;
+                }
+                a.child.parent = next;
+                a.child.pv = progress(a.child.g, a.child.me);
+                a.child.passed = next.passed;
+                next = a.child;
+            }
+            if (failed || !progressed(next.pv, cur.pv)) {
+                break;
+            }
+            cur = next;
+            reps++;
+            if (lethalPastBlockers(cur)) {
+                // enough attackers for the opponent's life past their blockers: stop here, so the next node's first
+                // move is the attack (its own lethal check), not 64 repetitions and a slow combat with every token
+                break;
+            }
+        }
+        // the node after the last repetition that progressed: a REPEAT move to go on from
+        final Node n = new Node();
+        n.g = cur.g;
+        n.me = cur.me;
+        n.ids = cur.ids;
+        n.turn = cur.turn;
+        n.passed = cur.passed;
+        n.parent = from;
+        n.pv = cur.pv;
+        n.path.addAll(prefix);
+        n.path.add(Step.repeat(body, reps));
+        f.node = n;
+        return f;
     }
 
     private final Limits lim;
@@ -254,10 +505,16 @@ final class ForcedWinEngine {
                 for (Player o : root.me.getOpponents()) {
                     ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng);
                 }
+                if (lim.ownKnownTop >= 0) {
+                    ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, rng);
+                }
             }
             root.ids = cloneScope(forge.util.IdScope.capture());
             e.startTurn = root.g.getPhaseHandler().getTurn();
             root.turn = e.startTurn;
+            if (lim.cycles) {
+                root.pv = progress(root.g, root.me);
+            }
             // this turn first (same-turn wins are preferred and cheaper); then lines that pass the turn once
             final boolean twoTurns = lim.passTurn;
             lim.passTurn = false;
@@ -268,6 +525,7 @@ final class ForcedWinEngine {
                 lim.passTurn = true;
                 lim.nodes = st.nodes + nodeCap / 2;
                 e.seen.clear();
+                e.table.clear();
                 win = e.dfs(root, 0);
             }
             lim.passTurn = twoTurns;
@@ -399,12 +657,39 @@ final class ForcedWinEngine {
                     // no value
                 }
             }
-            if (a.child == null || !seen.add(a.key)) {
+            if (a.child == null) {
                 continue;
             }
             a.child.path.addAll(node.path);
             a.child.path.add(mv);
             a.child.passed = node.passed || mv.pass;
+            if (lim.cycles) {
+                // search-bones-1015 (c): the progress table instead of the exact-key set, and loops fast-forwarded
+                a.child.parent = node;
+                a.child.pv = progress(a.child.g, a.child.me);
+                final List<Step> body = loopBody(a.child);
+                if (body != null) {
+                    final Forward fw = fastForward(a.child, body);
+                    if (fw.win != null) {
+                        return fw.win;
+                    }
+                    if (!seenDominated(fw.node)) {
+                        final List<Step> r = dfs(fw.node, depth + 1);
+                        if (r != null) {
+                            return r;
+                        }
+                    } else {
+                        st.pruned++;
+                    }
+                    continue;
+                }
+                if (seenDominated(a.child)) {
+                    st.pruned++;
+                    continue;
+                }
+            } else if (!seen.add(a.key)) {
+                continue;
+            }
             final List<Step> r = dfs(a.child, depth + 1);
             if (r != null) {
                 return r;
@@ -510,7 +795,11 @@ final class ForcedWinEngine {
         out.addAll(spells);
         out.addAll(floats);
         out.addAll(lands);
-        if (!node.passed && lim.passTurn) {
+        if (!node.passed && lim.cycles && oppDecked(me)) {
+            // (c): an opponent with no library loses at their draw: passing is the first move, in the this-turn
+            // phase too (a mill loop's kill is the pass; the engine still plays their turn up to the draw)
+            out.add(0, Step.PASS);
+        } else if (!node.passed && lim.passTurn) {
             out.add(Step.PASS);
         }
         if (g.getPhaseHandler().is(PhaseType.MAIN1) && canAttack(me)) {
@@ -524,6 +813,15 @@ final class ForcedWinEngine {
         return out;
     }
 
+    private static boolean oppDecked(Player me) {
+        for (Player o : me.getOpponents()) {
+            if (o.getCardsIn(ZoneType.Library).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static boolean canAttack(Player me) {
         for (Card c : me.getCreaturesInPlay()) {
             for (Player o : me.getOpponents()) {
@@ -533,6 +831,42 @@ final class ForcedWinEngine {
             }
         }
         return false;
+    }
+
+    /**
+     * (c): our attackers' power, less the strongest few that the opponent's untapped creatures could block, covers the
+     * opponent's life (in our first main phase). Used to end a loop's fast-forward, not to order moves.
+     */
+    private static boolean lethalPastBlockers(Node n) {
+        final Player me = n.me;
+        if (!n.g.getPhaseHandler().is(PhaseType.MAIN1)) {
+            return false;
+        }
+        Player opp = null;
+        for (Player o : me.getOpponents()) {
+            opp = o;
+        }
+        if (opp == null) {
+            return false;
+        }
+        final List<Integer> pw = new ArrayList<>();
+        for (Card c : me.getCreaturesInPlay()) {
+            if (CombatUtil.canAttack(c, opp)) {
+                pw.add(Math.max(0, c.getNetCombatDamage()));
+            }
+        }
+        int blockers = 0;
+        for (Card c : opp.getCreaturesInPlay()) {
+            if (!c.isTapped()) {
+                blockers++;
+            }
+        }
+        pw.sort(java.util.Collections.reverseOrder());
+        int power = 0;
+        for (int i = blockers; i < pw.size(); i++) {
+            power += pw.get(i);
+        }
+        return power >= opp.getLife();
     }
 
     private static boolean lethalOnBoard(Player me) {
