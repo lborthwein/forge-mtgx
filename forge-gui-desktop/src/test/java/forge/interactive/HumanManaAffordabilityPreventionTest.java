@@ -1,6 +1,7 @@
 package forge.interactive;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.assertTrue;
 
 import java.util.List;
@@ -10,6 +11,7 @@ import org.testng.annotations.Test;
 import forge.ai.AITest;
 import forge.game.Game;
 import forge.game.card.Card;
+import forge.game.card.CounterEnumType;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.replacement.ReplacementType;
@@ -81,5 +83,53 @@ public class HumanManaAffordabilityPreventionTest extends AITest {
         assertEquals(HumanManaAffordability.assess(me, spell(arena)), Assessment.UNKNOWN,
                 "Furnace of Rath replaces damage with more damage: unchanged");
         assertEquals(HumanManaAffordability.assessPayable(me, spell(arena)), Assessment.UNKNOWN);
+    }
+
+    // ---- block-search-1019 (review): sources the proof loops cannot count keep the proof UNKNOWN
+
+    private void notUnpayable(final Card card, final String why) {
+        final SpellAbility sa = spell(card);
+        assertNotEquals(HumanManaAffordability.assess(me, sa), Assessment.PROVEN_UNAFFORDABLE, why);
+        assertNotEquals(HumanManaAffordability.assessPayable(me, sa), Assessment.PROVEN_UNAFFORDABLE, why);
+        assertTrue(HumanManaAffordability.payable(me, sa), why);
+    }
+
+    @Test
+    public void deathriteShamanWithALandInAGraveyardIsNeverProvenUnpayable() {
+        board();
+        protectionFromEverything();
+        final Card shaman = addCard("Deathrite Shaman", me);
+        shaman.setSickness(false);
+        addCardToZone("Forest", game.getPlayers().get(0), ZoneType.Graveyard);
+        final Card bolt = addCardToZone("Lightning Bolt", me, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        notUnpayable(bolt, "Deathrite's targeted ability adds one mana of any color");
+    }
+
+    @Test
+    public void nykthosWithDevotionIsNeverProvenUnpayable() {
+        game = initAndCreateGame();
+        me = game.getPlayers().get(1);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+        protectionFromEverything();
+        addCard("Nykthos, Shrine to Nyx", me);
+        addCard("Forest", me);
+        addCard("Forest", me);
+        addCard("Leatherback Baloth", me);
+        addCard("Leatherback Baloth", me);
+        final Card tusk = addCardToZone("Thragtusk", me, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        notUnpayable(tusk, "two Forests pay for Nykthos, which adds GGGGGG (devotion 6) for {4}{G}");
+    }
+
+    @Test
+    public void aLoyaltyManaAbilityIsNeverProvenUnpayable() {
+        board();
+        protectionFromEverything();
+        final Card chandra = addCard("Chandra, Torch of Defiance", me);
+        chandra.setCounters(CounterEnumType.LOYALTY, 4);
+        final Card bolt = addCardToZone("Lightning Bolt", me, ZoneType.Hand);
+        game.getAction().checkStateEffects(true);
+        notUnpayable(bolt, "Chandra's +1 adds {R}{R} before the cast");
     }
 }
