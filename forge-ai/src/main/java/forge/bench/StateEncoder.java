@@ -81,8 +81,17 @@ public final class StateEncoder {
 
         final JsonArray players = new JsonArray();
         final JsonArray life = new JsonArray();
-        for (Player p : game.getPlayers()) {
-            players.add(encodePlayer(game, p, viewer));
+        // Lane block-search-1019: every seat, in seat order. game.getPlayers() drops a player who has lost, so the
+        // terminal view of a finished game had no loser and the client drew it at default life, poison and zones. An
+        // eliminated player keeps its final public state (the same visibility rules), flagged "lost": true; a player
+        // still in the game is encoded exactly as before.
+        for (Player p : game.getRegisteredPlayers()) {
+            final boolean out = !game.getPlayers().contains(p);
+            final JsonObject po = encodePlayer(game, p, viewer);
+            if (out) {
+                po.addProperty("lost", true);
+            }
+            players.add(po);
             life.add(p.getLife());
         }
         st.add("players", players);
