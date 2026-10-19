@@ -189,13 +189,23 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * ({@link PlanSearch.Spec}).
          */
         public JsonObject plans = null;
+        /**
+         * Lane block-search-1019 (0 = off, the default, and then nothing changes): 1 = the look-ahead also searches the seat's
+         * declare-blockers asks ({@link #decideBlocks}): the policy's own declaration (the default), its next most sampled
+         * ones, no blocks and Forge AI's declaration, played out as the priority candidates are. Policy play-outs only.
+         */
+        public int blocks = 0;
+        /** Block search: policy samples (sampled DECIDEs of the ask) whose distinct declarations are ranked by count. */
+        public int blockSamples = 8;
+        /** Block search: the policy's declarations searched in all, its own (greedy) one included. */
+        public int blockTop = 3;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
-                "obs", "labelSink", "copyFidelity", "forcedWin", "plans"));
+                "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -241,6 +251,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("copyFidelity")) c.copyFidelity = o.get("copyFidelity").getAsInt();
             if (o.has("forcedWin") && !o.get("forcedWin").isJsonNull()) c.forcedWin = o.getAsJsonObject("forcedWin");
             if (o.has("plans") && !o.get("plans").isJsonNull()) c.plans = o.getAsJsonObject("plans");
+            if (o.has("blocks")) c.blocks = o.get("blocks").getAsInt();
+            if (o.has("blockSamples")) c.blockSamples = o.get("blockSamples").getAsInt();
+            if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
             c.check();
             return c;
         }
@@ -287,6 +300,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                             + "or forcedWin");
                 }
                 PlanSearch.Spec.parse(plans);
+            }
+            if (blocks != 0 && blocks != 1) {
+                throw new IllegalArgumentException("search.blocks must be 0 (off) or 1, not " + blocks);
+            }
+            if (blocks > 0 && !"policy".equals(playout)) {
+                throw new IllegalArgumentException("search.blocks (block search) needs playout=policy");
+            }
+            if (blockSamples < 0 || blockSamples > 64 || blockTop < 1 || blockTop > 8) {
+                throw new IllegalArgumentException("search: 0 <= blockSamples <= 64, 1 <= blockTop <= 8");
             }
             choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
@@ -341,6 +363,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (plans != null) {
                 o.add("plans", plans);
+            }
+            if (blocks > 0) {
+                // block-search-1019: only when on, so every other spec's JSON is unchanged
+                o.addProperty("blocks", blocks);
+                o.addProperty("blockSamples", blockSamples);
+                o.addProperty("blockTop", blockTop);
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -1084,6 +1112,178 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         rows.add(row);
     }
 
+    // ------------------------------------------------------------------------------------------------ block search
+
+    private int blockAsks = 0, blockSearched = 0, blockDepartures = 0, blockCapped = 0, blockForgeMissing = 0,
+            blockSampleFailures = 0;
+
+    /**
+     * Lane block-search-1019 (spec key {@code blocks}; off = null at once, nothing else runs): the look-ahead over the
+     * seat's block declarations at a declare-blockers ask, after the server's greedy DECISION ({@code greedy}). The
+     * candidates, deduplicated, in this order: the policy's own declaration (the default), its next most frequent ones
+     * among {@code blockSamples} sampled DECIDEs of the same frame (up to {@code blockTop} policy declarations in all),
+     * no blocks, and Forge AI's own declaration ({@code AiBlockController}, in a copy). Forge's declaration and "no
+     * blocks" are candidates like the others: they are played only when the search values them past the departZ gate.
+     * The play-outs, worlds, value leaf, gate and wall budget are the priority search's (one budget for the whole
+     * decision, sampling included). Returns the steps to play instead, or null to keep the policy's own.
+     */
+    @Override
+    public short[] decideBlocks(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame,
+            final short[] greedy, final Object objs) {
+        if (cfg.blocks <= 0) {
+            return null;
+        }
+        final long t0 = System.nanoTime();
+        blockAsks++;
+        lastProposeMs = -1;
+        if (m.family != RlSchema.F_BLOCK || greedy == null || greedy.length != m.S() || m.S() == 0
+                || m.validate(greedy) != null) {
+            return null;
+        }
+        if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
+            return null;
+        }
+        final List<short[]> cs = new ArrayList<>();
+        final List<String> labels = new ArrayList<>();
+        final java.util.Set<String> keys = new java.util.HashSet<>();
+        cs.add(greedy);
+        labels.add("policy");
+        keys.add(java.util.Arrays.toString(greedy));
+        // the policy's own distribution: distinct sampled declarations by count (ties: first drawn)
+        final Map<String, int[]> count = new java.util.LinkedHashMap<>();
+        final Map<String, short[]> stepsOf = new java.util.HashMap<>();
+        if (cfg.blockSamples > 0 && cfg.blockTop > 1) {
+            final long uid0 = frame.gameUid;
+            try {
+                for (int j = 0; j < cfg.blockSamples; j++) {
+                    // the service seeds a sampled DECISION by (game uid, seat, dec_idx): one uid per sample
+                    frame.gameUid = splitmix(uid0 ^ (0xb10c0000L + j));
+                    final RlWire.Decision d = client().decide(RlWire.encodeDecide(frame), true);
+                    if (d.status != RlWire.ST_OK || d.steps == null || m.validate(d.steps) != null) {
+                        continue;
+                    }
+                    final String k = java.util.Arrays.toString(d.steps);
+                    count.computeIfAbsent(k, x -> new int[1])[0]++;
+                    stepsOf.putIfAbsent(k, d.steps);
+                }
+            } catch (IOException | RuntimeException e) {
+                drop();
+                blockSampleFailures++;
+                System.err.println("[rlsearch] block samples failed, searching without them: " + e);
+            } finally {
+                frame.gameUid = uid0;
+            }
+            final List<String> byCount = new ArrayList<>(count.keySet());
+            byCount.sort((x, y) -> Integer.compare(count.get(y)[0], count.get(x)[0]));
+            for (String k : byCount) {
+                if (cs.size() >= cfg.blockTop) {
+                    break;
+                }
+                if (keys.add(k)) {
+                    cs.add(stepsOf.get(k));
+                    labels.add("sample" + count.get(k)[0]);
+                }
+            }
+        }
+        final short[] none = m.noBlockSteps();
+        if (none != null && keys.add(java.util.Arrays.toString(none))) {
+            cs.add(none);
+            labels.add("none");
+        }
+        final Map<Integer, List<Integer>> fb = ls.forgeBlocks(g, me);
+        final short[] forge = fb == null ? null : m.blockSteps(fb);
+        if (forge == null) {
+            blockForgeMissing++;
+        } else if (keys.add(java.util.Arrays.toString(forge))) {
+            cs.add(forge);
+            labels.add("forge");
+        }
+        final List<Map<Integer, List<Integer>>> plans = new ArrayList<>(cs.size());
+        for (short[] st : cs) {
+            plans.add(m.blockMap(st));
+        }
+        final double prepMs = (System.nanoTime() - t0) / 1e6;
+        final LookaheadSearch.GivenResult r = ls.decideBlocks(g, me, plans, labels, t0);
+        if (r.givenIndex.length > 0) {
+            blockSearched++;
+            searchCpuMs += r.cpuMs;
+        }
+        poolCpuMs += r.poolCpuMs;
+        if ("capped".equals(r.outcome)) {
+            blockCapped++;
+        }
+        final short[] answer = r.chosen > 0 && r.chosen < cs.size() ? cs.get(r.chosen) : null;
+        if (answer != null) {
+            blockDepartures++;
+        }
+        final double ms = (System.nanoTime() - t0) / 1e6;
+        final BlocksDecided hook = onBlocksDecided;
+        if (hook != null) {
+            try {
+                hook.decided(g, r, cs.size(), labels, r.chosen > 0 ? labels.get(r.chosen) : "policy", ms, prepMs);
+            } catch (RuntimeException e) {
+                System.err.println("[rlsearch] onBlocksDecided failed: " + e);
+            }
+        }
+        if (cfg.decisionLog != null || rowsWanted) {
+            final JsonObject row = new JsonObject();
+            row.addProperty("game_uid", Long.toUnsignedString(uid));
+            row.addProperty("dec_idx", frame.decIdx);
+            row.addProperty("turn", g.getPhaseHandler().getTurn());
+            row.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+            row.addProperty("kind", "blocks");
+            row.addProperty("C", m.C());
+            row.addProperty("S", m.S());
+            final JsonArray lb = new JsonArray();
+            for (String l : labels) {
+                lb.add(l);
+            }
+            row.add("cands", lb);
+            final JsonArray ix = new JsonArray();
+            final JsonArray ev = new JsonArray();
+            for (int j = 0; j < r.givenIndex.length; j++) {
+                ix.add(r.givenIndex[j]);
+                ev.add(Double.isNaN(r.ev[j]) ? null : r.ev[j]);
+            }
+            row.add("searched", ix);
+            row.add("ev", ev);
+            final JsonArray vw = new JsonArray();
+            for (int j = 0; j < r.values.length; j++) {
+                final JsonArray w = new JsonArray();
+                for (double x : r.values[j]) {
+                    if (Double.isInfinite(x) || Double.isNaN(x)) {
+                        w.add((Number) null);
+                    } else {
+                        w.add(Math.round(x * 1e4) / 1e4);
+                    }
+                }
+                vw.add(w);
+            }
+            row.add("values", vw);
+            row.addProperty("outcome", r.outcome);
+            row.addProperty("chosen", r.chosen <= 0 ? 0 : r.chosen);
+            row.addProperty("failed", r.failed);
+            row.addProperty("leaf_fallback", r.leafFallback);
+            row.addProperty("prep_ms", Math.round(prepMs * 10) / 10.0);
+            row.addProperty("ms", Math.round(ms * 10) / 10.0);
+            row.addProperty("cpu_ms", Math.round(r.cpuMs * 10) / 10.0);
+            rows.add(row);
+        }
+        return answer;
+    }
+
+    /**
+     * Live play (block-search-1019; null by default, and never called without {@code blocks}): every block decision the
+     * search made, searched or not. {@code ms} is the whole decision (samples, Forge's declaration, play-outs);
+     * {@code prepMs} its part before the play-outs; {@code chosen} the label of the declaration played.
+     */
+    public interface BlocksDecided {
+        void decided(Game g, LookaheadSearch.GivenResult r, int candidates, List<String> labels, String chosen, double ms,
+                double prepMs);
+    }
+
+    public BlocksDecided onBlocksDecided;
+
     @Override
     public ChoiceWindow takeWindow() {
         final ChoiceWindow w = pendingWindow;
@@ -1515,6 +1715,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             planSearches.forEach((id, d) -> pl.add(String.valueOf(id), d.summary()));
             o.add("plans", pl);
         }
+        if (cfg.blocks > 0) {
+            // block-search-1019: only when on
+            final JsonObject bl = new JsonObject();
+            bl.addProperty("asks", blockAsks);
+            bl.addProperty("searched", blockSearched);
+            bl.addProperty("departures", blockDepartures);
+            bl.addProperty("capped", blockCapped);
+            bl.addProperty("forge_missing", blockForgeMissing);
+            bl.addProperty("sample_failures", blockSampleFailures);
+            o.add("blocks", bl);
+        }
         return o;
     }
 
@@ -1686,8 +1897,33 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             this.keepUltimatesFirst = keepUltimatesFirst;
         }
 
+        /**
+         * Block search (block-search-1019): the searched declaration, declared at this copy's first declare-blockers step
+         * (null = none), and why it could not be (the play-out then fails).
+         */
+        Object forcedBlocks;
+        private boolean forcedUsed = false;
+        volatile String forcedFailure;
+
+        @Override
+        public void declareBlockers(final Player defender, final forge.game.combat.Combat combat) {
+            if (forcedBlocks != null && !forcedUsed) {
+                forcedUsed = true;
+                final String why = LookaheadSearch.applyBlocks(forcedBlocks, getGame(), defender, combat);
+                if (why == null) {
+                    return;
+                }
+                forcedFailure = "the searched blocks could not be declared in the play-out: " + why;
+            }
+            super.declareBlockers(defender, combat);
+        }
+
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
+            if (forcedBlocks != null && !forcedUsed && forcedFailure == null) {
+                // block-search-1019: the copy reached a priority before its declare-blockers step
+                forcedFailure = "the play-out reached a priority before declaring the searched blocks";
+            }
             if (probe != null) {
                 probe.onPriority(getGame(), getPlayer());
             }
@@ -1807,7 +2043,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         rs.seenNames = cc.know::opponentSeen;
         final String[] why = {null};
         // search-bones-1015 (S-b): a recording play-out or a plan candidate has no forced first action
-        final boolean planned = first.recorder != null || first.plan != null;
+        // block-search-1019: a block candidate has no forced priority action either (its seat declares the blocks)
+        final boolean planned = first.recorder != null || first.plan != null || first.block != null;
         if (first.recorder instanceof PlanSearch.Recorder) {
             final PlanSearch.Recorder rec = (PlanSearch.Recorder) first.recorder;
             rec.seatPlayer = me;
@@ -1913,6 +2150,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // search-bones-1015 (S-b): the solver line's follower in front of the copy's policy seat
             pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first);
         }
+        pc.forcedBlocks = first.block;
         return new LookaheadSearch.PlayoutSeat() {
             @Override
             public PlayerControllerAi controller() {
@@ -1923,6 +2161,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             public String failure() {
                 if (rs.fatal != null) {
                     return rs.fatal;
+                }
+                if (pc.forcedFailure != null) {
+                    return pc.forcedFailure;
                 }
                 return rs.voidReason;
             }

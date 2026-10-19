@@ -49,6 +49,12 @@ import forge.game.Game;
  * {@code plans.solverCfg.paySearch}) and every other key, and requires {@code plans.solverCfg.hideOwnLibrary=true}: the
  * solver must not search on our real library order, which a player does not see.
  *
+ * <p><b>Block search</b> (lane block-search-1019; off unless the spec has {@code blocks=1}, and then the seat is S-c / S-b
+ * byte for byte): the seat's declare-blockers asks are searched too ({@link RlSearch#decideBlocks}): the policy's own
+ * declaration (the default), its next most sampled ones ({@code blocks.samples}, {@code blocks.top}), no blocks and Forge
+ * AI's declaration are played out with the priority search's worlds, leaf, departZ gate and wall budget. One
+ * {@code [lookahead-decision]} line per block decision, with {@code "kind":"blocks"}.
+ *
  * <p><b>Wall</b> (lane sc-wallguard-1009). A searched decision past its budget plays the policy's own choice
  * ("capped"): its policy play-outs stop at their next service request or main-loop step, and the wait for them ends at
  * the budget plus {@link LookaheadSearch#WALL_GRACE_MS} at the latest (then the decision line carries
@@ -134,6 +140,14 @@ public final class RlLiveSeat {
             }
         }
 
+        /** block-search-1019: a {@code blocks} key's integer value within its bounds, or an error. */
+        private static int blockKey(final String k, final String v, final int lo, final int hi) {
+            if (!v.matches("\\d{1,3}") || Integer.parseInt(v) < lo || Integer.parseInt(v) > hi) {
+                throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want an integer in " + lo + ".." + hi + ")");
+            }
+            return Integer.parseInt(v);
+        }
+
         public static Spec parse(final String raw) {
             final Spec s = new Spec();
             s.raw = raw;
@@ -191,6 +205,10 @@ public final class RlLiveSeat {
                     case "log": s.log = !"0".equals(v); break;
                     case "obs": c.obs = Integer.parseInt(v); break;
                     case "copyFidelity": c.copyFidelity = Integer.parseInt(v); break;
+                    // block-search-1019: the look-ahead over declare-blockers asks (absent = off, S-c / S-b unchanged)
+                    case "blocks": c.blocks = blockKey(k, v, 0, 1); break;
+                    case "blocks.samples": c.blockSamples = blockKey(k, v, 0, 64); break;
+                    case "blocks.top": c.blockTop = blockKey(k, v, 1, 8); break;
                     default:
                         if (k.startsWith("plans.")) {
                             planKey(c, k, v); // sb-live-1018: S-b, flat keys
@@ -312,6 +330,9 @@ public final class RlLiveSeat {
             if (spec.search.plans != null) {
                 o.addProperty("plans", true); // sb-live-1018: S-b on (the spec is in search.plans); absent otherwise
             }
+            if (spec.search.blocks > 0) {
+                o.addProperty("blocks", true); // block-search-1019: block search on; absent otherwise
+            }
             o.addProperty("helloMs", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
             o.add("search", spec.search.toJson());
             line(o);
@@ -423,6 +444,9 @@ public final class RlLiveSeat {
             if (spec.log) {
                 s.onPlanDecided = this::planDecided;
             }
+        }
+        if (spec.search.blocks > 0 && spec.log) {
+            s.onBlocksDecided = this::blocksDecided; // block-search-1019
         }
         this.seat = rs;
         this.search = s;
@@ -545,6 +569,53 @@ public final class RlLiveSeat {
             d.addProperty("failed", r.failed);
             d.addProperty("leafFallback", r.leafFallback);
         }
+        d.addProperty("searched", st.searched);
+        d.addProperty("departedTotal", st.departed);
+        d.addProperty("cappedTotal", st.capped);
+        if (forge.ai.WallClock.rebuilding()) {
+            d.addProperty("rebuild", true);
+        }
+        System.err.println("[lookahead-decision] " + d);
+    }
+
+    /**
+     * block-search-1019 (block search only): one {@code [lookahead-decision]} line per block decision, with
+     * {@code "kind":"blocks"}. searchMs is the whole decision (samples, Forge's declaration, play-outs), so the host's
+     * latency and cap counts cover it; an uncontested decision (one distinct declaration) has no play-outs.
+     */
+    private void blocksDecided(final Game g, final LookaheadSearch.GivenResult r, final int candidates,
+            final java.util.List<String> labels, final String chosen, final double ms, final double prepMs) {
+        final LookaheadSearch.Stats st = search.lookaheadStats();
+        final JsonObject d = new JsonObject();
+        d.addProperty("seat", "policy");
+        d.addProperty("kind", "blocks");
+        d.addProperty("decision", searchedLines++);
+        d.addProperty("turn", g.getPhaseHandler().getTurn());
+        d.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        d.addProperty("stack", g.getStack().size());
+        d.addProperty("candidates", r.givenIndex.length);
+        d.addProperty("entries", candidates);
+        d.addProperty("worlds", r.worlds);
+        d.addProperty("searchMs", Math.round(ms * 10) / 10.0);
+        d.addProperty("cpuMs", Math.round(r.cpuMs));
+        d.addProperty("scoreMs", Math.round(prepMs * 10) / 10.0);
+        d.addProperty("capped", "capped".equals(r.outcome));
+        if (r.wall) {
+            d.addProperty("wall", true);
+        }
+        d.addProperty("outcome", r.outcome);
+        d.addProperty("departed", r.chosen > 0);
+        d.addProperty("chosen", chosen);
+        final com.google.gson.JsonArray lb = new com.google.gson.JsonArray();
+        labels.forEach(lb::add);
+        d.add("labels", lb);
+        final com.google.gson.JsonArray ev = new com.google.gson.JsonArray();
+        for (double x : r.ev) {
+            ev.add(Double.isNaN(x) ? null : Math.round(x * 1e4) / 1e4);
+        }
+        d.add("ev", ev);
+        d.addProperty("failed", r.failed);
+        d.addProperty("leafFallback", r.leafFallback);
         d.addProperty("searched", st.searched);
         d.addProperty("departedTotal", st.departed);
         d.addProperty("cappedTotal", st.capped);

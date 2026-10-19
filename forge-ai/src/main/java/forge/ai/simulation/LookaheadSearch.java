@@ -965,6 +965,27 @@ public final class LookaheadSearch {
          * {@link FirstAction#plan}), or null. A plan candidate has no first action of its own.
          */
         final Object plan;
+        /**
+         * Lane block-search-1019: a block assignment candidate ({@link BlockPlan}), or null. It has no first priority action:
+         * its play-out rewinds the copy to the end of declare attackers and the play-out seat declares it.
+         */
+        final BlockPlan block;
+
+        /** block-search-1019: a block assignment candidate; {@code label} names it, its blocks are its key. */
+        Cand(BlockPlan block, String label, boolean isDefault) {
+            this.pass = false;
+            this.hostId = -1;
+            this.desc = "";
+            this.land = false;
+            this.isDefault = isDefault;
+            this.label = "blocks " + label;
+            this.kind = "block";
+            this.tgt = null;
+            this.schedule = null;
+            this.macro = null;
+            this.plan = null;
+            this.block = block;
+        }
 
         /** S-b: a turn-plan candidate; {@code label} names it (and is its key). */
         Cand(Object plan, String label) {
@@ -979,6 +1000,7 @@ public final class LookaheadSearch {
             this.schedule = null;
             this.macro = null;
             this.plan = plan;
+            this.block = null;
         }
 
         private Cand(Cand base, String tgt, String tgtLabel) {
@@ -993,6 +1015,7 @@ public final class LookaheadSearch {
             this.schedule = null;
             this.macro = null;
             this.plan = null;
+            this.block = null;
         }
 
         /** S-t: {@code base} played out with a forced-answer schedule for its choice asks (a macro candidate). */
@@ -1008,6 +1031,7 @@ public final class LookaheadSearch {
             this.schedule = schedule;
             this.macro = macro;
             this.plan = null;
+            this.block = null;
         }
 
         Cand(SpellAbility sa, boolean isDefault) {
@@ -1022,6 +1046,7 @@ public final class LookaheadSearch {
             this.schedule = null;
             this.macro = null;
             this.plan = null;
+            this.block = null;
         }
 
         /** The prior request's candidate: {id, kind, fid} (fid = the host card's id, absent for pass). */
@@ -1038,6 +1063,9 @@ public final class LookaheadSearch {
         String key() {
             if (plan != null) {
                 return label;
+            }
+            if (block != null) {
+                return "block|" + block.key();
             }
             return (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc + (tgt == null ? "" : "|T:" + tgt))
                     + (macro == null ? "" : "|M:" + macro);
@@ -1175,6 +1203,11 @@ public final class LookaheadSearch {
          * turn ends, and is not a searched candidate. Null otherwise.
          */
         public Object recorder;
+        /**
+         * Lane block-search-1019: the block assignment this play-out's seat declares at the copy's declare-blockers step
+         * (opaque: {@link LookaheadSearch#applyBlocks}); null = a priority candidate.
+         */
+        public final Object block;
 
         FirstAction(Cand c) {
             this.pass = c.pass;
@@ -1183,6 +1216,7 @@ public final class LookaheadSearch {
             this.land = c.land;
             this.schedule = c.schedule;
             this.plan = c.plan;
+            this.block = c.block;
         }
 
         /**
@@ -4877,6 +4911,11 @@ public final class LookaheadSearch {
         Budget budget;
         /** Lane copy-fidelity-1010: why the candidate could not be found in the copy (diagnostics), or null. */
         String missWhy;
+        /**
+         * Lane block-search-1019: the copy was rewound to the end of declare attackers (a block candidate): its next
+         * main-loop step enters declare blockers, so priority is not given to the seat.
+         */
+        boolean rewound;
     }
 
     Rollout rollout(Game live, Player liveMe, Cand c, SpellAbility defSa, long worldSeed, boolean resample, Boolean wantFp) {
@@ -4933,6 +4972,11 @@ public final class LookaheadSearch {
                     }
                     MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
                 }
+                if (c.block != null) {
+                    // block-search-1019: a block candidate's copy resumes at the end of declare attackers
+                    rewindToBlocks(p.g, p.me);
+                    p.rewound = true;
+                }
                 if (hookLeaf || hookPlayout) {
                     // S1: the hooks' per-copy context (a seat-knowledge tracker forked into the copy, attached to it)
                     p.hookCtx = hooks.onCopy(p.g, p.me);
@@ -4944,10 +4988,14 @@ public final class LookaheadSearch {
                     p.firstAction.budget = p.budget;
                     p.firstAction.mayPlayLoose = fidelityPass();
                     p.playoutSeed = mix(worldSeed, 5);
-                    if (!c.pass && c.plan == null && locate(p.g, p.me, c, fidelityPass()) == null) {
+                    if (!c.pass && c.plan == null && c.block == null && locate(p.g, p.me, c, fidelityPass()) == null) {
                         p.failed = true;
                         p.missWhy = locateMiss(p.g, p.me, c);
                     }
+                } else if (c.block != null) {
+                    // block-search-1019: block candidates are searched with policy play-outs only
+                    p.failed = true;
+                    p.missWhy = "a block candidate needs policy play-outs";
                 } else if (!c.pass) {
                     SpellAbility sa = prepare(p.g, p.me, c, defSa, copier);
                     if (sa == null) {
@@ -5044,9 +5092,11 @@ public final class LookaheadSearch {
                 }
             }
             final PhaseHandler ph = g.getPhaseHandler();
-            givePriority(ph, me);
-            if (p.firstPriority != null) {
-                setFirstPriority(ph, p.firstPriority);
+            if (!p.rewound) {
+                givePriority(ph, me);
+                if (p.firstPriority != null) {
+                    setFirstPriority(ph, p.firstPriority);
+                }
             }
             final TurnWatch watch = new TurnWatch(ph.getTurn() + (recording ? 1 : cfg.horizonTurns),
                     Boolean.TRUE.equals(wantFp) ? me : null);
@@ -5825,6 +5875,293 @@ public final class LookaheadSearch {
             }
         }
         stats.combatNanos += System.nanoTime() - t0;
+    }
+
+    // ------------------------------------------------------------------ block search (lane block-search-1019)
+
+    /**
+     * Block search: rewind a copy made at the searching seat's declare-blockers ask to the end of declare attackers (its
+     * blockers cleared, both players passed), so that its next main-loop step enters declare blockers and the seat's
+     * play-out controller declares there (as {@link #combatRollout} rewinds for C2).
+     */
+    static void rewindToBlocks(Game g, Player me) {
+        final PhaseHandler ph = g.getPhaseHandler();
+        final forge.game.combat.Combat c = ph.getCombat();
+        if (c == null || ph.getPhase() != forge.game.phase.PhaseType.COMBAT_DECLARE_BLOCKERS) {
+            throw new IllegalStateException("block search: the copy is not at declare blockers (" + ph.getPhase()
+                    + (c == null ? ", no combat)" : ")"));
+        }
+        final Player active = ph.getPlayerTurn();
+        final Player other = g.getNextPlayerAfter(active);
+        BlockPlan.clear(c, me);
+        ph.devModeSet(forge.game.phase.PhaseType.COMBAT_DECLARE_ATTACKERS, active, false, ph.getTurn());
+        setPriorityState(ph, other, active, false);
+    }
+
+    /** Block search: an assignment (blocker card id -> attacker card ids) as the opaque plan of a candidate. */
+    public static Object blockPlan(String label, Map<Integer, List<Integer>> blocks) {
+        final BlockPlan b = new BlockPlan(label);
+        for (Map.Entry<Integer, List<Integer>> e : blocks.entrySet()) {
+            b.blocks.put(e.getKey(), new ArrayList<>(e.getValue()));
+        }
+        return b;
+    }
+
+    /**
+     * Block search: declare {@code block} (a {@link #blockPlan}) into {@code combat} for {@code defender}, as the bridge
+     * declares an answer (each pair must be a legal block, then the whole declaration must validate). Null when declared;
+     * otherwise why not (and nothing of it stays declared).
+     */
+    public static String applyBlocks(Object block, Game g, Player defender, forge.game.combat.Combat combat) {
+        if (!(block instanceof BlockPlan)) {
+            return "not a block plan";
+        }
+        final BlockPlan b = (BlockPlan) block;
+        BlockPlan.clear(combat, defender);
+        String bad = null;
+        for (Map.Entry<Integer, List<Integer>> e : b.blocks.entrySet()) {
+            final Card bl = g.findById(e.getKey());
+            for (Integer aid : e.getValue()) {
+                final Card at = g.findById(aid);
+                if (bl == null || at == null) {
+                    bad = "blocker " + e.getKey() + " or attacker " + aid + " is not in the copy";
+                    break;
+                }
+                if (!forge.game.combat.CombatUtil.canBlock(at, bl, combat)) {
+                    bad = bl.getName() + " cannot block " + at.getName();
+                    break;
+                }
+                combat.addBlocker(at, bl);
+            }
+            if (bad != null) {
+                break;
+            }
+        }
+        if (bad == null) {
+            final String problem = forge.game.combat.CombatUtil.validateBlocks(combat, defender);
+            if (problem != null) {
+                bad = "validateBlocks: " + problem;
+            }
+        }
+        if (bad != null) {
+            BlockPlan.clear(combat, defender);
+        }
+        return bad;
+    }
+
+    /**
+     * Block search: Forge AI's own block declaration ({@code AiBlockController}, through a play-out Forge AI controller)
+     * at the searching seat's declare-blockers ask, made in a copy of the live game (its scopes isolated; the live game
+     * is only read). Null when it cannot be made.
+     */
+    public Map<Integer, List<Integer>> forgeBlocks(Game live, Player liveMe) {
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(new Random(mix(cfg.seed, 0xf0b10cL + decisionIndex)));
+        AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            final Game g;
+            final Player me;
+            synchronized (live) {
+                final GameCopier copier = copierOf(live);
+                g = copier.makeCopy();
+                me = (Player) copier.find(liveMe);
+            }
+            final forge.game.combat.Combat c = g.getPhaseHandler().getCombat();
+            if (c == null) {
+                return null;
+            }
+            BlockPlan.clear(c, me);
+            final RolloutAi ai = new RolloutAi(g, me, me.getController().getLobbyPlayer());
+            me.dangerouslySetController(ai);
+            ai.declareBlockers(me, c);
+            return BlockPlan.of("forge", c, me).blocks;
+        } catch (RuntimeException | StackOverflowError e) {
+            System.err.println("[lookahead] block search: Forge's blocks failed: " + e);
+            return null;
+        } finally {
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+    }
+
+    /**
+     * Block search (lane block-search-1019): the S1 recipe over a GIVEN set of block assignments at the searching seat's
+     * declare-blockers ask. {@code plans} (blocker card id -> attacker card ids) are in the caller's order; index 0 is the
+     * default the search departs from (the policy's own declaration). Duplicates are dropped. Each candidate is played out
+     * in K worlds (common random numbers) by the policy play-out seat, which declares the candidate at the copy's declare
+     * blockers (the copy is rewound to the end of declare attackers) and is the policy afterwards; the value leaf, the
+     * departZ gate and the wall budget (counted from {@code startNanos}, 0 = this call's start) are the priority search's.
+     * Needs policy play-outs. The live game is only read.
+     */
+    public GivenResult decideBlocks(Game live, Player me, List<Map<Integer, List<Integer>>> plans, List<String> labels,
+            long startNanos) {
+        final GivenResult res = new GivenResult();
+        stats.s1On = true;
+        stats.decisions++;
+        stats.blockDecisions++;
+        if (!hookPlayout) {
+            res.outcome = "unsupported";
+            return res;
+        }
+        final int index = decisionIndex++;
+        final List<Cand> cands = new ArrayList<>();
+        final List<Integer> at = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        for (int i = 0; i < plans.size(); i++) {
+            final Cand c = new Cand((BlockPlan) blockPlan(labels.get(i), plans.get(i)), labels.get(i), i == 0);
+            if (seen.add(c.key())) {
+                cands.add(c);
+                at.add(i);
+            }
+        }
+        if (cands.size() < 2) {
+            stats.uncontested++;
+            res.outcome = "uncontested";
+            return res;
+        }
+        final long t0 = System.nanoTime();
+        final long c0 = TMX.getCurrentThreadCpuTime();
+        final java.util.concurrent.atomic.AtomicLong pc = new java.util.concurrent.atomic.AtomicLong();
+        poolCpu = pc;
+        final java.util.concurrent.atomic.AtomicLong[] prevAcc = forge.ai.CpuAccount.get();
+        forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
+        final long start = startNanos != 0L ? startNanos : t0;
+        final Budget b = cfg.budgetMs > 0 ? new Budget(start + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
+        budget = b;
+        boolean searched = false;
+        try {
+            searched = decideBlocks0(live, me, cands, at, index, res);
+        } catch (RuntimeException e) {
+            stats.departFallback++;
+            res.chosen = 0;
+            res.outcome = "failed";
+            System.err.println("[lookahead] block search failed at decision " + index + ", playing the default: " + e);
+            if (FAILURE_TRACES.getAndIncrement() < 20) {
+                e.printStackTrace();
+            }
+        } finally {
+            budget = null;
+            if (b != null && b.wallCut) {
+                res.wall = true;
+            }
+            poolCpu = null;
+            forge.ai.CpuAccount.set(prevAcc);
+            final long dt = System.nanoTime() - t0;
+            final long cpu = TMX.getCurrentThreadCpuTime() - c0 + pc.get();
+            res.ms = dt / 1e6;
+            res.cpuMs = cpu / 1e6;
+            res.poolCpuMs = pc.get() / 1e6;
+            if (searched) {
+                stats.searchNanos += dt;
+                stats.maxSearchNanos = Math.max(stats.maxSearchNanos, dt);
+                stats.searchMsEach.add(dt / 1e6);
+                stats.searchCpuNanos += cpu;
+                stats.searchCpuMsEach.add(cpu / 1e6);
+                stats.combatNanos += dt;
+            }
+        }
+        return res;
+    }
+
+    private boolean decideBlocks0(Game live, Player me, List<Cand> cands, List<Integer> at, int index, GivenResult res) {
+        final long decisionSeed = mix(cfg.seed, 0xb10c5eedL + index);
+        stats.searched++;
+        stats.blockSearched++;
+        lastCandidates = cands;
+        final int k = Math.max(1, cfg.worlds);
+        final int n = cands.size();
+        final double[][] values = new double[n][k];
+        final Rollout[][] outs = new Rollout[n][k];
+        final boolean[] ok = new boolean[n];
+        Arrays.fill(ok, true);
+        explainChoices = EXPLAIN ? new String[n] : null;
+        labelChoices = null;
+        labelTargets = null;
+        final int aborted = playAll(live, me, cands, null, decisionSeed, new Carried[k], values, outs, ok, null);
+        if (hookLeaf && aborted == 0) {
+            final long fb = stats.leafFallbacks;
+            valueLeaves(values, outs, ok, k);
+            res.leafFallback = stats.leafFallbacks != fb;
+        }
+        final boolean overBudget = aborted > 0;
+        final double[] ev = new double[n];
+        for (int c = 0; c < n; c++) {
+            double s = 0;
+            for (int w = 0; w < k; w++) {
+                s += values[c][w];
+            }
+            ev[c] = ok[c] ? s / k : Double.NaN;
+            if (!ok[c]) {
+                stats.candidatesDropped++;
+                res.failed++;
+            }
+        }
+        final int best = overBudget ? 0 : argmax(values, ok, n, k);
+        res.chosen = 0;
+        String outcome = "kept";
+        if (best != 0 && !cfg.shadow) {
+            res.chosen = at.get(best);
+            stats.departed++;
+            stats.blockDeparted++;
+            outcome = "departed";
+        } else if (best != 0) {
+            outcome = "shadow-would-depart";
+        }
+        if (overBudget) {
+            stats.capped++;
+            res.chosen = 0;
+            outcome = "capped";
+        }
+        res.outcome = outcome;
+        res.worlds = k;
+        res.ev = ev;
+        res.values = values;
+        res.givenIndex = new int[n];
+        for (int c = 0; c < n; c++) {
+            res.givenIndex[c] = at.get(c);
+        }
+        final PhaseHandler ph = live.getPhaseHandler();
+        if (Boolean.getBoolean("lookahead.trace")) {
+            final StringBuilder tb = new StringBuilder("[ltrace] blocks d=").append(index).append(" T").append(ph.getTurn())
+                    .append(' ').append(ph.getPhase()).append(" best=").append(best).append(" out=").append(outcome);
+            for (int c = 0; c < n; c++) {
+                tb.append(" | ").append(cands.get(c).label.replace('|', '/')).append(ok[c] ? "" : " FAIL");
+                for (int w = 0; w < k; w++) {
+                    tb.append(' ').append(Double.doubleToLongBits(values[c][w]));
+                }
+            }
+            System.err.println(tb);
+        }
+        if (EXPLAIN) {
+            final JsonObject x = new JsonObject();
+            x.addProperty("given", true);
+            x.addProperty("kind", "blocks");
+            x.addProperty("decision", index);
+            x.addProperty("turn", ph.getTurn());
+            x.addProperty("phase", String.valueOf(ph.getPhase()));
+            x.addProperty("best", best);
+            x.addProperty("outcome", outcome);
+            final JsonArray ca = new JsonArray();
+            for (int c = 0; c < n; c++) {
+                final JsonObject co = new JsonObject();
+                co.addProperty("label", cands.get(c).label);
+                co.addProperty("ok", ok[c]);
+                co.addProperty("ev", ok[c] ? ev[c] : null);
+                final JsonArray vs = new JsonArray();
+                for (int w = 0; w < k; w++) {
+                    vs.add(values[c][w]);
+                }
+                co.add("values", vs);
+                ca.add(co);
+            }
+            x.add("candidates", ca);
+            System.err.println("[lookahead-explain] " + x);
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------ tutor ranking (lane tutor-ranking-0928)
