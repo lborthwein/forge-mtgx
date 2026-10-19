@@ -808,6 +808,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             stage = sb.propose(g, me, m, menuObjs, t0);
             if (stage.hook) {
                 planRow(g, frame, stage, null, order, -1, t0);
+                planDecided(g, stage, null, t0);
                 return RlSeat.PrioritySearch.HOOK;
             }
         }
@@ -856,6 +857,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             planRow(g, frame, stage, r, order, pa, t0);
             if (pa != -2) {
                 departures++;
+                planDecided(g, stage, r, t0);
                 return pa;
             }
         }
@@ -895,6 +897,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
         }
         final Searched hook = onSearched;
+        lastProposeMs = stage != null ? stage.ms : -1; // sb-live-1018: S-b only (stage is null without plans)
         if (hook != null && r.givenIndex.length > 0) {
             try {
                 hook.searched(g, r, by.size(), (System.nanoTime() - t0) / 1e6 - r.ms);
@@ -1395,6 +1398,32 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
     }
 
     public Searched onSearched;
+
+    /**
+     * Live play, S-b only (lane sb-live-1018; null by default, and never called without {@code plans}): a plan point the
+     * seat decided without an S-c decision line, i.e. a proven solver line taken at once ({@code r} null) or a plan or
+     * line adopted after the play-outs. {@code ms}: the whole decision from its start (SCORE, proposals and play-outs).
+     */
+    public interface PlanDecided {
+        void decided(Game g, LookaheadSearch.GivenResult r, String note, int plans, double ms);
+    }
+
+    public PlanDecided onPlanDecided;
+
+    /** sb-live-1018: the proposals' ms of the decision {@link #onSearched} is told about (S-b plan points), else -1. */
+    public double lastProposeMs = -1;
+
+    private void planDecided(final Game g, final PlanSearch.Stage st, final LookaheadSearch.GivenResult r, final long t0) {
+        final PlanDecided h = onPlanDecided;
+        if (h == null) {
+            return;
+        }
+        try {
+            h.decided(g, r, st.note, st.plans.size(), (System.nanoTime() - t0) / 1e6);
+        } catch (RuntimeException e) {
+            System.err.println("[rlsearch] onPlanDecided failed: " + e);
+        }
+    }
 
     /** The search's per-game counters (live play: the decision lines' running totals). */
     public LookaheadSearch.Stats lookaheadStats() {
