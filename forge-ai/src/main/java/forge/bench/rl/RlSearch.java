@@ -715,11 +715,48 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 : -1;
     }
 
+    // ---- J1 (lane block-search-1019; both null by default, and then nothing below changes)
+    /** The live choices to replay ({@link forge.ai.simulation.AiReplay}), or null. */
+    public forge.ai.simulation.AiReplay replay;
+    /** The index the next decision line will carry (RlLiveSeat's searchedLines), or null. */
+    public java.util.function.IntSupplier nextLine;
+    /** The last decision's replay flags (for its decision line; false without a replay). */
+    public boolean lastForced, lastForcedMiss;
+
+    /** J1: the live decision for the next decision line, or null. */
+    private forge.ai.simulation.AiReplay.Mark mark() {
+        final forge.ai.simulation.AiReplay r = replay;
+        final java.util.function.IntSupplier nl = nextLine;
+        return r == null || nl == null ? null : r.at(nl.getAsInt());
+    }
+
+    /** J1: before a given / block search, the label the live game played there (null = none, or a proven line). */
+    private void armForce(final forge.ai.simulation.AiReplay.Mark mk) {
+        if (mk == null) {
+            return;
+        }
+        if ("proven".equals(mk.outcome) || mk.played == null) {
+            // live took a proven solver line here (or the mark has no label): nothing among the candidates to force
+            lastForcedMiss = true;
+            return;
+        }
+        ls.forcePlayed = mk.played;
+    }
+
+    /** J1: the result's replay flags into the decision line's. */
+    private void tookForce(final LookaheadSearch.GivenResult r) {
+        lastForced |= r.forced;
+        lastForcedMiss |= r.forcedMiss;
+        ls.forcePlayed = null;
+    }
+
     @Override
     public int decide(final Game g, final Player me, final RlCandidates.Menu m, final RlWire.Decide frame, final int greedy,
             final List<SpellAbility> menuObjs) {
         pendingWindow = null;
         liveMacro = null;
+        lastForced = false;
+        lastForcedMiss = false;
         priorityAsks++;
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
@@ -835,11 +872,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // search-bones-1015 (S-b): a plan point: the proposals, then S-c's worlds over the given candidates and plans
             stage = sb.propose(g, me, m, menuObjs, t0);
             if (stage.hook) {
+                // J1: a proven line taken at once; live must have taken one here too
+                final forge.ai.simulation.AiReplay.Mark mk = mark();
+                if (mk != null && !"proven".equals(mk.outcome)) {
+                    lastForcedMiss = true;
+                }
                 planRow(g, frame, stage, null, order, -1, t0);
                 planDecided(g, stage, null, t0);
                 return RlSeat.PrioritySearch.HOOK;
             }
         }
+        armForce(mark());
         if (sb != null) {
             // S-b: every searched decision has the proof flags; a plan point also has its plans (and its budget counts
             // from the decision's start, the proposals included)
@@ -874,6 +917,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         } else {
             r = ls.decideGiven(g, me, given, cfg.breadth);
         }
+        tookForce(r);
         poolCpuMs += r.poolCpuMs;
         int answer = -1;
         if (r.givenIndex.length > 0) {
@@ -1203,7 +1247,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             plans.add(m.blockMap(st));
         }
         final double prepMs = (System.nanoTime() - t0) / 1e6;
+        lastForced = false;
+        lastForcedMiss = false;
+        armForce(mark());
         final LookaheadSearch.GivenResult r = ls.decideBlocks(g, me, plans, labels, t0);
+        tookForce(r);
         if (r.givenIndex.length > 0) {
             blockSearched++;
             searchCpuMs += r.cpuMs;

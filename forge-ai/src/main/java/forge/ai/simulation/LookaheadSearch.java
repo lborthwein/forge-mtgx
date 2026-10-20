@@ -1302,6 +1302,59 @@ public final class LookaheadSearch {
     }
 
     private SearchHooks hooks = null;
+
+    /**
+     * J1 (lane block-search-1019; null = none, the default): the label of the candidate the next given / block decision
+     * must play when the search would play another ({@link AiReplay}). Taken (cleared) by the decision it is set for.
+     */
+    public volatile String forcePlayed = null;
+    /** The force of the decision in progress (set from {@link #forcePlayed} at its start). */
+    private String decisionForce = null;
+    /**
+     * J1: the index the caller's next decision line will carry (RlLiveSeat's searchedLines), written on every given and
+     * block explain row as {@code line}; null = none (the row is unchanged).
+     */
+    public volatile java.util.function.IntSupplier explainLine = null;
+    /**
+     * Tests only (J1; null = none): at the decision whose {@link #explainLine} value it accepts, the candidate to play
+     * instead of the search's choice (an artificial "cut" that changed a live choice). Never set outside tests.
+     */
+    static volatile java.util.function.IntUnaryOperator testOverride = null;
+    /**
+     * Tests only (J1; null = none): before the given decision whose {@link #explainLine} value it accepts, the search's
+     * own decision counter advances once more, as an uncontested, skipped or failed search advances it live without a
+     * decision line. Never set outside tests.
+     */
+    static volatile java.util.function.IntPredicate testBump = null;
+
+    /** J1: the candidate this search would play for {@code best}, without changing anything (overBudget / shadow / guard). */
+    private int wouldPlay(final List<Cand> cands, final int best, final boolean overBudget, final int provenPick,
+            final PhaseHandler ph, final Game live) {
+        if (overBudget || best == 0 || cfg.shadow) {
+            return 0;
+        }
+        final String key = cands.get(best).key() + "@" + ph.getPhase() + "#" + live.getStack().size();
+        final int seenN = departureCounts.getOrDefault(key, 0);
+        if (provenPick < 0 && (departuresThisTurn >= cfg.maxDeparturesPerTurn || seenN >= cfg.maxSameDepartures)) {
+            return 0;
+        }
+        return best;
+    }
+
+    /** J1: the K8 seat's live decision at line {@code index} ({@link AiReplay#current()}), or null. */
+    private static AiReplay.Mark replayMark(final int index) {
+        final AiReplay r = AiReplay.current();
+        return r == null ? null : r.at(index);
+    }
+
+    private static int indexOfLabel(final List<Cand> cands, final String label) {
+        for (int c = 0; c < cands.size(); c++) {
+            if (label.equals(cands.get(c).label)) {
+                return c;
+            }
+        }
+        return -1;
+    }
     private boolean hookLeaf = false, hookPlayout = false;
     /** S1: the CPU time of pool tasks (play-outs on worker threads) is summed here while it is non-null. */
     private volatile java.util.concurrent.atomic.AtomicLong poolCpu = null;
@@ -1719,6 +1772,30 @@ public final class LookaheadSearch {
             reuseVerify(live, me, cands, defSa, decisionSeed, carried, values, ok, freshDef, best);
         }
 
+        // J1 (block-search-1019): an interactive K8 seat replaying its live choices (AiReplay, keyed by this decision
+        // line's own index): when the live game played another candidate and it is one here, play that one
+        final AiReplay.Mark mark = cfg.decisionLog ? replayMark(index) : null;
+        boolean forcing = false, forcedMiss = false;
+        if (mark != null && mark.played != null) {
+            int natural = overBudget || best == 0 || cfg.shadow ? 0 : best;
+            if (natural != 0) {
+                final String nk = cands.get(natural).key() + "@" + ph.getPhase() + "#" + live.getStack().size();
+                if (departuresThisTurn >= cfg.maxDeparturesPerTurn || departureCounts.getOrDefault(nk, 0) >= 2) {
+                    natural = 0;
+                }
+            }
+            if (!mark.played.equals(cands.get(natural).label)) {
+                final int idx = indexOfLabel(cands, mark.played);
+                if (idx >= 0) {
+                    best = idx;
+                    forcing = true;
+                } else {
+                    forcedMiss = true;
+                }
+            }
+        } else if (mark != null) {
+            forcedMiss = true; // a mark with no label: nothing to match
+        }
         List<SpellAbility> answer = def;
         String outcome = "kept";
         if (best != 0 && !cfg.shadow) {
@@ -1750,9 +1827,14 @@ public final class LookaheadSearch {
         } else if (best != 0) {
             outcome = "shadow-would-depart";
         }
-        if (overBudget) {
+        if (overBudget && !forcing) {
             stats.capped++;
             outcome = "capped";
+        }
+        final String played = cands.get("departed".equals(outcome) ? best : 0).label;
+        if (forcing && !played.equals(mark.played)) {
+            forcing = false;
+            forcedMiss = true;
         }
         if (priorEntry != null) {
             final boolean extra = best >= bSize;
@@ -1790,6 +1872,8 @@ public final class LookaheadSearch {
             x.addProperty("stack", live.getStack().size());
             x.addProperty("best", best);
             x.addProperty("outcome", outcome);
+            x.addProperty("line", index); // J1: the K8 decision line's own index (its "decision")
+            x.addProperty("played", played);
             final JsonArray ca = new JsonArray();
             for (int c = 0; c < n; c++) {
                 final JsonObject co = new JsonObject();
@@ -1854,6 +1938,12 @@ public final class LookaheadSearch {
             }
             d.addProperty("outcome", outcome);
             d.addProperty("departed", "departed".equals(outcome));
+            if (forcing) {
+                d.addProperty("forced", true); // J1: only when replaying (aiReplay), so a live line is unchanged
+            }
+            if (forcedMiss) {
+                d.addProperty("forcedMiss", true);
+            }
             d.addProperty("searched", stats.searched);
             d.addProperty("departedTotal", stats.departed);
             d.addProperty("cappedTotal", stats.capped);
@@ -1936,6 +2026,10 @@ public final class LookaheadSearch {
         public boolean proven;
         /** S-b: over the budget, the number of worlds every candidate finished in that decided (0 = all, or capped). */
         public int partialWorlds;
+        /** J1 (block-search-1019): the label of the candidate this decision played (the default's unless it departed). */
+        public String played;
+        /** J1: an {@link AiReplay} mark made this decision play the live choice / named a choice that was not a candidate. */
+        public boolean forced, forcedMiss;
     }
 
     /**
@@ -2138,6 +2232,12 @@ public final class LookaheadSearch {
             throw new IllegalStateException("S-t: expanding choices needs policy play-outs");
         }
         final GivenResult res = new GivenResult();
+        decisionForce = forcePlayed;
+        forcePlayed = null;
+        final java.util.function.IntPredicate bump = testBump;
+        if (bump != null && explainLine != null && bump.test(explainLine.getAsInt())) {
+            decisionIndex++; // tests only (J1)
+        }
         stats.s1On = true;
         stats.decisions++;
         stats.givenDecisions++;
@@ -2496,6 +2596,31 @@ public final class LookaheadSearch {
         if (cfg.crewNoop == AiFixes.Mode.SHADOW && best != 0 && crewNoopKeys.contains(cands.get(best).key())) {
             stats.crewNoopShadowBest++;
         }
+        final java.util.function.IntUnaryOperator to = testOverride;
+        final java.util.function.IntSupplier lineOf = explainLine;
+        if (to != null && lineOf != null) {
+            final int o = to.applyAsInt(lineOf.getAsInt());
+            if (o >= 0 && o < n && okArg[o]) {
+                best = o; // tests only (J1)
+            }
+        }
+        // J1 (block-search-1019): the live game played another candidate than this search would: play that one (the
+        // departure bookkeeping below then follows the live choice, as it did live)
+        final String want = decisionForce;
+        decisionForce = null;
+        boolean forcing = false;
+        if (want != null) {
+            final int natural = wouldPlay(cands, best, overBudget, provenPick, ph, live);
+            if (!want.equals(cands.get(natural).label)) {
+                final int idx = indexOfLabel(cands, want);
+                if (idx >= 0) {
+                    best = idx;
+                    forcing = true;
+                } else {
+                    res.forcedMiss = true;
+                }
+            }
+        }
         res.chosen = 0;
         String outcome = "kept";
         if (best != 0 && !cfg.shadow) {
@@ -2507,7 +2632,7 @@ public final class LookaheadSearch {
                 outcome = "loop-guard";
             } else {
                 res.chosen = at.get(best);
-                res.proven = provenPick >= 0;
+                res.proven = provenPick >= 0 && best == provenPick;
                 stats.departed++;
                 if (onStack) {
                     stats.stackDeparted++;
@@ -2524,13 +2649,18 @@ public final class LookaheadSearch {
         } else if (best != 0) {
             outcome = "shadow-would-depart";
         }
-        if (overBudget) {
+        if (overBudget && !forcing) {
             stats.capped++;
             res.chosen = 0;
             res.chosenMacro = -1;
             outcome = "capped";
         }
         res.outcome = outcome;
+        res.played = cands.get("departed".equals(outcome) ? best : 0).label;
+        if (forcing) {
+            res.forced = res.played.equals(want);
+            res.forcedMiss = !res.forced;
+        }
         res.worlds = k;
         res.ev = ev;
         res.values = values;
@@ -2556,6 +2686,10 @@ public final class LookaheadSearch {
             final JsonObject x = new JsonObject();
             x.addProperty("given", true);
             x.addProperty("decision", index);
+            if (lineOf != null) {
+                x.addProperty("line", lineOf.getAsInt()); // J1: the decision line's index
+            }
+            x.addProperty("played", res.played);
             x.addProperty("turn", turn);
             x.addProperty("phase", String.valueOf(ph.getPhase()));
             x.addProperty("best", best);
@@ -6000,6 +6134,8 @@ public final class LookaheadSearch {
     public GivenResult decideBlocks(Game live, Player me, List<Map<Integer, List<Integer>>> plans, List<String> labels,
             long startNanos) {
         final GivenResult res = new GivenResult();
+        decisionForce = forcePlayed;
+        forcePlayed = null;
         stats.s1On = true;
         stats.decisions++;
         stats.blockDecisions++;
@@ -6100,7 +6236,31 @@ public final class LookaheadSearch {
                 res.failed++;
             }
         }
-        final int best = overBudget ? 0 : argmax(values, ok, n, k);
+        int best = overBudget ? 0 : argmax(values, ok, n, k);
+        final java.util.function.IntUnaryOperator to = testOverride;
+        final java.util.function.IntSupplier lineOf = explainLine;
+        if (to != null && lineOf != null) {
+            final int o = to.applyAsInt(lineOf.getAsInt());
+            if (o >= 0 && o < n && ok[o]) {
+                best = o; // tests only (J1)
+            }
+        }
+        // J1: the live game's block declaration, when the search would play another and it is a candidate
+        final String want = decisionForce;
+        decisionForce = null;
+        boolean forcing = false;
+        if (want != null) {
+            final int natural = overBudget || cfg.shadow ? 0 : best;
+            if (!want.equals(cands.get(natural).label)) {
+                final int idx = indexOfLabel(cands, want);
+                if (idx >= 0) {
+                    best = idx;
+                    forcing = true;
+                } else {
+                    res.forcedMiss = true;
+                }
+            }
+        }
         res.chosen = 0;
         String outcome = "kept";
         if (best != 0 && !cfg.shadow) {
@@ -6111,12 +6271,17 @@ public final class LookaheadSearch {
         } else if (best != 0) {
             outcome = "shadow-would-depart";
         }
-        if (overBudget) {
+        if (overBudget && !forcing) {
             stats.capped++;
             res.chosen = 0;
             outcome = "capped";
         }
         res.outcome = outcome;
+        res.played = cands.get("departed".equals(outcome) ? best : 0).label;
+        if (forcing) {
+            res.forced = res.played.equals(want);
+            res.forcedMiss = !res.forced;
+        }
         res.worlds = k;
         res.ev = ev;
         res.values = values;
@@ -6141,6 +6306,10 @@ public final class LookaheadSearch {
             x.addProperty("given", true);
             x.addProperty("kind", "blocks");
             x.addProperty("decision", index);
+            if (lineOf != null) {
+                x.addProperty("line", lineOf.getAsInt());
+            }
+            x.addProperty("played", res.played);
             x.addProperty("turn", ph.getTurn());
             x.addProperty("phase", String.valueOf(ph.getPhase()));
             x.addProperty("best", best);

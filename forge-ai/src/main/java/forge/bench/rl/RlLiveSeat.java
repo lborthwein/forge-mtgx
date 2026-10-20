@@ -448,6 +448,11 @@ public final class RlLiveSeat {
         if (spec.search.blocks > 0 && spec.log) {
             s.onBlocksDecided = this::blocksDecided; // block-search-1019
         }
+        // J1 (block-search-1019): every explain row names the decision line it belongs to; with -Dforge.interactive.aiReplay
+        // the live choices are replayed by that line index
+        s.nextLine = () -> searchedLines;
+        s.ls().explainLine = s.nextLine;
+        s.replay = forge.ai.simulation.AiReplay.current();
         this.seat = rs;
         this.search = s;
         this.seatCalls0 = seatClient.calls;
@@ -537,6 +542,7 @@ public final class RlLiveSeat {
             d.addProperty("plan", "searched");
             d.addProperty("proposeMs", Math.round(search.lastProposeMs * 10) / 10.0);
         }
+        replayFlags(d);
         System.err.println("[lookahead-decision] " + d);
     }
 
@@ -575,6 +581,7 @@ public final class RlLiveSeat {
         if (forge.ai.WallClock.rebuilding()) {
             d.addProperty("rebuild", true);
         }
+        replayFlags(d);
         System.err.println("[lookahead-decision] " + d);
     }
 
@@ -622,7 +629,18 @@ public final class RlLiveSeat {
         if (forge.ai.WallClock.rebuilding()) {
             d.addProperty("rebuild", true);
         }
+        replayFlags(d);
         System.err.println("[lookahead-decision] " + d);
+    }
+
+    /** J1: "forced" / "forcedMiss" on a decision line, only when an aiReplay mark acted (a live line is unchanged). */
+    private void replayFlags(final JsonObject d) {
+        if (search.lastForced) {
+            d.addProperty("forced", true);
+        }
+        if (search.lastForcedMiss) {
+            d.addProperty("forcedMiss", true);
+        }
     }
 
     private boolean finished = false;
