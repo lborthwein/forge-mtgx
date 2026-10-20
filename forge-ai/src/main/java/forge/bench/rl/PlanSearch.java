@@ -536,12 +536,28 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     private static final Map<String, Map<String, Map<String, Double>>> SYN = new java.util.HashMap<>();
 
-    /** strong-opp-1020: the co-draft table ({@code {"syn": {a: {b: score}}}}), loaded once per path. */
+    /** strong-opp-1020: the jar's co-draft table (mtgx public/data/cobra-drafted-with.json, the mush cube). */
+    public static final String DEFEND_PRIOR = "classpath:/forge/ai/simulation/defend-prior-cobra-mush.json";
+
+    /**
+     * strong-opp-1020: the co-draft table ({@code {"syn": {a: {b: score}}}}), loaded once per path ({@code classpath:} = a
+     * jar resource).
+     */
     static synchronized Map<String, Map<String, Double>> loadSyn(final String path) {
         return SYN.computeIfAbsent(path, k -> {
             try {
-                final JsonObject o = com.google.gson.JsonParser.parseString(
-                        new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(k)), java.nio.charset.StandardCharsets.UTF_8))
+                final byte[] raw;
+                if (k.startsWith("classpath:")) {
+                    try (java.io.InputStream in = PlanSearch.class.getResourceAsStream(k.substring("classpath:".length()))) {
+                        if (in == null) {
+                            throw new java.io.IOException("no resource " + k);
+                        }
+                        raw = in.readAllBytes();
+                    }
+                } else {
+                    raw = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(k));
+                }
+                final JsonObject o = com.google.gson.JsonParser.parseString(new String(raw, java.nio.charset.StandardCharsets.UTF_8))
                         .getAsJsonObject().getAsJsonObject("syn");
                 final Map<String, Map<String, Double>> m = new java.util.HashMap<>();
                 for (Map.Entry<String, com.google.gson.JsonElement> e : o.entrySet()) {
