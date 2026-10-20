@@ -96,12 +96,55 @@ public final class RlLiveSeat {
                 "budgetMs", "engineMs", "evalReserveMs", "wallGraceMs", "planMs", "nodes", "engineNodes", "worlds", "top",
                 "horizon", "cycles", "hideOwnLibrary"));
 
+        /**
+         * strong-opp-1020: the {@code plans.defendCfg.<key>} keys live accepts and their value pattern; {@code prior} names
+         * the jar's co-draft table ({@code jar} = {@link PlanSearch#DEFEND_PRIOR}) or {@code none}.
+         */
+        public static final java.util.Map<String, String> LIVE_DEFEND_KEYS = new java.util.TreeMap<>(java.util.Map.of(
+                "prior", "jar|none", "priorGain", "\\d{1,3}(\\.\\d+)?", "tieBreakTurns", "[0-2]", "defendMs", "\\d{1,5}",
+                "sharedReader", "true|false", "priorFillBasics", "true|false", "defenseWorlds", "[1-8]",
+                "counterDelta", "0(\\.\\d+)?|1(\\.0+)?", "threatExtraTurns", "[0-2]", "planMs", "\\d{1,5}"));
+
         /** sb-live-1018: one {@code plans.} entry into {@code c.plans} (created on the first), or an error. */
         private static void planKey(final RlSearch.Config c, final String k, final String v) {
             if (c.plans == null) {
                 c.plans = new JsonObject();
             }
             final String sub = k.substring("plans.".length());
+            if ("defend".equals(sub)) {
+                // strong-opp-1020: the solver's defense in front of the seat (on the honest belief, always on live)
+                if (!v.matches("true|false") || c.plans.has("defend")) {
+                    throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want true|false, once)");
+                }
+                c.plans.addProperty("defend", Boolean.parseBoolean(v));
+                return;
+            }
+            if (sub.startsWith("defendCfg.")) {
+                final String dk = sub.substring("defendCfg.".length());
+                final String pat = LIVE_DEFEND_KEYS.get(dk);
+                if (pat == null) {
+                    throw new IllegalArgumentException("policySearch: " + k + " is not supported live (plans.defendCfg keys "
+                            + String.join("|", LIVE_DEFEND_KEYS.keySet()) + ")");
+                }
+                if (!v.matches(pat)) {
+                    throw new IllegalArgumentException("policySearch: " + k + "=" + v + " (want " + pat + ")");
+                }
+                if (!c.plans.has("defendCfg")) {
+                    c.plans.add("defendCfg", new JsonObject());
+                }
+                final JsonObject dc = c.plans.getAsJsonObject("defendCfg");
+                if (dc.has(dk)) {
+                    throw new IllegalArgumentException("policySearch: " + k + " twice");
+                }
+                if ("prior".equals(dk)) {
+                    if ("jar".equals(v)) {
+                        dc.addProperty(dk, PlanSearch.DEFEND_PRIOR);
+                    }
+                    return; // none: no prior (the belief's uniform re-draw)
+                }
+                dc.addProperty(dk, v);
+                return;
+            }
             if (sub.startsWith("solverCfg.")) {
                 final String sk = sub.substring("solverCfg.".length());
                 if (!LIVE_SOLVER_KEYS.contains(sk)) {
@@ -339,6 +382,9 @@ public final class RlLiveSeat {
             }
             if (spec.search.blocks > 0) {
                 o.addProperty("blocks", true); // block-search-1019: block search on; absent otherwise
+            }
+            if (spec.search.plans != null && spec.search.plans.has("defend") && spec.search.plans.get("defend").getAsBoolean()) {
+                o.addProperty("defend", true); // strong-opp-1020: the solver's defense on; absent otherwise
             }
             o.addProperty("belief", spec.search.belief); // honest-belief-1020: always "uniform" live
             o.addProperty("helloMs", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
