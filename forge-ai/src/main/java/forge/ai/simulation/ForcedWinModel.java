@@ -571,6 +571,29 @@ public final class ForcedWinModel {
         final ForcedWinProbe.Stats probeStats = new ForcedWinProbe.Stats();
         long seed = 20261012L;
 
+        /** strong-opp-1020: the learned templates as JSON (card name -> template), for a precomputed cache. */
+        synchronized String exportJson() {
+            return new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create().toJson(templates);
+        }
+
+        /**
+         * strong-opp-1020: preload templates learned offline (a name already learned here is kept). Affordances depend
+         * only on the card (each is learned in a sandbox copy with rich floating mana), so a cache learned once serves
+         * every game; it saves the defense's first-call probes (about 0.15 s per new card name).
+         */
+        synchronized int preload(String json) {
+            final java.lang.reflect.Type t = new com.google.gson.reflect.TypeToken<Map<String, ACard>>() { }.getType();
+            final Map<String, ACard> m = new com.google.gson.GsonBuilder().serializeSpecialFloatingPointValues().create()
+                    .fromJson(json, t);
+            int n = 0;
+            for (Map.Entry<String, ACard> e : m.entrySet()) {
+                if (e.getValue() != null && templates.putIfAbsent(e.getKey(), e.getValue()) == null) {
+                    n++;
+                }
+            }
+            return n;
+        }
+
         /** search-bones-1015: synchronized (a reader may be shared by the play-outs' threat checks, (d)). */
         synchronized ACard card(Game live, Player me, Card c) {
             ACard t = templates.get(c.getName());

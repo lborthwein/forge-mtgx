@@ -699,7 +699,23 @@ public final class ForcedWinSolver {
      * strong-opp-1020: one opponent-card affordance reader for every defender in this JVM (affordances depend only on the
      * card name; the probe cache then survives from game to game). Its card lookup is synchronized.
      */
-    static final ForcedWinModel.Reader SHARED_OPP_READER = new ForcedWinModel.Reader();
+    static final ForcedWinModel.Reader SHARED_OPP_READER = sharedOppReader();
+
+    /** strong-opp-1020: the jar's precomputed affordances of the mush cube's cards (absent = learn on first use). */
+    public static final String AFFORDANCE_CACHE = "/forge/ai/simulation/defend-affordances-mush.json";
+
+    private static ForcedWinModel.Reader sharedOppReader() {
+        final ForcedWinModel.Reader r = new ForcedWinModel.Reader();
+        try (java.io.InputStream in = ForcedWinSolver.class.getResourceAsStream(AFFORDANCE_CACHE)) {
+            if (in != null) {
+                final int n = r.preload(new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+                receipt("FORCED_WIN affordance cache preloaded " + n);
+            }
+        } catch (java.io.IOException | RuntimeException e) {
+            receipt("FORCED_WIN affordance cache not loaded: " + e);
+        }
+        return r;
+    }
     private int defendedStackId = -1;
     public int threatChecks, threats, counters, holds, discardChoices;
 
