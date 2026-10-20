@@ -371,7 +371,7 @@ final class InteractiveWatch {
                 for (int i = 0; i < channels.size(); i++) {
                     final JsonObject body = new JsonObject();
                     body.addProperty("reason", "decision");
-                    body.add("view", InteractiveState.seatView(game, seats[i], channels.get(i).seat()));
+                    body.add("view", InteractiveState.seatView(game, seats[i], channels.get(i).seat(), false));
                     body.add("decision", decision.deepCopy());
                     channels.get(i).send("state", body);
                 }
@@ -396,7 +396,7 @@ final class InteractiveWatch {
                 for (int i = 0; i < channels.size(); i++) {
                     final JsonObject body = new JsonObject();
                     body.addProperty("reason", "game-completed");
-                    body.add("view", InteractiveState.seatView(game, seats[i], channels.get(i).seat()));
+                    body.add("view", InteractiveState.seatView(game, seats[i], channels.get(i).seat(), false));
                     channels.get(i).send("state", body);
                 }
             } catch (InteractiveProtocol.ProtocolException e) {
