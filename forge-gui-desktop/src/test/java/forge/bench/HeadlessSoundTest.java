@@ -44,4 +44,24 @@ public class HeadlessSoundTest extends AITest {
             prefs.setPref(FPref.UI_ENABLE_MUSIC, false);
         }
     }
+
+    /** A headless entry point's crash report is logged and counted; it opens no window (and so plays no alert). */
+    @Test
+    public void aReportedExceptionOpensNoWindow() {
+        final boolean was = forge.gui.error.BugReporter.isLogOnly();
+        try {
+            HeadlessSound.silence(FModel.getPreferences());
+            org.testng.Assert.assertTrue(forge.gui.error.BugReporter.isLogOnly());
+            final int windows = java.awt.Window.getWindows().length;
+            final int before = forge.gui.error.BugReporter.reportCount();
+            forge.gui.error.BugReporter.reportException(new IllegalStateException("block-search-1019 test"), "a test report");
+            forge.gui.error.BugReporter.reportBug("a test bug report");
+            org.testng.Assert.assertEquals(forge.gui.error.BugReporter.reportCount(), before + 2, "both counted");
+            org.testng.Assert.assertEquals(java.awt.Window.getWindows().length, windows, "no window was opened");
+        } finally {
+            forge.gui.error.BugReporter.setLogOnly(was);
+            FModel.getPreferences().setPref(FPref.UI_ENABLE_SOUNDS, false);
+            FModel.getPreferences().setPref(FPref.UI_ENABLE_MUSIC, false);
+        }
+    }
 }
