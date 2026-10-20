@@ -153,6 +153,8 @@ public final class ForcedWinSolver {
          * {@link #answerDiscardP}), ms; past it the threat worlds stop, and a decision that could not finish has no opinion.
          */
         public long defendMs = 0;
+        /** strong-opp-1020: the defense's opponent reader is the JVM-wide shared one ({@link #SHARED_OPP_READER}). */
+        public boolean sharedReader = false;
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -186,6 +188,7 @@ public final class ForcedWinSolver {
             c.threatExtraTurns = intOr(get.apply("threatExtraTurns"), c.threatExtraTurns);
             c.tieBreakTurns = intOr(get.apply("tieBreakTurns"), c.tieBreakTurns);
             c.defendMs = intOr(get.apply("defendMs"), (int) c.defendMs);
+            c.sharedReader = "true".equals(get.apply("sharedReader"));
             return c;
         }
 
@@ -285,6 +288,7 @@ public final class ForcedWinSolver {
         this.cfg = cfg;
         this.reader = shared != null ? shared : new ForcedWinModel.Reader();
         this.reader.seed = cfg.seed;
+        this.oppReader = cfg.sharedReader ? SHARED_OPP_READER : new ForcedWinModel.Reader();
     }
 
     public Config config() {
@@ -690,7 +694,12 @@ public final class ForcedWinSolver {
     // ------------------------------------------------------------------ defense: the same search from their seat
 
     /** Reads the opponent's cards (probed from their seat), for threat checks. */
-    final ForcedWinModel.Reader oppReader = new ForcedWinModel.Reader();
+    final ForcedWinModel.Reader oppReader;
+    /**
+     * strong-opp-1020: one opponent-card affordance reader for every defender in this JVM (affordances depend only on the
+     * card name; the probe cache then survives from game to game). Its card lookup is synchronized.
+     */
+    static final ForcedWinModel.Reader SHARED_OPP_READER = new ForcedWinModel.Reader();
     private int defendedStackId = -1;
     public int threatChecks, threats, counters, holds, discardChoices;
 

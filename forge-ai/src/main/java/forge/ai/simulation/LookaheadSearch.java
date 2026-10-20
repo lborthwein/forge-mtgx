@@ -7202,14 +7202,25 @@ public final class LookaheadSearch {
      * {@code syn} is a co-draft table from public data (never their real cards). Null when no belief is on.
      */
     public ForcedWinSolver.Redraw opponentRedrawPrior(final Map<String, Map<String, Double>> syn, final double gain) {
+        return opponentRedrawPrior(syn, gain, false);
+    }
+
+    /**
+     * As above; {@code fillBasics}: a drawn card the prior does not boost (weight 1: no co-draft link to anything they
+     * showed) enters the copy as a basic land instead. The defender's threat check then reads (and probes) only the
+     * cards their shown cards point to; an unlinked card rarely makes a forced win, and every new card name costs an
+     * affordance probe (strong-opp-1020: about 50 per game, the defense's main cost).
+     */
+    public ForcedWinSolver.Redraw opponentRedrawPrior(final Map<String, Map<String, Double>> syn, final double gain,
+            final boolean fillBasics) {
         if (beliefCube == null || cfg.beliefShadow || syn == null) {
             return null;
         }
-        return (live, liveMe, g, me, rng) -> redrawOpponentsPrior(live, liveMe, g, me, rng, syn, gain);
+        return (live, liveMe, g, me, rng) -> redrawOpponentsPrior(live, liveMe, g, me, rng, syn, gain, fillBasics);
     }
 
     private void redrawOpponentsPrior(Game live, Player liveMe, Game g, Player me, Random rng,
-            Map<String, Map<String, Double>> syn, double gain) {
+            Map<String, Map<String, Double>> syn, double gain, boolean fillBasics) {
         final PlayerView myView = liveMe.getView();
         for (Player opp : me.getOpponents()) {
             final Player liveOpp = (Player) live.getPlayer(opp.getId());
@@ -7255,6 +7266,7 @@ public final class LookaheadSearch {
             }
             final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
             final double[] w = new double[pool.size()];
+            final boolean[] linked = new boolean[pool.size()];
             double max = 0;
             for (int i = 0; i < w.length; i++) {
                 double best = 0;
@@ -7266,6 +7278,7 @@ public final class LookaheadSearch {
                     }
                 }
                 w[i] = 1.0 + gain * best * best;
+                linked[i] = best > 0;
                 max = Math.max(max, w[i]);
             }
             for (int i = 0; i < w.length; i++) {
@@ -7281,8 +7294,19 @@ public final class LookaheadSearch {
             Collections.shuffle(all, rng);
             final List<Card> newHand = new ArrayList<>(keep);
             final List<Card> newLib = new ArrayList<>(libKnownTop);
+            final Map<String, Integer> itemOf = new java.util.HashMap<>();
+            for (int i = 0; i < pool.size(); i++) {
+                itemOf.put(pool.get(i), i);
+            }
             for (int k = 0; k < all.size(); k++) {
-                final Card nc = beliefCard(d.slotName[all.get(k)], opp, g);
+                String nm = d.slotName[all.get(k)];
+                if (fillBasics && !BeliefSampler.isBasic(nm)) {
+                    final Integer it = itemOf.get(nm);
+                    if (it == null || !linked[it]) {
+                        nm = BeliefSampler.BASICS[rng.nextInt(BeliefSampler.BASICS.length)];
+                    }
+                }
+                final Card nc = beliefCard(nm, opp, g);
                 if (k < need) {
                     newHand.add(nc);
                 } else {
