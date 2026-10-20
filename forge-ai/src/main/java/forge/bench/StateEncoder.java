@@ -93,6 +93,15 @@ public final class StateEncoder {
         return st;
     }
 
+    /**
+     * One player's seat-visible encoding, as {@link #encode} writes each in-game player (lane block-search-1019: the
+     * interactive view adds an eliminated seat with it; {@link #encode} itself is unchanged and lists in-game players
+     * only, so the bench, RL and search inputs are as before).
+     */
+    public static JsonObject encodePlayerFor(final Game game, final Player p, final PlayerView viewer) {
+        return encodePlayer(game, p, viewer);
+    }
+
     private static JsonObject encodePlayer(final Game game, final Player p, final PlayerView viewer) {
         final JsonObject o = new JsonObject();
         o.addProperty("index", playerIndex(game, p));

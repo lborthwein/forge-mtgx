@@ -10,8 +10,14 @@ package forge.interactive;
 
 import com.google.gson.JsonObject;
 
+import forge.ImageKeys;
+import forge.StaticData;
+import forge.card.CardStateName;
+import forge.card.ColorSet;
+import forge.card.MagicColor;
 import forge.game.Game;
 import forge.game.card.Card;
+import forge.game.card.CardState;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
 
@@ -32,6 +38,19 @@ import forge.game.spellability.SpellAbility;
  *       ({@link Card#getCopiedPermanent()}: token copies, a resolved spell copy, a "cast a copy" card), or a permanent
  *       currently copying something ({@link Card#isCloned()}, a Clone after its copy effect). On a stack entry for an
  *       ability, it is also true for a copied ability ({@link SpellAbility#isCopied()}).</li>
+ * </ul>
+ *
+ * <p><b>Token identity</b> (lane block-search-1019, for the client's token art): on a zone entry of a token the viewer
+ * may see, the token's printed characteristics, as optional fields. The display name alone cannot pick the art: a
+ * renamed type ("Phyrexian Wurm") is not its printing's name ("Wurm"), and some faces differ only by colours or base
+ * P/T (two Insects, three Constructs, two Thopters, two Elementals).
+ * <ul>
+ *   <li>{@code tokenScript}: Forge's token script id (res/tokenscripts, e.g. {@code g_6_6_wurm}), when the token was made
+ *       from one; absent for a token with no script (a token copy of a card).</li>
+ *   <li>{@code tokenColors}: its printed colours, WUBRG letters in that order ({@code []} = colourless); not the current
+ *       colours an effect may have changed.</li>
+ *   <li>{@code tokenBasePower}, {@code tokenBaseToughness}: its printed base P/T, only for a creature token; not the
+ *       current values.</li>
  * </ul>
  *
  * <p>The facts are additive and confined to this browser payload. {@code forge.bench.StateEncoder} (the bench and RL
@@ -72,6 +91,61 @@ final class InteractiveCardFacts {
     static void addTokenAndCopy(final JsonObject object, final Card card) {
         object.addProperty("isToken", card.isToken());
         object.addProperty("isCopy", isCopy(card));
+        if (card.isToken()) {
+            addTokenIdentity(object, card);
+        }
+    }
+
+    /**
+     * The token's printed identity ({@code tokenScript}, {@code tokenColors}, {@code tokenBasePower},
+     * {@code tokenBaseToughness}; see the class comment). Only for a token whose zone entry the viewer may see (the
+     * caller has established that, and never calls this for a face-down object). Read-only; a field that cannot be
+     * read is left out.
+     */
+    static void addTokenIdentity(final JsonObject object, final Card card) {
+        try {
+            final String script = tokenScript(card);
+            if (script != null) {
+                object.addProperty("tokenScript", script);
+            }
+            CardState printed = card.getState(CardStateName.Original);
+            if (printed == null) {
+                printed = card.getCurrentState();
+            }
+            final ColorSet colors = printed.getColor();
+            final com.google.gson.JsonArray cs = new com.google.gson.JsonArray();
+            for (byte c : MagicColor.WUBRG) {
+                if (colors.hasAnyColor(c)) {
+                    cs.add(MagicColor.toShortString(c));
+                }
+            }
+            object.add("tokenColors", cs);
+            if (printed.getType().isCreature()) {
+                object.addProperty("tokenBasePower", printed.getBasePower());
+                object.addProperty("tokenBaseToughness", printed.getBaseToughness());
+            }
+        } catch (RuntimeException e) {
+            // a token whose printed state cannot be read gets no identity fields
+        }
+    }
+
+    /**
+     * Forge's token script id of {@code card} (as {@code GameState}'s dump reads it): its image key's token image name
+     * up to any {@code |edition} suffix, when the token database has that script; otherwise null. The card's own image
+     * key, never {@code PaperToken.getImageKey}, which draws from the game's random stream.
+     */
+    static String tokenScript(final Card card) {
+        final String key = card.getImageKey();
+        if (key == null || key.isBlank()) {
+            return null;
+        }
+        final String img = ImageKeys.getTokenImageName(key);
+        if (img == null || img.isBlank()) {
+            return null;
+        }
+        final int bar = img.indexOf('|');
+        final String script = bar < 0 ? img : img.substring(0, bar);
+        return !script.isEmpty() && StaticData.instance().getAllTokens().containsRule(script) ? script : null;
     }
 
     /** {@code ownerSeat}, {@code isToken} and {@code isCopy}: a stack entry or an event the viewer may see. */

@@ -1058,14 +1058,20 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 return true;
             }
             final String id = "card:" + card.getId();
+            // block-search-1019 (hidden information): a card this seat sees face down gets no field derived from its
+            // face (the preview's abilities and mana cost, payable, manaOnly, the cast/play verb) unless the seat may
+            // look at it AND faceDownIdentity is on (InteractiveState: held, default off); otherwise saved replays and
+            // CubeTV tapes of this channel would carry the hidden card's cost
+            final boolean hiddenFace = view.isFaceDown() && !(InteractiveState.mayReceiveIdentity(view, human.getView())
+                    && InteractiveState.faceDownIdentityOn());
             final JsonObject control = control(id, "selectCard",
-                    (activate == null ? "Select" : sanitizeText(activate)) + ": "
+                    (activate == null || hiddenFace ? "Select" : sanitizeText(activate)) + ": "
                             + InteractiveState.safeCardLabel(view, human.getView()));
             control.addProperty("cardId", card.getId());
             final JsonObject value = new JsonObject();
             value.addProperty("selected", isHighlighted(view));
             value.addProperty("zone", String.valueOf(view.getZone()));
-            if (input instanceof InputPassPriority) {
+            if (input instanceof InputPassPriority && !hiddenFace) {
                 // Same candidate list that Forge uses when this card is clicked.
                 // A land with a non-mana ability must still hold priority.
                 value.addProperty("manaOnly", !affordableAbilities.isEmpty()

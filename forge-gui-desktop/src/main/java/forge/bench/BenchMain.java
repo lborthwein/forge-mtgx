@@ -259,6 +259,7 @@ public final class BenchMain {
         FModel.initialize(null, prefs -> {
             prefs.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
             prefs.setPref(FPref.UI_LANGUAGE, "en-US");
+            forge.bench.HeadlessSound.silence(prefs); // block-search-1019: no sounds or music headless
             return null;
         });
         MyRandom.setRandom(new Random(seed));

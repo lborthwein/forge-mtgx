@@ -640,6 +640,73 @@ public final class RlCandidates {
             }
             return -1;
         }
+
+        /** Lane block-search-1019 (a BLOCK menu): the steps that declare no blockers, or null. */
+        short[] noBlockSteps() {
+            if (family != RlSchema.F_BLOCK) {
+                return null;
+            }
+            final short[] out = new short[S()];
+            for (int s = 0; s < S(); s++) {
+                final int i = noneOf(s);
+                if (i < 0) {
+                    return null;
+                }
+                out[s] = (short) i;
+            }
+            return out;
+        }
+
+        /**
+         * Lane block-search-1019 (a BLOCK menu): the steps of a declaration (blocker card id -> attacker card ids), or
+         * null when the menu cannot express it (a blocker off the menu, a blocker on two attackers, an illegal pair).
+         */
+        short[] blockSteps(final java.util.Map<Integer, java.util.List<Integer>> blocks) {
+            final short[] out = noBlockSteps();
+            if (out == null || blocks == null) {
+                return null;
+            }
+            int placed = 0;
+            for (int s = 0; s < S(); s++) {
+                final java.util.List<Integer> ats = blocks.get(slotCards.get(s).getId());
+                if (ats == null || ats.isEmpty()) {
+                    continue;
+                }
+                if (ats.size() > 1) {
+                    return null;
+                }
+                int found = -1;
+                for (int i = 0; i < C(); i++) {
+                    final Cand x = cands.get(i);
+                    if (x.slot == s && x.kind == RlSchema.K_ATTACKER && ("card:" + ats.get(0)).equals(x.key)) {
+                        found = i;
+                        break;
+                    }
+                }
+                if (found < 0) {
+                    return null;
+                }
+                out[s] = (short) found;
+                placed++;
+            }
+            int wanted = 0;
+            for (java.util.List<Integer> ats : blocks.values()) {
+                wanted += ats.isEmpty() ? 0 : 1;
+            }
+            return placed == wanted && validate(out) == null ? out : null;
+        }
+
+        /** Lane block-search-1019 (a BLOCK menu): the declaration of valid steps (blocker card id -> attacker card ids). */
+        java.util.Map<Integer, java.util.List<Integer>> blockMap(final short[] steps) {
+            final java.util.Map<Integer, java.util.List<Integer>> m = new java.util.TreeMap<>();
+            for (int s = 0; s < steps.length && s < S(); s++) {
+                final Cand x = cands.get(steps[s]);
+                if (x.kind == RlSchema.K_ATTACKER && x.tgt0 instanceof Card) {
+                    m.put(slotCards.get(s).getId(), new java.util.ArrayList<>(java.util.List.of(((Card) x.tgt0).getId())));
+                }
+            }
+            return m;
+        }
     }
 
     static String refKey(final JsonElement ref) {

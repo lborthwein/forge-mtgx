@@ -161,6 +161,16 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         default void scheduledAsk(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, String askKey, int ordinal,
                 int scheduled, int mine) {
         }
+
+        /**
+         * Lane block-search-1019: after the server's DECISION at a declare-blockers ask (family BLOCK) of the seat, the
+         * look-ahead over block assignments may replace it: the steps to play instead, or null to keep the policy's own
+         * ({@code greedy}). Always null unless the search's spec turns block search on.
+         */
+        default short[] decideBlocks(Game g, Player p, RlCandidates.Menu m, RlWire.Decide frame, short[] greedy,
+                Object objs) {
+            return null;
+        }
     }
 
     /**
@@ -617,6 +627,22 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
                 }
                 window = w;
                 window.open(g.getPhaseHandler().getTurn());
+            }
+        }
+        if (search != null && (searchSeat < 0 || seat == searchSeat) && family == RlSchema.F_BLOCK
+                && d.status == RlWire.ST_OK) {
+            // block-search-1019: the look-ahead over block assignments (the policy's own declaration is its default; a
+            // no-op unless the spec turns block search on)
+            final short[] alt = search.decideBlocks(g, player, m, frame, d.steps, objs);
+            if (alt != null && !java.util.Arrays.equals(alt, d.steps)) {
+                final String badAlt = m.validate(alt);
+                if (badAlt != null) {
+                    System.err.println("[rlseat] block search answered invalid steps for dec " + frame.decIdx + ": " + badAlt
+                            + "; the policy's own declaration stands");
+                } else {
+                    d.steps = alt;
+                    searchDepartures++;
+                }
             }
         }
         if (wAsk != null && !(d.status == RlWire.ST_OK && d.steps.length <= 1)) {

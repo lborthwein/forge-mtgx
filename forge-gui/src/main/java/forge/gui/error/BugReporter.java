@@ -43,6 +43,28 @@ public class BugReporter {
     private static Throwable exception;
     private static String message;
 
+    /**
+     * Lane block-search-1019 (false = Forge's behaviour, the default): the non-GUI entry points (the interactive server,
+     * the bench and RL actor mains, the probes) only LOG a report: its stack trace and one {@code [bug-reporter]} line
+     * on stderr, counted. Never a dialog (a headful JVM with apple.awt.UIElement shows no window, but its alert sound
+     * played from the Studio's speakers), never a Sentry upload.
+     */
+    private static volatile boolean logOnly = false;
+    private static final java.util.concurrent.atomic.AtomicInteger reports = new java.util.concurrent.atomic.AtomicInteger();
+
+    public static void setLogOnly(final boolean on) {
+        logOnly = on;
+    }
+
+    public static boolean isLogOnly() {
+        return logOnly;
+    }
+
+    /** Reports made in this JVM (exceptions and bug reports), whatever the mode. */
+    public static int reportCount() {
+        return reports.get();
+    }
+
 
     /**
      * Shows exception information in a format ready to post to the forum as a
@@ -59,6 +81,11 @@ public class BugReporter {
         }
         System.err.print(FThreads.debugGetCurrThreadId() + " > ");
         ex.printStackTrace();
+        final int n = reports.incrementAndGet();
+        if (logOnly) {
+            System.err.println("[bug-reporter] report " + n + " (logged, no dialog): " + ex);
+            return;
+        }
 
         final StringBuilder sb = new StringBuilder();
         if (null != message && !message.isEmpty()) {
@@ -114,6 +141,11 @@ public class BugReporter {
             sb.append(details);
         }
         message = sb.toString();
+        final int n = reports.incrementAndGet();
+        if (logOnly) {
+            System.err.println("[bug-reporter] bug report " + n + " (logged, no dialog): " + message.trim());
+            return;
+        }
 
         if (isSentryEnabled()) {
             sendSentry();

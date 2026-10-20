@@ -68,6 +68,8 @@ final class InteractiveGameEvents {
             }
         } else if (event instanceof GameEventCardChangeZone e) {
             zoneChanged(result, game, e, viewer);
+        } else if (event instanceof GameEventCardCounters e) {
+            countersChanged(result, game, e, viewer);
         } else if (event instanceof GameEventPlayerLivesChanged e) {
             if (e.oldLives() == e.newLives()) {
                 return result;
@@ -152,14 +154,30 @@ final class InteractiveGameEvents {
             java.util.EnumSet.of(ZoneType.Graveyard, ZoneType.Hand, ZoneType.Library, ZoneType.Stack);
 
     /**
+     * Origins whose card was public as it left (lane block-search-1019): a graveyard is face up (CR 404.2), and a
+     * permanent leaving the battlefield is revealed (CR 708.9). A face-up spell leaving the stack was public there too;
+     * a face-down one is not (see {@link #zoneChanged}). Exile is not one: a card exiled face down is hidden there, and
+     * the event does not say how it lay. Hand and library never are.
+     */
+    private static final java.util.Set<ZoneType> PUBLIC_ORIGINS =
+            java.util.EnumSet.of(ZoneType.Graveyard, ZoneType.Battlefield, ZoneType.Stack);
+
+    /**
      * {@code zone_changed} (lane bridgemeta-1018): {@code fromZone} and {@code toZone} (Forge's zone names; a zone is
-     * absent when Forge names none, e.g. a token created from nowhere). That a card moved between two zones is public;
-     * the card's identity is added ({@code card}, {@code fid}, {@code ownerSeat}, {@code isToken}, {@code isCopy})
-     * only when the move ends in one of {@link #IDENTITY_DESTINATIONS} and the viewer may see the card there. A draw
-     * the viewer does not see, a card put into a library, any move into exile or onto the battlefield, and any other
-     * move into a zone the viewer cannot see carries no identity at all, not even an id.
+     * absent when Forge names none, e.g. a token created from nowhere). That a card moved between two zones, and whose
+     * zones they are ({@code fromSeat}, {@code toSeat}: the zone's player as a seat), is public.
      *
-     * <p>No {@code playerSeat}: whose zone it was is not claimed, and the game log therefore leaves the event out.</p>
+     * <p>The card's identity ({@code card}, {@code fid}, {@code ownerSeat}, {@code controllerSeat}, {@code isToken},
+     * {@code isCopy}) is added when the move ends in one of {@link #IDENTITY_DESTINATIONS} and the viewer may see the
+     * card there. Lane block-search-1019: also when it left a public origin ({@link #PUBLIC_ORIGINS}; a stack origin
+     * only for a face-up card): its name is then public whatever the destination (Persist returning a creature from a
+     * graveyard to the battlefield; a creature returned to an opponent's hand). The {@code fid} and the other facts of
+     * such a move are added only when the viewer may see the card where it now is: a card returned to a hidden hand is
+     * named but not given an id, so no hidden object can be tracked by it later. A draw the viewer does not see, a card
+     * put into a library or exile from a hidden zone, and any other move out of a hidden zone into one the viewer
+     * cannot see carry no identity at all, not even an id.</p>
+     *
+     * <p>No {@code playerSeat}: who moved it is not claimed, and the game log therefore leaves the event out.</p>
      */
     private static void zoneChanged(final JsonObject result, final Game game, final GameEventCardChangeZone e,
                                     final PlayerView viewer) {
@@ -168,18 +186,128 @@ final class InteractiveGameEvents {
         final ZoneType to = zoneType(e.to());
         if (from != null) {
             result.addProperty("fromZone", from.name());
+            zoneSeat(result, game, e.from(), "fromSeat");
         }
         if (to != null) {
             result.addProperty("toZone", to.name());
+            zoneSeat(result, game, e.to(), "toSeat");
         }
-        final Card card = to == null || !IDENTITY_DESTINATIONS.contains(to) ? null
+        final Card moved = cardOf(game, e.card());
+        Card card = to == null || !IDENTITY_DESTINATIONS.contains(to) ? null
                 : publicIn(game, e.card(), to, viewer);
+        if (card == null && to == ZoneType.Graveyard && inGraveyardFaceUp(moved)) {
+            // a graveyard is face up (CR 404.2): during state-based actions the arriving card's view is not filled in
+            // yet (a frozen tracker), so its real zone stands in for the view's
+            card = moved;
+        }
+        final boolean publicOrigin = from != null && PUBLIC_ORIGINS.contains(from) && e.card() != null
+                && !e.card().isFaceDown() && moved != null && !moved.isFaceDown();
+        if (card == null && !publicOrigin) {
+            return;
+        }
+        String name = card == null ? null : nameOf(card.getView());
+        if (name == null) {
+            name = nameOf(e.card()); // the leaving card's own view (filled in even while the tracker is frozen)
+        }
+        if (name != null) {
+            result.addProperty("card", name);
+        }
+        if (card == null && publicOrigin && to != null) {
+            // left a public zone: its name is public; its id only if the viewer may see it where it now is
+            card = publicIn(game, e.card(), to, viewer);
+        }
         if (card != null) {
-            final String name = card.getView().getCurrentState().getName();
+            facts(result, game, card, null);
+            seatOf(result, game, card.getController(), "controllerSeat");
+        }
+    }
+
+    private static boolean inGraveyardFaceUp(final Card card) {
+        return card != null && card.getZone() != null && card.getZone().getZoneType() == ZoneType.Graveyard
+                && !card.isFaceDown();
+    }
+
+    private static String nameOf(final CardView view) {
+        if (view == null || view.getCurrentState() == null) {
+            return null;
+        }
+        final String name = view.getCurrentState().getName();
+        return name == null || name.isBlank() ? null : name;
+    }
+
+    /** Zones whose objects' counters are public (CR 122: counters on public objects are public information). */
+    private static final java.util.Set<ZoneType> PUBLIC_ZONES = java.util.EnumSet.of(ZoneType.Battlefield,
+            ZoneType.Graveyard, ZoneType.Exile, ZoneType.Stack, ZoneType.Command);
+
+    /**
+     * {@code counters_changed} (lane block-search-1019): {@code fid}, {@code counter} (Forge's counter type name, e.g.
+     * {@code M1M1}, {@code P1P1}, {@code LOYALTY}), {@code oldCount}, {@code newCount}, for an object in a public zone
+     * ({@code zone}). A face-up object the viewer may see also gets {@code card} and its facts; a face-down permanent
+     * gets its {@code fid} and counts only (its battlefield entry shows both), never a name. An object in a hidden zone,
+     * or a face-down object off the battlefield, gives an event with no kind and nothing else.
+     */
+    private static void countersChanged(final JsonObject result, final Game game, final GameEventCardCounters e,
+                                        final PlayerView viewer) {
+        final Card card = cardOf(game, e.card());
+        if (card == null || card.getZone() == null || e.type() == null) {
+            return;
+        }
+        final ZoneType zone = card.getZone().getZoneType();
+        if (!PUBLIC_ZONES.contains(zone)) {
+            return;
+        }
+        final Card shown = publicIn(game, e.card(), zone, viewer);
+        final boolean faceDownPermanent = shown == null && zone == ZoneType.Battlefield && card.isFaceDown()
+                && card.getView() != null && card.getView().getZone() == ZoneType.Battlefield;
+        if (shown == null && !faceDownPermanent) {
+            return;
+        }
+        kind(result, "counters_changed");
+        result.addProperty("zone", zone.name());
+        result.addProperty("counter", e.type().toString());
+        result.addProperty("oldCount", e.oldValue());
+        result.addProperty("newCount", e.newValue());
+        if (shown != null) {
+            final String name = shown.getView().getCurrentState().getName();
             if (name != null && !name.isBlank()) {
                 result.addProperty("card", name);
             }
-            facts(result, game, card, null);
+            facts(result, game, shown, null);
+        } else {
+            result.addProperty("fid", card.getId());
+        }
+    }
+
+    private static Card cardOf(final Game game, final CardView view) {
+        if (view == null) {
+            return null;
+        }
+        try {
+            return game.findById(view.getId());
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    /** {@code field}: the seat of the zone's player ({@code ZoneView.player()}), when it has one. */
+    private static void zoneSeat(final JsonObject result, final Game game, final ZoneView zone, final String field) {
+        if (zone == null || zone.player() == null) {
+            return;
+        }
+        int index = 0;
+        for (Player registered : game.getRegisteredPlayers()) {
+            if (registered.getId() == zone.player().getId()) {
+                result.addProperty(field, index);
+                return;
+            }
+            index++;
+        }
+    }
+
+    private static void seatOf(final JsonObject result, final Game game, final Player player, final String field) {
+        final int seat = InteractiveCardFacts.seatOf(game, player);
+        if (seat >= 0) {
+            result.addProperty(field, seat);
         }
     }
 

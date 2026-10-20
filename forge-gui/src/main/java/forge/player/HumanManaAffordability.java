@@ -37,6 +37,48 @@ public final class HumanManaAffordability {
     public enum Assessment { PROVEN_UNAFFORDABLE, POTENTIALLY_AFFORDABLE, UNKNOWN }
     private HumanManaAffordability() {}
 
+    /**
+     * Is there a mana source of {@code player}'s that the proof loops cannot count (lane block-search-1019)? The loops
+     * count only plain mana abilities ({@link SpellAbility#isManaAbility()} with a fixed output). An activated ability
+     * that makes mana but is no mana ability by the rules is invisible to them: a targeted one (Deathrite Shaman:
+     * exile a land card from a graveyard, add one mana), a loyalty one (Chandra, Torch of Defiance's +1, activated
+     * before casting), or one whose mana is a sub-ability (Nykthos's devotion ability). With any such ability that
+     * could be activated where its card is, no proof is made: "never claim unpayable without proof".
+     */
+    static boolean unenumeratedManaSource(final Player player) {
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            if (card.isPhasedOut()) continue;
+            for (SpellAbility sa : card.getSpellAbilities()) {
+                if (sa.isSpell() || !makesMana(sa)) continue;
+                if (sa.getRestrictions() != null && sa.getRestrictions().getZone() != null
+                        && !card.isInZone(sa.getRestrictions().getZone())
+                        && !sa.hasParam("AdditionalActivationZone")) continue;
+                if (sa.isManaAbility() && sa.getManaPart() != null) continue; // counted by the loops (or UNKNOWN there)
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean makesMana(final SpellAbility sa) {
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.getApi() == ApiType.Mana || s.getApi() == ApiType.ManaReflected) return true;
+        }
+        return false;
+    }
+
+    /**
+     * A DamageDone replacement that only prevents the damage ({@code Prevent$ True}, nothing put in its place): a
+     * player's or permanent's protection keyword card (The Rhinegold's "protection from everything until your next turn"
+     * puts one in the command zone), a Fog. Preventing damage never changes the mana a player can make or pay with, so it
+     * does not make the proof UNKNOWN (castable-glow-1019: it made every card glow for a turn cycle).
+     */
+    static boolean preventsDamageOnly(final forge.game.replacement.ReplacementEffect r) {
+        return r.getMode() == ReplacementType.DamageDone && "True".equals(r.getParam("Prevent"))
+                && !r.hasParam("ReplaceWith");
+    }
+
     public static boolean mayAfford(final Player player, final SpellAbility ability) {
         return assess(player, ability) != Assessment.PROVEN_UNAFFORDABLE;
     }
@@ -100,13 +142,16 @@ public final class HumanManaAffordability {
             if (card.getReplacementEffects().stream().filter(r -> r.zonesCheck(player.getGame().getZoneOf(card)))
                     .anyMatch(r -> r.getMode() == ReplacementType.ProduceMana
                     || r.getMode() == ReplacementType.PayLife || r.getMode() == ReplacementType.LifeReduced
-                    || r.getMode() == ReplacementType.DamageDone || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
+                    || r.getMode() == ReplacementType.DamageDone && !preventsDamageOnly(r)
+                    || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
             if (card.getTriggers().stream().filter(t -> t.getSpawningAbility() != null
                     || t.zonesCheck(player.getGame().getZoneOf(card)))
                     .anyMatch(t -> t.getMode() == TriggerType.TapsForMana
                     || t.getMode() == TriggerType.ManaAdded)) return Assessment.UNKNOWN;
         }
 
+        // block-search-1019: a mana source the loop below cannot count makes any proof unsound
+        if (unenumeratedManaSource(player)) return Assessment.UNKNOWN;
         final List<Integer> tokens = new ArrayList<>();
         // Life tokens can match only phyrexian pips, never generic mana. Ignoring
         // source life costs overestimates supply and cannot hide a legal payment.
@@ -259,13 +304,16 @@ public final class HumanManaAffordability {
             if (card.getReplacementEffects().stream().filter(r -> r.zonesCheck(player.getGame().getZoneOf(card)))
                     .anyMatch(r -> r.getMode() == ReplacementType.ProduceMana
                     || r.getMode() == ReplacementType.PayLife || r.getMode() == ReplacementType.LifeReduced
-                    || r.getMode() == ReplacementType.DamageDone || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
+                    || r.getMode() == ReplacementType.DamageDone && !preventsDamageOnly(r)
+                    || r.getMode() == ReplacementType.DealtDamage)) return Assessment.UNKNOWN;
             if (card.getTriggers().stream().filter(t -> t.getSpawningAbility() != null
                     || t.zonesCheck(player.getGame().getZoneOf(card)))
                     .anyMatch(t -> t.getMode() == TriggerType.TapsForMana
                     || t.getMode() == TriggerType.ManaAdded)) return Assessment.UNKNOWN;
         }
 
+        // block-search-1019: a mana source the loop below cannot count makes any proof unsound
+        if (unenumeratedManaSource(player)) return Assessment.UNKNOWN;
         final List<Integer> tokens = new ArrayList<>();
         for (int i = 1; i <= phyrexian && player.canPayLife(2 * i, false, ability); i++) tokens.add(LIFE_PAYMENT);
         for (var mana : player.getManaPool()) {

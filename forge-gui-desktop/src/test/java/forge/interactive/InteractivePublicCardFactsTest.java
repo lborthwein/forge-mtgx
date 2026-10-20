@@ -255,8 +255,14 @@ public class InteractivePublicCardFactsTest extends AITest {
         final Card morph = addCard("Ainok Tracker", seat0);
         morph.turnFaceDown(true);
         game.getAction().checkStateEffects(true);
-        // A face-down exiled card is not listed for the opponent at all (CardView#canBeShownTo).
-        assertNull(zoneEntry(seat1, exiled.getId()));
+        // A face-down exiled card is listed for the opponent only as a redacted shell (lane block-search-1019: it was
+        // dropped, so the exile count was short): the public face-down fields, no identity, none of the facts.
+        final JsonObject shell = zoneEntry(seat1, exiled.getId());
+        assertNotNull(shell, "the opponent's exile counts it");
+        assertTrue(shell.get("identityRedacted").getAsBoolean(), shell.toString());
+        assertEquals(shell.get("name").getAsString(), "Face-down card");
+        assertFalse(shell.has("isToken"), shell.toString());
+        assertFalse(shell.has("isCopy"), shell.toString());
         // A face-down permanent is listed, redacted, and gains none of the facts.
         final JsonObject entry = zoneEntry(seat1, morph.getId());
         assertNotNull(entry, "the opponent sees a face-down permanent");

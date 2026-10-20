@@ -13,8 +13,10 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import forge.bench.StateEncoder;
+import forge.card.CardStateName;
 import forge.game.Game;
 import forge.game.card.Card;
+import forge.game.card.CardState;
 import forge.game.card.CardCollectionView;
 import forge.game.card.CardView;
 import forge.game.player.Player;
@@ -42,6 +44,23 @@ final class InteractiveState {
             "power", "toughness", "damage", "counters", "attachments", "attachedTo",
             "attachedToKind");
 
+    /**
+     * A face-down card's own face on its zone entry (lane block-search-1019), present only on the channel of a seat Forge
+     * lets look at it (Thief of Sanity's exile, a "you may look at it" grant, the controller's own face-down permanent);
+     * never on a watch channel.
+     */
+    static final String FACE_DOWN_IDENTITY = "faceDownIdentity";
+
+    /**
+     * HELD (orchestrator 2026-10-19): {@link #FACE_DOWN_IDENTITY} and the looked-at face-down label are sent only with
+     * {@code -Dforge.interactive.faceDownIdentity=on}. Off (the default) until the review pipeline stops carrying a seat's
+     * transcript names into the public review (mtgx #1126): a seat's own channel feeds review-game.mjs transcriptFacts,
+     * then review.json, then CubeTV. Read on each call, so tests can switch it.
+     */
+    static boolean faceDownIdentityOn() {
+        return "on".equals(System.getProperty("forge.interactive.faceDownIdentity"));
+    }
+
     /** A player's field for the top card of their library, present only for a viewer who may see it. */
     static final String LIBRARY_TOP = "libraryTop";
 
@@ -49,6 +68,14 @@ final class InteractiveState {
     }
 
     static JsonObject encode(final Game game, final Player human) {
+        return encode(game, human, true);
+    }
+
+    /**
+     * {@code lookedAt}: whether face-down cards this seat may look at carry {@link #FACE_DOWN_IDENTITY} (the seat's own
+     * GUI: true; a watch channel, which a spectator replays: false).
+     */
+    static JsonObject encode(final Game game, final Player human, final boolean lookedAt) {
         final JsonObject view = StateEncoder.encode(game, human).deepCopy();
         // StateEncoder omits eliminated players from its positional life array.
         // Keep this wire vector indexed by the original registered seats.
@@ -58,11 +85,49 @@ final class InteractiveState {
         }
         view.add("life", life);
         final PlayerView viewer = human.getView();
-        sanitizePlayerZones(view, game, viewer);
+        addEliminatedSeats(view, game, viewer);
+        sanitizePlayerZones(view, game, viewer, lookedAt);
         addVisibleLibraryTops(view, game, viewer);
         sanitizeStack(view, game, viewer);
         sanitizeCombat(view, game, viewer);
         return view;
+    }
+
+    /**
+     * Lane block-search-1019 (review S3): {@link StateEncoder#encode} lists in-game players only (it also feeds the
+     * bridge's state and the search's payloads, so it stays as it is). A player who has lost leaves that list, and the
+     * browser's terminal view showed the loser at default life, poison and zones. This view lists every registered seat
+     * in seat order; an eliminated seat is encoded as the encoder encodes a player (its final public state under the
+     * same visibility rules, sanitized below like every seat) and flagged {@code "lost": true}.
+     */
+    private static void addEliminatedSeats(final JsonObject view, final Game game, final PlayerView viewer) {
+        if (!view.has("players") || !view.get("players").isJsonArray()) {
+            return;
+        }
+        final JsonArray listed = view.getAsJsonArray("players");
+        if (listed.size() >= game.getRegisteredPlayers().size()) {
+            return; // nobody has left the game: the view is the encoder's, unchanged
+        }
+        final Map<Integer, JsonElement> byIndex = new HashMap<>();
+        for (JsonElement e : listed) {
+            if (e.isJsonObject() && e.getAsJsonObject().has("index")) {
+                byIndex.put(e.getAsJsonObject().get("index").getAsInt(), e);
+            }
+        }
+        final JsonArray out = new JsonArray();
+        int seat = 0;
+        for (Player p : game.getRegisteredPlayers()) {
+            final JsonElement kept = byIndex.get(seat);
+            if (kept != null) {
+                out.add(kept);
+            } else {
+                final JsonObject lost = StateEncoder.encodePlayerFor(game, p, viewer);
+                lost.addProperty("lost", true);
+                out.add(lost);
+            }
+            seat++;
+        }
+        view.add("players", out);
     }
 
     /**
@@ -71,7 +136,12 @@ final class InteractiveState {
      * {@code ownerSeat}). The one helper for a human seat's GUI and a watch table's channels (lane forge-bot-tables-1011).
      */
     static JsonObject seatView(final Game game, final Player seatPlayer, final int seat) {
-        final JsonObject view = encode(game, seatPlayer);
+        return seatView(game, seatPlayer, seat, true);
+    }
+
+    /** As above; {@code lookedAt} false for a watch channel (no {@link #FACE_DOWN_IDENTITY}: a spectator replays it). */
+    static JsonObject seatView(final Game game, final Player seatPlayer, final int seat, final boolean lookedAt) {
+        final JsonObject view = encode(game, seatPlayer, lookedAt);
         view.addProperty("seat", seat);
         normalizePlayerNamespaces(game, view);
         view.addProperty(InteractiveCardFacts.FIELD, InteractiveCardFacts.VERSION);
@@ -147,9 +217,19 @@ final class InteractiveState {
         if (card == null) {
             return "Unknown card";
         }
-        return mayReceiveIdentity(card, viewer)
-                ? visibleCardLabel(card)
-                : "Face-down card (" + card.getId() + ")";
+        if (!mayReceiveIdentity(card, viewer)) {
+            return "Face-down card (" + card.getId() + ")";
+        }
+        // block-search-1019: a face-down card this viewer may look at (Thief of Sanity's exile) has no name in its
+        // face-down state, so the label read "Card (73)"; name it by its original face, as the desktop GUI shows it
+        return card.isFaceDown() && faceDownIdentityOn() ? lookedAtCardLabel(card) : visibleCardLabel(card);
+    }
+
+    /** Only after {@link #mayReceiveIdentity} for the viewer: a face-down card by its original face's name. */
+    private static String lookedAtCardLabel(final CardView card) {
+        final CardView.CardStateView original = card.getAlternateState();
+        final String name = original == null || original.getState() != CardStateName.Original ? null : original.getName();
+        return name == null || name.isBlank() ? visibleCardLabel(card) : name + " (" + card.getId() + ")";
     }
 
     static String visibleCardLabel(final CardView card) {
@@ -162,7 +242,7 @@ final class InteractiveState {
     }
 
     private static void sanitizePlayerZones(final JsonObject view, final Game game,
-                                            final PlayerView viewer) {
+                                            final PlayerView viewer, final boolean lookedAt) {
         if (!view.has("players") || !view.get("players").isJsonArray()) {
             return;
         }
@@ -172,9 +252,54 @@ final class InteractiveState {
             }
             final JsonObject object = player.getAsJsonObject();
             for (String zone : ListNames.CARD_ZONES) {
-                sanitizeCardArray(object.get(zone), game, viewer, zone);
+                sanitizeCardArray(object.get(zone), game, viewer, zone, lookedAt);
+            }
+            addHiddenExileShells(object, game);
+        }
+    }
+
+    /**
+     * Lane block-search-1019: a face-down exiled card the viewer may not look at is not listed at all
+     * ({@link StateEncoder} omits it, {@link #sanitizeCardArray} drops an unverified one), so the viewer's exile count
+     * was short (the owner of a card Thief of Sanity exiled saw one card fewer). Each such card gets a redacted shell
+     * in zone order: the public face-down fields only ({@link #redactPrivateCard}), never its identity.
+     */
+    private static void addHiddenExileShells(final JsonObject playerObject, final Game game) {
+        if (!playerObject.has("index") || !playerObject.has("exile") || !playerObject.get("exile").isJsonArray()) {
+            return;
+        }
+        final int index = playerObject.get("index").getAsInt();
+        if (index < 0 || index >= game.getRegisteredPlayers().size()) {
+            return;
+        }
+        final Player owner = game.getRegisteredPlayers().get(index);
+        final JsonArray listed = playerObject.getAsJsonArray("exile");
+        final java.util.Map<Integer, JsonElement> byFid = new java.util.HashMap<>();
+        for (JsonElement e : listed) {
+            if (e.isJsonObject() && e.getAsJsonObject().has("fid") && e.getAsJsonObject().get("fid").isJsonPrimitive()) {
+                byFid.put(e.getAsJsonObject().get("fid").getAsInt(), e);
             }
         }
+        final JsonArray out = new JsonArray();
+        boolean added = false;
+        for (Card c : owner.getCardsIn(forge.game.zone.ZoneType.Exile)) {
+            final JsonElement kept = byFid.remove(c.getId());
+            if (kept != null) {
+                out.add(kept);
+            } else if (c.isFaceDown()) {
+                final JsonObject shell = StateEncoder.encodeCardUnchecked(c);
+                redactPrivateCard(shell);
+                out.add(shell);
+                added = true;
+            }
+        }
+        if (!added) {
+            return;
+        }
+        for (JsonElement rest : byFid.values()) {
+            out.add(rest); // never seen: an entry not in the zone any more stays as the encoder listed it
+        }
+        playerObject.add("exile", out);
     }
 
     /**
@@ -318,7 +443,7 @@ final class InteractiveState {
     }
 
     private static void sanitizeCardArray(final JsonElement value, final Game game,
-                                          final PlayerView viewer, final String zone) {
+                                          final PlayerView viewer, final String zone, final boolean lookedAt) {
         if (value == null || !value.isJsonArray()) {
             return;
         }
@@ -341,6 +466,10 @@ final class InteractiveState {
                 // Looking at an owned face-down card does not authorize the new provenance facts.
                 if (!card.isFaceDown()) {
                     InteractiveCardFacts.addTokenAndCopy(cardObject, card);
+                } else if (lookedAt && faceDownIdentityOn()) {
+                    // block-search-1019: Forge lets this viewer look at the face-down card (visibleCardForFid: its
+                    // may-look rule); its own face, for this seat's channel only
+                    addFaceDownIdentity(cardObject, card);
                 }
             }
         }
@@ -375,6 +504,29 @@ final class InteractiveState {
         } catch (RuntimeException e) {
             // An id that does not resolve names nothing.
         }
+    }
+
+    /**
+     * {@link #FACE_DOWN_IDENTITY} (owner's report 2026-10-19T21-15-50: "I just exiled Karn with Thief of Sanity, but I
+     * don't see it anywhere"): the printed face of a face-down card the viewer may look at: name, type line, mana cost,
+     * mana value, base P/T (creatures). The entry's own fields stay the face-down state's. Called only for an entry
+     * {@link #sanitizeCardArray} admitted for this viewer by Forge's may-look rule, and only on a seat's own channel.
+     */
+    private static void addFaceDownIdentity(final JsonObject cardObject, final Card card) {
+        final CardState original = card.getState(CardStateName.Original);
+        if (original == null || original.getName() == null || original.getName().isBlank()) {
+            return;
+        }
+        final JsonObject identity = new JsonObject();
+        identity.addProperty("name", original.getName());
+        identity.addProperty("types", original.getType().toString());
+        identity.addProperty("manaCost", String.valueOf(original.getManaCost()));
+        identity.addProperty("cmc", original.getManaCost().getCMC());
+        if (original.getType().isCreature()) {
+            identity.addProperty("basePower", original.getBasePower());
+            identity.addProperty("baseToughness", original.getBaseToughness());
+        }
+        cardObject.add(FACE_DOWN_IDENTITY, identity);
     }
 
     static void redactPrivateCard(final JsonObject cardObject) {

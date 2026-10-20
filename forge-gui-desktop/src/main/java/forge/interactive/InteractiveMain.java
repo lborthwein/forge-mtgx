@@ -468,8 +468,7 @@ public final class InteractiveMain {
             // The browser owns presentation. Opening desktop audio clips here
             // blocks game-event delivery (including each mana-source tap) on
             // the server, and cannot provide sound to the remote player.
-            preferences.setPref(FPref.UI_ENABLE_SOUNDS, false);
-            preferences.setPref(FPref.UI_ENABLE_MUSIC, false);
+            forge.bench.HeadlessSound.silence(preferences); // block-search-1019: unless -Dforge.sound=on
             preferences.setPref(FPref.PLAYER_NAME, "Browser Player");
             preferences.setPref(FPref.UI_CURRENT_AI_PROFILE, "Default");
             preferences.setPref(FPref.YIELD_AUTO_PASS_NO_ACTIONS, false);
