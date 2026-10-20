@@ -141,6 +141,18 @@ public final class ForcedWinSolver {
          * P(belief) = the worst over the adversary's counters.
          */
         public boolean exact = false;
+        /**
+         * strong-opp-1020 (0 = the default, and then nothing changes): extra turns added to the defense threat window
+         * ({@link #threat}: their next 2 turns, or 3 when they cannot act at sorcery speed now).
+         */
+        public int threatExtraTurns = 0;
+        /** strong-opp-1020 (0 = off): a discard choice tied between cards re-checks the tied ones this many turns further. */
+        public int tieBreakTurns = 0;
+        /**
+         * strong-opp-1020 (0 = none, the default): the wall budget of one defense decision ({@link #defend},
+         * {@link #answerDiscardP}), ms; past it the threat worlds stop, and a decision that could not finish has no opinion.
+         */
+        public long defendMs = 0;
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -171,6 +183,9 @@ public final class ForcedWinSolver {
             c.hideOwnLibrary = "true".equals(get.apply("hideOwnLibrary"));
             c.exact = "true".equals(get.apply("exact"));
             c.planMs = intOr(get.apply("planMs"), (int) c.planMs);
+            c.threatExtraTurns = intOr(get.apply("threatExtraTurns"), c.threatExtraTurns);
+            c.tieBreakTurns = intOr(get.apply("tieBreakTurns"), c.tieBreakTurns);
+            c.defendMs = intOr(get.apply("defendMs"), (int) c.defendMs);
             return c;
         }
 
@@ -698,6 +713,9 @@ public final class ForcedWinSolver {
      * convention), their library holding the rest. {@code without}: cards taken out (a discard candidate).
      */
     Threat threat(Game live, Player opp, Card pending, List<Card> without, boolean revealed, int worlds) {
+        if (redraw != null) {
+            return threatHonest(live, opp, pending, without, revealed, worlds);
+        }
         final long t0 = System.nanoTime();
         threatChecks++;
         final Threat t = new Threat();
@@ -738,7 +756,7 @@ public final class ForcedWinSolver {
             // POST-FREEZE 3: when they cannot act at sorcery speed now (our turn, or their non-main step), their
             // threat window is their next two turns (a setup spell next turn, the win the turn after: a
             // pass-the-turn Doomsday pile); in their own main phase it is this turn and their next
-            lim.horizon = base.sorcerySpeed ? 2 : 3;
+            lim.horizon = (base.sorcerySpeed ? 2 : 3) + cfg.threatExtraTurns;
             final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
             if (!res.lines.isEmpty()) {
                 wins++;
@@ -749,6 +767,94 @@ public final class ForcedWinSolver {
         }
         t.worlds = n;
         t.p = (double) wins / n;
+        plannerNanos += System.nanoTime() - t0;
+        return t;
+    }
+
+    /**
+     * strong-opp-1020: {@link #threat} on the seat's belief instead of the opponent's registered deck. Each world is a
+     * copy of the game whose opponent hidden hand and library the search's belief re-draw ({@link #redraw}: the cube
+     * pool minus what we know) replaced; their position is read from that copy (all its hand cards: the cards we see
+     * plus the world's sample), so no world holds their real hidden cards. {@code revealed}: their whole hand is known
+     * (a discard effect looking at it), so only the library is drawn.
+     */
+    /** strong-opp-1020: the current defense decision's deadline (System.nanoTime), or 0 = none. */
+    private long defendDeadline = 0;
+    /** strong-opp-1020: set when a threat check stopped at the deadline (its verdict is incomplete). */
+    private boolean defendCut = false;
+    public int defendCuts;
+
+    private boolean pastDeadline() {
+        if (defendDeadline != 0 && System.nanoTime() > defendDeadline) {
+            defendCut = true;
+            return true;
+        }
+        return false;
+    }
+
+    private Threat threatHonest(Game live, Player opp, Card pending, List<Card> without, boolean revealed, int worlds) {
+        final long t0 = System.nanoTime();
+        threatChecks++;
+        final Threat t = new Threat();
+        final PhaseHandler ph = live.getPhaseHandler();
+        final int n = Math.max(1, worlds);
+        int wins = 0, ran = 0;
+        for (int w = 0; w < n; w++) {
+            if (pastDeadline()) {
+                break;
+            }
+            final Position pos;
+            final Object prevIds = forge.util.IdScope.capture();
+            forge.util.IdScope.open();
+            try {
+                final Game g;
+                final Player co;
+                synchronized (live) {
+                    final GameCopier copier = new GameCopier(live, true);
+                    g = copier.makeCopy();
+                    final Player cm = (Player) copier.find(me);
+                    co = (Player) copier.find(opp);
+                    copies++;
+                    redraw.apply(live, me, g, cm, new Random(mix(cfg.seed, 7919L * w + 31L * ph.getTurn() + 5)));
+                }
+                pos = oppReader.read(g, co, null, true, co, pending);
+                if (pos != null && revealed) {
+                    // their hand is known to us (a discard effect revealed it): the real hand, only the library is drawn
+                    final Position real = oppReader.read(live, opp, null, false, opp, pending);
+                    if (real != null) {
+                        pos.hand.clear();
+                        pos.hand.addAll(real.hand);
+                    }
+                }
+            } catch (RuntimeException e) {
+                receipt("FORCED_WIN threatHonest copy error " + e);
+                continue;
+            } finally {
+                forge.util.IdScope.install(prevIds);
+            }
+            if (pos == null) {
+                continue;
+            }
+            if (without != null) {
+                for (Card c : without) {
+                    pos.hand.removeIf(a -> a.id == c.getId());
+                }
+            }
+            pos.sorcerySpeed = ph.isPlayerTurn(opp) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
+            final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
+            lim.nodes = cfg.nodes / 2;
+            lim.horizon = (pos.sorcerySpeed ? 2 : 3) + cfg.threatExtraTurns;
+            final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
+            ran++;
+            if (!res.lines.isEmpty()) {
+                wins++;
+                if (t.line == null) {
+                    t.line = res.lines.get(0);
+                }
+            }
+        }
+        t.worlds = ran;
+        t.p = ran == 0 ? 0 : (double) wins / ran;
         plannerNanos += System.nanoTime() - t0;
         return t;
     }
@@ -816,6 +922,114 @@ public final class ForcedWinSolver {
             return Decision.PASS;
         }
         return Decision.NONE;
+    }
+
+    /**
+     * strong-opp-1020: the defense alone, whatever {@link Config#act} says: with the opponent's spell on top, counter it
+     * when resolving it gives them a forced win ({@link #defendCounter}), pass when a bigger threat is likely still to
+     * come, else no opinion. Never throws.
+     */
+    public Decision defend(Game live) {
+        try {
+            if (live.getStack().isEmpty() || !cfg.defense) {
+                return Decision.NONE;
+            }
+            startDeadline();
+            final Decision d = defendCounter(live);
+            if (defendCut) {
+                defendCuts++;
+                receipt("FORCED_WIN defend cut at the deadline: no opinion");
+                return Decision.NONE;
+            }
+            return d;
+        } catch (RuntimeException | StackOverflowError e) {
+            receipt("FORCED_WIN defend error " + e);
+            return Decision.NONE;
+        } finally {
+            defendDeadline = 0;
+        }
+    }
+
+    /**
+     * strong-opp-1020: our discard choice from the opponent's revealed hand by threat probability: their forced-win
+     * chance by their next turns now, and with each candidate removed ({@link Config#defenseWorlds} worlds each); take
+     * the card that lowers it most. Null (no opinion) when they have no line now or no card lowers it.
+     */
+    public CardCollection answerDiscardP(Player p, SpellAbility sa, CardCollection valid, int min, int max) {
+        if (!cfg.defense || p == me || sa == null || sa.getActivatingPlayer() != me || valid == null || valid.isEmpty()
+                || max != 1) {
+            return null;
+        }
+        final long t0 = System.nanoTime();
+        startDeadline();
+        try {
+            final Game live = me.getGame();
+            final int wn = Math.max(1, cfg.defenseWorlds);
+            final Threat nowT = threat(live, p, null, null, true, wn);
+            if (nowT.p <= 0) {
+                receipt("FORCED_WIN discardP turn=" + live.getPhaseHandler().getTurn() + " threat=none");
+                return null;
+            }
+            discardChoices++;
+            Card best = null;
+            double bestP = nowT.p;
+            final List<String> tried = new ArrayList<>();
+            final List<Card> tied = new ArrayList<>();
+            for (Card c : valid) {
+                final double pa = threat(live, p, null, List.of(c), true, wn).p;
+                tried.add(c.getName() + ":" + String.format("%.2f", pa));
+                if (pa < bestP - 1e-9) {
+                    bestP = pa;
+                    best = c;
+                    tied.clear();
+                    tied.add(c);
+                } else if (best != null && Math.abs(pa - bestP) <= 1e-9) {
+                    tied.add(c);
+                }
+            }
+            if (tied.size() > 1 && cfg.tieBreakTurns > 0) {
+                // strong-opp-1020: several cards stop their line equally; look one window further (a card they can
+                // replace from their library stops it only for now)
+                final int keepExtra = cfg.threatExtraTurns;
+                cfg.threatExtraTurns = keepExtra + cfg.tieBreakTurns;
+                try {
+                    double bp = Double.MAX_VALUE;
+                    for (Card c : tied) {
+                        final double pa = threat(live, p, null, List.of(c), true, wn).p;
+                        tried.add("tb:" + c.getName() + ":" + String.format("%.2f", pa));
+                        if (pa < bp - 1e-9) {
+                            bp = pa;
+                            best = c;
+                        }
+                    }
+                } finally {
+                    cfg.threatExtraTurns = keepExtra;
+                }
+            }
+            receipt("FORCED_WIN discardP turn=" + live.getPhaseHandler().getTurn() + " now=" + nowT + " tried=" + tried
+                    + " take=" + (best == null ? "-" : best.getName()) + (defendCut ? " CUT" : "") + " ms="
+                    + (System.nanoTime() - t0) / 1_000_000);
+            if (defendCut) {
+                defendCuts++;
+                return null;
+            }
+            if (best == null) {
+                return null;
+            }
+            final CardCollection out = new CardCollection();
+            out.add(best);
+            return out;
+        } catch (RuntimeException e) {
+            receipt("FORCED_WIN discardP error " + e);
+        } finally {
+            defendDeadline = 0;
+        }
+        return null;
+    }
+
+    private void startDeadline() {
+        defendCut = false;
+        defendDeadline = cfg.defendMs > 0 ? System.nanoTime() + forge.ai.WallClock.budgetMs(cfg.defendMs) * 1_000_000L : 0;
     }
 
     private SpellAbility counterFor(Game g, SpellAbility top) {
