@@ -85,11 +85,49 @@ final class InteractiveState {
         }
         view.add("life", life);
         final PlayerView viewer = human.getView();
+        addEliminatedSeats(view, game, viewer);
         sanitizePlayerZones(view, game, viewer, lookedAt);
         addVisibleLibraryTops(view, game, viewer);
         sanitizeStack(view, game, viewer);
         sanitizeCombat(view, game, viewer);
         return view;
+    }
+
+    /**
+     * Lane block-search-1019 (review S3): {@link StateEncoder#encode} lists in-game players only (it also feeds the
+     * bridge's state and the search's payloads, so it stays as it is). A player who has lost leaves that list, and the
+     * browser's terminal view showed the loser at default life, poison and zones. This view lists every registered seat
+     * in seat order; an eliminated seat is encoded as the encoder encodes a player (its final public state under the
+     * same visibility rules, sanitized below like every seat) and flagged {@code "lost": true}.
+     */
+    private static void addEliminatedSeats(final JsonObject view, final Game game, final PlayerView viewer) {
+        if (!view.has("players") || !view.get("players").isJsonArray()) {
+            return;
+        }
+        final JsonArray listed = view.getAsJsonArray("players");
+        if (listed.size() >= game.getRegisteredPlayers().size()) {
+            return; // nobody has left the game: the view is the encoder's, unchanged
+        }
+        final Map<Integer, JsonElement> byIndex = new HashMap<>();
+        for (JsonElement e : listed) {
+            if (e.isJsonObject() && e.getAsJsonObject().has("index")) {
+                byIndex.put(e.getAsJsonObject().get("index").getAsInt(), e);
+            }
+        }
+        final JsonArray out = new JsonArray();
+        int seat = 0;
+        for (Player p : game.getRegisteredPlayers()) {
+            final JsonElement kept = byIndex.get(seat);
+            if (kept != null) {
+                out.add(kept);
+            } else {
+                final JsonObject lost = StateEncoder.encodePlayerFor(game, p, viewer);
+                lost.addProperty("lost", true);
+                out.add(lost);
+            }
+            seat++;
+        }
+        view.add("players", out);
     }
 
     /**
