@@ -1347,13 +1347,27 @@ public final class LookaheadSearch {
         return r == null ? null : r.at(index);
     }
 
+    /** J1: the one candidate with this label; -1 when none has it OR when more than one does (an ambiguous key). */
     private static int indexOfLabel(final List<Cand> cands, final String label) {
+        int found = -1;
         for (int c = 0; c < cands.size(); c++) {
             if (label.equals(cands.get(c).label)) {
-                return c;
+                if (found >= 0) {
+                    return -1; // review S2: an ambiguous key is never forced (the caller counts a forcedMiss)
+                }
+                found = c;
             }
         }
-        return -1;
+        return found;
+    }
+
+    /** J1: how many candidates carry this label. */
+    private static int labelCount(final List<Cand> cands, final String label) {
+        int n = 0;
+        for (Cand c : cands) {
+            n += label.equals(c.label) ? 1 : 0;
+        }
+        return n;
     }
     private boolean hookLeaf = false, hookPlayout = false;
     /** S1: the CPU time of pool tasks (play-outs on worker threads) is summed here while it is non-null. */
@@ -1776,7 +1790,9 @@ public final class LookaheadSearch {
         // line's own index): when the live game played another candidate and it is one here, play that one
         final AiReplay.Mark mark = cfg.decisionLog ? replayMark(index) : null;
         boolean forcing = false, forcedMiss = false;
-        if (mark != null && mark.played != null) {
+        if (mark != null && mark.played != null && labelCount(cands, mark.played) > 1) {
+            forcedMiss = true; // review S2: an ambiguous key
+        } else if (mark != null && mark.played != null) {
             int natural = overBudget || best == 0 || cfg.shadow ? 0 : best;
             if (natural != 0) {
                 final String nk = cands.get(natural).key() + "@" + ph.getPhase() + "#" + live.getStack().size();
@@ -2609,7 +2625,9 @@ public final class LookaheadSearch {
         final String want = decisionForce;
         decisionForce = null;
         boolean forcing = false;
-        if (want != null) {
+        if (want != null && labelCount(cands, want) > 1) {
+            res.forcedMiss = true; // review S2: an ambiguous key
+        } else if (want != null) {
             final int natural = wouldPlay(cands, best, overBudget, provenPick, ph, live);
             if (!want.equals(cands.get(natural).label)) {
                 final int idx = indexOfLabel(cands, want);
@@ -6249,7 +6267,9 @@ public final class LookaheadSearch {
         final String want = decisionForce;
         decisionForce = null;
         boolean forcing = false;
-        if (want != null) {
+        if (want != null && labelCount(cands, want) > 1) {
+            res.forcedMiss = true; // review S2: an ambiguous key
+        } else if (want != null) {
             final int natural = overBudget || cfg.shadow ? 0 : best;
             if (!want.equals(cands.get(natural).label)) {
                 final int idx = indexOfLabel(cands, want);

@@ -1243,14 +1243,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             labels.add("forge");
         }
         final List<Map<Integer, List<Integer>>> plans = new ArrayList<>(cs.size());
+        // review S2: each candidate's identity (its label in the search, its explain row and the J1 replay key) is its
+        // canonical declaration, never its source label: two distinct sampled declarations may share a count
+        final List<String> decls = new ArrayList<>(cs.size());
         for (short[] st : cs) {
-            plans.add(m.blockMap(st));
+            final Map<Integer, List<Integer>> bm = m.blockMap(st);
+            plans.add(bm);
+            decls.add(declarationKey(bm));
         }
         final double prepMs = (System.nanoTime() - t0) / 1e6;
         lastForced = false;
         lastForcedMiss = false;
         armForce(mark());
-        final LookaheadSearch.GivenResult r = ls.decideBlocks(g, me, plans, labels, t0);
+        final LookaheadSearch.GivenResult r = ls.decideBlocks(g, me, plans, decls, t0);
         tookForce(r);
         if (r.givenIndex.length > 0) {
             blockSearched++;
@@ -1287,6 +1292,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 lb.add(l);
             }
             row.add("cands", lb);
+            final JsonArray dk = new JsonArray();
+            for (String d : decls) {
+                dk.add(d);
+            }
+            row.add("decls", dk);
             final JsonArray ix = new JsonArray();
             final JsonArray ev = new JsonArray();
             for (int j = 0; j < r.givenIndex.length; j++) {
@@ -1318,6 +1328,29 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             rows.add(row);
         }
         return answer;
+    }
+
+    /**
+     * Review S2: a block declaration's canonical identity: its attacker/blocker pairs ({@code a<attacker id>>b<blocker
+     * id>}) sorted by attacker, then blocker, comma-separated; {@code none} for no blocks. Distinct declarations have
+     * distinct keys; the same declaration always the same key.
+     */
+    static String declarationKey(final Map<Integer, List<Integer>> blocks) {
+        final List<long[]> pairs = new ArrayList<>();
+        for (Map.Entry<Integer, List<Integer>> e : blocks.entrySet()) {
+            for (Integer a : e.getValue()) {
+                pairs.add(new long[] {a, e.getKey()});
+            }
+        }
+        if (pairs.isEmpty()) {
+            return "none";
+        }
+        pairs.sort((x, y) -> x[0] != y[0] ? Long.compare(x[0], y[0]) : Long.compare(x[1], y[1]));
+        final StringBuilder sb = new StringBuilder();
+        for (long[] pr : pairs) {
+            sb.append(sb.length() == 0 ? "" : ",").append('a').append(pr[0]).append(">b").append(pr[1]);
+        }
+        return sb.toString();
     }
 
     /**

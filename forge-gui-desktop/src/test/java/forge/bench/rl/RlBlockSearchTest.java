@@ -145,6 +145,9 @@ public class RlBlockSearchTest extends SimulationTest {
         Card[] build(Game g, Player p0, Player p1);
     }
 
+    /** Review S2: the live seat's 8 block samples alternate "slot 0 blocks" / "slot 1 blocks" (null = off). */
+    private volatile boolean splitSamples = false;
+
     private Run run(final String extra, final Board board, final boolean liveChumps) throws Exception {
         final Run r = new Run();
         final PrintStream was = System.err;
@@ -175,7 +178,11 @@ public class RlBlockSearchTest extends SimulationTest {
                 lb.put(r.blocker.getId(), r.attacker.getId());
             }
             final Script script = new Script(liveUid, lb);
-            svc.script = liveChumps ? d -> {
+            final java.util.Set<Long> even = new java.util.HashSet<>(), odd = new java.util.HashSet<>();
+            for (int j = 0; j < 64; j++) {
+                (j % 2 == 0 ? even : odd).add(RlSearch.splitmix(liveUid ^ (0xb10c0000L + j)));
+            }
+            final java.util.function.Function<RlWire.Decide, short[]> base = liveChumps ? d -> {
                 if (d.gameUid == liveUid && d.family == RlSchema.F_BLOCK) {
                     // the live seat's own (greedy) declaration: the blocker on the attacker
                     final short[] out = script.apply(d);
@@ -188,6 +195,20 @@ public class RlBlockSearchTest extends SimulationTest {
                 }
                 return script.apply(d);
             } : script;
+            svc.script = !splitSamples ? base : d -> {
+                if (d.family == RlSchema.F_BLOCK && (even.contains(d.gameUid) || odd.contains(d.gameUid))) {
+                    // a sampled DECIDE of the live block frame: alternately the slot-0 and the slot-1 blocker blocks
+                    final short[] out = script.apply(d);
+                    final int slot = even.contains(d.gameUid) ? 0 : 1;
+                    for (int i = 0; i < d.C; i++) {
+                        if (d.candSlot[i] == slot && d.candKind[i] == RlSchema.K_ATTACKER) {
+                            out[slot] = (short) i;
+                        }
+                    }
+                    return out;
+                }
+                return base.apply(d);
+            };
             game.getPhaseHandler().devModeSet(PhaseType.COMBAT_DECLARE_BLOCKERS, p1, false, 8);
             final Combat combat = new Combat(p1);
             combat.addAttacker(r.attacker, p0);
@@ -365,5 +386,79 @@ public class RlBlockSearchTest extends SimulationTest {
         // and without the search the policy's chump stands (so the departure is the search's)
         final Run off = run("", this::dreadmaw, true);
         Assert.assertEquals(off.combat.getAttackersBlockedBy(off.blocker).size(), 1, "the policy chumps without blocks=1");
+    }
+
+    // ------------------------------------------------------------------------------------------------ review S2
+
+    /** Two untapped Grizzly Bears-sized blockers (distinct cards) and an attacking Craw Wurm, AI at 20 life. */
+    private Card[] twoBlockers(final Game g, final Player p0, final Player p1) {
+        p0.setLife(20, null);
+        final Card a = addCard("Grizzly Bears", p0);
+        a.setSickness(false);
+        final Card b = addCard("Runeclaw Bear", p0);
+        b.setSickness(false);
+        fillLibrary(p0, 30);
+        final Card wurm = addCard("Craw Wurm", p1);
+        wurm.setSickness(false);
+        fillLibrary(p1, 30);
+        return new Card[] {wurm, a};
+    }
+
+    private static Card blockerOf(final Combat c) {
+        return c.getAllBlockers().isEmpty() ? null : c.getAllBlockers().get(0);
+    }
+
+    /**
+     * Review S2: two distinct sampled declarations, equally frequent (both "sample4"), the natural choice altered to the
+     * first (a test hook): the replay mark names the other by its canonical declaration and the replay plays exactly it;
+     * a mark naming no candidate is a forcedMiss and the natural choice stands.
+     */
+    @Test
+    public void equallyFrequentDistinctSampledDeclarationsReplayByTheirCanonicalIdentity() throws Exception {
+        splitSamples = true;
+        try {
+            forge.ai.simulation.LookaheadTestHooks.setOverride(line -> 1); // the first distinct sampled declaration
+            final Run first = run("blocks=1", this::twoBlockers, false);
+            final Card natural = blockerOf(first.combat);
+            Assert.assertNotNull(natural, "the altered natural choice blocks: " + first.err);
+            Assert.assertEquals(first.blockLines.size(), 1, first.err);
+            Assert.assertTrue(first.blockLines.get(0).contains("\"sample4\""), "both samples count 4: " + first.blockLines);
+            // the other declaration: the other bear on the wurm, by its canonical identity in the replayed game itself
+            final String otherName = natural.getName().equals("Grizzly Bears") ? "Runeclaw Bear" : "Grizzly Bears";
+            final Path marks = Files.createTempFile("block-marks-", ".jsonl");
+            final int[] otherId = {-1};
+            System.setProperty("forge.interactive.aiReplay", marks.toString());
+            final Run replay = run("blocks=1", (g, p0, p1) -> {
+                final Card[] ab = twoBlockers(g, p0, p1);
+                for (Card c : p0.getCardsIn(ZoneType.Battlefield)) {
+                    if (c.getName().equals(otherName)) {
+                        otherId[0] = c.getId();
+                    }
+                }
+                try {
+                    // written before the seat binds (and reads the marks)
+                    Files.write(marks, ("{\"t\":\"ai\",\"decision\":0,\"outcome\":\"departed\",\"played\":\"blocks a"
+                            + ab[0].getId() + ">b" + otherId[0] + "\"}\n").getBytes(StandardCharsets.UTF_8));
+                } catch (java.io.IOException e) {
+                    throw new AssertionError(e);
+                }
+                return ab;
+            }, false);
+            Assert.assertEquals(blockerOf(replay.combat).getName(), otherName, "the replay plays the named declaration: "
+                    + replay.blockLines);
+            Assert.assertEquals(blockerOf(replay.combat).getId(), otherId[0]);
+            Assert.assertTrue(replay.blockLines.get(0).contains("\"forced\":true"), replay.blockLines.toString());
+
+            final Path miss = Files.createTempFile("block-marks-", ".jsonl");
+            Files.write(miss, "{\"t\":\"ai\",\"decision\":0,\"played\":\"blocks a1>b2\"}\n".getBytes(StandardCharsets.UTF_8));
+            System.setProperty("forge.interactive.aiReplay", miss.toString());
+            final Run missed = run("blocks=1", this::twoBlockers, false);
+            Assert.assertEquals(blockerOf(missed.combat).getName(), natural.getName(), "no such candidate: the natural choice");
+            Assert.assertTrue(missed.blockLines.get(0).contains("\"forcedMiss\":true"), missed.blockLines.toString());
+        } finally {
+            splitSamples = false;
+            System.clearProperty("forge.interactive.aiReplay");
+            forge.ai.simulation.LookaheadTestHooks.setOverride(null);
+        }
     }
 }
