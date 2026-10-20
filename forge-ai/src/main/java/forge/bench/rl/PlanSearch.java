@@ -618,8 +618,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         final PhaseHandler ph = g.getPhaseHandler();
         if (spec.samples > 0 && ph.isPlayerTurn(p)) {
             final long a = System.nanoTime();
-            final long deadline = Math.min(a + spec.recordMs * 1_000_000L,
-                    t0 + Math.max(1000L, rs.budgetMs() / 2) * 1_000_000L);
+            // J0 (block-search-1019): both clocks go through WallClock, so a "Continue from here" rebuild unbinds them
+            // (unchanged live)
+            final long deadline = Math.min(a + forge.ai.WallClock.budgetMs(spec.recordMs) * 1_000_000L,
+                    t0 + Math.max(1000L, forge.ai.WallClock.budgetMs(rs.budgetMs()) / 2) * 1_000_000L);
             final List<Object> recs = new ArrayList<>();
             final Recorder greedy = new Recorder(ph.getTurn(), 0L, 1.0, false, spec.maxSteps);
             recs.add(greedy);

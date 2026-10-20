@@ -227,6 +227,17 @@ public final class ForcedWinSolver {
 
     private final Player me;
     private final Config cfg;
+
+    /**
+     * J0 (lane block-search-1019): the decision budget as it binds now ({@link forge.ai.WallClock}): unchanged live, and
+     * at least the rebuild budget while a "Continue from here" game is rebuilt, so no S-b wall clock cuts a rebuilt
+     * decision differently. engineMs and planMs go through WallClock too. evalReserveMs does not: it is a reservation
+     * inside the budget (the engine stops that long before it), and inflating it with the budget would leave the engine
+     * no time; wallGraceMs is a grace past the budget, unbound once the budget is.
+     */
+    private long budgetMs() {
+        return forge.ai.WallClock.budgetMs(cfg.budgetMs);
+    }
     final ForcedWinModel.Reader reader;
     private Follower active;
     private String noLineKey;
@@ -473,7 +484,7 @@ public final class ForcedWinSolver {
         decisions++;
         final int index = decisionIndex++;
         final long t0 = System.nanoTime();
-        decisionWall = t0 + (cfg.budgetMs + cfg.wallGraceMs) * 1_000_000L;
+        decisionWall = t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
         final Position pos = readPosition(live, knownTop(live));
         if (pos == null) {
             noLineKey = key;
@@ -481,7 +492,7 @@ public final class ForcedWinSolver {
         }
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.nodes = cfg.nodes;
-        lim.ms = cfg.planMs;
+        lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
         boolean payOnly = false;
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
@@ -898,8 +909,8 @@ public final class ForcedWinSolver {
         el.wall = decisionWall;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
-        final long engineDeadline = Math.max(t1 + Math.min(cfg.engineMs, cfg.budgetMs - reserve) * 1_000_000L,
-                t0 + (cfg.budgetMs - reserve) * 1_000_000L);
+        final long engineDeadline = Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs), budgetMs() - reserve)
+                * 1_000_000L, t0 + (budgetMs() - reserve) * 1_000_000L);
         final List<Line> likelyCands = cfg.likely ? new ArrayList<>() : null;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
@@ -915,7 +926,7 @@ public final class ForcedWinSolver {
         engineFound++;
         evaluated++;
         final Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999),
-                Math.max(t0 + cfg.budgetMs * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2));
+                Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2));
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
         if (evalSink != null) {
             evalSink.add(e);
@@ -954,7 +965,7 @@ public final class ForcedWinSolver {
         final long l0 = System.nanoTime();
         // stop the rollouts half a second before the decision's budget: measured at the full budget, Part B decisions
         // ended at 8.0-8.4 s (a rollout in flight, the line's set-up)
-        final long deadline = t0 + (cfg.budgetMs - 500) * 1_000_000L;
+        final long deadline = t0 + (budgetMs() - 500) * 1_000_000L;
         if (deadline - l0 < 300_000_000L) {
             // no time left in the decision's budget for even one world
             receipt("FORCED_WIN likely" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " no budget left");
@@ -1114,7 +1125,7 @@ public final class ForcedWinSolver {
 
     /** As above; the evaluation's budget counts from {@code from} (the decision's start with the payment search on). */
     Eval evaluateTop(Game live, List<Line> lines, int index, long from) {
-        final long deadline = from + cfg.budgetMs * 1_000_000L;
+        final long deadline = from + budgetMs() * 1_000_000L;
         final List<Line> picked = new ArrayList<>();
         final Set<String> shapes = new HashSet<>();
         for (Line l : lines) {
