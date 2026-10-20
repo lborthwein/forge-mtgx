@@ -290,6 +290,49 @@ final class InteractiveProtocol {
                 humanSeats, names, frame, watchSeats, seatAi);
     }
 
+    /**
+     * honest-belief-1020: the event's card pool, optional in the config line: {@code beliefPool} = the card names a
+     * player in the AI's seat knows the opponent's deck was built from (the draft's cube list, a random-deck generator's
+     * pool, a puzzle's or lesson's card set), {@code beliefPoolSingleton} = the pool is a singleton cube (default false).
+     * The AI seats' look-ahead worlds draw the opponent's hidden cards from it, never from the real deck.
+     */
+    record BeliefPool(List<String> names, boolean singleton) {
+        BeliefPool {
+            names = List.copyOf(names);
+        }
+    }
+
+    /** The config line's {@code beliefPool}, or null when absent (the jar's live pool is used). */
+    static BeliefPool readBeliefPool(final String line) throws ProtocolException {
+        final JsonObject json = parseObject(line, "invalid_config", "config");
+        if (!json.has("beliefPool") || json.get("beliefPool").isJsonNull()) {
+            if (json.has("beliefPoolSingleton") && !json.get("beliefPoolSingleton").isJsonNull()) {
+                throw new ProtocolException("invalid_config", "beliefPoolSingleton needs beliefPool");
+            }
+            return null;
+        }
+        if (!json.get("beliefPool").isJsonArray() || json.getAsJsonArray("beliefPool").isEmpty()
+                || json.getAsJsonArray("beliefPool").size() > 50_000) {
+            throw new ProtocolException("invalid_config", "beliefPool must be an array of 1..50000 card names");
+        }
+        final List<String> names = new ArrayList<>();
+        for (JsonElement value : json.getAsJsonArray("beliefPool")) {
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString() || value.getAsString().isBlank()
+                    || value.getAsString().length() > 200) {
+                throw new ProtocolException("invalid_config", "each beliefPool entry must be a card name (1..200 chars)");
+            }
+            names.add(value.getAsString().trim());
+        }
+        boolean singleton = false;
+        if (json.has("beliefPoolSingleton") && !json.get("beliefPoolSingleton").isJsonNull()) {
+            if (!json.get("beliefPoolSingleton").isJsonPrimitive() || !json.getAsJsonPrimitive("beliefPoolSingleton").isBoolean()) {
+                throw new ProtocolException("invalid_config", "beliefPoolSingleton must be a boolean");
+            }
+            singleton = json.get("beliefPoolSingleton").getAsBoolean();
+        }
+        return new BeliefPool(names, singleton);
+    }
+
     private static boolean isSeatNumber(final JsonElement value, final int seat) {
         return value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber() && value.getAsDouble() == seat;
     }

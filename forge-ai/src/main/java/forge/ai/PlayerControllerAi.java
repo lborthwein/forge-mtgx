@@ -633,7 +633,8 @@ public class PlayerControllerAi extends PlayerController {
 
         if (destinationZone == ZoneType.Graveyard) {
             // In presence of Volrath's Shapeshifter in deck, try to place the best creature on top of the graveyard
-            if (getGame().getCardsInGame().anyMatch(card -> {
+            // honest-belief-1020: under fairNaming=on, only cards this player may see
+            if (FairNaming.fair(player, getGame().getCardsInGame()).anyMatch(card -> {
                 // need a custom predicate here since Volrath's Shapeshifter may have a different name OTB
                 return card.getOriginalState(CardStateName.Original).getName().equals("Volrath's Shapeshifter");
             })) {
@@ -1290,7 +1291,8 @@ public class PlayerControllerAi extends PlayerController {
         if (logic == null || logic.equals("MostProminentHumanCreatures")) {
             CardCollection list = player.getOpponents().getCreaturesInPlay();
             if (list.isEmpty()) {
-                list = CardLists.filterControlledBy(getGame().getCardsInGame(), player.getOpponents());
+                // honest-belief-1020: under fairNaming=on, only the opponents' cards this player has seen
+                list = FairNaming.fair(player, CardLists.filterControlledBy(getGame().getCardsInGame(), player.getOpponents()));
             }
             if (!list.isEmpty()) {
                 choice = ComputerUtilCard.getMostProminentColor(list);

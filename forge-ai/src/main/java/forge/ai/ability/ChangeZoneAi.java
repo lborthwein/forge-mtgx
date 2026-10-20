@@ -2045,8 +2045,9 @@ public class ChangeZoneAi extends SpellAbilityAi {
                 // this assumes that the deck list is known to the AI before the match starts,
                 // so it's possible to figure out what remains in library/hand if you know what's
                 // in graveyard, exile, etc.
-                scanList.addAll(aiPlayer.getOpponents().getCardsIn(ZoneType.Library));
-                scanList.addAll(aiPlayer.getOpponents().getCardsIn(ZoneType.Hand));
+                // honest-belief-1020: under fairNaming=on, only the opponents' cards the AI has seen
+                scanList.addAll(forge.ai.FairNaming.fair(aiPlayer, aiPlayer.getOpponents().getCardsIn(ZoneType.Library)));
+                scanList.addAll(forge.ai.FairNaming.fair(aiPlayer, aiPlayer.getOpponents().getCardsIn(ZoneType.Hand)));
             }
 
             if (logic.contains("NonLand")) {

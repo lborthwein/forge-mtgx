@@ -73,6 +73,10 @@ public class ClashAi extends SpellAbilityAi {
             final Card top = col.get(0);
             for (Player p : options) {
                 final Card oppTop = p.getCardsIn(ZoneType.Library).getFirst();
+                // honest-belief-1020: under fairNaming=on, an opponent's unseen top card is not read
+                if (!forge.ai.FairNaming.mayRead(ai, oppTop)) {
+                    continue;
+                }
                 // TODO add logic for SplitCards
                 if (top.getCMC() > oppTop.getCMC()) {
                     return p;

@@ -189,6 +189,8 @@ final class ForcedWinEngine {
          * default) keeps the real order.
          */
         int ownKnownTop = -1;
+        /** honest-belief-1020: the solver's re-draw of the opponents' hidden cards at the root (null = off). */
+        ForcedWinSolver.Redraw redraw;
     }
 
     /** A search node: a game copy at our priority, with its own id scope. */
@@ -502,6 +504,9 @@ final class ForcedWinEngine {
                 root.me = (Player) copier.find(liveMe);
                 st.copies++;
                 final Random rng = new Random(LookaheadSearch.mix(seed, 2));
+                if (lim.redraw != null) {
+                    lim.redraw.apply(live, liveMe, root.g, root.me, rng); // honest-belief-1020
+                }
                 for (Player o : root.me.getOpponents()) {
                     ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng);
                 }

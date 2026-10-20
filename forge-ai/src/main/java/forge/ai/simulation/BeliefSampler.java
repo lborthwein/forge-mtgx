@@ -67,7 +67,7 @@ public final class BeliefSampler {
         }
         final byte[] bytes;
         try {
-            bytes = Files.readAllBytes(Path.of(path));
+            bytes = readCube(path);
         } catch (Exception e) {
             throw new IllegalStateException("belief cube " + path + ": " + e, e);
         }
@@ -110,6 +110,83 @@ public final class BeliefSampler {
         }
         CUBES.put(key, cube);
         return cube;
+    }
+
+    /**
+     * honest-belief-1020: a pool given as card names (the event's card pool, sent by the host), as a {@link Cube}: names
+     * deduplicated in the given order, basics dropped (they are the pool's basic slots), each resolved up front (an
+     * unresolvable name is dropped and listed in {@link Cube#unresolved}), each kept under Forge's own name. Its sha256 is
+     * over the kept Forge names, one per line in order. Cached per (the given names, basics).
+     */
+    public static synchronized Cube cubeOf(List<String> names, int basics) {
+        if (names == null || names.isEmpty()) {
+            throw new IllegalStateException("belief: an empty card pool");
+        }
+        final java.util.LinkedHashSet<String> uniq = new java.util.LinkedHashSet<>();
+        for (String n : names) {
+            if (n != null && !n.isBlank() && !isBasic(n.trim())) {
+                uniq.add(n.trim());
+            }
+        }
+        final String inSha = hex(sha256(String.join("\n", uniq).getBytes(StandardCharsets.UTF_8)));
+        final String key = "pool:" + inSha + "|" + basics;
+        final Cube have = CUBES.get(key);
+        if (have != null) {
+            return have;
+        }
+        final Cube cube = new Cube();
+        cube.basics = basics;
+        for (String name : uniq) {
+            final PaperCard pc = resolve(name);
+            if (pc == null) {
+                cube.unresolved.add(name);
+                continue;
+            }
+            // keyed by Forge's own name (an alias or split-card spelling resolves to it), so the pool's exclusions, which
+            // compare Forge names, match
+            final String fn = pc.getName();
+            if (cube.paper.containsKey(fn) || isBasic(fn)) {
+                continue;
+            }
+            cube.names.add(fn);
+            cube.tags.put(fn, new java.util.TreeSet<>());
+            cube.paper.put(fn, pc);
+        }
+        cube.sha256 = hex(sha256(String.join("\n", cube.names).getBytes(StandardCharsets.UTF_8)));
+        for (String b : BASICS) {
+            final PaperCard pc = resolve(b);
+            if (pc == null) {
+                throw new IllegalStateException("belief: Forge cannot resolve basic land " + b);
+            }
+            cube.paper.put(b, pc);
+            cube.tags.put(b, new java.util.TreeSet<>(List.of("land", "basic")));
+        }
+        if (cube.names.isEmpty()) {
+            throw new IllegalStateException("belief: no card of the pool resolves");
+        }
+        CUBES.put(key, cube);
+        return cube;
+    }
+
+    /**
+     * honest-belief-1020: the live draft cube shipped in the jar ({@code belief-cube-mush.json}: mtgx's bundled mush cube,
+     * 540 cards), the honest pool of the interactive server's seats. A {@code classpath:} path names a jar resource.
+     */
+    public static final String LIVE_CUBE = "classpath:/forge/ai/simulation/belief-cube-mush.json";
+    public static final String LIVE_CUBE_SHA256 = "ba67f1c549797231c4beefaddd3b37802a38f028df1b231a688561c2132fe8a8";
+    /** The jar pool without an event pool: not treated as a singleton cube (a practice mirror or a saved deck may repeat cards). */
+    public static final boolean LIVE_CUBE_SINGLETON = false;
+
+    static byte[] readCube(String path) throws java.io.IOException {
+        if (path.startsWith("classpath:")) {
+            try (java.io.InputStream in = BeliefSampler.class.getResourceAsStream(path.substring("classpath:".length()))) {
+                if (in == null) {
+                    throw new java.io.FileNotFoundException("no resource " + path);
+                }
+                return in.readAllBytes();
+            }
+        }
+        return Files.readAllBytes(Path.of(path));
     }
 
     static PaperCard resolve(String name) {

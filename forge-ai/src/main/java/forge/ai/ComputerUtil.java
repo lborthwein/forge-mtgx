@@ -2329,7 +2329,9 @@ public class ComputerUtil {
     public static CardCollection getCardsToDiscardFromOpponent(Player chooser, Player discarder, SpellAbility sa, CardCollection validCards, int min, int max) {
         // Focus on keycards
         boolean foundKeycard = false;
-        List<String> keyCards = discarder.getRegisteredPlayer().getDeck().getKeyCards();
+        // honest-belief-1020: under fairNaming=on the opponent's deck metadata is not read
+        List<String> keyCards = FairNaming.mode(chooser) == AiFixes.Mode.ON && chooser.isOpponentOf(discarder)
+                ? java.util.Collections.emptyList() : discarder.getRegisteredPlayer().getDeck().getKeyCards();
         CardCollection goodChoices = CardLists.filter(validCards, c -> keyCards.contains(c.getName()) && !c.hasSVar("DiscardMeByOpp") && !c.hasSVar("DiscardMe"));
         if (goodChoices.isEmpty()) {
             goodChoices = CardLists.filter(validCards, c -> !c.hasSVar("DiscardMeByOpp") && !c.hasSVar("DiscardMe"));
@@ -2508,7 +2510,8 @@ public class ComputerUtil {
                     CardCollection list = ai.getOpponents().getCardsIn(ZoneType.Battlefield);
                     chosen = ComputerUtilCard.getMostProminentType(list, validTypes);
                     if (!CardType.isACreatureType(chosen)) {
-                        list = CardLists.filterControlledBy(game.getCardsInGame(), ai.getOpponents());
+                        // honest-belief-1020: under fairNaming=on, only the opponents' cards the AI has seen
+                        list = FairNaming.fair(ai, CardLists.filterControlledBy(game.getCardsInGame(), ai.getOpponents()));
                         chosen = ComputerUtilCard.getMostProminentType(list, validTypes);
                     }
                 } else if (logic.startsWith("MostProminentInComputerDeck")) {
@@ -2634,7 +2637,8 @@ public class ComputerUtil {
                         restrictedToColors.put(sp.getOriginalDescription(), sp);
                     }
                 }
-                CardCollection lists = CardLists.filterControlledBy(game.getCardsInGame(), ai.getOpponents());
+                // honest-belief-1020: under fairNaming=on, only the opponents' cards the AI has seen
+                CardCollection lists = FairNaming.fair(ai, CardLists.filterControlledBy(game.getCardsInGame(), ai.getOpponents()));
                 return restrictedToColors.get(StringUtils.capitalize(ComputerUtilCard.getMostProminentColor(lists, restrictedToColors.keySet())));
             }
             return Iterables.getFirst(votes.keySet(), null);

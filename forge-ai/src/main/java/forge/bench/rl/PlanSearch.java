@@ -405,6 +405,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         this.me = me;
         final ForcedWinSolver.Config sc = spec.solverConfig();
         this.driver = new SolverDriver(me, sc);
+        // honest-belief-1020: the solver's verification worlds and engine root draw the opponent's hidden cards from the
+        // search's belief pool (null = belief off: as before)
+        this.driver.solver().redraw = rs.ls().opponentRedraw();
         this.followCfg = sc;
         this.threat = spec.opp ? new forge.ai.simulation.ThreatCheck(spec.oppConfig()) : null;
     }

@@ -1,0 +1,3271 @@
+{
+"cards": [
+{
+"name": "Esper Sentinel",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Giver of Runes",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Mother of Runes",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Student of Warfare",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Thraben Inspector",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Usher of the Fallen",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Adanto Vanguard",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Cathar Commando",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Containment Priest",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Intrepid Adversary",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Lion Sash",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Luminarch Aspirant",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Samwise the Stouthearted",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Selfless Spirit",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Stoneforge Mystic",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Thalia, Guardian of Thraben",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Wall of Omens",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Adeline, Resplendent Cathar",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Blade Splicer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Elite Spellbinder",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Flickerwisp",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Loran of the Third Path",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Monastery Mentor",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Porcelain Legionnaire",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Ranger-Captain of Eos",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Recruiter of the Guard",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Skyclave Apparition",
+"tags": [
+"creature"
+]
+},
+{
+"name": "White Plume Adventurer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Hero of Bladehold",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Palace Jailer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Restoration Angel",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Seasoned Dungeoneer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Serra Paragon",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Boon-Bringer Valkyrie",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Solitude",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Timeless Dragon",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Eagles of the North",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Steel Seraph",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Elspeth, Knight-Errant",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Gideon, Ally of Zendikar",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "The Wandering Emperor",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Elspeth, Sun's Champion",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Enlightened Tutor",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Ephemerate",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Mana Tithe",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Path to Exile",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Swords to Plowshares",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Get Lost",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Reprieve",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Unexpectedly Absent",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Oust",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Prismatic Ending",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Balance",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Winds of Abandon",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Council's Judgment",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Sevinne's Reclamation",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Spectral Procession",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Armageddon",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Wrath of God",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Portable Hole",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Touch the Spirit Realm",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Parallax Wave",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Leyline Binding",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Jace, Vryn's Prodigy",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Phantasmal Image",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Snapcaster Mage",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Thassa's Oracle",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Thieving Skydiver",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Brazen Borrower",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Chrome Host Seedshark",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Deceiver Exarch",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Emry, Lurker of the Loch",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Hullbreacher",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Pestermite",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Sicarian Infiltrator",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Spellseeker",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Tishana's Tidebinder",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Trinket Mage",
+"tags": [
+"creature"
+]
+},
+{
+"name": "True-Name Nemesis",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Vendilion Clique",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Displacer Kitten",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Glen Elendra Archmage",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Phyrexian Metamorph",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Subtlety",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Urza, Lord High Artificer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Venser, Shaper Savant",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Narset, Parter of Veils",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Jace, the Mind Sculptor",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Jace, Wielder of Mysteries",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Ancestral Recall",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Brainstorm",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Consider",
+"tags": [
+"instant"
+]
+},
+{
+"name": "High Tide",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Mystical Tutor",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Spell Pierce",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Stern Scolding",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Brain Freeze",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Counterspell",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Daze",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Flash",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Mana Drain",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Mana Leak",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Memory Lapse",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Miscalculation",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Remand",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Snap",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Force of Negation",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Frantic Search",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Cryptic Command",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Turnabout",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Force of Will",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Gush",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Mystic Confluence",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Dig Through Time",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Gitaxian Probe",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Ponder",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Preordain",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Chart a Course",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Time Walk",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Show and Tell",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Timetwister",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Tinker",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "L\u00f3rien Revealed",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Time Warp",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Echo of Eons",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Mind's Desire",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Time Spiral",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Upheaval",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Treasure Cruise",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Opposition",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Treachery",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Concealing Curtains",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Evolved Sleeper",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Putrid Imp",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Dark Confidant",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Dauthi Voidwalker",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Deep-Cavern Bat",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Mesmeric Fiend",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Oona's Prowler",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Orcish Bowmasters",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Pack Rat",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Scrapheap Scrounger",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Hypnotic Specter",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Ophiomancer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Rotting Regisaur",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Grief",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Rankle, Master of Pranks",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Sheoldred, the Apocalypse",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Custodi Lich",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Necron Deathmark",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Grave Titan",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Troll of Khazad-d\u00fbm",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Archon of Cruelty",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Griselbrand",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Liliana of the Veil",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Liliana, Death's Majesty",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Dark Ritual",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Entomb",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Fatal Push",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Rain of Filth",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Vampiric Tutor",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Bitter Triumph",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Cabal Ritual",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Shallow Grave",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Corpse Dance",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Dismember",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Snuff Out",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Bone Shards",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Duress",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Imperial Seal",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Inquisition of Kozilek",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Mind Twist",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Reanimate",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Thoughtseize",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Unearth",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Collective Brutality",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Demonic Tutor",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Exhume",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Hymn to Tourach",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Night's Whisper",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Persist",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Unmarked Grave",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Doomsday",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Toxic Deluge",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Yawgmoth's Will",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Beseech the Mirror",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Damnation",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Tendrils of Agony",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "From the Catacombs",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Wishclaw Talisman",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Bolas's Citadel",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Animate Dead",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Bitterblossom",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Necromancy",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Recurring Nightmare",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Virtue of Persistence",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Bomat Courier",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Dragon's Rage Channeler",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Goblin Welder",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Grim Lavamancer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Monastery Swiftspear",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Ragavan, Nimble Pilferer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Voldaren Epicure",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Embereth Shieldbreaker",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Goblin Cratermaker",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Goblin Engineer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Inti, Seneschal of the Sun",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Krark, the Thumbless",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Magda, Brazen Outlaw",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Robber of the Rich",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Scrapwork Mutt",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Young Pyromancer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Birgi, God of Storytelling",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Bonecrusher Giant",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Broadside Bombardiers",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Goblin Rabblemaster",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Gut, True Soul Zealot",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Imperial Recruiter",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Laelia, the Blade Reforged",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Seasoned Pyromancer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Squee, Goblin Nabob",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Caves of Chaos Adventurer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Flametongue Kavu",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Pia and Kiran Nalaar",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Fury",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Glorybringer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Goldspan Dragon",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Kiki-Jiki, Mirror Breaker",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Noise Marine",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Thundermaw Hellkite",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Zealous Conscripts",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Inferno Titan",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Oliphaunt",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Trumpeting Carnosaur",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Chandra, Torch of Defiance",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Koth of the Hammer",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Burst Lightning",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Lightning Bolt",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Red Elemental Blast",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Unholy Heat",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Abrade",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Cast into the Fire",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Incinerate",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Manamorphose",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Seething Song",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Through the Breach",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Fireblast",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Pyrokinesis",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Chain Lightning",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Faithless Looting",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Firebolt",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Mizzium Mortars",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Wheel of Fortune",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Fiery Confluence",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Kumano Faces Kakkazan",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Underworld Breach",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Fable of the Mirror-Breaker",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Sulfuric Vortex",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Sneak Attack",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Splinter Twin",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Arbor Elf",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Birds of Paradise",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Elvish Mystic",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Elvish Reclaimer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Fyndhorn Elves",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Hexdrinker",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Joraga Treespeaker",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Llanowar Elves",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Lotus Cobra",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Paradise Druid",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Rofellos, Llanowar Emissary",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Sakura-Tribe Elder",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Satyr Wayfinder",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Scavenging Ooze",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Sylvan Caryatid",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Tough Cookie",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Wall of Roots",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Augur of Autumn",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Courser of Kruphix",
+"tags": [
+"creature",
+"enchantment"
+]
+},
+{
+"name": "Endurance",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Eternal Witness",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Ramunap Excavator",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Reclamation Sage",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Tireless Tracker",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Wood Elves",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Oracle of Mul Daya",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Questing Beast",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Undermountain Adventurer",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Deranged Hermit",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Elder Gargaroth",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Thragtusk",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Titania, Protector of Argoth",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Vorinclex",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Generous Ent",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Old One Eye",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Primeval Titan",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Hornet Queen",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Titan of Industry",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Craterhoof Behemoth",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Woodfall Primus",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Worldspine Wurm",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Garruk Wildspeaker",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Nissa, Who Shakes the World",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Nissa, Ascended Animist",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Crop Rotation",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Once Upon a Time",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Force of Vigor",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Green Sun's Zenith",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Pest Infestation",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Channel",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Finale of Devastation",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Life from the Loam",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Regrowth",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Natural Order",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Esika's Chariot",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Exploration",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Fastbond",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Utopia Sprawl",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Wild Growth",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Oath of Druids",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Survival of the Fittest",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Sylvan Library",
+"tags": [
+"enchantment"
+]
+},
+{
+"name": "Walking Ballista",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Phyrexian Revoker",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Syr Ginger, the Meal Ender",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Wurmcoil Engine",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Myr Battlesphere",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Blightsteel Colossus",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Emrakul, the Aeons Torn",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Sundering Titan",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Triplicate Titan",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Ulamog, the Ceaseless Hunger",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Ulamog, the Infinite Gyre",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Karn, Scion of Urza",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Black Lotus",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Chrome Mox",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Everflowing Chalice",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Lion's Eye Diamond",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Lotus Petal",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mana Crypt",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mishra's Bauble",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mox Diamond",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mox Emerald",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mox Jet",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mox Opal",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mox Pearl",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mox Ruby",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mox Sapphire",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Zuran Orb",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Candelabra of Tawnos",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Chromatic Star",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Currency Converter",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Expedition Map",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mana Vault",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Relic of Progenitus",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Retrofitter Foundry",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Sensei's Divining Top",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Skullclamp",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Sol Ring",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Grim Monolith",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Helm of Awakening",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Lightning Greaves",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mind Stone",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Pentad Prism",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Reckoner Bankbuster",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Smuggler's Copter",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Sword of the Meek",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Umezawa's Jitte",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Winter Orb",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Basalt Monolith",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Coalition Relic",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Crucible of Worlds",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mimic Vat",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Night Scythe",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Palant\u00edr of Orthanc",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Aetherflux Reservoir",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Mystic Forge",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "The One Ring",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Batterskull",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Memory Jar",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Coveted Jewel",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Kaldra Compleat",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Portal to Phyrexia",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Talisman of Progress",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Soulherder",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Spell Queller",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Teferi, Time Raveler",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Fractured Identity",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Teferi, Hero of Dominaria",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Baleful Strix",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Talisman of Dominance",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Ashiok, Nightmare Weaver",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Kaito Shizuki",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Thief of Sanity",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Ertai Resurrected",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Fallen Shinobi",
+"tags": [
+"creature"
+]
+},
+{
+"name": "The Scarab God",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Angrath's Rampage",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Bloodtithe Harvester",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Kroxa, Titan of Death's Hunger",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Talisman of Indulgence",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Valki, God of Lies",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Daretti, Ingenious Iconoclast",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Fire Covenant",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Kolaghan's Command",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Decadent Dragon",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Chaos Defiler",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Orcish Lumberjack",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Mawloc",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Talisman of Impulse",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Wrenn and Six",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Minsc & Boo, Timeless Heroes",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Escape to the Wilds",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Etali, Primal Conqueror",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Talisman of Unity",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Knight of Autumn",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Knight of the Reliquary",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Torsten, Founder of Benalia",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Damn",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Talisman of Hierarchy",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Tidehollow Sculler",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Lingering Souls",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Lurrus of the Dream-Den",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Vindicate",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Ashen Rider",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Expressive Iteration",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Talisman of Creativity",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Third Path Iconoclast",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Dack Fayden",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Saheeli, Sublime Artificer",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Deathrite Shaman",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Abrupt Decay",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Fiend Artisan",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Talisman of Resilience",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Tear Asunder",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Grist, the Hunger Tide",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Life // Death",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Maelstrom Pulse",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Figure of Destiny",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Forth Eorlingas!",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Talisman of Conviction",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Zirda, the Dawnwaker",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Comet, Stellar Pup",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Otharri, Suns' Glory",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Hydroid Krasis",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Kinnan, Bonder Prodigy",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Talisman of Curiosity",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Oko, Thief of Crowns",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Sail into the West",
+"tags": [
+"instant"
+]
+},
+{
+"name": "Tamiyo, Collector of Tales",
+"tags": [
+"planeswalker"
+]
+},
+{
+"name": "Bring to Light",
+"tags": [
+"sorcery"
+]
+},
+{
+"name": "Noble Hierarch",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Thopter Foundry",
+"tags": [
+"artifact"
+]
+},
+{
+"name": "Ignoble Hierarch",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Leovold, Emissary of Trest",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Omnath, Locus of Creation",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Atraxa, Grand Unifier",
+"tags": [
+"creature"
+]
+},
+{
+"name": "Golos, Tireless Pilgrim",
+"tags": [
+"artifact",
+"creature"
+]
+},
+{
+"name": "Celestial Colonnade",
+"tags": [
+"land"
+]
+},
+{
+"name": "Flooded Strand",
+"tags": [
+"land"
+]
+},
+{
+"name": "Hallowed Fountain",
+"tags": [
+"land"
+]
+},
+{
+"name": "Seachrome Coast",
+"tags": [
+"land"
+]
+},
+{
+"name": "Tundra",
+"tags": [
+"land"
+]
+},
+{
+"name": "Creeping Tar Pit",
+"tags": [
+"land"
+]
+},
+{
+"name": "Darkslick Shores",
+"tags": [
+"land"
+]
+},
+{
+"name": "Polluted Delta",
+"tags": [
+"land"
+]
+},
+{
+"name": "Underground Sea",
+"tags": [
+"land"
+]
+},
+{
+"name": "Watery Grave",
+"tags": [
+"land"
+]
+},
+{
+"name": "Badlands",
+"tags": [
+"land"
+]
+},
+{
+"name": "Blackcleave Cliffs",
+"tags": [
+"land"
+]
+},
+{
+"name": "Blood Crypt",
+"tags": [
+"land"
+]
+},
+{
+"name": "Bloodstained Mire",
+"tags": [
+"land"
+]
+},
+{
+"name": "Graven Cairns",
+"tags": [
+"land"
+]
+},
+{
+"name": "Copperline Gorge",
+"tags": [
+"land"
+]
+},
+{
+"name": "Raging Ravine",
+"tags": [
+"land"
+]
+},
+{
+"name": "Stomping Ground",
+"tags": [
+"land"
+]
+},
+{
+"name": "Taiga",
+"tags": [
+"land"
+]
+},
+{
+"name": "Wooded Foothills",
+"tags": [
+"land"
+]
+},
+{
+"name": "Horizon Canopy",
+"tags": [
+"land"
+]
+},
+{
+"name": "Razorverge Thicket",
+"tags": [
+"land"
+]
+},
+{
+"name": "Savannah",
+"tags": [
+"land"
+]
+},
+{
+"name": "Temple Garden",
+"tags": [
+"land"
+]
+},
+{
+"name": "Windswept Heath",
+"tags": [
+"land"
+]
+},
+{
+"name": "Concealed Courtyard",
+"tags": [
+"land"
+]
+},
+{
+"name": "Godless Shrine",
+"tags": [
+"land"
+]
+},
+{
+"name": "Marsh Flats",
+"tags": [
+"land"
+]
+},
+{
+"name": "Scrubland",
+"tags": [
+"land"
+]
+},
+{
+"name": "Silent Clearing",
+"tags": [
+"land"
+]
+},
+{
+"name": "Fiery Islet",
+"tags": [
+"land"
+]
+},
+{
+"name": "Scalding Tarn",
+"tags": [
+"land"
+]
+},
+{
+"name": "Spirebluff Canal",
+"tags": [
+"land"
+]
+},
+{
+"name": "Steam Vents",
+"tags": [
+"land"
+]
+},
+{
+"name": "Volcanic Island",
+"tags": [
+"land"
+]
+},
+{
+"name": "Bayou",
+"tags": [
+"land"
+]
+},
+{
+"name": "Blooming Marsh",
+"tags": [
+"land"
+]
+},
+{
+"name": "Nurturing Peatland",
+"tags": [
+"land"
+]
+},
+{
+"name": "Overgrown Tomb",
+"tags": [
+"land"
+]
+},
+{
+"name": "Verdant Catacombs",
+"tags": [
+"land"
+]
+},
+{
+"name": "Arid Mesa",
+"tags": [
+"land"
+]
+},
+{
+"name": "Inspiring Vantage",
+"tags": [
+"land"
+]
+},
+{
+"name": "Plateau",
+"tags": [
+"land"
+]
+},
+{
+"name": "Restless Bivouac",
+"tags": [
+"land"
+]
+},
+{
+"name": "Sacred Foundry",
+"tags": [
+"land"
+]
+},
+{
+"name": "Sunbaked Canyon",
+"tags": [
+"land"
+]
+},
+{
+"name": "Botanical Sanctum",
+"tags": [
+"land"
+]
+},
+{
+"name": "Breeding Pool",
+"tags": [
+"land"
+]
+},
+{
+"name": "Misty Rainforest",
+"tags": [
+"land"
+]
+},
+{
+"name": "Restless Vinestalk",
+"tags": [
+"land"
+]
+},
+{
+"name": "Tropical Island",
+"tags": [
+"land"
+]
+},
+{
+"name": "Waterlogged Grove",
+"tags": [
+"land"
+]
+},
+{
+"name": "Spara's Headquarters",
+"tags": [
+"land"
+]
+},
+{
+"name": "Raffine's Tower",
+"tags": [
+"land"
+]
+},
+{
+"name": "Xander's Lounge",
+"tags": [
+"land"
+]
+},
+{
+"name": "Ziatora's Proving Ground",
+"tags": [
+"land"
+]
+},
+{
+"name": "Jetmir's Garden",
+"tags": [
+"land"
+]
+},
+{
+"name": "Savai Triome",
+"tags": [
+"land"
+]
+},
+{
+"name": "Ketria Triome",
+"tags": [
+"land"
+]
+},
+{
+"name": "Indatha Triome",
+"tags": [
+"land"
+]
+},
+{
+"name": "Raugrin Triome",
+"tags": [
+"land"
+]
+},
+{
+"name": "Zagoth Triome",
+"tags": [
+"land"
+]
+},
+{
+"name": "Ancient Tomb",
+"tags": [
+"land"
+]
+},
+{
+"name": "Bazaar of Baghdad",
+"tags": [
+"land"
+]
+},
+{
+"name": "Boseiju, Who Endures",
+"tags": [
+"land"
+]
+},
+{
+"name": "City of Traitors",
+"tags": [
+"land"
+]
+},
+{
+"name": "Dark Depths",
+"tags": [
+"land"
+]
+},
+{
+"name": "Fabled Passage",
+"tags": [
+"land"
+]
+},
+{
+"name": "Gaea's Cradle",
+"tags": [
+"land"
+]
+},
+{
+"name": "Karakas",
+"tags": [
+"land"
+]
+},
+{
+"name": "Library of Alexandria",
+"tags": [
+"land"
+]
+},
+{
+"name": "Mana Confluence",
+"tags": [
+"land"
+]
+},
+{
+"name": "Mishra's Workshop",
+"tags": [
+"land"
+]
+},
+{
+"name": "Otawara, Soaring City",
+"tags": [
+"land"
+]
+},
+{
+"name": "Prismatic Vista",
+"tags": [
+"land"
+]
+},
+{
+"name": "Shelldock Isle",
+"tags": [
+"land"
+]
+},
+{
+"name": "Strip Mine",
+"tags": [
+"land"
+]
+},
+{
+"name": "Thespian's Stage",
+"tags": [
+"land"
+]
+},
+{
+"name": "Tolarian Academy",
+"tags": [
+"land"
+]
+},
+{
+"name": "Urborg, Tomb of Yawgmoth",
+"tags": [
+"land"
+]
+},
+{
+"name": "Urza's Saga",
+"tags": [
+"enchantment",
+"land"
+]
+},
+{
+"name": "Wasteland",
+"tags": [
+"land"
+]
+}
+],
+"schema": "mtgx-belief-cube/1",
+"source": "mtgx public/data/mush.json (CubeCobra mush, Powered Channel Cube, 540 cards, fetched 2026-07-28T18:03:54.567Z): the live draft cube"
+}

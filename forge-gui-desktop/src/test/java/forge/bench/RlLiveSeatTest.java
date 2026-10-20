@@ -96,6 +96,11 @@ public class RlLiveSeatTest {
         Assert.assertEquals(s.aiFixes0928, AiFixes.Mode.OFF, "the seat's own Forge AI as in the read");
         Assert.assertEquals(s.capActions, 40);
         Assert.assertEquals(s.maxDecisions, 3000);
+        // honest-belief-1020: live worlds come from the observation-only pool, the jar's live pool unless the host sends one
+        Assert.assertEquals(s.search.belief, "uniform");
+        Assert.assertEquals(s.search.beliefCube, forge.ai.simulation.BeliefSampler.LIVE_CUBE);
+        Assert.assertEquals(s.search.beliefCubeSha256, forge.ai.simulation.BeliefSampler.LIVE_CUBE_SHA256);
+        Assert.assertEquals(s.search.toJson().get("belief").getAsString(), "uniform");
         final RlLiveSeat.Spec t = RlLiveSeat.Spec.parse(spec("127.0.0.1:1", "budgetMs=6000,threads=8,log=0"));
         Assert.assertEquals(t.search.budgetMs, 6000L);
         Assert.assertEquals(t.search.threads, 8);
