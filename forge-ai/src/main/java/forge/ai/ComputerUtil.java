@@ -2329,7 +2329,9 @@ public class ComputerUtil {
     public static CardCollection getCardsToDiscardFromOpponent(Player chooser, Player discarder, SpellAbility sa, CardCollection validCards, int min, int max) {
         // Focus on keycards
         boolean foundKeycard = false;
-        List<String> keyCards = discarder.getRegisteredPlayer().getDeck().getKeyCards();
+        // honest-belief-1020: under fairNaming=on the opponent's deck metadata is not read
+        List<String> keyCards = FairNaming.mode(chooser) == AiFixes.Mode.ON && chooser.isOpponentOf(discarder)
+                ? java.util.Collections.emptyList() : discarder.getRegisteredPlayer().getDeck().getKeyCards();
         CardCollection goodChoices = CardLists.filter(validCards, c -> keyCards.contains(c.getName()) && !c.hasSVar("DiscardMeByOpp") && !c.hasSVar("DiscardMe"));
         if (goodChoices.isEmpty()) {
             goodChoices = CardLists.filter(validCards, c -> !c.hasSVar("DiscardMeByOpp") && !c.hasSVar("DiscardMe"));

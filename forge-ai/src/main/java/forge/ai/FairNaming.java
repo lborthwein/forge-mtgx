@@ -187,8 +187,9 @@ public final class FairNaming {
 
     /**
      * honest-belief-1020: {@code cards} as Forge AI's other choice logic may read them under fairNaming=on: an opponent's
-     * card (owned or controlled by an opponent of {@code ai}) stays only when {@code ai} sees it now or has seen it this
-     * game (as {@link #known(Player, Player)}); {@code ai}'s own cards always stay. OFF and SHADOW: {@code cards}
+     * card (owned or controlled by an opponent of {@code ai}) stays only when {@code ai} sees this very card now
+     * ({@link #visible}); {@code ai}'s own cards always stay. Unlike naming, no name memory: a seen name never admits an
+     * unseen copy in a hand or library. OFF and SHADOW: {@code cards}
      * unchanged, so upstream Forge AI (the bench's Forge Default) is untouched. Used where upstream reads an opponent's
      * hand or library for a colour, type or mana-value choice (protection colour, Chalice of the Void, Clash, ...).
      */
@@ -203,10 +204,9 @@ public final class FairNaming {
             }
             return out;
         }
-        final Set<String> seen = seen(ai);
         for (Card c : cards) {
             final boolean theirs = ai.isOpponentOf(c.getOwner()) || ai.isOpponentOf(c.getController());
-            if (!theirs || visible(c, ai) || seen.contains(c.getName())) {
+            if (!theirs || visible(c, ai)) {
                 out.add(c);
             }
         }
@@ -216,7 +216,7 @@ public final class FairNaming {
     /** honest-belief-1020: may {@code ai} read {@code c}'s identity under fairNaming=on (always, when not on)? */
     public static boolean mayRead(final Player ai, final Card c) {
         return mode(ai) != AiFixes.Mode.ON || c == null || !(ai.isOpponentOf(c.getOwner()) || ai.isOpponentOf(c.getController()))
-                || visible(c, ai) || seen(ai).contains(c.getName());
+                || visible(c, ai);
     }
 
     /** The cards of {@code cards} (an opponent's) that {@code ai} sees now or has seen this game, as {@link #known(Player, Player)}. */

@@ -479,6 +479,7 @@ public final class InteractiveMain {
         if (System.getProperty("forge.interactive.lookahead") != null || policySpec() != null) {
             // Look-ahead play-outs may run on threads: fill the lazily built token table up front (see TokenDb).
             FModel.getMagicDb().getAllTokens().preloadTokens();
+            settledPool(); // honest-belief-1020: the game's pool, resolved and named at game start
         }
     }
 
@@ -609,7 +610,7 @@ public final class InteractiveMain {
                     k8.seed = seed * 31 + i;
                     k8Fixes = pl.aiFixes;
                 }
-                final InteractiveProtocol.BeliefPool pool = eventPool; // honest-belief-1020
+                final InteractiveProtocol.BeliefPool pool = settledPool(); // honest-belief-1020
                 lp.live().setBeliefPool(pool == null ? null : pool.names(), pool != null && pool.singleton());
                 lp.live().bind(game, i, seed, k8, k8Fixes);
             }
@@ -637,7 +638,7 @@ public final class InteractiveMain {
             c.belief = "uniform";
         }
         c.beliefShadow = false;
-        final InteractiveProtocol.BeliefPool pool = eventPool;
+        final InteractiveProtocol.BeliefPool pool = settledPool();
         if (pool != null) {
             c.beliefPool = pool.names();
             c.beliefSingleton = pool.singleton();
@@ -649,6 +650,74 @@ public final class InteractiveMain {
         c.reuse = false;
         c.reuseVerify = false;
         c.reuseShadowFresh = false;
+    }
+
+    private static boolean poolSettled;
+
+    /** Tests: a new session's pool, settled again on first use. */
+    static synchronized void resetPool(final InteractiveProtocol.BeliefPool pool) {
+        eventPool = pool;
+        poolSettled = false;
+    }
+
+    /**
+     * honest-belief-1020: the event pool as the game uses it, settled once (after Forge's card database is up) and named
+     * by one {@code [belief-pool]} stderr line. The host's names are resolved to Forge cards here, at game start, never in
+     * a bind: a pool none of whose non-basic names resolves, or more than a quarter of whose non-basic names do not, is
+     * dropped with the reason, and the game uses the jar's live pool. Null = the jar's live pool.
+     */
+    static synchronized InteractiveProtocol.BeliefPool settledPool() {
+        if (poolSettled) {
+            return eventPool;
+        }
+        poolSettled = true;
+        final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+        final InteractiveProtocol.BeliefPool pool = eventPool;
+        String reason = null;
+        if (pool != null) {
+            int asked = 0;
+            for (String n : new java.util.LinkedHashSet<>(pool.names())) {
+                if (!forge.ai.simulation.BeliefSampler.isBasic(n)) {
+                    asked++;
+                }
+            }
+            try {
+                final forge.ai.simulation.BeliefSampler.Cube cube = forge.ai.simulation.BeliefSampler.cubeOf(pool.names(),
+                        new forge.ai.simulation.LookaheadSearch.Config().beliefBasics);
+                o.addProperty("asked", asked);
+                o.addProperty("unresolved", cube.unresolved.size());
+                if (cube.unresolved.size() * 4 > asked) {
+                    reason = cube.unresolved.size() + " of " + asked + " names do not resolve";
+                } else {
+                    eventPool = new InteractiveProtocol.BeliefPool(cube.names, pool.singleton());
+                    o.addProperty("source", "event");
+                    o.addProperty("size", cube.names.size());
+                    o.addProperty("sha256", cube.sha256);
+                    o.addProperty("singleton", pool.singleton());
+                }
+            } catch (RuntimeException e) {
+                reason = String.valueOf(e.getMessage());
+            }
+        }
+        if (eventPool == null || reason != null) {
+            eventPool = null;
+            o.addProperty("source", "jar");
+            if (reason != null) {
+                o.addProperty("dropped", reason);
+            }
+            try {
+                final forge.ai.simulation.BeliefSampler.Cube cube = forge.ai.simulation.BeliefSampler.loadCube(
+                        forge.ai.simulation.BeliefSampler.LIVE_CUBE, forge.ai.simulation.BeliefSampler.LIVE_CUBE_SHA256,
+                        new forge.ai.simulation.LookaheadSearch.Config().beliefBasics);
+                o.addProperty("size", cube.names.size());
+                o.addProperty("sha256", cube.sha256);
+            } catch (RuntimeException e) {
+                o.addProperty("error", String.valueOf(e.getMessage()));
+            }
+            o.addProperty("singleton", forge.ai.simulation.BeliefSampler.LIVE_CUBE_SINGLETON);
+        }
+        System.err.println("[belief-pool] " + o);
+        return eventPool;
     }
 
     static ParsedLookahead parseLookahead(final String spec) {

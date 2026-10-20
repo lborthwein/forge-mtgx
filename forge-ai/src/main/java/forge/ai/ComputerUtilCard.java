@@ -1149,7 +1149,7 @@ public class ComputerUtilCard {
                 chosen.add(prominence.get(0));
                 chosen.add(prominence.get(1));
             } else if (logic.equals("MostProminentInGame")) {
-                chosen.add(getMostProminentColor(game.getCardsInGame(), colorChoices));
+                chosen.add(getMostProminentColor(FairNaming.fair(ai, game.getCardsInGame()), colorChoices));
             } else if (logic.equals("MostProminentHumanCreatures")) {
                 CardCollectionView list = opp.getCreaturesInPlay();
                 if (list.isEmpty()) {

@@ -115,8 +115,8 @@ public final class BeliefSampler {
     /**
      * honest-belief-1020: a pool given as card names (the event's card pool, sent by the host), as a {@link Cube}: names
      * deduplicated in the given order, basics dropped (they are the pool's basic slots), each resolved up front (an
-     * unresolvable name is dropped and listed in {@link Cube#unresolved}). Its sha256 is over the kept names, one per
-     * line in the given order. Cached per (sha, basics).
+     * unresolvable name is dropped and listed in {@link Cube#unresolved}), each kept under Forge's own name. Its sha256 is
+     * over the kept Forge names, one per line in order. Cached per (the given names, basics).
      */
     public static synchronized Cube cubeOf(List<String> names, int basics) {
         if (names == null || names.isEmpty()) {
@@ -128,14 +128,13 @@ public final class BeliefSampler {
                 uniq.add(n.trim());
             }
         }
-        final String sha = hex(sha256(String.join("\n", uniq).getBytes(StandardCharsets.UTF_8)));
-        final String key = "pool:" + sha + "|" + basics;
+        final String inSha = hex(sha256(String.join("\n", uniq).getBytes(StandardCharsets.UTF_8)));
+        final String key = "pool:" + inSha + "|" + basics;
         final Cube have = CUBES.get(key);
         if (have != null) {
             return have;
         }
         final Cube cube = new Cube();
-        cube.sha256 = sha;
         cube.basics = basics;
         for (String name : uniq) {
             final PaperCard pc = resolve(name);
@@ -143,10 +142,17 @@ public final class BeliefSampler {
                 cube.unresolved.add(name);
                 continue;
             }
-            cube.names.add(name);
-            cube.tags.put(name, new java.util.TreeSet<>());
-            cube.paper.put(name, pc);
+            // keyed by Forge's own name (an alias or split-card spelling resolves to it), so the pool's exclusions, which
+            // compare Forge names, match
+            final String fn = pc.getName();
+            if (cube.paper.containsKey(fn) || isBasic(fn)) {
+                continue;
+            }
+            cube.names.add(fn);
+            cube.tags.put(fn, new java.util.TreeSet<>());
+            cube.paper.put(fn, pc);
         }
+        cube.sha256 = hex(sha256(String.join("\n", cube.names).getBytes(StandardCharsets.UTF_8)));
         for (String b : BASICS) {
             final PaperCard pc = resolve(b);
             if (pc == null) {

@@ -407,9 +407,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (!"off".equals(belief)) {
                 // honest-belief-1020: only when on, so every other spec's JSON is unchanged
                 o.addProperty("belief", belief);
-                if (beliefPool != null) {
-                    o.addProperty("beliefPoolSize", beliefPool.size());
-                } else {
+                if (beliefPool == null) {
+                    // an event pool is named by the server's per-game [belief-pool] line, not here
                     o.addProperty("beliefCube", beliefCube);
                     o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 }
