@@ -594,4 +594,69 @@ public class InteractivePreviewTest extends AITest {
         assertNull(InteractivePreview.scriptParam("DB$ Tap | UnlessCost$ PayLife<2>", "Missing"));
         assertEquals(InteractivePreview.scriptParam("DB$ Tap | UnlessCost$ PayLife<2>", "UnlessCost"), "PayLife<2>");
     }
+
+    // ---- block-search-1019: a face-down card's control carries nothing derived from its face ----------------------
+
+    /** Thief of Sanity connects: one of the foe's cards exiled face down, which the seat may look at and cast. */
+    private Card thiefBoard(final Player seat, final Player foe) {
+        final Game g = seat.getGame();
+        addCard("Island", seat);
+        addCard("Plains", seat);
+        for (int i = 0; i < 5; i++) {
+            addCardToZone("Lotus Cobra", foe, ZoneType.Library);
+        }
+        final Card thief = addCard("Thief of Sanity", seat);
+        g.getTriggerHandler().registerActiveTrigger(thief, false);
+        g.getAction().checkStateEffects(true);
+        foe.addDamageAfterPrevention(2, thief, null, true, new forge.game.GameEntityCounterTable());
+        g.getTriggerHandler().collectTriggerForWaiting();
+        g.getTriggerHandler().runWaitingTriggers();
+        g.getStack().addAllTriggeredAbilitiesToStack();
+        for (int guard = 0; !g.getStack().isEmpty() && guard < 50; guard++) {
+            g.getStack().resolveStack();
+            g.getAction().checkStateEffects(true);
+            g.getStack().addAllTriggeredAbilitiesToStack();
+        }
+        for (Card c : g.getCardsIn(ZoneType.Exile)) {
+            if (c.isFaceDown()) {
+                return c;
+            }
+        }
+        throw new AssertionError("Thief of Sanity exiled nothing face down");
+    }
+
+    @Test(timeOut = 600000)
+    public void aFaceDownCardsControlCarriesNoPreviewOrCostByDefault() throws Exception {
+        final Card[] exiled = new Card[1];
+        System.clearProperty("forge.interactive.faceDownIdentity");
+        try (Harness h = new Harness((seat, foe) -> exiled[0] = thiefBoard(seat, foe))) {
+            final JsonObject request = h.request();
+            final JsonObject control = control(request, exiled[0]);
+            assertNotNull(control, "the grantee may cast the face-down card: " + request);
+            final JsonObject value = control.getAsJsonObject("value");
+            for (String f : new String[] {"preview", "payable", "manaOnly"}) {
+                assertFalse(value.has(f), f + " on a face-down card's control: " + control);
+            }
+            final String label = control.get("label").getAsString();
+            assertFalse(label.contains("Lotus Cobra") || label.startsWith("Cast"), label);
+            for (JsonElement c : request.getAsJsonArray("controls")) {
+                final JsonObject co = c.getAsJsonObject();
+                if (co.get("controlId").getAsString().equals("card:" + exiled[0].getId())) {
+                    assertFalse(co.toString().contains("{1}{G}") || co.toString().contains("Lotus Cobra"), co.toString());
+                }
+            }
+        }
+    }
+
+    @Test(timeOut = 600000)
+    public void withFaceDownIdentityOnTheGranteesControlHasItsPreview() throws Exception {
+        final Card[] exiled = new Card[1];
+        System.setProperty("forge.interactive.faceDownIdentity", "on");
+        try (Harness h = new Harness((seat, foe) -> exiled[0] = thiefBoard(seat, foe))) {
+            final JsonObject value = control(h.request(), exiled[0]).getAsJsonObject("value");
+            assertTrue(value.has("preview") && value.has("payable"), value.toString());
+        } finally {
+            System.clearProperty("forge.interactive.faceDownIdentity");
+        }
+    }
 }
