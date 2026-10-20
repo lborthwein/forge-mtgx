@@ -8,6 +8,8 @@ import static org.testng.Assert.assertTrue;
 
 import java.util.List;
 
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import com.google.gson.JsonArray;
@@ -36,6 +38,31 @@ public class InteractiveMayLookExileTest extends AITest {
 
     private Card exiled;
     private long grant;
+
+    /** The field is held behind -Dforge.interactive.faceDownIdentity=on (default off); these tests switch it on. */
+    @BeforeMethod
+    public void faceDownIdentityOn() {
+        System.setProperty("forge.interactive.faceDownIdentity", "on");
+    }
+
+    @AfterMethod(alwaysRun = true)
+    public void faceDownIdentityOff() {
+        System.clearProperty("forge.interactive.faceDownIdentity");
+    }
+
+    /** Default (held): no seat gets the face, the label stays unnamed, and the exile counts are still right. */
+    @Test(timeOut = 900000)
+    public void heldByDefaultNothingIsSentButCountsAreRight() {
+        System.clearProperty("forge.interactive.faceDownIdentity");
+        board();
+        for (Player viewer : List.of(thief, owner)) {
+            final JsonObject v = view(viewer, true);
+            assertFalse(v.toString().contains(InteractiveState.FACE_DOWN_IDENTITY), v.toString());
+            assertFalse(v.toString().contains("Serra Angel"), v.toString());
+            assertEquals(exileOf(v, 1).size(), 2, "both exiled cards counted");
+        }
+        assertFalse(InteractiveState.safeCardLabel(exiled.getView(), thief.getView()).contains("Serra Angel"));
+    }
 
     private void board() {
         game = initAndCreateGame();

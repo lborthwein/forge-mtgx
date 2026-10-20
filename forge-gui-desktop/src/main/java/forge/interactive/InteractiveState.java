@@ -51,6 +51,16 @@ final class InteractiveState {
      */
     static final String FACE_DOWN_IDENTITY = "faceDownIdentity";
 
+    /**
+     * HELD (orchestrator 2026-10-19): {@link #FACE_DOWN_IDENTITY} and the looked-at face-down label are sent only with
+     * {@code -Dforge.interactive.faceDownIdentity=on}. Off (the default) until the review pipeline stops carrying a seat's
+     * transcript names into the public review (mtgx #1126): a seat's own channel feeds review-game.mjs transcriptFacts,
+     * then review.json, then CubeTV. Read on each call, so tests can switch it.
+     */
+    static boolean faceDownIdentityOn() {
+        return "on".equals(System.getProperty("forge.interactive.faceDownIdentity"));
+    }
+
     /** A player's field for the top card of their library, present only for a viewer who may see it. */
     static final String LIBRARY_TOP = "libraryTop";
 
@@ -174,7 +184,7 @@ final class InteractiveState {
         }
         // block-search-1019: a face-down card this viewer may look at (Thief of Sanity's exile) has no name in its
         // face-down state, so the label read "Card (73)"; name it by its original face, as the desktop GUI shows it
-        return card.isFaceDown() ? lookedAtCardLabel(card) : visibleCardLabel(card);
+        return card.isFaceDown() && faceDownIdentityOn() ? lookedAtCardLabel(card) : visibleCardLabel(card);
     }
 
     /** Only after {@link #mayReceiveIdentity} for the viewer: a face-down card by its original face's name. */
@@ -418,7 +428,7 @@ final class InteractiveState {
                 // Looking at an owned face-down card does not authorize the new provenance facts.
                 if (!card.isFaceDown()) {
                     InteractiveCardFacts.addTokenAndCopy(cardObject, card);
-                } else if (lookedAt) {
+                } else if (lookedAt && faceDownIdentityOn()) {
                     // block-search-1019: Forge lets this viewer look at the face-down card (visibleCardForFid: its
                     // may-look rule); its own face, for this seat's channel only
                     addFaceDownIdentity(cardObject, card);
