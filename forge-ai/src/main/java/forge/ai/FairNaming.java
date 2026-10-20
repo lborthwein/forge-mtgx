@@ -185,6 +185,40 @@ public final class FairNaming {
         return out;
     }
 
+    /**
+     * honest-belief-1020: {@code cards} as Forge AI's other choice logic may read them under fairNaming=on: an opponent's
+     * card (owned or controlled by an opponent of {@code ai}) stays only when {@code ai} sees it now or has seen it this
+     * game (as {@link #known(Player, Player)}); {@code ai}'s own cards always stay. OFF and SHADOW: {@code cards}
+     * unchanged, so upstream Forge AI (the bench's Forge Default) is untouched. Used where upstream reads an opponent's
+     * hand or library for a colour, type or mana-value choice (protection colour, Chalice of the Void, Clash, ...).
+     */
+    public static CardCollection fair(final Player ai, final Iterable<Card> cards) {
+        final CardCollection out = new CardCollection();
+        if (cards == null) {
+            return out;
+        }
+        if (mode(ai) != AiFixes.Mode.ON) {
+            for (Card c : cards) {
+                out.add(c);
+            }
+            return out;
+        }
+        final Set<String> seen = seen(ai);
+        for (Card c : cards) {
+            final boolean theirs = ai.isOpponentOf(c.getOwner()) || ai.isOpponentOf(c.getController());
+            if (!theirs || visible(c, ai) || seen.contains(c.getName())) {
+                out.add(c);
+            }
+        }
+        return out;
+    }
+
+    /** honest-belief-1020: may {@code ai} read {@code c}'s identity under fairNaming=on (always, when not on)? */
+    public static boolean mayRead(final Player ai, final Card c) {
+        return mode(ai) != AiFixes.Mode.ON || c == null || !(ai.isOpponentOf(c.getOwner()) || ai.isOpponentOf(c.getController()))
+                || visible(c, ai) || seen(ai).contains(c.getName());
+    }
+
     /** The cards of {@code cards} (an opponent's) that {@code ai} sees now or has seen this game, as {@link #known(Player, Player)}. */
     public static CardCollection knownAmong(final Player ai, final CardCollectionView cards) {
         final Set<String> seen = seen(ai);

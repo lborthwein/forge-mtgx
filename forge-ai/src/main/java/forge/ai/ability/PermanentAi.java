@@ -146,7 +146,8 @@ public class PermanentAi extends SpellAbilityAi {
                 CardCollection aiCards = CardLists.filter(ai.getAllCards(), card -> (card.isInZone(ZoneType.Library) || !card.isInZone(ZoneType.Hand))
                         && card.getState(CardStateName.Original).getManaCost() != null
                         && card.getState(CardStateName.Original).getManaCost().getCMC() == manaValue);
-                CardCollection oppCards = CardLists.filter(ai.getStrongestOpponent().getAllCards(), card -> (card.isInZone(ZoneType.Library) || !card.isInZone(ZoneType.Hand))
+                // honest-belief-1020: under fairNaming=on, only the opponent's cards the AI has seen
+                CardCollection oppCards = CardLists.filter(forge.ai.FairNaming.fair(ai, ai.getStrongestOpponent().getAllCards()), card -> (card.isInZone(ZoneType.Library) || !card.isInZone(ZoneType.Hand))
                         && card.getState(CardStateName.Original).getManaCost() != null
                         && card.getState(CardStateName.Original).getManaCost().getCMC() == manaValue);
                 if (manaValue == 0) {

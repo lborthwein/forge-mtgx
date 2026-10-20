@@ -1290,7 +1290,8 @@ public class PlayerControllerAi extends PlayerController {
         if (logic == null || logic.equals("MostProminentHumanCreatures")) {
             CardCollection list = player.getOpponents().getCreaturesInPlay();
             if (list.isEmpty()) {
-                list = CardLists.filterControlledBy(getGame().getCardsInGame(), player.getOpponents());
+                // honest-belief-1020: under fairNaming=on, only the opponents' cards this player has seen
+                list = FairNaming.fair(player, CardLists.filterControlledBy(getGame().getCardsInGame(), player.getOpponents()));
             }
             if (!list.isEmpty()) {
                 choice = ComputerUtilCard.getMostProminentColor(list);

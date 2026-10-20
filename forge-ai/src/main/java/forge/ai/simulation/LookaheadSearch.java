@@ -299,6 +299,17 @@ public final class LookaheadSearch {
         public String beliefCubeSha256 = null;
         /** Copies of each basic land type in the pool. */
         public int beliefBasics = 8;
+        /**
+         * honest-belief-1020: the event's card pool as names (the host's {@code beliefPool}); when set it is the belief's
+         * pool instead of {@link #beliefCube}. Not a spec key: the interactive server sets it per game.
+         */
+        public java.util.List<String> beliefPool = null;
+        /**
+         * honest-belief-1020: the pool is a singleton cube (true, the default and belief-sampling-0928's rule): our own
+         * deck's names and every opponent card we can see leave the pool. False (a pool whose decks may repeat a card,
+         * e.g. random constructed decks): the pool stays whole.
+         */
+        public boolean beliefSingleton = true;
 
         /** A belief is computed at searched decisions (acting or shadow). */
         public boolean beliefOn() {
@@ -440,6 +451,12 @@ public final class LookaheadSearch {
                 o.addProperty("beliefCube", beliefCube);
                 o.addProperty("beliefCubeSha256", beliefCubeSha256);
                 o.addProperty("beliefBasics", beliefBasics);
+                if (beliefPool != null) {
+                    o.addProperty("beliefPoolSize", beliefPool.size());
+                }
+                if (!beliefSingleton) {
+                    o.addProperty("beliefSingleton", false);
+                }
             }
             if (rankerOn()) {
                 final JsonObject r = new JsonObject();
@@ -1492,7 +1509,8 @@ public final class LookaheadSearch {
      * checkpoint pin (once per JVM and service). Throws {@link IllegalStateException}; a runner calls it at start.
      */
     public static BeliefSampler.Cube checkBelief(Config c) {
-        final BeliefSampler.Cube cube = BeliefSampler.loadCube(c.beliefCube, c.beliefCubeSha256, c.beliefBasics);
+        final BeliefSampler.Cube cube = c.beliefPool != null ? BeliefSampler.cubeOf(c.beliefPool, c.beliefBasics)
+                : BeliefSampler.loadCube(c.beliefCube, c.beliefCubeSha256, c.beliefBasics);
         if (c.beliefHuman()) {
             BeliefClient.checkHealth(c.beliefUrl, c.beliefCheckpointSha256, c.beliefTimeoutMs);
         }
@@ -5111,12 +5129,7 @@ public final class LookaheadSearch {
                     MyRandom.setThreadRandom(PlayoutKeys.TrackedRandom.ofSnapshot(carried.rng));
                 } else {
                     if (resample) {
-                        final BeliefSampler.Dist bd = decisionBelief;
-                        if (bd != null) {
-                            resampleBelief(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)), bd);
-                        } else {
-                            resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
-                        }
+                        redraw(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
                         if (ownKnownTop > 0) {
                             // search-bones-1015: the top of our library we placed ourselves (pile memory) stays in place
                             restoreOwnTop(liveMe, p.me, ownKnownTop);
@@ -5842,7 +5855,7 @@ public final class LookaheadSearch {
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
                 if (resample) {
-                    resample(live, liveMe, g, me, new Random(mix(worldSeed, 2)));
+                    redraw(live, liveMe, g, me, new Random(mix(worldSeed, 2)));
                 }
             }
             MyRandom.setThreadRandom(new Random(mix(worldSeed, 3)));
@@ -6787,7 +6800,7 @@ public final class LookaheadSearch {
                     p.trigSa = rebuildTrigger(p.g, p.me, liveWrap);
                 }
                 if (cfg.resample) {
-                    resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
+                    redraw(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
                 }
                 MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
             }
@@ -7001,26 +7014,13 @@ public final class LookaheadSearch {
             stats.beliefSkipped++;
             return null;
         }
-        final Set<String> known = new HashSet<>(deckOf(liveMe).keySet());
         int openMana = 0;
-        for (Card c : live.getCardsInGame()) {
-            if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
-                    && c.getView().canBeShownTo(myView)) {
-                known.add(c.getPaperCard().getName());
-            }
-        }
         for (Card c : liveOpp.getCardsIn(ZoneType.Battlefield)) {
             if (c.isLand() && !c.isTapped()) {
                 openMana++;
             }
         }
-        final List<String> pool = new ArrayList<>();
-        for (String name : beliefCube.names) {
-            if (!known.contains(name)) {
-                pool.add(name);
-            }
-        }
-        pool.addAll(Arrays.asList(BeliefSampler.BASICS));
+        final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
         final double[] ones = new double[pool.size()];
         Arrays.fill(ones, 1.0);
         double[] w = ones;
@@ -7063,7 +7063,7 @@ public final class LookaheadSearch {
                 System.err.println("[lookahead] belief call failed at decision " + index + ", sampling uniformly: " + error);
             }
         }
-        final BeliefSampler.Dist bd = new BeliefSampler.Dist(pool, w, cfg.beliefBasics, hid[0], hid[1]);
+        final BeliefSampler.Dist bd = new BeliefSampler.Dist(pool, w, basicsFor(pool, hid[0], hid[1]), hid[0], hid[1]);
         bd.uniform = beliefClient == null || fallback;
         bd.fallback = fallback;
         bd.oppId = liveOpp.getId();
@@ -7112,16 +7112,103 @@ public final class LookaheadSearch {
     }
 
     /**
-     * Belief re-draw of one world (in a copy): the opponent's hidden hand from the belief, the hidden library uniform
+     * The belief pool for {@code liveOpp} as the seat sees the live game: the cube's (or the event pool's) names, minus,
+     * for a singleton pool ({@link Config#beliefSingleton}), our registered deck and every non-token card the opponent
+     * owns that the seat can see; then the basics (M slots each in the distribution).
+     */
+    private List<String> beliefPoolFor(Game live, Player liveMe, Player liveOpp) {
+        final PlayerView myView = liveMe.getView();
+        final Set<String> known = new HashSet<>();
+        if (cfg.beliefSingleton) {
+            known.addAll(ownDeckNames(liveMe));
+            for (Card c : live.getCardsInGame()) {
+                if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
+                        && c.getView().canBeShownTo(myView)) {
+                    known.add(c.getPaperCard().getName());
+                }
+            }
+        }
+        final List<String> pool = new ArrayList<>();
+        for (String name : beliefCube.names) {
+            if (!known.contains(name)) {
+                pool.add(name);
+            }
+        }
+        pool.addAll(Arrays.asList(BeliefSampler.BASICS));
+        return pool;
+    }
+
+    /** Our registered main deck's card names (a player knows their own deck), once. */
+    private Set<String> ownDeckNames(Player liveMe) {
+        Set<String> d = ownDeckNames;
+        if (d == null) {
+            d = new HashSet<>();
+            final forge.deck.Deck deck = liveMe.getRegisteredPlayer() == null ? null : liveMe.getRegisteredPlayer().getDeck();
+            if (deck != null && deck.has(forge.deck.DeckSection.Main)) {
+                for (Map.Entry<forge.item.PaperCard, Integer> e : deck.get(forge.deck.DeckSection.Main)) {
+                    d.add(e.getKey().getName());
+                }
+            }
+            ownDeckNames = d;
+        }
+        return d;
+    }
+
+    private volatile Set<String> ownDeckNames;
+
+    /**
+     * honest-belief-1020: the basics multiplicity M: {@link Config#beliefBasics}, raised only when the pool would have
+     * fewer slots than the hidden cards it must fill (so a hidden library is never cut short).
+     */
+    private int basicsFor(List<String> pool, int hand, int lib) {
+        final int nonBasic = pool.size() - BeliefSampler.BASICS.length;
+        final int need = hand + lib;
+        int m = cfg.beliefBasics;
+        if (nonBasic + m * BeliefSampler.BASICS.length < need) {
+            m = (need - nonBasic + BeliefSampler.BASICS.length - 1) / BeliefSampler.BASICS.length;
+        }
+        return m;
+    }
+
+    /**
+     * The world re-draw of a search copy (honest-belief-1020: the one entry point). With a belief on (acting), every
+     * opponent's hidden cards come from the belief pool ({@link #resampleBelief}), never from their real cards; with
+     * belief off or in shadow mode, {@link #resample} as before.
+     */
+    void redraw(Game live, Player liveMe, Game g, Player me, Random rng) {
+        if (beliefCube != null && !cfg.beliefShadow) {
+            resampleBelief(live, liveMe, g, me, rng, decisionBelief);
+        } else {
+            resample(live, liveMe, g, me, rng);
+        }
+    }
+
+    /**
+     * honest-belief-1020: the solver's re-draw ({@link ForcedWinSolver#redraw}): the opponents' hidden cards from the
+     * belief pool, uniformly; our own library is left to the solver (its known-top rule). Null when no belief is on.
+     */
+    public ForcedWinSolver.Redraw opponentRedraw() {
+        if (beliefCube == null || cfg.beliefShadow) {
+            return null;
+        }
+        return (live, liveMe, g, me, rng) -> redrawOpponents(live, liveMe, g, me, rng, null);
+    }
+
+    /**
+     * Belief re-draw of one world (in a copy): each opponent's hidden hand from the belief, the hidden library uniform
      * over the pool slots left (known cards stay where they are), then our own library as {@link #resample}. The
-     * opponent's hidden cards in the copy are replaced by new cards of the drawn names.
+     * opponent's hidden cards in the copy are replaced by new cards of the drawn names. {@code bd} (or null) is the
+     * decision's belief; an opponent it does not describe (another opponent, or a copy whose hidden counts differ from
+     * the decision's) is drawn uniformly from its own pool: never from their real cards (honest-belief-1020).
      */
     void resampleBelief(Game live, Player liveMe, Game g, Player me, Random rng, BeliefSampler.Dist bd) {
+        redrawOpponents(live, liveMe, g, me, rng, bd);
+        shuffleOwnLibrary(liveMe, me, rng);
+    }
+
+    private void redrawOpponents(Game live, Player liveMe, Game g, Player me, Random rng, BeliefSampler.Dist bd) {
         final PlayerView myView = liveMe.getView();
         for (Player opp : me.getOpponents()) {
-            if (opp.getId() != bd.oppId) {
-                continue;
-            }
             final Player liveOpp = (Player) live.getPlayer(opp.getId());
             final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
             final List<Card> keep = new ArrayList<>();
@@ -7145,16 +7232,29 @@ public final class LookaheadSearch {
             }
             final int need = hand.size() - keep.size();
             final int libNeed = opp.getCardsIn(ZoneType.Library).size() - libKnownTop.size();
-            if (need != bd.n || libNeed != bd.libHidden) {
-                // The copy does not show what the decision saw: keep the default re-draw for this world.
-                synchronized (stats) {
-                    stats.beliefMismatch++;
-                }
-                resample(live, liveMe, g, me, rng);
-                return;
+            if (need == 0 && libNeed == 0) {
+                continue;
             }
-            final int[] handSlots = bd.sampleHand(rng);
-            final List<Integer> libSlots = bd.library(handSlots, rng);
+            BeliefSampler.Dist d = bd;
+            if (d == null || opp.getId() != d.oppId || need != d.n || libNeed != d.libHidden) {
+                if (d != null && opp.getId() == d.oppId) {
+                    // The copy does not show what the decision saw: a uniform draw over this opponent's pool.
+                    synchronized (stats) {
+                        stats.beliefMismatch++;
+                    }
+                }
+                if (liveOpp == null) {
+                    throw new IllegalStateException("belief: no live player for opponent " + opp.getId());
+                }
+                final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
+                final double[] ones = new double[pool.size()];
+                Arrays.fill(ones, 1.0);
+                d = new BeliefSampler.Dist(pool, ones, basicsFor(pool, need, libNeed), need, libNeed);
+                d.uniform = true;
+                d.oppId = opp.getId();
+            }
+            final int[] handSlots = d.sampleHand(rng);
+            final List<Integer> libSlots = d.library(handSlots, rng);
             final List<Integer> hs = new ArrayList<>();
             for (int i : handSlots) {
                 hs.add(i);
@@ -7163,11 +7263,11 @@ public final class LookaheadSearch {
             final long c0 = System.nanoTime();
             final List<Card> newHand = new ArrayList<>(keep);
             for (int i : hs) {
-                newHand.add(beliefCard(bd.slotName[i], opp, g));
+                newHand.add(beliefCard(d.slotName[i], opp, g));
             }
             final List<Card> newLib = new ArrayList<>(libKnownTop);
             for (int i : libSlots) {
-                newLib.add(beliefCard(bd.slotName[i], opp, g));
+                newLib.add(beliefCard(d.slotName[i], opp, g));
             }
             opp.getZone(ZoneType.Hand).setCards(newHand);
             opp.getZone(ZoneType.Library).setCards(newLib);
@@ -7177,7 +7277,6 @@ public final class LookaheadSearch {
                 stats.beliefCreateNanos += System.nanoTime() - c0;
             }
         }
-        shuffleOwnLibrary(liveMe, me, rng);
     }
 
     private Card beliefCard(String name, Player owner, Game g) {

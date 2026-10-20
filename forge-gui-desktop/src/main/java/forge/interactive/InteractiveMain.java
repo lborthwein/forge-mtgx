@@ -83,6 +83,7 @@ public final class InteractiveMain {
         final InteractiveProtocol.Config config;
         try {
             config = InteractiveProtocol.readConfig(configLine);
+            eventPool = InteractiveProtocol.readBeliefPool(configLine); // honest-belief-1020
             validateDeckFiles(config.decks());
         } catch (InteractiveProtocol.ProtocolException e) {
             InteractiveProtocol.writeBootFatal(protocolOut,
@@ -608,6 +609,8 @@ public final class InteractiveMain {
                     k8.seed = seed * 31 + i;
                     k8Fixes = pl.aiFixes;
                 }
+                final InteractiveProtocol.BeliefPool pool = eventPool; // honest-belief-1020
+                lp.live().setBeliefPool(pool == null ? null : pool.names(), pool != null && pool.singleton());
                 lp.live().bind(game, i, seed, k8, k8Fixes);
             }
         }
@@ -618,6 +621,34 @@ public final class InteractiveMain {
         final forge.ai.simulation.LookaheadSearch.Config config = new forge.ai.simulation.LookaheadSearch.Config();
         forge.ai.AiFixes.Mode aiFixes = forge.ai.AiFixes.Mode.OFF;
         forge.ai.AiFixes.Mode fairNaming = null;
+    }
+
+    /** honest-belief-1020: this session's event card pool (the config's beliefPool), or null: the jar's live pool. */
+    static volatile InteractiveProtocol.BeliefPool eventPool;
+
+    /**
+     * honest-belief-1020 (owner, 2026-10-20: "fix the decklist leak"): every look-ahead seat this server runs (the K8
+     * seat, a degraded policy seat's K8, a watch table's look-ahead seat) draws the opponent's hidden hand and library
+     * from an observation-only pool: the event's card pool when the host sent one, else the jar's live pool; never their
+     * real cards. Carried worlds (reuse) hold real cards, so reuse is off. A belief=human spec stays as given.
+     */
+    static void honest(final forge.ai.simulation.LookaheadSearch.Config c) {
+        if (!"human".equals(c.belief)) {
+            c.belief = "uniform";
+        }
+        c.beliefShadow = false;
+        final InteractiveProtocol.BeliefPool pool = eventPool;
+        if (pool != null) {
+            c.beliefPool = pool.names();
+            c.beliefSingleton = pool.singleton();
+        } else if (c.beliefCube == null) {
+            c.beliefCube = forge.ai.simulation.BeliefSampler.LIVE_CUBE;
+            c.beliefCubeSha256 = forge.ai.simulation.BeliefSampler.LIVE_CUBE_SHA256;
+            c.beliefSingleton = forge.ai.simulation.BeliefSampler.LIVE_CUBE_SINGLETON;
+        }
+        c.reuse = false;
+        c.reuseVerify = false;
+        c.reuseShadowFresh = false;
     }
 
     static ParsedLookahead parseLookahead(final String spec) {
@@ -675,6 +706,7 @@ public final class InteractiveMain {
         }
         pl.aiFixes = aiFixes;
         pl.fairNaming = fairNaming;
+        honest(c);
         return pl;
     }
 

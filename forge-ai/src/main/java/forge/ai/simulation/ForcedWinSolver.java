@@ -226,6 +226,19 @@ public final class ForcedWinSolver {
     // ------------------------------------------------------------------ per-seat state
 
     private final Player me;
+    /**
+     * honest-belief-1020 (null = off, the default, and then nothing changes): the re-draw of the opponents' hidden cards
+     * in every copy the solver evaluates (verification worlds, the engine's root), from the seat's belief pool, before
+     * {@link #hideOrSample}; so no world holds the opponent's real hand or library. Set by the search that owns the
+     * belief ({@link LookaheadSearch#opponentRedraw}).
+     */
+    public Redraw redraw;
+
+    /** honest-belief-1020: re-draws the opponents' hidden cards of copy {@code g} (called inside {@code synchronized (live)}). */
+    @FunctionalInterface
+    public interface Redraw {
+        void apply(Game live, Player liveMe, Game g, Player me, Random rng);
+    }
     private final Config cfg;
 
     /**
@@ -912,6 +925,7 @@ public final class ForcedWinSolver {
         final long engineDeadline = Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs), budgetMs() - reserve)
                 * 1_000_000L, t0 + (budgetMs() - reserve) * 1_000_000L);
         final List<Line> likelyCands = cfg.likely ? new ArrayList<>() : null;
+        el.redraw = redraw;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
         engineNanos += System.nanoTime() - t1;
@@ -1044,6 +1058,9 @@ public final class ForcedWinSolver {
                 cm = (Player) copier.find(me);
                 copies++;
                 final Random rng = new Random(mix(seed, 2));
+                if (redraw != null) {
+                    redraw.apply(live, me, g, cm, rng); // honest-belief-1020
+                }
                 for (Player o : cm.getOpponents()) {
                     hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
                 }
@@ -1287,6 +1304,9 @@ public final class ForcedWinSolver {
                 final Random rng = new Random(mix(seed, 2));
                 if (world >= 0) {
                     // search-bones-1015 (d): world -1 = the position as it stands (exact)
+                    if (redraw != null) {
+                        redraw.apply(live, me, g, cm, rng); // honest-belief-1020
+                    }
                     for (Player o : cm.getOpponents()) {
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
                         hideOrSample(live, me, liveOpp, o, world == 0, rng);

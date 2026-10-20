@@ -170,6 +170,13 @@ public final class RlLiveSeat {
             c.budgetMs = 8000;
             c.connectTimeoutMs = 2000;
             c.readTimeoutMs = 8000;
+            // honest-belief-1020 (owner, 2026-10-20: "fix the decklist leak"): live worlds never hold the opponent's real
+            // hand or library. They are drawn from the event's card pool (bind's beliefPool, sent by the host) or, without
+            // one, from the jar's live pool; there is no live key that turns this off.
+            c.belief = "uniform";
+            c.beliefCube = forge.ai.simulation.BeliefSampler.LIVE_CUBE;
+            c.beliefCubeSha256 = forge.ai.simulation.BeliefSampler.LIVE_CUBE_SHA256;
+            c.beliefSingleton = forge.ai.simulation.BeliefSampler.LIVE_CUBE_SINGLETON;
             for (String kv : raw.split(",")) {
                 final String[] p = kv.split("=", 2);
                 if (p.length != 2) {
@@ -333,6 +340,7 @@ public final class RlLiveSeat {
             if (spec.search.blocks > 0) {
                 o.addProperty("blocks", true); // block-search-1019: block search on; absent otherwise
             }
+            o.addProperty("belief", spec.search.belief); // honest-belief-1020: always "uniform" live
             o.addProperty("helloMs", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
             o.add("search", spec.search.toJson());
             line(o);
@@ -382,6 +390,15 @@ public final class RlLiveSeat {
      * seat. {@code k8} (or null) is the live K8 look-ahead's config for a degraded seat, {@code k8AiFixes} its seat's
      * Forge AI fixes; {@code seed} the game's seed (the search's worlds derive from it).
      */
+    /**
+     * honest-belief-1020: the event's card pool for the next {@link #bind} (null = none: the jar's live pool).
+     * {@code singleton}: a cube pool (our deck and the opponent cards we see leave it), else whole.
+     */
+    public void setBeliefPool(final java.util.List<String> pool, final boolean singleton) {
+        spec.search.beliefPool = pool;
+        spec.search.beliefSingleton = pool == null ? forge.ai.simulation.BeliefSampler.LIVE_CUBE_SINGLETON : singleton;
+    }
+
     public void bind(final Game g, final int seatIndex, final long seed, final LookaheadSearch.Config k8,
             final AiFixes.Mode k8AiFixes) {
         this.game = g;

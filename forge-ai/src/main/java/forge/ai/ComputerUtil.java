@@ -2508,7 +2508,8 @@ public class ComputerUtil {
                     CardCollection list = ai.getOpponents().getCardsIn(ZoneType.Battlefield);
                     chosen = ComputerUtilCard.getMostProminentType(list, validTypes);
                     if (!CardType.isACreatureType(chosen)) {
-                        list = CardLists.filterControlledBy(game.getCardsInGame(), ai.getOpponents());
+                        // honest-belief-1020: under fairNaming=on, only the opponents' cards the AI has seen
+                        list = FairNaming.fair(ai, CardLists.filterControlledBy(game.getCardsInGame(), ai.getOpponents()));
                         chosen = ComputerUtilCard.getMostProminentType(list, validTypes);
                     }
                 } else if (logic.startsWith("MostProminentInComputerDeck")) {
@@ -2634,7 +2635,8 @@ public class ComputerUtil {
                         restrictedToColors.put(sp.getOriginalDescription(), sp);
                     }
                 }
-                CardCollection lists = CardLists.filterControlledBy(game.getCardsInGame(), ai.getOpponents());
+                // honest-belief-1020: under fairNaming=on, only the opponents' cards the AI has seen
+                CardCollection lists = FairNaming.fair(ai, CardLists.filterControlledBy(game.getCardsInGame(), ai.getOpponents()));
                 return restrictedToColors.get(StringUtils.capitalize(ComputerUtilCard.getMostProminentColor(lists, restrictedToColors.keySet())));
             }
             return Iterables.getFirst(votes.keySet(), null);

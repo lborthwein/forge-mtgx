@@ -199,13 +199,31 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public int blockSamples = 8;
         /** Block search: the policy's declarations searched in all, its own (greedy) one included. */
         public int blockTop = 3;
+        /**
+         * honest-belief-1020 ("off" = the default, and then nothing changes): "uniform" = every world, solver line check and
+         * engine root draws the opponent's hidden hand and library from an observation-only pool
+         * ({@link LookaheadSearch.Config#belief}): the cube list ({@link #beliefCube}, or the event's pool
+         * {@link #beliefPool}) minus our deck minus every opponent card we can see, plus basics. The opponent's real
+         * remainder is never read.
+         */
+        public String belief = "off";
+        /** honest-belief-1020: the cube list file ({@code mtgx-belief-cube/1}; {@code classpath:} = a jar resource) and its pin. */
+        public String beliefCube;
+        public String beliefCubeSha256;
+        /** honest-belief-1020: copies of each basic in the pool. */
+        public int beliefBasics = 8;
+        /** honest-belief-1020: the pool is a singleton cube (our deck and the cards we saw leave it). */
+        public boolean beliefSingleton = true;
+        /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
+        public List<String> beliefPool;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
                 "playoutSample", "deadEtb", "zeroX", "crewNoop", "departMedian", "stack", "server", "readTimeoutMs",
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
-                "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop"));
+                "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -254,6 +272,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("blocks")) c.blocks = o.get("blocks").getAsInt();
             if (o.has("blockSamples")) c.blockSamples = o.get("blockSamples").getAsInt();
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
+            if (o.has("belief")) c.belief = o.get("belief").getAsString();
+            if (o.has("beliefCube") && !o.get("beliefCube").isJsonNull()) c.beliefCube = o.get("beliefCube").getAsString();
+            if (o.has("beliefCubeSha256") && !o.get("beliefCubeSha256").isJsonNull()) {
+                c.beliefCubeSha256 = o.get("beliefCubeSha256").getAsString();
+            }
+            if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
+            if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
             c.check();
             return c;
         }
@@ -309,6 +334,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (blockSamples < 0 || blockSamples > 64 || blockTop < 1 || blockTop > 8) {
                 throw new IllegalArgumentException("search: 0 <= blockSamples <= 64, 1 <= blockTop <= 8");
+            }
+            if (!"off".equals(belief) && !"uniform".equals(belief)) {
+                throw new IllegalArgumentException("search.belief must be off or uniform, not " + belief);
+            }
+            if ("uniform".equals(belief) && beliefCube == null && beliefPool == null) {
+                throw new IllegalArgumentException("search.belief=uniform needs beliefCube (or the event's pool)");
+            }
+            if (beliefBasics < 0 || beliefBasics > 64) {
+                throw new IllegalArgumentException("search.beliefBasics must be 0..64, not " + beliefBasics);
             }
             choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
@@ -369,6 +403,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.addProperty("blocks", blocks);
                 o.addProperty("blockSamples", blockSamples);
                 o.addProperty("blockTop", blockTop);
+            }
+            if (!"off".equals(belief)) {
+                // honest-belief-1020: only when on, so every other spec's JSON is unchanged
+                o.addProperty("belief", belief);
+                if (beliefPool != null) {
+                    o.addProperty("beliefPoolSize", beliefPool.size());
+                } else {
+                    o.addProperty("beliefCube", beliefCube);
+                    o.addProperty("beliefCubeSha256", beliefCubeSha256);
+                }
+                o.addProperty("beliefBasics", beliefBasics);
+                o.addProperty("beliefSingleton", beliefSingleton);
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -436,6 +482,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             SolverDriver d = null;
             if (cfg.forcedWin != null) {
                 d = new SolverDriver(p, SolverDriver.config(cfg.forcedWin));
+                d.solver().redraw = ls.opponentRedraw(); // honest-belief-1020 (null when belief is off)
                 solverDrivers.put(p.getId(), d);
                 b.planHook = d;
             }
@@ -566,6 +613,15 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.budgetMs = cfg.budgetMs;
         lc.maxSameDepartures = cfg.sameDepartures;
         lc.copyFidelity = cfg.copyFidelity;
+        if (!"off".equals(cfg.belief)) {
+            // honest-belief-1020: the observation-only pool for every world (and, below, the solver's copies)
+            lc.belief = cfg.belief;
+            lc.beliefCube = cfg.beliefCube;
+            lc.beliefCubeSha256 = cfg.beliefCubeSha256;
+            lc.beliefBasics = cfg.beliefBasics;
+            lc.beliefSingleton = cfg.beliefSingleton;
+            lc.beliefPool = cfg.beliefPool;
+        }
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)
             lc.stack = true;
