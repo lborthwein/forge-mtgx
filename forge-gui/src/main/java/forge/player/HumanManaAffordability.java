@@ -141,8 +141,11 @@ public final class HumanManaAffordability {
             if (!card.isInZone(ZoneType.Battlefield) && !card.isInZone(ZoneType.Command)
                     && !card.isInZone(ZoneType.Stack) && card != host) continue;
             for (StaticAbility s : card.getStaticAbilities()) {
+                // ManaConvert: only the player is scoped. Forge tests ValidCard at payment, with the spell on the
+                // stack under the caster's control (Vizier of the Menagerie's Creature.YouCtrl on an opponent's card
+                // cast from exile), so where the host sits now proves nothing: any ValidCard counts as "it acts".
                 if (s.checkMode(StaticAbilityMode.ManaConvert)
-                        && holds(() -> s.matchesValidParam("ValidPlayer", player) && s.matchesValidParam("ValidCard", host))) {
+                        && holds(() -> s.matchesValidParam("ValidPlayer", player))) {
                     hooks |= HOOK_CONVERT;
                 }
                 if (spell && (s.checkMode(StaticAbilityMode.OptionalCost)

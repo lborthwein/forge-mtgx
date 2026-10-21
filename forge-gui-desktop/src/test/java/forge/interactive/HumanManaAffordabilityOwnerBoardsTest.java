@@ -332,6 +332,32 @@ public class HumanManaAffordabilityOwnerBoardsTest extends AITest {
         doesNotGlow(consider);
     }
 
+    /**
+     * Review S1: Vizier of the Menagerie's ManaConvert has {@code ValidCard$ Creature.YouCtrl}, which Forge tests at
+     * payment, with the spell on the stack under the caster's control. An opponent-owned creature card in exile that
+     * the human may cast (Praetor's Grasp) fails it where it sits now; the proof must still count the conversion.
+     */
+    @Test
+    public void vizierConvertsForAnOpponentsCardCastFromExile() {
+        board(PhaseType.MAIN1, true);
+        mine("Vizier of the Menagerie", false);
+        mine("Forest", false);
+        final Card delver = addCardToZone("Delver of Secrets", foe, ZoneType.Exile);   // {U}, owned by the opponent
+        settle();
+        final SpellAbility cast = spell(delver);
+        assertNotEquals(HumanManaAffordability.assessPayable(me, cast), Assessment.PROVEN_UNAFFORDABLE,
+                "Vizier lets the Forest's {G} pay {U} for a creature spell");
+        assertNotEquals(HumanManaAffordability.assess(me, cast), Assessment.PROVEN_UNAFFORDABLE);
+        assertTrue(HumanManaAffordability.payable(me, cast));
+        // The proof still stands with no mana to convert.
+        board(PhaseType.MAIN1, true);
+        mine("Vizier of the Menagerie", false);
+        mine("Forest", true);
+        final Card delver2 = addCardToZone("Delver of Secrets", foe, ZoneType.Exile);
+        settle();
+        assertEquals(HumanManaAffordability.assessPayable(me, spell(delver2)), Assessment.PROVEN_UNAFFORDABLE);
+    }
+
     /** Cycling, landcycling and a hand creature's mana ability are not sources. */
     @Test
     public void handAndGraveyardAbilitiesAreNotSources() {
