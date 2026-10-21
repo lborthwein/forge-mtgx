@@ -721,6 +721,11 @@ public final class AiTape {
             if (forge.util.IdScope.isOpen()) {
                 put(r, "sc", new JsonPrimitive(1)); // inside the AI's look-ahead: built on scoped ids
             }
+            if (game.findById(card) != st.getCard()) {
+                // not the game's own card of that id: a copy (last known information, a card mid-move) or a card the AI
+                // made while deliberating. The replay builds it only where its engine makes the same copy.
+                put(r, "cp", new JsonPrimitive(1));
+            }
             return new LazyTok(this, r, null, null, false, card);
         }
         JsonObject e = null;
@@ -791,7 +796,7 @@ public final class AiTape {
                 return;
             }
             final int at = c.i;
-            final forge.game.card.Card card = game.findById(n.get("a").getAsInt());
+            final forge.game.card.Card card = n.has("cp") ? null : game.findById(n.get("a").getAsInt());
             final String st = str(n, "st");
             final forge.game.card.CardState state = card == null ? null
                     : card.getState(st == null ? forge.card.CardStateName.Original : forge.card.CardStateName.valueOf(st));
@@ -801,8 +806,8 @@ public final class AiTape {
             if (cursors.peek() == c && c.i == at) {
                 c.i++;
                 if (card == null) {
-                    // a card the AI made while deliberating (a token it imagined), never in the game: nothing to build,
-                    // and the ids its trait took are the record's next state, restored there
+                    // a copy only the AI's deliberation made, or a card it imagined (a token), never the game's own: not
+                    // built on the game's card, and the ids its trait took are the record's next state, restored there
                     lazyGone++;
                 } else {
                     // the replay's card had it already: the replay is not exact
