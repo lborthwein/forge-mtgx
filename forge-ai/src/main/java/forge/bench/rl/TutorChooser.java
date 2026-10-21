@@ -97,10 +97,10 @@ final class TutorChooser {
             if (o.has("solverCfg")) c.solverCfg = o.getAsJsonObject("solverCfg");
             if (o.has("reach")) c.reach = Boolean.parseBoolean(o.get("reach").getAsString());
             if (o.has("reachSteps")) c.reachSteps = Integer.parseInt(o.get("reachSteps").getAsString());
-            if (c.valueTop < 0 || c.maxCands < 1 || c.worlds < 1 || c.wallMs < 500 || c.wallMs > 7000 || c.threads < 1
+            if (c.valueTop < 0 || c.maxCands < 1 || c.worlds < 1 || c.wallMs < 500 || c.wallMs > 20000 || c.threads < 1
                     || !("value".equals(c.fallback) || "policy".equals(c.fallback))) {
                 throw new IllegalArgumentException("plans.chooseCfg: valueTop >= 0, maxCands >= 1, worlds >= 1, "
-                        + "wallMs 500..7000, threads >= 1, fallback value|policy");
+                        + "wallMs 500..20000, threads >= 1, fallback value|policy");
             }
             return c;
         }

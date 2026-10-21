@@ -38,7 +38,7 @@ public class TutorChooserSpecTest {
 
     @Test(expectedExceptions = IllegalArgumentException.class)
     public void aWallOverTheBudgetFails() {
-        TutorChooser.Cfg.parse(JsonParser.parseString("{\"wallMs\": \"9000\"}").getAsJsonObject());
+        TutorChooser.Cfg.parse(JsonParser.parseString("{\"wallMs\": \"25000\"}").getAsJsonObject());
     }
 
     @Test
