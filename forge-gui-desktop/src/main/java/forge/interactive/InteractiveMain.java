@@ -84,6 +84,7 @@ public final class InteractiveMain {
         try {
             config = InteractiveProtocol.readConfig(configLine);
             eventPool = InteractiveProtocol.readBeliefPool(configLine); // honest-belief-1020
+            puzzle = InteractivePuzzle.read(com.google.gson.JsonParser.parseString(configLine).getAsJsonObject());
             validateDeckFiles(config.decks());
         } catch (InteractiveProtocol.ProtocolException e) {
             InteractiveProtocol.writeBootFatal(protocolOut,
@@ -145,10 +146,16 @@ public final class InteractiveMain {
                 policy = forge.bench.rl.RlLiveSeat.connect(policySpec(), "live-" + config.session());
             }
             MyRandom.setRandom(new Random(config.seed()));
+            // lane puzzle-host-1021: a puzzle's position, checked against the card database (now up)
+            final List<String> puzzleLines = puzzle == null ? null : InteractivePuzzle.lines(puzzle, config.humanSeat());
+            if (puzzleLines != null) {
+                InteractivePuzzle.checkCards(puzzleLines);
+            }
 
-            final List<RegisteredPlayer> registered = createPlayers(config, policy);
-            final GameRules rules = new GameRules(GameType.Constructed);
-            rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
+            final List<RegisteredPlayer> registered = createPlayers(config, policy, puzzleLines);
+            final GameType gameType = puzzle == null ? GameType.Constructed : GameType.Puzzle;
+            final GameRules rules = new GameRules(gameType);
+            rules.setAppliedVariants(EnumSet.of(gameType));
             rules.setGamesPerMatch(1);
             rules.setAISideboardingEnabled(false);
             rules.setSideboardForAI(false);
@@ -209,9 +216,11 @@ public final class InteractiveMain {
 
             final CompletableFuture<Void> gameFinished = new CompletableFuture<>();
             final InteractiveGuiGame finalGui = gui;
+            final Runnable puzzleHook = puzzleLines == null ? null
+                    : InteractivePuzzle.hook(InteractivePuzzle.position(puzzle, puzzleLines, config.humanSeat()), game);
             game.getAction().invoke(() -> {
                 try {
-                    match.startGame(game);
+                    match.startGame(game, puzzleHook);
                     gameFinished.complete(null);
                 } catch (InteractiveGuiGame.GameConceded conceded) {
                     // Concede is a real Forge game action. Its outcome, not this control
@@ -219,6 +228,9 @@ public final class InteractiveMain {
                     gameFinished.complete(null);
                 } catch (InteractiveGuiGame.InteractiveAbort aborted) {
                     gameFinished.complete(null);
+                } catch (InteractivePuzzle.Refused refused) {
+                    finalGui.puzzleRefused(refused);
+                    gameFinished.completeExceptionally(refused);
                 } catch (Throwable failure) {
                     finalGui.engineFailure(failure);
                     gameFinished.completeExceptionally(failure);
@@ -241,7 +253,9 @@ public final class InteractiveMain {
             if (!gui.hasFailed()) {
                 gui.emitFinalState();
                 if (!gui.hasFailed()) {
-                    completedNormally = emitTerminal(channel, game, registered);
+                    completedNormally = emitTerminal(channel, game, registered,
+                            puzzle == null ? null : InteractivePuzzle.outcome(puzzle, game.getOutcome(), registered,
+                                    config.humanSeat()));
                 }
             }
         } catch (InteractiveProtocol.ProtocolException failure) {
@@ -484,16 +498,23 @@ public final class InteractiveMain {
     }
 
     private static List<RegisteredPlayer> createPlayers(final InteractiveProtocol.Config config,
-            final forge.bench.rl.RlLiveSeat policy) throws InteractiveProtocol.ProtocolException {
+            final forge.bench.rl.RlLiveSeat policy, final List<String> puzzleLines)
+            throws InteractiveProtocol.ProtocolException {
         final List<RegisteredPlayer> players = new ArrayList<>(2);
         for (int seat = 0; seat < 2; seat++) {
-            final Path path = config.decks().get(seat);
-            final Deck deck = DeckSerializer.fromFile(path.toFile());
-            if (deck == null) {
-                throw new InteractiveProtocol.ProtocolException("invalid_config",
-                        "could not parse deck: " + path);
+            final Deck deck;
+            if (puzzleLines != null) {
+                // lane puzzle-host-1021: the seat's own puzzle cards; the position sets every zone at the hook
+                deck = InteractivePuzzle.deckOf(puzzleLines, seat);
+            } else {
+                final Path path = config.decks().get(seat);
+                deck = DeckSerializer.fromFile(path.toFile());
+                if (deck == null) {
+                    throw new InteractiveProtocol.ProtocolException("invalid_config",
+                            "could not parse deck: " + path);
+                }
+                validateLoadedDeck(path, deck);
             }
-            validateLoadedDeck(path, deck);
             final LobbyPlayer lobbyPlayer = seat == config.humanSeat()
                     ? GamePlayerUtil.getGuiPlayer()
                     : policy != null
@@ -504,6 +525,9 @@ public final class InteractiveMain {
                                     config.aiProfile());
             final RegisteredPlayer registered = new RegisteredPlayer(deck);
             registered.setPlayer(lobbyPlayer);
+            if (puzzleLines != null) {
+                registered.setStartingHand(0);
+            }
             players.add(registered);
         }
         return players;
@@ -626,6 +650,9 @@ public final class InteractiveMain {
 
     /** honest-belief-1020: this session's event card pool (the config's beliefPool), or null: the jar's live pool. */
     static volatile InteractiveProtocol.BeliefPool eventPool;
+
+    /** Lane puzzle-host-1021: this one-seat game's puzzle position (the config's puzzle), or null: a deck game. */
+    static volatile InteractivePuzzle.Spec puzzle;
 
     /**
      * honest-belief-1020 (owner, 2026-10-20: "fix the decklist leak"): every look-ahead seat this server runs (the K8
@@ -804,6 +831,15 @@ public final class InteractiveMain {
                                         final Game game,
                                         final List<RegisteredPlayer> registered)
             throws InteractiveProtocol.ProtocolException {
+        return emitTerminal(channel, game, registered, null);
+    }
+
+    /** {@code puzzle}: a puzzle game's goal outcome for the terminal (lane puzzle-host-1021), or null. */
+    static boolean emitTerminal(final InteractiveProtocol.Channel channel,
+                                        final Game game,
+                                        final List<RegisteredPlayer> registered,
+                                        final JsonObject puzzle)
+            throws InteractiveProtocol.ProtocolException {
         final GameOutcome outcome = game.getOutcome();
         if (outcome == null) {
             channel.fatal("engine", "match returned without a GameOutcome",
@@ -823,7 +859,7 @@ public final class InteractiveMain {
             winner = seat;
         }
         channel.terminal("g1", winner, String.valueOf(outcome.getWinCondition()),
-                outcome.getLastTurnNumber(), lossesOf(outcome, registered));
+                outcome.getLastTurnNumber(), lossesOf(outcome, registered), puzzle);
         return true;
     }
 
