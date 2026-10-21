@@ -398,6 +398,43 @@ public class HumanManaAffordabilityOwnerBoardsTest extends AITest {
         }
     }
 
+    /**
+     * Round-2 review S1-1: Forest tapped, Grizzly Bears untapped, Earthcraft (tap a creature: untap a basic land) and Pulse
+     * of Llanowar (a basic land makes any colour). Pulse was set aside while no source was untapped, but Earthcraft brings
+     * the Forest back and Pulse then makes {U}: Brainstorm is not proven unpayable.
+     */
+    @Test
+    public void untapWithAProductionHookStaysUnknown() {
+        board(PhaseType.MAIN1, true);
+        mine("Forest", true);
+        mine("Grizzly Bears", false);
+        mine("Earthcraft", false);
+        mine("Pulse of Llanowar", false);
+        final Card brainstorm = hand("Brainstorm");
+        settle();
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(brainstorm)), Assessment.PROVEN_UNAFFORDABLE);
+        assertTrue(HumanManaAffordability.payable(me, spell(brainstorm)));
+    }
+
+    /**
+     * Round-2 review S1-2: three Mountains, a tapped white creature and Seeker of Skybreak (untap target creature). The
+     * untapped white creature then convokes {W}: Conclave Tribunal is not proven unpayable.
+     */
+    @Test
+    public void untapWithConvokeStaysUnknown() {
+        board(PhaseType.MAIN1, true);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        mine("Savannah Lions", true);
+        mine("Seeker of Skybreak", false);
+        theirs("Grizzly Bears", false);
+        final Card tribunal = hand("Conclave Tribunal");
+        settle();
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(tribunal)), Assessment.PROVEN_UNAFFORDABLE);
+        assertTrue(HumanManaAffordability.payable(me, spell(tribunal)));
+    }
+
     /** Cycling, landcycling and a hand creature's mana ability are not sources. */
     @Test
     public void handAndGraveyardAbilitiesAreNotSources() {

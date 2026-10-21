@@ -376,6 +376,9 @@ public final class HumanManaAffordability {
         if (hooksMatter(hooks, anySource, anySource || player.getManaPool().totalMana() > 0)) return Assessment.UNKNOWN;
         if (canMatch(shards, tokens)) return Assessment.POTENTIALLY_AFFORDABLE;
         if (unenumerated == UNENUMERATED_UNTAP) {
+            // Review S1-1: a production hook set aside for want of an untapped source acts again once the untap brings
+            // a tapped one back (Earthcraft + Pulse of Llanowar, Utopia Sprawl on a tapped land): unknown.
+            if ((hooks & HOOK_PRODUCTION) != 0) return Assessment.UNKNOWN;
             return colourImpossible(player, ability, shards, hooks, 0) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
         }
         return Assessment.PROVEN_UNAFFORDABLE;
@@ -620,7 +623,10 @@ public final class HumanManaAffordability {
         }
         if (payableWith(shards, base, units, cap)) return Assessment.POTENTIALLY_AFFORDABLE;
         if (unenumerated == UNENUMERATED_UNTAP) {
-            // Convoke pays with its creatures' colours; improvise and delve with colourless.
+            // Review S1-1: a production hook set aside for want of an untapped source acts again once the untap brings
+            // a tapped one back: unknown. S1-2: an untap can untap a creature that then convokes its colour: unknown.
+            if ((hooks & HOOK_PRODUCTION) != 0 || spell && host.hasKeyword(Keyword.CONVOKE)) return Assessment.UNKNOWN;
+            // Improvise and delve pay with colourless.
             int extra = 0;
             for (Token t : base) {
                 if (t.spellOnly() && t.colors() != LIFE_PAYMENT) extra |= t.colors();
