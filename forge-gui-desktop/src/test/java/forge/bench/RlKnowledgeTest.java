@@ -212,6 +212,62 @@ public class RlKnowledgeTest extends AITest {
         Assert.assertEquals(zone(f.obs(f.p0), RlSchema.Z_U_LIB_KNOWN).size(), 1);
     }
 
+    /** Resolves a tutor's first spell ability for {@code p} through Forge's own effect code (the bridge seat picks). */
+    private Card resolveTutor(final Fixture f, final Player p, final String tutor) {
+        final Card t = add(p, ZoneType.Hand, tutor);
+        final forge.game.spellability.SpellAbility sa = t.getFirstSpellAbility();
+        sa.setActivatingPlayer(p);
+        forge.game.ability.AbilityUtils.resolve(sa);
+        return p.getCardsIn(ZoneType.Library).get(0);
+    }
+
+    /**
+     * combo-assembly-1021 (B0): Vampiric Tutor / Imperial Seal search, shuffle, then put the picked card on top. The
+     * picker chose it, so it knows its top card (zone 17 at lib_pos 0); the opponent saw nothing (no reveal).
+     */
+    @Test
+    public void ownSearchPlacementOnTopIsKnownToThePickerOnly() {
+        final Fixture f = new Fixture();
+        fillLib(f.p0, 12);
+        final Card top = resolveTutor(f, f.p0, "Vampiric Tutor");
+        final List<int[]> z = zone(f.obs(f.p0), RlSchema.Z_U_LIB_KNOWN);
+        Assert.assertEquals(z.size(), 1, "the picked card is known");
+        Assert.assertEquals(z.get(0)[0], idx(top.getName()));
+        Assert.assertEquals(z.get(0)[1], 0, "on top");
+        Assert.assertEquals(zone(f.obs(f.p1), RlSchema.Z_O_LIB_KNOWN).size(), 0, "no reveal: the opponent knows nothing");
+        // the next shuffle forgets it, as for any known library card
+        f.p0.shuffle(null);
+        Assert.assertEquals(zone(f.obs(f.p0), RlSchema.Z_U_LIB_KNOWN).size(), 0);
+    }
+
+    /** Mystical Tutor reveals the card: the picker knows it from its pick, the opponent from the reveal. */
+    @Test
+    public void revealedSearchPlacementIsKnownToBothSeats() {
+        final Fixture f = new Fixture();
+        fillLib(f.p0, 12);
+        final Card top = resolveTutor(f, f.p0, "Mystical Tutor");
+        Assert.assertTrue(top.isInstant() || top.isSorcery(), top.getName());
+        final List<int[]> mine = zone(f.obs(f.p0), RlSchema.Z_U_LIB_KNOWN);
+        Assert.assertEquals(mine.size(), 1);
+        Assert.assertEquals(mine.get(0)[0], idx(top.getName()));
+        Assert.assertEquals(mine.get(0)[1], 0);
+        final List<int[]> theirs = zone(f.obs(f.p1), RlSchema.Z_O_LIB_KNOWN);
+        Assert.assertEquals(theirs.size(), 1, "revealed to the opponent");
+        Assert.assertEquals(theirs.get(0)[0], idx(top.getName()));
+        f.p0.drawCard();
+        Assert.assertEquals(zone(f.obs(f.p0), RlSchema.Z_U_LIB_KNOWN).size(), 0, "drawn: no longer in the library");
+    }
+
+    /** The opponent's own top-tutor teaches this seat nothing (it did not pick, and nothing was revealed). */
+    @Test
+    public void theOpponentsSearchPlacementStaysHidden() {
+        final Fixture f = new Fixture();
+        fillLib(f.p1, 12);
+        resolveTutor(f, f.p1, "Vampiric Tutor");
+        Assert.assertEquals(zone(f.obs(f.p0), RlSchema.Z_O_LIB_KNOWN).size(), 0);
+        Assert.assertEquals(zone(f.obs(f.p1), RlSchema.Z_U_LIB_KNOWN).size(), 1, "the picker itself knows it");
+    }
+
     @Test
     public void scryToBottomLeavesTheTopSegment() {
         final Fixture f = new Fixture();
