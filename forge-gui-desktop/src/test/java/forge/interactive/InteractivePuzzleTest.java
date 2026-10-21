@@ -105,7 +105,7 @@ public class InteractivePuzzleTest extends AITest {
     }
 
     @Test
-    public void badPositionsAreRefusedAsInvalidPuzzle() {
+    public void badPositionsAreRefusedAsInvalidPuzzle() throws Exception {
         final List<String[]> bad = List.of(
                 new String[] {INTRO_01, "kill", "7"},
                 new String[] {INTRO_01, "win", "6"},              // the limit before the position's turn
@@ -113,7 +113,6 @@ public class InteractivePuzzleTest extends AITest {
                 new String[] {INTRO_01, "win", "seven"},
                 new String[] {"", "win", "7"},
                 new String[] {INTRO_01.replace("turn=7\n", ""), "win", "7"},
-                new String[] {INTRO_01.replace("activephase=MAIN1", "activephase=LUNCH"), "win", "7"},
                 new String[] {INTRO_01.replace("activeplayer=human", "activeplayer=bob"), "win", "7"},
                 new String[] {INTRO_01.replace("humanlife=9", "humanlife=lots"), "win", "7"},
                 new String[] {INTRO_01 + "\nhumanfavourite=Lightning Bolt", "win", "7"},
@@ -126,6 +125,12 @@ public class InteractivePuzzleTest extends AITest {
             assertNotNull(why, "accepted: " + b[1] + "/" + b[2] + " " + b[0].substring(0, Math.min(60, b[0].length())));
             assertTrue(why.startsWith(InteractivePuzzle.REFUSED + ":"), why);
         }
+        // a phase Forge does not know: refused once Forge's localizer is up (the game start), not by the config reader
+        initAndCreateGame();
+        final String lunch = INTRO_01.replace("activephase=MAIN1", "activephase=LUNCH");
+        final String why = code(() -> InteractivePuzzle.lines(InteractivePuzzle.read(config(puzzleJson(lunch, "win", 7), "")), 0));
+        assertNotNull(why);
+        assertTrue(why.startsWith("invalid_puzzle: activephase is not a phase"), why);
         // an unknown field of the puzzle object, and a puzzle that is not an object
         assertNotNull(code(() -> InteractivePuzzle.read(config("{\"state\":\"turn=7\",\"goal\":\"win\",\"turns\":7,\"x\":1}", ""))));
         assertNotNull(code(() -> InteractivePuzzle.read(config("\"turn=7\"", ""))));

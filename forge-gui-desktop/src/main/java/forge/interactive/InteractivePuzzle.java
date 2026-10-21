@@ -123,7 +123,7 @@ final class InteractivePuzzle {
             throw refuse("puzzle.turns must be an integer");
         }
         final Spec spec = new Spec(state.getAsString(), goal.getAsString(), t);
-        lines(spec, 0); // the structure, refused here before any JVM work
+        lines(spec, 0, false); // the structure, refused here before any Forge singleton is up
         return spec;
     }
 
@@ -137,6 +137,15 @@ final class InteractivePuzzle {
      * the turn limit is reachable. For humanSeat 1 the seat keys are swapped (see the class comment).
      */
     static List<String> lines(final Spec spec, final int humanSeat) throws InteractiveProtocol.ProtocolException {
+        return lines(spec, humanSeat, true);
+    }
+
+    /**
+     * {@code phases}: check the phase names too. {@link PhaseType}'s class init needs Forge's localizer, so the config
+     * reader (before {@code FModel.initialize}) checks everything else and the game start checks the phases.
+     */
+    static List<String> lines(final Spec spec, final int humanSeat, final boolean phases)
+            throws InteractiveProtocol.ProtocolException {
         final List<String> out = new ArrayList<>();
         Integer turn = null;
         String active = null;
@@ -164,7 +173,11 @@ final class InteractivePuzzle {
                     case "turn" -> turn = parseInt(key, value, 1, 1000);
                     case "activeplayer" -> active = value.trim().toLowerCase(Locale.ROOT);
                     case "activephase" -> phase = value.trim();
-                    case "activephaseadvance" -> phaseOf(key, value);
+                    case "activephaseadvance" -> {
+                        if (phases) {
+                            phaseOf(key, value);
+                        }
+                    }
                     default -> { }
                 }
                 if (Set.of("activeplayer", "monarch", "initiative").contains(key)) {
@@ -194,7 +207,9 @@ final class InteractivePuzzle {
         if (phase == null) {
             throw refuse("puzzle.state needs activephase=");
         }
-        phaseOf("activephase", phase);
+        if (phases) {
+            phaseOf("activephase", phase);
+        }
         if (spec.turns() < turn || spec.turns() > turn + MAX_TURNS_AHEAD) {
             throw refuse("puzzle.turns must be from the position's turn (" + turn + ") to " + (turn + MAX_TURNS_AHEAD));
         }
