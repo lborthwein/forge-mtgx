@@ -136,6 +136,13 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
      * nobody knowing where the card went. Cleared when the resolving spell or ability finishes.
      */
     private final Set<Integer> arranged = new HashSet<>();
+    /**
+     * combo-assembly-1021 (B0): library cards a seat itself picked in a search of its own library for a library
+     * destination (card id -> that seat). The effect shuffles and then places the card: that placing move teaches the
+     * picker the card's position (the shuffle in between does not matter, the picker chose it). Cleared when the
+     * resolving spell or ability finishes.
+     */
+    private final Map<Integer, Integer> placed = new HashMap<>();
     public Log log;
 
     public RlKnowledge(final Game game) {
@@ -165,6 +172,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         }
         k.tail.addAll(tail);
         k.arranged.addAll(arranged);
+        k.placed.putAll(placed);
         for (Pending p : pending) {
             Player owner = null;
             if (p.handOwner != null) {
@@ -368,6 +376,17 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         }
     }
 
+    @Override
+    public void onPlaced(final Game g, final Player chooser, final Card card) {
+        if (g != game || card == null) {
+            return;
+        }
+        final int s = seatOf(chooser);
+        if (s >= 0) {
+            placed.put(card.getId(), s);
+        }
+    }
+
     // ------------------------------------------------------------------------------------------------ events
 
     private static boolean isPublic(final ZoneType z) {
@@ -389,6 +408,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
         final Player tp = to == null ? null : playerOf(to.player());
         final boolean withinLibrary = fz == ZoneType.Library && tz == ZoneType.Library && fp == tp;
         final boolean arrangedMove = withinLibrary && arranged.remove(c.getId());
+        final Integer placer = withinLibrary ? placed.remove(c.getId()) : null;
         clock++;
         for (int s = 0; s < 2; s++) {
             final Player me = seatPlayer(s);
@@ -417,6 +437,11 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
             }
             final boolean fromSeen = (fz != null && isPublic(fz)) || (fz == ZoneType.Hand && fp == me);
             if (withinLibrary) {
+                if (placer != null && placer == s) {
+                    // B0: the seat picked this card in its own search; Forge placed it after the shuffle
+                    learn(s, c, "own search placement");
+                    continue;
+                }
                 if (!arrangedMove) {
                     // put back in an order nobody chose or saw (Forge's "in a random order"): the card is still among
                     // those cards, but its position is unknown; obs-v1 has no segment, so it is forgotten
@@ -444,6 +469,7 @@ public final class RlKnowledge implements BenchSession.KnowledgeObserver {
     @Subscribe
     public void resolved(final GameEventSpellResolved ev) {
         arranged.clear();
+        placed.clear();
         settle();
     }
 

@@ -92,10 +92,18 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         public boolean defend = false;
         /** strong-opp-1020: the defender's solver config (string values; act=false is forced). */
         public JsonObject defendCfg = new JsonObject();
+        /**
+         * combo-assembly-1021 (B1), off by default (and then nothing changes): the tutor chooser
+         * ({@link TutorChooser}) answers this seat's single-card library searches when no solver line is active: Forge
+         * resolves every offered name in a copy, one value-head batch ranks them, the solver checks the top few.
+         */
+        public boolean choose = false;
+        /** combo-assembly-1021: the chooser's config ({@link TutorChooser.Cfg} keys, string values). */
+        public JsonObject chooseCfg = new JsonObject();
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
                 "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
-                "defendCfg"));
+                "defendCfg", "choose", "chooseCfg"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -119,6 +127,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("oppCfg")) s.oppCfg = o.getAsJsonObject("oppCfg");
             if (o.has("defend")) s.defend = o.get("defend").getAsBoolean();
             if (o.has("defendCfg")) s.defendCfg = o.getAsJsonObject("defendCfg");
+            if (o.has("choose")) s.choose = o.get("choose").getAsBoolean();
+            if (o.has("chooseCfg")) s.chooseCfg = o.getAsJsonObject("chooseCfg");
+            TutorChooser.Cfg.parse(s.chooseCfg); // validated here, so a bad key fails at parse time
             if (s.samples < 0 || s.temperature <= 0 || s.maxSteps < 1 || s.maxLines < 0 || s.minProvenWorlds < 1) {
                 throw new IllegalArgumentException("plans: samples >= 0, temperature > 0, maxSteps >= 1, maxLines >= 0, "
                         + "minProvenWorlds >= 1");
@@ -422,6 +433,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** strong-opp-1020: the defender (null = off) and its counters. */
     final ForcedWinSolver defender;
     int defendCalls, defendCounters, defendHolds, defendDiscards, defendErrors;
+    /** combo-assembly-1021: the tutor chooser (null = off). */
+    final TutorChooser chooser;
     final List<Double> defendMs = new ArrayList<>();
 
     // counters
@@ -459,6 +472,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         } else {
             this.defender = null;
         }
+        this.chooser = spec.choose ? new TutorChooser(TutorChooser.Cfg.parse(spec.chooseCfg), rs, me, spec.solverCfg) : null;
     }
 
     /**
@@ -638,7 +652,12 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     @Override
     public Card pick(final ZoneType destination, final List<ZoneType> origin, final SpellAbility sa,
             final CardCollection choices, final Player decider) {
-        return driver.pick(destination, origin, sa, choices, decider);
+        final Card c = driver.pick(destination, origin, sa, choices, decider);
+        if (c != null || chooser == null || !driver.solver().lineDone()) {
+            return c;
+        }
+        // combo-assembly-1021 (B1): no solver line answered: the tutor chooser, else (null) the policy's ask
+        return chooser.pick(destination, origin, sa, choices, decider);
     }
 
     @Override
@@ -735,6 +754,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         st.knownTop = driver.probe(() -> solver.knownTopCount(g));
         if (spec.solver) {
             final long a = System.nanoTime();
+            // combo-assembly-1021 (G1 attempt 2): the cards the seat knows in its library (B0's own placements and the
+            // tracker's other honest knowledge) are the solver's known top; hideOwnLibrary hides only the rest
+            solver.notePlaced(rs.knownOwnLibrary(me));
             final List<ForcedWinSolver.Proposal> props = driver.probe(() -> solver.propose(g));
             solverRuns++;
             solverMs.add((System.nanoTime() - a) / 1e6);
@@ -991,6 +1013,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.add("pointMs", dist(pointMs));
         o.add("solverMs", dist(solverMs));
         o.add("driver", driver.summary());
+        if (chooser != null) {
+            o.add("choose", chooser.summary());
+        }
         if (threat != null) {
             o.addProperty("respondPoints", respondPoints);
             o.addProperty("threat", threat.summary());

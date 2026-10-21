@@ -1987,6 +1987,28 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         return f;
     }
 
+    /**
+     * combo-assembly-1021 (G1 attempt 2): our library cards whose identity and position this seat knows (its tracker:
+     * B0's own-search placements, put-backs, arranged looks, reveals), top first. Empty without a tracker.
+     */
+    java.util.List<forge.game.card.Card> knownOwnLibrary(final Player me) {
+        return knownOwnLibrary(liveKnow, me);
+    }
+
+    static java.util.List<forge.game.card.Card> knownOwnLibrary(final RlKnowledge k, final Player me) {
+        final java.util.List<forge.game.card.Card> out = new java.util.ArrayList<>();
+        if (k == null || me == null) {
+            return out;
+        }
+        final int s = k.seatOf(me);
+        for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Library)) {
+            if (k.knows(s, c)) {
+                out.add(c);
+            }
+        }
+        return out;
+    }
+
     @Override
     public Object captureLeaf(final Object copyCtx, final Game g, final Player me) {
         final CopyCtx c = (CopyCtx) copyCtx;

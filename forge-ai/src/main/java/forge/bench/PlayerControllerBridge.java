@@ -3067,6 +3067,37 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
             CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
             Player decider) {
+        final Card c = chooseSingleCardForZoneChange0(destination, origin, sa, fetchList, delayedReveal, selectPrompt,
+                isOptional, decider);
+        observePlaced(c, destination, origin, decider);
+        return c;
+    }
+
+    /**
+     * combo-assembly-1021 (B0): a card this seat picked from its own library for a library destination is reported to
+     * the knowledge observer, whoever answered the pick (host, plan hook or Forge), so the seat keeps knowing the card
+     * Forge then shuffles and places (`ChangeZoneEffect`: shuffle, then `moveToLibrary(card, LibraryPosition)`).
+     */
+    private void observePlaced(final Card c, final ZoneType destination, final List<ZoneType> origin,
+            final Player decider) {
+        if (c == null || destination != ZoneType.Library || origin == null || !origin.contains(ZoneType.Library)
+                || decider != getPlayer() || c.getOwner() != getPlayer()) {
+            return;
+        }
+        final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
+        if (o == null || !isLiveGame()) {
+            return;
+        }
+        try {
+            o.onPlaced(getGame(), getPlayer(), c);
+        } catch (RuntimeException e) {
+            JsonRpcChannel.logErr("knowledge observer failed on a placement", e);
+        }
+    }
+
+    private Card chooseSingleCardForZoneChange0(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+            CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
+            Player decider) {
         count("chooseSingleCardForZoneChange");
         if (localAnswers() && (decider != getPlayer() || fetchList == null || fetchList.isEmpty())) {
             note(decider != getPlayer() ? "zoneChange.otherDecider" : "zoneChange.empty"); // RL census, rl-r0-b4-1006

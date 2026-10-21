@@ -141,6 +141,14 @@ public final class BenchSession {
          */
         void onLook(forge.game.Game game, forge.game.player.Player viewer, java.util.List<forge.game.card.Card> cards,
                 forge.game.zone.ZoneType destination);
+
+        /**
+         * combo-assembly-1021 (B0): {@code chooser} itself picked {@code card} in a search of its own library whose
+         * destination is its library (Vampiric Tutor, Imperial Seal, Mystical / Enlightened / Worldly Tutor): the
+         * effect then shuffles and puts the card at a fixed position, so the chooser knows where it is. Default: no-op.
+         */
+        default void onPlaced(forge.game.Game game, forge.game.player.Player chooser, forge.game.card.Card card) {
+        }
     }
 
     private KnowledgeObserver knowledgeObserver = null;
