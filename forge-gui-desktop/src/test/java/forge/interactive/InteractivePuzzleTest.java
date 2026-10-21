@@ -131,6 +131,20 @@ public class InteractivePuzzleTest extends AITest {
         final String why = code(() -> InteractivePuzzle.lines(InteractivePuzzle.read(config(puzzleJson(lunch, "win", 7), "")), 0));
         assertNotNull(why);
         assertTrue(why.startsWith("invalid_puzzle: activephase is not a phase"), why);
+        // a combat damage step has no Combat to resume: refused
+        for (String step : List.of("COMBAT_DAMAGE", "COMBAT_FIRST_STRIKE_DAMAGE")) {
+            final String dmg = INTRO_01.replace("activephase=MAIN1", "activephase=" + step);
+            final String w = code(() -> InteractivePuzzle.lines(InteractivePuzzle.read(config(puzzleJson(dmg, "win", 7), "")), 0));
+            assertEquals(w, "invalid_puzzle: activephase cannot be a combat damage step", step);
+        }
+        // more than 300 cards
+        final String many = INTRO_01.replace("aiexile=", "aiexile=" + String.join(";", java.util.Collections.nCopies(301, "Island")));
+        assertNotNull(code(() -> InteractivePuzzle.read(config(puzzleJson(many, "win", 7), ""))));
+        // spaces around a number are taken (and passed on trimmed: GameState parses them untrimmed)
+        final String spaced = INTRO_01.replace("turn=7", "turn= 7 ").replace("humanlife=9", "humanlife= 9");
+        final List<String> lines = InteractivePuzzle.lines(InteractivePuzzle.read(config(puzzleJson(spaced, "win", 7), "")), 0);
+        assertTrue(lines.contains("turn=7"), lines.toString());
+        assertTrue(lines.contains("p0life=9"), lines.toString());
         // an unknown field of the puzzle object, and a puzzle that is not an object
         assertNotNull(code(() -> InteractivePuzzle.read(config("{\"state\":\"turn=7\",\"goal\":\"win\",\"turns\":7,\"x\":1}", ""))));
         assertNotNull(code(() -> InteractivePuzzle.read(config("\"turn=7\"", ""))));
@@ -145,7 +159,7 @@ public class InteractivePuzzleTest extends AITest {
         final String typo = INTRO_01.replace("Monastery Swiftspear", "Monastery Swiftspeer");
         final String why = code(() -> InteractivePuzzle.checkCards(InteractivePuzzle.lines(spec(typo, "win"), 0)));
         assertNotNull(why);
-        assertTrue(why.startsWith("invalid_puzzle: unknown or unsupported card in p0battlefield: Monastery Swiftspeer"), why);
+        assertEquals(why, "invalid_puzzle: unknown or unsupported card in p0battlefield", "the name stays off the wire");
     }
 
     // --- the position, installed by Forge's own Puzzle -------------------------------------------------------------

@@ -54,6 +54,8 @@ final class InteractivePuzzle {
     static final int MAX_STATE = 65536;
     /** A win must come within this many turns of the position's own turn (and a survive goal end within it). */
     static final int MAX_TURNS_AHEAD = 20;
+    /** At most this many cards in the whole position (a 64 KiB state could otherwise name thousands). */
+    static final int MAX_CARDS = 300;
     /** The goal's effect card, as {@link Puzzle#addGoalEnforcement} names it. */
     static final String GOAL_CARD = "Puzzle Goal";
 
@@ -148,6 +150,7 @@ final class InteractivePuzzle {
             throws InteractiveProtocol.ProtocolException {
         final List<String> out = new ArrayList<>();
         Integer turn = null;
+        int cards = 0;
         String active = null;
         String phase = null;
         for (String raw : spec.state().split("\\R")) {
@@ -169,6 +172,8 @@ final class InteractivePuzzle {
                     throw refuse("ability scripts are not supported with humanSeat 1");
                 }
             } else if (GLOBAL_KEYS.contains(key)) {
+                // GameState parses these values untrimmed ("turn= 7" would throw inside Forge, outside the hook)
+                value = value.trim();
                 switch (key) {
                     case "turn" -> turn = parseInt(key, value, 1, 1000);
                     case "activeplayer" -> active = value.trim().toLowerCase(Locale.ROOT);
@@ -189,7 +194,14 @@ final class InteractivePuzzle {
                     throw refuse("puzzle.state has an unknown key: " + clip(key));
                 }
                 if (INT_KEYS.contains(m.group(2))) {
+                    value = value.trim();
                     parseInt(key, value, -1000, 1000);
+                }
+                if (CARD_KEYS.contains(m.group(2)) && !value.isBlank()) {
+                    cards += value.split(";").length;
+                    if (cards > MAX_CARDS) {
+                        throw refuse("puzzle.state names more than " + MAX_CARDS + " cards");
+                    }
                 }
                 if (humanSeat != 0 && Pattern.compile("(?i)(^|[|:;,=])(human|ai)($|[|;,])").matcher(value).find()) {
                     throw refuse("a card attribute naming a player (HUMAN/AI) is not supported with humanSeat 1: " + key);
@@ -237,12 +249,19 @@ final class InteractivePuzzle {
         if (value.trim().equalsIgnoreCase("none")) {
             return;
         }
+        final PhaseType phase;
         try {
-            if (PhaseType.smartValueOf(value.trim()) == null) {
+            phase = PhaseType.smartValueOf(value.trim());
+            if (phase == null) {
                 throw new IllegalArgumentException();
             }
         } catch (RuntimeException e) {
             throw refuse(key + " is not a phase: " + clip(value));
+        }
+        // A damage step has no Combat to resume (GameState builds one for declare attackers/blockers only): the next
+        // step's begin would NPE mid-game. Start at declare blockers or end of combat instead.
+        if (phase == PhaseType.COMBAT_FIRST_STRIKE_DAMAGE || phase == PhaseType.COMBAT_DAMAGE) {
+            throw refuse(key + " cannot be a combat damage step");
         }
     }
 
@@ -290,7 +309,10 @@ final class InteractivePuzzle {
                 }
                 final PaperCard pc = StaticData.instance().getCommonCards().getCard(info[0], setOf(info), artOf(info));
                 if (pc == null || pc.getRules().isUnsupported()) {
-                    throw refuse("unknown or unsupported card in " + zone.getKey() + ": " + clip(info[0]));
+                    // the name stays on stderr: a hidden zone's card must never reach the browser in the fatal's text
+                    System.err.println("[forge.interactive] puzzle refused: unknown or unsupported card in "
+                            + zone.getKey() + ": " + clip(info[0]));
+                    throw refuse("unknown or unsupported card in " + zone.getKey());
                 }
             }
         }
@@ -405,7 +427,8 @@ final class InteractivePuzzle {
                 position.applyToGame(game);
                 beginCombat(game);
             } catch (RuntimeException e) {
-                throw new Refused("the puzzle position could not be installed: " + e, e);
+                // the detail (which may name hidden cards) goes to stderr with the stack, never into the fatal's text
+                throw new Refused("the puzzle position could not be installed", e);
             } finally {
                 self.setName(was);
             }
@@ -418,6 +441,8 @@ final class InteractivePuzzle {
      * A position in the beginning of combat step has no {@code Combat} yet: GameState sets the phase without running
      * its begin (where PhaseHandler creates it), and declare attackers would then NPE on a null combat. Create it as
      * the step's begin does (CR 507). The other combat steps are GameState's own (it declares attackers/blockers).
+     * Known gap (review 103 S3-3): PhaseHandler's combat counter has no setter and stays 0, so a "first combat this
+     * turn" check does not see this combat as the first; no catalog puzzle depends on it.
      */
     static void beginCombat(final Game game) {
         final forge.game.phase.PhaseHandler ph = game.getPhaseHandler();
