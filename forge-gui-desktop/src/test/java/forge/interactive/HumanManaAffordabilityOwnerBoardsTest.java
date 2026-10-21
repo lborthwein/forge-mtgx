@@ -266,6 +266,27 @@ public class HumanManaAffordabilityOwnerBoardsTest extends AITest {
         assertEquals(flag(island), Boolean.TRUE, "the Island's own mana ability");
     }
 
+    /**
+     * 2026-10-21T17-16-51, turn 1, the AI's main phase with its Ignoble Hierarch on the stack: no lands in play, an empty
+     * pool. The only offer was Raugrin Triome's cycling ({3}, discard it); the table paused on the stack (client
+     * #1250 makes autopass skip payable:false offers). The jar must keep it false, and nothing in hand may glow.
+     */
+    @Test
+    public void owner1021_171651_cyclingLandWithNoLands() {
+        board(PhaseType.MAIN1, false);
+        theirs("Forest", true);
+        final Card triome = hand("Raugrin Triome");
+        final List<Card> rest = List.of(hand("Walking Ballista"), hand("Preordain"), hand("Island"), hand("Wheel of Fortune"),
+                hand("Sol Ring"), hand("Tendrils of Agony"));
+        settle();
+        final SpellAbility cycling = triome.getSpellAbilities().stream()
+                .filter(sa -> !sa.isLandAbility() && !sa.isSpell() && !sa.isManaAbility()).findFirst().orElseThrow();
+        cycling.setActivatingPlayer(me);
+        assertEquals(HumanManaAffordability.assessPayable(me, cycling), Assessment.PROVEN_UNAFFORDABLE, "cycling {3}");
+        assertEquals(flag(triome), Boolean.FALSE, "the Triome's control: offered (cycling), not payable");
+        for (Card card : rest) assertNotEquals(flag(card), Boolean.TRUE, card.getName() + " must not glow");
+    }
+
     // ------------------------------------------------------------------ scoping of the mana hooks
 
     /** My own Kinnan sees only nonland permanents I tap for mana: with lands alone the proof stands. */
