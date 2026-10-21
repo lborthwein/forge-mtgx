@@ -46,6 +46,12 @@ public class StrongOppLiveSpecTest {
         Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("plans.defendCfg.wolrds=4")));
         Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("plans.defendCfg.prior=/tmp/x.json")));
         Assert.assertThrows(IllegalArgumentException.class,
-                () -> RlLiveSeat.Spec.parse(spec("plans.defendCfg.defendMs=1,plans.defendCfg.defendMs=2")));
+                () -> RlLiveSeat.Spec.parse(spec("plans.defendCfg.defendMs=1000,plans.defendCfg.defendMs=2000")));
+        // review S3-2: the wall stays 500..6000 ms live (0 would turn it off)
+        Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("plans.defendCfg.defendMs=0")));
+        Assert.assertThrows(IllegalArgumentException.class, () -> RlLiveSeat.Spec.parse(spec("plans.defendCfg.defendMs=7000")));
+        // review S3-6: prior=none is recorded, so a second prior key is refused
+        Assert.assertThrows(IllegalArgumentException.class,
+                () -> RlLiveSeat.Spec.parse(spec("plans.defendCfg.prior=none,plans.defendCfg.prior=jar")));
     }
 }

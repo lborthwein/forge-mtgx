@@ -153,8 +153,14 @@ public final class ForcedWinSolver {
          * {@link #answerDiscardP}), ms; past it the threat worlds stop, and a decision that could not finish has no opinion.
          */
         public long defendMs = 0;
-        /** strong-opp-1020: the defense's opponent reader is the JVM-wide shared one ({@link #SHARED_OPP_READER}). */
+        /** strong-opp-1020: the defense's opponent reader is the JVM-wide shared one ({@link #sharedOppReader}). */
         public boolean sharedReader = false;
+        /**
+         * strong-opp-1020 (review S2-4; off by default): the defense may HOLD, i.e. pass priority to keep its counter
+         * when a bigger threat is likely still to come. Off: a "hold" verdict only declines to counter (no opinion), so
+         * the seat's other responses stay its own.
+         */
+        public boolean hold = false;
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -189,6 +195,7 @@ public final class ForcedWinSolver {
             c.tieBreakTurns = intOr(get.apply("tieBreakTurns"), c.tieBreakTurns);
             c.defendMs = intOr(get.apply("defendMs"), (int) c.defendMs);
             c.sharedReader = "true".equals(get.apply("sharedReader"));
+            c.hold = "true".equals(get.apply("hold"));
             return c;
         }
 
@@ -288,7 +295,7 @@ public final class ForcedWinSolver {
         this.cfg = cfg;
         this.reader = shared != null ? shared : new ForcedWinModel.Reader();
         this.reader.seed = cfg.seed;
-        this.oppReader = cfg.sharedReader ? SHARED_OPP_READER : new ForcedWinModel.Reader();
+        this.oppReader = cfg.sharedReader ? sharedOppReader() : new ForcedWinModel.Reader();
     }
 
     public Config config() {
@@ -699,19 +706,26 @@ public final class ForcedWinSolver {
      * strong-opp-1020: one opponent-card affordance reader for every defender in this JVM (affordances depend only on the
      * card name; the probe cache then survives from game to game). Its card lookup is synchronized.
      */
-    static final ForcedWinModel.Reader SHARED_OPP_READER = sharedOppReader();
+    /** strong-opp-1020 (review S3-5): a lazy holder, loaded only by a defender with sharedReader on; never throws. */
+    private static final class SharedOppReader {
+        static final ForcedWinModel.Reader R = load();
+    }
+
+    static ForcedWinModel.Reader sharedOppReader() {
+        return SharedOppReader.R;
+    }
 
     /** strong-opp-1020: the jar's precomputed affordances of the mush cube's cards (absent = learn on first use). */
     public static final String AFFORDANCE_CACHE = "/forge/ai/simulation/defend-affordances-mush.json";
 
-    private static ForcedWinModel.Reader sharedOppReader() {
+    private static ForcedWinModel.Reader load() {
         final ForcedWinModel.Reader r = new ForcedWinModel.Reader();
         try (java.io.InputStream in = ForcedWinSolver.class.getResourceAsStream(AFFORDANCE_CACHE)) {
             if (in != null) {
                 final int n = r.preload(new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
                 receipt("FORCED_WIN affordance cache preloaded " + n);
             }
-        } catch (java.io.IOException | RuntimeException e) {
+        } catch (Throwable e) {
             receipt("FORCED_WIN affordance cache not loaded: " + e);
         }
         return r;
@@ -869,6 +883,11 @@ public final class ForcedWinSolver {
             final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
             lim.nodes = cfg.nodes / 2;
             lim.horizon = (pos.sorcerySpeed ? 2 : 3) + cfg.threatExtraTurns;
+            lim.ms = cfg.planMs;
+            if (defendDeadline != 0) {
+                // review S3-1: a world's width search never runs past the defense's wall
+                lim.ms = Math.max(1, Math.min(lim.ms, (defendDeadline - System.nanoTime()) / 1_000_000L));
+            }
             final ForcedWinPlanner.Result res = ForcedWinPlanner.plan(pos, lim);
             ran++;
             if (!res.lines.isEmpty()) {
@@ -913,6 +932,16 @@ public final class ForcedWinSolver {
 
     /** Our counterspell for the opponent's spell on top when resolving it gives them a forced win; else no opinion. */
     private Decision defendCounter(Game live) {
+        return defendCounter(live, false);
+    }
+
+    /**
+     * {@code live}: strong-opp-1020's defense ({@link #defend}): the counter is chosen by {@link #counterForLive} (hard
+     * before soft, a soft one only when they cannot pay, no bounce counters, mana cost before an alternative cost); both
+     * threat checks must have run a world; a "hold" verdict only declines unless {@link Config#hold}. The ForcedWin
+     * profiles' own defense (live false) is unchanged.
+     */
+    private Decision defendCounter(Game live, boolean strongOpp) {
         if (!cfg.defense || !cfg.forced) {
             return Decision.NONE;
         }
@@ -921,7 +950,7 @@ public final class ForcedWinSolver {
         if (top == null || top.getActivatingPlayer() == me || !top.isSpell() || si.getId() == defendedStackId) {
             return Decision.NONE;
         }
-        final SpellAbility counter = counterFor(live, top);
+        final SpellAbility counter = strongOpp ? counterForLive(live, top) : counterFor(live, top);
         if (counter == null) {
             return Decision.NONE;
         }
@@ -931,6 +960,11 @@ public final class ForcedWinSolver {
         // their forced-win chance if it resolves, and if it is countered (the spell gone)
         final Threat resolves = threat(live, opp, top.getHostCard(), null, false, cfg.defenseWorlds);
         final Threat countered = threat(live, opp, null, List.of(top.getHostCard()), false, cfg.defenseWorlds);
+        if (strongOpp && (resolves.worlds == 0 || countered.worlds == 0)) {
+            // review S3-4: a check that ran no world says nothing (a failed "countered" check must not read as 0)
+            receipt("FORCED_WIN defense" + tag() + " spell=" + top.getHostCard().getName() + " no worlds ran: no opinion");
+            return Decision.NONE;
+        }
         final double delta = resolves.p - countered.p;
         final String verdict = delta >= cfg.counterDelta ? "counter" : countered.p >= cfg.counterDelta ? "hold" : "native";
         receipt("FORCED_WIN defense" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " spell=" + top.getHostCard().getName()
@@ -944,6 +978,9 @@ public final class ForcedWinSolver {
         if ("hold".equals(verdict)) {
             // a bigger threat is likely still to come: keep the counter for it
             holds++;
+            if (strongOpp && !cfg.hold) {
+                return Decision.NONE; // review S2-4: decline the counter only; the seat's other responses stay its own
+            }
             return Decision.PASS;
         }
         return Decision.NONE;
@@ -960,14 +997,15 @@ public final class ForcedWinSolver {
                 return Decision.NONE;
             }
             startDeadline();
-            final Decision d = defendCounter(live);
+            final Decision d = defendCounter(live, true);
             if (defendCut) {
                 defendCuts++;
                 receipt("FORCED_WIN defend cut at the deadline: no opinion");
                 return Decision.NONE;
             }
             return d;
-        } catch (RuntimeException | StackOverflowError e) {
+        } catch (Throwable e) {
+            // review S2-2: nothing the defense does may reach the game thread; the seat decides as before
             receipt("FORCED_WIN defend error " + e);
             return Decision.NONE;
         } finally {
@@ -981,8 +1019,26 @@ public final class ForcedWinSolver {
      * the card that lowers it most. Null (no opinion) when they have no line now or no card lowers it.
      */
     public CardCollection answerDiscardP(Player p, SpellAbility sa, CardCollection valid, int min, int max) {
+        return answerDiscardP(p, sa, valid, min, max, null);
+    }
+
+    /**
+     * As above; {@code visibleToChooser}: the cards the effect showed us (null = none said). Review S2-1: the threat
+     * check reads their real hand only when the effect revealed ALL of it; otherwise no opinion (the policy chooses),
+     * so no unrevealed hand card ever reaches the defense.
+     */
+    public CardCollection answerDiscardP(Player p, SpellAbility sa, CardCollection valid, int min, int max,
+            CardCollectionView visibleToChooser) {
         if (!cfg.defense || p == me || sa == null || sa.getActivatingPlayer() != me || valid == null || valid.isEmpty()
                 || max != 1) {
+            return null;
+        }
+        try {
+            if (visibleToChooser == null || !revealsWholeHand(p, visibleToChooser)) {
+                receipt("FORCED_WIN discardP: the effect did not reveal the whole hand: no opinion");
+                return null;
+            }
+        } catch (Throwable e) {
             return null;
         }
         final long t0 = System.nanoTime();
@@ -1044,12 +1100,86 @@ public final class ForcedWinSolver {
             final CardCollection out = new CardCollection();
             out.add(best);
             return out;
-        } catch (RuntimeException e) {
+        } catch (Throwable e) {
+            // review S2-2: nothing reaches the game thread; the policy chooses
             receipt("FORCED_WIN discardP error " + e);
         } finally {
             defendDeadline = 0;
         }
         return null;
+    }
+
+    /** Review S2-1: every card in their hand is among the cards the effect showed us. */
+    private static boolean revealsWholeHand(Player p, CardCollectionView visible) {
+        final Set<Integer> shown = new HashSet<>();
+        for (Card c : visible) {
+            shown.add(c.getId());
+        }
+        for (Card c : p.getCardsIn(ZoneType.Hand)) {
+            if (!shown.contains(c.getId())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * strong-opp-1020 (review S2-3): the counter for {@link #defend}: hard counters (no "unless they pay", the spell to
+     * the graveyard or exile) first; a soft one ({@code UnlessCost}) only when they cannot pay it from their available
+     * mana (not sure = can pay); bounce counters (the spell back to hand or library: Remand, Memory Lapse) never; among
+     * equals, a mana cost before an alternative cost (Force of Will's pitch, Daze's Island).
+     */
+    private SpellAbility counterForLive(Game g, SpellAbility top) {
+        SpellAbility best = null;
+        int bestRank = Integer.MAX_VALUE;
+        final Player opp = top.getActivatingPlayer();
+        for (Card c : me.getCardsIn(ZoneType.Hand)) {
+            for (SpellAbility sa : c.getAllPossibleAbilities(me, true)) {
+                if (sa.getApi() != ApiType.Counter || !sa.usesTargeting()) {
+                    continue;
+                }
+                final String dest = sa.getParamOrDefault("Destination", "Graveyard");
+                if (!"Graveyard".equals(dest) && !"Exile".equals(dest)) {
+                    continue; // Remand, Memory Lapse: the spell comes back
+                }
+                int rank = 0;
+                if (sa.hasParam("UnlessCost")) {
+                    if (opponentCanPay(opp, sa.getParam("UnlessCost"))) {
+                        continue;
+                    }
+                    rank += 10;
+                }
+                if (sa.getAlternativeCost() != null) {
+                    rank += 1;
+                }
+                if (rank >= bestRank) {
+                    continue;
+                }
+                final SpellAbility cs = sa.copy(me);
+                cs.setActivatingPlayer(me);
+                if (!cs.canTargetSpellAbility(top)) {
+                    continue;
+                }
+                cs.resetTargets();
+                cs.getTargets().add(top);
+                if (!cs.canPlay() || !ComputerUtilCost.canPayCost(cs, me, false)) {
+                    continue;
+                }
+                best = cs;
+                bestRank = rank;
+            }
+        }
+        return best;
+    }
+
+    /** Review S2-3: can they pay a counter's "unless" cost from their available mana? Not sure = yes. */
+    static boolean opponentCanPay(Player opp, String unlessCost) {
+        try {
+            final int n = Integer.parseInt(unlessCost.trim());
+            return forge.ai.ComputerUtilMana.getAvailableManaEstimate(opp, false) >= n;
+        } catch (RuntimeException e) {
+            return true;
+        }
     }
 
     private void startDeadline() {

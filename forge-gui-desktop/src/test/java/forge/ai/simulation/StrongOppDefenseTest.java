@@ -96,10 +96,91 @@ public class StrongOppDefenseTest extends AITest {
             final SpellAbility sa = ts.getFirstSpellAbility();
             sa.setActivatingPlayer(me);
             final CardCollection valid = new CardCollection(opp.getCardsIn(ZoneType.Hand));
-            final CardCollection took = s.answerDiscardP(opp, sa, valid, 1, 1);
+            final CardCollection took = s.answerDiscardP(opp, sa, valid, 1, 1, new CardCollection(opp.getCardsIn(ZoneType.Hand)));
             Assert.assertNotNull(took, "worlds=" + worlds + ": their Bolt is lethal, the discard has an opinion");
             Assert.assertEquals(took.get(0).getName(), "Lightning Bolt", "worlds=" + worlds);
         }
+    }
+
+    /** Review S2-1: an effect that did not reveal the whole hand gets no opinion (never the real unrevealed cards). */
+    @Test
+    public void aPartialRevealGetsNoOpinion() {
+        final Game g = ForcedWinSolverTest.game("Default", "Default",
+                ForcedWinSolverTest.frame("Thoughtseize", "Swamp", 3, "Grizzly Bears;Lightning Bolt", "Mountain;Forest;Forest", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final Player opp = g.getPlayers().get(1);
+        final ForcedWinSolver s = new ForcedWinSolver(me, defendCfg());
+        final SpellAbility sa = ForcedWinSolverTest.inZone(me, ZoneType.Hand, "Thoughtseize").getFirstSpellAbility();
+        sa.setActivatingPlayer(me);
+        final CardCollection valid = new CardCollection(opp.getCardsIn(ZoneType.Hand));
+        final CardCollection bears = new CardCollection(ForcedWinSolverTest.inZone(opp, ZoneType.Hand, "Grizzly Bears"));
+        Assert.assertNull(s.answerDiscardP(opp, sa, valid, 1, 1, bears), "only the Bears were shown: no opinion");
+        Assert.assertNull(s.answerDiscardP(opp, sa, valid, 1, 1, null), "nothing said shown: no opinion");
+    }
+
+    /** Review S2-2: an Error inside the defense (a deep recursion) never reaches the caller; no opinion. */
+    @Test
+    public void anErrorInsideTheDefenseIsNoOpinion() {
+        final Game g = boltAtUs(3, "Counterspell", "Island;Island", "Lightning Bolt");
+        final ForcedWinSolver s = new ForcedWinSolver(g.getPlayers().get(0), defendCfg());
+        s.redraw = (live, liveMe, copy, cm, rng) -> {
+            throw new StackOverflowError("test");
+        };
+        Assert.assertFalse(s.defend(g).owned);
+        final Game d = ForcedWinSolverTest.game("Default", "Default",
+                ForcedWinSolverTest.frame("Thoughtseize", "Swamp", 3, "Grizzly Bears;Lightning Bolt", "Mountain;Forest;Forest", 20, "human"));
+        final Player me = d.getPlayers().get(0);
+        final Player opp = d.getPlayers().get(1);
+        final ForcedWinSolver t = new ForcedWinSolver(me, defendCfg());
+        t.redraw = (live, liveMe, copy, cm, rng) -> {
+            throw new StackOverflowError("test");
+        };
+        final SpellAbility sa = ForcedWinSolverTest.inZone(me, ZoneType.Hand, "Thoughtseize").getFirstSpellAbility();
+        sa.setActivatingPlayer(me);
+        final CardCollection hand = new CardCollection(opp.getCardsIn(ZoneType.Hand));
+        Assert.assertNull(t.answerDiscardP(opp, sa, hand, 1, 1, hand));
+    }
+
+    /** Review S2-3: a hard counter before a soft one they can pay; a soft one when they cannot; never a bounce counter. */
+    @Test
+    public void itPicksTheCounterThatWorks() {
+        // they have two untapped Mountains (they can pay Daze's 1): Counterspell, not Daze
+        final Game g = boltAtUs(3, "Daze;Counterspell", "Island;Island", "Lightning Bolt");
+        final ForcedWinSolver.Decision d = new ForcedWinSolver(g.getPlayers().get(0), defendCfg()).defend(g);
+        Assert.assertTrue(d.owned);
+        Assert.assertEquals(d.action.getHostCard().getName(), "Counterspell");
+        // Daze alone against a player who can pay: no counter that works, no opinion
+        final Game g2 = boltAtUs(3, "Daze", "Island;Island", "Lightning Bolt");
+        Assert.assertFalse(new ForcedWinSolver(g2.getPlayers().get(0), defendCfg()).defend(g2).owned);
+        // Daze alone, their Mountains tapped: Daze works
+        final String f = ForcedWinSolverTest.frame("Daze", "Island;Island", 3, "", "Mountain|Tapped;Mountain|Tapped", 20, "ai")
+                + "aiputonstack=Lightning Bolt->human\n";
+        final Game g3 = ForcedWinSolverTest.game("Default", "Default", f);
+        final ForcedWinSolver.Decision d3 = new ForcedWinSolver(g3.getPlayers().get(0), defendCfg()).defend(g3);
+        Assert.assertTrue(d3.owned);
+        Assert.assertEquals(d3.action.getHostCard().getName(), "Daze");
+        // Remand only (the spell comes back): never
+        final Game g4 = boltAtUs(3, "Remand", "Island;Island", "Lightning Bolt");
+        Assert.assertFalse(new ForcedWinSolver(g4.getPlayers().get(0), defendCfg()).defend(g4).owned);
+    }
+
+    /** Review S2-4: a "hold" verdict declines the counter only (no opinion) unless hold is on (then it passes). */
+    @Test
+    public void aHoldOnlyDeclinesUnlessHoldIsOn() {
+        final String lib = "Lightning Bolt;Lightning Bolt;Lightning Bolt;Lightning Bolt;Lightning Bolt;Lightning Bolt;"
+                + "Lightning Bolt;Lightning Bolt;Lightning Bolt;Lightning Bolt";
+        final String f = "[state]\nturn=7\nactiveplayer=ai\nactivephase=MAIN1\nhumanlife=3\nailife=20\nhumanlandsplayed=0\n"
+                + "ailandsplayed=0\naihand=Lightning Bolt\nailibrary=" + lib + "\naigraveyard=\naiexile=\n"
+                + "aibattlefield=Mountain;Mountain;Forest;Forest\nhumanhand=Counterspell\nhumanbattlefield=Island;Island\n"
+                + "humangraveyard=\nhumanexile=\nhumanlibrary=" + ForcedWinSolverTest.OURLIB + "\naiputonstack=Grizzly Bears\n";
+        final Game g = ForcedWinSolverTest.game("Default", "Default", f);
+        final ForcedWinSolver off = new ForcedWinSolver(g.getPlayers().get(0), defendCfg());
+        Assert.assertFalse(off.defend(g).owned, "hold off: the seat keeps every other response");
+        Assert.assertEquals(off.holds, 1, "the verdict was hold");
+        final Game g2 = ForcedWinSolverTest.game("Default", "Default", f);
+        final ForcedWinSolver.Decision on = new ForcedWinSolver(g2.getPlayers().get(0), defendCfg("hold", "true")).defend(g2);
+        Assert.assertTrue(on.owned);
+        Assert.assertNull(on.action, "hold on: pass to keep the counter");
     }
 
     @Test

@@ -421,7 +421,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     int respondPoints;
     /** strong-opp-1020: the defender (null = off) and its counters. */
     final ForcedWinSolver defender;
-    int defendCalls, defendCounters, defendHolds, defendDiscards;
+    int defendCalls, defendCounters, defendHolds, defendDiscards, defendErrors;
     final List<Double> defendMs = new ArrayList<>();
 
     // counters
@@ -446,7 +446,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         this.threat = spec.opp ? new forge.ai.simulation.ThreatCheck(spec.oppConfig()) : null;
         if (spec.defend) {
             this.defender = new ForcedWinSolver(me, spec.defendConfig());
-            final ForcedWinSolver.Redraw prior = spec.defendCfg.has("prior")
+            final ForcedWinSolver.Redraw prior = spec.defendCfg.has("prior") && !"none".equals(spec.defendCfg.get("prior").getAsString())
                     ? rs.ls().opponentRedrawPrior(loadSyn(spec.defendCfg.get("prior").getAsString()),
                             spec.defendCfg.has("priorGain") ? Double.parseDouble(spec.defendCfg.get("priorGain").getAsString()) : 20.0,
                             spec.defendCfg.has("priorFillBasics") && "true".equals(spec.defendCfg.get("priorFillBasics").getAsString()))
@@ -496,7 +496,17 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         if (defender != null && !me.getGame().getStack().isEmpty() && !driver.solver().lineActive()) {
             final long t0 = System.nanoTime();
             final int c0 = defender.counters, h0 = defender.holds, k0 = defender.threatChecks;
-            final ForcedWinSolver.Decision d = driver.probe(() -> defender.defend(me.getGame()));
+            ForcedWinSolver.Decision d;
+            try {
+                d = driver.probe(() -> defender.defend(me.getGame()));
+            } catch (Throwable e) {
+                // review S2-2: the defense never reaches the game thread; the seat decides as before
+                d = null;
+                defendErrors++;
+            }
+            if (d == null) {
+                return PlayerControllerBridge.NO_OPINION;
+            }
             if (defender.threatChecks != k0) {
                 defendCalls++;
                 defendMs.add((System.nanoTime() - t0) / 1e6);
@@ -577,11 +587,23 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     @Override
     public CardCollection discard(final Player p, final SpellAbility sa, final CardCollection valid, final int min,
             final int max) {
+        return discard(p, sa, valid, min, max, null);
+    }
+
+    @Override
+    public CardCollection discard(final Player p, final SpellAbility sa, final CardCollection valid, final int min,
+            final int max, final CardCollectionView visibleToChooser) {
         if (defender == null) {
             return null;
         }
         final long t0 = System.nanoTime();
-        final CardCollection r = driver.probe(() -> defender.answerDiscardP(p, sa, valid, min, max));
+        CardCollection r;
+        try {
+            r = driver.probe(() -> defender.answerDiscardP(p, sa, valid, min, max, visibleToChooser));
+        } catch (Throwable e) {
+            r = null; // review S2-2: the policy chooses
+            defendErrors++;
+        }
         defendMs.add((System.nanoTime() - t0) / 1e6);
         if (r != null) {
             defendDiscards++;
@@ -935,6 +957,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             o.addProperty("defendDiscards", defendDiscards);
             o.addProperty("defendThreatChecks", defender.threatChecks);
             o.addProperty("defendCuts", defender.defendCuts);
+            o.addProperty("defendErrors", defendErrors);
             double mx = 0, sum = 0;
             for (double x : defendMs) {
                 mx = Math.max(mx, x);

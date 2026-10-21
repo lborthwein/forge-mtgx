@@ -171,6 +171,15 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return null;
         }
 
+        /**
+         * strong-opp-1020 (review S2-1): as above, with the cards the effect showed the chooser (null = not said). The
+         * default ignores them (every existing hook unchanged).
+         */
+        default CardCollection discard(Player p, SpellAbility sa, CardCollection valid, int min, int max,
+                CardCollectionView visibleToChooser) {
+            return discard(p, sa, valid, min, max);
+        }
+
         default Boolean confirm(SpellAbility sa, String message) {
             return null;
         }
@@ -2914,7 +2923,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
     public CardCollection chooseCardsToDiscardFrom(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
         count("chooseCardsToDiscardFrom");
         if (planHook != null && bridged()) {
-            final CardCollection h = planHook.discard(playerDiscard, sa, validCards, min, max);
+            final CardCollection h = planHook.discard(playerDiscard, sa, validCards, min, max, visibleToChooser);
             if (h != null) {
                 return h; // search-bones-1015
             }

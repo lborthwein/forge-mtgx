@@ -101,7 +101,8 @@ public final class RlLiveSeat {
          * the jar's co-draft table ({@code jar} = {@link PlanSearch#DEFEND_PRIOR}) or {@code none}.
          */
         public static final java.util.Map<String, String> LIVE_DEFEND_KEYS = new java.util.TreeMap<>(java.util.Map.of(
-                "prior", "jar|none", "priorGain", "\\d{1,3}(\\.\\d+)?", "tieBreakTurns", "[0-2]", "defendMs", "\\d{1,5}",
+                "prior", "jar|none", "priorGain", "\\d{1,3}(\\.\\d+)?", "tieBreakTurns", "[0-2]",
+                "defendMs", "[5-9]\\d\\d|[1-5]\\d{3}|6000",
                 "sharedReader", "true|false", "priorFillBasics", "true|false", "defenseWorlds", "[1-8]",
                 "counterDelta", "0(\\.\\d+)?|1(\\.0+)?", "threatExtraTurns", "[0-2]", "planMs", "\\d{1,5}"));
 
@@ -137,10 +138,9 @@ public final class RlLiveSeat {
                     throw new IllegalArgumentException("policySearch: " + k + " twice");
                 }
                 if ("prior".equals(dk)) {
-                    if ("jar".equals(v)) {
-                        dc.addProperty(dk, PlanSearch.DEFEND_PRIOR);
-                    }
-                    return; // none: no prior (the belief's uniform re-draw)
+                    // jar = the jar's co-draft table; none = recorded (so a second prior key is refused), no prior
+                    dc.addProperty(dk, "jar".equals(v) ? PlanSearch.DEFEND_PRIOR : "none");
+                    return;
                 }
                 dc.addProperty(dk, v);
                 return;
@@ -275,6 +275,10 @@ public final class RlLiveSeat {
             }
             if (s.loopGuard < 0) {
                 throw new IllegalArgumentException("policySearch: loopGuard >= 0 (0 = off)");
+            }
+            if (c.plans != null && c.plans.has("defend") && c.plans.get("defend").getAsBoolean() && !"uniform".equals(c.belief)) {
+                // strong-opp-1020 (review S3-3): the defense reads the honest belief, or it would fall back to their real deck
+                throw new IllegalArgumentException("policySearch: plans.defend needs the honest belief (belief=uniform)");
             }
             if (c.plans != null) {
                 // sb-live-1018: live S-b never searches on our real library order (the r6 leak fix)
