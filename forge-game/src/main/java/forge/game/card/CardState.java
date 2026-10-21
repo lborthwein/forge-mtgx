@@ -520,10 +520,7 @@ public class CardState implements GameObject, IHasSVars, ITranslatable {
 
         CardTypeView type = getTypeWithChanges();
         if (type.isLand()) {
-            if (landAbility == null) {
-                landAbility = new LandAbility(card, this);
-            }
-            newCol.add(landAbility);
+            newCol.add(lazyLand());
         } else if (type.isAura()) {
             newCol.add(getAuraSpell());
         } else if (type.isPermanent()) {
@@ -533,19 +530,54 @@ public class CardState implements GameObject, IHasSVars, ITranslatable {
                 return;
             }
 
-            if (permanentAbility == null) {
-                permanentAbility = new SpellPermanent(card, this);
-            }
-            newCol.add(permanentAbility);
+            newCol.add(lazyPermanent());
+        }
+    }
+
+    private SpellAbility lazyLand() {
+        if (landAbility == null) {
+            final Object lz = LazyTraits.before(this, "land");
+            landAbility = new LandAbility(card, this);
+            LazyTraits.after(lz);
+        }
+        return landAbility;
+    }
+
+    private SpellAbility lazyPermanent() {
+        if (permanentAbility == null) {
+            final Object lz = LazyTraits.before(this, "permanent");
+            permanentAbility = new SpellPermanent(card, this);
+            LazyTraits.after(lz);
+        }
+        return permanentAbility;
+    }
+
+    /** Build the lazily built trait {@code kind} (a {@link LazyTraits} kind) now, if it is not built yet. */
+    void buildLazy(final String kind) {
+        if (kind.startsWith("landMana:")) {
+            getLandManaForColor(MagicColor.Color.valueOf(kind.substring("landMana:".length())));
+            return;
+        }
+        switch (kind) {
+        case "land" -> lazyLand();
+        case "permanent" -> lazyPermanent();
+        case "aura" -> getAuraSpell();
+        case "loyalty" -> getLoyaltyRep();
+        case "defense" -> getDefenseRep();
+        case "saga" -> getSagaRep();
+        // the card's own (shield, stun and finality counters) and the global rules' (adventure, omen) replacements
+        default -> getReplacementEffects();
         }
     }
 
     public SpellAbility getLandManaForColor(MagicColor.Color c) {
         return landManaAbilities.computeIfAbsent(c, a -> {
+            final Object lz = LazyTraits.before(this, "landMana:" + a.name());
             String abString  = "AB$ Mana | Cost$ T | Produced$ " + a.getShortName() +
                     " | Secondary$ True | SpellDescription$ Add " + a.getSymbol() + ".";
             SpellAbility sa = AbilityFactory.getAbility(abString, this);
             sa.setIntrinsic(true); // always intrinsic
+            LazyTraits.after(lz);
             return sa;
         });
     }
@@ -633,10 +665,7 @@ public class CardState implements GameObject, IHasSVars, ITranslatable {
         if (type.isAura()) {
             return getAuraSpell();
         }
-        if (permanentAbility == null) {
-            permanentAbility = new SpellPermanent(card, this);
-        }
-        return permanentAbility;
+        return lazyPermanent();
     }
 
     public final SpellAbility getAuraSpell() {
@@ -645,6 +674,7 @@ public class CardState implements GameObject, IHasSVars, ITranslatable {
             return null;
         }
         if (auraAbility == null) {
+            final Object lz = LazyTraits.before(this, "aura");
             String desc = "";
             String extra = "";
             for (KeywordInterface ki : this.getCachedKeyword(Keyword.ENCHANT)) {
@@ -665,6 +695,7 @@ public class CardState implements GameObject, IHasSVars, ITranslatable {
             String st = "SP$ Attach | ValidTgts$ Card.CanBeEnchantedBy,Player.CanBeEnchantedBy | TgtZone$ Battlefield,Graveyard | ValidTgtsDesc$ " + desc + extra;
             auraAbility = AbilityFactory.getAbility(st, this);
             auraAbility.setIntrinsic(true);
+            LazyTraits.after(lz);
         }
         return this.auraAbility;
     }
@@ -754,13 +785,17 @@ public class CardState implements GameObject, IHasSVars, ITranslatable {
         // below are global rules
         if (type.hasSubtype("Adventure")) {
             if (this.adventureRep == null) {
+                final Object lz = LazyTraits.before(this, "adventure");
                 adventureRep = CardFactoryUtil.setupAdventureAbility(this);
+                LazyTraits.after(lz);
             }
             result.add(adventureRep);
         }
         if (type.hasSubtype("Omen")) {
             if (this.omenRep == null) {
+                final Object lz = LazyTraits.before(this, "omen");
                 omenRep = CardFactoryUtil.setupOmenAbility(this);
+                LazyTraits.after(lz);
             }
             result.add(omenRep);
         }
@@ -789,19 +824,25 @@ public class CardState implements GameObject, IHasSVars, ITranslatable {
 
     public ReplacementEffect getLoyaltyRep() {
         if (loyaltyRep == null) {
+            final Object lz = LazyTraits.before(this, "loyalty");
             loyaltyRep = CardFactoryUtil.makeEtbCounter("etbCounter:LOYALTY:" + this.baseLoyalty, this, true);
+            LazyTraits.after(lz);
         }
         return loyaltyRep;
     }
     public ReplacementEffect getDefenseRep() {
         if (defenseRep == null) {
+            final Object lz = LazyTraits.before(this, "defense");
             defenseRep = CardFactoryUtil.makeEtbCounter("etbCounter:DEFENSE:" + this.baseDefense, this, true);
+            LazyTraits.after(lz);
         }
         return defenseRep;
     }
     public ReplacementEffect getSagaRep() {
         if (sagaRep == null) {
+            final Object lz = LazyTraits.before(this, "saga");
             sagaRep = CardFactoryUtil.makeEtbCounter("etbCounter:LORE:1", this, true);
+            LazyTraits.after(lz);
         }
         return sagaRep;
     }

@@ -187,6 +187,9 @@ public class InteractiveAiTapeTest extends AITest {
     }
 
     private static void assertForcedClean(final Run r, final int entries) {
+        for (JsonObject o : r.status) {
+            System.out.println("[tape-status] " + o);
+        }
         assertTrue(r.ok, "the forced replay completes: " + r.status);
         assertTrue(r.status("divergence").isEmpty(), "no divergence: " + r.status("divergence"));
         final List<JsonObject> ends = r.status("end");
@@ -198,6 +201,15 @@ public class InteractiveAiTapeTest extends AITest {
             used += e.get("used").getAsInt();
         }
         assertEquals(used, entries);
+    }
+
+    /** Both seats' forced replay was exact: nothing drifted, nothing ran ahead of the record (but combat-view ids). */
+    private static boolean exact(final Run r) {
+        boolean all = true;
+        for (JsonObject e : r.status("end")) {
+            all &= e.has("exact") && e.get("exact").getAsBoolean();
+        }
+        return all;
     }
 
     // ------------------------------------------------------------------------------------------------ games
@@ -216,6 +228,7 @@ public class InteractiveAiTapeTest extends AITest {
             final Run forced = watch(cfg, tapeFile(rec.tape));
             assertForcedClean(forced, rec.tape.size());
             assertSameStream(forced.stream, rec.stream, "the forced replay is the game");
+            assertTrue(exact(forced), "on the same AI the forced replay is exact: " + forced.status("end"));
             System.err.println("[tape-test] classic: " + rec.tape.size() + " entries, "
                     + rec.tape.stream().mapToInt(String::length).sum() + " bytes");
         });
@@ -233,6 +246,9 @@ public class InteractiveAiTapeTest extends AITest {
                 final Run forced = watch(config(722161002L, "Default", "lookahead"), tapeFile(rec.tape));
                 assertForcedClean(forced, rec.tape.size());
                 assertSameStream(forced.stream, rec.stream, "forced, it is the recorded game");
+                // the game is the record's; its exactness is reported, never assumed (a card's lazily built abilities
+                // take later ids where the record's AI built them while deliberating: the replay says inexact)
+                System.out.println("[tape-test] other-AI forced exact=" + exact(forced));
             });
         });
     }
@@ -252,6 +268,7 @@ public class InteractiveAiTapeTest extends AITest {
                 final Run forced = watch(config(722161003L, "Default", "lookahead"), tapeFile(tape));
                 assertForcedClean(forced, tape.size());
                 assertSameStream(forced.stream, stream[0], "forced on another search, it is the recorded game");
+                System.out.println("[tape-test] cheaper-search forced exact=" + exact(forced));
             });
         });
     }
@@ -277,6 +294,51 @@ public class InteractiveAiTapeTest extends AITest {
             assertEquals(div.get(0).get("s").getAsInt(), 1);
             assertFalse(forced.stream.contains("\"type\":\"terminal\""), "the game stops there");
         });
+    }
+
+    // ------------------------------------------------------------------------------------------------ upstream drift
+
+    /**
+     * AiTapeController's forced execution bodies copy PlayerControllerAi's (review forge-mtgx#110 S3 #7). These are the
+     * originals' text as the copies were made from them: when an upstream sync changes one, this fails, and the copy in
+     * AiTapeController must be brought in line before the pin here is moved.
+     */
+    @Test
+    public void theForcedBodiesMirrorTheirOriginals() throws Exception {
+        final String src = Files.readString(Path.of("../forge-ai/src/main/java/forge/ai/PlayerControllerAi.java"), StandardCharsets.UTF_8);
+        final String[][] pins = {
+                {"public boolean playChosenSpellAbility(SpellAbility sa) {", "6801c55b72b6ae33"},
+                {"public void playSpellAbilityNoStack(SpellAbility effectSA, boolean canSetupTargets) {", "3f6ba6033e2beea2"},
+                {"public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {", "2e9a06ae128aec2c"},
+                {"private boolean prepareSingleSaUntaped(final Card host, SpellAbility sa, boolean isMandatory) {", "85e757ad9ace5d23"},
+                {"public boolean playTrigger(Card host, WrappedAbility wrapperAbility, boolean isMandatory) {", "b54fb880090478a0"},
+                {"public boolean playSaFromPlayEffect(SpellAbility tgtSA) {", "25ae78233882cdf1"},
+                {"public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) {", "2cd61af1a041ca66"},
+                {"public boolean payManaCost(ManaCost toPay, CostPartMana costPartMana, SpellAbility sa, String prompt /* ai needs hints as well */, ManaConversionMatrix matrix, boolean effect) {", "03d7956e2f68a1d2"},
+                {"public boolean payCombatCost(Card c, Cost cost, SpellAbility sa, String prompt) {", "f2ed41ad7866bd19"},
+        };
+        for (String[] pin : pins) {
+            final int i = src.indexOf(pin[0]);
+            assertTrue(i >= 0, "PlayerControllerAi no longer has: " + pin[0]);
+            int k = src.indexOf('{', i);
+            int depth = 0;
+            for (; ; k++) {
+                final char ch = src.charAt(k);
+                if (ch == '{') {
+                    depth++;
+                } else if (ch == '}' && --depth == 0) {
+                    break;
+                }
+            }
+            final byte[] d = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(src.substring(i, k + 1).getBytes(StandardCharsets.UTF_8));
+            final StringBuilder hex = new StringBuilder();
+            for (int b = 0; b < 8; b++) {
+                hex.append(String.format("%02x", d[b]));
+            }
+            assertEquals(hex.toString(), pin[1], "PlayerControllerAi changed: bring AiTapeController's forced copy of " + pin[0]
+                    + " in line, then re-pin");
+        }
     }
 
     // ------------------------------------------------------------------------------------------------ the sync state

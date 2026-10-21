@@ -79,6 +79,15 @@ final class AiTapePlays {
     }
 
     static SpellAbility decode(final Game g, final Player seat, final JsonObject o) {
+        return decode(g, seat, o, false);
+    }
+
+    /**
+     * {@code idsShifted}: this replay's ability ids already ran ahead of the record's (the replay is then marked
+     * inexact): every later id is offset, so an ability is matched by its description alone. Otherwise its id must be
+     * the record's.
+     */
+    static SpellAbility decode(final Game g, final Player seat, final JsonObject o, final boolean idsShifted) {
         final int hostId = o.get("h").getAsInt();
         final Card host = (Card) AiTapeCodec.deref(g, "c" + hostId);
         final String d = AiTape.str(o, "d");
@@ -89,10 +98,33 @@ final class AiTapePlays {
             }
         }
         final boolean nm = o.has("nm") && o.get("nm").getAsBoolean();
-        final SpellAbility sa = IdScope.detached(() -> find(host, seat, d, oc, nm));
-        if (sa == null) {
+        final int sid0 = o.has("sid") && o.getAsJsonArray("sid").size() > 0 ? o.getAsJsonArray("sid").get(0).getAsInt() : -1;
+        final List<SpellAbility> found = IdScope.detached(() -> find(host, seat, d, oc, nm));
+        if (found.isEmpty()) {
             throw new IllegalStateException("card " + hostId + " offers no ability like the record's (" + d + ")");
         }
+        // the record's own ability by its id (review forge-mtgx#110 item 6: two abilities may share a description), else a
+        // variant rebuilt here; an existing ability of another id is not the record's
+        SpellAbility pick = null;
+        for (SpellAbility c : found) {
+            if (c.getId() == sid0) {
+                pick = c;
+                break;
+            }
+        }
+        if (pick == null) {
+            for (SpellAbility c : found) {
+                if (c.getId() >= SCOPED) {
+                    pick = c;
+                    break;
+                }
+            }
+        }
+        if (pick == null && sid0 >= 0 && !idsShifted) {
+            throw new IllegalStateException("card " + hostId + "'s ability like the record's has id " + found.get(0).getId()
+                    + ", the record's " + sid0);
+        }
+        final SpellAbility sa = pick != null ? pick : found.get(0);
         // a variant rebuilt here (scoped ids) takes the live variant's ids
         if (o.has("sid")) {
             final JsonArray sid = o.getAsJsonArray("sid");
@@ -134,7 +166,8 @@ final class AiTapePlays {
         return sa;
     }
 
-    private static SpellAbility find(final Card host, final Player seat, final String d, final List<String> oc, final boolean nm) {
+    private static List<SpellAbility> find(final Card host, final Player seat, final String d, final List<String> oc, final boolean nm) {
+        final List<SpellAbility> out = new ArrayList<>();
         final List<SpellAbility> candidates = new ArrayList<>();
         for (SpellAbility base : host.getAllPossibleAbilities(seat, false)) {
             base.setActivatingPlayer(seat);
@@ -164,9 +197,9 @@ final class AiTapePlays {
                 v = GameActionUtil.addOptionalCosts(v, vals);
             }
             if (AiTapeCodec.descOf(v).equals(d)) {
-                return v;
+                out.add(v);
             }
         }
-        return null;
+        return out;
     }
 }

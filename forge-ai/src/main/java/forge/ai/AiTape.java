@@ -170,6 +170,10 @@ public final class AiTape {
     private long recordNanos;
     private String divergence;
     private final List<String> driftNotes = new ArrayList<>();
+    private int resync;
+    private final java.util.TreeSet<String> driftFields = new java.util.TreeSet<>();
+    private final java.util.TreeSet<String> resyncFields = new java.util.TreeSet<>();
+    private final java.util.TreeSet<String> aheadFields = new java.util.TreeSet<>();
 
     /** Which sync fields differ (record vs replay), by name. */
     static String syncDiff(final String want, final String got) {
@@ -305,6 +309,7 @@ public final class AiTape {
     public void install() {
         installed.add(this);
         DecisionTap.install(DISPATCH);
+        forge.game.card.LazyTraits.install(LAZY_TAP);
         final JsonObject o = new JsonObject();
         o.addProperty("format", FORMAT);
         o.addProperty("mode", resume ? (strict ? "restore" : "resume") : mode == Mode.RECORD ? "record" : "forced");
@@ -324,6 +329,7 @@ public final class AiTape {
         installed.remove(this);
         if (installed.isEmpty()) {
             DecisionTap.install(null);
+            forge.game.card.LazyTraits.install(null);
         }
     }
 
@@ -373,7 +379,35 @@ public final class AiTape {
     }
 
     /** Restore {@code s} (from {@link #sync}); returns how many counters were already past it. */
+    private static final String[] SYNC_FIELDS = {"rng", "cid", "hid", "ts", "gameIds", "saIds", "stackIds", "trigIds", "replIds",
+        "staticIds", "combatIds"};
+
+    /** Restore {@code s}; the names of the counters that were already past it go into {@code aheadFields}. */
     private int restore(final String s) {
+        final int[] before = GlobalIds.capture();
+        final int[] cidBefore = game.peekCardIdCounters();
+        final long tsBefore = game.getTimestamp();
+        final int n = restoreCounting(s);
+        if (n > 0) {
+            final String[] p = s.split("\\.");
+            if (cidBefore[0] > Integer.parseUnsignedInt(p[1], 16)) aheadFields.add("cid");
+            if (cidBefore[1] > Integer.parseUnsignedInt(p[2], 16)) aheadFields.add("hid");
+            if (tsBefore > Long.parseUnsignedLong(p[3], 16)) aheadFields.add("ts");
+            for (int i = 0; i < before.length && 4 + i < p.length; i++) {
+                final int want = Integer.parseUnsignedInt(p[4 + i], 16);
+                // CombatView counts down
+                if (i == before.length - 1 ? before[i] < want : before[i] > want) aheadFields.add(SYNC_FIELDS[4 + i]);
+            }
+        }
+        return n;
+    }
+
+    /** Has this replay's {@code field} counter ever been ahead of the record's (see {@link #restore})? */
+    boolean aheadOn(final String field) {
+        return aheadFields.contains(field);
+    }
+
+    private int restoreCounting(final String s) {
         final String[] p = s.split("\\.");
         final String r = p[0];
         final int g = r.indexOf('g');
@@ -478,6 +512,9 @@ public final class AiTape {
 
     /** The next entry, which must be of kind {@code k} and detail {@code m}; its start state restored. */
     JsonObject take(final String k, final String m) {
+        if (!LAZY.equals(k)) {
+            applyLazyAhead();
+        }
         final JsonArray list = cursors.isEmpty() ? tape : cursors.peek().list;
         final int at = cursors.isEmpty() ? forcedTop : cursors.peek().i;
         if (cursors.isEmpty()) {
@@ -498,14 +535,31 @@ public final class AiTape {
         } else {
             cursors.peek().i++;
         }
-        final String pre = e.has("pre") ? str(e, "pre") : lastPost;
+        // An entry that records its start state (`pre`) started elsewhere than the last entry left the game: in the record
+        // something ran in between, Forge's engine or (inside an execution) Forge AI's own deliberation, which a forced
+        // replay skips; restoring it is a RESYNC. An entry without one started where the last left it: a replay that is
+        // elsewhere there has DRIFTED (something outside the tape ran differently), and its replay is not exact.
+        final boolean explicit = e.has("pre");
+        final String pre = explicit ? str(e, "pre") : lastPost;
         if (pre != null) {
             final String now = sync();
             if (!pre.equals(now)) {
-                drift++;
+                final String diff = syncDiff(pre, now);
+                for (String part : diff.split(" ")) {
+                    for (String f : SYNC_FIELDS) {
+                        if (part.equals(f)) {
+                            (explicit ? resyncFields : driftFields).add(f);
+                        }
+                    }
+                }
+                if (explicit) {
+                    resync++;
+                } else {
+                    drift++;
+                }
                 if (driftNotes.size() < 8) {
-                    driftNotes.add((cursors.isEmpty() ? "n" + (forcedTop - 1) : "child") + " " + what(ek, em) + " T"
-                            + game.getPhaseHandler().getTurn() + ": " + syncDiff(pre, now));
+                    driftNotes.add((explicit ? "resync " : "drift ") + (cursors.isEmpty() ? "n" + (forcedTop - 1) : "child") + " "
+                            + what(ek, em) + " T" + game.getPhaseHandler().getTurn() + ": " + diff);
                 }
                 ahead += restore(pre);
             }
@@ -522,7 +576,15 @@ public final class AiTape {
         cursors.push(new Cur(e.has("sub") ? e.getAsJsonArray("sub") : new JsonArray(), exec));
     }
 
+    /** An entry whose forced run threw: its cursor goes, whatever it left (the game stops at the divergence). */
+    void abandon(final JsonObject e) {
+        if (!cursors.isEmpty()) {
+            cursors.pop();
+        }
+    }
+
     void leave(final JsonObject e) {
+        applyLazyAhead();
         final Cur c = cursors.pop();
         if (c.i < c.list.size()) {
             final JsonObject next = c.list.get(c.i).getAsJsonObject();
@@ -540,12 +602,213 @@ public final class AiTape {
             }
             lastPost = post;
         }
-        forcedEntries++;
+        if (!LAZY.equals(str(e, "k"))) {
+            forcedEntries++;
+        }
         if (resume && cursors.isEmpty()) {
             // the resumed game's own journal keeps its forced decisions too (a restore's host already has them)
             final JsonObject echo = e.deepCopy();
             echo.addProperty("r", 1);
             out.println(PREFIX + echo);
+        }
+    }
+
+    /** {@link #take} for an entry that runs nothing of its own (a choice): the traits the AI built deciding it, built. */
+    JsonObject takeChoice(final String k, final String m) {
+        final JsonObject e = take(k, m);
+        applyLazySub(e);
+        return e;
+    }
+
+    /** {@code e}'s recorded trait builds (a choice's, or what an execution the replay skips built), built here. */
+    void applyLazySub(final JsonObject e) {
+        if (!e.has("sub")) {
+            return;
+        }
+        final Cur c = new Cur(e.getAsJsonArray("sub"), false);
+        cursors.push(c);
+        try {
+            applyLazyAhead();
+        } finally {
+            cursors.remove(c);
+        }
+    }
+
+    // ------------------------------------------------------------------ lazily built traits
+
+    /*
+     * Forge builds some of a card's traits on their first query (LazyTraits: a land's or permanent's spell, its mana
+     * abilities, the counter and adventure replacements), taking ids from the process-wide counters. The live game's AI
+     * often asks first, while deliberating; a forced replay does not deliberate, so the engine would build the trait
+     * later, on other ids, and the replay would run ahead of its record (review forge-mtgx#110). So the record notes
+     * each trait built inside an entry (a "lazy" child: kind, card id, the state it started from), and the replay
+     * builds it at the same place: where the engine builds it too, as it does; where only the AI did, the replay
+     * builds it itself, before the next recorded decision.
+     */
+    static final String LAZY = "lazy";
+    private int lazyDepth;
+    private int decodeDepth;
+    private int lazyMissed;
+    private int lazyGone;
+
+    private static final class LazyTok {
+        final AiTape tape;
+        final Object rec;
+        final JsonObject e;
+        final Object prevScope;
+        final boolean swapped;
+        final int card;
+
+        LazyTok(final AiTape tape, final Object rec, final JsonObject e, final Object prevScope, final boolean swapped,
+                final int card) {
+            this.tape = tape;
+            this.rec = rec;
+            this.e = e;
+            this.prevScope = prevScope;
+            this.swapped = swapped;
+            this.card = card;
+        }
+    }
+
+    private static final forge.game.card.LazyTraits.Listener LAZY_TAP = new forge.game.card.LazyTraits.Listener() {
+        @Override
+        public Object before(final forge.game.card.CardState st, final String kind) {
+            for (AiTape t : installed) {
+                if (st.getCard().getGame() == t.game && Thread.currentThread() == t.gameThread && t.divergence == null) {
+                    final Object tok = t.lazyBefore(st, kind);
+                    if (tok != null) {
+                        return tok;
+                    }
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public void after(final Object token) {
+            if (token instanceof LazyTok lt) {
+                lt.tape.lazyAfter(lt);
+            }
+        }
+    };
+
+    /** Decode a recorded answer: lookups only, so anything it builds takes scoped ids (never the game's own). */
+    <T> T decoding(final Supplier<T> body) {
+        decodeDepth++;
+        try {
+            return forge.util.IdScope.detached(body);
+        } finally {
+            decodeDepth--;
+        }
+    }
+
+    private Object lazyBefore(final forge.game.card.CardState st, final String kind) {
+        final int card = st.getCard().getId();
+        final String state = st.getStateName() == forge.card.CardStateName.Original ? null : st.getStateName().name();
+        if (lazyDepth > 0) {
+            // built as part of another trait's build (recorded, and replayed, with it)
+            return null;
+        }
+        if (mode == Mode.RECORD) {
+            if (open.isEmpty()) {
+                return null; // the engine's, between decisions: the replay's engine builds it at the same place
+            }
+            lazyDepth++;
+            final Object r = begin(LAZY, kind, false);
+            if (state != null) {
+                put(r, "st", new JsonPrimitive(state));
+            }
+            if (forge.util.IdScope.isOpen()) {
+                put(r, "sc", new JsonPrimitive(1)); // inside the AI's look-ahead: built on scoped ids
+            }
+            return new LazyTok(this, r, null, null, false, card);
+        }
+        JsonObject e = null;
+        if (!cursors.isEmpty()) {
+            final Cur c = cursors.peek();
+            if (c.i < c.list.size()) {
+                final JsonObject n = c.list.get(c.i).getAsJsonObject();
+                if (LAZY.equals(str(n, "k")) && kind.equals(str(n, "m")) && n.get("a").getAsInt() == card
+                        && java.util.Objects.equals(state, str(n, "st"))) {
+                    e = take(LAZY, kind);
+                }
+            }
+        }
+        if (e == null) {
+            if (cursors.isEmpty() && decodeDepth == 0) {
+                return null; // the engine's, between decisions, as in the record
+            }
+            lazyMissed("a trait built where the record built none (" + kind + ")");
+        }
+        lazyDepth++;
+        // where the record built it on scoped ids, so does the replay; anywhere else on the game's own (never a decode's)
+        final Object prev = forge.util.IdScope.capture();
+        final boolean scoped = e != null && e.has("sc");
+        if (scoped) {
+            forge.util.IdScope.open();
+        } else if (prev != null) {
+            forge.util.IdScope.install(null);
+        }
+        return new LazyTok(this, null, e, prev, scoped || prev != null, card);
+    }
+
+    private void lazyAfter(final LazyTok t) {
+        lazyDepth--;
+        if (t.rec != null) {
+            end(t.rec, new JsonPrimitive(t.card));
+            return;
+        }
+        if (t.swapped) {
+            forge.util.IdScope.install(t.prevScope);
+        }
+        if (t.e != null) {
+            done(t.e);
+        }
+    }
+
+    private void lazyMissed(final String why) {
+        lazyMissed++;
+        drift++;
+        driftFields.add(LAZY);
+        if (driftNotes.size() < 8) {
+            driftNotes.add("drift " + why + " T" + game.getPhaseHandler().getTurn());
+        }
+    }
+
+    /**
+     * Build the record's trait builds next at the open cursor that the replay's engine has not built by now, the latest
+     * place they can go (the next recorded decision, or the frame's end): the engine builds its own where the record's
+     * did, and only what the AI alone built is left (review forge-mtgx#110).
+     */
+    private void applyLazyAhead() {
+        while (!cursors.isEmpty() && divergence == null && lazyDepth == 0) {
+            final Cur c = cursors.peek();
+            if (c.i >= c.list.size()) {
+                return;
+            }
+            final JsonObject n = c.list.get(c.i).getAsJsonObject();
+            if (!LAZY.equals(str(n, "k"))) {
+                return;
+            }
+            final int at = c.i;
+            final forge.game.card.Card card = game.findById(n.get("a").getAsInt());
+            final String st = str(n, "st");
+            final forge.game.card.CardState state = card == null ? null
+                    : card.getState(st == null ? forge.card.CardStateName.Original : forge.card.CardStateName.valueOf(st));
+            if (state != null) {
+                forge.game.card.LazyTraits.build(state, str(n, "m"));
+            }
+            if (cursors.peek() == c && c.i == at) {
+                c.i++;
+                if (card == null) {
+                    // a card the AI made while deliberating (a token it imagined), never in the game: nothing to build,
+                    // and the ids its trait took are the record's next state, restored there
+                    lazyGone++;
+                } else {
+                    // the replay's card had it already: the replay is not exact
+                    lazyMissed("a recorded trait build the replay could not make (" + str(n, "m") + ")");
+                }
+            }
         }
     }
 
@@ -600,17 +863,40 @@ public final class AiTape {
             o.addProperty("used", forcedTop);
             o.addProperty("forced", forcedEntries);
             o.addProperty("drift", drift);
+            o.add("driftFields", strings(driftFields));
+            o.addProperty("resync", resync);
+            o.add("resyncFields", strings(resyncFields));
+            o.add("aheadFields", strings(aheadFields));
+            // exact: no drift and nothing ahead but the combat views' ids (negative view ids, never game state)
+            o.addProperty("exact", onlyCombatViews(driftFields) && onlyCombatViews(aheadFields));
             if (!driftNotes.isEmpty()) {
                 final JsonArray dn = new JsonArray();
                 driftNotes.forEach(dn::add);
                 o.add("driftNotes", dn);
             }
             o.addProperty("ahead", ahead);
+            o.addProperty("lazyMissed", lazyMissed);
+            o.addProperty("lazyGone", lazyGone);
             if (divergence != null) {
                 o.addProperty("divergence", divergence);
             }
         }
         emit("end", o);
+    }
+
+    private static JsonArray strings(final java.util.Collection<String> xs) {
+        final JsonArray a = new JsonArray();
+        xs.forEach(a::add);
+        return a;
+    }
+
+    private static boolean onlyCombatViews(final java.util.Collection<String> fields) {
+        for (String f : fields) {
+            if (!"combatIds".equals(f)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void emit(final String what, final JsonObject o) {
@@ -645,10 +931,10 @@ public final class AiTape {
             }
             return d;
         }
-        final JsonObject e = take("cost", m);
+        final JsonObject e = takeChoice("cost", m);
         final PaymentDecision d;
         try {
-            d = AiTapeCodec.decision(game, e.get("a"));
+            d = decoding(() -> AiTapeCodec.decision(game, e.get("a")));
         } catch (Divergence x) {
             throw x;
         } catch (RuntimeException x) {
@@ -671,10 +957,10 @@ public final class AiTape {
             }
             return ma;
         }
-        final JsonObject e = take("mana", null);
+        final JsonObject e = takeChoice("mana", null);
         final SpellAbility ma;
         try {
-            ma = AiTapeCodec.manaChoice(game, options, e.get("a"));
+            ma = decoding(() -> AiTapeCodec.manaChoice(game, options, e.get("a")));
         } catch (RuntimeException x) {
             throw diverge("mana source: " + x.getMessage());
         }
@@ -689,9 +975,12 @@ public final class AiTape {
             end(r, safe(() -> AiTapeCodec.config(game, seat, sa)));
             return;
         }
-        final JsonObject e = take("cfg", where);
+        final JsonObject e = takeChoice("cfg", where);
         try {
-            AiTapeCodec.applyConfig(game, seat, sa, e.get("a"));
+            decoding(() -> {
+                AiTapeCodec.applyConfig(game, seat, sa, e.get("a"));
+                return null;
+            });
         } catch (RuntimeException x) {
             throw diverge("targets of " + AiTapeCodec.saWhat(sa) + ": " + x.getMessage());
         }
@@ -713,7 +1002,7 @@ public final class AiTape {
             }
             return o;
         }
-        final JsonObject e = take("order", null);
+        final JsonObject e = takeChoice("order", null);
         final List<SpellAbility> o;
         try {
             o = AiTapeCodec.pick(sas, e.get("a"));
@@ -770,7 +1059,21 @@ public final class AiTape {
             return false;
         }
         enter(e, true);
-        final boolean got = nonAi.getAsBoolean();
+        final boolean got;
+        boolean ok = false;
+        try {
+            got = nonAi.getAsBoolean();
+            ok = true;
+        } catch (Divergence x) {
+            throw x;
+        } catch (IllegalStateException | IllegalArgumentException | NullPointerException | ClassCastException
+                 | IndexOutOfBoundsException x) {
+            throw diverge("a recorded trigger could not be prepared: " + x.getClass().getSimpleName());
+        } finally {
+            if (!ok) {
+                abandon(e);
+            }
+        }
         leave(e);
         if (!got) {
             throw diverge("a trigger the record prepared could not be prepared in the replay");

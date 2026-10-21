@@ -89,7 +89,7 @@ import java.util.function.Supplier;
  * Everything that is not a decision (reveals, notifications, the AI's state, the cost decision maker itself) is the
  * inner controller's in both modes. Without a tape this class is never created.
  */
-public final class AiTapeController extends PlayerControllerAi {
+public final class AiTapeController extends PlayerControllerAi implements AiCostDecision.PaymentDecisions {
     private final PlayerControllerAi inner;
     private final AiTape tape;
 
@@ -141,10 +141,12 @@ public final class AiTapeController extends PlayerControllerAi {
             }
             return v;
         }
-        final JsonObject e = tape.take("m", m);
+        final JsonObject e = tape.takeChoice("m", m);
         final T v;
         try {
-            v = dec.apply(e.get("a"));
+            // decoding only checks and looks up (legality, candidates): whatever it builds takes scoped ids, never the
+            // game's own, which the record's next state names (review #110: a forced replay ran ahead of its record)
+            v = tape.decoding(() -> dec.apply(e.get("a")));
         } catch (AiTape.Divergence x) {
             throw x;
         } catch (RuntimeException x) {
@@ -178,18 +180,45 @@ public final class AiTapeController extends PlayerControllerAi {
         }
         final JsonObject e = tape.take("m", m);
         final JsonElement a = e.get("a");
-        AiTapeCodec.checkEncodable(a);
-        if (shortcut != null) {
-            final T s = shortcut.apply(a);
-            if (s != null) {
-                tape.done(e);
-                return s;
+        try {
+            AiTapeCodec.checkEncodable(a);
+            if (shortcut != null) {
+                final T s = shortcut.apply(a);
+                if (s != null) {
+                    tape.applyLazySub(e);
+                    tape.done(e);
+                    return s;
+                }
             }
+        } catch (AiTape.Divergence x) {
+            throw x;
+        } catch (RuntimeException x) {
+            throw tape.diverge(m + ": " + x.getMessage());
         }
         tape.enter(e, true);
-        final T v = forced.get();
+        final T v;
+        boolean ok = false;
+        try {
+            v = forced.get();
+            ok = true;
+        } catch (AiTape.Divergence x) {
+            throw x;
+        } catch (IllegalStateException | IllegalArgumentException | NullPointerException | ClassCastException
+                 | IndexOutOfBoundsException x) {
+            // the record forced a state the execution could not take: that decision's divergence, never a raw failure
+            throw tape.diverge(m + " could not run as recorded: " + x.getClass().getSimpleName());
+        } finally {
+            if (!ok) {
+                tape.abandon(e);
+            }
+        }
         tape.leave(e);
-        final JsonElement got = enc.apply(v);
+        final JsonElement got;
+        try {
+            got = enc.apply(v);
+        } catch (RuntimeException x) {
+            throw tape.diverge(m + ": " + x.getMessage());
+        }
         if (a != null && !a.equals(got)) {
             throw tape.diverge(m + " returned " + got + " in the replay, " + a + " live");
         }
@@ -330,7 +359,7 @@ public final class AiTapeController extends PlayerControllerAi {
             }
             final List<SpellAbility> out = new ArrayList<>();
             for (JsonElement x : e.getAsJsonArray()) {
-                out.add(AiTapePlays.decode(g(), getPlayer(), x.getAsJsonObject()));
+                out.add(AiTapePlays.decode(g(), getPlayer(), x.getAsJsonObject(), tape.aheadOn("saIds")));
             }
             return out;
         });
@@ -451,8 +480,10 @@ public final class AiTapeController extends PlayerControllerAi {
 
     @Override
     public CardCollection orderBlocker(final Card attacker, final Card blocker, final CardCollection oldBlockers) {
-        final CardCollection all = new CardCollection(oldBlockers);
-        all.add(blocker);
+        final CardCollection all = oldBlockers == null ? new CardCollection() : new CardCollection(oldBlockers);
+        if (blocker != null) {
+            all.add(blocker);
+        }
         return choice("orderBlocker", () -> inner.orderBlocker(attacker, blocker, oldBlockers), this::cards, e -> amongCards(all, e));
     }
 
@@ -585,8 +616,12 @@ public final class AiTapeController extends PlayerControllerAi {
     public CardCollection chooseCardsForEffectMultiple(final Map<String, CardCollection> validMap, final SpellAbility sa,
             final String title, final boolean isOptional) {
         final CardCollection all = new CardCollection();
-        for (CardCollection c : validMap.values()) {
-            all.addAll(c);
+        if (validMap != null) {
+            for (CardCollection c : validMap.values()) {
+                if (c != null) {
+                    all.addAll(c);
+                }
+            }
         }
         return choice("chooseCardsForEffectMultiple", () -> inner.chooseCardsForEffectMultiple(validMap, sa, title, isOptional),
                 this::cards, e -> amongCards(all, e));
@@ -886,7 +921,7 @@ public final class AiTapeController extends PlayerControllerAi {
     @Override
     public List<AbilitySub> chooseModeForAbility(final SpellAbility sa, final List<AbilitySub> possible, final int min, final int num,
             final boolean allowRepeat) {
-        final List<AbilitySub> offered = new ArrayList<>(possible);
+        final List<AbilitySub> offered = possible == null ? new ArrayList<>() : new ArrayList<>(possible);
         return choice("chooseModeForAbility", () -> inner.chooseModeForAbility(sa, possible, min, num, allowRepeat), v -> {
             if (v == null) {
                 return JsonNull.INSTANCE;
@@ -1141,6 +1176,12 @@ public final class AiTapeController extends PlayerControllerAi {
     }
 
     // ------------------------------------------------------------------ execution: runs in both modes
+    //
+    // The forced bodies below are PlayerControllerAi's own (playChosenSpellAbility, playSpellAbilityNoStack, playTrigger
+    // with prepareSingleSa, playSaFromPlayEffect, orderAndPlaySimultaneousSa, payCostToPreventEffect, payManaCost,
+    // payCombatCost in PlayerControllerAi.java) without the AI's own choices, which the record supplies. An upstream sync
+    // that changes those originals must change these too: InteractiveAiTapeTest.theForcedBodiesMirrorTheirOriginals pins
+    // the originals' text and fails when one moves.
 
     @Override
     public void playSpellAbilityNoStack(final SpellAbility effectSA, final boolean canSetupTargets) {
@@ -1263,6 +1304,16 @@ public final class AiTapeController extends PlayerControllerAi {
     public boolean helpPayForAssistSpell(final ManaCostBeingPaid cost, final SpellAbility sa, final int max, final int requested) {
         return exec("helpPayForAssistSpell", () -> inner.helpPayForAssistSpell(cost, sa, max, requested),
                 () -> inner.helpPayForAssistSpell(cost, sa, max, requested), AiTapeController::bool, null);
+    }
+
+    /**
+     * The policy seat's own cost decisions (review forge-mtgx#110 S1): {@link AiCostDecision#forPayment} asks the payer's
+     * controller, which is this one; the bridged seat's are its inner controller's ({@code SeatCostDecision}). Null for
+     * any other seat, as before the swap: then Forge AI's own.
+     */
+    @Override
+    public AiCostDecision costDecisionForPayment(final Player payer, final SpellAbility sa, final boolean effect) {
+        return inner instanceof AiCostDecision.PaymentDecisions pd ? pd.costDecisionForPayment(payer, sa, effect) : null;
     }
 
     /** LobbyPlayer identity is the inner controller's (the same object). */
