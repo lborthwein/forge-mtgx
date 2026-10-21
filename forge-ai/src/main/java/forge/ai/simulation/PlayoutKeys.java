@@ -106,6 +106,13 @@ public final class PlayoutKeys {
             return r;
         }
 
+        /** Lane replay-record-1021: continue this stream, in place, from a {@link #snapshot()} (the AI tape's forced replay). */
+        public synchronized void restore(long[] snap) {
+            s = snap[0];
+            haveNextNextGaussian = snap[1] != 0;
+            nextNextGaussian = Double.longBitsToDouble(snap[2]);
+        }
+
         public synchronized String state() {
             return Long.toHexString(s) + (haveNextNextGaussian ? "g" + Double.doubleToLongBits(nextNextGaussian) : "");
         }

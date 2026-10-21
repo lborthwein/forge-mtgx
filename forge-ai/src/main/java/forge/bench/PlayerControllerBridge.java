@@ -4078,6 +4078,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
 
     /** PlayerControllerAi.prepareSingleSa (private there), with the seat choosing the targets afterwards. */
     private boolean prepareForSeat(final SpellAbility sa0, final boolean isMandatory) {
+        // lane replay-record-1021: taped as PlayerControllerAi.prepareSingleSa is (a forced replay prepares it the same way)
+        return forge.ai.AiTape.prepare(getPlayer(), () -> prepareForSeatUntaped(sa0, isMandatory));
+    }
+
+    private boolean prepareForSeatUntaped(final SpellAbility sa0, final boolean isMandatory) {
         SpellAbility sa = sa0;
         final Card host = sa.getHostCard();
         if (sa.getApi() == forge.game.ability.ApiType.Charm) {

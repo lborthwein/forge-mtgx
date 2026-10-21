@@ -67,6 +67,10 @@ public class Game {
     private static int maxId = 0;
     private static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.GAME); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
+    /** Lane replay-record-1021 (forge.game.GlobalIds): the process-wide counter, read and restored by the AI tape. */
+    public static int peekMaxId() { return maxId; }
+    public static void dangerouslySetMaxId(final int v) { maxId = v; }
+
     private boolean noGUIUser;
 
     /** The ID. */
@@ -559,6 +563,12 @@ public class Game {
     public void dangerouslySyncCardIdCounters(Game from) {
         this.cardIdCounter = from.cardIdCounter;
         this.hiddenCardIdCounter = from.hiddenCardIdCounter;
+    }
+
+    /** Lane replay-record-1021: restore the fresh-card-id counters to a recorded state (the AI tape's forced replay). */
+    public void dangerouslySetCardIdCounters(final int cards, final int hidden) {
+        this.cardIdCounter = cards;
+        this.hiddenCardIdCounter = hidden;
     }
 
     /** Read-only: the fresh-card-id counters (look-ahead state keys). */

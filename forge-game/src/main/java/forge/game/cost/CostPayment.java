@@ -143,13 +143,18 @@ public class CostPayment extends ManaConversionMatrix {
         }
 
         final Game game = decisionMaker.getPlayer().getGame();
+        // lane replay-record-1021: an AI seat paying through this path is taped as payComputerCosts is; null otherwise
+        final forge.game.player.DecisionTap.Tap tap = forge.game.player.DecisionTap.of(decisionMaker.getPlayer());
 
+        int partIndex = 0;
         for (final CostPart part : costParts) {
             // Wrap the cost and push onto the cost stack
             try {
                 game.costPaymentStack.push(part, this);
 
-                PaymentDecision pd = part.accept(decisionMaker);
+                PaymentDecision pd = tap == null ? part.accept(decisionMaker)
+                        : tap.cost(decisionMaker.getPlayer(), part, partIndex, ability, () -> part.accept(decisionMaker));
+                partIndex++;
 
                 // Right before we start paying as decided, we need to transfer the CostPayments matrix over?
                 if (pd != null) {
@@ -189,9 +194,14 @@ public class CostPayment extends ManaConversionMatrix {
         // Set all of the decisions before attempting to pay anything
 
         final Game game = decisionMaker.getPlayer().getGame();
+        // lane replay-record-1021: the AI tape records these decisions (a forced replay answers them); null otherwise
+        final forge.game.player.DecisionTap.Tap tap = forge.game.player.DecisionTap.of(decisionMaker.getPlayer());
 
+        int partIndex = 0;
         for (final CostPart part : parts) {
-            PaymentDecision decision = part.accept(decisionMaker);
+            final PaymentDecision decision = tap == null ? part.accept(decisionMaker)
+                    : tap.cost(decisionMaker.getPlayer(), part, partIndex, ability, () -> part.accept(decisionMaker));
+            partIndex++;
             if (null == decision) return false;
 
             try {

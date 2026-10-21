@@ -157,10 +157,15 @@ public final class InteractiveMain {
             initializeForge();
             // lane live-sc-1009 (off unless -Dforge.interactive.policySearch is set): the AI seat is the S1 read's S-c
             // when its policy service answers with the pinned checkpoint; otherwise the usual opponent below
-            if (policySpec() != null) {
+            // lane replay-record-1021: a FORCED tape replay answers the AI seat from the record: no policy service
+            final String tapeMode = aiTapeMode();
+            if (policySpec() != null && !"forced".equals(tapeMode)) {
                 policy = forge.bench.rl.RlLiveSeat.connect(policySpec(), "live-" + config.session());
             }
-            MyRandom.setRandom(new Random(config.seed()));
+            // the game's RNG: a taped game's is TrackedRandom, the same stream as new Random(seed) with a readable state
+            final forge.ai.simulation.PlayoutKeys.TrackedRandom tapeRng = tapeMode == null ? null
+                    : new forge.ai.simulation.PlayoutKeys.TrackedRandom(config.seed());
+            MyRandom.setRandom(tapeRng != null ? tapeRng : new Random(config.seed()));
             // lane puzzle-host-1021: a puzzle's position, checked against the card database (now up)
             final List<String> puzzleLines = puzzle == null ? null : InteractivePuzzle.lines(puzzle, config.humanSeat());
             if (puzzleLines != null) {
@@ -189,9 +194,11 @@ public final class InteractiveMain {
             // lane forge-continue-1011: a rebuild remembers the live AI_TIMEOUT for its handover and runs at 600 s
             final InteractiveContinuation continuation = rebuild ? InteractiveContinuation.forGame(game) : null;
             bindAiFixes(registered);
-            bindLookahead(registered, game, config.seed());
+            bindLookahead(registered, game, config.seed(), "forced".equals(tapeMode));
             bindPolicy(registered, game, config.seed());
             countFairNaming(registered, game);
+            // lane replay-record-1021: the AI seat's decision tape (record, or a forced replay of one); off by default
+            tape = tapeMode == null ? null : installTape(tapeMode, game, config.humanSeat(), tapeRng);
             if (InteractiveReview.spec() != null) {
                 // lane game-review-1010 (off unless -Dforge.interactive.review is set): an offline replay's human seat,
                 // observed for the game's review; every decision is still the browser's (the journal's)
@@ -233,8 +240,12 @@ public final class InteractiveMain {
             final InteractiveGuiGame finalGui = gui;
             final Runnable puzzleHook = puzzleLines == null ? null
                     : InteractivePuzzle.hook(InteractivePuzzle.position(puzzle, puzzleLines, config.humanSeat()), game);
+            final forge.ai.AiTape gameTape = tape;
             game.getAction().invoke(() -> {
                 try {
+                    if (gameTape != null) {
+                        gameTape.bindGameThread(Thread.currentThread());
+                    }
                     match.startGame(game, puzzleHook);
                     gameFinished.complete(null);
                 } catch (InteractiveGuiGame.GameConceded conceded) {
@@ -264,6 +275,11 @@ public final class InteractiveMain {
             if (review != null) {
                 review.finish();
             }
+            if (tape != null) {
+                // lane replay-record-1021: the tape's end line goes out before the terminal (the host may stop the JVM then)
+                tape.finish();
+                tape.uninstall();
+            }
 
             if (!gui.hasFailed()) {
                 gui.emitFinalState();
@@ -285,6 +301,10 @@ public final class InteractiveMain {
                 failure.printStackTrace(System.err);
             }
         } finally {
+            if (tape != null) {
+                tape.finish(); // once: a no-op after the normal path's
+                tape.uninstall();
+            }
             if (gui != null) {
                 gui.close();
             }
@@ -583,6 +603,10 @@ public final class InteractiveMain {
             }
             final LobbyPlayer lobbyPlayer = seat == config.humanSeat()
                     ? GamePlayerUtil.getGuiPlayer()
+                    // lane replay-record-1021: a forced tape replay of a policy-seat game seats the unbound look-ahead
+                    // (its Forge AI executes; every decision is the record's)
+                    : policy == null && policySpec() != null && "forced".equals(aiTapeMode())
+                            ? lookaheadLobby(config.aiProfile())
                     : policy != null
                             ? policy.lobby("Default Forge", seat, config.aiProfile())
                     : lookaheadSpec() != null
@@ -660,6 +684,12 @@ public final class InteractiveMain {
     }
 
     private static void bindLookahead(final List<RegisteredPlayer> registered, final Game game, final long seed) {
+        bindLookahead(registered, game, seed, false);
+    }
+
+    /** {@code unbound} (lane replay-record-1021, a forced tape replay): the seat's Forge AI settings, and no search. */
+    private static void bindLookahead(final List<RegisteredPlayer> registered, final Game game, final long seed,
+                                      final boolean unbound) {
         final String spec = lookaheadSpec();
         if (spec == null) {
             return;
@@ -672,10 +702,75 @@ public final class InteractiveMain {
                 if (pl.fairNaming != null) {
                     lp.setFairNaming(pl.fairNaming);
                 }
+                if (unbound) {
+                    continue;
+                }
                 c.seed = seed * 31 + i;
                 lp.bind(game, new forge.ai.simulation.LookaheadSearch(c));
             }
         }
+    }
+
+    /** The live game's tape (lane replay-record-1021), or null. */
+    private static volatile forge.ai.AiTape tape;
+
+    /**
+     * {@code -Dforge.interactive.aiTape=record}, {@code =forced:<file>}, {@code =resume:<file>} or {@code =restore:<file>}
+     * (lane replay-record-1021): the AI seat's decision tape ({@link forge.ai.AiTape}). forced: a replay (the seat
+     * unbound, every decision the record's); resume: a game rebuilt to go on (the seat bound as live, forced through the
+     * record, then live and recorded); restore: resume, where any decision off the record is a divergence. Unset (every
+     * game today): null, and nothing anywhere changes.
+     */
+    static String aiTapeMode() {
+        final String v = System.getProperty("forge.interactive.aiTape");
+        if (v == null || v.isBlank() || "off".equals(v)) {
+            return null;
+        }
+        if ("record".equals(v)) {
+            return "record";
+        }
+        if (v.startsWith("forced:")) {
+            return "forced";
+        }
+        if (v.startsWith("resume:")) {
+            return "resume";
+        }
+        if (v.startsWith("restore:")) {
+            return "restore";
+        }
+        throw new IllegalArgumentException("forge.interactive.aiTape must be record, forced:<file>, resume:<file> or restore:<file>, not " + v);
+    }
+
+    /** Swap the AI seat's bound controller for the taping one and install the tape. */
+    static forge.ai.AiTape installTape(final String mode, final Game game, final int humanSeat,
+                                       final forge.ai.simulation.PlayoutKeys.TrackedRandom rng) throws java.io.IOException {
+        return installTape(mode, game, playerAtSeat(game, 1 - humanSeat), rng, false);
+    }
+
+    /** {@code tagged}: one of several taped seats (a watch table): its lines name its seat. */
+    static forge.ai.AiTape installTape(final String mode, final Game game, final Player ai,
+                                       final forge.ai.simulation.PlayoutKeys.TrackedRandom rng, final boolean tagged)
+            throws java.io.IOException {
+        if (ai == null || !(ai.getController() instanceof forge.ai.PlayerControllerAi inner)) {
+            throw new IllegalStateException("the AI seat has no Forge AI controller to tape");
+        }
+        final forge.ai.AiTape t;
+        if ("record".equals(mode)) {
+            t = forge.ai.AiTape.record(game, ai, rng, System.err);
+        } else {
+            final String v = System.getProperty("forge.interactive.aiTape");
+            final String file = v.substring(v.indexOf(':') + 1);
+            final List<String> lines = Files.readAllLines(Path.of(file), StandardCharsets.UTF_8);
+            t = "resume".equals(mode) ? forge.ai.AiTape.resume(game, ai, rng, System.err, lines)
+                    : "restore".equals(mode) ? forge.ai.AiTape.restore(game, ai, rng, System.err, lines)
+                    : forge.ai.AiTape.forced(game, ai, rng, System.err, lines);
+        }
+        if (tagged) {
+            t.tagSeat();
+        }
+        ai.dangerouslySetController(new forge.ai.AiTapeController(inner, t));
+        t.install();
+        return t;
     }
 
     /** {@code -Dforge.interactive.policySearch} (lane live-sc-1009; off unless set), see {@link forge.bench.rl.RlLiveSeat}. */

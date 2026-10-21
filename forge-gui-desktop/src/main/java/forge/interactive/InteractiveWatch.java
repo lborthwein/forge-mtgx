@@ -112,9 +112,12 @@ final class InteractiveWatch {
         Watcher watcher = null;
         boolean completedNormally = false;
         try {
+            // lane replay-record-1021: both seats' decision tapes (record, or a forced / resumed replay of them)
+            final String tapeMode = InteractiveMain.aiTapeMode();
+            tapeRng = tapeMode == null ? null : new forge.ai.simulation.PlayoutKeys.TrackedRandom(config.seed());
             // policy seats connect before the game's random stream is seeded, as a human game's policy seat does
             for (int seat = 0; seat < 2; seat++) {
-                if ("policy".equals(config.seatAi().get(seat))) {
+                if ("policy".equals(config.seatAi().get(seat)) && !"forced".equals(tapeMode)) {
                     policy[seat] = RlLiveSeat.connect(InteractiveMain.policySpec(),
                             "bot-" + config.session() + "-s" + seat);
                 }
@@ -124,6 +127,11 @@ final class InteractiveWatch {
             final Game game = prepared.game();
             final List<RegisteredPlayer> registered = prepared.registered();
 
+            if (tapeMode != null) {
+                for (Player p : game.getRegisteredPlayers()) {
+                    tapes.add(InteractiveMain.installTape(tapeMode, game, p, tapeRng, true));
+                }
+            }
             watcher = new Watcher(game, channels);
             game.subscribeToEvents(watcher);
             game.addPriorityDecisionListener(watcher);
@@ -136,6 +144,9 @@ final class InteractiveWatch {
             final Watcher finalWatcher = watcher;
             game.getAction().invoke(() -> {
                 try {
+                    for (forge.ai.AiTape t : tapes) {
+                        t.bindGameThread(Thread.currentThread());
+                    }
                     match.startGame(game);
                     gameFinished.complete(null);
                 } catch (WatchAbort aborted) {
@@ -152,6 +163,7 @@ final class InteractiveWatch {
                 // the watcher already sent the only fatal
             }
             finishSeats(policy, review);
+            finishTapes();
 
             if (!watcher.hasFailed()) {
                 watcher.emitFinalStates();
@@ -174,6 +186,7 @@ final class InteractiveWatch {
             }
         } finally {
             finishSeats(policy, review);
+            finishTapes();
         }
         return completedNormally;
     }
@@ -186,9 +199,21 @@ final class InteractiveWatch {
      * The game of {@code config}: the random stream seeded, both AI seats created and bound (a policy seat from
      * {@code policy}, null when it has none or its service did not answer), as a human game's AI seat is bound.
      */
+    /** Lane replay-record-1021: a taped watch game's RNG (the same stream as new Random(seed)), and its seats' tapes. */
+    private static forge.ai.simulation.PlayoutKeys.TrackedRandom tapeRng;
+    private static final List<forge.ai.AiTape> tapes = new ArrayList<>();
+
+    private static void finishTapes() {
+        for (forge.ai.AiTape t : tapes) {
+            t.finish();
+            t.uninstall();
+        }
+        tapes.clear();
+    }
+
     static Prepared prepare(final InteractiveProtocol.Config config, final RlLiveSeat[] policy)
             throws InteractiveProtocol.ProtocolException {
-        MyRandom.setRandom(new Random(config.seed()));
+        MyRandom.setRandom(tapeRng != null ? tapeRng : new Random(config.seed()));
         final List<RegisteredPlayer> registered = createPlayers(config, policy);
         final GameRules rules = new GameRules(GameType.Constructed);
         rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
@@ -207,7 +232,7 @@ final class InteractiveWatch {
             game.AI_TIMEOUT = aiTimeoutSec;
         }
         InteractiveMain.bindAiFixes(registered);
-        bindLookahead(registered, game, config.seed());
+        bindLookahead(registered, game, config.seed(), "forced".equals(InteractiveMain.aiTapeMode()));
         InteractiveMain.bindPolicy(registered, game, config.seed());
         InteractiveMain.countFairNaming(registered, game);
         for (Player player : game.getPlayers()) {
@@ -264,7 +289,9 @@ final class InteractiveWatch {
      * Each look-ahead seat gets its OWN config parsed from the spec (two seats never share one mutated config), seeded
      * {@code gameSeed * 31 + seat}, with the spec's aiFixes0928 and fairNaming as a human game's look-ahead seat.
      */
-    private static void bindLookahead(final List<RegisteredPlayer> registered, final Game game, final long seed) {
+    /** {@code unbound} (lane replay-record-1021, a forced tape replay): the seats' Forge AI settings, and no search. */
+    private static void bindLookahead(final List<RegisteredPlayer> registered, final Game game, final long seed,
+                                      final boolean unbound) {
         final String spec = InteractiveMain.lookaheadSpec();
         if (spec == null) {
             return;
@@ -275,6 +302,9 @@ final class InteractiveWatch {
                 lp.setAiFixes0928(pl.aiFixes);
                 if (pl.fairNaming != null) {
                     lp.setFairNaming(pl.fairNaming);
+                }
+                if (unbound) {
+                    continue;
                 }
                 pl.config.seed = seed * 31 + i;
                 lp.bind(game, new forge.ai.simulation.LookaheadSearch(pl.config));
