@@ -1001,6 +1001,21 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     /**
+     * glow-audit-1021: the control's {@code payableProof}, over the abilities it offers: UNAFFORDABLE exactly when
+     * {@link #controlPayable} is false, AFFORDABLE when some offered ability is proved affordable, else UNKNOWN.
+     */
+    static forge.player.HumanManaAffordability.Proof controlProof(final Player human, final List<SpellAbility> offered) {
+        if (!controlPayable(human, offered)) return forge.player.HumanManaAffordability.Proof.UNAFFORDABLE;
+        for (SpellAbility ability : offered) {
+            if (forge.player.HumanManaAffordability.proof(human, ability)
+                    == forge.player.HumanManaAffordability.Proof.AFFORDABLE) {
+                return forge.player.HumanManaAffordability.Proof.AFFORDABLE;
+            }
+        }
+        return forge.player.HumanManaAffordability.Proof.UNKNOWN;
+    }
+
+    /**
      * A flag must never cost the player the request it rides on: a check that throws (an unexpected
      * cost shape) says payable, the safe side, and is logged, instead of failing the publish.
      */
@@ -1087,6 +1102,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 // clickable. False is a proof (HumanManaAffordability.payable). It is a read, so the game,
                 // its random stream and the AI's memory are untouched. This seat only.
                 value.addProperty("payable", controlPayable(human, affordableAbilities));
+                // glow-audit-1021: the tri-state beside it, over the same abilities (controlProof). Absent when the
+                // control offers none, as a plain selection has nothing to pay for.
+                if (!affordableAbilities.isEmpty()) {
+                    value.addProperty("payableProof", controlProof(human, affordableAbilities).wire);
+                }
                 if (previews != null) {
                     previews.add(new PreviewJob(card, value, possibleAbilities, priorityAbilities, affordableAbilities));
                 }

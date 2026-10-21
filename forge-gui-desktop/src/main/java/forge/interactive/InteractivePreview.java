@@ -225,6 +225,12 @@ final class InteractivePreview {
                 && sa.getCardStateName() != card.getCurrentStateName()) {
             o.addProperty("face", String.valueOf(sa.getCardStateName()));
         }
+        if (!sa.isLandAbility()) {
+            // glow-audit-1021: this ability's own cost proof ("affordable" | "unknown" | "unaffordable",
+            // HumanManaAffordability.proof). A permanent's control-level flag is over all its abilities, its mana
+            // abilities too; this one lets a reader judge the non-mana activation by itself. A read.
+            o.addProperty("payableProof", forge.player.HumanManaAffordability.proof(human, sa).wire);
+        }
         if (sa.isManaAbility()) {
             return o;
         }
