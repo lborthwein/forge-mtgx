@@ -1,0 +1,11967 @@
+{
+"schema": "route-roles-1021/1",
+"version": "route-roles-1021/1",
+"generated": "2026-10-21T07:19:07-07:00",
+"lane": "combo-assembly-1021 B2",
+"note": "roles prune and score; they never decide alone (the solver verifies). An unknown name has no roles.",
+"sources": {
+"forge_worktree_head": "d98a4247b12a8c3d2cabafd1e437c58aeb9749c6",
+"cardsfolder": "forge-gui/res/cardsfolder (front face only)",
+"route_library_sha256": "0efe262760dd80f407a7da4667873ecee7d1c1f6645dae6ebee343153e92ff57",
+"scryfall_tags_sha256": "3f94ed786ba490f3c95c9c4d8c803d0f0f8e666cc9516e18f1e7d1b25a698031",
+"affordances_sha256": "10fd7afe26522a3b2f28861b5f4fcf39c78878f0496ba2ef8ade3fae6589374b",
+"belief_cube_sha256": "ba67f1c549797231c4beefaddd3b37802a38f028df1b231a688561c2132fe8a8",
+"decks_manifest_sha256": "fa11cd9fe42c930fd06b807eb14d8b0f200156868aa0fc78fa04dbc7421de7e7",
+"generator_sha256": "a1de8722d291774dab6647afdd8beee93c7ebe252cd146309de9627608980683",
+"card_set": {
+"affordances": 545,
+"belief_cube": 540,
+"route_library": 167,
+"decks": 559
+}
+},
+"role_vocabulary": {
+"PAYLOAD": "creature payload: a creature with mana value >= 6 (route-library cheat rule min_mv 6)",
+"PAYLOAD_ARTIFACT": "artifact payload: a nonland artifact with mana value >= 5 (route-library Tinker rule min_mv 5)",
+"GY_ENABLER": "puts a card of ours from library or hand into our graveyard (union of TUTOR_GY, DISCARD_OUTLET, SELF_MILL, GY_SELF)",
+"TUTOR_GY": "searches our library for a card and puts it into our graveyard (Entomb, Buried Alive)",
+"DISCARD_OUTLET": "we discard card(s) of our choice (or our whole hand): a discard cost, a loot, a wheel (costs.DISCARD_OUTLET = activation mana)",
+"SELF_MILL": "mills our own library (random, not routed)",
+"GY_SELF": "[extension] the card can put itself from hand into the graveyard (cycling / typecycling; costs.GY_SELF)",
+"REANIMATE": "puts a creature card from a graveyard onto the battlefield (no mana-value limit)",
+"CHEAT": "puts a creature card from our hand onto the battlefield (Sneak Attack, Show and Tell, Through the Breach; costs.CHEAT = activation)",
+"CHEAT_LIBRARY": "[extension] puts a creature card from our library onto the battlefield without a mana-value limit (Natural Order); 'finds' is its filter",
+"TINKER": "sacrifices an artifact to put an artifact from our library onto the battlefield",
+"ARTIFACT_FODDER": "a cheap artifact (mana value <= 2, artifact lands included) to sacrifice",
+"DOOMSDAY": "builds an ordered pile from library + graveyard and exiles the rest",
+"WINCON_EMPTY_LIBRARY": "wins with an empty (or small) library: Thassa's Oracle, Laboratory Maniac, Jace, Wielder of Mysteries",
+"DRAW": "an instant/sorcery that draws >= 2 cards ('dig' = cards seen)",
+"CANTRIP": "a cheap instant/sorcery that draws 1 (or digs) ('dig' = cards seen)",
+"ESCAPE_ENGINE": "lets us cast cards from our graveyard (Underworld Breach, Yawgmoth's Will, Past in Flames)",
+"FREE_MANA": "one-shot net-positive mana: LED, Lotus Petal, Black Lotus, rituals, spirit guides ('mana' gives net and colours)",
+"STORM_KILL": "a storm spell that damages, drains or mills a player (Brain Freeze, Grapeshot, Tendrils of Agony)",
+"UNTAPPER": "a creature whose ETB untaps (or blinks) a permanent (Pestermite, Deceiver Exarch, Zealous Conscripts, Restoration Angel)",
+"COPY_ENABLER": "makes a hasty token copy by tapping (Splinter Twin, Kiki-Jiki)",
+"TUTOR_ANY": "searches our library for ANY card to our hand",
+"TUTOR_HAND": "searches our library for a restricted card to our hand ('tutor' gives the filter)",
+"TUTOR_TOP": "searches our library for a card and puts it on top ('tutor' gives the filter)",
+"TUTOR_BF": "searches our library for a restricted card onto the battlefield (GSZ, Eldritch Evolution...)",
+"MANA:W|U|B|R|G|C": "produces that colour (land, rock, dork, ritual or one-shot; 'mana' gives kind/amount/colours)"
+},
+"route_semantics": "slots in execution order; zones: hand (in hand by that turn, drawn or tutored), library (not yet drawn), battlefield, graveyard; pay: cast (mana cost when cast from hand/graveyard), use (costs[role]), cast+use, none; roles: all required; filter_by: the slot whose card's 'finds' filter this card must pass",
+"routes": [
+{
+"id": "doomsday/pile",
+"family": "doomsday",
+"slots": [
+{
+"roles": [
+"DOOMSDAY"
+],
+"zones": [
+"hand"
+],
+"pay": "cast"
+},
+{
+"roles": [
+"WINCON_EMPTY_LIBRARY"
+],
+"zones": [
+"library",
+"hand"
+],
+"pay": "none"
+}
+]
+},
+{
+"id": "reanimator/graveyard",
+"family": "reanimator",
+"slots": [
+{
+"roles": [
+"PAYLOAD"
+],
+"zones": [
+"graveyard"
+],
+"pay": "none"
+},
+{
+"roles": [
+"REANIMATE"
+],
+"zones": [
+"hand",
+"battlefield"
+],
+"pay": "cast+use"
+}
+]
+},
+{
+"id": "reanimator/outlet",
+"family": "reanimator",
+"slots": [
+{
+"roles": [
+"DISCARD_OUTLET"
+],
+"zones": [
+"hand",
+"battlefield"
+],
+"pay": "cast+use"
+},
+{
+"roles": [
+"PAYLOAD"
+],
+"zones": [
+"hand"
+],
+"pay": "none"
+},
+{
+"roles": [
+"REANIMATE"
+],
+"zones": [
+"hand",
+"battlefield"
+],
+"pay": "cast+use"
+}
+]
+},
+{
+"id": "reanimator/cycler",
+"family": "reanimator",
+"slots": [
+{
+"roles": [
+"PAYLOAD",
+"GY_SELF"
+],
+"zones": [
+"hand"
+],
+"pay": "use"
+},
+{
+"roles": [
+"REANIMATE"
+],
+"zones": [
+"hand",
+"battlefield"
+],
+"pay": "cast+use"
+}
+]
+},
+{
+"id": "sneak-show/cheat",
+"family": "sneak-show",
+"slots": [
+{
+"roles": [
+"CHEAT"
+],
+"zones": [
+"hand",
+"battlefield"
+],
+"pay": "cast+use"
+},
+{
+"roles": [
+"PAYLOAD"
+],
+"zones": [
+"hand"
+],
+"pay": "none"
+}
+]
+},
+{
+"id": "natural-order/library",
+"family": "natural-order",
+"slots": [
+{
+"roles": [
+"CHEAT_LIBRARY"
+],
+"zones": [
+"hand"
+],
+"pay": "cast"
+},
+{
+"roles": [
+"PAYLOAD"
+],
+"zones": [
+"library"
+],
+"pay": "none",
+"filter_by": 0
+}
+]
+},
+{
+"id": "tinker/fodder",
+"family": "tinker",
+"slots": [
+{
+"roles": [
+"ARTIFACT_FODDER"
+],
+"zones": [
+"battlefield",
+"hand"
+],
+"pay": "cast"
+},
+{
+"roles": [
+"TINKER"
+],
+"zones": [
+"hand"
+],
+"pay": "cast"
+},
+{
+"roles": [
+"PAYLOAD_ARTIFACT"
+],
+"zones": [
+"library"
+],
+"pay": "none",
+"filter_by": 1
+}
+]
+},
+{
+"id": "twin/copy-untap",
+"family": "twin",
+"slots": [
+{
+"roles": [
+"UNTAPPER"
+],
+"zones": [
+"hand",
+"battlefield"
+],
+"pay": "cast"
+},
+{
+"roles": [
+"COPY_ENABLER"
+],
+"zones": [
+"hand",
+"battlefield"
+],
+"pay": "cast"
+}
+]
+},
+{
+"id": "breach/free-mana",
+"family": "breach",
+"slots": [
+{
+"roles": [
+"FREE_MANA"
+],
+"zones": [
+"hand",
+"battlefield"
+],
+"pay": "cast"
+},
+{
+"roles": [
+"ESCAPE_ENGINE"
+],
+"zones": [
+"hand",
+"battlefield"
+],
+"pay": "cast"
+},
+{
+"roles": [
+"STORM_KILL"
+],
+"zones": [
+"hand",
+"graveyard"
+],
+"pay": "cast"
+}
+]
+}
+],
+"role_counts": {
+"ARTIFACT_FODDER": 73,
+"CANTRIP": 14,
+"CHEAT": 4,
+"CHEAT_LIBRARY": 2,
+"COPY_ENABLER": 2,
+"DISCARD_OUTLET": 47,
+"DOOMSDAY": 1,
+"DRAW": 15,
+"ESCAPE_ENGINE": 4,
+"FREE_MANA": 7,
+"GY_ENABLER": 86,
+"GY_SELF": 18,
+"MANA:B": 69,
+"MANA:C": 26,
+"MANA:G": 79,
+"MANA:R": 70,
+"MANA:U": 68,
+"MANA:W": 68,
+"PAYLOAD": 34,
+"PAYLOAD_ARTIFACT": 19,
+"REANIMATE": 13,
+"SELF_MILL": 19,
+"STORM_KILL": 2,
+"TINKER": 1,
+"TUTOR_ANY": 2,
+"TUTOR_BF": 4,
+"TUTOR_GY": 3,
+"TUTOR_HAND": 8,
+"TUTOR_TOP": 4,
+"UNTAPPER": 5,
+"WINCON_EMPTY_LIBRARY": 2
+},
+"missing_scripts": [
+"Life // Death"
+],
+"cards": {
+"Abhorrent Oculus": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"roles": []
+},
+"Abrade": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [],
+"tags": [
+"artifact-removal",
+"burn",
+"burn-creature",
+"creature-removal",
+"cycle",
+"modal",
+"removal"
+]
+},
+"Abrupt Decay": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "BG",
+"colors": "BG",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"cycle",
+"enchantment-removal",
+"removal"
+]
+},
+"Adanto Vanguard": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": []
+},
+"Adeline, Resplendent Cathar": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"attack-trigger"
+]
+},
+"Aether Spellbomb": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Aetherflux Reservoir": {
+"types": [
+"Artifact"
+],
+"mv": 4,
+"cost": "4",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"lifegain",
+"removal"
+]
+},
+"Agatha's Soul Cauldron": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Ajani, Nacatl Pariah": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": []
+},
+"Ancestral Recall": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"dig": 3,
+"roles": [
+"DRAW"
+],
+"tags": [
+"burst-draw",
+"card-advantage",
+"cycle",
+"draw"
+]
+},
+"Ancient Tomb": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "C",
+"amount": 2
+},
+"roles": [
+"MANA:C"
+],
+"tags": [
+"adds-multiple-mana",
+"painland",
+"ramp"
+]
+},
+"Angrath's Rampage": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "BR",
+"colors": "BR",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"cycle",
+"edict",
+"modal",
+"removal"
+]
+},
+"Animate Dead": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Arbor Elf": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": [],
+"tags": [
+"mana-dork",
+"ramp"
+]
+},
+"Archon of Cruelty": {
+"types": [
+"Creature"
+],
+"mv": 8,
+"cost": "6BB",
+"colors": "B",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"attack-trigger",
+"cantrip",
+"card-advantage",
+"creature-removal",
+"discard",
+"draw",
+"edict",
+"evasion",
+"lifegain",
+"removal"
+]
+},
+"Arena of Glory": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "R",
+"amount": 1
+},
+"roles": [
+"MANA:R"
+]
+},
+"Arid Mesa": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WR",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Armageddon": {
+"types": [
+"Sorcery"
+],
+"mv": 4,
+"cost": "3W",
+"colors": "W",
+"roles": [],
+"tags": [
+"boardwipe",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Ashen Rider": {
+"types": [
+"Creature"
+],
+"mv": 8,
+"cost": "4WWBB",
+"colors": "WB",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"death-trigger",
+"enchantment-removal",
+"evasion",
+"removal"
+]
+},
+"Ashiok, Nightmare Weaver": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1UB",
+"colors": "UB",
+"roles": [],
+"tags": [
+"graveyard-hate",
+"mill"
+]
+},
+"Atraxa, Grand Unifier": {
+"types": [
+"Creature"
+],
+"mv": 7,
+"cost": "3WUBG",
+"colors": "WUBG",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"card-advantage",
+"evasion",
+"impulse",
+"lifegain"
+]
+},
+"Augur of Autumn": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"card-advantage"
+]
+},
+"Avacyn's Pilgrim": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "W",
+"amount": 1
+},
+"roles": [
+"MANA:W"
+]
+},
+"Badlands": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BR",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Balance": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [],
+"tags": [
+"boardwipe",
+"creature-removal",
+"discard",
+"edict",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Baleful Strix": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 2,
+"cost": "UB",
+"colors": "UB",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cantrip",
+"card-advantage",
+"cycle",
+"draw",
+"evasion"
+]
+},
+"Barrowgoyf": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+]
+},
+"Basalt Monolith": {
+"types": [
+"Artifact"
+],
+"mv": 3,
+"cost": "3",
+"mana": {
+"kind": "rock",
+"colors": "C",
+"amount": 3
+},
+"roles": [
+"MANA:C"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-rock",
+"ramp"
+]
+},
+"Batterskull": {
+"types": [
+"Artifact"
+],
+"mv": 5,
+"cost": "5",
+"roles": [
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"bounce",
+"bounce-self",
+"lifegain"
+]
+},
+"Bayou": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BG",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Bazaar of Baghdad": {
+"types": [
+"Land"
+],
+"mv": 0,
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"card-advantage",
+"draw",
+"loot",
+"utility-land"
+]
+},
+"Beseech the Mirror": {
+"types": [
+"Sorcery"
+],
+"mv": 4,
+"cost": "1BBB",
+"colors": "B",
+"roles": [],
+"tags": [
+"sac-outlet",
+"sacrifice-outlet",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Beza, the Bounding Spring": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2WW",
+"colors": "W",
+"roles": []
+},
+"Birds of Paradise": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"evasion",
+"mana-dork",
+"ramp"
+]
+},
+"Birgi, God of Storytelling": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"mana": {
+"kind": "dork",
+"colors": "R",
+"amount": 1
+},
+"roles": [
+"MANA:R"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"impulse-draw",
+"ramp"
+]
+},
+"Bitter Triumph": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [],
+"tags": [
+"creature-removal",
+"removal"
+]
+},
+"Bitterblossom": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [],
+"tags": [
+"evasion"
+]
+},
+"Black Lotus": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "oneshot",
+"colors": "WUBRG",
+"amount": 3,
+"net": 3
+},
+"roles": [
+"FREE_MANA",
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"adds-multiple-mana",
+"ramp"
+]
+},
+"Blackcleave Cliffs": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BR",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Blade Splicer": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": []
+},
+"Blazemire Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BR",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:R"
+]
+},
+"Bleachbone Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WB",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:B"
+]
+},
+"Blightsteel Colossus": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 12,
+"cost": "12",
+"roles": [
+"PAYLOAD",
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"recursion"
+]
+},
+"Blood Crypt": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BR",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Bloodbraid Elf": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2RG",
+"colors": "RG",
+"roles": []
+},
+"Bloodstained Mire": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BR",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Bloodtithe Harvester": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "BR",
+"colors": "BR",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"tag_roles": [
+"DISCARD_OUTLET"
+],
+"tags": [
+"card-advantage",
+"creature-removal",
+"cycle",
+"draw",
+"removal",
+"rummage"
+]
+},
+"Blooming Marsh": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BG",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Bolas's Citadel": {
+"types": [
+"Artifact"
+],
+"mv": 6,
+"cost": "3BBB",
+"colors": "B",
+"roles": [
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Bomat Courier": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"ARTIFACT_FODDER"
+],
+"costs": {
+"DISCARD_OUTLET": "R"
+},
+"tags": [
+"attack-trigger",
+"card-advantage",
+"draw",
+"wheel"
+]
+},
+"Bone Shards": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [],
+"tags": [
+"creature-removal",
+"removal",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Bonecrusher Giant": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"cycle",
+"removal"
+]
+},
+"Boon-Bringer Valkyrie": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"evasion",
+"lifegain"
+]
+},
+"Booster Tutor": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": []
+},
+"Boseiju, Who Endures": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"costs": {
+"DISCARD_OUTLET": "1G"
+},
+"tags": [
+"artifact-removal",
+"cycle",
+"enchantment-removal",
+"removal",
+"utility-land"
+]
+},
+"Botanical Sanctum": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UG",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Brain Freeze": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [
+"STORM_KILL",
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"copy",
+"mill",
+"self-mill"
+]
+},
+"Brainstorm": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"dig": 3,
+"roles": [
+"DRAW"
+],
+"tags": [
+"cantrip",
+"card-advantage",
+"draw"
+]
+},
+"Brazen Borrower": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"artifact-removal",
+"bounce",
+"creature-removal",
+"enchantment-removal",
+"evasion",
+"removal"
+]
+},
+"Breeding Pool": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UG",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Bring to Light": {
+"types": [
+"Sorcery"
+],
+"mv": 5,
+"cost": "3UG",
+"colors": "UG",
+"roles": [],
+"tags": [
+"tutor",
+"tutor-to"
+]
+},
+"Bristly Bill, Spine Sower": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": []
+},
+"Broadside Bombardiers": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"evasion",
+"removal",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Burst Lightning": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"cycle",
+"removal"
+]
+},
+"Cabal Ritual": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"mana": {
+"kind": "ritual",
+"colors": "B",
+"amount": 1,
+"net": -1
+},
+"roles": [
+"MANA:B",
+"FREE_MANA"
+],
+"tag_roles": [
+"FREE_MANA"
+],
+"tags": [
+"adds-multiple-mana",
+"ramp",
+"ritual",
+"threshold"
+]
+},
+"Candelabra of Tawnos": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"ramp"
+]
+},
+"Cankerbloom": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": []
+},
+"Carnage Interpreter": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1BB",
+"colors": "BR",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+]
+},
+"Cast into the Fire": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [],
+"tags": [
+"artifact-removal",
+"burn",
+"burn-creature",
+"creature-removal",
+"modal",
+"removal"
+]
+},
+"Cathar Commando": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [],
+"tags": [
+"artifact-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Caustic Bronco": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": []
+},
+"Caves of Chaos Adventurer": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3R",
+"colors": "R",
+"roles": [],
+"tags": [
+"attack-trigger",
+"card-advantage",
+"cycle",
+"impulse-draw",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Celestial Colonnade": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WU",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U"
+],
+"tags": [
+"cycle",
+"dual-land",
+"evasion",
+"man-land",
+"manland",
+"tapland",
+"utility-land"
+]
+},
+"Chain Lightning": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"removal"
+]
+},
+"Chandra, Torch of Defiance": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"adds-multiple-mana",
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"card-advantage",
+"creature-removal",
+"impulse-draw",
+"ramp",
+"removal"
+]
+},
+"Channel": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"ramp",
+"ritual"
+]
+},
+"Chaos Defiler": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 5,
+"cost": "3BR",
+"colors": "BR",
+"roles": [
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"death-trigger",
+"enchantment-removal",
+"removal"
+]
+},
+"Chart a Course": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"dig": 2,
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"DRAW"
+],
+"tags": [
+"card-advantage",
+"draw",
+"loot"
+]
+},
+"Chromatic Star": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"mana": {
+"kind": "oneshot",
+"colors": "WUBRG",
+"amount": 1,
+"activation": "1",
+"net": -1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"card-advantage",
+"death-trigger",
+"draw"
+]
+},
+"Chrome Host Seedshark": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"roles": [],
+"tags": [
+"evasion"
+]
+},
+"Chrome Mox": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"mana-rock",
+"moxen",
+"ramp"
+]
+},
+"City of Traitors": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "C",
+"amount": 2
+},
+"roles": [
+"MANA:C"
+],
+"tags": [
+"adds-multiple-mana",
+"ramp"
+]
+},
+"Coalition Relic": {
+"types": [
+"Artifact"
+],
+"mv": 3,
+"cost": "3",
+"mana": {
+"kind": "rock",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-rock",
+"ramp"
+]
+},
+"Collective Brutality": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [],
+"tags": [
+"creature-removal",
+"cycle",
+"discard",
+"lifegain",
+"modal",
+"removal"
+]
+},
+"Comet, Stellar Pup": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2WR",
+"colors": "WR",
+"roles": [],
+"tags": [
+"burn",
+"burn-creature",
+"burn-player",
+"card-advantage",
+"creature-removal",
+"recursion",
+"removal"
+]
+},
+"Commercial District": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "RG",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"MANA:G"
+]
+},
+"Concealed Courtyard": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WB",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:B"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Concealing Curtains": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [],
+"tags": [
+"discard",
+"evasion"
+]
+},
+"Consider": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"dig": 1,
+"roles": [
+"CANTRIP",
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"cantrip",
+"card-advantage",
+"draw",
+"mill",
+"self-mill"
+]
+},
+"Consult the Star Charts": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"dig": 1,
+"roles": [
+"CANTRIP"
+]
+},
+"Containment Priest": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [],
+"tags": [
+"hatebear"
+]
+},
+"Copperline Gorge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "RG",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Cori-Steel Cutter": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Corpse Dance": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Cosmogrand Zenith": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": []
+},
+"Council's Judgment": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "1WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Counterspell": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell"
+]
+},
+"Courser of Kruphix": {
+"types": [
+"Creature",
+"Enchantment"
+],
+"mv": 3,
+"cost": "1GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"card-advantage",
+"landfall",
+"lifegain"
+]
+},
+"Coveted Jewel": {
+"types": [
+"Artifact"
+],
+"mv": 6,
+"cost": "6",
+"mana": {
+"kind": "rock",
+"colors": "WUBRG",
+"amount": 3
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G",
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"adds-multiple-mana",
+"burst-draw",
+"card-advantage",
+"draw",
+"mana-rock",
+"ramp"
+]
+},
+"Crabomination": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "4BB",
+"colors": "B",
+"roles": [
+"PAYLOAD"
+]
+},
+"Craterhoof Behemoth": {
+"types": [
+"Creature"
+],
+"mv": 8,
+"cost": "5GGG",
+"colors": "G",
+"roles": [
+"PAYLOAD"
+]
+},
+"Creeping Tar Pit": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UB",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:B"
+],
+"tags": [
+"cycle",
+"dual-land",
+"evasion",
+"man-land",
+"manland",
+"tapland",
+"utility-land"
+]
+},
+"Crop Rotation": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": [],
+"tags": [
+"sac-outlet",
+"sacrifice-outlet",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Crucible of Worlds": {
+"types": [
+"Artifact"
+],
+"mv": 3,
+"cost": "3",
+"roles": [],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Cryptic Command": {
+"types": [
+"Instant"
+],
+"mv": 4,
+"cost": "1UUU",
+"colors": "U",
+"dig": 1,
+"roles": [],
+"tags": [
+"artifact-removal",
+"bounce",
+"cantrip",
+"card-advantage",
+"counter",
+"counterspell",
+"creature-removal",
+"cycle",
+"draw",
+"enchantment-removal",
+"modal",
+"removal"
+]
+},
+"Currency Converter": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"ARTIFACT_FODDER"
+],
+"costs": {
+"DISCARD_OUTLET": "2"
+},
+"tags": [
+"card-advantage",
+"draw",
+"loot",
+"ramp"
+]
+},
+"Custodi Lich": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3BB",
+"colors": "B",
+"roles": [],
+"tags": [
+"card-advantage",
+"creature-removal",
+"cycle",
+"draw",
+"edict",
+"removal"
+]
+},
+"Cut Down": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": []
+},
+"Dack Fayden": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1UR",
+"colors": "UR",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"tag_roles": [
+"DISCARD_OUTLET"
+],
+"tags": [
+"card-advantage",
+"draw",
+"loot"
+]
+},
+"Damn": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "BB",
+"colors": "B",
+"roles": [],
+"tags": [
+"boardwipe",
+"creature-removal",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Damnation": {
+"types": [
+"Sorcery"
+],
+"mv": 4,
+"cost": "2BB",
+"colors": "B",
+"roles": [],
+"tags": [
+"boardwipe",
+"creature-removal",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Daretti, Ingenious Iconoclast": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1BR",
+"colors": "BR",
+"roles": [],
+"tags": [
+"artifact-removal",
+"copy",
+"creature-removal",
+"removal",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Dark Confidant": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [],
+"tags": [
+"card-advantage",
+"impulse"
+]
+},
+"Dark Depths": {
+"types": [
+"Land"
+],
+"mv": 0,
+"roles": [],
+"tags": [
+"evasion"
+]
+},
+"Dark Ritual": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"mana": {
+"kind": "ritual",
+"colors": "B",
+"amount": 3,
+"net": 2
+},
+"roles": [
+"FREE_MANA",
+"MANA:B"
+],
+"tags": [
+"adds-multiple-mana",
+"cycle",
+"ramp",
+"ritual"
+]
+},
+"Darkslick Shores": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UB",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:B"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Dauthi Voidwalker": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "BB",
+"colors": "B",
+"roles": [],
+"tags": [
+"evasion",
+"graveyard-hate",
+"hatebear"
+]
+},
+"Daze": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [],
+"tags": [
+"bounce",
+"counter",
+"counterspell",
+"soft-counter"
+]
+},
+"Death-Greeter's Champion": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": []
+},
+"Deathrite Shaman": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "B",
+"colors": "BG",
+"mana": {
+"kind": "dork",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"graveyard-hate",
+"lifegain",
+"mana-dork",
+"ramp"
+]
+},
+"Decadent Dragon": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"attack-trigger",
+"combat-ramp",
+"cycle",
+"evasion",
+"mill",
+"ramp"
+]
+},
+"Deceiver Exarch": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"roles": [
+"UNTAPPER"
+],
+"tags": [
+"cycle",
+"modal"
+]
+},
+"Deep-Cavern Bat": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [],
+"tags": [
+"evasion",
+"lifegain",
+"removal"
+]
+},
+"Demonic Tutor": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"tutor": {
+"types": [],
+"to": "hand"
+},
+"roles": [
+"TUTOR_ANY"
+],
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Deranged Hermit": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"anthem"
+]
+},
+"Descendant of Storms": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": []
+},
+"Detective's Phoenix": {
+"types": [
+"Creature",
+"Enchantment"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": []
+},
+"Dig Through Time": {
+"types": [
+"Instant"
+],
+"mv": 8,
+"cost": "6UU",
+"colors": "U",
+"dig": 7,
+"roles": [],
+"tags": [
+"card-advantage",
+"delve",
+"impulse"
+]
+},
+"Dismember": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "1",
+"colors": "B",
+"roles": [],
+"tags": [
+"creature-removal",
+"removal"
+]
+},
+"Displacer Kitten": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3U",
+"colors": "U",
+"roles": [],
+"tags": [
+"blink",
+"flicker",
+"protection"
+]
+},
+"Doomsday": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "BBB",
+"colors": "B",
+"roles": [
+"DOOMSDAY"
+],
+"tags": [
+"recursion",
+"tutor",
+"tutor-to"
+]
+},
+"Draconautics Engineer": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": []
+},
+"Dragon's Rage Channeler": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"evasion",
+"mill",
+"self-mill"
+]
+},
+"Dreams of Steel and Oil": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": []
+},
+"Dress Down": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": []
+},
+"Duelist of the Mind": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+]
+},
+"Duress": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [],
+"tags": [
+"discard"
+]
+},
+"Eagles of the North": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "5W",
+"colors": "W",
+"roles": [
+"GY_SELF",
+"PAYLOAD",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "1"
+},
+"tags": [
+"cycle",
+"evasion",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Echo of Eons": {
+"types": [
+"Sorcery"
+],
+"mv": 6,
+"cost": "4UU",
+"colors": "U",
+"dig": 7,
+"roles": [
+"DRAW"
+],
+"tags": [
+"burst-draw",
+"card-advantage",
+"draw",
+"flashback",
+"recursion",
+"wheel"
+]
+},
+"Elder Gargaroth": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"attack-trigger",
+"card-advantage",
+"draw",
+"lifegain",
+"modal"
+]
+},
+"Elegant Parlor": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WR",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:R"
+]
+},
+"Elegy Acolyte": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2BB",
+"colors": "B",
+"roles": []
+},
+"Elite Spellbinder": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": [],
+"tags": [
+"evasion"
+]
+},
+"Elspeth, Knight-Errant": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"protection"
+]
+},
+"Elspeth, Storm Slayer": {
+"types": [
+"Planeswalker"
+],
+"mv": 5,
+"cost": "3WW",
+"colors": "W",
+"roles": []
+},
+"Elspeth, Sun's Champion": {
+"types": [
+"Planeswalker"
+],
+"mv": 6,
+"cost": "4WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"anthem",
+"boardwipe",
+"creature-removal",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Elvish Mystic": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G"
+],
+"tags": [
+"mana-dork",
+"ramp"
+]
+},
+"Elvish Reclaimer": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": [],
+"tags": [
+"sac-outlet",
+"sacrifice-outlet",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Embereth Shieldbreaker": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [],
+"tags": [
+"artifact-removal",
+"removal"
+]
+},
+"Emperor of Bones": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": []
+},
+"Emrakul, the Aeons Torn": {
+"types": [
+"Creature"
+],
+"mv": 15,
+"cost": "15",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"artifact-removal",
+"attack-trigger",
+"creature-removal",
+"edict",
+"enchantment-removal",
+"evasion",
+"extra-turn",
+"recursion",
+"removal"
+]
+},
+"Emry, Lurker of the Loch": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"roles": [
+"ESCAPE_ENGINE",
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tags": [
+"mill",
+"reanimate",
+"recursion",
+"self-mill"
+]
+},
+"Endurance": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"cycle",
+"graveyard-hate",
+"pitch-spell",
+"recursion"
+]
+},
+"Enduring Curiosity": {
+"types": [
+"Creature",
+"Enchantment"
+],
+"mv": 4,
+"cost": "2UU",
+"colors": "U",
+"roles": []
+},
+"Enduring Innocence": {
+"types": [
+"Creature",
+"Enchantment"
+],
+"mv": 3,
+"cost": "1WW",
+"colors": "W",
+"roles": []
+},
+"Enlightened Tutor": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"tutor": {
+"types": [
+"Artifact",
+"Enchantment"
+],
+"to": "top"
+},
+"roles": [
+"TUTOR_TOP"
+],
+"tags": [
+"cycle",
+"tutor",
+"tutor-to"
+]
+},
+"Entomb": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"tutor": {
+"types": [],
+"to": "graveyard"
+},
+"roles": [
+"TUTOR_GY",
+"GY_ENABLER"
+],
+"tags": [
+"tutor",
+"tutor-to"
+]
+},
+"Ephemerate": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [],
+"tags": [
+"blink",
+"flicker",
+"protection"
+]
+},
+"Ertai Resurrected": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2UB",
+"colors": "UB",
+"roles": [],
+"tags": [
+"card-advantage",
+"counter",
+"counterspell",
+"creature-removal",
+"cycle",
+"draw",
+"modal",
+"removal"
+]
+},
+"Escape to the Wilds": {
+"types": [
+"Sorcery"
+],
+"mv": 5,
+"cost": "3RG",
+"colors": "RG",
+"roles": [],
+"tags": [
+"card-advantage",
+"cycle",
+"impulse-draw",
+"ramp"
+]
+},
+"Esika's Chariot": {
+"types": [
+"Artifact"
+],
+"mv": 4,
+"cost": "3G",
+"colors": "G",
+"roles": [],
+"tags": [
+"attack-trigger",
+"copy",
+"copy-token"
+]
+},
+"Esper Sentinel": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"card-advantage",
+"draw",
+"hatebear",
+"tax"
+]
+},
+"Etali, Primal Conqueror": {
+"types": [
+"Creature"
+],
+"mv": 7,
+"cost": "5RR",
+"colors": "R",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"mill"
+]
+},
+"Eternal Witness": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"card-advantage",
+"recursion"
+]
+},
+"Everflowing Chalice": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "rock",
+"colors": "C",
+"amount": 1
+},
+"roles": [
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-rock",
+"ramp"
+]
+},
+"Evolved Sleeper": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [],
+"tags": [
+"card-advantage",
+"draw"
+]
+},
+"Exhume": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Expedition Map": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Exploration": {
+"types": [
+"Enchantment"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": [],
+"tags": [
+"ramp"
+]
+},
+"Explore": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"dig": 1,
+"roles": [
+"CANTRIP"
+]
+},
+"Expressive Iteration": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "UR",
+"colors": "UR",
+"dig": 3,
+"roles": [
+"CANTRIP"
+],
+"tags": [
+"card-advantage",
+"impulse",
+"impulse-draw"
+]
+},
+"Fable of the Mirror-Breaker": {
+"types": [
+"Enchantment"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"tag_roles": [
+"DISCARD_OUTLET"
+],
+"tags": [
+"attack-trigger",
+"card-advantage",
+"combat-ramp",
+"copy",
+"draw",
+"mana-dork",
+"ramp",
+"rummage"
+]
+},
+"Fabled Passage": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Faerie Mastermind": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": []
+},
+"Faithless Looting": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"dig": 2,
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"DRAW"
+],
+"tags": [
+"card-advantage",
+"draw",
+"flashback",
+"loot"
+]
+},
+"Fallen Shinobi": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3UB",
+"colors": "UB",
+"roles": [],
+"tags": [
+"bounce",
+"card-advantage",
+"cycle",
+"mill"
+]
+},
+"Fanatic of Rhonas": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "G",
+"amount": 4
+},
+"roles": [
+"MANA:G"
+]
+},
+"Fastbond": {
+"types": [
+"Enchantment"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": [],
+"tags": [
+"ramp"
+]
+},
+"Fatal Push": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [],
+"tags": [
+"creature-removal",
+"removal"
+]
+},
+"Fear of Missing Out": {
+"types": [
+"Creature",
+"Enchantment"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+]
+},
+"Field of the Dead": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "C",
+"amount": 1
+},
+"roles": [
+"MANA:C"
+]
+},
+"Fiend Artisan": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "BB",
+"colors": "BG",
+"tutor": {
+"types": [
+"Creature"
+],
+"maxmv": 99,
+"to": "battlefield"
+},
+"roles": [
+"TUTOR_BF"
+],
+"tags": [
+"sac-outlet",
+"sacrifice-outlet",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Fiery Confluence": {
+"types": [
+"Sorcery"
+],
+"mv": 4,
+"cost": "2RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"artifact-removal",
+"boardwipe",
+"burn",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"cycle",
+"mass-removal",
+"modal",
+"removal",
+"sweeper"
+]
+},
+"Fiery Islet": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UR",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:R"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"dual-land",
+"painland",
+"utility-land"
+]
+},
+"Figure of Destiny": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "WR",
+"roles": [],
+"tags": [
+"evasion"
+]
+},
+"Finale of Devastation": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "GG",
+"colors": "G",
+"tutor": {
+"types": [
+"Creature"
+],
+"maxmv": 99,
+"to": "battlefield"
+},
+"roles": [
+"TUTOR_BF"
+],
+"tags": [
+"cycle",
+"reanimate",
+"recursion",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Fire Covenant": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "1BR",
+"colors": "BR",
+"roles": [],
+"tags": [
+"burn",
+"burn-creature",
+"creature-removal",
+"removal"
+]
+},
+"Fireblast": {
+"types": [
+"Instant"
+],
+"mv": 6,
+"cost": "4RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"removal",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Firebolt": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"flashback",
+"removal"
+]
+},
+"Flame Slash": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": []
+},
+"Flametongue Kavu": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-creature",
+"creature-removal",
+"removal"
+]
+},
+"Flash": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [
+"CHEAT"
+]
+},
+"Flickerwisp": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WW",
+"colors": "W",
+"roles": [
+"UNTAPPER"
+],
+"tags": [
+"blink",
+"evasion",
+"flicker"
+]
+},
+"Flooded Strand": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WU",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Floodfarm Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WU",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U"
+]
+},
+"Force of Negation": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "1UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell",
+"cycle",
+"pitch-spell"
+]
+},
+"Force of Vigor": {
+"types": [
+"Instant"
+],
+"mv": 4,
+"cost": "2GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"artifact-removal",
+"cycle",
+"enchantment-removal",
+"pitch-spell",
+"removal"
+]
+},
+"Force of Will": {
+"types": [
+"Instant"
+],
+"mv": 5,
+"cost": "3UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell",
+"cycle",
+"pitch-spell"
+]
+},
+"Forest": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G"
+]
+},
+"Forth Eorlingas!": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "WR",
+"colors": "WR",
+"roles": [],
+"tags": [
+"card-advantage",
+"draw"
+]
+},
+"Fractured Identity": {
+"types": [
+"Sorcery"
+],
+"mv": 5,
+"cost": "3WU",
+"colors": "WU",
+"roles": [],
+"tags": [
+"artifact-removal",
+"copy",
+"creature-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Frantic Search": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"dig": 2,
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"DRAW"
+],
+"tags": [
+"card-advantage",
+"draw",
+"loot"
+]
+},
+"From the Catacombs": {
+"types": [
+"Sorcery"
+],
+"mv": 5,
+"cost": "3BB",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"tags": [
+"flashback",
+"reanimate",
+"recursion",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Fury": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-creature",
+"creature-removal",
+"cycle",
+"pitch-spell",
+"removal"
+]
+},
+"Fyndhorn Elves": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G"
+],
+"tags": [
+"mana-dork",
+"ramp"
+]
+},
+"Gaea's Cradle": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G"
+],
+"tags": [
+"adds-multiple-mana",
+"cycle",
+"ramp"
+]
+},
+"Galvanic Blast": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": []
+},
+"Galvanic Discharge": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": []
+},
+"Garruk Wildspeaker": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"cycle",
+"ramp"
+]
+},
+"Generous Ent": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "5G",
+"colors": "G",
+"roles": [
+"GY_SELF",
+"PAYLOAD",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "1"
+},
+"tags": [
+"cycle",
+"lifegain",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Generous Plunderer": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": []
+},
+"Get Lost": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"creature-removal",
+"enchantment-removal",
+"mill",
+"removal",
+"self-mill"
+]
+},
+"Ghostfire Slice": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": []
+},
+"Gideon, Ally of Zendikar": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"anthem"
+]
+},
+"Gitaxian Probe": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "0",
+"colors": "U",
+"dig": 1,
+"roles": [
+"CANTRIP"
+],
+"tags": [
+"cantrip",
+"card-advantage",
+"draw"
+]
+},
+"Giver of Runes": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [],
+"tags": [
+"protection"
+]
+},
+"Glen Elendra Archmage": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3U",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell",
+"death-trigger",
+"evasion",
+"persist"
+]
+},
+"Glimmer Lens": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Gloomlake Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UB",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:B"
+]
+},
+"Glorybringer": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-creature",
+"creature-removal",
+"evasion",
+"removal"
+]
+},
+"Go for the Throat": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": []
+},
+"Goblin Bombardment": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": []
+},
+"Goblin Cratermaker": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [],
+"tags": [
+"artifact-removal",
+"burn",
+"burn-creature",
+"creature-removal",
+"enchantment-removal",
+"modal",
+"removal"
+]
+},
+"Goblin Engineer": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"tutor": {
+"types": [
+"Artifact"
+],
+"to": "graveyard"
+},
+"roles": [
+"TUTOR_GY",
+"GY_ENABLER"
+],
+"tags": [
+"reanimate",
+"recursion",
+"sac-outlet",
+"sacrifice-outlet",
+"tutor",
+"tutor-to"
+]
+},
+"Goblin Rabblemaster": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": [],
+"tags": [
+"attack-trigger"
+]
+},
+"Goblin Welder": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"artifact-removal",
+"edict",
+"reanimate",
+"recursion",
+"removal",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Godless Shrine": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WB",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:B"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Goldspan Dragon": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3RR",
+"colors": "R",
+"mana": {
+"kind": "dork",
+"colors": "WUBRG",
+"amount": 2
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"attack-trigger",
+"combat-ramp",
+"evasion",
+"ramp"
+]
+},
+"Golos, Tireless Pilgrim": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 5,
+"cost": "5",
+"roles": [
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"card-advantage",
+"impulse-draw",
+"ramp",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Grave Titan": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "4BB",
+"colors": "B",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"attack-trigger",
+"cycle"
+]
+},
+"Graven Cairns": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BR",
+"amount": 2
+},
+"roles": [
+"MANA:B",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Green Sun's Zenith": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"tutor": {
+"types": [
+"Creature"
+],
+"maxmv": 99,
+"colors": "G",
+"to": "battlefield"
+},
+"roles": [
+"TUTOR_BF"
+],
+"tags": [
+"cycle",
+"recursion",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Grief": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2BB",
+"colors": "B",
+"roles": [],
+"tags": [
+"cycle",
+"discard",
+"evasion",
+"pitch-spell"
+]
+},
+"Grim Lavamancer": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"removal"
+]
+},
+"Grim Monolith": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "C",
+"amount": 3
+},
+"roles": [
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-rock",
+"ramp"
+]
+},
+"Griselbrand": {
+"types": [
+"Creature"
+],
+"mv": 8,
+"cost": "4BBBB",
+"colors": "B",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"burst-draw",
+"card-advantage",
+"draw",
+"evasion",
+"lifegain"
+]
+},
+"Grist, the Hunger Tide": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1BG",
+"colors": "BG",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"creature-removal",
+"mill",
+"removal",
+"sac-outlet",
+"sacrifice-outlet",
+"self-mill"
+]
+},
+"Guide of Souls": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": []
+},
+"Gush": {
+"types": [
+"Instant"
+],
+"mv": 5,
+"cost": "4U",
+"colors": "U",
+"dig": 2,
+"roles": [
+"DRAW"
+],
+"tags": [
+"bounce",
+"card-advantage",
+"draw"
+]
+},
+"Gut, True Soul Zealot": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": [],
+"tags": [
+"attack-trigger",
+"cycle",
+"evasion",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Hallowed Fountain": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WU",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Harvester of Misery": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3BB",
+"colors": "B",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "1B"
+}
+},
+"Haywire Mite": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Hazoret the Fervent": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3R",
+"colors": "R",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "2R"
+}
+},
+"Hedge Maze": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UG",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:G"
+]
+},
+"Hellrider": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2RR",
+"colors": "R",
+"roles": []
+},
+"Helm of Awakening": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Hero of Bladehold": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"attack-trigger"
+]
+},
+"Hexdrinker": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": [],
+"tags": [
+"evasion",
+"protection"
+]
+},
+"High Tide": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"roles": [],
+"tags": [
+"ramp",
+"ritual"
+]
+},
+"Hired Claw": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": []
+},
+"Horizon Canopy": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:G"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"dual-land",
+"painland",
+"utility-land"
+]
+},
+"Hornet Queen": {
+"types": [
+"Creature"
+],
+"mv": 7,
+"cost": "4GGG",
+"colors": "G",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"evasion"
+]
+},
+"Hullbreacher": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"roles": [],
+"tags": [
+"ramp"
+]
+},
+"Hushwood Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:G"
+]
+},
+"Hydroid Krasis": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "UG",
+"colors": "UG",
+"roles": [],
+"tags": [
+"burst-draw",
+"card-advantage",
+"cycle",
+"draw",
+"evasion",
+"lifegain"
+]
+},
+"Hymn to Tourach": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "BB",
+"colors": "B",
+"roles": [],
+"tags": [
+"discard"
+]
+},
+"Hypnotic Specter": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1BB",
+"colors": "B",
+"roles": [],
+"tags": [
+"discard",
+"evasion"
+]
+},
+"Icetill Explorer": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2GG",
+"colors": "G",
+"roles": []
+},
+"Ignoble Hierarch": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "BRG",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"attack-trigger",
+"mana-dork",
+"ramp"
+]
+},
+"Imperial Recruiter": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"tutor": {
+"types": [
+"Creature"
+],
+"to": "hand"
+},
+"roles": [
+"TUTOR_HAND"
+],
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Imperial Seal": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"tutor": {
+"types": [],
+"to": "top"
+},
+"roles": [
+"TUTOR_TOP"
+],
+"tags": [
+"tutor",
+"tutor-to"
+]
+},
+"Incinerate": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"removal"
+]
+},
+"Indatha Triome": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WBG",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:W",
+"MANA:B",
+"MANA:G",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Inferno Titan": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "4RR",
+"colors": "R",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"attack-trigger",
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"cycle",
+"removal"
+]
+},
+"Inquisition of Kozilek": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [],
+"tags": [
+"discard"
+]
+},
+"Inspiring Vantage": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WR",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Inti, Seneschal of the Sun": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"attack-trigger",
+"card-advantage",
+"impulse-draw"
+]
+},
+"Intrepid Adversary": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [],
+"tags": [
+"anthem",
+"cycle",
+"lifegain"
+]
+},
+"Island": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "U",
+"amount": 1
+},
+"roles": [
+"MANA:U"
+]
+},
+"Ivora, Insatiable Heir": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": []
+},
+"Jace, Vryn's Prodigy": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"loot",
+"mill",
+"recursion"
+]
+},
+"Jace, Wielder of Mysteries": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "1UUU",
+"colors": "U",
+"roles": [
+"WINCON_EMPTY_LIBRARY",
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"burst-draw",
+"card-advantage",
+"cycle",
+"draw",
+"mill",
+"self-mill"
+]
+},
+"Jace, the Mind Sculptor": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"bounce",
+"card-advantage",
+"creature-removal",
+"cycle",
+"draw",
+"mill",
+"removal"
+]
+},
+"Jadar, Ghoulcaller of Nephalia": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": []
+},
+"Jetmir's Garden": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WRG",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:W",
+"MANA:R",
+"MANA:G",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Joraga Treespeaker": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "G",
+"amount": 2
+},
+"roles": [
+"MANA:G"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-dork",
+"ramp"
+]
+},
+"Kaito Shizuki": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1UB",
+"colors": "UB",
+"finds": {
+"types": [
+"Creature"
+],
+"colors": "UB"
+},
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"CHEAT_LIBRARY"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"card-advantage",
+"draw",
+"evasion",
+"loot",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Kaldra Compleat": {
+"types": [
+"Artifact"
+],
+"mv": 7,
+"cost": "7",
+"roles": [
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"creature-removal",
+"protection",
+"removal"
+]
+},
+"Kappa Cannoneer": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 6,
+"cost": "5U",
+"colors": "U",
+"roles": [
+"PAYLOAD",
+"PAYLOAD_ARTIFACT"
+]
+},
+"Karakas": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "W",
+"amount": 1
+},
+"roles": [
+"MANA:W"
+],
+"tags": [
+"bounce",
+"creature-removal",
+"cycle",
+"removal",
+"utility-land"
+]
+},
+"Kari Zev, Skyship Raider": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": []
+},
+"Karn, Scion of Urza": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "4",
+"roles": [],
+"tags": [
+"card-advantage",
+"impulse"
+]
+},
+"Keen-Eyed Curator": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "GG",
+"colors": "G",
+"roles": []
+},
+"Kellan, Planar Trailblazer": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": []
+},
+"Ketria Triome": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "URG",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:U",
+"MANA:R",
+"MANA:G",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Kiki-Jiki, Mirror Breaker": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "2RRR",
+"colors": "R",
+"roles": [
+"COPY_ENABLER"
+],
+"tags": [
+"copy"
+]
+},
+"Kinnan, Bonder Prodigy": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "UG",
+"colors": "UG",
+"roles": [],
+"tags": [
+"card-advantage",
+"cycle",
+"impulse",
+"ramp"
+]
+},
+"Knight of Autumn": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WG",
+"colors": "WG",
+"roles": [],
+"tags": [
+"artifact-removal",
+"enchantment-removal",
+"lifegain",
+"modal",
+"removal"
+]
+},
+"Knight of the Reliquary": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WG",
+"colors": "WG",
+"roles": [],
+"tags": [
+"cycle",
+"ramp",
+"sac-outlet",
+"sacrifice-outlet",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Kolaghan's Command": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "1BR",
+"colors": "BR",
+"roles": [],
+"tags": [
+"artifact-removal",
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"card-advantage",
+"creature-removal",
+"cycle",
+"discard",
+"modal",
+"recursion",
+"removal"
+]
+},
+"Koth of the Hammer": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"adds-multiple-mana",
+"animate-land",
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"ramp",
+"removal"
+]
+},
+"Krark, the Thumbless": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [],
+"tags": [
+"copy",
+"cycle"
+]
+},
+"Kroxa, Titan of Death's Hunger": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "BR",
+"colors": "BR",
+"roles": [],
+"tags": [
+"attack-trigger",
+"discard",
+"flashback",
+"reanimate",
+"recursion"
+]
+},
+"Kumano Faces Kakkazan": {
+"types": [
+"Enchantment"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"boardwipe",
+"burn",
+"burn-player",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Kytheon, Hero of Akros": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": []
+},
+"Laelia, the Blade Reforged": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": [],
+"tags": [
+"attack-trigger",
+"card-advantage",
+"cycle",
+"impulse-draw"
+]
+},
+"Lavaspur Boots": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Legion Extruder": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Leovold, Emissary of Trest": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "UBG",
+"colors": "UBG",
+"roles": [],
+"tags": [
+"card-advantage",
+"draw",
+"tax"
+]
+},
+"Leyline Binding": {
+"types": [
+"Enchantment"
+],
+"mv": 6,
+"cost": "5W",
+"colors": "W",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Library of Alexandria": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "C",
+"amount": 1
+},
+"roles": [
+"MANA:C"
+],
+"tags": [
+"card-advantage",
+"draw",
+"utility-land"
+]
+},
+"Life from the Loam": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"card-advantage",
+"mill",
+"recursion",
+"self-mill"
+]
+},
+"Lightning Bolt": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"cycle",
+"removal"
+]
+},
+"Lightning Greaves": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"protection"
+]
+},
+"Lightning Helix": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "WR",
+"colors": "WR",
+"roles": []
+},
+"Lightstall Inquisitor": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": []
+},
+"Liliana of the Veil": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1BB",
+"colors": "B",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"artifact-removal",
+"boardwipe",
+"creature-removal",
+"discard",
+"edict",
+"enchantment-removal",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Liliana, Death's Majesty": {
+"types": [
+"Planeswalker"
+],
+"mv": 5,
+"cost": "3BB",
+"colors": "B",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER",
+"REANIMATE"
+],
+"costs": {
+"REANIMATE": "0"
+},
+"tags": [
+"boardwipe",
+"creature-removal",
+"mass-removal",
+"mill",
+"reanimate",
+"recursion",
+"removal",
+"self-mill",
+"sweeper"
+]
+},
+"Lingering Souls": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": [],
+"tags": [
+"cycle",
+"evasion",
+"flashback"
+]
+},
+"Lion Sash": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"graveyard-hate"
+]
+},
+"Lion's Eye Diamond": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "oneshot",
+"colors": "WUBRG",
+"amount": 3,
+"net": 3
+},
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"FREE_MANA",
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G",
+"ARTIFACT_FODDER"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"adds-multiple-mana",
+"ramp"
+]
+},
+"Llanowar Elves": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G"
+],
+"tags": [
+"cycle",
+"mana-dork",
+"ramp"
+]
+},
+"Loot, the Pathfinder": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "2URG",
+"colors": "URG",
+"mana": {
+"kind": "dork",
+"colors": "WUBRG",
+"amount": 3,
+"activation": "G"
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+]
+},
+"Loran of the Third Path": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": [],
+"tags": [
+"artifact-removal",
+"card-advantage",
+"draw",
+"enchantment-removal",
+"removal"
+]
+},
+"Lotus Cobra": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"landfall",
+"mana-dork",
+"ramp"
+]
+},
+"Lotus Petal": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "oneshot",
+"colors": "WUBRG",
+"amount": 1,
+"net": 1
+},
+"roles": [
+"FREE_MANA",
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"ramp"
+]
+},
+"Luminarch Aspirant": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": []
+},
+"Lurrus of the Dream-Den": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WW",
+"colors": "WB",
+"roles": [],
+"tags": [
+"cycle",
+"lifegain",
+"reanimate",
+"recursion"
+]
+},
+"Lush Portico": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:G"
+]
+},
+"Lórien Revealed": {
+"types": [
+"Sorcery"
+],
+"mv": 5,
+"cost": "3UU",
+"colors": "U",
+"dig": 3,
+"roles": [
+"GY_SELF",
+"DRAW",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "1"
+},
+"tags": [
+"burst-draw",
+"card-advantage",
+"cycle",
+"draw",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Maelstrom Pulse": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "1BG",
+"colors": "BG",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"cycle",
+"enchantment-removal",
+"removal"
+]
+},
+"Magda, Brazen Outlaw": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"tutor": {
+"types": [
+"Artifact",
+"Dragon"
+],
+"to": "battlefield"
+},
+"roles": [
+"TUTOR_BF"
+],
+"tags": [
+"anthem",
+"combat-ramp",
+"mana-dork",
+"ramp",
+"sac-outlet",
+"sacrifice-outlet",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Malcolm, Alluring Scoundrel": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+]
+},
+"Malevolent Rumble": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"dig": 4,
+"roles": [
+"CANTRIP"
+]
+},
+"Mana Confluence": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"painland"
+]
+},
+"Mana Crypt": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "rock",
+"colors": "C",
+"amount": 2
+},
+"roles": [
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-rock",
+"ramp"
+]
+},
+"Mana Drain": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"adds-multiple-mana",
+"counter",
+"counterspell",
+"ramp",
+"ritual"
+]
+},
+"Mana Leak": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell",
+"soft-counter"
+]
+},
+"Mana Tithe": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [],
+"tags": [
+"counter",
+"counterspell",
+"soft-counter"
+]
+},
+"Mana Vault": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"mana": {
+"kind": "rock",
+"colors": "C",
+"amount": 3
+},
+"roles": [
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-rock",
+"ramp"
+]
+},
+"Manamorphose": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "RG",
+"mana": {
+"kind": "ritual",
+"colors": "WUBRG",
+"amount": 2,
+"net": 0
+},
+"dig": 1,
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G",
+"CANTRIP",
+"FREE_MANA"
+],
+"tag_roles": [
+"FREE_MANA"
+],
+"tags": [
+"cantrip",
+"card-advantage",
+"draw",
+"ramp",
+"ritual"
+]
+},
+"March of Otherworldly Light": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": []
+},
+"Marsh Flats": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WB",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:B"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Mawloc": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "RG",
+"colors": "RG",
+"roles": [],
+"tags": [
+"burn",
+"burn-creature",
+"cantrip",
+"card-advantage",
+"creature-removal",
+"draw",
+"removal"
+]
+},
+"Memory Jar": {
+"types": [
+"Artifact"
+],
+"mv": 5,
+"cost": "5",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"PAYLOAD_ARTIFACT"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"burst-draw",
+"card-advantage",
+"discard",
+"draw",
+"wheel"
+]
+},
+"Memory Lapse": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell"
+]
+},
+"Mesmeric Fiend": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [],
+"tags": [
+"removal"
+]
+},
+"Meticulous Archive": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WU",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U"
+]
+},
+"Mimic Vat": {
+"types": [
+"Artifact"
+],
+"mv": 3,
+"cost": "3",
+"roles": [],
+"tags": [
+"copy",
+"death-trigger",
+"graveyard-hate"
+]
+},
+"Mind Stone": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "C",
+"amount": 1
+},
+"roles": [
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"card-advantage",
+"draw",
+"mana-rock",
+"ramp"
+]
+},
+"Mind Twist": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [],
+"tags": [
+"discard"
+]
+},
+"Mind's Desire": {
+"types": [
+"Sorcery"
+],
+"mv": 6,
+"cost": "4UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"card-advantage",
+"copy",
+"impulse-draw"
+]
+},
+"Mine Collapse": {
+"types": [
+"Instant"
+],
+"mv": 4,
+"cost": "3R",
+"colors": "R",
+"roles": []
+},
+"Minsc & Boo, Timeless Heroes": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2RG",
+"colors": "RG",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"burst-draw",
+"card-advantage",
+"creature-removal",
+"draw",
+"removal",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Miscalculation": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [
+"GY_SELF",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "2"
+},
+"tags": [
+"card-advantage",
+"counter",
+"counterspell",
+"draw",
+"soft-counter"
+]
+},
+"Mishra's Bauble": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"card-advantage",
+"draw"
+]
+},
+"Mishra's Workshop": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "C",
+"amount": 3
+},
+"roles": [
+"MANA:C"
+],
+"tags": [
+"adds-multiple-mana",
+"ramp"
+]
+},
+"Misty Rainforest": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UG",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Mizzium Mortars": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [],
+"tags": [
+"boardwipe",
+"burn",
+"burn-creature",
+"creature-removal",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Monastery Mentor": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": []
+},
+"Monastery Swiftspear": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": []
+},
+"Monstrous Rage": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": []
+},
+"Mosswood Dreadknight": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [
+"ESCAPE_ENGINE"
+]
+},
+"Mother of Runes": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [],
+"tags": [
+"protection"
+]
+},
+"Mountain": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "R",
+"amount": 1
+},
+"roles": [
+"MANA:R"
+]
+},
+"Mox Diamond": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "rock",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"mana-rock",
+"moxen",
+"ramp"
+]
+},
+"Mox Emerald": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "rock",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"moxen",
+"ramp"
+]
+},
+"Mox Jet": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "rock",
+"colors": "B",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"moxen",
+"ramp"
+]
+},
+"Mox Opal": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "rock",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"mana-rock",
+"moxen",
+"ramp"
+]
+},
+"Mox Pearl": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "rock",
+"colors": "W",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"moxen",
+"ramp"
+]
+},
+"Mox Ruby": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "rock",
+"colors": "R",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"moxen",
+"ramp"
+]
+},
+"Mox Sapphire": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"mana": {
+"kind": "rock",
+"colors": "U",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"moxen",
+"ramp"
+]
+},
+"Multiversal Passage": {
+"types": [
+"Land"
+],
+"mv": 0,
+"roles": []
+},
+"Murderous Cut": {
+"types": [
+"Instant"
+],
+"mv": 5,
+"cost": "4B",
+"colors": "B",
+"roles": []
+},
+"Myr Battlesphere": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 7,
+"cost": "7",
+"roles": [
+"PAYLOAD",
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"attack-trigger",
+"burn",
+"burn-player",
+"removal"
+]
+},
+"Mystic Confluence": {
+"types": [
+"Instant"
+],
+"mv": 5,
+"cost": "3UU",
+"colors": "U",
+"dig": 1,
+"roles": [],
+"tags": [
+"bounce",
+"card-advantage",
+"counter",
+"counterspell",
+"creature-removal",
+"cycle",
+"draw",
+"modal",
+"removal",
+"soft-counter"
+]
+},
+"Mystic Forge": {
+"types": [
+"Artifact"
+],
+"mv": 4,
+"cost": "4",
+"roles": [],
+"tags": [
+"card-advantage",
+"mill"
+]
+},
+"Mystical Tutor": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"tutor": {
+"types": [
+"Instant",
+"Sorcery"
+],
+"to": "top"
+},
+"roles": [
+"TUTOR_TOP"
+],
+"tags": [
+"cycle",
+"tutor",
+"tutor-to"
+]
+},
+"Nadu, Winged Wisdom": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1UG",
+"colors": "UG",
+"roles": []
+},
+"Narset, Parter of Veils": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"card-advantage",
+"cycle",
+"impulse"
+]
+},
+"Natural Order": {
+"types": [
+"Sorcery"
+],
+"mv": 4,
+"cost": "2GG",
+"colors": "G",
+"finds": {
+"types": [
+"Creature"
+],
+"colors": "G"
+},
+"roles": [
+"CHEAT_LIBRARY"
+],
+"tags": [
+"sac-outlet",
+"sacrifice-outlet",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Necromancy": {
+"types": [
+"Enchantment"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Necron Deathmark": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 5,
+"cost": "3BB",
+"colors": "B",
+"roles": [
+"PAYLOAD_ARTIFACT",
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"creature-removal",
+"mill",
+"removal",
+"self-mill"
+]
+},
+"Nethergoyf": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": []
+},
+"Nettlecyst": {
+"types": [
+"Artifact"
+],
+"mv": 3,
+"cost": "3",
+"roles": []
+},
+"Nexus of Becoming": {
+"types": [
+"Artifact"
+],
+"mv": 6,
+"cost": "6",
+"roles": [
+"PAYLOAD_ARTIFACT"
+]
+},
+"Night Scythe": {
+"types": [
+"Artifact"
+],
+"mv": 3,
+"cost": "3",
+"roles": [],
+"tags": [
+"evasion"
+]
+},
+"Night's Whisper": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"dig": 2,
+"roles": [
+"DRAW"
+],
+"tags": [
+"card-advantage",
+"draw"
+]
+},
+"Nissa, Ascended Animist": {
+"types": [
+"Planeswalker"
+],
+"mv": 7,
+"cost": "3GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"artifact-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Nissa, Resurgent Animist": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+]
+},
+"Nissa, Who Shakes the World": {
+"types": [
+"Planeswalker"
+],
+"mv": 5,
+"cost": "3GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"animate-land",
+"cycle",
+"protection",
+"ramp",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"No More Lies": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "WU",
+"colors": "WU",
+"roles": []
+},
+"Noble Hierarch": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "WUG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:G"
+],
+"tags": [
+"attack-trigger",
+"mana-dork",
+"ramp"
+]
+},
+"Noise Marine": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "4R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"card-advantage",
+"creature-removal",
+"removal"
+]
+},
+"Nova Hellkite": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3RR",
+"colors": "R",
+"roles": []
+},
+"Nurturing Peatland": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BG",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:G"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"dual-land",
+"painland",
+"utility-land"
+]
+},
+"Oath of Druids": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"impulse",
+"mill",
+"self-mill"
+]
+},
+"Ocelot Pride": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": []
+},
+"Oko, Thief of Crowns": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1UG",
+"colors": "UG",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"cycle",
+"lifegain",
+"removal"
+]
+},
+"Old One Eye": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "5G",
+"colors": "G",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"PAYLOAD"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"recursion"
+]
+},
+"Oliphaunt": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "5R",
+"colors": "R",
+"roles": [
+"GY_SELF",
+"PAYLOAD",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "1"
+},
+"tags": [
+"attack-trigger",
+"cycle",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Omnath, Locus of Creation": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "WURG",
+"colors": "WURG",
+"mana": {
+"kind": "dork",
+"colors": "WURG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"adds-multiple-mana",
+"boardwipe",
+"burn",
+"burn-player",
+"cantrip",
+"card-advantage",
+"draw",
+"landfall",
+"lifegain",
+"mass-removal",
+"ramp",
+"removal",
+"sweeper"
+]
+},
+"Once Upon a Time": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"dig": 5,
+"roles": [
+"CANTRIP"
+],
+"tags": [
+"card-advantage",
+"impulse"
+]
+},
+"Oona's Prowler": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"evasion"
+]
+},
+"Ophiomancer": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": []
+},
+"Opposition": {
+"types": [
+"Enchantment"
+],
+"mv": 4,
+"cost": "2UU",
+"colors": "U",
+"roles": []
+},
+"Oracle of Mul Daya": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3G",
+"colors": "G",
+"roles": [],
+"tags": [
+"card-advantage",
+"ramp"
+]
+},
+"Orcish Bowmasters": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"hatebear",
+"removal"
+]
+},
+"Orcish Lumberjack": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"mana": {
+"kind": "dork",
+"colors": "RG",
+"amount": 3
+},
+"roles": [
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-dork",
+"ramp",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Otawara, Soaring City": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "U",
+"amount": 1
+},
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"MANA:U"
+],
+"costs": {
+"DISCARD_OUTLET": "3U"
+},
+"tags": [
+"artifact-removal",
+"bounce",
+"creature-removal",
+"cycle",
+"enchantment-removal",
+"removal",
+"utility-land"
+]
+},
+"Otharri, Suns' Glory": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3WR",
+"colors": "WR",
+"roles": [],
+"tags": [
+"attack-trigger",
+"evasion",
+"lifegain",
+"reanimate",
+"recursion"
+]
+},
+"Ouroboroid": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2GG",
+"colors": "G",
+"roles": []
+},
+"Oust": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [],
+"tags": [
+"creature-removal",
+"lifegain",
+"removal"
+]
+},
+"Outland Liberator": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": []
+},
+"Overgrown Tomb": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BG",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Overlord of the Balemurk": {
+"types": [
+"Creature",
+"Enchantment"
+],
+"mv": 5,
+"cost": "3BB",
+"colors": "B",
+"roles": []
+},
+"Overlord of the Boilerbilges": {
+"types": [
+"Creature",
+"Enchantment"
+],
+"mv": 6,
+"cost": "4RR",
+"colors": "R",
+"roles": [
+"PAYLOAD"
+]
+},
+"Overlord of the Mistmoors": {
+"types": [
+"Creature",
+"Enchantment"
+],
+"mv": 7,
+"cost": "5WW",
+"colors": "W",
+"roles": [
+"PAYLOAD"
+]
+},
+"Pack Rat": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "2B"
+},
+"tags": [
+"copy"
+]
+},
+"Palace Jailer": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"card-advantage",
+"creature-removal",
+"draw",
+"removal"
+]
+},
+"Palantír of Orthanc": {
+"types": [
+"Artifact"
+],
+"mv": 3,
+"cost": "3",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tags": [
+"card-advantage",
+"draw",
+"mill",
+"self-mill"
+]
+},
+"Paradise Druid": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"mana-dork",
+"protection",
+"ramp"
+]
+},
+"Parallax Wave": {
+"types": [
+"Enchantment"
+],
+"mv": 4,
+"cost": "2WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"blink",
+"creature-removal",
+"cycle",
+"flicker",
+"protection",
+"removal"
+]
+},
+"Path to Exile": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [],
+"tags": [
+"creature-removal",
+"ramp",
+"removal",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Pentad Prism": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"mana-rock",
+"ramp",
+"sunburst"
+]
+},
+"Persist": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Pest Infestation": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": [],
+"tags": [
+"artifact-removal",
+"enchantment-removal",
+"lifegain",
+"removal"
+]
+},
+"Pestermite": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"roles": [
+"UNTAPPER"
+],
+"tags": [
+"evasion"
+]
+},
+"Phantasmal Image": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [],
+"tags": [
+"clone",
+"copy",
+"cycle"
+]
+},
+"Phelia, Exuberant Shepherd": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": []
+},
+"Phlage, Titan of Fire's Fury": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WR",
+"colors": "WR",
+"roles": []
+},
+"Phyrexian Metamorph": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 4,
+"cost": "3",
+"colors": "U",
+"roles": [],
+"tags": [
+"clone",
+"copy"
+]
+},
+"Phyrexian Revoker": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"hatebear"
+]
+},
+"Pia and Kiran Nalaar": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"cycle",
+"evasion",
+"removal",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Pick Your Poison": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": []
+},
+"Pillage the Bog": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "BG",
+"colors": "BG",
+"dig": 1,
+"roles": [
+"CANTRIP"
+]
+},
+"Pinnacle Emissary": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 3,
+"cost": "1UR",
+"colors": "UR",
+"roles": []
+},
+"Plains": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "W",
+"amount": 1
+},
+"roles": [
+"MANA:W"
+]
+},
+"Plateau": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WR",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Polluted Delta": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UB",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:B"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Ponder": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"dig": 3,
+"roles": [
+"CANTRIP"
+],
+"tags": [
+"cantrip",
+"card-advantage",
+"draw"
+]
+},
+"Porcelain Legionnaire": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 3,
+"cost": "2",
+"colors": "W",
+"roles": []
+},
+"Portable Hole": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Portal to Phyrexia": {
+"types": [
+"Artifact"
+],
+"mv": 9,
+"cost": "9",
+"roles": [
+"REANIMATE",
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"creature-removal",
+"edict",
+"reanimate",
+"recursion",
+"removal"
+]
+},
+"Preacher of the Schism": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": []
+},
+"Preordain": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"dig": 3,
+"roles": [
+"CANTRIP"
+],
+"tags": [
+"cantrip",
+"card-advantage",
+"draw"
+]
+},
+"Primeval Titan": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "4GG",
+"colors": "G",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"attack-trigger",
+"combat-ramp",
+"cycle",
+"ramp",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Prismatic Ending": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Prismatic Vista": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Proft's Eidetic Memory": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": []
+},
+"Psychic Frog": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "UB",
+"colors": "UB",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+}
+},
+"Putrid Imp": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"evasion",
+"threshold"
+]
+},
+"Pyrite Spellbomb": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Pyrogoyf": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3R",
+"colors": "R",
+"roles": []
+},
+"Pyrokinesis": {
+"types": [
+"Instant"
+],
+"mv": 6,
+"cost": "4RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-creature",
+"creature-removal",
+"cycle",
+"pitch-spell",
+"removal"
+]
+},
+"Qarsi Revenant": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1BB",
+"colors": "B",
+"roles": []
+},
+"Quantum Riddler": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3UU",
+"colors": "U",
+"roles": []
+},
+"Questing Beast": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"burn",
+"evasion",
+"removal"
+]
+},
+"Questing Druid": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": []
+},
+"Raffine's Tower": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WUB",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Ragavan, Nimble Pilferer": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"bounce",
+"bounce-self",
+"card-advantage",
+"combat-ramp",
+"mill",
+"ramp"
+]
+},
+"Raging Ravine": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "RG",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"attack-trigger",
+"cycle",
+"dual-land",
+"man-land",
+"manland",
+"tapland",
+"utility-land"
+]
+},
+"Rain of Filth": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"mana": {
+"kind": "oneshot",
+"colors": "B",
+"amount": 1,
+"net": 0
+},
+"roles": [
+"MANA:B"
+],
+"tags": [
+"ramp",
+"ritual",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Ramunap Excavator": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2G",
+"colors": "G",
+"roles": [],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Ranger-Captain of Eos": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WW",
+"colors": "W",
+"tutor": {
+"types": [
+"Creature"
+],
+"maxmv": 1,
+"to": "hand"
+},
+"roles": [
+"TUTOR_HAND"
+],
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Rankle, Master of Pranks": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2BB",
+"colors": "B",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"tags": [
+"card-advantage",
+"creature-removal",
+"discard",
+"draw",
+"edict",
+"evasion",
+"modal",
+"removal",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Raucous Theater": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BR",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:R"
+]
+},
+"Raugrin Triome": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WUR",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:W",
+"MANA:U",
+"MANA:R",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Razorverge Thicket": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Reanimate": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Reckoner Bankbuster": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"card-advantage",
+"draw"
+]
+},
+"Reclamation Sage": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2G",
+"colors": "G",
+"roles": [],
+"tags": [
+"artifact-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Recruiter of the Guard": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"tutor": {
+"types": [
+"Creature"
+],
+"to": "hand"
+},
+"roles": [
+"TUTOR_HAND"
+],
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Recurring Nightmare": {
+"types": [
+"Enchantment"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"costs": {
+"REANIMATE": "0"
+},
+"tags": [
+"bounce",
+"bounce-self",
+"reanimate",
+"recursion",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Red Elemental Blast": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"artifact-removal",
+"counter",
+"counterspell",
+"creature-removal",
+"enchantment-removal",
+"modal",
+"removal"
+]
+},
+"Regrowth": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [],
+"tags": [
+"card-advantage",
+"recursion"
+]
+},
+"Relic of Progenitus": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"card-advantage",
+"draw",
+"graveyard-hate"
+]
+},
+"Remand": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"dig": 1,
+"roles": [
+"CANTRIP"
+],
+"tags": [
+"cantrip",
+"card-advantage",
+"counter",
+"counterspell",
+"draw"
+]
+},
+"Reprieve": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"dig": 1,
+"roles": [
+"CANTRIP"
+],
+"tags": [
+"cantrip",
+"card-advantage",
+"counter",
+"counterspell",
+"draw"
+]
+},
+"Restless Bivouac": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WR",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:R"
+],
+"tags": [
+"attack-trigger",
+"cycle",
+"dual-land",
+"man-land",
+"manland",
+"tapland",
+"utility-land"
+]
+},
+"Restless Cottage": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BG",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:G"
+]
+},
+"Restless Fortress": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WB",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:B"
+]
+},
+"Restless Prairie": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:G"
+]
+},
+"Restless Ridgeline": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "RG",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"MANA:G"
+]
+},
+"Restless Vents": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BR",
+"amount": 1
+},
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"MANA:B",
+"MANA:R"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+}
+},
+"Restless Vinestalk": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UG",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:G"
+],
+"tags": [
+"attack-trigger",
+"cycle",
+"dual-land",
+"man-land",
+"manland",
+"tapland",
+"utility-land"
+]
+},
+"Restoration Angel": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3W",
+"colors": "W",
+"roles": [
+"UNTAPPER"
+],
+"tags": [
+"blink",
+"evasion",
+"flicker",
+"protection"
+]
+},
+"Retrofitter Foundry": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"evasion",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Riverpyre Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UR",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:R"
+]
+},
+"Robber of the Rich": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [],
+"tags": [
+"attack-trigger",
+"card-advantage",
+"mill"
+]
+},
+"Rofellos, Llanowar Emissary": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "GG",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-dork",
+"ramp"
+]
+},
+"Rotting Regisaur": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+]
+},
+"Sacred Foundry": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WR",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Sage of the Skies": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": []
+},
+"Saheeli, Sublime Artificer": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1UU",
+"colors": "UR",
+"roles": [],
+"tags": [
+"copy",
+"cycle"
+]
+},
+"Sail into the West": {
+"types": [
+"Instant"
+],
+"mv": 4,
+"cost": "2UG",
+"colors": "UG",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"tags": [
+"burst-draw",
+"card-advantage",
+"draw",
+"recursion",
+"wheel"
+]
+},
+"Sakura-Tribe Elder": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [],
+"tags": [
+"ramp",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Samwise the Stouthearted": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [],
+"tags": [
+"card-advantage",
+"recursion"
+]
+},
+"Sanguine Evangelist": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": []
+},
+"Satyr Wayfinder": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"card-advantage",
+"impulse",
+"mill",
+"self-mill"
+]
+},
+"Savai Triome": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WBR",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:W",
+"MANA:B",
+"MANA:R",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Savannah": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Scalding Tarn": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UR",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Scavenging Ooze": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [],
+"tags": [
+"graveyard-hate",
+"hatebear",
+"lifegain"
+]
+},
+"Scrapheap Scrounger": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Scrapwork Mutt": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"ARTIFACT_FODDER"
+],
+"costs": {
+"DISCARD_OUTLET": "0"
+},
+"tags": [
+"card-advantage",
+"draw",
+"reanimate",
+"recursion",
+"rummage"
+]
+},
+"Screaming Nemesis": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": []
+},
+"Scrubland": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WB",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:B"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Scythecat Cub": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": []
+},
+"Seachrome Coast": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WU",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Seasoned Dungeoneer": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3W",
+"colors": "W",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"attack-trigger",
+"evasion",
+"mill",
+"protection",
+"self-mill",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Seasoned Pyromancer": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1RR",
+"colors": "R",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"tags": [
+"card-advantage",
+"draw",
+"rummage"
+]
+},
+"Seething Song": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"mana": {
+"kind": "ritual",
+"colors": "R",
+"amount": 5,
+"net": 2
+},
+"roles": [
+"FREE_MANA",
+"MANA:R"
+],
+"tags": [
+"adds-multiple-mana",
+"ramp",
+"ritual"
+]
+},
+"Selfless Spirit": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [],
+"tags": [
+"evasion",
+"protection"
+]
+},
+"Sensei's Divining Top": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"card-advantage",
+"draw"
+]
+},
+"Sentinel of the Nameless City": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2G",
+"colors": "G",
+"roles": []
+},
+"Serra Paragon": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"death-trigger",
+"evasion",
+"lifegain",
+"reanimate",
+"recursion"
+]
+},
+"Sevinne's Reclamation": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": [],
+"tags": [
+"copy",
+"cycle",
+"flashback",
+"ramp",
+"reanimate",
+"recursion"
+]
+},
+"Shadowspear": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Shadowy Backstreet": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WB",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:B"
+]
+},
+"Shallow Grave": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Shelldock Isle": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "U",
+"amount": 1
+},
+"roles": [
+"MANA:U"
+],
+"tags": [
+"cycle",
+"tapland",
+"utility-land"
+]
+},
+"Sheoldred's Edict": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": []
+},
+"Sheoldred, the Apocalypse": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2BB",
+"colors": "B",
+"roles": [],
+"tags": [
+"cycle",
+"lifegain"
+]
+},
+"Shifting Woodland": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G"
+]
+},
+"Show and Tell": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"roles": [
+"CHEAT"
+],
+"tags": [
+"ramp"
+]
+},
+"Showdown of the Skalds": {
+"types": [
+"Enchantment"
+],
+"mv": 4,
+"cost": "2WR",
+"colors": "WR",
+"roles": []
+},
+"Sicarian Infiltrator": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"roles": [],
+"tags": [
+"burst-draw",
+"cantrip",
+"card-advantage",
+"copy",
+"draw"
+]
+},
+"Silent Clearing": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WB",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:B"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"dual-land",
+"painland",
+"utility-land"
+]
+},
+"Sink into Stupor": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "1UU",
+"colors": "U",
+"roles": []
+},
+"Six": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2G",
+"colors": "G",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+]
+},
+"Skullclamp": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"card-advantage",
+"death-trigger",
+"draw"
+]
+},
+"Skyclave Apparition": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Sleight of Hand": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"dig": 2,
+"roles": [
+"CANTRIP"
+]
+},
+"Smuggler's Copter": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"attack-trigger",
+"card-advantage",
+"draw",
+"evasion",
+"loot"
+]
+},
+"Snap": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [],
+"tags": [
+"bounce",
+"creature-removal",
+"removal"
+]
+},
+"Snapcaster Mage": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [],
+"tags": [
+"recursion"
+]
+},
+"Sneak Attack": {
+"types": [
+"Enchantment"
+],
+"mv": 4,
+"cost": "3R",
+"colors": "R",
+"roles": [
+"CHEAT"
+],
+"costs": {
+"CHEAT": "R"
+}
+},
+"Snuff Out": {
+"types": [
+"Instant"
+],
+"mv": 4,
+"cost": "3B",
+"colors": "B",
+"roles": [],
+"tags": [
+"creature-removal",
+"removal"
+]
+},
+"Sol Ring": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"mana": {
+"kind": "rock",
+"colors": "C",
+"amount": 2
+},
+"roles": [
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"adds-multiple-mana",
+"mana-rock",
+"ramp"
+]
+},
+"Solitude": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"creature-removal",
+"cycle",
+"lifegain",
+"pitch-spell",
+"removal"
+]
+},
+"Sorin of House Markov": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": []
+},
+"Soul-Guide Lantern": {
+"types": [
+"Artifact"
+],
+"mv": 1,
+"cost": "1",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Soulherder": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WU",
+"colors": "WU",
+"roles": [],
+"tags": [
+"blink",
+"cycle",
+"flicker"
+]
+},
+"Souls of the Lost": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": []
+},
+"Sowing Mycospawn": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3G",
+"colors": "G",
+"roles": []
+},
+"Spara's Headquarters": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WUG",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:W",
+"MANA:U",
+"MANA:G",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Spectral Procession": {
+"types": [
+"Sorcery"
+],
+"mv": 0,
+"cost": "0",
+"roles": [],
+"tags": [
+"cycle",
+"evasion"
+]
+},
+"Spell Pierce": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell",
+"soft-counter"
+]
+},
+"Spell Queller": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1WU",
+"colors": "WU",
+"roles": [],
+"tags": [
+"counter",
+"counterspell",
+"cycle",
+"evasion",
+"removal"
+]
+},
+"Spellseeker": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"tutor": {
+"types": [
+"Instant",
+"Sorcery"
+],
+"maxmv": 2,
+"to": "hand"
+},
+"roles": [
+"TUTOR_HAND"
+],
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Spirebluff Canal": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UR",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Splinter Twin": {
+"types": [
+"Enchantment"
+],
+"mv": 4,
+"cost": "2RR",
+"colors": "R",
+"roles": [
+"COPY_ENABLER"
+],
+"tags": [
+"copy"
+]
+},
+"Splitskin Doll": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"ARTIFACT_FODDER"
+]
+},
+"Springheart Nantuko": {
+"types": [
+"Creature",
+"Enchantment"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": []
+},
+"Squee, Goblin Nabob": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": [],
+"tags": [
+"recursion"
+]
+},
+"Staff of the Storyteller": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Steam Vents": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UR",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Steel Seraph": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 6,
+"cost": "6",
+"roles": [
+"PAYLOAD",
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"evasion",
+"lifegain"
+]
+},
+"Stern Scolding": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell"
+]
+},
+"Stock Up": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"dig": 5,
+"roles": []
+},
+"Stomping Ground": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "RG",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Stoneforge Mystic": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"tutor": {
+"types": [
+"Equipment"
+],
+"to": "hand"
+},
+"roles": [
+"TUTOR_HAND"
+],
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Strip Mine": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "C",
+"amount": 1
+},
+"roles": [
+"MANA:C"
+],
+"tags": [
+"removal",
+"utility-land"
+]
+},
+"Student of Warfare": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": []
+},
+"Subtlety": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell",
+"cycle",
+"evasion",
+"pitch-spell"
+]
+},
+"Sulfuric Vortex": {
+"types": [
+"Enchantment"
+],
+"mv": 3,
+"cost": "1RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-player"
+]
+},
+"Sunbaked Canyon": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WR",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:R"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"dual-land",
+"painland",
+"utility-land"
+]
+},
+"Sunbillow Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WR",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:R"
+]
+},
+"Sundering Titan": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 8,
+"cost": "8",
+"roles": [
+"PAYLOAD",
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"removal"
+]
+},
+"Sunfall": {
+"types": [
+"Sorcery"
+],
+"mv": 5,
+"cost": "3WW",
+"colors": "W",
+"roles": []
+},
+"Surrak, Elusive Hunter": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2G",
+"colors": "G",
+"roles": []
+},
+"Survival of the Fittest": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"tutor": {
+"types": [
+"Creature"
+],
+"to": "hand"
+},
+"roles": [
+"TUTOR_HAND",
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "G"
+},
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Swamp": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "B",
+"amount": 1
+},
+"roles": [
+"MANA:B"
+]
+},
+"Sword of Fire and Ice": {
+"types": [
+"Artifact"
+],
+"mv": 3,
+"cost": "3",
+"roles": []
+},
+"Sword of the Meek": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Swords to Plowshares": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [],
+"tags": [
+"creature-removal",
+"lifegain",
+"removal"
+]
+},
+"Sylvan Caryatid": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "WUBRG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"mana-dork",
+"ramp"
+]
+},
+"Sylvan Library": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [],
+"tags": [
+"card-advantage",
+"draw"
+]
+},
+"Sylvan Safekeeper": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": []
+},
+"Syr Ginger, the Meal Ender": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"death-trigger",
+"lifegain",
+"protection"
+]
+},
+"Taiga": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "RG",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Takenuma, Abandoned Mire": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "B",
+"amount": 1
+},
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"SELF_MILL",
+"MANA:B"
+],
+"costs": {
+"DISCARD_OUTLET": "3B"
+}
+},
+"Talisman of Conviction": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "WRC",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:R",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Talisman of Creativity": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "URC",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:R",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Talisman of Curiosity": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "UGC",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:G",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Talisman of Dominance": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "UBC",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:B",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Talisman of Hierarchy": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "WBC",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:B",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Talisman of Impulse": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "RGC",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"MANA:G",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Talisman of Indulgence": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "BRC",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:R",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Talisman of Progress": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "WUC",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Talisman of Resilience": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "BGC",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:G",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Talisman of Unity": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"mana": {
+"kind": "rock",
+"colors": "WGC",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:G",
+"MANA:C",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"mana-rock",
+"ramp"
+]
+},
+"Tamiyo, Collector of Tales": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2UG",
+"colors": "UG",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"impulse",
+"mill",
+"recursion",
+"self-mill"
+]
+},
+"Tamiyo, Inquisitive Student": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"roles": []
+},
+"Tarmogoyf": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": []
+},
+"Tear Asunder": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"cycle",
+"enchantment-removal",
+"removal"
+]
+},
+"Teferi, Hero of Dominaria": {
+"types": [
+"Planeswalker"
+],
+"mv": 5,
+"cost": "3WU",
+"colors": "WU",
+"roles": [],
+"tags": [
+"artifact-removal",
+"card-advantage",
+"creature-removal",
+"draw",
+"enchantment-removal",
+"ramp",
+"removal"
+]
+},
+"Teferi, Time Raveler": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "1WU",
+"colors": "WU",
+"roles": [],
+"tags": [
+"artifact-removal",
+"bounce",
+"card-advantage",
+"creature-removal",
+"cycle",
+"draw",
+"enchantment-removal",
+"removal"
+]
+},
+"Temple Garden": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Tendrils of Agony": {
+"types": [
+"Sorcery"
+],
+"mv": 4,
+"cost": "2BB",
+"colors": "B",
+"roles": [
+"STORM_KILL"
+],
+"tags": [
+"copy",
+"lifegain"
+]
+},
+"Territorial Kavu": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "RG",
+"colors": "RG",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+]
+},
+"Tersa Lightshatter": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+]
+},
+"Tezzeret, Cruel Captain": {
+"types": [
+"Planeswalker"
+],
+"mv": 3,
+"cost": "3",
+"tutor": {
+"types": [
+"Artifact"
+],
+"maxmv": 1,
+"to": "hand"
+},
+"roles": [
+"TUTOR_HAND"
+]
+},
+"Thalia, Guardian of Thraben": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [],
+"tags": [
+"hatebear"
+]
+},
+"Thassa's Oracle": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "UU",
+"colors": "U",
+"roles": [
+"WINCON_EMPTY_LIBRARY"
+],
+"tags": [
+"card-advantage",
+"impulse"
+]
+},
+"The Endstone": {
+"types": [
+"Artifact"
+],
+"mv": 7,
+"cost": "7",
+"roles": [
+"PAYLOAD_ARTIFACT"
+]
+},
+"The Mightstone and Weakstone": {
+"types": [
+"Artifact"
+],
+"mv": 5,
+"cost": "5",
+"mana": {
+"kind": "rock",
+"colors": "C",
+"amount": 2
+},
+"roles": [
+"MANA:C",
+"PAYLOAD_ARTIFACT"
+]
+},
+"The One Ring": {
+"types": [
+"Artifact"
+],
+"mv": 4,
+"cost": "4",
+"roles": [],
+"tags": [
+"burst-draw",
+"card-advantage",
+"draw",
+"protection"
+]
+},
+"The Scarab God": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3UB",
+"colors": "UB",
+"roles": [],
+"tags": [
+"copy",
+"cycle",
+"death-trigger",
+"graveyard-hate",
+"reanimate",
+"recursion"
+]
+},
+"The Wandering Emperor": {
+"types": [
+"Planeswalker"
+],
+"mv": 4,
+"cost": "2WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"creature-removal",
+"lifegain",
+"removal"
+]
+},
+"Thespian's Stage": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "C",
+"amount": 1
+},
+"roles": [
+"MANA:C"
+],
+"tags": [
+"copy",
+"utility-land"
+]
+},
+"Thief of Sanity": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1UB",
+"colors": "UB",
+"roles": [],
+"tags": [
+"card-advantage",
+"evasion",
+"mill"
+]
+},
+"Thieving Skydiver": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [],
+"tags": [
+"evasion"
+]
+},
+"Third Path Iconoclast": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "UR",
+"colors": "UR",
+"roles": [],
+"tags": [
+"cycle"
+]
+},
+"Thirst for Discovery": {
+"types": [
+"Instant"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"dig": 3,
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"DRAW"
+]
+},
+"Thopter Foundry": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "WU",
+"colors": "WUB",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"evasion",
+"lifegain",
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Thornspire Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "RG",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"MANA:G"
+]
+},
+"Thoughtseize": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [],
+"tags": [
+"discard"
+]
+},
+"Thraben Inspector": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": [],
+"tags": [
+"card-advantage",
+"draw"
+]
+},
+"Thragtusk": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "4G",
+"colors": "G",
+"roles": [],
+"tags": [
+"death-trigger",
+"lifegain"
+]
+},
+"Three Steps Ahead": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "U",
+"colors": "U",
+"dig": 2,
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"DRAW"
+]
+},
+"Through the Breach": {
+"types": [
+"Instant"
+],
+"mv": 5,
+"cost": "4R",
+"colors": "R",
+"roles": [
+"CHEAT"
+],
+"tags": [
+"sac-outlet",
+"sacrifice-outlet"
+]
+},
+"Thundering Falls": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UR",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:R"
+]
+},
+"Thundermaw Hellkite": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3RR",
+"colors": "R",
+"roles": [],
+"tags": [
+"boardwipe",
+"burn",
+"burn-creature",
+"creature-removal",
+"evasion",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Thundertrap Trainer": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": []
+},
+"Tidehollow Sculler": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 2,
+"cost": "WB",
+"colors": "WB",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"cycle",
+"removal"
+]
+},
+"Time Spiral": {
+"types": [
+"Sorcery"
+],
+"mv": 6,
+"cost": "4UU",
+"colors": "U",
+"dig": 7,
+"roles": [
+"DRAW"
+],
+"tags": [
+"burst-draw",
+"card-advantage",
+"draw",
+"recursion",
+"wheel"
+]
+},
+"Time Walk": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1U",
+"colors": "U",
+"roles": [],
+"tags": [
+"extra-turn"
+]
+},
+"Time Warp": {
+"types": [
+"Sorcery"
+],
+"mv": 5,
+"cost": "3UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"extra-turn"
+]
+},
+"Timeless Dragon": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3WW",
+"colors": "W",
+"roles": [
+"GY_SELF",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "2"
+},
+"tags": [
+"copy",
+"evasion",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Timetwister": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"dig": 7,
+"roles": [
+"DRAW"
+],
+"tags": [
+"burst-draw",
+"card-advantage",
+"draw",
+"recursion",
+"wheel"
+]
+},
+"Tinker": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"finds": {
+"types": [
+"Artifact"
+]
+},
+"roles": [
+"TINKER"
+],
+"tags": [
+"sac-outlet",
+"sacrifice-outlet",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Tireless Tracker": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2G",
+"colors": "G",
+"roles": [],
+"tags": [
+"card-advantage",
+"draw",
+"landfall"
+]
+},
+"Tishana's Tidebinder": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"roles": [],
+"tags": [
+"counter",
+"counterspell"
+]
+},
+"Titan of Industry": {
+"types": [
+"Creature"
+],
+"mv": 7,
+"cost": "4GGG",
+"colors": "G",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"artifact-removal",
+"enchantment-removal",
+"lifegain",
+"modal",
+"protection",
+"removal"
+]
+},
+"Titania, Protector of Argoth": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3GG",
+"colors": "G",
+"roles": [],
+"tags": [
+"cycle",
+"death-trigger",
+"ramp",
+"reanimate",
+"recursion"
+]
+},
+"Tolarian Academy": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "U",
+"amount": 1
+},
+"roles": [
+"MANA:U"
+],
+"tags": [
+"adds-multiple-mana",
+"cycle",
+"ramp"
+]
+},
+"Torsten, Founder of Benalia": {
+"types": [
+"Creature"
+],
+"mv": 7,
+"cost": "5WG",
+"colors": "WG",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"card-advantage",
+"death-trigger",
+"impulse"
+]
+},
+"Touch the Spirit Realm": {
+"types": [
+"Enchantment"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "1W"
+},
+"tags": [
+"artifact-removal",
+"blink",
+"creature-removal",
+"flicker",
+"protection",
+"removal"
+]
+},
+"Tough Cookie": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"lifegain"
+]
+},
+"Toxic Deluge": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": [],
+"tags": [
+"boardwipe",
+"creature-removal",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Treachery": {
+"types": [
+"Enchantment"
+],
+"mv": 5,
+"cost": "3UU",
+"colors": "U",
+"roles": []
+},
+"Treasure Cruise": {
+"types": [
+"Sorcery"
+],
+"mv": 8,
+"cost": "7U",
+"colors": "U",
+"dig": 3,
+"roles": [
+"DRAW"
+],
+"tags": [
+"burst-draw",
+"card-advantage",
+"delve",
+"draw"
+]
+},
+"Tribal Flames": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": []
+},
+"Trinket Mage": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2U",
+"colors": "U",
+"tutor": {
+"types": [
+"Artifact"
+],
+"maxmv": 1,
+"to": "hand"
+},
+"roles": [
+"TUTOR_HAND"
+],
+"tags": [
+"cycle",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Triplicate Titan": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 9,
+"cost": "9",
+"roles": [
+"PAYLOAD",
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"death-trigger",
+"evasion"
+]
+},
+"Troll of Khazad-dûm": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "5B",
+"colors": "B",
+"roles": [
+"GY_SELF",
+"PAYLOAD",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "1"
+},
+"tags": [
+"cycle",
+"evasion",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Tropical Island": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UG",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"True-Name Nemesis": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"cycle",
+"evasion"
+]
+},
+"Trumpeting Carnosaur": {
+"types": [
+"Creature"
+],
+"mv": 6,
+"cost": "4RR",
+"colors": "R",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"PAYLOAD"
+],
+"costs": {
+"DISCARD_OUTLET": "2R"
+},
+"tags": [
+"burn",
+"burn-creature",
+"card-advantage",
+"creature-removal",
+"removal"
+]
+},
+"Tundra": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WU",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:U"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Turnabout": {
+"types": [
+"Instant"
+],
+"mv": 4,
+"cost": "2UU",
+"colors": "U",
+"roles": []
+},
+"Ugin, Eye of the Storms": {
+"types": [
+"Planeswalker"
+],
+"mv": 7,
+"cost": "7",
+"roles": []
+},
+"Ulamog, the Ceaseless Hunger": {
+"types": [
+"Creature"
+],
+"mv": 10,
+"cost": "10",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"artifact-removal",
+"attack-trigger",
+"creature-removal",
+"enchantment-removal",
+"mill",
+"removal"
+]
+},
+"Ulamog, the Infinite Gyre": {
+"types": [
+"Creature"
+],
+"mv": 11,
+"cost": "11",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"artifact-removal",
+"attack-trigger",
+"creature-removal",
+"edict",
+"enchantment-removal",
+"recursion",
+"removal"
+]
+},
+"Ulvenwald Oddity": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2GG",
+"colors": "G",
+"roles": []
+},
+"Umezawa's Jitte": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"creature-removal",
+"lifegain",
+"modal",
+"removal"
+]
+},
+"Unburial Rites": {
+"types": [
+"Sorcery"
+],
+"mv": 5,
+"cost": "4B",
+"colors": "B",
+"roles": [
+"REANIMATE"
+]
+},
+"Undercity Sewers": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UB",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:B"
+]
+},
+"Underground Mortuary": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BG",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:G"
+]
+},
+"Underground Sea": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UB",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:B"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Undermountain Adventurer": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G"
+],
+"tags": [
+"adds-multiple-mana",
+"cycle",
+"mana-dork",
+"ramp",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Underworld Breach": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [
+"ESCAPE_ENGINE"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Unearth": {
+"types": [
+"Sorcery"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"roles": [
+"GY_SELF",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "2"
+},
+"tags": [
+"card-advantage",
+"draw",
+"reanimate",
+"recursion"
+]
+},
+"Unexpectedly Absent": {
+"types": [
+"Instant"
+],
+"mv": 2,
+"cost": "WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Unholy Heat": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [],
+"tags": [
+"burn",
+"burn-creature",
+"creature-removal",
+"removal"
+]
+},
+"Unlicensed Hearse": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Unmarked Grave": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"tutor": {
+"types": [],
+"to": "graveyard"
+},
+"roles": [
+"TUTOR_GY",
+"GY_ENABLER"
+],
+"tags": [
+"tutor",
+"tutor-to"
+]
+},
+"Up the Beanstalk": {
+"types": [
+"Enchantment"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"roles": []
+},
+"Upheaval": {
+"types": [
+"Sorcery"
+],
+"mv": 6,
+"cost": "4UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"artifact-removal",
+"boardwipe",
+"bounce",
+"creature-removal",
+"enchantment-removal",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Urborg, Tomb of Yawgmoth": {
+"types": [
+"Land"
+],
+"mv": 0,
+"roles": []
+},
+"Uro, Titan of Nature's Wrath": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1UG",
+"colors": "UG",
+"roles": []
+},
+"Urza's Bauble": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Urza's Saga": {
+"types": [
+"Enchantment",
+"Land"
+],
+"mv": 0,
+"roles": [],
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-battlefield",
+"utility-land"
+]
+},
+"Urza, Lord High Artificer": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2UU",
+"colors": "U",
+"mana": {
+"kind": "dork",
+"colors": "U",
+"amount": 1
+},
+"roles": [
+"MANA:U"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"impulse-draw",
+"ramp"
+]
+},
+"Usher of the Fallen": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "W",
+"colors": "W",
+"roles": []
+},
+"Utopia Sprawl": {
+"types": [
+"Enchantment"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": [],
+"tags": [
+"ramp"
+]
+},
+"Valki, God of Lies": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"roles": [],
+"tags": [
+"artifact-removal",
+"card-advantage",
+"copy",
+"creature-removal",
+"cycle",
+"graveyard-hate",
+"impulse-draw",
+"mill",
+"ramp",
+"removal"
+]
+},
+"Vampire Hexmage": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "BB",
+"colors": "B",
+"roles": []
+},
+"Vampiric Tutor": {
+"types": [
+"Instant"
+],
+"mv": 1,
+"cost": "B",
+"colors": "B",
+"tutor": {
+"types": [],
+"to": "top"
+},
+"roles": [
+"TUTOR_TOP"
+],
+"tags": [
+"cycle",
+"tutor",
+"tutor-to"
+]
+},
+"Vaultborn Tyrant": {
+"types": [
+"Creature"
+],
+"mv": 7,
+"cost": "5GG",
+"colors": "G",
+"roles": [
+"PAYLOAD"
+]
+},
+"Vendilion Clique": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"cycle",
+"evasion"
+]
+},
+"Venser, Shaper Savant": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2UU",
+"colors": "U",
+"roles": [],
+"tags": [
+"artifact-removal",
+"bounce",
+"counter",
+"counterspell",
+"creature-removal",
+"enchantment-removal",
+"removal"
+]
+},
+"Verdant Catacombs": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BG",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Vindicate": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "1WB",
+"colors": "WB",
+"roles": [],
+"tags": [
+"artifact-removal",
+"creature-removal",
+"cycle",
+"enchantment-removal",
+"removal"
+]
+},
+"Virtue of Loyalty": {
+"types": [
+"Enchantment"
+],
+"mv": 5,
+"cost": "3WW",
+"colors": "W",
+"roles": []
+},
+"Virtue of Persistence": {
+"types": [
+"Enchantment"
+],
+"mv": 7,
+"cost": "5BB",
+"colors": "B",
+"roles": [
+"REANIMATE"
+],
+"tags": [
+"creature-removal",
+"cycle",
+"lifegain",
+"reanimate",
+"recursion",
+"removal"
+]
+},
+"Voice of Victory": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": []
+},
+"Volcanic Island": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UR",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:R"
+],
+"tags": [
+"cycle",
+"dual-land"
+]
+},
+"Voldaren Epicure": {
+"types": [
+"Creature"
+],
+"mv": 1,
+"cost": "R",
+"colors": "R",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"tag_roles": [
+"DISCARD_OUTLET"
+],
+"tags": [
+"burn",
+"burn-player",
+"card-advantage",
+"draw",
+"rummage"
+]
+},
+"Vorinclex": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "3GG",
+"colors": "G",
+"roles": [
+"SELF_MILL",
+"GY_ENABLER"
+],
+"tag_roles": [
+"SELF_MILL"
+],
+"tags": [
+"burn",
+"burn-creature",
+"card-advantage",
+"creature-removal",
+"cycle",
+"impulse",
+"mill",
+"ramp",
+"removal",
+"self-mill",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Walking Ballista": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 0,
+"cost": "0",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"creature-removal",
+"removal"
+]
+},
+"Wall of Omens": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [],
+"tags": [
+"cantrip",
+"card-advantage",
+"draw"
+]
+},
+"Wall of Roots": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1G",
+"colors": "G",
+"mana": {
+"kind": "dork",
+"colors": "G",
+"amount": 1
+},
+"roles": [
+"MANA:G"
+],
+"tags": [
+"mana-dork",
+"ramp"
+]
+},
+"Wasteland": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "C",
+"amount": 1
+},
+"roles": [
+"MANA:C"
+],
+"tags": [
+"removal",
+"utility-land"
+]
+},
+"Wastewood Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BG",
+"amount": 1
+},
+"roles": [
+"MANA:B",
+"MANA:G"
+]
+},
+"Waterlogged Grove": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UG",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:G"
+],
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"dual-land",
+"painland",
+"utility-land"
+]
+},
+"Watery Grave": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UB",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:B"
+],
+"tags": [
+"cycle",
+"dual-land",
+"shockland"
+]
+},
+"Wheel of Fortune": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "2R",
+"colors": "R",
+"dig": 7,
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER",
+"DRAW"
+],
+"tags": [
+"burst-draw",
+"card-advantage",
+"discard",
+"draw",
+"wheel"
+]
+},
+"White Plume Adventurer": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2W",
+"colors": "W",
+"roles": [],
+"tags": [
+"cycle",
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Wight of the Reliquary": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "BG",
+"colors": "BG",
+"roles": []
+},
+"Wild Growth": {
+"types": [
+"Enchantment"
+],
+"mv": 1,
+"cost": "G",
+"colors": "G",
+"roles": [],
+"tags": [
+"ramp"
+]
+},
+"Willowrush Verge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UG",
+"amount": 1
+},
+"roles": [
+"MANA:U",
+"MANA:G"
+]
+},
+"Winds of Abandon": {
+"types": [
+"Sorcery"
+],
+"mv": 2,
+"cost": "1W",
+"colors": "W",
+"roles": [],
+"tags": [
+"boardwipe",
+"creature-removal",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Windswept Heath": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "WG",
+"amount": 1
+},
+"roles": [
+"MANA:W",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Winter Orb": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "2",
+"roles": [
+"ARTIFACT_FODDER"
+]
+},
+"Wishclaw Talisman": {
+"types": [
+"Artifact"
+],
+"mv": 2,
+"cost": "1B",
+"colors": "B",
+"tutor": {
+"types": [],
+"to": "hand"
+},
+"roles": [
+"TUTOR_ANY",
+"ARTIFACT_FODDER"
+],
+"tags": [
+"tutor",
+"tutor-to",
+"tutor-to-hand"
+]
+},
+"Witch Enchanter": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "3W",
+"colors": "W",
+"roles": []
+},
+"Woe Strider": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": []
+},
+"Wood Elves": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "2G",
+"colors": "G",
+"roles": [],
+"tags": [
+"ramp",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Wooded Foothills": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "RG",
+"amount": 1
+},
+"roles": [
+"MANA:R",
+"MANA:G"
+],
+"tags": [
+"cycle",
+"fetchland",
+"tutor",
+"tutor-to",
+"tutor-to-battlefield"
+]
+},
+"Woodfall Primus": {
+"types": [
+"Creature"
+],
+"mv": 8,
+"cost": "5GGG",
+"colors": "G",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"artifact-removal",
+"cycle",
+"death-trigger",
+"enchantment-removal",
+"persist",
+"removal"
+]
+},
+"Worldspine Wurm": {
+"types": [
+"Creature"
+],
+"mv": 11,
+"cost": "8GGG",
+"colors": "G",
+"roles": [
+"PAYLOAD"
+],
+"tags": [
+"cycle",
+"death-trigger",
+"recursion"
+]
+},
+"Wrath of God": {
+"types": [
+"Sorcery"
+],
+"mv": 4,
+"cost": "2WW",
+"colors": "W",
+"roles": [],
+"tags": [
+"boardwipe",
+"creature-removal",
+"mass-removal",
+"removal",
+"sweeper"
+]
+},
+"Wrenn and Six": {
+"types": [
+"Planeswalker"
+],
+"mv": 2,
+"cost": "RG",
+"colors": "RG",
+"roles": [],
+"tags": [
+"burn",
+"burn-any",
+"burn-creature",
+"burn-player",
+"card-advantage",
+"creature-removal",
+"recursion",
+"removal"
+]
+},
+"Wurmcoil Engine": {
+"types": [
+"Artifact",
+"Creature"
+],
+"mv": 6,
+"cost": "6",
+"roles": [
+"PAYLOAD",
+"PAYLOAD_ARTIFACT"
+],
+"tags": [
+"death-trigger",
+"lifegain"
+]
+},
+"Xander's Lounge": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UBR",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:U",
+"MANA:B",
+"MANA:R",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Yavimaya, Cradle of Growth": {
+"types": [
+"Land"
+],
+"mv": 0,
+"roles": []
+},
+"Yawgmoth's Will": {
+"types": [
+"Sorcery"
+],
+"mv": 3,
+"cost": "2B",
+"colors": "B",
+"roles": [
+"ESCAPE_ENGINE"
+],
+"tags": [
+"reanimate",
+"recursion"
+]
+},
+"Yawgmoth, Thran Physician": {
+"types": [
+"Creature"
+],
+"mv": 4,
+"cost": "2BB",
+"colors": "B",
+"roles": [
+"DISCARD_OUTLET",
+"GY_ENABLER"
+],
+"costs": {
+"DISCARD_OUTLET": "BB"
+}
+},
+"Young Pyromancer": {
+"types": [
+"Creature"
+],
+"mv": 2,
+"cost": "1R",
+"colors": "R",
+"roles": [],
+"tags": [
+"cycle"
+]
+},
+"Zagoth Triome": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "UBG",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:U",
+"MANA:B",
+"MANA:G",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Zealous Conscripts": {
+"types": [
+"Creature"
+],
+"mv": 5,
+"cost": "4R",
+"colors": "R",
+"roles": [
+"UNTAPPER"
+]
+},
+"Ziatora's Proving Ground": {
+"types": [
+"Land"
+],
+"mv": 0,
+"mana": {
+"kind": "land",
+"colors": "BRG",
+"amount": 1
+},
+"roles": [
+"GY_SELF",
+"MANA:B",
+"MANA:R",
+"MANA:G",
+"GY_ENABLER"
+],
+"costs": {
+"GY_SELF": "3"
+},
+"tags": [
+"card-advantage",
+"cycle",
+"draw",
+"tapland",
+"utility-land"
+]
+},
+"Zirda, the Dawnwaker": {
+"types": [
+"Creature"
+],
+"mv": 3,
+"cost": "1RR",
+"colors": "WR",
+"roles": [],
+"tags": [
+"cycle"
+]
+},
+"Zuran Orb": {
+"types": [
+"Artifact"
+],
+"mv": 0,
+"cost": "0",
+"roles": [
+"ARTIFACT_FODDER"
+],
+"tags": [
+"lifegain",
+"sac-outlet",
+"sacrifice-outlet"
+]
+}
+}
+}
