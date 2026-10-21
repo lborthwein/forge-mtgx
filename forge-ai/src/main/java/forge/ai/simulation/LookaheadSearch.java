@@ -6772,6 +6772,127 @@ public final class LookaheadSearch {
         return a;
     }
 
+    // ------------------------------------------------------------------ combo-assembly-1021 (B1): choice copies
+
+    /** One candidate answer of the live game's resolving library search, resolved by Forge in a copy. */
+    public static final class ChoiceCopy {
+        /** The copy right after the search's resolution (null when it failed), and its copy of the seat. */
+        public Game g;
+        public Player me;
+        /** The caller's per-copy context ({@link ChoiceHooks#onCopy}), made before the resolution. */
+        public Object ctx;
+        /** The forced card was offered and taken. */
+        public boolean used;
+        public boolean failed;
+        public String error;
+        public long nanos;
+    }
+
+    /** The caller's hooks on a choice copy. */
+    public interface ChoiceHooks {
+        /** Made before the resolution (so a knowledge tracker in it watches the resolution); may return null. */
+        Object onCopy(Game copy, Player me);
+
+        /** The copy's scripted pick for a library destination (B0's own-search placement rule inside the copy). */
+        void placed(Object ctx, Game copy, Player me, Card card);
+    }
+
+    /** Forge AI whose first single-card library search takes a given card id, reporting a library placement. */
+    static final class ChoiceScripted extends RolloutAi {
+        private final int forcedId;
+        private final java.util.function.Consumer<Card> placed;
+        boolean tried = false;
+        boolean used = false;
+
+        ChoiceScripted(Game g, Player p, forge.LobbyPlayer lp, int forcedId, java.util.function.Consumer<Card> placed) {
+            super(g, p, lp);
+            this.forcedId = forcedId;
+            this.placed = placed;
+        }
+
+        @Override
+        public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa, CardCollection fetchList,
+                forge.game.player.DelayedReveal delayedReveal, String selectPrompt, boolean isOptional, Player decider) {
+            if (!tried) {
+                tried = true;
+                for (Card c : fetchList) {
+                    if (c.getId() == forcedId) {
+                        used = true;
+                        if (placed != null && destination == ZoneType.Library) {
+                            placed.accept(c);
+                        }
+                        return c;
+                    }
+                }
+            }
+            return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider);
+        }
+    }
+
+    /**
+     * combo-assembly-1021 (B1): the live game's resolving single-card library search (the searching spell or ability
+     * on top of the stack, or a resolving trigger) replayed in a copy with card {@code forcedId} taken. Forge resolves
+     * it: destination, library position, shuffle, reveal, life payment and sub-abilities come from the card's own
+     * script. The copy stops right after the resolution (no priority, no play-out). Never throws.
+     */
+    public ChoiceCopy resolveChoice(Game live, Player liveMe, int forcedId, long worldSeed, ChoiceHooks hooks) {
+        final ChoiceCopy out = new ChoiceCopy();
+        final long t0 = System.nanoTime();
+        final Prepared p = prepareTutor(live, liveMe, forcedId, worldSeed, null);
+        if (p.failed) {
+            out.failed = true;
+            out.error = String.valueOf(p.error);
+            out.nanos = System.nanoTime() - t0;
+            return out;
+        }
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        MyRandom.setThreadRandom(p.rnd);
+        AiCache.installScope(p.cache);
+        forge.util.IdScope.install(p.ids);
+        try {
+            final Game g = p.g;
+            final Player me = p.me;
+            final Object ctx = hooks == null ? null : hooks.onCopy(g, me);
+            out.ctx = ctx;
+            final ChoiceScripted st = new ChoiceScripted(g, me, me.getController().getLobbyPlayer(), forcedId,
+                    hooks == null ? null : c -> hooks.placed(ctx, g, me, c));
+            me.dangerouslySetController(st);
+            for (Player o : g.getPlayers()) {
+                if (o != me) {
+                    o.dangerouslySetController(new RolloutAi(g, o, o.getController().getLobbyPlayer()));
+                }
+            }
+            final PhaseHandler ph = g.getPhaseHandler();
+            if (p.trigSa != null) {
+                me.getController().playSpellAbilityNoStack(p.trigSa, false);
+                g.getAction().checkStaticAbilities();
+                ph.resetPriority();
+                ph.onStackResolved();
+            } else {
+                g.getStack().resolveStack();
+            }
+            out.used = st.used;
+            if (!st.used) {
+                out.failed = true;
+                out.error = "the forced card was not offered in the copy";
+            } else {
+                out.g = g;
+                out.me = me;
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            out.failed = true;
+            out.error = String.valueOf(e);
+        } finally {
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
+        out.nanos = System.nanoTime() - t0;
+        return out;
+    }
+
     /**
      * One tutor play-out's copy: the live position with its whole stack (the searching ability on top, not yet
      * resolved in the copy), the world resampled, and the card to force.
