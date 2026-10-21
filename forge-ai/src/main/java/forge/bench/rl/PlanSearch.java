@@ -449,7 +449,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             final ForcedWinSolver.Redraw prior = spec.defendCfg.has("prior") && !"none".equals(spec.defendCfg.get("prior").getAsString())
                     ? rs.ls().opponentRedrawPrior(loadSyn(spec.defendCfg.get("prior").getAsString()),
                             spec.defendCfg.has("priorGain") ? Double.parseDouble(spec.defendCfg.get("priorGain").getAsString()) : 20.0,
-                            spec.defendCfg.has("priorFillBasics") && "true".equals(spec.defendCfg.get("priorFillBasics").getAsString()))
+                            spec.defendCfg.has("priorFillBasics") && "true".equals(spec.defendCfg.get("priorFillBasics").getAsString()),
+                            // deck-guess-1021: the earlier games' cards in the deck prior (0 = off, the default)
+                            spec.defendCfg.has("seenGain") ? Double.parseDouble(spec.defendCfg.get("seenGain").getAsString()) : 0)
                     : null;
             // the belief's re-draw (uniform, or with the co-draft deck prior); null when the spec has no belief: the
             // solver's old registered-deck read (a leak, for comparison only)

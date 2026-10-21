@@ -84,6 +84,7 @@ public final class InteractiveMain {
         try {
             config = InteractiveProtocol.readConfig(configLine);
             eventPool = InteractiveProtocol.readBeliefPool(configLine); // honest-belief-1020
+            beliefSeen = InteractiveProtocol.readBeliefSeen(configLine); // deck-guess-1021
             puzzle = InteractivePuzzle.read(com.google.gson.JsonParser.parseString(configLine).getAsJsonObject());
             validateDeckFiles(config.decks());
         } catch (InteractiveProtocol.ProtocolException e) {
@@ -636,6 +637,10 @@ public final class InteractiveMain {
                 }
                 final InteractiveProtocol.BeliefPool pool = settledPool(); // honest-belief-1020
                 lp.live().setBeliefPool(pool == null ? null : pool.names(), pool != null && pool.singleton());
+                lp.live().setBeliefSeen(beliefSeen); // deck-guess-1021
+                if (beliefSeen != null) {
+                    System.err.println("[belief-seen] seat=" + i + " names=" + beliefSeen.size()); // count only, never names
+                }
                 lp.live().bind(game, i, seed, k8, k8Fixes);
             }
         }
@@ -647,6 +652,9 @@ public final class InteractiveMain {
         forge.ai.AiFixes.Mode aiFixes = forge.ai.AiFixes.Mode.OFF;
         forge.ai.AiFixes.Mode fairNaming = null;
     }
+
+    /** deck-guess-1021: the opponent's cards from earlier games of this match (the config's beliefSeen), or null. */
+    static volatile java.util.List<String> beliefSeen;
 
     /** honest-belief-1020: this session's event card pool (the config's beliefPool), or null: the jar's live pool. */
     static volatile InteractiveProtocol.BeliefPool eventPool;

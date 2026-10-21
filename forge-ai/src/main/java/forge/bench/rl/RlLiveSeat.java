@@ -98,13 +98,19 @@ public final class RlLiveSeat {
 
         /**
          * strong-opp-1020: the {@code plans.defendCfg.<key>} keys live accepts and their value pattern; {@code prior} names
-         * the jar's co-draft table ({@code jar} = {@link PlanSearch#DEFEND_PRIOR}) or {@code none}.
+         * the jar's co-draft table ({@code jar} = {@link PlanSearch#DEFEND_PRIOR}) or {@code none}. deck-guess-1021:
+         * {@code defenseWorlds} up to 16 (a counter that never rests on one sampled world) and {@code seenGain} (the
+         * earlier games' cards in the deck prior; 0 = off).
          */
-        public static final java.util.Map<String, String> LIVE_DEFEND_KEYS = new java.util.TreeMap<>(java.util.Map.of(
-                "prior", "jar|none", "priorGain", "\\d{1,3}(\\.\\d+)?", "tieBreakTurns", "[0-2]",
-                "defendMs", "[5-9]\\d\\d|[1-5]\\d{3}|6000",
-                "sharedReader", "true|false", "priorFillBasics", "true|false", "defenseWorlds", "[1-8]",
-                "counterDelta", "0(\\.\\d+)?|1(\\.0+)?", "threatExtraTurns", "[0-2]", "planMs", "\\d{1,5}"));
+        public static final java.util.Map<String, String> LIVE_DEFEND_KEYS = new java.util.TreeMap<>(java.util.Map.ofEntries(
+                java.util.Map.entry("prior", "jar|none"), java.util.Map.entry("priorGain", "\\d{1,3}(\\.\\d+)?"),
+                java.util.Map.entry("tieBreakTurns", "[0-2]"),
+                java.util.Map.entry("defendMs", "[5-9]\\d\\d|[1-5]\\d{3}|6000"),
+                java.util.Map.entry("sharedReader", "true|false"), java.util.Map.entry("priorFillBasics", "true|false"),
+                java.util.Map.entry("defenseWorlds", "[1-9]|1[0-6]"),
+                java.util.Map.entry("counterDelta", "0(\\.\\d+)?|1(\\.0+)?"),
+                java.util.Map.entry("threatExtraTurns", "[0-2]"), java.util.Map.entry("planMs", "\\d{1,5}"),
+                java.util.Map.entry("seenGain", "\\d{1,2}(\\.\\d+)?")));
 
         /** sb-live-1018: one {@code plans.} entry into {@code c.plans} (created on the first), or an error. */
         private static void planKey(final RlSearch.Config c, final String k, final String v) {
@@ -447,6 +453,15 @@ public final class RlLiveSeat {
     public void setBeliefPool(final java.util.List<String> pool, final boolean singleton) {
         spec.search.beliefPool = pool;
         spec.search.beliefSingleton = pool == null ? forge.ai.simulation.BeliefSampler.LIVE_CUBE_SINGLETON : singleton;
+    }
+
+    /**
+     * deck-guess-1021: the opponent's cards from the earlier games of this match (the host's {@code beliefSeen}; null =
+     * none) for the next {@link #bind}. Only the defender's deck prior reads it, and only with
+     * {@code plans.defendCfg.seenGain} above 0.
+     */
+    public void setBeliefSeen(final java.util.List<String> seen) {
+        spec.search.beliefSeen = seen;
     }
 
     public void bind(final Game g, final int seatIndex, final long seed, final LookaheadSearch.Config k8,
