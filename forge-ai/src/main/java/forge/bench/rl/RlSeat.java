@@ -46,6 +46,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         RlWire.Decision decide(byte[] decidePayload) throws IOException;
 
         void record(byte[] recordPayload) throws IOException;
+
+        /**
+         * Lane search-bones-1015 (S-b proposals): a sampled answer to this frame (the play-out seat's recorder asks it
+         * only at the asks {@link #sampleIf} selects). The default is the greedy decision.
+         */
+        default RlWire.Decision decideSampled(byte[] decidePayload, RlWire.Decide frame) throws IOException {
+            return decide(decidePayload);
+        }
     }
 
     public enum Role { RL, RECORD, FORGE }
@@ -132,6 +140,12 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         int VOID = -2;
 
         /**
+         * Lane search-bones-1015 (S-b): the search handed this priority to the seat's plan hook (a forced-win line it
+         * adopted); the seat gives no answer (the bridge asks the hook again), and the decision is marked overridden.
+         */
+        int HOOK = -3;
+
+        /**
          * S-t (lane cm-choice-search-1009): after {@link #decide}, the forced answers of a macro departure (the window
          * the seat answers its next choice asks from), or null (always null unless the spec's {@code choices} > 0).
          */
@@ -169,6 +183,27 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
      * sent (the searched candidate a look-ahead play-out starts with); then this seat is the policy as usual.
      */
     public PlayoutFirst playoutFirst;
+
+    /**
+     * Lane search-bones-1015 (S-b, null by default): a turn-plan the seat follows inside a play-out. At each PRIORITY ask
+     * of this seat the cursor may name the candidate to answer with (never sent); -1 = the policy decides.
+     */
+    public PlanCursor planCursor;
+
+    /** S-b: the plan a play-out seat follows (see {@link #planCursor}). */
+    public interface PlanCursor {
+        int choose(Game g, Player p, RlCandidates.Menu m, List<SpellAbility> menuObjs);
+    }
+
+    /** S-b proposals (null by default): the asks of this seat whose answer is sampled ({@link Endpoint#decideSampled}). */
+    public java.util.function.BiPredicate<Game, RlWire.Decide> sampleIf;
+
+    /** S-b proposals (null by default): told every PRIORITY answer of this seat (the menu choice: 0 = pass). */
+    public PriorityTrace priorityTrace;
+
+    public interface PriorityTrace {
+        void answered(Game g, Player p, RlCandidates.Menu m, List<SpellAbility> menuObjs, int choice);
+    }
 
     /** S1: the forced first priority answer of a play-out seat. */
     public interface PlayoutFirst {
@@ -441,6 +476,22 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         if (playoutFirst != null && family == RlSchema.F_PRIORITY && roles[seat] == Role.RL) {
             return forcedFirst(g, player, seat, method, m, objs);
         }
+        if (planCursor != null && family == RlSchema.F_PRIORITY && roles[seat] == Role.RL && objs instanceof List) {
+            // search-bones-1015 (S-b play-outs): the plan's step, never sent
+            @SuppressWarnings("unchecked")
+            final List<SpellAbility> menuObjs = (List<SpellAbility>) objs;
+            final int idx = planCursor.choose(g, player, m, menuObjs);
+            if (idx >= 0 && idx < m.C() && m.validate(new short[] {(short) idx}) == null) {
+                final JsonObject ans = m.answer(new short[] {(short) idx});
+                lastAnswered.put(method, -1);
+                lastFamily.put(method, RlSchema.F_PRIORITY);
+                ok(method);
+                if (priorityTrace != null) {
+                    priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt());
+                }
+                return ans;
+            }
+        }
         if (m.trivial) {
             if (wAsk != null) {
                 window.saw(family, "trivial");
@@ -539,6 +590,14 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             final int alt = search.decide(g, player, m, frame, d.steps[0], menuObjs);
             if (alt == PrioritySearch.VOID) {
                 endGame("cpu_cap");
+                return null;
+            }
+            if (alt == PrioritySearch.HOOK) {
+                // search-bones-1015: the seat's plan hook plays this priority (the bridge asks it again)
+                noteSent(seat, family, m, frame, d.steps);
+                noteVersion(seat, controllers[seat].substring(3), d.policyVersion);
+                overridden.add(frame.decIdx);
+                forgeDecidedExtra.merge("planHook", 1, Integer::sum);
                 return null;
             }
             if (alt >= 0 && alt != d.steps[0]) {
@@ -653,6 +712,12 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
         lastFamily.put(method, family);
         ok(method);
+        if (family == RlSchema.F_PRIORITY && priorityTrace != null && objs instanceof List && roles[seat] == Role.RL) {
+            // search-bones-1015 (S-b proposals): the recorder sees the answer played
+            @SuppressWarnings("unchecked")
+            final List<SpellAbility> menuObjs = (List<SpellAbility>) objs;
+            priorityTrace.answered(g, player, m, menuObjs, ans.get("choice").getAsInt());
+        }
         if (family == RlSchema.F_PRIORITY && ans.get("choice").getAsInt() > 0) {
             final int turn = g.getPhaseHandler().getTurn();
             final int[] ta = turnActs[seat];
@@ -718,7 +783,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     private RlWire.Decision decide(final RlWire.Decide frame) {
         final RlWire.Decision d;
         try {
-            d = ep.decide(RlWire.encodeDecide(frame));
+            final java.util.function.BiPredicate<Game, RlWire.Decide> si = sampleIf;
+            d = si != null && si.test(game, frame) ? ep.decideSampled(RlWire.encodeDecide(frame), frame)
+                    : ep.decide(RlWire.encodeDecide(frame));
         } catch (RlClient.ServerError e) {
             fatal = "server: " + e.getMessage();
             endGame("server_error");

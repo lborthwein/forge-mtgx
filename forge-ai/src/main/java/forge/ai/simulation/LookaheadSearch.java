@@ -534,6 +534,8 @@ public final class LookaheadSearch {
         public long combatNanos;
         /** Wall budget: searched decisions that ran past it (and played Forge's answer); play-outs stopped by it. */
         public long capped, rolloutsAborted;
+        /** search-bones-1015 (S-b): decisions over the budget decided on the worlds every candidate finished in. */
+        public long partialDecisions;
         /**
          * Hard wall (lane sc-wallguard-1009): searched decisions whose wait for their play-outs the wall cut short
          * (budget + {@link #WALL_GRACE_MS}), and the play-outs still running at the cut (told to stop; their results are
@@ -736,6 +738,10 @@ public final class LookaheadSearch {
                     o.addProperty("wallCuts", wallCuts);
                     o.addProperty("wallStragglers", wallStragglers);
                 }
+            }
+            if (partialDecisions > 0) {
+                // search-bones-1015: only when S-b decided a capped search on its finished worlds
+                o.addProperty("partialDecisions", partialDecisions);
             }
             o.addProperty("attackDecisions", attackDecisions);
             o.addProperty("attackSearched", attackSearched);
@@ -954,6 +960,26 @@ public final class LookaheadSearch {
         final Object schedule;
         /** S-t macro: the schedule's label (part of the key), or null. */
         final String macro;
+        /**
+         * Lane search-bones-1015 (S-b): a turn-plan candidate (opaque here: the policy play-out seat follows it,
+         * {@link FirstAction#plan}), or null. A plan candidate has no first action of its own.
+         */
+        final Object plan;
+
+        /** S-b: a turn-plan candidate; {@code label} names it (and is its key). */
+        Cand(Object plan, String label) {
+            this.pass = false;
+            this.hostId = -1;
+            this.desc = "";
+            this.land = false;
+            this.isDefault = false;
+            this.label = "plan " + label;
+            this.kind = "plan";
+            this.tgt = null;
+            this.schedule = null;
+            this.macro = null;
+            this.plan = plan;
+        }
 
         private Cand(Cand base, String tgt, String tgtLabel) {
             this.pass = false;
@@ -966,6 +992,7 @@ public final class LookaheadSearch {
             this.tgt = tgt;
             this.schedule = null;
             this.macro = null;
+            this.plan = null;
         }
 
         /** S-t: {@code base} played out with a forced-answer schedule for its choice asks (a macro candidate). */
@@ -980,6 +1007,7 @@ public final class LookaheadSearch {
             this.tgt = base.tgt;
             this.schedule = schedule;
             this.macro = macro;
+            this.plan = null;
         }
 
         Cand(SpellAbility sa, boolean isDefault) {
@@ -993,6 +1021,7 @@ public final class LookaheadSearch {
             this.tgt = null;
             this.schedule = null;
             this.macro = null;
+            this.plan = null;
         }
 
         /** The prior request's candidate: {id, kind, fid} (fid = the host card's id, absent for pass). */
@@ -1007,6 +1036,9 @@ public final class LookaheadSearch {
         }
 
         String key() {
+            if (plan != null) {
+                return label;
+            }
             return (pass ? "pass" : hostId + "|" + (land ? "L" : "S") + "|" + desc + (tgt == null ? "" : "|T:" + tgt))
                     + (macro == null ? "" : "|M:" + macro);
         }
@@ -1134,6 +1166,15 @@ public final class LookaheadSearch {
         Budget budget;
         /** Copy fidelity: a may-play spell may also match by its base description ({@link #matchesMayPlay}). */
         public boolean mayPlayLoose = false;
+        /** Lane search-bones-1015 (S-b): the turn-plan this play-out follows (null = a single first action). */
+        public final Object plan;
+        /** S-b: what became of the plan in this play-out: 0 = not finished, 1 = played to its end, 2 = broke. */
+        public volatile int planState = 0;
+        /**
+         * S-b proposals: this play-out records a sampled plan (opaque: the play-out seat's recorder), plays until our
+         * turn ends, and is not a searched candidate. Null otherwise.
+         */
+        public Object recorder;
 
         FirstAction(Cand c) {
             this.pass = c.pass;
@@ -1141,6 +1182,7 @@ public final class LookaheadSearch {
             this.desc = c.desc;
             this.land = c.land;
             this.schedule = c.schedule;
+            this.plan = c.plan;
         }
 
         /**
@@ -1849,6 +1891,17 @@ public final class LookaheadSearch {
         public int chosenMacro = -1;
         /** Lane sc-wallguard-1009: the hard wall cut this decision's wait for its play-outs (outcome "capped"). */
         public boolean wall;
+        /**
+         * Lane search-bones-1015 (S-b; empty otherwise): per searched candidate, a terminal win in every world with its
+         * plan unbroken (a proven win) / a terminal loss in every world (a proven loss), and how many worlds its plan
+         * broke in.
+         */
+        public boolean[] provenWin = new boolean[0], provenLoss = new boolean[0];
+        public int[] planBroken = new int[0];
+        /** S-b: the choice was a proven win (no departZ gate, no loop guard). */
+        public boolean proven;
+        /** S-b: over the budget, the number of worlds every candidate finished in that decided (0 = all, or capped). */
+        public int partialWorlds;
     }
 
     /**
@@ -1878,6 +1931,147 @@ public final class LookaheadSearch {
         /** Copy fidelity 2 (copy-fidelity-1010): the decision is searched again; forget this decision's probes and macros. */
         default void restart() {
         }
+    }
+
+    // ------------------------------------------------------------------ search-bones-1015 (S-b): turn-plans
+
+    /**
+     * S-b (d): a check inside a play-out, at the opponent's first main-phase priority with an empty stack: does the
+     * opponent have a line that wins there? Yes = the play-out is a proven loss for our candidate (value 0).
+     */
+    public interface OppCheck {
+        boolean theyWin(Game g, Player me);
+    }
+
+    /** S-b (d): the check of the decision in progress (null = none: S-c's play-outs). */
+    private volatile OppCheck oppCheck = null;
+
+    /** S-b (d): play-outs the opponent check ended as losses, and checks made (per game). */
+    public final java.util.concurrent.atomic.AtomicLong oppChecks = new java.util.concurrent.atomic.AtomicLong(),
+            oppLosses = new java.util.concurrent.atomic.AtomicLong();
+
+    /** S-b: the plan candidates of the decision in progress ({@link #decideGivenPlans}; null otherwise). */
+    private List<Object> pendingPlans = null;
+    private List<String> pendingPlanLabels = null;
+    /** S-b: proven-win / proven-loss flags take part in the choice (off = S-c's choice exactly). */
+    private boolean proof = false;
+    /**
+     * S-b: when the decision began (System.nanoTime), if a stage before the play-outs (the proposals) already spent part
+     * of its budget; 0 = the play-outs' own start (S-c).
+     */
+    private volatile long decisionStartNanos = 0L;
+    /**
+     * S-b: cards on top of our library the seat placed itself (pile memory, ForcedWinSolver.knownTopCount); every world
+     * keeps them in place. 0 = S-c's worlds (only the cards we can see stay).
+     */
+    private volatile int ownKnownTop = 0;
+
+    /**
+     * S-b: {@link #decideGiven} with turn-plan candidates appended after the given ones (index given.size() + i in
+     * {@link GivenResult#givenIndex} and {@link GivenResult#chosen}), the proof flags in the choice, our known top kept
+     * in every world, and the budget counted from {@code startNanos}.
+     */
+    public GivenResult decideGivenPlans(Game live, Player me, List<SpellAbility> given, int breadth, List<Object> plans,
+            List<String> labels, int knownTop, long startNanos) {
+        return decideGivenPlans(live, me, given, breadth, plans, labels, knownTop, startNanos, null);
+    }
+
+    /** As above, with (d)'s opponent check in every play-out ({@code opp}; null = none). */
+    public GivenResult decideGivenPlans(Game live, Player me, List<SpellAbility> given, int breadth, List<Object> plans,
+            List<String> labels, int knownTop, long startNanos, OppCheck opp) {
+        return decideGivenPlans(live, me, given, breadth, plans, labels, knownTop, startNanos, opp, null);
+    }
+
+    /**
+     * As above, with S-t's choice expansion of the given (non-plan) candidates ({@code expander}; null = none): (d)'s
+     * discard choices, among others, are searched as macros and priced by the opponent check.
+     */
+    public GivenResult decideGivenPlans(Game live, Player me, List<SpellAbility> given, int breadth, List<Object> plans,
+            List<String> labels, int knownTop, long startNanos, OppCheck opp, ChoiceExpander expander) {
+        pendingPlans = plans == null || plans.isEmpty() ? null : plans;
+        pendingPlanLabels = labels;
+        proof = true;
+        ownKnownTop = Math.max(0, knownTop);
+        decisionStartNanos = startNanos;
+        oppCheck = opp;
+        try {
+            return decideGiven(live, me, given, breadth, expander);
+        } finally {
+            pendingPlans = null;
+            pendingPlanLabels = null;
+            proof = false;
+            ownKnownTop = 0;
+            decisionStartNanos = 0L;
+            oppCheck = null;
+        }
+    }
+
+    /** S-b: the next searched decision's world-0 seed (its recordings play in the same world 0 as its valuation). */
+    public long nextWorld0Seed() {
+        return mix(mix(cfg.seed, 0x5eedL + decisionIndex), 1000);
+    }
+
+    /**
+     * S-b proposals: one recording play-out per recorder, each a copy of the next decision's world 0, its policy seat
+     * driven by the recorder (it samples and records our priority answers) until our turn ends; the play-outs run on the
+     * search's pool and stop at {@code deadlineNanos}. Returns, per recorder, whether its play-out ran to the end of our
+     * turn without failing.
+     */
+    public boolean[] recordPlans(Game live, Player me, List<Object> recorders, int knownTop, long deadlineNanos) {
+        final int n = recorders.size();
+        final boolean[] done = new boolean[n];
+        if (n == 0 || !hookPlayout) {
+            return done;
+        }
+        final long ws = nextWorld0Seed();
+        final Budget b = new Budget(deadlineNanos);
+        final Budget prevBudget = budget;
+        budget = b;
+        ownKnownTop = Math.max(0, knownTop);
+        final Prepared[] prep = new Prepared[n];
+        try {
+            for (int i = 0; i < n; i++) {
+                prep[i] = prepare(live, me, new Cand((SpellAbility) null, true), null, ws, cfg.resample, null);
+                if (prep[i].firstAction != null) {
+                    prep[i].firstAction.recorder = recorders.get(i);
+                }
+            }
+            final List<Runnable> tasks = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                final int ii = i;
+                tasks.add(() -> {
+                    final Rollout r = play(prep[ii], null);
+                    prep[ii] = null;
+                    done[ii] = r.ok && !r.aborted;
+                });
+            }
+            if (!runAll(tasks, b)) {
+                b.stop();
+            }
+        } finally {
+            budget = prevBudget;
+            ownKnownTop = 0;
+        }
+        return done;
+    }
+
+    /** S-b: put the live library's top {@code k} cards (by id) back on top of the copy's library, in order. */
+    static void restoreOwnTop(Player liveMe, Player me, int k) {
+        final List<Card> liveLib = new ArrayList<>(liveMe.getCardsIn(ZoneType.Library));
+        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+        final List<Card> top = new ArrayList<>();
+        for (int i = 0; i < Math.min(k, liveLib.size()); i++) {
+            final int id = liveLib.get(i).getId();
+            for (Card c : lib) {
+                if (c.getId() == id) {
+                    top.add(c);
+                    break;
+                }
+            }
+        }
+        lib.removeAll(top);
+        top.addAll(lib);
+        me.getZone(ZoneType.Library).setCards(top);
     }
 
     /** S-t: tag the policy play-outs' first actions (candidate index, world, probe), set only inside an expansion. */
@@ -1948,7 +2142,9 @@ public final class LookaheadSearch {
         final java.util.concurrent.atomic.AtomicLong[] prevAcc = forge.ai.CpuAccount.get();
         forge.ai.CpuAccount.set(forge.ai.CpuAccount.plus(prevAcc, pc));
         // lane forge-continue-1011: as in decide, a rebuild's deadline never binds (forge.ai.WallClock); the test is unchanged
-        final Budget b = cfg.budgetMs > 0 ? new Budget(t0 + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
+        // search-bones-1015: S-b's proposal stage spent part of the decision's budget before this call (0 = none)
+        final long start = decisionStartNanos != 0L ? decisionStartNanos : t0;
+        final Budget b = cfg.budgetMs > 0 ? new Budget(start + forge.ai.WallClock.budgetMs(cfg.budgetMs) * 1_000_000L) : null;
         budget = b;
         boolean searched = false;
         try {
@@ -2000,6 +2196,14 @@ public final class LookaheadSearch {
         List<Cand> cands = new ArrayList<>();
         final List<Integer> at = new ArrayList<>();
         guardGiven(live, me, all, allAt, breadth, decisionSeed, cands, at);
+        final List<Object> plans = pendingPlans;
+        if (plans != null) {
+            // search-bones-1015 (S-b): the turn-plan candidates, after the given ones (their index: given.size() + i)
+            for (int i = 0; i < plans.size(); i++) {
+                cands.add(new Cand(plans.get(i), pendingPlanLabels.get(i)));
+                at.add(given.size() + i);
+            }
+        }
         if (cands.size() < 2) {
             stats.uncontested++;
             stats.givenUncontested++;
@@ -2011,7 +2215,7 @@ public final class LookaheadSearch {
             stats.stackSearched++;
         }
         lastCandidates = cands;
-        final int k = Math.max(1, cfg.worlds);
+        int k = Math.max(1, cfg.worlds);
         // copy-fidelity-1010, level 2: a first pass on level-0 copies; if a searched candidate was missing from them, the
         // play-outs again (base candidates, probes, macros) on level-1 copies with the same seeds, the first pass's counts
         // restored. Every other level plays one pass.
@@ -2115,6 +2319,41 @@ public final class LookaheadSearch {
         } finally {
             forceFidelity = false;
         }
+        if (proof && aborted > 0) {
+            // search-bones-1015 (S-b): anytime. Over the budget, the worlds every candidate finished in decide (common
+            // random numbers kept), when there are at least two; otherwise the decision is capped as S-c's
+            final List<Integer> full = new ArrayList<>();
+            for (int w = 0; w < k; w++) {
+                boolean every = true;
+                for (int c = 0; c < n && every; c++) {
+                    every = outs[c][w] != null && !outs[c][w].aborted;
+                }
+                if (every) {
+                    full.add(w);
+                }
+            }
+            if (full.size() >= 2) {
+                final int k2 = full.size();
+                final double[][] v2 = new double[n][k2];
+                final Rollout[][] o2 = new Rollout[n][k2];
+                final boolean[] ok2 = new boolean[n];
+                for (int c = 0; c < n; c++) {
+                    ok2[c] = true;
+                    for (int j = 0; j < k2; j++) {
+                        v2[c][j] = values[c][full.get(j)];
+                        o2[c][j] = outs[c][full.get(j)];
+                        ok2[c] &= o2[c][j].ok;
+                    }
+                }
+                values = v2;
+                outs = o2;
+                ok = ok2;
+                k = k2;
+                aborted = 0;
+                stats.partialDecisions++;
+                res.partialWorlds = k2;
+            }
+        }
         // live-sc-1009: over the wall budget the default is played whatever the values say, so the leaf call is skipped
         // (aborted is always 0 without a budget: the S1 read's path is unchanged)
         if (hookLeaf && aborted == 0) {
@@ -2155,9 +2394,57 @@ public final class LookaheadSearch {
                 }
             }
         }
-        final int plainBest = overBudget ? 0 : argmax(values, okArg, n, k);
+        // search-bones-1015 (S-b, proof on): proven wins and losses over the worlds (MCTS-Solver flags)
+        final boolean[] provenWin = new boolean[n], provenLoss = new boolean[n];
+        final int[] planBroken = new int[n];
+        int provenPick = -1;
+        if (proof && !overBudget && k >= Math.min(3, Math.max(1, cfg.worlds))) {
+            for (int c = 0; c < n; c++) {
+                boolean win = ok[c], loss = ok[c];
+                for (int w = 0; w < k; w++) {
+                    final Rollout r = outs[c][w];
+                    if (r == null || !r.ok) {
+                        win = false;
+                        loss = false;
+                        continue;
+                    }
+                    if (r.planState == 2) {
+                        planBroken[c]++;
+                    }
+                    if (!(r.pTerminal == 1.0) || r.planState == 2) {
+                        win = false;
+                    }
+                    if (!(r.pTerminal == 0.0)) {
+                        loss = false;
+                    }
+                }
+                provenWin[c] = win;
+                provenLoss[c] = loss;
+            }
+            if (provenWin[0]) {
+                provenPick = 0;
+            } else {
+                for (int c = 1; c < n && provenPick < 0; c++) {
+                    if (provenWin[c] && okArg[c]) {
+                        provenPick = c;
+                    }
+                }
+            }
+            if (provenPick < 0 && !provenLoss[0]) {
+                okArg = okArg.clone();
+                for (int c = 1; c < n; c++) {
+                    if (provenLoss[c]) {
+                        okArg[c] = false;
+                    }
+                }
+            }
+            res.provenWin = provenWin;
+            res.provenLoss = provenLoss;
+            res.planBroken = planBroken;
+        }
+        final int plainBest = overBudget ? 0 : provenPick >= 0 ? provenPick : argmax(values, okArg, n, k);
         int best = plainBest;
-        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget) {
+        if (cfg.departMedian != AiFixes.Mode.OFF && !overBudget && provenPick < 0) {
             final int medBest = argmaxMedian(values, okArg, n, k);
             if (medBest != plainBest) {
                 stats.departMedianChanged++;
@@ -2181,11 +2468,12 @@ public final class LookaheadSearch {
             final Cand chosen = cands.get(best);
             final String key = chosen.key() + "@" + ph.getPhase() + "#" + live.getStack().size();
             final int seenN = departureCounts.getOrDefault(key, 0);
-            if (departuresThisTurn >= cfg.maxDeparturesPerTurn || seenN >= cfg.maxSameDepartures) {
+            if (provenPick < 0 && (departuresThisTurn >= cfg.maxDeparturesPerTurn || seenN >= cfg.maxSameDepartures)) {
                 stats.loopGuard++;
                 outcome = "loop-guard";
             } else {
                 res.chosen = at.get(best);
+                res.proven = provenPick >= 0;
                 stats.departed++;
                 if (onStack) {
                     stats.stackDeparted++;
@@ -4330,6 +4618,8 @@ public final class LookaheadSearch {
         String failClass;
         /** Lane copy-fidelity-1010: a copy failure's detail (the copy's exception, or why the candidate was not found). */
         String failDetail;
+        /** Lane search-bones-1015 (S-b): the plan's fate in this play-out ({@link FirstAction#planState}). */
+        int planState;
     }
 
     /**
@@ -4636,6 +4926,10 @@ public final class LookaheadSearch {
                         } else {
                             resample(live, liveMe, p.g, p.me, new Random(mix(worldSeed, 2)));
                         }
+                        if (ownKnownTop > 0) {
+                            // search-bones-1015: the top of our library we placed ourselves (pile memory) stays in place
+                            restoreOwnTop(liveMe, p.me, ownKnownTop);
+                        }
                     }
                     MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
                 }
@@ -4650,7 +4944,7 @@ public final class LookaheadSearch {
                     p.firstAction.budget = p.budget;
                     p.firstAction.mayPlayLoose = fidelityPass();
                     p.playoutSeed = mix(worldSeed, 5);
-                    if (!c.pass && locate(p.g, p.me, c, fidelityPass()) == null) {
+                    if (!c.pass && c.plan == null && locate(p.g, p.me, c, fidelityPass()) == null) {
                         p.failed = true;
                         p.missWhy = locateMiss(p.g, p.me, c);
                     }
@@ -4729,7 +5023,9 @@ public final class LookaheadSearch {
             final Player me = p.me;
             r.copyNanos = p.copyNanos;
             // S1 (null unless the hooks are set): the value-leaf probe, and a policy-piloted searching seat
-            final LeafProbe probe = hookLeaf ? new LeafProbe(hooks, p.hookCtx) : null;
+            // search-bones-1015: a recording play-out (S-b's sampled plans) has no leaf and ends with our turn
+            final boolean recording = p.firstAction != null && p.firstAction.recorder != null;
+            final LeafProbe probe = hookLeaf && !recording ? new LeafProbe(hooks, p.hookCtx) : null;
             PlayoutSeat seat = null;
             final int[] stepRef = new int[1];
             if (hookPlayout) {
@@ -4752,7 +5048,8 @@ public final class LookaheadSearch {
             if (p.firstPriority != null) {
                 setFirstPriority(ph, p.firstPriority);
             }
-            final TurnWatch watch = new TurnWatch(ph.getTurn() + cfg.horizonTurns, Boolean.TRUE.equals(wantFp) ? me : null);
+            final TurnWatch watch = new TurnWatch(ph.getTurn() + (recording ? 1 : cfg.horizonTurns),
+                    Boolean.TRUE.equals(wantFp) ? me : null);
             g.subscribeToEvents(watch);
             if (probe != null) {
                 probe.watch = watch;
@@ -4766,6 +5063,9 @@ public final class LookaheadSearch {
                 r.keys = new ArrayList<>();
             }
             WorldMemo.Entry hit = null;
+            // search-bones-1015 (d): the opponent check of this play-out (once, at their first main-phase priority)
+            final OppCheck oc = recording ? null : oppCheck;
+            boolean oppDone = oc == null, oppWon = false;
             // Without a probe: to the start of the horizon turn (K8). With one: on to the seat's first priority in it,
             // at most leafExtraSteps main-loop steps past its start.
             while (!g.isGameOver() && !(probe == null ? watch.reached : probe.done || watch.reached && extra >= cfg.leafExtraSteps)
@@ -4777,6 +5077,17 @@ public final class LookaheadSearch {
                 final java.util.function.Consumer<Game> hook = playoutStepHook;
                 if (hook != null) {
                     hook.accept(g);
+                }
+                if (!oppDone && !ph.isPlayerTurn(me) && g.getStack().isEmpty()
+                        && (ph.is(forge.game.phase.PhaseType.MAIN1) || ph.is(forge.game.phase.PhaseType.MAIN2))
+                        && ph.getPriorityPlayer() != null && ph.getPriorityPlayer() != me) {
+                    oppDone = true;
+                    oppChecks.incrementAndGet();
+                    if (oc.theyWin(g, me)) {
+                        oppWon = true;
+                        oppLosses.incrementAndGet();
+                        break;
+                    }
                 }
                 ph.mainLoopStep();
                 steps++;
@@ -4828,7 +5139,12 @@ public final class LookaheadSearch {
                 r.value = Double.NEGATIVE_INFINITY;
                 return r;
             }
-            if (hit != null) {
+            if (oppWon) {
+                // search-bones-1015 (d): the opponent's verified line wins this world: a terminal loss for the candidate
+                r.capped = false;
+                r.value = -TERMINAL;
+                r.pTerminal = 0.0;
+            } else if (hit != null) {
                 // Same position as an earlier candidate of this world (exact key): its continuation is this one's.
                 final Rollout src = hit.src;
                 r.dedupFrom = hit.cand;
@@ -4873,6 +5189,9 @@ public final class LookaheadSearch {
                 r.ok = false;
                 r.value = Double.NEGATIVE_INFINITY;
                 r.seatFailure = seat.failure();
+            }
+            if (p.firstAction != null) {
+                r.planState = p.firstAction.planState;
             }
         } catch (RuntimeException | StackOverflowError e) {
             r.ok = false;
