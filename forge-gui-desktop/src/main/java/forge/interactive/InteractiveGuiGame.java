@@ -355,6 +355,11 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 "match.startGame", null, failure);
     }
 
+    /** Lane puzzle-host-1021: the puzzle position could not be installed; the game's only fatal. */
+    void puzzleRefused(final InteractivePuzzle.Refused refused) {
+        fail(InteractivePuzzle.REFUSED, refused.getMessage(), null, "puzzle", null, refused);
+    }
+
     boolean hasFailed() {
         return aborting.get() || channel.isEnded();
     }

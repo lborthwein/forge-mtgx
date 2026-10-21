@@ -147,12 +147,19 @@ final class InteractiveProtocol {
             throw new ProtocolException("invalid_config", "aiProfile must be exactly 'Default'");
         }
 
-        if (!json.has("decks") || !json.get("decks").isJsonArray()
-                || json.getAsJsonArray("decks").size() != 2) {
+        // lane puzzle-host-1021: a puzzle game (InteractivePuzzle) has no decks: its position is the whole game.
+        final boolean puzzle = json.has(InteractivePuzzle.FIELD) && !json.get(InteractivePuzzle.FIELD).isJsonNull();
+        final boolean noDecks = !json.has("decks") || json.get("decks").isJsonNull()
+                || (json.get("decks").isJsonArray() && json.getAsJsonArray("decks").isEmpty());
+        if (puzzle && !noDecks) {
+            throw new ProtocolException("invalid_config", "a puzzle game has no decks");
+        }
+        if (!puzzle && (!json.has("decks") || !json.get("decks").isJsonArray()
+                || json.getAsJsonArray("decks").size() != 2)) {
             throw new ProtocolException("invalid_config", "decks must contain exactly two absolute paths");
         }
         final List<Path> decks = new ArrayList<>(2);
-        for (JsonElement value : json.getAsJsonArray("decks")) {
+        for (JsonElement value : puzzle ? new com.google.gson.JsonArray() : json.getAsJsonArray("decks")) {
             if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
                 throw new ProtocolException("invalid_config", "each deck path must be a string");
             }
@@ -285,6 +292,12 @@ final class InteractiveProtocol {
             watchSeats = List.of(0, 1);
         } else if (json.has("seatAi") && !json.get("seatAi").isJsonNull()) {
             throw new ProtocolException("invalid_config", "seatAi is a watch-table (watchSeats) option");
+        }
+        if (puzzle && (humanSeats != null || watchSeats != null || frame != null)) {
+            throw new ProtocolException("invalid_config", "a puzzle is a one-seat game (no humanSeats, watchSeats or frame)");
+        }
+        if (puzzle && startingChooser >= 0) {
+            throw new ProtocolException("invalid_config", "a puzzle's position names the active player (no startingChooser)");
         }
         return new Config(session, humanSeat, decks, seed, aiProfile, startingChooser, gameNumber,
                 humanSeats, names, frame, watchSeats, seatAi);
@@ -542,6 +555,12 @@ final class InteractiveProtocol {
         /** {@code losses}: each losing seat's GameLossReason (additive, 2026-09-25); null omits it. */
         void terminal(final String game, final Integer winner, final String reason,
                       final Integer turns, final JsonArray losses) throws ProtocolException {
+            terminal(game, winner, reason, turns, losses, null);
+        }
+
+        /** {@code puzzle} (lane puzzle-host-1021, additive): a puzzle game's {goal, goalMet, reason}; null omits it. */
+        void terminal(final String game, final Integer winner, final String reason,
+                      final Integer turns, final JsonArray losses, final JsonObject puzzle) throws ProtocolException {
             if (!ended.compareAndSet(false, true)) {
                 return;
             }
@@ -558,6 +577,9 @@ final class InteractiveProtocol {
             }
             if (losses != null) {
                 body.add("losses", losses);
+            }
+            if (puzzle != null) {
+                body.add(InteractivePuzzle.FIELD, puzzle);
             }
             sendInternal("terminal", body, true);
         }

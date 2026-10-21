@@ -120,7 +120,11 @@ public class Puzzle extends GameState implements InventoryItem, Comparable<Puzzl
                 human = p;
             }
         }
+        addGoalEnforcement(game, human);
+    }
 
+    /** mtgx (lane puzzle-host-1021): the goal for a named player, e.g. the browser seat of an interactive game. */
+    public void addGoalEnforcement(Game game, Player human) {
         Card goalCard = new Card(-1, game);
 
         goalCard.setOwner(human);
