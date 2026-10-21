@@ -3795,6 +3795,22 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         }
     }
 
+    /**
+     * May {@code p} look at this card only through a temporary look, a choice in progress (PlayerController
+     * tempShowCards: a library search, a scry), and through no lasting permission (a MayLookAt static)? A read.
+     */
+    public final boolean mayLookOnlyTemporarily(final Player p) {
+        if (p == null || !mayLookTemp.contains(p)) {
+            return false;
+        }
+        for (PlayerCollection v : mayLook.values()) {
+            if (v.contains(p)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public final void updateMayLook() {
         PlayerCollection result = new PlayerCollection();
         for (PlayerCollection v : mayLook.values()) {
