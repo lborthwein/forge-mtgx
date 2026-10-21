@@ -506,10 +506,14 @@ public final class InteractiveMain {
         return prewarmedDesktop != null ? prewarmedDesktop : new InteractiveGuiDesktop();
     }
 
+    /** Exit status of a spare whose prewarm failed (review 108 S2): the host never adopts it and launches a cold JVM. */
+    static final int PREWARM_FAILED_EXIT = 3;
+
     /**
      * The prewarm (lane puzzle-speed-1021): the same properties, GUI interface and model init the game path does, before
-     * any config. A failure here is not reported: the game path calls {@link #initializeModel()} again after its hello
-     * and reports it there, exactly as without a prewarm.
+     * any config. A failure is NEVER retried in this process (review 108 S2: a half-built FModel's singletons would
+     * carry into the retry): the spare says why on stderr and exits {@link #PREWARM_FAILED_EXIT}, before or after a
+     * host wrote it a config, so the host launches the game on a cold JVM instead (or, adopted, reports the exit).
      */
     static void prewarmModel() {
         try {
@@ -520,8 +524,10 @@ public final class InteractiveMain {
             prewarmedDesktop = desktop;
             initializeModel();
         } catch (Throwable failure) {
-            prewarmedDesktop = null;
-            System.err.println("[forge.interactive] prewarm failed (the game path will retry): " + failure);
+            System.err.println("[forge.interactive] prewarm failed, exiting " + PREWARM_FAILED_EXIT
+                    + " (never retried in this JVM): " + failure);
+            failure.printStackTrace(System.err);
+            System.exit(PREWARM_FAILED_EXIT);
         }
     }
 
