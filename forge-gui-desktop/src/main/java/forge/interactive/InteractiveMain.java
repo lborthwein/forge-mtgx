@@ -70,9 +70,23 @@ public final class InteractiveMain {
         final BufferedReader input = new BufferedReader(
                 new InputStreamReader(System.in, StandardCharsets.UTF_8));
 
+        // lane puzzle-speed-1021 (off unless -Dforge.interactive.prewarm=true): the Forge model (~6.5 s, the whole card
+        // database) is initialized BEFORE the config line is read, so a host can keep this JVM as a warm spare and hand
+        // it the next game's config. The init is the same call with the same preferences; nothing reads the config
+        // during it, and the game's RNG is still seeded from the config after it. Without the property nothing changes.
+        final boolean prewarm = prewarmRequested();
+        if (prewarm) {
+            prewarmModel();
+        }
+
         final String configLine;
         try {
             configLine = input.readLine();
+            if (prewarm && configLine == null) {
+                // a warm spare the host never used (stdin closed): nothing to report
+                System.exit(0);
+                return;
+            }
         } catch (Exception e) {
             InteractiveProtocol.writeBootFatal(protocolOut, "unknown", "invalid_config",
                     "could not read config: " + e.getMessage());
@@ -138,7 +152,7 @@ public final class InteractiveMain {
             System.setProperty("java.util.Arrays.useLegacyMergeSort", "true");
             System.setProperty("sun.java2d.d3d", "false");
 
-            final InteractiveGuiDesktop desktop = new InteractiveGuiDesktop();
+            final InteractiveGuiDesktop desktop = guiDesktop();
             GuiBase.setInterface(desktop);
             initializeForge();
             // lane live-sc-1009 (off unless -Dforge.interactive.policySearch is set): the AI seat is the S1 read's S-c
@@ -316,7 +330,7 @@ public final class InteractiveMain {
         try {
             System.setProperty("java.util.Arrays.useLegacyMergeSort", "true");
             System.setProperty("sun.java2d.d3d", "false");
-            final InteractiveGuiDesktop desktop = new InteractiveGuiDesktop();
+            final InteractiveGuiDesktop desktop = guiDesktop();
             GuiBase.setInterface(desktop);
             initializeForge();
             MyRandom.setRandom(new Random(config.seed()));
@@ -477,7 +491,52 @@ public final class InteractiveMain {
         return players;
     }
 
+    /** {@code -Dforge.interactive.prewarm=true}, and not a continuation rebuild (its JVM is never a spare). */
+    static boolean prewarmRequested() {
+        return Boolean.getBoolean("forge.interactive.prewarm")
+                && System.getProperty("forge.interactive.continuation") == null;
+    }
+
+    /** The desktop GUI a prewarm installed before the model's init (that one is kept), else a new one. */
+    private static InteractiveGuiDesktop prewarmedDesktop;
+    /** True once {@link #initializeModel()} completed (a prewarm, or the game's own init). */
+    private static boolean modelInitialized;
+
+    static InteractiveGuiDesktop guiDesktop() {
+        return prewarmedDesktop != null ? prewarmedDesktop : new InteractiveGuiDesktop();
+    }
+
+    /**
+     * The prewarm (lane puzzle-speed-1021): the same properties, GUI interface and model init the game path does, before
+     * any config. A failure here is not reported: the game path calls {@link #initializeModel()} again after its hello
+     * and reports it there, exactly as without a prewarm.
+     */
+    static void prewarmModel() {
+        try {
+            System.setProperty("java.util.Arrays.useLegacyMergeSort", "true");
+            System.setProperty("sun.java2d.d3d", "false");
+            final InteractiveGuiDesktop desktop = new InteractiveGuiDesktop();
+            GuiBase.setInterface(desktop);
+            prewarmedDesktop = desktop;
+            initializeModel();
+        } catch (Throwable failure) {
+            prewarmedDesktop = null;
+            System.err.println("[forge.interactive] prewarm failed (the game path will retry): " + failure);
+        }
+    }
+
     static void initializeForge() {
+        initializeModel();
+        if (System.getProperty("forge.interactive.lookahead") != null || policySpec() != null) {
+            settledPool(); // honest-belief-1020: the game's pool, resolved and named at game start
+        }
+    }
+
+    /** Forge's model, once per process: everything of the init that does not depend on the game's config. */
+    static synchronized void initializeModel() {
+        if (modelInitialized) {
+            return;
+        }
         FModel.initialize(null, preferences -> {
             preferences.setPref(FPref.LOAD_CARD_SCRIPTS_LAZILY, false);
             preferences.setPref(FPref.UI_LANGUAGE, "en-US");
@@ -494,8 +553,8 @@ public final class InteractiveMain {
         if (System.getProperty("forge.interactive.lookahead") != null || policySpec() != null) {
             // Look-ahead play-outs may run on threads: fill the lazily built token table up front (see TokenDb).
             FModel.getMagicDb().getAllTokens().preloadTokens();
-            settledPool(); // honest-belief-1020: the game's pool, resolved and named at game start
         }
+        modelInitialized = true;
     }
 
     private static List<RegisteredPlayer> createPlayers(final InteractiveProtocol.Config config,

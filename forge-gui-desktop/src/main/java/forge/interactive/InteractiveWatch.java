@@ -94,7 +94,7 @@ final class InteractiveWatch {
             System.setProperty("sun.java2d.d3d", "false");
             if (initializeForge) {
                 // Unbound: an engine path that asks the process-wide GUI chooser in an AI-only game fails loudly.
-                GuiBase.setInterface(new InteractiveGuiDesktop());
+                GuiBase.setInterface(InteractiveMain.guiDesktop()); // a prewarm's own, when there was one
                 InteractiveMain.initializeForge();
             }
         } catch (Throwable failure) {
