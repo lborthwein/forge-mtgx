@@ -216,6 +216,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public boolean beliefSingleton = true;
         /** honest-belief-1020: the event's card pool (names), set per game by the live seat; not a JSON key. */
         public List<String> beliefPool;
+        /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
+        public List<String> beliefSeen;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -620,6 +622,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefBasics = cfg.beliefBasics;
             lc.beliefSingleton = cfg.beliefSingleton;
             lc.beliefPool = cfg.beliefPool;
+            lc.beliefSeen = cfg.beliefSeen; // deck-guess-1021
         }
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)

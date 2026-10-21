@@ -310,6 +310,13 @@ public final class LookaheadSearch {
          * e.g. random constructed decks): the pool stays whole.
          */
         public boolean beliefSingleton = true;
+        /**
+         * deck-guess-1021 (null = none, the default, and then nothing changes): the card names the opponent showed in
+         * the EARLIER games of this match (public zones and casts only; the host's {@code beliefSeen}). Read only by the
+         * defender's deck prior ({@link #opponentRedrawPrior} with a seen gain above 0). Not a spec key: the interactive
+         * server sets it per game.
+         */
+        public java.util.List<String> beliefSeen = null;
 
         /** A belief is computed at searched decisions (acting or shadow). */
         public boolean beliefOn() {
@@ -7213,14 +7220,49 @@ public final class LookaheadSearch {
      */
     public ForcedWinSolver.Redraw opponentRedrawPrior(final Map<String, Map<String, Double>> syn, final double gain,
             final boolean fillBasics) {
+        return opponentRedrawPrior(syn, gain, fillBasics, 0);
+    }
+
+    /**
+     * deck-guess-1021: as above, plus the cards they showed in EARLIER games of this match ({@link #beliefSeenOf}; honest:
+     * they were public then). With {@code seenGain > 0}: (a) those cards join the shown set, so their co-draft partners
+     * are boosted as for a card shown now; (b) each such card still in the pool (not seen in this game) gets weight
+     * {@code seenGain * (1 + gain)}, i.e. seenGain times the strongest co-draft link, and counts as linked (never a
+     * basic under fillBasics). A seen card stays a weight, never a certainty (sideboarding may have taken it out).
+     * {@code seenGain = 0} (or no seen list) = exactly the 3-argument prior.
+     */
+    public ForcedWinSolver.Redraw opponentRedrawPrior(final Map<String, Map<String, Double>> syn, final double gain,
+            final boolean fillBasics, final double seenGain) {
         if (beliefCube == null || cfg.beliefShadow || syn == null) {
             return null;
         }
-        return (live, liveMe, g, me, rng) -> redrawOpponentsPrior(live, liveMe, g, me, rng, syn, gain, fillBasics);
+        return (live, liveMe, g, me, rng) -> redrawOpponentsPrior(live, liveMe, g, me, rng, syn, gain, fillBasics,
+                seenGain > 0 ? beliefSeenOf(live) : null, seenGain);
+    }
+
+    /**
+     * deck-guess-1021, EVAL harnesses only (null = off, the default): the earlier-games list per game, for a JVM that
+     * plays many games (a bank of positions from different matches). Live has one game per JVM and uses
+     * {@link Config#beliefSeen}.
+     */
+    public static volatile java.util.function.Function<Game, java.util.Collection<String>> BELIEF_SEEN_HOOK;
+
+    /** deck-guess-1021: the opponent's cards shown in earlier games of this match: the EVAL hook's, else the config's. */
+    java.util.Collection<String> beliefSeenOf(final Game live) {
+        final java.util.function.Function<Game, java.util.Collection<String>> h = BELIEF_SEEN_HOOK;
+        if (h != null) {
+            final java.util.Collection<String> s = h.apply(live);
+            if (s != null) {
+                return s;
+            }
+        }
+        return cfg.beliefSeen;
     }
 
     private void redrawOpponentsPrior(Game live, Player liveMe, Game g, Player me, Random rng,
-            Map<String, Map<String, Double>> syn, double gain, boolean fillBasics) {
+            Map<String, Map<String, Double>> syn, double gain, boolean fillBasics,
+            java.util.Collection<String> seenBefore, double seenGain) {
+        final Set<String> seen = seenBefore == null || seenGain <= 0 ? Collections.emptySet() : new HashSet<>(seenBefore);
         final PlayerView myView = liveMe.getView();
         for (Player opp : me.getOpponents()) {
             final Player liveOpp = (Player) live.getPlayer(opp.getId());
@@ -7264,6 +7306,8 @@ public final class LookaheadSearch {
                     shown.add(si.getSourceCard().getPaperCard().getName());
                 }
             }
+            // deck-guess-1021: the cards of their earlier games link their co-draft partners too
+            shown.addAll(seen);
             final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
             final double[] w = new double[pool.size()];
             final boolean[] linked = new boolean[pool.size()];
@@ -7279,6 +7323,11 @@ public final class LookaheadSearch {
                 }
                 w[i] = 1.0 + gain * best * best;
                 linked[i] = best > 0;
+                if (!seen.isEmpty() && seen.contains(pool.get(i)) && !BeliefSampler.isBasic(pool.get(i))) {
+                    // deck-guess-1021: in their deck in an earlier game, not seen yet in this one
+                    w[i] = Math.max(w[i], seenGain * (1.0 + gain));
+                    linked[i] = true;
+                }
                 max = Math.max(max, w[i]);
             }
             for (int i = 0; i < w.length; i++) {

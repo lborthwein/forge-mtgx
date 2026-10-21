@@ -346,6 +346,31 @@ final class InteractiveProtocol {
         return new BeliefPool(names, singleton);
     }
 
+    /**
+     * deck-guess-1021: the opponent's cards from the EARLIER games of this match, optional in the config line:
+     * {@code beliefSeen} = card names the human seat showed in public zones or casts in games 1..n-1 (what anyone at the
+     * table saw; the host reads them from its own recordings). Null when absent. An old jar ignores the key. The AI
+     * seat's defender reads it only with {@code plans.defendCfg.seenGain} above 0.
+     */
+    static List<String> readBeliefSeen(final String line) throws ProtocolException {
+        final JsonObject json = parseObject(line, "invalid_config", "config");
+        if (!json.has("beliefSeen") || json.get("beliefSeen").isJsonNull()) {
+            return null;
+        }
+        if (!json.get("beliefSeen").isJsonArray() || json.getAsJsonArray("beliefSeen").size() > 300) {
+            throw new ProtocolException("invalid_config", "beliefSeen must be an array of at most 300 card names");
+        }
+        final List<String> names = new ArrayList<>();
+        for (JsonElement value : json.getAsJsonArray("beliefSeen")) {
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString() || value.getAsString().isBlank()
+                    || value.getAsString().length() > 200) {
+                throw new ProtocolException("invalid_config", "each beliefSeen entry must be a card name (1..200 chars)");
+            }
+            names.add(value.getAsString().trim());
+        }
+        return List.copyOf(names);
+    }
+
     private static boolean isSeatNumber(final JsonElement value, final int seat) {
         return value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber() && value.getAsDouble() == seat;
     }
