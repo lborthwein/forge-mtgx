@@ -358,6 +358,83 @@ public class HumanManaAffordabilityOwnerBoardsTest extends AITest {
         assertEquals(HumanManaAffordability.assessPayable(me, spell(delver2)), Assessment.PROVEN_UNAFFORDABLE);
     }
 
+    /**
+     * 2026-10-21T19-07-35, turn 3 main 2 (round 2): Swamp tapped, Mountain and Candelabra of Tawnos untapped. Candelabra's
+     * untap makes the amount unknown, never the colour: no permanent of the seat makes {U}, so every {U} card is unpayable.
+     */
+    @Test
+    public void owner1021_190735_candelabraCannotMakeBlue() {
+        board(PhaseType.MAIN2, true);
+        mine("Swamp", true);
+        mine("Mountain", false);
+        mine("Candelabra of Tawnos", false);
+        final List<Card> blue = List.of(hand("Timetwister"), hand("High Tide"), hand("Urza, Lord High Artificer"),
+                hand("Hullbreacher"));
+        final Card bolt = hand("Lightning Bolt");
+        final Card stone = hand("Mind Stone");
+        settle();
+        for (Card card : blue) doesNotGlow(card);
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(bolt)), Assessment.PROVEN_UNAFFORDABLE, "{R}: the Mountain");
+        glows(bolt);
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(stone)), Assessment.PROVEN_UNAFFORDABLE,
+                "{2}: the Mountain, untapped again by Candelabra");
+        glows(stone);
+    }
+
+    /** 19-07-35's control: a tapped Island can be untapped by Candelabra, so {U} is no longer proven unpayable. */
+    @Test
+    public void owner1021_190735_withATappedIsland() {
+        board(PhaseType.MAIN2, true);
+        mine("Swamp", true);
+        mine("Mountain", false);
+        mine("Candelabra of Tawnos", false);
+        mine("Island", true);
+        final Card tide = hand("High Tide");
+        final Card twister = hand("Timetwister");
+        settle();
+        for (Card card : List.of(tide, twister)) {
+            assertNotEquals(HumanManaAffordability.assessPayable(me, spell(card)), Assessment.PROVEN_UNAFFORDABLE, card.getName());
+            glows(card);
+        }
+    }
+
+    /**
+     * Round-2 review S1-1: Forest tapped, Grizzly Bears untapped, Earthcraft (tap a creature: untap a basic land) and Pulse
+     * of Llanowar (a basic land makes any colour). Pulse was set aside while no source was untapped, but Earthcraft brings
+     * the Forest back and Pulse then makes {U}: Brainstorm is not proven unpayable.
+     */
+    @Test
+    public void untapWithAProductionHookStaysUnknown() {
+        board(PhaseType.MAIN1, true);
+        mine("Forest", true);
+        mine("Grizzly Bears", false);
+        mine("Earthcraft", false);
+        mine("Pulse of Llanowar", false);
+        final Card brainstorm = hand("Brainstorm");
+        settle();
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(brainstorm)), Assessment.PROVEN_UNAFFORDABLE);
+        assertTrue(HumanManaAffordability.payable(me, spell(brainstorm)));
+    }
+
+    /**
+     * Round-2 review S1-2: three Mountains, a tapped white creature and Seeker of Skybreak (untap target creature). The
+     * untapped white creature then convokes {W}: Conclave Tribunal is not proven unpayable.
+     */
+    @Test
+    public void untapWithConvokeStaysUnknown() {
+        board(PhaseType.MAIN1, true);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        mine("Mountain", false);
+        mine("Savannah Lions", true);
+        mine("Seeker of Skybreak", false);
+        theirs("Grizzly Bears", false);
+        final Card tribunal = hand("Conclave Tribunal");
+        settle();
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(tribunal)), Assessment.PROVEN_UNAFFORDABLE);
+        assertTrue(HumanManaAffordability.payable(me, spell(tribunal)));
+    }
+
     /** Cycling, landcycling and a hand creature's mana ability are not sources. */
     @Test
     public void handAndGraveyardAbilitiesAreNotSources() {
