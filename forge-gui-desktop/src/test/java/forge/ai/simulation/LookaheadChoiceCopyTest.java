@@ -118,6 +118,65 @@ public class LookaheadChoiceCopyTest extends SimulationTest {
         AssertJUnit.assertTrue(cc.me.getCardsIn(ZoneType.Graveyard).stream().anyMatch(c -> c.getName().equals("Griselbrand")));
     }
 
+    /** A Doomsday deck at our main phase: seven Underground Seas, Brainstorm in hand, Doomsday and Oracle in the library. */
+    private Game doomsdayBoard() {
+        final Game game = initAndCreateGame();
+        final Player a = game.getPlayers().get(0);
+        final Player b = game.getPlayers().get(1);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
+        for (int i = 0; i < 7; i++) {
+            addCard("Underground Sea", a);
+        }
+        addCardToZone("Brainstorm", a, ZoneType.Hand);
+        final String[] lib = {"Doomsday", "Thassa's Oracle", "Island", "Swamp", "Ponder", "Lightning Bolt", "Forest", "Mountain"};
+        for (int i = 0; i < 24; i++) {
+            addCardToZone(i < lib.length ? lib[i] : "Island", a, ZoneType.Library);
+            addCardToZone("Forest", b, ZoneType.Library);
+        }
+        final Card t = addCardToZone("Vampiric Tutor", a, ZoneType.Hand);
+        final SpellAbility sa = t.getFirstSpellAbility();
+        sa.setActivatingPlayer(a);
+        game.getStack().add(sa);
+        return game;
+    }
+
+    /** G1 attempt 3: the one-step reach after Vampiric -> Doomsday: our next main phase 1 with Doomsday drawn. */
+    @Test
+    public void vampiricDoomsdayReachDrawsTheKnownTop() {
+        final Game live = doomsdayBoard();
+        final Player a = live.getPlayers().get(0);
+        final int turn = live.getPhaseHandler().getTurn();
+        final LookaheadSearch.ChoiceCopy cc = search().resolveChoice(live, a, named(a, "Doomsday").getId(), 7L, new Hooks());
+        AssertJUnit.assertFalse(String.valueOf(cc.error), cc.failed);
+        AssertJUnit.assertEquals("Doomsday", cc.me.getCardsIn(ZoneType.Library).get(0).getName());
+        AssertJUnit.assertTrue(LookaheadSearch.passToOurNextMain(cc, 600));
+        AssertJUnit.assertTrue(cc.g.getPhaseHandler().getTurn() > turn);
+        AssertJUnit.assertTrue(cc.g.getPhaseHandler().isPlayerTurn(cc.me));
+        AssertJUnit.assertTrue(cc.g.getPhaseHandler().is(PhaseType.MAIN1));
+        AssertJUnit.assertTrue(cc.me.getCardsIn(ZoneType.Hand).stream().anyMatch(c -> c.getName().equals("Doomsday")));
+        // the live game did not move
+        AssertJUnit.assertEquals(turn, live.getPhaseHandler().getTurn());
+    }
+
+    /** ... and from there the forced-win solver (hideOwnLibrary) proves the Doomsday line. */
+    @Test
+    public void vampiricDoomsdayReachIsProvenBySolver() {
+        final Game live = doomsdayBoard();
+        final Player a = live.getPlayers().get(0);
+        final LookaheadSearch.ChoiceCopy cc = search().resolveChoice(live, a, named(a, "Doomsday").getId(), 7L, new Hooks());
+        AssertJUnit.assertTrue(LookaheadSearch.passToOurNextMain(cc, 600));
+        final ForcedWinSolver.Config c = new ForcedWinSolver.Config();
+        c.hideOwnLibrary = true;
+        c.worlds = 2;
+        final ForcedWinSolver s = new ForcedWinSolver(cc.me, c);
+        final List<ForcedWinSolver.Proposal> props = s.propose(cc.g);
+        boolean proven = false;
+        for (ForcedWinSolver.Proposal p : props) {
+            proven |= p.proven(2);
+        }
+        AssertJUnit.assertTrue("proposals: " + props.size(), proven);
+    }
+
     @Test
     public void aCardTheSearchDoesNotOfferFailsCleanly() {
         final Game live = board("Mystical Tutor"); // instants and sorceries only

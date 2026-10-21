@@ -62,12 +62,19 @@ final class TutorChooser {
         int threads = 8;
         boolean routes = true;
         String fallback = "value";
+        /**
+         * G1 attempt 3: for a library destination (a top tutor), the solver runs after the one-step reach: both seats
+         * pass to our next main phase 1, past the draw of the card we put on top (we know it). Default on.
+         */
+        boolean reach = true;
+        /** The reach's main-loop step cap. */
+        int reachSteps = 600;
         double valueMargin = 0.0;
         /** The solver's per-candidate config (string values; S-b2h's keys, then these defaults where absent). */
         JsonObject solverCfg = new JsonObject();
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("valueTop", "maxCands", "worlds",
-                "wallMs", "threads", "routes", "fallback", "valueMargin", "solverCfg"));
+                "wallMs", "threads", "routes", "fallback", "valueMargin", "solverCfg", "reach", "reachSteps"));
 
         static Cfg parse(final JsonObject o) {
             final Cfg c = new Cfg();
@@ -88,6 +95,8 @@ final class TutorChooser {
             if (o.has("fallback")) c.fallback = o.get("fallback").getAsString();
             if (o.has("valueMargin")) c.valueMargin = Double.parseDouble(o.get("valueMargin").getAsString());
             if (o.has("solverCfg")) c.solverCfg = o.getAsJsonObject("solverCfg");
+            if (o.has("reach")) c.reach = Boolean.parseBoolean(o.get("reach").getAsString());
+            if (o.has("reachSteps")) c.reachSteps = Integer.parseInt(o.get("reachSteps").getAsString());
             if (c.valueTop < 0 || c.maxCands < 1 || c.worlds < 1 || c.wallMs < 500 || c.wallMs > 7000 || c.threads < 1
                     || !("value".equals(c.fallback) || "policy".equals(c.fallback))) {
                 throw new IllegalArgumentException("plans.chooseCfg: valueTop >= 0, maxCands >= 1, worlds >= 1, "
@@ -166,6 +175,8 @@ final class TutorChooser {
         LookaheadSearch.ChoiceCopy copy;
         double value = Double.NaN;
         boolean checked, proven, cut;
+        /** The solver ran after the one-step reach (a library destination); reached = the pass got there. */
+        boolean viaReach, reached;
         double pBelief = 0;
         String line = "";
 
@@ -297,6 +308,7 @@ final class TutorChooser {
             final ForcedWinSolver.Redraw redraw = rs.ls().opponentRedraw();
             final List<Future<?>> fs = new ArrayList<>();
             for (Cand c : check) {
+                c.viaReach = cfg.reach && destination == ZoneType.Library;
                 fs.add(ex.submit(() -> solve(c, redraw, seed)));
             }
             for (int i = 0; i < fs.size(); i++) {
@@ -340,6 +352,9 @@ final class TutorChooser {
             if (c.checked || c.cut) {
                 o.addProperty("proven", c.proven);
                 o.addProperty("pB", Math.round(c.pBelief * 100) / 100.0);
+                if (c.viaReach) {
+                    o.addProperty("reach", c.reached);
+                }
                 if (c.cut) {
                     o.addProperty("cut", true);
                 }
@@ -362,6 +377,13 @@ final class TutorChooser {
         MyRandom.setThreadRandom(new java.util.Random(RlSearch.splitmix(seed ^ c.rep.getId())));
         AiCache.openScope();
         try {
+            if (c.viaReach) {
+                c.reached = LookaheadSearch.passToOurNextMain(c.copy, cfg.reachSteps);
+                if (!c.reached) {
+                    c.checked = true;
+                    return;
+                }
+            }
             final SolverDriver d = new SolverDriver(c.copy.me, solverCfg);
             d.solver().redraw = redraw;
             // G1 attempt 2: the copy's own known library (B0: a top-tutored card) is the solver's known top

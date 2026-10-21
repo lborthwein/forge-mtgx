@@ -6786,6 +6786,76 @@ public final class LookaheadSearch {
         public boolean failed;
         public String error;
         public long nanos;
+        /** The copy's scopes (ids, AI cache, RNG), for later steps on it ({@link #passToOurNextMain}). */
+        Object ids, cache;
+        Random rnd;
+    }
+
+    /** combo-assembly-1021 (G1 attempt 3): a seat that passes every priority, attacks and blocks with nothing. */
+    static final class PassAi extends RolloutAi {
+        PassAi(Game g, Player p, forge.LobbyPlayer lp) {
+            super(g, p, lp);
+        }
+
+        @Override
+        public List<SpellAbility> chooseSpellAbilityToPlay() {
+            return null;
+        }
+
+        @Override
+        public void declareAttackers(Player attacker, forge.game.combat.Combat combat) {
+        }
+
+        @Override
+        public void declareBlockers(Player defender, forge.game.combat.Combat combat) {
+        }
+    }
+
+    /**
+     * combo-assembly-1021 (G1 attempt 3): the one-step reach of a choice copy. Both seats pass (Forge AI answers only
+     * forced choices such as cleanup discards) until {@code cc.me}'s next main phase 1 with an empty stack, i.e. past
+     * its next draw: a card the seat put on top of its own library (it knows it) is then in its hand. Deterministic for
+     * a given copy. True when reached within {@code maxSteps} main-loop steps and the game is not over. Never throws.
+     */
+    public static boolean passToOurNextMain(ChoiceCopy cc, int maxSteps) {
+        if (cc == null || cc.g == null || cc.me == null) {
+            return false;
+        }
+        final Random prev = MyRandom.getThreadRandom();
+        final Object prevIds = forge.util.IdScope.capture();
+        final Object prevCache = AiCache.captureScope();
+        if (cc.rnd != null) {
+            MyRandom.setThreadRandom(cc.rnd);
+        }
+        if (cc.cache != null) {
+            AiCache.installScope(cc.cache);
+        }
+        if (cc.ids != null) {
+            forge.util.IdScope.install(cc.ids);
+        }
+        try {
+            final Game g = cc.g;
+            final Player me = cc.me;
+            for (Player p : g.getPlayers()) {
+                p.dangerouslySetController(new PassAi(g, p, p.getController().getLobbyPlayer()));
+            }
+            final PhaseHandler ph = g.getPhaseHandler();
+            final int start = ph.getTurn();
+            for (int steps = 0; steps < maxSteps && !g.isGameOver(); steps++) {
+                if (ph.getTurn() > start && ph.isPlayerTurn(me) && ph.is(forge.game.phase.PhaseType.MAIN1)
+                        && g.getStack().isEmpty()) {
+                    return true;
+                }
+                ph.mainLoopStep();
+            }
+            return false;
+        } catch (RuntimeException | StackOverflowError e) {
+            return false;
+        } finally {
+            AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            MyRandom.setThreadRandom(prev);
+        }
     }
 
     /** The caller's hooks on a choice copy. */
@@ -6874,6 +6944,9 @@ public final class LookaheadSearch {
                 g.getStack().resolveStack();
             }
             out.used = st.used;
+            out.ids = p.ids;
+            out.cache = p.cache;
+            out.rnd = p.rnd;
             if (!st.used) {
                 out.failed = true;
                 out.error = "the forced card was not offered in the copy";
