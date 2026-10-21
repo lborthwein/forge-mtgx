@@ -1176,7 +1176,7 @@ public final class ForcedWinSolver {
     static boolean opponentCanPay(Player opp, String unlessCost) {
         try {
             final int n = Integer.parseInt(unlessCost.trim());
-            return forge.ai.ComputerUtilMana.getAvailableManaEstimate(opp, false) >= n;
+            return forge.ai.ComputerUtilMana.getAvailableManaEstimate(opp, true) >= n; // untapped, activatable sources
         } catch (RuntimeException e) {
             return true;
         }
