@@ -344,12 +344,63 @@ final class InteractiveState {
                 continue;
             }
             final Card top = libraryTop(registered.get(index));
-            if (top != null && !top.isFaceDown() && mayReceiveLibraryTop(top.getView(), viewer)) {
+            if (top != null && !top.isFaceDown() && mayReceiveLibraryTop(top.getView(), viewer)
+                    && !searchLookOnly(game, registered.get(index), top, viewer)) {
                 final JsonObject shown = StateEncoder.encodeCardUnchecked(top);
                 InteractiveCardFacts.addTokenAndCopy(shown, top);
                 player.add(LIBRARY_TOP, shown);
             }
         }
+    }
+
+    /**
+     * Is the viewer's only look at this library top the one a library search gives (afford-jar-1021, the owner's
+     * report 2026-10-21T16-56-19: "Top: Narset" mid-search, swampcycling and Expedition Map)? A search shows the
+     * searcher the library, or its matching cards, through Forge's temporary look ({@code tempShowCards}); that never
+     * makes the top card itself known, and the library is shuffled afterwards. The top is suppressed when the viewer's
+     * permission on it is temporary only and either (a) the whole library is temporarily visible to the viewer (the
+     * search's reveal), or (b) the resolving ability's chain moves cards out of a library without naming them (a
+     * search, cycling's landcycling included). A lasting permission (Courser of Kruphix, Bolas's Citadel) still shows
+     * it, and so does a temporary look at the top cards alone (scry, surveil, look at the top N).
+     */
+    static boolean searchLookOnly(final Game game, final Player owner, final Card top, final PlayerView viewer) {
+        if (viewer == null) {
+            return false;
+        }
+        final Player looker;
+        try {
+            looker = game.getPlayer(viewer);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+        if (looker == null || !top.mayLookOnlyTemporarily(looker)) {
+            return false;
+        }
+        boolean wholeLibrary = true;
+        for (Card card : owner.getCardsIn(ZoneType.Library)) {
+            if (!card.getView().mayPlayerLook(viewer)) {
+                wholeLibrary = false;
+                break;
+            }
+        }
+        if (wholeLibrary) {
+            return true;
+        }
+        if (game.getStack().isResolving() && !game.getStack().isEmpty()) {
+            for (forge.game.spellability.SpellAbility sa = game.getStack().peekAbility(); sa != null;
+                 sa = sa.getSubAbility()) {
+                if (searchesALibrary(sa)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean searchesALibrary(final forge.game.spellability.SpellAbility sa) {
+        final forge.game.ability.ApiType api = sa.getApi();
+        return (api == forge.game.ability.ApiType.ChangeZone || api == forge.game.ability.ApiType.ChangeZoneAll)
+                && sa.getParamOrDefault("Origin", "").contains("Library") && !sa.hasParam("Defined");
     }
 
     /** The card a player would draw next, or null for an empty library. Index 0 is the top in Forge. */
