@@ -59,7 +59,7 @@ final class TutorChooser {
         int maxCands = 8;
         int worlds = 2;
         long wallMs = 6000;
-        int threads = 4;
+        int threads = 8;
         boolean routes = true;
         String fallback = "value";
         double valueMargin = 0.0;
@@ -364,6 +364,10 @@ final class TutorChooser {
         try {
             final SolverDriver d = new SolverDriver(c.copy.me, solverCfg);
             d.solver().redraw = redraw;
+            // G1 attempt 2: the copy's own known library (B0: a top-tutored card) is the solver's known top
+            if (c.copy.ctx instanceof RlSearch.CopyCtx) {
+                d.solver().notePlaced(RlSearch.knownOwnLibrary(((RlSearch.CopyCtx) c.copy.ctx).know, c.copy.me));
+            }
             final List<ForcedWinSolver.Proposal> props = d.probe(() -> d.solver().propose(c.copy.g));
             synchronized (this) {
                 solverRuns++;

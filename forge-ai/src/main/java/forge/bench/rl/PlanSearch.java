@@ -752,6 +752,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         st.knownTop = driver.probe(() -> solver.knownTopCount(g));
         if (spec.solver) {
             final long a = System.nanoTime();
+            // combo-assembly-1021 (G1 attempt 2): the cards the seat knows in its library (B0's own placements and the
+            // tracker's other honest knowledge) are the solver's known top; hideOwnLibrary hides only the rest
+            solver.notePlaced(rs.knownOwnLibrary(me));
             final List<ForcedWinSolver.Proposal> props = driver.probe(() -> solver.propose(g));
             solverRuns++;
             solverMs.add((System.nanoTime() - a) / 1e6);
