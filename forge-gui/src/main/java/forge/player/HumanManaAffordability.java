@@ -51,20 +51,90 @@ public final class HumanManaAffordability {
      * could be activated where its card is, no proof is made: "never claim unpayable without proof".
      */
     static boolean unenumeratedManaSource(final Player player) {
+        return unenumerated(player) != UNENUMERATED_NONE;
+    }
+
+    /** {@link #unenumerated}: no source the loops cannot count. */
+    static final int UNENUMERATED_NONE = 0;
+    /** {@link #unenumerated}: only untap abilities on the battlefield (the amount is unknown, the colours are not). */
+    static final int UNENUMERATED_UNTAP = 1;
+    /** {@link #unenumerated}: a mana-making ability the loops cannot count (Deathrite, Chandra, Nykthos). */
+    static final int UNENUMERATED_OTHER = 2;
+
+    /** {@link #unenumeratedManaSource}, telling an untap ability apart from every other cause (afford-jar-1021 round 2). */
+    static int unenumerated(final Player player) {
+        int found = UNENUMERATED_NONE;
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
             if (card.isPhasedOut()) continue;
             for (SpellAbility sa : card.getSpellAbilities()) {
                 if (sa.isSpell() || !activatableWhereItIs(card, sa)) continue;
                 // afford-jar-1021: an untap ability can use a mana source twice (Devoted Druid's -1/-1 counter,
-                // Voltaic Key); the loops count each {T} once.
-                if (card.isInZone(ZoneType.Battlefield) && !sa.isManaAbility() && untaps(sa)) return true;
+                // Voltaic Key, Candelabra of Tawnos); the loops count each {T} once.
+                if (card.isInZone(ZoneType.Battlefield) && !sa.isManaAbility() && untaps(sa)) {
+                    found = UNENUMERATED_UNTAP;
+                    continue;
+                }
                 if (!makesMana(sa)) continue;
                 if (sa.isManaAbility() && sa.getManaPart() != null) continue; // counted by the loops (or UNKNOWN there)
-                return true;
+                return UNENUMERATED_OTHER;
             }
         }
+        return found;
+    }
+
+    /**
+     * afford-jar-1021 round 2 (owner report 2026-10-21T19-07-35: Swamp tapped, Mountain and Candelabra of Tawnos
+     * untapped, every {U} card glowing). An untap ability makes the AMOUNT of mana unknown, never its COLOUR: it only
+     * reuses mana abilities of permanents the seat already controls. So the cost is still unpayable when one of its
+     * coloured pips can be paid by no colour that the pool holds or that any mana ability of the seat could make: on
+     * any permanent it controls, tapped or untapped (an untap can reach it), or on a card elsewhere that can be
+     * activated where it is (a Spirit Guide). A hybrid pip needs every half unmakeable ({@code canBePaidWithManaOfColor});
+     * a Phyrexian pip counts only when life cannot pay it. A source whose colours the proof cannot read (Any, a chosen
+     * colour, reflected mana, a filter's combination) makes every colour; a mana conversion, every colour.
+     */
+    static boolean colourImpossible(final Player player, final SpellAbility ability, final List<ManaCostShard> shards,
+                                    final int hooks, final int extraColours) {
+        int colours = extraColours;
+        if ((hooks & HOOK_CONVERT) != 0) colours |= ManaAtom.ALL_MANA_TYPES;
+        for (var mana : player.getManaPool()) {
+            colours |= mana.getColor() | player.getManaPool().getPossibleColorUses(mana.getColor());
+        }
+        for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
+                ZoneType.Exile, ZoneType.Command)) {
+            if (card.isPhasedOut()) continue;
+            for (SpellAbility source : card.getManaAbilities()) {
+                if (!card.isInZone(ZoneType.Battlefield) && !activatableWhereItIs(card, source)) continue;
+                colours |= producibleColours(player, source);
+            }
+        }
+        for (ManaCostShard shard : shards) {
+            if (shard.isPhyrexian() && player.canPayLife(2, false, ability)) continue;
+            boolean payable = false;
+            for (byte colour : ManaAtom.MANATYPES) {
+                if ((colours & colour) != 0 && shard.canBePaidWithManaOfColor(colour)) {
+                    payable = true;
+                    break;
+                }
+            }
+            if (!payable) return true;
+        }
         return false;
+    }
+
+    /** The colours a mana ability can make, as a mask; every colour when the proof cannot read them. */
+    private static int producibleColours(final Player player, final SpellAbility source) {
+        if (source.getManaPart() == null) return ManaAtom.ALL_MANA_TYPES;
+        final String produced = source.getManaPart().getOrigProduced();
+        if (produced == null || "Any".equals(produced)) return ManaAtom.ALL_MANA_TYPES;
+        final String simple = produced.startsWith("Combo ") ? produced.substring(6) : produced;
+        if (!simple.matches("[WUBRGC]( [WUBRGC])*")) return ManaAtom.ALL_MANA_TYPES;
+        int colours = 0;
+        for (String symbol : simple.split(" ")) {
+            final byte colour = ManaAtom.fromName(symbol);
+            colours |= colour | player.getManaPool().getPossibleColorUses(colour);
+        }
+        return colours;
     }
 
     /**
@@ -247,8 +317,10 @@ public final class HumanManaAffordability {
         final int hooks = activeHooks(player, ability.getHostCard(), ability.isSpell());
         if (hooks == HOOK_UNKNOWN) return Assessment.UNKNOWN;
 
-        // block-search-1019: a mana source the loop below cannot count makes any proof unsound
-        if (unenumeratedManaSource(player)) return Assessment.UNKNOWN;
+        // block-search-1019: a mana source the loop below cannot count makes any proof unsound. An untap ability alone
+        // leaves the colour proof (colourImpossible) once the matching fails.
+        final int unenumerated = unenumerated(player);
+        if (unenumerated == UNENUMERATED_OTHER) return Assessment.UNKNOWN;
         final List<Integer> tokens = new ArrayList<>();
         // Life tokens can match only phyrexian pips, never generic mana. Ignoring
         // source life costs overestimates supply and cannot hide a legal payment.
@@ -302,7 +374,11 @@ public final class HumanManaAffordability {
             if (maxAmount > 0) anySource = true;
         }
         if (hooksMatter(hooks, anySource, anySource || player.getManaPool().totalMana() > 0)) return Assessment.UNKNOWN;
-        return canMatch(shards, tokens) ? Assessment.POTENTIALLY_AFFORDABLE : Assessment.PROVEN_UNAFFORDABLE;
+        if (canMatch(shards, tokens)) return Assessment.POTENTIALLY_AFFORDABLE;
+        if (unenumerated == UNENUMERATED_UNTAP) {
+            return colourImpossible(player, ability, shards, hooks, 0) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
+        }
+        return Assessment.PROVEN_UNAFFORDABLE;
     }
 
     /**
@@ -404,8 +480,10 @@ public final class HumanManaAffordability {
         final int hooks = activeHooks(player, host, spell);
         if (hooks == HOOK_UNKNOWN) return Assessment.UNKNOWN;
 
-        // block-search-1019: a mana source the loop below cannot count makes any proof unsound
-        if (unenumeratedManaSource(player)) return Assessment.UNKNOWN;
+        // block-search-1019: a mana source the loop below cannot count makes any proof unsound. An untap ability alone
+        // leaves the colour proof (colourImpossible) once the matching fails.
+        final int unenumerated = unenumerated(player);
+        if (unenumerated == UNENUMERATED_OTHER) return Assessment.UNKNOWN;
         final List<Token> base = new ArrayList<>();
         for (int i = 1; i <= phyrexian && player.canPayLife(2 * i, false, ability); i++) {
             base.add(new Token(LIFE_PAYMENT, -1, true));
@@ -540,7 +618,16 @@ public final class HumanManaAffordability {
         for (int[] group : freeGroups) {
             for (int i = 0; i < Math.min(group[0], cap); i++) base.add(new Token(group[1], -1, false));
         }
-        return payableWith(shards, base, units, cap) ? Assessment.POTENTIALLY_AFFORDABLE : Assessment.PROVEN_UNAFFORDABLE;
+        if (payableWith(shards, base, units, cap)) return Assessment.POTENTIALLY_AFFORDABLE;
+        if (unenumerated == UNENUMERATED_UNTAP) {
+            // Convoke pays with its creatures' colours; improvise and delve with colourless.
+            int extra = 0;
+            for (Token t : base) {
+                if (t.spellOnly() && t.colors() != LIFE_PAYMENT) extra |= t.colors();
+            }
+            return colourImpossible(player, ability, shards, hooks, extra) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
+        }
+        return Assessment.PROVEN_UNAFFORDABLE;
     }
 
     /** Is a cost reduction or a set cost in play that is not limited to spells or to non-mana abilities? */

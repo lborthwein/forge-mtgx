@@ -358,6 +358,46 @@ public class HumanManaAffordabilityOwnerBoardsTest extends AITest {
         assertEquals(HumanManaAffordability.assessPayable(me, spell(delver2)), Assessment.PROVEN_UNAFFORDABLE);
     }
 
+    /**
+     * 2026-10-21T19-07-35, turn 3 main 2 (round 2): Swamp tapped, Mountain and Candelabra of Tawnos untapped. Candelabra's
+     * untap makes the amount unknown, never the colour: no permanent of the seat makes {U}, so every {U} card is unpayable.
+     */
+    @Test
+    public void owner1021_190735_candelabraCannotMakeBlue() {
+        board(PhaseType.MAIN2, true);
+        mine("Swamp", true);
+        mine("Mountain", false);
+        mine("Candelabra of Tawnos", false);
+        final List<Card> blue = List.of(hand("Timetwister"), hand("High Tide"), hand("Urza, Lord High Artificer"),
+                hand("Hullbreacher"));
+        final Card bolt = hand("Lightning Bolt");
+        final Card stone = hand("Mind Stone");
+        settle();
+        for (Card card : blue) doesNotGlow(card);
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(bolt)), Assessment.PROVEN_UNAFFORDABLE, "{R}: the Mountain");
+        glows(bolt);
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(stone)), Assessment.PROVEN_UNAFFORDABLE,
+                "{2}: the Mountain, untapped again by Candelabra");
+        glows(stone);
+    }
+
+    /** 19-07-35's control: a tapped Island can be untapped by Candelabra, so {U} is no longer proven unpayable. */
+    @Test
+    public void owner1021_190735_withATappedIsland() {
+        board(PhaseType.MAIN2, true);
+        mine("Swamp", true);
+        mine("Mountain", false);
+        mine("Candelabra of Tawnos", false);
+        mine("Island", true);
+        final Card tide = hand("High Tide");
+        final Card twister = hand("Timetwister");
+        settle();
+        for (Card card : List.of(tide, twister)) {
+            assertNotEquals(HumanManaAffordability.assessPayable(me, spell(card)), Assessment.PROVEN_UNAFFORDABLE, card.getName());
+            glows(card);
+        }
+    }
+
     /** Cycling, landcycling and a hand creature's mana ability are not sources. */
     @Test
     public void handAndGraveyardAbilitiesAreNotSources() {
