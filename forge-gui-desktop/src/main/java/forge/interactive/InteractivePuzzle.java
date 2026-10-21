@@ -403,6 +403,7 @@ final class InteractivePuzzle {
             self.setName("Game-puzzle-install");
             try {
                 position.applyToGame(game);
+                beginCombat(game);
             } catch (RuntimeException e) {
                 throw new Refused("the puzzle position could not be installed: " + e, e);
             } finally {
@@ -411,6 +412,19 @@ final class InteractivePuzzle {
             System.err.println("[forge.interactive] puzzle position installed: turn " + game.getPhaseHandler().getTurn()
                     + ", " + game.getPhaseHandler().getPhase());
         };
+    }
+
+    /**
+     * A position in the beginning of combat step has no {@code Combat} yet: GameState sets the phase without running
+     * its begin (where PhaseHandler creates it), and declare attackers would then NPE on a null combat. Create it as
+     * the step's begin does (CR 507). The other combat steps are GameState's own (it declares attackers/blockers).
+     */
+    static void beginCombat(final Game game) {
+        final forge.game.phase.PhaseHandler ph = game.getPhaseHandler();
+        if (ph.getPhase() == PhaseType.COMBAT_BEGIN && ph.getCombat() == null && ph.getPlayerTurn() != null) {
+            ph.setCombat(new forge.game.combat.Combat(ph.getPlayerTurn()));
+            game.updateCombatForView();
+        }
     }
 
     /** The terminal's {@code puzzle} for this finished game, from the browser seat's own outcome. */

@@ -217,6 +217,9 @@ public class InteractivePuzzleTest extends AITest {
         assertFalse(named(h8, ZoneType.Battlefield, "Baleful Strix").hasSickness());
         assertFalse(named(a8, ZoneType.Battlefield, "Rotting Regisaur").hasSickness());
         assertNotNull(named(h8, ZoneType.Command, InteractivePuzzle.GOAL_CARD));
+        assertNotNull(g8.getPhaseHandler().getCombat(), "a beginning-of-combat position has its combat");
+        assertEquals(g8.getPhaseHandler().getCombat().getAttackingPlayer(), a8);
+        assertNull(g5.getPhaseHandler().getCombat(), "a main-phase position has none");
     }
 
     @Test
