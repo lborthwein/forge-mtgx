@@ -80,9 +80,22 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         public boolean opp = false;
         /** (d): the opponent check's solver config (string values; exact, act=false, no defence are forced). */
         public JsonObject oppCfg = new JsonObject();
+        /**
+         * strong-opp-1020, off by default (and then nothing changes): the forced-win solver's DEFENSE in front of the live
+         * seat. With their spell on top of the stack and a counterspell we can cast: counter it when resolving it gives
+         * them a forced win by their next turns (and countering it does not), pass to keep the counter when a bigger
+         * threat is likely still to come, else no opinion (the policy / search decide). Our discard effect on their
+         * revealed hand: the card whose removal lowers their forced-win chance most. Their hidden cards come from the
+         * search's belief re-draw when the spec has a belief (honest), else from their registered deck (the solver's
+         * old convention: a leak, for comparison only).
+         */
+        public boolean defend = false;
+        /** strong-opp-1020: the defender's solver config (string values; act=false is forced). */
+        public JsonObject defendCfg = new JsonObject();
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("samples", "temperature",
-                "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg"));
+                "maxSteps", "solver", "maxLines", "minProvenWorlds", "recordMs", "solverCfg", "opp", "oppCfg", "defend",
+                "defendCfg"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -104,6 +117,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             if (o.has("solverCfg")) s.solverCfg = o.getAsJsonObject("solverCfg");
             if (o.has("opp")) s.opp = o.get("opp").getAsBoolean();
             if (o.has("oppCfg")) s.oppCfg = o.getAsJsonObject("oppCfg");
+            if (o.has("defend")) s.defend = o.get("defend").getAsBoolean();
+            if (o.has("defendCfg")) s.defendCfg = o.getAsJsonObject("defendCfg");
             if (s.samples < 0 || s.temperature <= 0 || s.maxSteps < 1 || s.maxLines < 0 || s.minProvenWorlds < 1) {
                 throw new IllegalArgumentException("plans: samples >= 0, temperature > 0, maxSteps >= 1, maxLines >= 0, "
                         + "minProvenWorlds >= 1");
@@ -124,6 +139,21 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 o.add(e.getKey(), e.getValue());
             }
             o.addProperty("act", "false");
+            return SolverDriver.config(o);
+        }
+
+        /** strong-opp-1020: the defender's config: a 1.5 s width-search budget, 4 belief worlds; then the spec's keys. */
+        ForcedWinSolver.Config defendConfig() {
+            final JsonObject o = new JsonObject();
+            o.addProperty("budgetMs", "3000");
+            o.addProperty("planMs", "1500");
+            o.addProperty("defenseWorlds", "4");
+            o.addProperty("engine", "false");
+            for (Map.Entry<String, com.google.gson.JsonElement> e : defendCfg.entrySet()) {
+                o.add(e.getKey(), e.getValue());
+            }
+            o.addProperty("act", "false");
+            o.addProperty("defense", "true");
             return SolverDriver.config(o);
         }
 
@@ -389,6 +419,10 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     /** (d): the opponent check (null = off). */
     final forge.ai.simulation.ThreatCheck threat;
     int respondPoints;
+    /** strong-opp-1020: the defender (null = off) and its counters. */
+    final ForcedWinSolver defender;
+    int defendCalls, defendCounters, defendHolds, defendDiscards, defendErrors;
+    final List<Double> defendMs = new ArrayList<>();
 
     // counters
     int planPoints, solverRuns, provenLinesTaken, lineCands, sampledPlans, recordings, recordFails, planDecisions,
@@ -410,6 +444,19 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         this.driver.solver().redraw = rs.ls().opponentRedraw();
         this.followCfg = sc;
         this.threat = spec.opp ? new forge.ai.simulation.ThreatCheck(spec.oppConfig()) : null;
+        if (spec.defend) {
+            this.defender = new ForcedWinSolver(me, spec.defendConfig());
+            final ForcedWinSolver.Redraw prior = spec.defendCfg.has("prior") && !"none".equals(spec.defendCfg.get("prior").getAsString())
+                    ? rs.ls().opponentRedrawPrior(loadSyn(spec.defendCfg.get("prior").getAsString()),
+                            spec.defendCfg.has("priorGain") ? Double.parseDouble(spec.defendCfg.get("priorGain").getAsString()) : 20.0,
+                            spec.defendCfg.has("priorFillBasics") && "true".equals(spec.defendCfg.get("priorFillBasics").getAsString()))
+                    : null;
+            // the belief's re-draw (uniform, or with the co-draft deck prior); null when the spec has no belief: the
+            // solver's old registered-deck read (a leak, for comparison only)
+            this.defender.redraw = prior != null ? prior : rs.ls().opponentRedraw();
+        } else {
+            this.defender = null;
+        }
     }
 
     /**
@@ -446,6 +493,39 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     @Override
     public List<SpellAbility> priority(final PlayerControllerBridge c) {
+        if (defender != null && !me.getGame().getStack().isEmpty() && !driver.solver().lineActive()) {
+            final long t0 = System.nanoTime();
+            final int c0 = defender.counters, h0 = defender.holds, k0 = defender.threatChecks;
+            ForcedWinSolver.Decision d;
+            try {
+                d = driver.probe(() -> defender.defend(me.getGame()));
+            } catch (Throwable e) {
+                // review S2-2: the defense never reaches the game thread; the seat decides as before
+                d = null;
+                defendErrors++;
+            }
+            if (d == null) {
+                return PlayerControllerBridge.NO_OPINION;
+            }
+            if (defender.threatChecks != k0) {
+                defendCalls++;
+                defendMs.add((System.nanoTime() - t0) / 1e6);
+            }
+            if (d.owned) {
+                if (defender.counters != c0) {
+                    defendCounters++;
+                }
+                if (defender.holds != h0) {
+                    defendHolds++;
+                }
+                if (d.action == null) {
+                    return null;
+                }
+                final List<SpellAbility> out = new ArrayList<>();
+                out.add(d.action);
+                return out;
+            }
+        }
         if (driver.solver().lineDone()) {
             return PlayerControllerBridge.NO_OPINION;
         }
@@ -460,6 +540,73 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             } else {
                 liveDone++;
             }
+        }
+        return r;
+    }
+
+    private static final Map<String, Map<String, Map<String, Double>>> SYN = new java.util.HashMap<>();
+
+    /** strong-opp-1020: the jar's co-draft table (mtgx public/data/cobra-drafted-with.json, the mush cube). */
+    public static final String DEFEND_PRIOR = "classpath:/forge/ai/simulation/defend-prior-cobra-mush.json";
+
+    /**
+     * strong-opp-1020: the co-draft table ({@code {"syn": {a: {b: score}}}}), loaded once per path ({@code classpath:} = a
+     * jar resource).
+     */
+    static synchronized Map<String, Map<String, Double>> loadSyn(final String path) {
+        return SYN.computeIfAbsent(path, k -> {
+            try {
+                final byte[] raw;
+                if (k.startsWith("classpath:")) {
+                    try (java.io.InputStream in = PlanSearch.class.getResourceAsStream(k.substring("classpath:".length()))) {
+                        if (in == null) {
+                            throw new java.io.IOException("no resource " + k);
+                        }
+                        raw = in.readAllBytes();
+                    }
+                } else {
+                    raw = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(k));
+                }
+                final JsonObject o = com.google.gson.JsonParser.parseString(new String(raw, java.nio.charset.StandardCharsets.UTF_8))
+                        .getAsJsonObject().getAsJsonObject("syn");
+                final Map<String, Map<String, Double>> m = new java.util.HashMap<>();
+                for (Map.Entry<String, com.google.gson.JsonElement> e : o.entrySet()) {
+                    final Map<String, Double> row = new java.util.HashMap<>();
+                    for (Map.Entry<String, com.google.gson.JsonElement> f : e.getValue().getAsJsonObject().entrySet()) {
+                        row.put(f.getKey(), f.getValue().getAsDouble());
+                    }
+                    m.put(e.getKey(), row);
+                }
+                return m;
+            } catch (java.io.IOException | RuntimeException e) {
+                throw new IllegalArgumentException("plans.defendCfg.prior: " + k + ": " + e, e);
+            }
+        });
+    }
+
+    @Override
+    public CardCollection discard(final Player p, final SpellAbility sa, final CardCollection valid, final int min,
+            final int max) {
+        return discard(p, sa, valid, min, max, null);
+    }
+
+    @Override
+    public CardCollection discard(final Player p, final SpellAbility sa, final CardCollection valid, final int min,
+            final int max, final CardCollectionView visibleToChooser) {
+        if (defender == null) {
+            return null;
+        }
+        final long t0 = System.nanoTime();
+        CardCollection r;
+        try {
+            r = driver.probe(() -> defender.answerDiscardP(p, sa, valid, min, max, visibleToChooser));
+        } catch (Throwable e) {
+            r = null; // review S2-2: the policy chooses
+            defendErrors++;
+        }
+        defendMs.add((System.nanoTime() - t0) / 1e6);
+        if (r != null) {
+            defendDiscards++;
         }
         return r;
     }
@@ -803,6 +950,22 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
 
     public JsonObject summary() {
         final JsonObject o = new JsonObject();
+        if (defender != null) {
+            o.addProperty("defendCalls", defendCalls);
+            o.addProperty("defendCounters", defendCounters);
+            o.addProperty("defendHolds", defendHolds);
+            o.addProperty("defendDiscards", defendDiscards);
+            o.addProperty("defendThreatChecks", defender.threatChecks);
+            o.addProperty("defendCuts", defender.defendCuts);
+            o.addProperty("defendErrors", defendErrors);
+            double mx = 0, sum = 0;
+            for (double x : defendMs) {
+                mx = Math.max(mx, x);
+                sum += x;
+            }
+            o.addProperty("defendMsMax", Math.round(mx));
+            o.addProperty("defendMsSum", Math.round(sum));
+        }
         o.addProperty("planPoints", planPoints);
         o.addProperty("solverRuns", solverRuns);
         o.addProperty("provenLinesTaken", provenLinesTaken);

@@ -7195,6 +7195,130 @@ public final class LookaheadSearch {
     }
 
     /**
+     * strong-opp-1020: the defender's re-draw with a DECK PRIOR: as {@link #opponentRedraw}, but the opponent's hidden
+     * cards (hand and library together: their deck) are drawn from the belief pool with weights
+     * {@code 1 + gain * max_s syn[s][card]^2} over the cards {@code s} they have shown (battlefield, graveyard, exile,
+     * their spells on the stack, the hand cards we see): a deck that shows Doomsday likely runs what Doomsday decks run.
+     * {@code syn} is a co-draft table from public data (never their real cards). Null when no belief is on.
+     */
+    public ForcedWinSolver.Redraw opponentRedrawPrior(final Map<String, Map<String, Double>> syn, final double gain) {
+        return opponentRedrawPrior(syn, gain, false);
+    }
+
+    /**
+     * As above; {@code fillBasics}: a drawn card the prior does not boost (weight 1: no co-draft link to anything they
+     * showed) enters the copy as a basic land instead. The defender's threat check then reads (and probes) only the
+     * cards their shown cards point to; an unlinked card rarely makes a forced win, and every new card name costs an
+     * affordance probe (strong-opp-1020: about 50 per game, the defense's main cost).
+     */
+    public ForcedWinSolver.Redraw opponentRedrawPrior(final Map<String, Map<String, Double>> syn, final double gain,
+            final boolean fillBasics) {
+        if (beliefCube == null || cfg.beliefShadow || syn == null) {
+            return null;
+        }
+        return (live, liveMe, g, me, rng) -> redrawOpponentsPrior(live, liveMe, g, me, rng, syn, gain, fillBasics);
+    }
+
+    private void redrawOpponentsPrior(Game live, Player liveMe, Game g, Player me, Random rng,
+            Map<String, Map<String, Double>> syn, double gain, boolean fillBasics) {
+        final PlayerView myView = liveMe.getView();
+        for (Player opp : me.getOpponents()) {
+            final Player liveOpp = (Player) live.getPlayer(opp.getId());
+            if (liveOpp == null) {
+                throw new IllegalStateException("belief: no live player for opponent " + opp.getId());
+            }
+            final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
+            final List<Card> keep = new ArrayList<>();
+            for (Card c : hand) {
+                Card lc = live.findById(c.getId());
+                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                    keep.add(c);
+                }
+            }
+            final List<Card> libKnownTop = new ArrayList<>();
+            for (Card lc : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library))) {
+                if (lc.getView().canBeShownTo(myView)) {
+                    Card cc = g.findById(lc.getId());
+                    if (cc != null) {
+                        libKnownTop.add(cc);
+                        continue;
+                    }
+                }
+                break;
+            }
+            final int need = hand.size() - keep.size();
+            final int libNeed = opp.getCardsIn(ZoneType.Library).size() - libKnownTop.size();
+            if (need == 0 && libNeed == 0) {
+                continue;
+            }
+            // what they have shown
+            final Set<String> shown = new HashSet<>();
+            for (Card c : live.getCardsInGame()) {
+                if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
+                        && c.getView().canBeShownTo(myView) && !c.isInZone(ZoneType.Library)) {
+                    shown.add(c.getPaperCard().getName());
+                }
+            }
+            for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
+                if (si.getActivatingPlayer() == liveOpp && si.getSourceCard() != null && si.getSourceCard().getPaperCard() != null) {
+                    shown.add(si.getSourceCard().getPaperCard().getName());
+                }
+            }
+            final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
+            final double[] w = new double[pool.size()];
+            final boolean[] linked = new boolean[pool.size()];
+            double max = 0;
+            for (int i = 0; i < w.length; i++) {
+                double best = 0;
+                for (String a : shown) {
+                    final Map<String, Double> row = syn.get(a);
+                    final Double v = row == null ? null : row.get(pool.get(i));
+                    if (v != null && v > best) {
+                        best = v;
+                    }
+                }
+                w[i] = 1.0 + gain * best * best;
+                linked[i] = best > 0;
+                max = Math.max(max, w[i]);
+            }
+            for (int i = 0; i < w.length; i++) {
+                w[i] /= max;
+            }
+            final int total = need + libNeed;
+            final BeliefSampler.Dist d = new BeliefSampler.Dist(pool, w, basicsFor(pool, total, 0), total, 0);
+            final int[] slots = d.sampleHand(rng);
+            final List<Integer> all = new ArrayList<>();
+            for (int i : slots) {
+                all.add(i);
+            }
+            Collections.shuffle(all, rng);
+            final List<Card> newHand = new ArrayList<>(keep);
+            final List<Card> newLib = new ArrayList<>(libKnownTop);
+            final Map<String, Integer> itemOf = new java.util.HashMap<>();
+            for (int i = 0; i < pool.size(); i++) {
+                itemOf.put(pool.get(i), i);
+            }
+            for (int k = 0; k < all.size(); k++) {
+                String nm = d.slotName[all.get(k)];
+                if (fillBasics && !BeliefSampler.isBasic(nm)) {
+                    final Integer it = itemOf.get(nm);
+                    if (it == null || !linked[it]) {
+                        nm = BeliefSampler.BASICS[rng.nextInt(BeliefSampler.BASICS.length)];
+                    }
+                }
+                final Card nc = beliefCard(nm, opp, g);
+                if (k < need) {
+                    newHand.add(nc);
+                } else {
+                    newLib.add(nc);
+                }
+            }
+            opp.getZone(ZoneType.Hand).setCards(newHand);
+            opp.getZone(ZoneType.Library).setCards(newLib);
+        }
+    }
+
+    /**
      * Belief re-draw of one world (in a copy): each opponent's hidden hand from the belief, the hidden library uniform
      * over the pool slots left (known cards stay where they are), then our own library as {@link #resample}. The
      * opponent's hidden cards in the copy are replaced by new cards of the drawn names. {@code bd} (or null) is the
