@@ -127,7 +127,14 @@ public final class AiTape {
     private volatile Thread gameThread;
 
     // RECORD
+    /**
+     * Frame order across every tape of the game (both seats of a watch or bot table): a trait built while frames of
+     * several tapes are open belongs to the most recently begun one, the innermost (review forge-mtgx#110, S2-2).
+     */
+    private static final java.util.concurrent.atomic.AtomicLong FRAMES = new java.util.concurrent.atomic.AtomicLong();
+
     private static final class Rec {
+        final long seq = FRAMES.incrementAndGet();
         final JsonObject o = new JsonObject();
         final boolean exec;
         final String pre;
@@ -146,6 +153,7 @@ public final class AiTape {
 
     // FORCED
     private static final class Cur {
+        final long seq = FRAMES.incrementAndGet();
         final JsonArray list;
         final boolean exec;
         int i;
@@ -164,6 +172,8 @@ public final class AiTape {
     private int children;
     private int forcedEntries;
     private int drift;
+    /** Drift in anything but the combat views' ids: a replay with any is not exact. */
+    private int gameDrift;
     private int ahead;
     private int unencodable;
     private long bytes;
@@ -556,6 +566,9 @@ public final class AiTape {
                     resync++;
                 } else {
                     drift++;
+                    if (!diff.matches("combatIds \\S+")) {
+                        gameDrift++; // anything but the combat views' ids (never game state)
+                    }
                 }
                 if (driftNotes.size() < 8) {
                     driftNotes.add((explicit ? "resync " : "drift ") + (cursors.isEmpty() ? "n" + (forcedTop - 1) : "child") + " "
@@ -648,6 +661,16 @@ public final class AiTape {
     static final String LAZY = "lazy";
     private int lazyDepth;
     private int decodeDepth;
+    private long decodeSeq;
+
+    /** When this tape's innermost open frame began ({@link #FRAMES}), or 0 when none is open (a trait built then is not its). */
+    long innermostFrame() {
+        if (mode == Mode.RECORD) {
+            return open.isEmpty() ? 0 : open.peek().seq;
+        }
+        final long c = cursors.isEmpty() ? 0 : cursors.peek().seq;
+        return decodeDepth > 0 ? Math.max(c, decodeSeq) : c;
+    }
     private int lazyMissed;
     private int lazyGone;
 
@@ -673,15 +696,18 @@ public final class AiTape {
     private static final forge.game.card.LazyTraits.Listener LAZY_TAP = new forge.game.card.LazyTraits.Listener() {
         @Override
         public Object before(final forge.game.card.CardState st, final String kind) {
+            AiTape inner = null;
+            long innerFrame = 0;
             for (AiTape t : installed) {
                 if (st.getCard().getGame() == t.game && Thread.currentThread() == t.gameThread && t.divergence == null) {
-                    final Object tok = t.lazyBefore(st, kind);
-                    if (tok != null) {
-                        return tok;
+                    final long f = t.innermostFrame();
+                    if (f > innerFrame) {
+                        inner = t;
+                        innerFrame = f;
                     }
                 }
             }
-            return null;
+            return inner == null ? null : inner.lazyBefore(st, kind);
         }
 
         @Override
@@ -694,11 +720,14 @@ public final class AiTape {
 
     /** Decode a recorded answer: lookups only, so anything it builds takes scoped ids (never the game's own). */
     <T> T decoding(final Supplier<T> body) {
+        final long prevSeq = decodeSeq;
+        decodeSeq = FRAMES.incrementAndGet();
         decodeDepth++;
         try {
             return forge.util.IdScope.detached(body);
         } finally {
             decodeDepth--;
+            decodeSeq = prevSeq;
         }
     }
 
@@ -774,6 +803,7 @@ public final class AiTape {
     private void lazyMissed(final String why) {
         lazyMissed++;
         drift++;
+        gameDrift++;
         driftFields.add(LAZY);
         if (driftNotes.size() < 8) {
             driftNotes.add("drift " + why + " T" + game.getPhaseHandler().getTurn());
@@ -805,6 +835,14 @@ public final class AiTape {
             }
             if (cursors.peek() == c && c.i == at) {
                 c.i++;
+                // the record's state after that build is where the next entry starts (review forge-mtgx#110, S2-1)
+                final String post = str(n, "post");
+                if (post != null) {
+                    if (!post.equals(sync())) {
+                        ahead += restore(post);
+                    }
+                    lastPost = post;
+                }
                 if (card == null) {
                     // a copy only the AI's deliberation made, or a card it imagined (a token), never the game's own: not
                     // built on the game's card, and the ids its trait took are the record's next state, restored there
@@ -873,7 +911,7 @@ public final class AiTape {
             o.add("resyncFields", strings(resyncFields));
             o.add("aheadFields", strings(aheadFields));
             // exact: no drift and nothing ahead but the combat views' ids (negative view ids, never game state)
-            o.addProperty("exact", onlyCombatViews(driftFields) && onlyCombatViews(aheadFields));
+            o.addProperty("exact", gameDrift == 0 && onlyCombatViews(driftFields) && onlyCombatViews(aheadFields));
             if (!driftNotes.isEmpty()) {
                 final JsonArray dn = new JsonArray();
                 driftNotes.forEach(dn::add);

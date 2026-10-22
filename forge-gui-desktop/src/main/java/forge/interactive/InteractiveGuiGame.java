@@ -353,7 +353,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     void engineFailure(final Throwable failure) {
         // lane replay-record-1021: an AI tape divergence may come wrapped (GameAction.moveTo names the card it moved):
         // what reaches the player is the divergence's own words, which name no card
-        for (Throwable t = failure; t != null; t = t.getCause()) {
+        // (at most 16 causes: a cause cycle never hangs the failure path)
+        int depth = 0;
+        for (Throwable t = failure; t != null && depth < 16; t = t.getCause(), depth++) {
             if (t instanceof forge.ai.AiTape.Divergence d) {
                 fail("engine", "Forge game failed: " + safeThrowable(d), null, "match.startGame", null, failure);
                 return;

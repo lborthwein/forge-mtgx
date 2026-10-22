@@ -24,9 +24,18 @@ public final class LazyTraits {
         listener = l;
     }
 
+    /** Is a listener installed (so a site may build its kind's name)? Off, every site does nothing more than this. */
+    static boolean active() {
+        return listener != null;
+    }
+
     static Object before(final CardState state, final String kind) {
         final Listener l = listener;
-        return l == null ? null : new Object[] {l, l.before(state, kind)};
+        if (l == null) {
+            return null;
+        }
+        final Object token = l.before(state, kind);
+        return token == null ? null : new Object[] {l, token};
     }
 
     static void after(final Object token) {
