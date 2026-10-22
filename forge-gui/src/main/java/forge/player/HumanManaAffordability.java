@@ -711,7 +711,8 @@ public final class HumanManaAffordability {
      *       Before, it made the whole answer unknown.</li>
      *   <li>More source shapes count: a mana ability limited to once per card by sacrificing or
      *       exiling the card itself (a Spirit Guide from the hand), a counter removed from the card
-     *       (Gemstone Mine, counters assumed present), and a source sacrificed afterwards.</li>
+     *       (Gemstone Mine; table-live-view-1022: as many activations as its counters pay for, so Pentad
+     *       Prism with one charge counter makes one mana), and a source sacrificed afterwards.</li>
      *   <li>afford-jar-1021: a mana ability's OWN mana cost is charged (Chromatic Star, Signets, filters:
      *       star-affordability spec, owner report 2026-10-20T19-46-27). It must be paid from other sources
      *       activated before it, each source used once ({@link #payableWith}); one whose cost cannot be paid
@@ -827,16 +828,27 @@ public final class HumanManaAffordability {
                 if (tap && (!card.isInZone(ZoneType.Battlefield) || card.isTapped() || card.isAbilitySick())) continue;
                 // Cost shapes that make no mana themselves. Each activation is once per card: a tap, or
                 // sacrificing or exiling the card itself (Lotus Petal, a Spirit Guide from the hand).
-                // Counters a cost removes from the card are assumed present: that only adds mana.
+                // table-live-view-1022 (owner friend table 2026-10-22T20-07-11: Miscalculation offered on every
+                // priority with only Pentad Prism's one charge counter left): counters a cost removes from the card
+                // limit its activations to the counters it has, and a cost that removes only counters makes the
+                // ability repeatable up to that many times. Before, such an ability counted as unbounded (UNKNOWN).
+                // No admitted source or sub-ability can put a counter back during the payment.
                 // glow-audit-1021: discarding (Lion's Eye Diamond's hand) only uses cards up, so it is ignored like
                 // the other non-mana parts; tapping other permanents (Urza, Lord High Artificer's "tap an untapped
                 // artifact you control") limits the activations to the permanents there are to tap.
                 CostTapType tapType = null;
+                Integer counterCap = null;
                 for (CostPart p : pay.getCostParts()) {
                     if (p instanceof CostTap || p instanceof CostPartMana || p instanceof CostPayLife
                             || p instanceof CostDiscard) continue;
-                    if ((p instanceof CostSacrifice || p instanceof CostExile || p instanceof CostRemoveCounter)
-                            && p.payCostFromSource()) continue;
+                    if (p instanceof CostRemoveCounter remove && remove.payCostFromSource()) {
+                        final Integer per = remove.convertAmount();
+                        if (per == null || per <= 0) return unknown("source-cost:RemoveCounter-amount", card);
+                        final int have = remove.counter == null ? card.getNumAllCounters() : card.getCounters(remove.counter);
+                        counterCap = Math.min(counterCap == null ? Integer.MAX_VALUE : counterCap, have / per);
+                        continue;
+                    }
+                    if ((p instanceof CostSacrifice || p instanceof CostExile) && p.payCostFromSource()) continue;
                     if (p instanceof CostTapType t && tapType == null) {
                         tapType = t;
                         continue;
@@ -850,9 +862,12 @@ public final class HumanManaAffordability {
                     final Integer tappable = tappableFor(tapType, source, player);
                     if (tappable == null) return unknown("source-cost:TapType", card);
                     activations = once ? Math.min(1, tappable) : tappable;
-                } else if (!once) {
+                } else if (!once && counterCap == null) {
                     return unknown("source-repeatable", card);
+                } else if (!once) {
+                    activations = counterCap;
                 }
+                if (counterCap != null) activations = Math.min(activations, counterCap);
                 if (source.getManaPart() == null) return unknown("source-mana-part", card);
                 if (source.hasParam("Each")) return unknown("source-each", card);
                 boolean plainTail = true;
