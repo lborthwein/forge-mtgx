@@ -454,7 +454,9 @@ public class InteractivePayableTest extends AITest {
         assertEquals(flag(counterspell), Boolean.FALSE, "{U}{U} cannot come from {R}");
 
         board();
-        land("Gemstone Mine", false);
+        // It enters with three mining counters (table-live-view-1022: the proof now counts the counters there are; a
+        // Mine with none cannot be activated at all).
+        land("Gemstone Mine", false).setCounters(CounterEnumType.MINING, 3);
         final Card brainstorm = hand("Brainstorm");
         final Card counter2 = hand("Counterspell");
         settle();

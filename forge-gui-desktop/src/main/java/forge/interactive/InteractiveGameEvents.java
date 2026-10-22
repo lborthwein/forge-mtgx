@@ -117,6 +117,14 @@ final class InteractiveGameEvents {
         } else if (event instanceof GameEventMulligan e) {
             kind(result, "mulligan");
             seat(result, game, e.player());
+        } else if (event instanceof GameEventTurnPhase e && e.phase() != null) {
+            // table-live-view-1022 (owner friend table 2026-10-22T19-53-19): the step the game enters, to every seat.
+            // The other person's tracker showed their previous step until its own next request. Whose turn it is,
+            // which step and the turn number are public (CR 500). playerSeat is the ACTIVE player; turn is global.
+            kind(result, "phase_changed");
+            seat(result, game, e.playerTurn());
+            result.addProperty("phase", e.phase().name());
+            result.addProperty("turn", game.getPhaseHandler().getTurn());
         }
         // A library-to-hand zone change is not necessarily a draw (it can be a
         // search). Do not fabricate draw/discard/destroy causes from zone changes.

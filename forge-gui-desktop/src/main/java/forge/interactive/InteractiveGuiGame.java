@@ -155,6 +155,26 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             ThreadLocal.withInitial(Collections::emptySet);
     /** The table this seat sits at (two browser seats, one game), or null for a one-seat game. */
     private final Table table;
+    /**
+     * WAITING VIEWS (table-live-view-1022; owner friend table 2026-10-22T19-53-19, 19-54-58). At a table of two
+     * people the seat Forge is NOT waiting on got no view between its own requests: its tracker showed the other
+     * person's previous step and their land drop showed up only at its next request. Now each time the other seat
+     * publishes a request (Forge's game thread is parked on it: a safe point), this seat is sent a {@code state}
+     * ({@code "reason": "waiting"}) with its OWN view, built from its own information set like every view it gets,
+     * when a game event reached it since its last view and the view differs from the last one sent. At most one per
+     * {@link #WAITING_VIEW_MIN_MS}; a later change inside that window is sent once it ends, at the next safe point.
+     */
+    static final long WAITING_VIEW_MIN_MS = 250;
+    static final String WAITING_VIEW_REASON = "waiting";
+    /** A game event reached this seat since its last view (a request's or a waiting one); true before its first. */
+    private final AtomicBoolean waitingViewDirty = new AtomicBoolean(true);
+    /** A deferred waiting view is scheduled. */
+    private final AtomicBoolean waitingViewScheduled = new AtomicBoolean();
+    /** When the last waiting view went out ({@link System#nanoTime}), once {@link #waitingViewEverSent}. */
+    private volatile long waitingViewSentNanos;
+    private volatile boolean waitingViewEverSent;
+    /** The last waiting view sent (its JSON text), null after a request of this seat's own. */
+    private volatile String waitingViewSent;
     /** The table seat whose action lane is running on this thread; see {@link #onCurrentThread}. */
     private static final ThreadLocal<InteractiveGuiGame> ACTION_OWNER = new ThreadLocal<>();
 
@@ -227,6 +247,37 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     return thread;
                 });
 
+        /** table-live-view-1022: the timer of a waiting seat's deferred view ({@link #offerWaitingView}). */
+        private final java.util.concurrent.ScheduledExecutorService views =
+                Executors.newSingleThreadScheduledExecutor(runnable -> {
+                    final Thread thread = new Thread(runnable, "Forge Interactive Table Views");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+
+        /**
+         * table-live-view-1022: {@code decider} has just published a request (an input or a modal), so Forge's game
+         * thread is parked on it and the decider's engine gate is held by the caller. Offer every OTHER seat a fresh
+         * view of its own ({@link #offerWaitingView}).
+         */
+        void publishWaitingViews(final InteractiveGuiGame decider) {
+            for (InteractiveGuiGame seat : seats) {
+                if (seat != decider) {
+                    seat.offerWaitingView();
+                }
+            }
+        }
+
+        /** Is some seat of this table inside its own control enumeration on the calling thread? */
+        boolean inReadOnlyQuery() {
+            for (InteractiveGuiGame seat : seats) {
+                if (seat.readOnlyQuery.get()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         /** Queue a look at pending concessions on the table's own thread. Never blocks the caller. */
         void tryRunPendingConcedes() {
             if (!pendingConcede.isEmpty()) {
@@ -293,6 +344,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
         void close() {
             concedes.shutdownNow();
+            views.shutdownNow();
         }
     }
 
@@ -345,6 +397,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             final JsonObject event = InteractiveGameEvents.encode(engineEvent, game, human.getView(), eventMoves);
             body.add("event", event);
             channel.send("event", body);
+            if (table != null) {
+                waitingViewDirty.set(true);
+            }
         } catch (InteractiveProtocol.ProtocolException e) {
             fail("eof", e.getMessage(), null, "onEngineEvent", null, e);
         } catch (Throwable e) {
@@ -740,7 +795,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * changes; forwarding them would republish, which enumerates again (a loop).
      */
     boolean isReadOnlyQueryEcho() {
-        return readOnlyQuery.get();
+        // table-live-view-1022: at a table the OTHER seat's enumeration on this thread is an echo for this seat too
+        // (its events would reach this seat's wire and mark a waiting view to send for a change that was undone).
+        return readOnlyQuery.get() || table != null && table.inReadOnlyQuery();
     }
 
     /**
@@ -863,6 +920,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             channel.send("request", body);
             if (table != null) {
                 table.tryRunPendingConcedes();
+                table.publishWaitingViews(this);
             }
         } catch (InteractiveAbort ignored) {
             // The fatal message was already emitted.
@@ -1632,6 +1690,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         body.addProperty("kind", kind);
         body.addProperty("inputClass", inputClass);
         body.addProperty("seat", humanSeat);
+        // table-live-view-1022: this seat's own request carries its view; a waiting view starts over from it.
+        waitingViewDirty.set(false);
+        waitingViewSent = null;
         body.add("view", visibleState());
         final JsonObject prompt = new JsonObject();
         // The card being paid for need not yet be a committed stack item. Use
@@ -1710,6 +1771,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             sent = true;
             if (table != null) {
                 table.tryRunPendingConcedes();
+                table.publishWaitingViews(this);
             }
         } catch (InteractiveProtocol.ProtocolException e) {
             fail("eof", e.getMessage(), requestId, inputClass, kind, e);
@@ -1759,6 +1821,137 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         } catch (Throwable e) {
             fail("engine", "could not encode Forge state: " + safeThrowable(e),
                     null, "state", null, e);
+        }
+    }
+
+    /**
+     * table-live-view-1022: send this waiting seat its own view if a game event reached it since its last one ({@link
+     * #waitingViewDirty}), it is not itself being asked, and the last waiting view went out at least {@link
+     * #WAITING_VIEW_MIN_MS} ago (else it is deferred to then). The caller holds the engine gate of another seat of the
+     * table whose request Forge is parked on, so nothing changes the game while the view is read.
+     */
+    void offerWaitingView() {
+        if (table == null || channel.isEnded() || game == null || human == null || game.isGameOver()) {
+            return;
+        }
+        if (!waitingViewDirty.get() || awaitingOwnAnswer()) {
+            return;
+        }
+        final long minNanos = WAITING_VIEW_MIN_MS * 1_000_000L;
+        final long since = System.nanoTime() - waitingViewSentNanos;
+        if (waitingViewEverSent && since < minNanos) {
+            scheduleWaitingView(minNanos - since);
+            return;
+        }
+        sendWaitingView();
+    }
+
+    /** Has this seat a request or modal of its own that it has not answered (its view came with it)? */
+    private boolean awaitingOwnAnswer() {
+        final ModalRequest modal = modalRequest.get();
+        if (modal != null && !modal.answer.isDone()) {
+            return true;
+        }
+        final ActiveRequest request = activeRequest.get();
+        return request != null && !request.claimed.get() && controller != null
+                && request.input == controller.getInputProxy().getInput();
+    }
+
+    /**
+     * With this seat's engine gate held: is Forge parked on this seat's request (an unclaimed input request that is
+     * Forge's current input with no action on it running, or an open, unanswered modal)? {@link #parkedOn} without
+     * the request id.
+     */
+    private boolean parkedForWaitingView() {
+        if (game == null || controller == null || game.isGameOver()) {
+            return false;
+        }
+        final ModalRequest modal = modalRequest.get();
+        if (modal != null) {
+            return !modal.claimed.get() && !modal.answer.isDone();
+        }
+        final ActiveRequest request = activeRequest.get();
+        return request != null && !request.claimed.get()
+                && request.input == controller.getInputProxy().getInput()
+                && !inFlightInputs.contains(request.input);
+    }
+
+    private void sendWaitingView() {
+        waitingViewDirty.set(false);
+        final JsonObject view;
+        final boolean wasQuery = readOnlyQuery.get();
+        // A read: anything Forge fired from it would be an echo for every seat (isReadOnlyQueryEcho).
+        readOnlyQuery.set(true);
+        try {
+            view = visibleState();
+        } catch (Throwable failure) {
+            // An extra, not a request: this seat's next own request carries its view. The class only (a message
+            // could name a card this seat may not see).
+            System.err.println("[forge.interactive] waiting view skipped for seat " + humanSeat + ": "
+                    + failure.getClass().getSimpleName());
+            return;
+        } finally {
+            readOnlyQuery.set(wasQuery);
+        }
+        final String text = view.toString();
+        if (text.equals(waitingViewSent)) {
+            return;
+        }
+        waitingViewSent = text;
+        waitingViewSentNanos = System.nanoTime();
+        waitingViewEverSent = true;
+        final JsonObject body = new JsonObject();
+        body.addProperty("reason", WAITING_VIEW_REASON);
+        body.add("view", view);
+        try {
+            channel.send("state", body);
+        } catch (InteractiveProtocol.ProtocolException e) {
+            fail("eof", e.getMessage(), null, "state", null, e);
+        }
+    }
+
+    private void scheduleWaitingView(final long delayNanos) {
+        if (table == null || !waitingViewScheduled.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            table.views.schedule(() -> FThreads.invokeInEdtLater(this::deferredWaitingView),
+                    Math.max(1L, delayNanos), java.util.concurrent.TimeUnit.NANOSECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException closed) {
+            waitingViewScheduled.set(false);
+        }
+    }
+
+    /**
+     * A deferred waiting view, on the EDT (where every input request is published): sent only at a safe point, with
+     * another seat's gate held and Forge parked on that seat's request. Otherwise the next request of that seat offers
+     * it again; a gate in use (a claim, a modal opening) is looked at once more a little later.
+     */
+    private void deferredWaitingView() {
+        waitingViewScheduled.set(false);
+        if (table == null || channel.isEnded() || !waitingViewDirty.get()) {
+            return;
+        }
+        boolean busy = false;
+        for (InteractiveGuiGame decider : table.seats) {
+            if (decider == this) {
+                continue;
+            }
+            if (!decider.engineGate.tryLock()) {
+                busy = true;
+                continue;
+            }
+            try {
+                if (decider.parkedForWaitingView()) {
+                    offerWaitingView();
+                    return;
+                }
+            } finally {
+                decider.engineGate.unlock();
+            }
+        }
+        if (busy) {
+            scheduleWaitingView(WAITING_VIEW_MIN_MS * 1_000_000L);
         }
     }
 

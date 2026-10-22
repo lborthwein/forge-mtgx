@@ -7,6 +7,8 @@ import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.event.GameEvent;
 import forge.game.event.GameEventSpellAbilityCast;
+import forge.game.event.GameEventTurnPhase;
+import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
@@ -84,5 +86,41 @@ public class InteractiveGameEventsTest extends AITest {
         game.getStack().add(sa);
         assertEquals(encoded.get(0).get("kind").getAsString(), "spell_cast");
         assertFalse(encoded.get(0).has("fromZone"), encoded.toString());
+    }
+
+    /**
+     * table-live-view-1022 (owner friend table 2026-10-22T19-53-19): the step the game enters reaches every seat as
+     * {@code phase_changed}, the shape the client's adapter ({@code forgePhaseChanged}) reads: the ACTIVE player's
+     * seat, Forge's PhaseType name and the global turn number, for the active player and for the other seat alike.
+     */
+    @Test
+    public void aPhaseChangeNamesTheActiveSeatThePhaseAndTheGlobalTurn() {
+        final Game game = initAndCreateGame();
+        final Player first = game.getPlayers().get(0);
+        final Player second = game.getPlayers().get(1);
+        final List<JsonObject> toFirst = new ArrayList<>();
+        final List<JsonObject> toSecond = new ArrayList<>();
+        game.subscribeToEvents(new Object() {
+            @Subscribe
+            public void on(final GameEvent event) {
+                if (event instanceof GameEventTurnPhase) {
+                    toFirst.add(InteractiveGameEvents.encode(event, game, first.getView()));
+                    toSecond.add(InteractiveGameEvents.encode(event, game, second.getView()));
+                }
+            }
+        });
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, second, 4);
+        assertEquals(toFirst.size(), 1, toFirst.toString());
+        for (JsonObject e : List.of(toFirst.get(0), toSecond.get(0))) {
+            assertEquals(e.get("kind").getAsString(), "phase_changed");
+            assertEquals(e.get("playerSeat").getAsInt(), 1, "the active player, whoever reads it: " + e);
+            assertEquals(e.get("phase").getAsString(), "MAIN1");
+            assertEquals(e.get("turn").getAsInt(), 4);
+        }
+        assertEquals(toFirst.get(0).toString(), toSecond.get(0).toString(), "public: the same for both seats");
+        game.getPhaseHandler().devModeSet(PhaseType.COMBAT_DECLARE_ATTACKERS, first, 5);
+        assertEquals(toSecond.get(1).get("phase").getAsString(), "COMBAT_DECLARE_ATTACKERS");
+        assertEquals(toSecond.get(1).get("playerSeat").getAsInt(), 0);
+        assertEquals(toSecond.get(1).get("turn").getAsInt(), 5);
     }
 }

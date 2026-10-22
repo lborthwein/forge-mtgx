@@ -497,7 +497,68 @@ public final class HumanManaAffordability {
      */
     public static boolean payable(final Player player, final SpellAbility ability) {
         return assess(player, ability) != Assessment.PROVEN_UNAFFORDABLE
-                && assessPayable(player, ability) != Assessment.PROVEN_UNAFFORDABLE;
+                && assessPayable(player, ability) != Assessment.PROVEN_UNAFFORDABLE
+                && !onlyTargetIsItsSacrificedSource(player, ability);
+    }
+
+    /**
+     * table-live-view-1022 (owner friend table 2026-10-22T19-55-39: "No valid target for Sapper's Tunnel and my friend
+     * sac'ed it without noticing"). Wasteland with no other nonbasic land in play glowed, and was activated targeting
+     * itself. Targets are chosen before costs are paid (CR 601.2c, 601.2h; 602.2b), so the source is a legal target
+     * then; the cost sacrifices it, the sacrificed card is a new object (CR 400.7), and an ability all of whose targets
+     * are illegal does not resolve (CR 608.2b). This is a PROOF that the activation can do nothing, so the
+     * {@code payable} flag says false for it (the control stays offered: Forge decides the click).
+     *
+     * <p>True only when: the ability is an activated ability of a permanent on the battlefield (no spell, mana or
+     * triggered ability); a cost part sacrifices the source itself; the seat is its activating player; some node of the
+     * ability chain targets; and EVERY targeting node asks for a fixed number of at least one target and has no legal
+     * candidate other than the source (no player, no stack object, no other card in its zones). Optional, variable,
+     * random, chosen-by-another-player or modal (Charm) targeting proves nothing. A read: Forge's own
+     * {@code canTarget} per candidate, as its legality check does. Anything that throws proves nothing.</p>
+     */
+    public static boolean onlyTargetIsItsSacrificedSource(final Player player, final SpellAbility ability) {
+        if (player == null || ability == null || ability.isSpell() || ability.isManaAbility() || ability.isTrigger()
+                || ability.isReplacementAbility() || ability.getPayCosts() == null
+                || ability.getActivatingPlayer() != player) {
+            return false;
+        }
+        final Card host = ability.getHostCard();
+        if (host == null || !host.isInZone(ZoneType.Battlefield)) return false;
+        if (ability.getPayCosts().getCostParts().stream()
+                .noneMatch(p -> p instanceof CostSacrifice && p.payCostFromSource())) {
+            return false;
+        }
+        try {
+            final forge.game.Game game = player.getGame();
+            boolean targeted = false;
+            for (SpellAbility node = ability; node != null; node = node.getSubAbility()) {
+                if (node.getApi() == ApiType.Charm) return false;
+                if (!node.usesTargeting()) continue;
+                targeted = true;
+                final forge.game.spellability.TargetRestrictions tgt = node.getTargetRestrictions();
+                if (tgt == null || !String.valueOf(tgt.getMinTargets()).matches("[1-9][0-9]{0,2}")
+                        || node.getMinTargets() < 1 || tgt.isRandomTarget() || node.hasParam("TargetingPlayer")) {
+                    return false;
+                }
+                final List<ZoneType> zones = tgt.getZone();
+                if (zones.contains(ZoneType.Stack)) {
+                    for (forge.game.spellability.SpellAbilityStackInstance si : game.getStack()) {
+                        if (node.canTargetSpellAbility(si.getSpellAbility())) return false;
+                    }
+                }
+                for (Player candidate : game.getPlayers()) {
+                    if (node.canTarget(candidate)) return false;
+                }
+                tgt.applyTargetTextChanges(node);
+                for (Card candidate : game.getCardsIn(zones)) {
+                    if (candidate.getId() == host.getId() || candidate.isInZone(ZoneType.Stack)) continue;
+                    if (node.canTarget(candidate)) return false;
+                }
+            }
+            return targeted;
+        } catch (RuntimeException unreadable) {
+            return false;
+        }
     }
 
     /**
@@ -711,7 +772,8 @@ public final class HumanManaAffordability {
      *       Before, it made the whole answer unknown.</li>
      *   <li>More source shapes count: a mana ability limited to once per card by sacrificing or
      *       exiling the card itself (a Spirit Guide from the hand), a counter removed from the card
-     *       (Gemstone Mine, counters assumed present), and a source sacrificed afterwards.</li>
+     *       (Gemstone Mine; table-live-view-1022: as many activations as its counters pay for, so Pentad
+     *       Prism with one charge counter makes one mana), and a source sacrificed afterwards.</li>
      *   <li>afford-jar-1021: a mana ability's OWN mana cost is charged (Chromatic Star, Signets, filters:
      *       star-affordability spec, owner report 2026-10-20T19-46-27). It must be paid from other sources
      *       activated before it, each source used once ({@link #payableWith}); one whose cost cannot be paid
@@ -827,16 +889,27 @@ public final class HumanManaAffordability {
                 if (tap && (!card.isInZone(ZoneType.Battlefield) || card.isTapped() || card.isAbilitySick())) continue;
                 // Cost shapes that make no mana themselves. Each activation is once per card: a tap, or
                 // sacrificing or exiling the card itself (Lotus Petal, a Spirit Guide from the hand).
-                // Counters a cost removes from the card are assumed present: that only adds mana.
+                // table-live-view-1022 (owner friend table 2026-10-22T20-07-11: Miscalculation offered on every
+                // priority with only Pentad Prism's one charge counter left): counters a cost removes from the card
+                // limit its activations to the counters it has, and a cost that removes only counters makes the
+                // ability repeatable up to that many times. Before, such an ability counted as unbounded (UNKNOWN).
+                // No admitted source or sub-ability can put a counter back during the payment.
                 // glow-audit-1021: discarding (Lion's Eye Diamond's hand) only uses cards up, so it is ignored like
                 // the other non-mana parts; tapping other permanents (Urza, Lord High Artificer's "tap an untapped
                 // artifact you control") limits the activations to the permanents there are to tap.
                 CostTapType tapType = null;
+                Integer counterCap = null;
                 for (CostPart p : pay.getCostParts()) {
                     if (p instanceof CostTap || p instanceof CostPartMana || p instanceof CostPayLife
                             || p instanceof CostDiscard) continue;
-                    if ((p instanceof CostSacrifice || p instanceof CostExile || p instanceof CostRemoveCounter)
-                            && p.payCostFromSource()) continue;
+                    if (p instanceof CostRemoveCounter remove && remove.payCostFromSource()) {
+                        final Integer per = remove.convertAmount();
+                        if (per == null || per <= 0) return unknown("source-cost:RemoveCounter-amount", card);
+                        final int have = remove.counter == null ? card.getNumAllCounters() : card.getCounters(remove.counter);
+                        counterCap = Math.min(counterCap == null ? Integer.MAX_VALUE : counterCap, have / per);
+                        continue;
+                    }
+                    if ((p instanceof CostSacrifice || p instanceof CostExile) && p.payCostFromSource()) continue;
                     if (p instanceof CostTapType t && tapType == null) {
                         tapType = t;
                         continue;
@@ -850,9 +923,12 @@ public final class HumanManaAffordability {
                     final Integer tappable = tappableFor(tapType, source, player);
                     if (tappable == null) return unknown("source-cost:TapType", card);
                     activations = once ? Math.min(1, tappable) : tappable;
-                } else if (!once) {
+                } else if (!once && counterCap == null) {
                     return unknown("source-repeatable", card);
+                } else if (!once) {
+                    activations = counterCap;
                 }
+                if (counterCap != null) activations = Math.min(activations, counterCap);
                 if (source.getManaPart() == null) return unknown("source-mana-part", card);
                 if (source.hasParam("Each")) return unknown("source-each", card);
                 boolean plainTail = true;
