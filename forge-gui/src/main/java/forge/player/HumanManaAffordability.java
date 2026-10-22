@@ -62,17 +62,30 @@ public final class HumanManaAffordability {
     /**
      * glow-audit-1021: a proof that gave up (UNKNOWN fails open: the card glows) logs why, once per reason and card per
      * JVM, so the next gap shows up in the host's stderr instead of in the owner's games. Logging is the only effect.
+     *
+     * <p>Review S3 (hidden information): the host's last stderr lines can reach a session's fatal message, which the
+     * client shows and transcripts keep, and a table JVM serves more than one seat. So the line names a card only when
+     * it is face up on the battlefield, in a graveyard or on the stack (public to every seat); otherwise (a hand, a
+     * library, exile, the command zone, face down) it carries the card's id alone.</p>
      */
     private static final Set<String> UNKNOWN_SEEN = ConcurrentHashMap.newKeySet();
     static final int UNKNOWN_SEEN_CAP = 512;
 
-    static Assessment unknown(final String reason, final Card card) {
-        final String name = card == null ? "?" : card.getName();
-        if (UNKNOWN_SEEN.size() < UNKNOWN_SEEN_CAP && UNKNOWN_SEEN.add(reason + "|" + name)) {
-            System.err.println("[forge.interactive] afford-unknown {\"reason\":\"" + reason + "\",\"card\":\""
-                    + name.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}");
-        }
+    public static Assessment unknown(final String reason, final Card card) {
+        final String line = unknownLine(reason, card);
+        if (UNKNOWN_SEEN.size() < UNKNOWN_SEEN_CAP && UNKNOWN_SEEN.add(line)) System.err.println(line);
         return Assessment.UNKNOWN;
+    }
+
+    /** The stderr line {@link #unknown} prints (a name only for a card public to every seat). */
+    public static String unknownLine(final String reason, final Card card) {
+        final StringBuilder sb = new StringBuilder("[forge.interactive] afford-unknown {\"reason\":\"").append(reason)
+                .append("\",\"card\":").append(card == null ? -1 : card.getId());
+        if (card != null && !card.isFaceDown() && (card.isInZone(ZoneType.Battlefield)
+                || card.isInZone(ZoneType.Graveyard) || card.isInZone(ZoneType.Stack))) {
+            sb.append(",\"name\":\"").append(card.getName().replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        }
+        return sb.append('}').toString();
     }
 
     /** The cost part's kind for {@link #unknown}: its class name without the "Cost" prefix. */
@@ -102,6 +115,15 @@ public final class HumanManaAffordability {
 
     /** {@link #unenumeratedManaSource}, telling an untap ability apart from every other cause (afford-jar-1021 round 2). */
     static int unenumerated(final Player player) {
+        return unenumerated(player, false);
+    }
+
+    /**
+     * {@link #unenumerated}; with {@code nowOnly} (glow-audit-1021, the payable flag's proof only), an untap ability
+     * counts only if it can be activated in this priority window ({@link #activatableNow}). {@link #assess}, which
+     * decides what is offered at all, keeps the zone-only reading.
+     */
+    static int unenumerated(final Player player, final boolean nowOnly) {
         int found = UNENUMERATED_NONE;
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
@@ -110,8 +132,11 @@ public final class HumanManaAffordability {
                 if (sa.isSpell() || !activatableWhereItIs(card, sa)) continue;
                 // afford-jar-1021: an untap ability can use a mana source twice (Devoted Druid's -1/-1 counter,
                 // Voltaic Key, Candelabra of Tawnos); the loops count each {T} once.
+                // glow-audit-1021 (owner report 2026-10-22T00-08-43): only one usable in THIS priority window counts.
+                // A cast pays with mana abilities only (CR 601.2g), so an untap must come first, now: a loyalty
+                // ability on the opponent's end step, or one already used this turn, untaps nothing for this payment.
                 if (card.isInZone(ZoneType.Battlefield) && !sa.isManaAbility() && untaps(sa)) {
-                    found = UNENUMERATED_UNTAP;
+                    if (!nowOnly || activatableNow(card, sa, player)) found = UNENUMERATED_UNTAP;
                     continue;
                 }
                 if (!makesMana(sa)) continue;
@@ -192,6 +217,26 @@ public final class HumanManaAffordability {
         }
     }
 
+    /**
+     * glow-audit-1021: may {@code player} activate {@code sa} in this priority window? Forge's own answer,
+     * {@code SpellAbilityRestriction.canPlay}: timing (sorcery speed, flash grants), activator, zone, a loyalty
+     * ability's once-per-turn (and its raised limits), activation limits this turn and this game. An ability usable
+     * only later this turn does not count. The activating player is set for the question and restored after (a field
+     * read by the check, nothing else). A check that throws counts as "it may": the safe side for an impossibility proof.
+     */
+    static boolean activatableNow(final Card card, final SpellAbility sa, final Player player) {
+        if (sa.getRestrictions() == null) return true;
+        final Player was = sa.getActivatingPlayer();
+        try {
+            sa.setActivatingPlayer(player);
+            return sa.getRestrictions().canPlay(card, sa);
+        } catch (RuntimeException unreadable) {
+            return true;
+        } finally {
+            sa.setActivatingPlayer(was);
+        }
+    }
+
     private static boolean untaps(final SpellAbility sa) {
         for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
             if (s.getApi() == ApiType.Untap || s.getApi() == ApiType.UntapAll) return true;
@@ -237,11 +282,23 @@ public final class HumanManaAffordability {
      * player has a source (or mana) for it to act on. A parameter Forge cannot evaluate here counts as "it acts".</p>
      */
     static int activeHooks(final Player player, final Card host, final boolean spell) {
+        return activeHooks(player, host, spell, true);
+    }
+
+    /**
+     * {@link #activeHooks}; with {@code tappedSources} false (glow-audit-1021), a source is one whose mana ability
+     * can be activated now: a {T} ability of a tapped or summoning-sick permanent does not count, so a mana trigger
+     * on a land matters only while such a land is untapped. The caller passes true when an untap ability usable now
+     * could bring a tapped source back ({@link #unenumerated}).
+     */
+    static int activeHooks(final Player player, final Card host, final boolean spell, final boolean tappedSources) {
         final List<Card> sources = new ArrayList<>();
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
             // A source is a card with a mana ability it can activate where it is (not a hand Urza's).
-            if (!card.isPhasedOut() && card.getManaAbilities().stream().anyMatch(sa -> activatableWhereItIs(card, sa))) {
+            if (!card.isPhasedOut() && card.getManaAbilities().stream().anyMatch(sa -> activatableWhereItIs(card, sa)
+                    && (tappedSources || sa.getPayCosts() == null || !sa.getPayCosts().hasTapCost()
+                        || card.isInZone(ZoneType.Battlefield) && !card.isTapped() && !card.isAbilitySick()))) {
                 sources.add(card);
             }
         }
@@ -442,6 +499,12 @@ public final class HumanManaAffordability {
     public static Proof proof(final Player player, final SpellAbility ability) {
         try {
             if (!payable(player, ability)) return Proof.UNAFFORDABLE;
+        } catch (RuntimeException failure) {
+            // As the bridge's flag always did: a check that throws says payable, and is logged.
+            System.err.println("[forge.interactive] payable check failed, reporting payable: " + failure);
+            return Proof.UNKNOWN;
+        }
+        try {
             return provablyAffordable(player, ability) ? Proof.AFFORDABLE : Proof.UNKNOWN;
         } catch (RuntimeException failure) {
             return Proof.UNKNOWN;
@@ -711,15 +774,17 @@ public final class HumanManaAffordability {
         if (!ownReduction) for (int i = 0; i < cost.getGenericCost(); i++) shards.add(ManaCostShard.GENERIC);
         if (shards.isEmpty()) return Assessment.POTENTIALLY_AFFORDABLE;
 
-        // As assess: mana conversion, an optional cost or granted payment keyword, a mana
-        // replacement or a mana trigger in a public active zone may make the supply unknown.
-        final int hooks = activeHooks(player, host, spell);
-        if (hooks == HOOK_UNKNOWN) return unknown("price-or-payment-static", host);
-
         // block-search-1019: a mana source the loop below cannot count makes any proof unsound. An untap ability alone
         // leaves the colour proof (colourImpossible) once the matching fails.
-        final int unenumerated = unenumerated(player);
+        final int unenumerated = unenumerated(player, true);
         if (unenumerated == UNENUMERATED_OTHER) return unknown("unenumerated-source", host);
+
+        // As assess: mana conversion, an optional cost or granted payment keyword, a mana
+        // replacement or a mana trigger in a public active zone may make the supply unknown.
+        // glow-audit-1021: a production hook counts a source only if it is usable now, or could be once an untap
+        // ability usable now brings it back.
+        final int hooks = activeHooks(player, host, spell, unenumerated == UNENUMERATED_UNTAP);
+        if (hooks == HOOK_UNKNOWN) return unknown("price-or-payment-static", host);
         final List<Token> base = new ArrayList<>();
         for (int i = 1; i <= phyrexian && player.canPayLife(2 * i, false, ability); i++) {
             base.add(new Token(LIFE_PAYMENT, -1, true));

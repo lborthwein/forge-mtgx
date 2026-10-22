@@ -258,6 +258,105 @@ public class HumanManaAffordabilityGlowAuditTest extends AITest {
         assertFalse(forgePays(spell(big)));
     }
 
+    // ------------------------------------------------------------------ an untap ability usable later, not now
+
+    /**
+     * Owner report 2026-10-22T00-08-43, turn 7, the OPPONENT's end step: every land and the two-mana artifact tapped,
+     * nothing floating; two Map tokens and a planeswalker whose +1 untaps a land (and whose mana trigger adds {G} per
+     * Forest) untapped. A {1}{G} instant glowed: the untap made the proof unknown, though a loyalty ability cannot be
+     * activated on the opponent's turn.
+     */
+    private Card nissaEndStepBoard() {
+        board(PhaseType.END_OF_TURN, false);
+        mine("Forest", true);
+        mine("Tropical Island", true);
+        mine("Mana Crypt", true);
+        mine("Forest", true);
+        addToken("c_a_map_sac_explore", me);
+        addToken("c_a_map_sac_explore", me);
+        final Card nissa = mine("Nissa, Who Shakes the World", false);
+        nissa.setCounters(forge.game.card.CounterEnumType.LOYALTY, 5);
+        hand("Forest");
+        final Card asunder = hand("Tear Asunder");
+        theirs("Plains").setTapped(true);
+        theirs("Mountain").setTapped(true);
+        settle();
+        return asunder;
+    }
+
+    @Test
+    public void owner1022_000843_loyaltyUntapOnTheOpponentsEndStep() {
+        final Card asunder = nissaEndStepBoard();
+        assertEquals(flag(asunder), Boolean.FALSE, "{1}{G} with nothing untapped that makes mana, now");
+        noGlow(asunder);
+        assertEquals(HumanManaAffordability.proof(me, offered(asunder).get(0)), Proof.UNAFFORDABLE);
+        assertEquals(controlProof(asunder), Proof.UNAFFORDABLE);
+    }
+
+    /** The same board in the owner's own main phase: the +1 can untap a Forest first, so no proof (it may be paid). */
+    @Test
+    public void loyaltyUntapInOwnMainPhaseStaysUnknown() {
+        nissaEndStepBoard();
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+        final Card asunder = me.getCardsIn(ZoneType.Hand).stream().filter(c -> c.getName().equals("Tear Asunder"))
+                .findFirst().orElseThrow();
+        settle();
+        assertEquals(flag(asunder), Boolean.TRUE, "untap a Forest with the +1, tap it for {G}{G}");
+        assertNotEquals(controlProof(asunder), Proof.UNAFFORDABLE);
+    }
+
+    /** Once the loyalty ability has been used this turn, it untaps nothing more: proved again in the main phase. */
+    @Test
+    public void loyaltyAlreadyUsedThisTurn() {
+        nissaEndStepBoard();
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+        final Card nissa = me.getCardsIn(ZoneType.Battlefield).stream()
+                .filter(c -> c.getName().startsWith("Nissa")).findFirst().orElseThrow();
+        nissa.addPlaneswalkerAbilityActivated();
+        final Card asunder = me.getCardsIn(ZoneType.Hand).stream().filter(c -> c.getName().equals("Tear Asunder"))
+                .findFirst().orElseThrow();
+        settle();
+        assertEquals(flag(asunder), Boolean.FALSE);
+    }
+
+    /** The mana trigger on Forests matters once a Forest is untapped: then the price is not proved either way. */
+    @Test
+    public void manaTriggerWithAnUntappedForest() {
+        nissaEndStepBoard();
+        mine("Forest", false);
+        final Card asunder = me.getCardsIn(ZoneType.Hand).stream().filter(c -> c.getName().equals("Tear Asunder"))
+                .findFirst().orElseThrow();
+        settle();
+        assertEquals(flag(asunder), Boolean.TRUE, "one Forest makes {G}{G} with the trigger");
+        assertTrue(forgePays(offered(asunder).get(0)));
+    }
+
+    // ------------------------------------------------------------------ the unknown log never names a hidden card
+
+    @Test
+    public void unknownLogNamesOnlyPublicCards() {
+        board(PhaseType.MAIN1, true);
+        final Card inHand = hand("Tear Asunder");
+        final Card inPlay = mine("Forest", false);
+        settle();
+        final String hidden = HumanManaAffordability.unknownLine("test", inHand);
+        assertFalse(hidden.contains("Tear Asunder"), hidden);
+        assertTrue(hidden.contains("\"card\":" + inHand.getId()), hidden);
+        final String shown = HumanManaAffordability.unknownLine("test", inPlay);
+        assertTrue(shown.contains("\"name\":\"Forest\""), shown);
+        // And the live path: a hand card's proof that gives up prints its id, never its name.
+        final java.io.ByteArrayOutputStream err = new java.io.ByteArrayOutputStream();
+        final java.io.PrintStream was = System.err;
+        System.setErr(new java.io.PrintStream(err, true));
+        try {
+            HumanManaAffordability.unknown("glow-audit-hidden-" + inHand.getId(), inHand);
+        } finally {
+            System.setErr(was);
+        }
+        assertTrue(err.toString().contains("afford-unknown"), err.toString());
+        assertFalse(err.toString().contains("Tear Asunder"), err.toString());
+    }
+
     // ------------------------------------------------------------------ payableProof, per control
 
     private Proof controlProof(final Card card) {

@@ -861,7 +861,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     /** A priority card control whose preview is computed once the request is known to be published. */
     private record PreviewJob(Card card, JsonObject value, List<SpellAbility> possible,
-                              List<SpellAbility> unrestricted, List<SpellAbility> affordable) {
+                              List<SpellAbility> unrestricted, List<SpellAbility> affordable,
+                              Map<SpellAbility, forge.player.HumanManaAffordability.Proof> proofs) {
     }
 
     /**
@@ -886,11 +887,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 } else {
                     // The "Choose an ability" modal lists every ability and offers the affordable
                     // ones (canChooseOfferedAbility); a cast restriction is refused after the move.
+                    // Review S3: each offered ability's proof was taken once, for the control's flags; reuse it.
                     preview = InteractivePreview.forCard(pass, human, job.card(), job.possible(),
                             ability -> job.affordable().contains(ability)
                                     || (!job.unrestricted().contains(ability)
                                     && forge.player.HumanManaAffordability.mayAfford(human, ability)),
-                            seat);
+                            seat, ability -> {
+                                final var known = job.proofs().get(ability);
+                                return known != null ? known : forge.player.HumanManaAffordability.proof(human, ability);
+                            });
                     markRestricted(preview, job);
                 }
                 job.value().add("preview", preview);
@@ -997,7 +1002,25 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * selection) has nothing to pay for.
      */
     static boolean controlPayable(final Player human, final List<SpellAbility> offered) {
-        return offered.isEmpty() || offered.stream().anyMatch(ability -> payableOrUnsure(human, ability));
+        return payableFrom(offered, proofs(human, offered));
+    }
+
+    /**
+     * Review S3 (glow-audit-1021): each offered ability's {@link forge.player.HumanManaAffordability#proof}, taken
+     * ONCE per request. {@code payable}, {@code payableProof} and the preview's per-ability proofs all read it.
+     */
+    static Map<SpellAbility, forge.player.HumanManaAffordability.Proof> proofs(final Player human,
+                                                                               final List<SpellAbility> offered) {
+        final Map<SpellAbility, forge.player.HumanManaAffordability.Proof> out = new java.util.IdentityHashMap<>();
+        for (SpellAbility ability : offered) out.put(ability, forge.player.HumanManaAffordability.proof(human, ability));
+        return out;
+    }
+
+    /** {@link #controlPayable} from the proofs: unaffordable is exactly {@code payable} false (a throw said payable). */
+    static boolean payableFrom(final List<SpellAbility> offered,
+                               final Map<SpellAbility, forge.player.HumanManaAffordability.Proof> proofs) {
+        return offered.isEmpty() || offered.stream()
+                .anyMatch(a -> proofs.get(a) != forge.player.HumanManaAffordability.Proof.UNAFFORDABLE);
     }
 
     /**
@@ -1005,28 +1028,18 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      * {@link #controlPayable} is false, AFFORDABLE when some offered ability is proved affordable, else UNKNOWN.
      */
     static forge.player.HumanManaAffordability.Proof controlProof(final Player human, final List<SpellAbility> offered) {
-        if (!controlPayable(human, offered)) return forge.player.HumanManaAffordability.Proof.UNAFFORDABLE;
-        for (SpellAbility ability : offered) {
-            if (forge.player.HumanManaAffordability.proof(human, ability)
-                    == forge.player.HumanManaAffordability.Proof.AFFORDABLE) {
-                return forge.player.HumanManaAffordability.Proof.AFFORDABLE;
-            }
-        }
-        return forge.player.HumanManaAffordability.Proof.UNKNOWN;
+        return controlProofFrom(offered, proofs(human, offered));
     }
 
-    /**
-     * A flag must never cost the player the request it rides on: a check that throws (an unexpected
-     * cost shape) says payable, the safe side, and is logged, instead of failing the publish.
-     */
-    private static boolean payableOrUnsure(final Player human, final SpellAbility ability) {
-        try {
-            return forge.player.HumanManaAffordability.payable(human, ability);
-        } catch (RuntimeException failure) {
-            System.err.println("[forge.interactive] payable check failed, reporting payable: " + failure);
-            return true;
-        }
+    static forge.player.HumanManaAffordability.Proof controlProofFrom(final List<SpellAbility> offered,
+            final Map<SpellAbility, forge.player.HumanManaAffordability.Proof> proofs) {
+        if (!payableFrom(offered, proofs)) return forge.player.HumanManaAffordability.Proof.UNAFFORDABLE;
+        return offered.stream().anyMatch(a -> proofs.get(a) == forge.player.HumanManaAffordability.Proof.AFFORDABLE)
+                ? forge.player.HumanManaAffordability.Proof.AFFORDABLE : forge.player.HumanManaAffordability.Proof.UNKNOWN;
     }
+
+    // A flag must never cost the player the request it rides on: a check that throws (an unexpected cost shape) says
+    // payable, the safe side, and is logged, instead of failing the publish (HumanManaAffordability.proof: UNKNOWN).
 
     private JsonArray buildStatefulControls(final Input input, final String kind,
                                             final Map<String, ControlBinding> bindings,
@@ -1101,14 +1114,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 // own ability here; X = 0). The client glows only payable cards and keeps the rest
                 // clickable. False is a proof (HumanManaAffordability.payable). It is a read, so the game,
                 // its random stream and the AI's memory are untouched. This seat only.
-                value.addProperty("payable", controlPayable(human, affordableAbilities));
+                final var proofs = proofs(human, affordableAbilities);
+                value.addProperty("payable", payableFrom(affordableAbilities, proofs));
                 // glow-audit-1021: the tri-state beside it, over the same abilities (controlProof). Absent when the
                 // control offers none, as a plain selection has nothing to pay for.
                 if (!affordableAbilities.isEmpty()) {
-                    value.addProperty("payableProof", controlProof(human, affordableAbilities).wire);
+                    value.addProperty("payableProof", controlProofFrom(affordableAbilities, proofs).wire);
                 }
                 if (previews != null) {
-                    previews.add(new PreviewJob(card, value, possibleAbilities, priorityAbilities, affordableAbilities));
+                    previews.add(new PreviewJob(card, value, possibleAbilities, priorityAbilities, affordableAbilities, proofs));
                 }
             }
             control.add("value", value);
