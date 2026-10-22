@@ -594,6 +594,80 @@ public class InteractivePayableTest extends AITest {
         assertTrue(unpayable >= 100, "the fuzz reaches unpayable cards: " + unpayable + " of " + offeredCards);
     }
 
+    /**
+     * glow-audit-1021: the other direction, for the wire's payableProof. Whenever an offered ability is proved
+     * "affordable", Forge's own payer pays it (in test mode), with X at max(XMin, 1) as the proof prices it; and
+     * "unaffordable" agrees with the flag. The boards add the shapes this lane taught the proofs: an artifact-tapping
+     * mana creature, a discarding self-sacrificing source, an untap-X-lands artifact and a manland.
+     */
+    @Test
+    public void affordableNeverContradictsForgesPayer() {
+        final Random rng = new Random(1021);
+        final String[] extra = {"Urza, Lord High Artificer", "Lion's Eye Diamond", "Candelabra of Tawnos", "Mutavault",
+            "Sensei's Divining Top"};
+        int affordable = 0;
+        int checked = 0;
+        for (int n = 0; n < 400; n++) {
+            board();
+            for (int i = rng.nextInt(7); i > 0; i--) land(pick(rng, LANDS), rng.nextInt(3) == 0);
+            for (int i = rng.nextInt(3); i > 0; i--) {
+                final String name = pick(rng, SOURCES);
+                if (name.equals("Simian Spirit Guide")) {
+                    hand(name);
+                    continue;
+                }
+                final Card source = rng.nextBoolean() ? permanent(name) : addCard(name, me);
+                source.setTapped(rng.nextInt(3) == 0);
+            }
+            if (rng.nextInt(2) == 0) permanent(pick(rng, extra)).setTapped(rng.nextInt(4) == 0);
+            if (rng.nextInt(3) == 0) permanent(pick(rng, MODIFIERS));
+            if (rng.nextInt(4) == 0) addCard(pick(rng, MODIFIERS), foe).setSickness(false);
+            if (rng.nextInt(4) == 0) {
+                final byte[] colors = {MagicColor.WHITE, MagicColor.BLUE, MagicColor.BLACK, MagicColor.RED, MagicColor.GREEN};
+                floating(colors[rng.nextInt(colors.length)]);
+            }
+            for (int i = 0; i < 5; i++) hand(pick(rng, SPELLS));
+            // Life 10+: the AI payer avoids painful sources at low life (board 33: life 2, a pain land and Ancient Tomb).
+            me.setLife(10 + rng.nextInt(11), null);
+            settle();
+            for (Card card : new ArrayList<>(me.getCardsIn(ZoneType.Hand, ZoneType.Battlefield))) {
+                final List<SpellAbility> offered = offered(card);
+                if (offered.isEmpty()) continue;
+                final boolean payable = InteractiveGuiGame.controlPayable(me, offered);
+                final HumanManaAffordability.Proof control = InteractiveGuiGame.controlProof(me, offered);
+                assertEquals(control == HumanManaAffordability.Proof.UNAFFORDABLE, !payable, "board " + n + " " + card);
+                for (SpellAbility sa : offered) {
+                    final HumanManaAffordability.Proof proof = HumanManaAffordability.proof(me, sa);
+                    checked++;
+                    if (proof != HumanManaAffordability.Proof.AFFORDABLE || sa.isManaAbility()) continue;
+                    affordable++;
+                    final forge.card.mana.ManaCost printed = sa.getPayCosts().getCostMana() == null ? null
+                            : sa.getPayCosts().getCostMana().getMana();
+                    // The AI payer declines to pay Phyrexian pips with life on its own judgement (life 7 on board 1):
+                    // a choice, not the rules, so those are left to the per-case tests.
+                    if (printed != null && printed.hasPhyrexian()) continue;
+                    final int x = printed == null || printed.countX() == 0 ? 0
+                            : Math.max(sa.getPayCosts().getCostMana().getXMin(), 1);
+                    final Integer xWas = sa.getXManaCostPaid();
+                    if (x > 0) sa.setXManaCostPaid(x);
+                    final boolean pays;
+                    try {
+                        pays = forge.ai.ComputerUtilMana.canPayManaCost(sa, me, 0, false);
+                    } finally {
+                        sa.setXManaCostPaid(xWas);
+                    }
+                    assertTrue(pays,
+                            "board " + n + ": proved affordable but Forge's payer cannot pay " + sa + " of " + card
+                                    + " (life " + me.getLife() + ", pool " + me.getManaPool().totalMana() + ", battlefield "
+                                    + me.getCardsIn(ZoneType.Battlefield) + ")");
+                }
+            }
+        }
+        System.out.println("[glow-audit-1021] fuzz: 400 boards, " + checked + " offered abilities, " + affordable
+                + " proved affordable, every one paid by Forge's payer");
+        assertTrue(affordable >= 100, "the fuzz reaches affordable abilities: " + affordable);
+    }
+
     // ------------------------------------------------------------------ no side effects
 
     /**

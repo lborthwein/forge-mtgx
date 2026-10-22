@@ -164,6 +164,14 @@ final class InteractivePreview {
     static JsonObject forCard(final Pass pass, final Player human, final Card card,
                               final List<SpellAbility> possible, final Predicate<SpellAbility> offered,
                               final Seat seat) {
+        return forCard(pass, human, card, possible, offered, seat, sa -> forge.player.HumanManaAffordability.proof(human, sa));
+    }
+
+    /** {@link #forCard}, with each ability's cost proof supplied (the bridge's, taken once per request). */
+    static JsonObject forCard(final Pass pass, final Player human, final Card card,
+                              final List<SpellAbility> possible, final Predicate<SpellAbility> offered,
+                              final Seat seat,
+                              final java.util.function.Function<SpellAbility, forge.player.HumanManaAffordability.Proof> proofOf) {
         pass.cards++;
         final JsonObject preview = new JsonObject();
         preview.addProperty("v", VERSION);
@@ -181,7 +189,7 @@ final class InteractivePreview {
                     break;
                 }
                 abilities.add(ability(i, possible.get(i), offered.test(possible.get(i)), possible.size() > 1,
-                        human, card, seat, pass));
+                        human, card, seat, pass, proofOf));
             }
             preview.add("abilities", abilities);
         } catch (RuntimeException failure) {
@@ -202,7 +210,8 @@ final class InteractivePreview {
 
     private static JsonObject ability(final int index, final SpellAbility sa, final boolean offered,
                                       final boolean chooser, final Player human, final Card card,
-                                      final Seat seat, final Pass pass) {
+                                      final Seat seat, final Pass pass,
+                                      final java.util.function.Function<SpellAbility, forge.player.HumanManaAffordability.Proof> proofOf) {
         final JsonObject o = new JsonObject();
         o.addProperty("i", index);
         o.addProperty("kind", sa.isLandAbility() ? "land" : sa.isManaAbility() ? "mana"
@@ -224,6 +233,12 @@ final class InteractivePreview {
         if (sa.getCardState() != null && card.getCurrentState() != null
                 && sa.getCardStateName() != card.getCurrentStateName()) {
             o.addProperty("face", String.valueOf(sa.getCardStateName()));
+        }
+        if (!sa.isLandAbility()) {
+            // glow-audit-1021: this ability's own cost proof ("affordable" | "unknown" | "unaffordable",
+            // HumanManaAffordability.proof). A permanent's control-level flag is over all its abilities, its mana
+            // abilities too; this one lets a reader judge the non-mana activation by itself. A read.
+            o.addProperty("payableProof", proofOf.apply(sa).wire);
         }
         if (sa.isManaAbility()) {
             return o;

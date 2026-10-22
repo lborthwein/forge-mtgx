@@ -11,8 +11,13 @@ import forge.game.cost.CostPayLife;
 import forge.game.cost.CostSacrifice;
 import forge.game.cost.CostAdjustment;
 import forge.game.cost.CostAddMana;
+import forge.game.cost.CostDiscard;
 import forge.game.cost.CostExile;
+import forge.game.cost.CostPart;
+import forge.game.cost.CostPutCounter;
 import forge.game.cost.CostRemoveCounter;
+import forge.game.cost.CostReveal;
+import forge.game.cost.CostTapType;
 import forge.game.cost.CostUntap;
 import forge.game.cost.CostUntapType;
 import forge.game.CardTraitBase;
@@ -31,6 +36,8 @@ import forge.game.zone.ZoneType;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 
 /** Read-only presentation filter. False proves insufficient mana; true is NOT a legality claim.
@@ -41,6 +48,51 @@ public final class HumanManaAffordability {
     static final int LIFE_PAYMENT = 256;
     public enum Assessment { PROVEN_UNAFFORDABLE, POTENTIALLY_AFFORDABLE, UNKNOWN }
     private HumanManaAffordability() {}
+
+    /**
+     * glow-audit-1021: the wire's {@code payableProof} (per preview ability and per control). AFFORDABLE is a
+     * constructive proof ({@link #provablyAffordable}), UNAFFORDABLE is {@link #payable} false, UNKNOWN is the rest.
+     */
+    public enum Proof {
+        AFFORDABLE("affordable"), UNKNOWN("unknown"), UNAFFORDABLE("unaffordable");
+        public final String wire;
+        Proof(final String wire) { this.wire = wire; }
+    }
+
+    /**
+     * glow-audit-1021: a proof that gave up (UNKNOWN fails open: the card glows) logs why, once per reason and card per
+     * JVM, so the next gap shows up in the host's stderr instead of in the owner's games. Logging is the only effect.
+     *
+     * <p>Review S3 (hidden information): the host's last stderr lines can reach a session's fatal message, which the
+     * client shows and transcripts keep, and a table JVM serves more than one seat. So the line names a card only when
+     * it is face up on the battlefield, in a graveyard or on the stack (public to every seat); otherwise (a hand, a
+     * library, exile, the command zone, face down) it carries the card's id alone.</p>
+     */
+    private static final Set<String> UNKNOWN_SEEN = ConcurrentHashMap.newKeySet();
+    static final int UNKNOWN_SEEN_CAP = 512;
+
+    public static Assessment unknown(final String reason, final Card card) {
+        final String line = unknownLine(reason, card);
+        if (UNKNOWN_SEEN.size() < UNKNOWN_SEEN_CAP && UNKNOWN_SEEN.add(line)) System.err.println(line);
+        return Assessment.UNKNOWN;
+    }
+
+    /** The stderr line {@link #unknown} prints (a name only for a card public to every seat). */
+    public static String unknownLine(final String reason, final Card card) {
+        final StringBuilder sb = new StringBuilder("[forge.interactive] afford-unknown {\"reason\":\"").append(reason)
+                .append("\",\"card\":").append(card == null ? -1 : card.getId());
+        if (card != null && !card.isFaceDown() && (card.isInZone(ZoneType.Battlefield)
+                || card.isInZone(ZoneType.Graveyard) || card.isInZone(ZoneType.Stack))) {
+            sb.append(",\"name\":\"").append(card.getName().replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        }
+        return sb.append('}').toString();
+    }
+
+    /** The cost part's kind for {@link #unknown}: its class name without the "Cost" prefix. */
+    private static String kind(final CostPart part) {
+        final String simple = part.getClass().getSimpleName();
+        return simple.startsWith("Cost") ? simple.substring(4) : simple;
+    }
 
     /**
      * Is there a mana source of {@code player}'s that the proof loops cannot count (lane block-search-1019)? The loops
@@ -63,6 +115,15 @@ public final class HumanManaAffordability {
 
     /** {@link #unenumeratedManaSource}, telling an untap ability apart from every other cause (afford-jar-1021 round 2). */
     static int unenumerated(final Player player) {
+        return unenumerated(player, false);
+    }
+
+    /**
+     * {@link #unenumerated}; with {@code nowOnly} (glow-audit-1021, the payable flag's proof only), an untap ability
+     * counts only if it can be activated in this priority window ({@link #activatableNow}). {@link #assess}, which
+     * decides what is offered at all, keeps the zone-only reading.
+     */
+    static int unenumerated(final Player player, final boolean nowOnly) {
         int found = UNENUMERATED_NONE;
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
@@ -71,8 +132,11 @@ public final class HumanManaAffordability {
                 if (sa.isSpell() || !activatableWhereItIs(card, sa)) continue;
                 // afford-jar-1021: an untap ability can use a mana source twice (Devoted Druid's -1/-1 counter,
                 // Voltaic Key, Candelabra of Tawnos); the loops count each {T} once.
+                // glow-audit-1021 (owner report 2026-10-22T00-08-43): only one usable in THIS priority window counts.
+                // A cast pays with mana abilities only (CR 601.2g), so an untap must come first, now: a loyalty
+                // ability on the opponent's end step, or one already used this turn, untaps nothing for this payment.
                 if (card.isInZone(ZoneType.Battlefield) && !sa.isManaAbility() && untaps(sa)) {
-                    found = UNENUMERATED_UNTAP;
+                    if (!nowOnly || activatableNow(card, sa, player)) found = UNENUMERATED_UNTAP;
                     continue;
                 }
                 if (!makesMana(sa)) continue;
@@ -153,9 +217,38 @@ public final class HumanManaAffordability {
         }
     }
 
+    /**
+     * glow-audit-1021: may {@code player} activate {@code sa} in this priority window? Forge's own answer,
+     * {@code SpellAbilityRestriction.canPlay}: timing (sorcery speed, flash grants), activator, zone, a loyalty
+     * ability's once-per-turn (and its raised limits), activation limits this turn and this game. An ability usable
+     * only later this turn does not count. The activating player is set for the question and restored after (a field
+     * read by the check, nothing else). A check that throws counts as "it may": the safe side for an impossibility proof.
+     */
+    static boolean activatableNow(final Card card, final SpellAbility sa, final Player player) {
+        if (sa.getRestrictions() == null) return true;
+        final Player was = sa.getActivatingPlayer();
+        try {
+            sa.setActivatingPlayer(player);
+            return sa.getRestrictions().canPlay(card, sa);
+        } catch (RuntimeException unreadable) {
+            return true;
+        } finally {
+            sa.setActivatingPlayer(was);
+        }
+    }
+
+    /**
+     * Can the ability untap a permanent? An Untap or UntapAll effect, a "tap or untap" effect (glow-audit-1021 review:
+     * TapOrUntap / TapOrUntapAll, a creature that untaps a land on entering or by its own ability), or an untap-symbol
+     * {Q} cost (the ability untaps its own permanent as its cost).
+     */
     private static boolean untaps(final SpellAbility sa) {
+        if (sa.getPayCosts() != null && sa.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostUntap)) {
+            return true;
+        }
         for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
-            if (s.getApi() == ApiType.Untap || s.getApi() == ApiType.UntapAll) return true;
+            if (s.getApi() == ApiType.Untap || s.getApi() == ApiType.UntapAll
+                    || s.getApi() == ApiType.TapOrUntap || s.getApi() == ApiType.TapOrUntapAll) return true;
         }
         return false;
     }
@@ -198,11 +291,23 @@ public final class HumanManaAffordability {
      * player has a source (or mana) for it to act on. A parameter Forge cannot evaluate here counts as "it acts".</p>
      */
     static int activeHooks(final Player player, final Card host, final boolean spell) {
+        return activeHooks(player, host, spell, true);
+    }
+
+    /**
+     * {@link #activeHooks}; with {@code tappedSources} false (glow-audit-1021), a source is one whose mana ability
+     * can be activated now: a {T} ability of a tapped or summoning-sick permanent does not count, so a mana trigger
+     * on a land matters only while such a land is untapped. The caller passes true when an untap ability usable now
+     * could bring a tapped source back ({@link #unenumerated}).
+     */
+    static int activeHooks(final Player player, final Card host, final boolean spell, final boolean tappedSources) {
         final List<Card> sources = new ArrayList<>();
         for (Card card : player.getCardsIn(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard,
                 ZoneType.Exile, ZoneType.Command)) {
             // A source is a card with a mana ability it can activate where it is (not a hand Urza's).
-            if (!card.isPhasedOut() && card.getManaAbilities().stream().anyMatch(sa -> activatableWhereItIs(card, sa))) {
+            if (!card.isPhasedOut() && card.getManaAbilities().stream().anyMatch(sa -> activatableWhereItIs(card, sa)
+                    && (tappedSources || sa.getPayCosts() == null || !sa.getPayCosts().hasTapCost()
+                        || card.isInZone(ZoneType.Battlefield) && !card.isTapped() && !card.isAbilitySick()))) {
                 sources.add(card);
             }
         }
@@ -396,6 +501,194 @@ public final class HumanManaAffordability {
     }
 
     /**
+     * glow-audit-1021: the wire's {@code payableProof} for one ability. UNAFFORDABLE exactly when {@link #payable} is
+     * false; AFFORDABLE when {@link #provablyAffordable} proves the cost can be paid now; UNKNOWN otherwise, and on any
+     * failure of the check (a flag never costs the request it rides on). A read, like {@link #payable}.
+     */
+    public static Proof proof(final Player player, final SpellAbility ability) {
+        try {
+            if (!payable(player, ability)) return Proof.UNAFFORDABLE;
+        } catch (RuntimeException failure) {
+            // As the bridge's flag always did: a check that throws says payable, and is logged.
+            System.err.println("[forge.interactive] payable check failed, reporting payable: " + failure);
+            return Proof.UNKNOWN;
+        }
+        try {
+            return provablyAffordable(player, ability) ? Proof.AFFORDABLE : Proof.UNKNOWN;
+        } catch (RuntimeException failure) {
+            return Proof.UNKNOWN;
+        }
+    }
+
+    /** The mana-ability parameters a sure source may carry: none restricts when or for what it is activated. */
+    private static final Set<String> PLAIN_SOURCE_PARAMS = Set.of("AB", "Cost", "Produced", "Amount", "SpellDescription",
+            "SubAbility", "AILogic", "AINoRecursiveCheck", "PrecostDesc", "CostDesc", "StackDescription",
+            "Secondary", "TriggersWhenSpent", "AddsKeywords", "AddsKeywordsValid", "AddsKeywordsUntil", "AddsCounters", "AddsNoCounter");
+
+    /**
+     * A cost part beside the mana that the affordable proof accepts. Forge's canPlay judged these for the offered list
+     * ({@code CostPayment.canPayAdditionalCosts}), and none can use up a source the matching counts: the host is never
+     * counted as a source, and discarding, revealing or exiling from a hand or graveyard touches no permanent.
+     */
+    private static boolean plainPart(final CostPart p) {
+        if (p instanceof CostPartMana || p instanceof CostTap || p instanceof CostDiscard || p instanceof CostReveal
+                || p instanceof CostPayLife) return true;
+        if ((p instanceof CostPutCounter || p instanceof CostRemoveCounter || p instanceof CostSacrifice)
+                && p.payCostFromSource()) return true;
+        return p instanceof CostExile exile && !exile.getFrom().isEmpty() && !exile.getFrom().contains(ZoneType.Battlefield);
+    }
+
+    /**
+     * glow-audit-1021: a CONSTRUCTIVE proof that {@code ability}'s mana can be paid right now, for the wire's
+     * {@code payableProof: "affordable"}. Where {@link #assessPayable} overestimates the supply to prove a payment
+     * impossible, this one counts only mana that surely exists and matches every pip to a distinct one (a bipartite
+     * matching: each coloured pip to mana of its colour, a hybrid pip to either half, a Phyrexian pip to its colour or 2
+     * life, the generic to the rest), with each X priced at max(XMin, 1):
+     * <ul>
+     *   <li>the pool's unrestricted mana;</li>
+     *   <li>one tap of each untapped, ready permanent the player controls, other than the ability's own host, through a
+     *       mana ability that costs exactly {T}, makes a fixed output (fixed colours; or any or a combination for ONE
+     *       mana), has no spend restriction and no activation condition (by its parameters);</li>
+     *   <li>2 life per Phyrexian pip when the player can pay it and the ability asks no other life.</li>
+     * </ul>
+     * The price is the printed mana when no static can raise, reduce or set a price, else Forge's presentation price
+     * ({@link CostAdjustment#presentationManaCost}, null = no proof). No proof with: a cost-changing parameter of its
+     * own, a commander, an announced value, a colour-limited X, snow or {2/C} pips, a mana hook or conversion or payment
+     * static ({@link #activeHooks}), a CantBeActivated or ManaRestriction static anywhere, or a cost part other than
+     * {@link #plainPart}. An ability with no mana to pay is affordable. It speaks to the cost only, never to targets,
+     * timing or restrictions; and it is checked against {@link #payable}, so "affordable" never meets "unaffordable".
+     */
+    static boolean provablyAffordable(final Player player, final SpellAbility ability) {
+        if (player == null || ability == null || ability.isLandAbility() || ability.isTrigger()
+                || ability.isReplacementAbility() || ability.isPowerUp() || ability.getPayCosts() == null) return false;
+        final Card host = ability.getHostCard();
+        if (host == null || host.isCommander()) return false;
+        if (ability.hasParam("ReduceCost") || ability.hasParam("RaiseCost") || ability.hasParam("XCantBe0")
+                || ability.hasParam("TapCreaturesForMana") || ability.hasSVar("NumTimes")
+                || (ability.hasParam("Announce") && !"X".equals(ability.getParam("Announce")))
+                || ability.getParamOrDefault("Cost", "").contains("\\")) return false;
+        if (ability.isSpell() && (ability.isOffering() || ability.isEmerge() || ability.isBestow()
+                || ability.isCastFaceDown())) return false;
+        final forge.game.cost.Cost pay = ability.getPayCosts();
+        for (CostPart p : pay.getCostParts()) {
+            if (!plainPart(p)) return false;
+        }
+        final CostPartMana part = pay.getCostMana();
+        if (part != null && (part.isExiledCreatureCost() || part.isEnchantedCreatureCost()
+                || part.getMaxWaterbend() != null)) return false;
+        // Each X is priced at max(XMin, 1) (spec addendum, board-glow noise data): X = 0 is a degenerate activation
+        // (an untap-X-lands artifact was "affordable" at X = 0 every turn), not a real choice. A colour-limited X
+        // ("XColor") is not modelled.
+        if (ability.getXColor() != null) return false;
+        final int xPrice = part == null ? 1 : Math.max(part.getXMin(), 1);
+        final CardPlayOption grant = ability.getMayPlayOption();
+        if (grant != null && (grant.isIgnoreManaCostType() || grant.isIgnoreManaCostColor()
+                || grant.isIgnoreSnowSourceManaCostColor())) return false;
+        final boolean priceStatics;
+        {
+            boolean raise = false;
+            for (Card card : player.getGame().getCardsInGame()) {
+                if (!card.isInZone(ZoneType.Battlefield) && !card.isInZone(ZoneType.Command)
+                        && !card.isInZone(ZoneType.Stack) && card != host) continue;
+                for (StaticAbility s : card.getStaticAbilities()) {
+                    if (s.checkMode(StaticAbilityMode.CantBeActivated) || s.checkMode(StaticAbilityMode.ManaRestriction)) {
+                        return false;
+                    }
+                    if (s.checkMode(StaticAbilityMode.RaiseCost) || s.checkMode(StaticAbilityMode.ReduceCost)
+                            || s.checkMode(StaticAbilityMode.SetCost)) raise = true;
+                }
+            }
+            priceStatics = raise;
+        }
+        final ManaCost cost = priceStatics ? CostAdjustment.presentationManaCost(ability)
+                : part == null ? ManaCost.ZERO : part.getMana();
+        if (cost == null) return false;
+        final List<ManaCostShard> shards = new ArrayList<>();
+        int phyrexian = 0;
+        int generic = cost.getGenericCost();
+        for (ManaCostShard shard : cost) {
+            if (shard == ManaCostShard.X) {
+                generic += xPrice;
+                continue;
+            }
+            if (shard.isSnow() || shard.isOr2Generic()) return false;
+            if (shard.isPhyrexian()) phyrexian++;
+            shards.add(shard);
+        }
+        for (int i = 0; i < generic; i++) shards.add(ManaCostShard.GENERIC);
+        if (shards.isEmpty()) return true;
+        if (activeHooks(player, host, ability.isSpell()) != 0) return false;
+
+        final List<Integer> tokens = new ArrayList<>();
+        final boolean asksLife = pay.getCostParts().stream().anyMatch(p -> p instanceof CostPayLife);
+        for (int i = 1; !asksLife && i <= phyrexian && player.canPayLife(2 * i, false, ability); i++) tokens.add(LIFE_PAYMENT);
+        for (var mana : player.getManaPool()) {
+            if (mana.isRestricted()) continue;
+            tokens.add((int) (mana.getColor() | player.getManaPool().getPossibleColorUses(mana.getColor())));
+        }
+        for (Card card : player.getCardsIn(ZoneType.Battlefield)) {
+            if (card == host || card.isPhasedOut() || card.isTapped() || card.isAbilitySick()) continue;
+            final List<int[]> outs = new ArrayList<>();   // {amount, colours, choice} of each sure {T} ability
+            final List<String[]> symbolsOf = new ArrayList<>();
+            for (SpellAbility source : card.getManaAbilities()) {
+                if (!activatableWhereItIs(card, source)) continue;
+                final forge.game.cost.Cost sourcePay = source.getPayCosts();
+                if (sourcePay == null || sourcePay.getCostParts().size() != 1
+                        || !(sourcePay.getCostParts().get(0) instanceof CostTap)) continue;
+                if (source.getManaPart() == null || !PLAIN_SOURCE_PARAMS.containsAll(source.getMapParams().keySet()))
+                    continue;
+                final String restrict = source.getManaPart().getManaRestrictions();
+                final String extra = source.getManaPart().getExtraManaRestriction();
+                if (restrict != null && !restrict.isEmpty() || extra != null && !extra.isEmpty()) continue;
+                boolean plainTail = true;
+                for (SpellAbility tail = source.getSubAbility(); tail != null; tail = tail.getSubAbility()) {
+                    if (tail.getApi() != ApiType.DealDamage && tail.getApi() != ApiType.LoseLife) plainTail = false;
+                }
+                if (!plainTail) continue;
+                final String amountText = source.getParamOrDefault("Amount", "1");
+                final String produced = source.getManaPart().getOrigProduced();
+                if (produced == null || !amountText.matches("[0-9]{1,2}")) continue;
+                final boolean choice = "Any".equals(produced) || produced.startsWith("Combo ");
+                final String simple = "Any".equals(produced) ? "W U B R G"
+                        : produced.startsWith("Combo ") ? produced.substring(6) : produced;
+                if (!simple.matches("[WUBRGC]( [WUBRGC])*")) continue;
+                final String[] symbols = simple.split(" ");
+                int colours = 0;
+                for (String symbol : symbols) {
+                    final byte colour = ManaAtom.fromName(symbol);
+                    colours |= colour | player.getManaPool().getPossibleColorUses(colour);
+                }
+                final int amount = Integer.parseInt(amountText) * (choice ? 1 : symbols.length);
+                if (amount <= 0) continue;
+                outs.add(new int[] {amount, colours, choice ? 1 : 0});
+                symbolsOf.add(symbols);
+            }
+            if (outs.isEmpty()) continue;
+            // One tap: one of its abilities. Every one makes one mana: one token of any of their colours (exact).
+            if (outs.stream().allMatch(o -> o[0] == 1)) {
+                int colours = 0;
+                for (int[] o : outs) colours |= o[1];
+                tokens.add(colours);
+                continue;
+            }
+            if (outs.size() != 1) continue;   // several outputs of different sizes: not modelled (no proof from it)
+            final int[] o = outs.get(0);
+            if (o[2] == 0) {
+                // A fixed output: each symbol, Amount times ("Add {C}{C}", "Add {U}{B}").
+                final int times = o[0] / symbolsOf.get(0).length;
+                for (int t = 0; t < times; t++) {
+                    for (String symbol : symbolsOf.get(0)) {
+                        final byte colour = ManaAtom.fromName(symbol);
+                        tokens.add((int) (colour | player.getManaPool().getPossibleColorUses(colour)));
+                    }
+                }
+            }
+            // Several mana of a chosen colour or combination: not modelled.
+        }
+        return canMatch(shards, tokens);
+    }
+
+    /**
      * {@link #assess} for the {@code payable} flag, with more reach and the same soundness.
      * It returns PROVEN_UNAFFORDABLE only when the cost's mana provably cannot come from the
      * mana pool, the mana abilities the player can activate now and Phyrexian life. For a spell
@@ -437,35 +730,46 @@ public final class HumanManaAffordability {
     public static Assessment assessPayable(final Player player, final SpellAbility ability) {
         if (player == null || ability == null || ability.isLandAbility()
                 || ability.isTrigger() || ability.isReplacementAbility() || ability.isPowerUp()
-                || ability.getPayCosts() == null || ability.hasParam("ReduceCost")
-                || ability.hasParam("TapCreaturesForMana")
-                || (ability.hasParam("Announce") && !"X".equals(ability.getParam("Announce")))
-                || ability.getParamOrDefault("Cost", "").contains("\\")
-                || ability.hasSVar("NumTimes") || player.hasKeyword("PayLifeInsteadOf:B")) {
+                || ability.getPayCosts() == null) {
             return Assessment.UNKNOWN;
         }
         final Card host = ability.getHostCard();
         if (host == null) return Assessment.UNKNOWN;
+        if (ability.hasParam("TapCreaturesForMana")) return unknown("TapCreaturesForMana", host);
+        if (ability.hasParam("Announce") && !"X".equals(ability.getParam("Announce"))) return unknown("Announce", host);
+        if (ability.getParamOrDefault("Cost", "").contains("\\")) return unknown("cost-text", host);
+        if (ability.hasSVar("NumTimes")) return unknown("NumTimes", host);
+        if (player.hasKeyword("PayLifeInsteadOf:B")) return unknown("PayLifeInsteadOf", host);
+        // glow-audit-1021 (owner game 2026-10-21 21:52Z: a channel land in hand, no land in play, glowing): the
+        // ability's own ReduceCost lowers only the generic part when it names no ReduceAmount (CostAdjustment.adjust:
+        // sumGeneric), so its colored pips are a lower bound -- unless a static could reduce or set a colored pip too.
+        final boolean ownReduction = ability.hasParam("ReduceCost");
+        if (ownReduction && (ability.hasParam("ReduceAmount") || costStaticInPlay(player)
+                || ability.isManaAbility() || ability.isSpell() && !ability.getPipsToReduce().isEmpty())) {
+            return unknown("ReduceCost", host);
+        }
         // afford-jar-1021: a mana ability is proved only for its own mana cost, paid by the OTHER sources
         // (Chromatic Star's {1}). A mana ability with no mana cost stays unknown (= payable), as before.
         final boolean manaAbility = ability.isManaAbility();
         if (manaAbility && ability.getPayCosts().getCostMana() == null) return Assessment.UNKNOWN;
         final boolean spell = ability.isSpell();
         if (spell && (ability.isOffering() || ability.isEmerge() || ability.isBestow()
-                || ability.isCastFaceDown() || host.hasKeyword(Keyword.ASSIST))) return Assessment.UNKNOWN;
+                || ability.isCastFaceDown() || host.hasKeyword(Keyword.ASSIST))) return unknown("spell-shape", host);
         // As assess: a may-play grant that converts what mana pays the cost (Thief of Sanity).
         final CardPlayOption grant = ability.getMayPlayOption();
         if (grant != null && (grant.isIgnoreManaCostType() || grant.isIgnoreManaCostColor()
                 || grant.isIgnoreSnowSourceManaCostColor())) {
-            return Assessment.UNKNOWN;
+            return unknown("may-play-grant", host);
         }
         final CostPartMana part = ability.getPayCosts().getCostMana();
         if (part != null && (part.isExiledCreatureCost() || part.isEnchantedCreatureCost()
-                || part.getMaxWaterbend() != null || part.getXMin() > 0)) return Assessment.UNKNOWN;
+                || part.getMaxWaterbend() != null || part.getXMin() > 0)) return unknown("mana-part-shape", host);
         if (ability.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostUntap
-                || p instanceof CostUntapType || p instanceof CostAddMana)) return Assessment.UNKNOWN;
-        final ManaCost cost = manaAbility ? part.getMana() : CostAdjustment.presentationManaCostLowerBound(ability);
-        if (cost == null) return Assessment.UNKNOWN;
+                || p instanceof CostUntapType || p instanceof CostAddMana)) return unknown("own-cost-makes-mana", host);
+        final ManaCost cost = manaAbility ? part.getMana()
+                : ownReduction ? (part == null ? ManaCost.ZERO : part.getMana())
+                : CostAdjustment.presentationManaCostLowerBound(ability);
+        if (cost == null) return unknown("price", host);
         final List<ManaCostShard> shards = new ArrayList<>();
         int phyrexian = 0;
         for (ManaCostShard shard : cost) {
@@ -475,18 +779,21 @@ public final class HumanManaAffordability {
             // {2/C} and snow shards stay: canBePaidWithManaOfColor takes any one mana for them.
             shards.add(shard);
         }
-        for (int i = 0; i < cost.getGenericCost(); i++) shards.add(ManaCostShard.GENERIC);
+        // An own ReduceCost may take every generic mana away: only the colored pips are a sure price.
+        if (!ownReduction) for (int i = 0; i < cost.getGenericCost(); i++) shards.add(ManaCostShard.GENERIC);
         if (shards.isEmpty()) return Assessment.POTENTIALLY_AFFORDABLE;
-
-        // As assess: mana conversion, an optional cost or granted payment keyword, a mana
-        // replacement or a mana trigger in a public active zone may make the supply unknown.
-        final int hooks = activeHooks(player, host, spell);
-        if (hooks == HOOK_UNKNOWN) return Assessment.UNKNOWN;
 
         // block-search-1019: a mana source the loop below cannot count makes any proof unsound. An untap ability alone
         // leaves the colour proof (colourImpossible) once the matching fails.
-        final int unenumerated = unenumerated(player);
-        if (unenumerated == UNENUMERATED_OTHER) return Assessment.UNKNOWN;
+        final int unenumerated = unenumerated(player, true);
+        if (unenumerated == UNENUMERATED_OTHER) return unknown("unenumerated-source", host);
+
+        // As assess: mana conversion, an optional cost or granted payment keyword, a mana
+        // replacement or a mana trigger in a public active zone may make the supply unknown.
+        // glow-audit-1021: a production hook counts a source only if it is usable now, or could be once an untap
+        // ability usable now brings it back.
+        final int hooks = activeHooks(player, host, spell, unenumerated == UNENUMERATED_UNTAP);
+        if (hooks == HOOK_UNKNOWN) return unknown("price-or-payment-static", host);
         final List<Token> base = new ArrayList<>();
         for (int i = 1; i <= phyrexian && player.canPayLife(2 * i, false, ability); i++) {
             base.add(new Token(LIFE_PAYMENT, -1, true));
@@ -513,7 +820,7 @@ public final class HumanManaAffordability {
                 // graveyard card's: never).
                 if (!activatableWhereItIs(card, source)) continue;
                 final forge.game.cost.Cost pay = source.getPayCosts();
-                if (pay == null) return Assessment.UNKNOWN;
+                if (pay == null) return unknown("source-cost", card);
                 final boolean tap = pay.hasTapCost();
                 // A {T} ability of a tapped or summoning-sick permanent, or of a card off the battlefield,
                 // cannot be activated at all.
@@ -521,35 +828,59 @@ public final class HumanManaAffordability {
                 // Cost shapes that make no mana themselves. Each activation is once per card: a tap, or
                 // sacrificing or exiling the card itself (Lotus Petal, a Spirit Guide from the hand).
                 // Counters a cost removes from the card are assumed present: that only adds mana.
-                if (pay.getCostParts().stream().anyMatch(p -> !(p instanceof CostTap) && !(p instanceof CostPartMana)
-                        && !(p instanceof CostPayLife)
-                        && !((p instanceof CostSacrifice || p instanceof CostExile || p instanceof CostRemoveCounter)
-                                && p.payCostFromSource()))) return Assessment.UNKNOWN;
-                if (!tap && pay.getCostParts().stream().noneMatch(p -> (p instanceof CostSacrifice
-                        || p instanceof CostExile) && p.payCostFromSource())) return Assessment.UNKNOWN;
-                if (source.getManaPart() == null) return Assessment.UNKNOWN;
-                if (source.hasParam("Each")) return Assessment.UNKNOWN;
+                // glow-audit-1021: discarding (Lion's Eye Diamond's hand) only uses cards up, so it is ignored like
+                // the other non-mana parts; tapping other permanents (Urza, Lord High Artificer's "tap an untapped
+                // artifact you control") limits the activations to the permanents there are to tap.
+                CostTapType tapType = null;
+                for (CostPart p : pay.getCostParts()) {
+                    if (p instanceof CostTap || p instanceof CostPartMana || p instanceof CostPayLife
+                            || p instanceof CostDiscard) continue;
+                    if ((p instanceof CostSacrifice || p instanceof CostExile || p instanceof CostRemoveCounter)
+                            && p.payCostFromSource()) continue;
+                    if (p instanceof CostTapType t && tapType == null) {
+                        tapType = t;
+                        continue;
+                    }
+                    return unknown("source-cost:" + kind(p), card);
+                }
+                final boolean once = tap || pay.getCostParts().stream().anyMatch(p -> (p instanceof CostSacrifice
+                        || p instanceof CostExile) && p.payCostFromSource());
+                int activations = 1;
+                if (tapType != null) {
+                    final Integer tappable = tappableFor(tapType, source, player);
+                    if (tappable == null) return unknown("source-cost:TapType", card);
+                    activations = once ? Math.min(1, tappable) : tappable;
+                } else if (!once) {
+                    return unknown("source-repeatable", card);
+                }
+                if (source.getManaPart() == null) return unknown("source-mana-part", card);
+                if (source.hasParam("Each")) return unknown("source-each", card);
+                boolean plainTail = true;
                 for (SpellAbility tail = source.getSubAbility(); tail != null; tail = tail.getSubAbility()) {
                     // Damage, life loss and sacrificing a source afterwards (Gemstone Mine) make no mana.
                     if (tail.getApi() != ApiType.DealDamage && tail.getApi() != ApiType.LoseLife
-                            && tail.getApi() != ApiType.Sacrifice) return Assessment.UNKNOWN;
+                            && tail.getApi() != ApiType.Sacrifice) plainTail = false;
                 }
+                if (!plainTail) return unknown("source-sub-ability", card);
                 final String amountText = source.getParamOrDefault("Amount", "1");
                 final String produced = source.getManaPart().getOrigProduced();
-                if (!amountText.matches("[0-9]{1,3}")) return Assessment.UNKNOWN;
+                if (!amountText.matches("[0-9]{1,3}")) return unknown("source-amount", card);
                 final boolean choice = "Any".equals(produced) || produced.startsWith("Combo ");
                 final String simple = "Any".equals(produced) ? "W U B R G"
                         : produced.startsWith("Combo ") ? produced.substring(6) : produced;
-                if (!simple.matches("[WUBRGC]( [WUBRGC])*")) return Assessment.UNKNOWN;
+                if (!simple.matches("[WUBRGC]( [WUBRGC])*")) return unknown("source-produced", card);
                 final List<ManaCostShard> own = ownManaCost(pay);
-                if (own == null) return Assessment.UNKNOWN;
+                if (own == null) return unknown("source-own-cost", card);
+                // A costed ability is modelled as used once ({@link Unit}); one activated per tapped permanent is not.
+                if (activations > 1 && !own.isEmpty()) return unknown("source-cost:TapType+mana", card);
+                if (activations == 0) continue;
                 final String[] symbols = simple.split(" ");
                 int colors = 0;
                 for (String symbol : symbols) {
                     byte color = ManaAtom.fromName(symbol);
                     colors |= color | player.getManaPool().getPossibleColorUses(color);
                 }
-                alts.add(new Alt(Integer.parseInt(amountText) * (choice ? 1 : symbols.length), colors, own));
+                alts.add(new Alt(activations * Integer.parseInt(amountText) * (choice ? 1 : symbols.length), colors, own));
                 allTap &= tap;
             }
             if (alts.isEmpty()) continue;
@@ -566,7 +897,7 @@ public final class HumanManaAffordability {
             }
             // A source with a mana-costed ability is used once, by one of its abilities: they share a {T}, or
             // there is only one. Anything else (a free sacrifice ability beside a costed {T} one) is unknown.
-            if (!allTap && alts.size() > 1) return Assessment.UNKNOWN;
+            if (!allTap && alts.size() > 1) return unknown("source-mixed-alternatives", card);
             int freeAmount = 0, freeColors = 0;
             final List<Alt> costed = new ArrayList<>();
             for (Alt a : alts) {
@@ -582,10 +913,10 @@ public final class HumanManaAffordability {
         }
         // The ordered search below is exponential in the costed sources: past a few, give up (unknown).
         if (units.size() > MAX_COSTED_SOURCES
-                || units.stream().mapToInt(u -> u.alts().size()).sum() > MAX_COSTED_ABILITIES) return Assessment.UNKNOWN;
+                || units.stream().mapToInt(u -> u.alts().size()).sum() > MAX_COSTED_ABILITIES) return unknown("costed-sources", host);
         // The own costs are the printed ones: a cost reduction that may reach a mana ability (Training Grounds)
         // would make them an overestimate, so the proof gives up.
-        if ((manaAbility || !units.isEmpty()) && manaAbilityCostsMayFall(player)) return Assessment.UNKNOWN;
+        if ((manaAbility || !units.isEmpty()) && manaAbilityCostsMayFall(player)) return unknown("mana-ability-cost-may-fall", host);
         final boolean anySource = freeGroups.stream().anyMatch(g -> g[0] > 0) || !units.isEmpty();
         if (spell) {
             // CR 702.51a convoke: each creature tapped pays {1} or one mana of its colour, sick or not.
@@ -616,7 +947,7 @@ public final class HumanManaAffordability {
             }
         }
         // A mana hook acts only on mana that is made or spent: with no source (and no mana), it cannot help.
-        if (hooksMatter(hooks, anySource, anySource || anyMana)) return Assessment.UNKNOWN;
+        if (hooksMatter(hooks, anySource, anySource || anyMana)) return unknown("mana-hook", host);
         final int cap = shards.size() + costShards;
         for (int[] group : freeGroups) {
             for (int i = 0; i < Math.min(group[0], cap); i++) base.add(new Token(group[1], -1, false));
@@ -634,6 +965,53 @@ public final class HumanManaAffordability {
             return colourImpossible(player, ability, shards, hooks, extra) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
         }
         return Assessment.PROVEN_UNAFFORDABLE;
+    }
+
+    /**
+     * glow-audit-1021: how many times a mana ability whose cost taps other permanents ({@code tapXType}) can be
+     * activated now: the untapped permanents of the type the player controls ({@link CostTapType#getMaxAmountX}, the
+     * same list its canPay counts), divided by how many each activation taps. Each of them may also be counted again as
+     * a source of its own: an overestimate, which keeps an impossibility proof sound. Null when the type is one the
+     * proof does not read (shared creature types, total power, the original host).
+     */
+    static Integer tappableFor(final CostTapType part, final SpellAbility source, final Player player) {
+        final String type = part.getType();
+        if (type == null || "OriginalHost".equals(type) || type.contains("sharesCreatureTypeWith")
+                || type.contains("withTotalPowerGE")) return null;
+        final Integer per = part.convertAmount();
+        if (per == null || per <= 0) return null;
+        try {
+            final Integer tappable = part.getMaxAmountX(source, player, false);
+            return tappable == null ? null : tappable / per;
+        } catch (RuntimeException unreadable) {
+            return null;
+        }
+    }
+
+    /** Is a static in play that may reduce or set a price (the lower bound then cannot be read off the printed pips)? */
+    static boolean costStaticInPlay(final Player player) {
+        for (Card card : player.getGame().getCardsInGame()) {
+            if (!card.isInZone(ZoneType.Battlefield) && !card.isInZone(ZoneType.Command)
+                    && !card.isInZone(ZoneType.Stack)) continue;
+            for (StaticAbility s : card.getStaticAbilities()) {
+                if (s.checkMode(StaticAbilityMode.ReduceCost) || s.checkMode(StaticAbilityMode.SetCost)) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Is a static in play that may raise, reduce or set a price, or stop an ability being activated? */
+    static boolean priceOrActivationStaticInPlay(final Player player) {
+        for (Card card : player.getGame().getCardsInGame()) {
+            if (!card.isInZone(ZoneType.Battlefield) && !card.isInZone(ZoneType.Command)
+                    && !card.isInZone(ZoneType.Stack)) continue;
+            for (StaticAbility s : card.getStaticAbilities()) {
+                if (s.checkMode(StaticAbilityMode.RaiseCost) || s.checkMode(StaticAbilityMode.ReduceCost)
+                        || s.checkMode(StaticAbilityMode.SetCost) || s.checkMode(StaticAbilityMode.CantBeActivated)
+                        || s.checkMode(StaticAbilityMode.ManaRestriction)) return true;
+            }
+        }
+        return false;
     }
 
     /** Is a cost reduction or a set cost in play that is not limited to spells or to non-mana abilities? */
