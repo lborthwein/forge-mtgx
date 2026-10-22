@@ -14,6 +14,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 
 import forge.LobbyPlayer;
+import forge.card.GamePieceType;
 import forge.card.MagicColor;
 import forge.card.mana.ManaAtom;
 import forge.deck.CardPool;
@@ -65,6 +66,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -81,6 +83,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
@@ -935,9 +938,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         return new InteractivePreview.Seat() {
             @Override
             public String abilityLabel(final SpellAbility ability) {
-                final String described = describeAbility(ability, text -> sanitizeWith(text, labels, ability));
+                final String described = describeAbility(ability, (text, source) -> sanitizeWith(text, labels, source));
                 return described != null ? described
-                        : sanitizeWith(Objects.requireNonNullElse(ability.getDescription(), "Ability"), labels, ability);
+                        : sanitizeWith(Objects.requireNonNullElse(ability.getDescription(), "Ability"), labels,
+                                ability.getHostCard());
             }
 
             @Override
@@ -957,13 +961,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         };
     }
 
-    private String sanitizeWith(final String text, final List<InteractiveText.CardLabel> labels,
-                                final SpellAbility subject) {
-        final Card host = subject.getHostCard();
-        final List<String> names = host != null
-                && InteractiveState.mayReceiveIdentity(host.getView(), human.getView())
-                ? List.of(host.getName()) : List.of();
-        return InteractiveTargetText.render(InteractiveText.sanitize(text, labels, names));
+    /**
+     * {@code text} about {@code host}, an ability's source: when this seat may identify the source, its name and the
+     * words of its printed text are kept ({@link InteractiveText#sanitize(String, List, java.util.Collection, String)}).
+     */
+    private String sanitizeWith(final String text, final List<InteractiveText.CardLabel> labels, final Card host) {
+        final boolean visible = host != null && InteractiveState.mayReceiveIdentity(host.getView(), human.getView());
+        return InteractiveTargetText.render(InteractiveText.sanitize(text, labels,
+                visible ? List.of(host.getName()) : List.of(),
+                visible ? InteractiveState.printedText(host.getView()) : null));
     }
 
     /**
@@ -1186,8 +1192,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     if (step.mana() == null) { continue; }
                     final int sourceId = step.mana().getSourceCard().getId();
                     sourceNumbers.computeIfAbsent(sourceId, ignored -> sourceNumbers.size() + 1);
-                    final String sourceName = InteractiveState.safeCardLabel(
-                            step.mana().getSourceCard().getView(), human.getView());
+                    final String sourceName = InteractiveState.manaSourceLabel(
+                            game, step.mana().getSourceCard(), human.getView());
                     sourceNames.computeIfAbsent(sourceName, ignored -> new LinkedHashSet<>()).add(sourceId);
                 }
             }
@@ -1207,8 +1213,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     mana.addProperty(color, mana.has(color) ? mana.get(color).getAsInt() + 1 : 1);
                     final JsonObject source = new JsonObject();
                     source.addProperty("cardId", step.mana().getSourceCard().getId());
-                    String sourceLabel = InteractiveState.safeCardLabel(
-                            step.mana().getSourceCard().getView(), human.getView());
+                    String sourceLabel = InteractiveState.manaSourceLabel(
+                            game, step.mana().getSourceCard(), human.getView());
                     if (sourceNames.get(sourceLabel).size() > 1) {
                         sourceLabel += " (source " + sourceNumbers.get(step.mana().getSourceCard().getId()) + ")";
                     }
@@ -1759,9 +1765,19 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     /**
      * Redact hidden card names from Forge's text for this seat ({@link InteractiveText}). When the
      * text is about a card ({@link #textSubject}: the presented prompt's card, or the card a
-     * confirmation names) and this seat may identify that card, its own name written bare is kept.
+     * confirmation names) and this seat may identify that card, its own name written bare is kept,
+     * and so are the words of its printed text (lane facedown-label-1021).
      */
     private String sanitizeText(final String text) {
+        return sanitizeText(text, null);
+    }
+
+    /**
+     * As {@link #sanitizeText(String)}, for the text of an ability of {@code source} (lane facedown-label-1021): when
+     * this seat may identify the source, its name and the words of its printed text are kept as well
+     * ({@link InteractiveText#sanitize(String, List, java.util.Collection, String)}). A null source adds nothing.
+     */
+    private String sanitizeText(final String text, final CardView source) {
         String result = Objects.requireNonNullElse(text, "");
         if (game == null || human == null) {
             return result;
@@ -1769,18 +1785,49 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final Set<Integer> authorized = explicitlyOfferedCards.get();
         final CardView subject = textSubject.get();
         final List<InteractiveText.CardLabel> labels = new ArrayList<>();
-        final List<String> subjectNames = new ArrayList<>(1);
+        final List<String> subjectNames = new ArrayList<>(2);
+        final Set<Integer> listed = new HashSet<>();
+        // The subject's view, when this seat may identify it: its printed text shields its own words (below).
+        final CardView[] knownSubject = new CardView[1];
         game.forEachCardInGame(card -> {
             final boolean visible = authorized.contains(card.getId())
                     || InteractiveState.mayReceiveIdentity(card.getView(), human.getView());
             labels.add(new InteractiveText.CardLabel(card.getId(), card.getName(), visible));
+            listed.add(card.getId());
             if (visible && subject != null && card.getId() == subject.getId()) {
                 subjectNames.add(card.getName());
+                knownSubject[0] = card.getView();
             }
             return true;
         });
+        // A spell copy Forge holds in no zone list while it goes on the stack (the subject of a copy's "choose new
+        // targets" prompt, the source of an order item) is none of the game's cards above. It counts when this seat
+        // may identify its own view, so its "Brain Freeze (6)" and its bare name stay (lane facedown-label-1021).
+        for (CardView unlisted : new CardView[] {subject, source}) {
+            if (unlisted != null && !listed.contains(unlisted.getId())
+                    && InteractiveState.mayReceiveIdentity(unlisted, human.getView())
+                    && unlisted.getName() != null && !unlisted.getName().isBlank()) {
+                listed.add(unlisted.getId());
+                labels.add(new InteractiveText.CardLabel(unlisted.getId(), unlisted.getName(), true));
+                if (unlisted == subject) {
+                    subjectNames.add(unlisted.getName());
+                    knownSubject[0] = unlisted;
+                }
+            }
+        }
+        final boolean sourceVisible = source != null && InteractiveState.mayReceiveIdentity(source, human.getView());
+        if (sourceVisible && source.getName() != null) {
+            subjectNames.add(source.getName());
+        }
+        // The printed words of the prompt's subject and of the ability's source are kept (review of #112: a subject's
+        // prompt quoting its own "an Island card" no longer reads differently when some Island is hidden).
+        final String publicText = String.join("\n", java.util.stream.Stream.of(
+                        knownSubject[0] == null ? null : InteractiveState.printedText(knownSubject[0]),
+                        sourceVisible ? InteractiveState.printedText(source) : null)
+                .filter(Objects::nonNull).toList());
         // Forge's raw target descriptors ("Select target Card.inZoneStack") are said in words.
-        return InteractiveTargetText.render(InteractiveText.sanitize(result, labels, subjectNames));
+        return InteractiveTargetText.render(InteractiveText.sanitize(result, labels, subjectNames,
+                publicText.isEmpty() ? null : publicText));
     }
 
     private static String inputClassName(final Input input) {
@@ -3483,17 +3530,24 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         final var offered = controller == null ? null : controller.getBrowserAbility(ability);
         if (offered != null) {
-            final String described = describeAbility(offered, this::sanitizeText);
+            final String described = describeAbility(offered, (text, source) -> sanitizeText(text, source.getView()));
             if (described != null) return described;
         }
-        return sanitizeText(Objects.requireNonNullElse(ability.getDescription(), "Ability"));
+        final String text = sanitizeText(Objects.requireNonNullElse(ability.getDescription(), "Ability"), host);
+        // A spell copy says so, by its spell's name (owner report 2026-10-21T17-36-59: the storm copies to order).
+        if (host != null && host.getGamePieceType() == GamePieceType.COPIED_SPELL
+                && host.getName() != null && !host.getName().isBlank()) {
+            return host.getName() + " (copy)" + (text.isBlank() ? "" : ": " + text);
+        }
+        return text;
     }
 
     /**
      * The words of an offered ability and its sub-abilities, as the "Choose an ability" modal shows
-     * them; null when they come out empty. Shared by the modal and the action preview.
+     * them; null when they come out empty. Shared by the modal and the action preview. {@code sanitize}
+     * gets each part's text and its source, a card this seat may identify.
      */
-    private String describeAbility(final SpellAbility offered, final Function<String, String> sanitize) {
+    private String describeAbility(final SpellAbility offered, final BiFunction<String, Card, String> sanitize) {
         final StringBuilder description = new StringBuilder();
         for (var node = offered; node != null; node = node.getSubAbility()) {
             final Card source = node.getHostCard();
@@ -3505,7 +3559,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             // source. A hidden duplicate name must not erase CARDNAME, and
             // knowing one public copy never authorizes other hidden copies.
             final String name = node.getHostName(node).getTranslatedName();
-            String part = sanitize.apply(node.getDescription())
+            String part = sanitize.apply(node.getDescription(), source)
                     .replace("CARDNAME", name)
                     .replace("NICKNAME", forge.util.Lang.getInstance().getNickName(name));
             if (part.contains("ORIGINALHOST")) {

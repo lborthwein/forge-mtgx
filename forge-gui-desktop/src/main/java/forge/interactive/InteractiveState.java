@@ -14,6 +14,7 @@ import com.google.gson.JsonObject;
 
 import forge.bench.StateEncoder;
 import forge.card.CardStateName;
+import forge.card.GamePieceType;
 import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.card.CardState;
@@ -208,9 +209,47 @@ final class InteractiveState {
     }
 
     // CardView treats a missing zone as public; a frozen tracker must instead fail closed.
+    // One zoneless object is public by the rules: a spell copy (isZonelessSpellCopy). It is judged as the stack judges
+    // it, except that a face-down copy fails closed for every viewer.
     static boolean mayReceiveIdentity(final CardView card, final PlayerView viewer) {
-        return card != null && card.getZone() != null && card.canBeShownTo(viewer)
-                && (!card.isFaceDown() || card.canFaceDownBeShownTo(viewer));
+        if (card == null || viewer == null) {
+            return false;
+        }
+        if (card.getZone() == null) {
+            return isZonelessSpellCopy(card) && !card.isFaceDown();
+        }
+        return card.canBeShownTo(viewer) && (!card.isFaceDown() || card.canFaceDownBeShownTo(viewer));
+    }
+
+    /**
+     * A copy of a spell in no zone (lane facedown-label-1021, owner report 2026-10-21T17-36-59). A spell copy is
+     * created on the stack (CR 707.10), but Forge builds each copy with no zone (CardFactory.copySpellHost) and asks
+     * its controller to order several copies (orderAndPlaySimultaneousSa) before it puts them there; a copy that has
+     * left the stack has ceased to exist (CR 707.10a) and is zoneless too. Either way its identity is that of a spell
+     * on the stack, public to every seat. Failing it closed labelled the seat's own Brain Freeze storm copies "Ability
+     * of face-down card (87)". Only Forge's COPIED_SPELL piece type qualifies: a card the tracker left zoneless (a
+     * frozen tracker's hand card) has no such type and still fails closed.
+     */
+    static boolean isZonelessSpellCopy(final CardView card) {
+        return card != null && card.getZone() == null && card.getGamePieceType() == GamePieceType.COPIED_SPELL;
+    }
+
+    /**
+     * The printed rules text of a card a viewer may identify, both faces (lane facedown-label-1021), or null. Call it
+     * only after {@link #mayReceiveIdentity}. A face-down card gives null: its other face is the hidden one.
+     */
+    static String printedText(final CardView card) {
+        if (card == null || card.isFaceDown()) {
+            return null;
+        }
+        final StringBuilder text = new StringBuilder();
+        for (CardView.CardStateView state : new CardView.CardStateView[] {card.getCurrentState(), card.getAlternateState()}) {
+            final String oracle = state == null ? null : state.getOracleText();
+            if (oracle != null && !oracle.isBlank()) {
+                text.append(text.length() == 0 ? "" : "\n").append(oracle);
+            }
+        }
+        return text.length() == 0 ? null : text.toString();
     }
 
     static String safeCardLabel(final CardView card, final PlayerView viewer) {
@@ -428,13 +467,16 @@ final class InteractiveState {
                 continue;
             }
             final JsonObject entry = element.getAsJsonObject();
-            final Card source = visibleCardForFid(entry, "fid", game, viewer);
+            final SpellAbilityStackInstance si = instanceOf(entry, instances);
+            Card source = visibleCardForFid(entry, "fid", game, viewer);
+            if (source == null) {
+                source = ceasedSource(entry, si, game);
+            }
             boolean renderedTextSafe = source != null;
             if (!renderedTextSafe) {
                 entry.addProperty("name", "Face-down spell or ability");
             } else if (!source.isFaceDown()) {
                 // Facts exclude face-down sources even when their owner may inspect their identity.
-                final SpellAbilityStackInstance si = instanceOf(entry, instances);
                 InteractiveCardFacts.addOwnerTokenAndCopy(entry, game, source,
                         si == null ? null : si.getSpellAbility());
             }
@@ -614,6 +656,58 @@ final class InteractiveState {
         } catch (RuntimeException e) {
             return null;
         }
+    }
+
+    /**
+     * The source of a stack entry that has ceased to exist (lane facedown-label-1021), per {@link #isCeasedPublicObject}.
+     * A Clue or a Food sacrificed to pay for its own ability is in no zone the game lists (CR 704.5d). So is a spell
+     * copy that has resolved (CR 707.10a) while its delayed trigger waits, e.g. a storm or Twincast copy of Pact of
+     * Negation at the next upkeep. {@link #visibleCardForFid} finds nothing, and the entry read "Face-down spell or
+     * ability" to both seats. A face-down object, any other card the game no longer lists, or an instance whose
+     * source is not the entry's {@code fid} gives null (fail closed).
+     */
+    private static Card ceasedSource(final JsonObject entry, final SpellAbilityStackInstance si, final Game game) {
+        final Card source = si == null ? null : si.getSourceCard();
+        if (source == null || !entry.has("fid") || !entry.get("fid").isJsonPrimitive()) {
+            return null;
+        }
+        try {
+            return entry.get("fid").getAsInt() == source.getId() && isCeasedPublicObject(game, source) ? source : null;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * A token or a spell copy, not face down, that the game no longer lists. It has ceased to exist (CR 704.5d for a
+     * token off the battlefield, CR 707.10a for a copy off the stack), and its identity was public on the battlefield
+     * or the stack. Forge never lists either in a hidden zone, so no listed hidden card qualifies.
+     */
+    static boolean isCeasedPublicObject(final Game game, final Card card) {
+        return card != null && (card.getGamePieceType() == GamePieceType.TOKEN || card.isCopiedSpell())
+                && !card.isFaceDown() && !card.getView().isFaceDown() && game.findById(card.getId()) == null;
+    }
+
+    /**
+     * A floating mana's source as {@code viewer} sees it now (lane facedown-label-1021). Forge keeps a last-known copy
+     * of the source on each mana (Mana: CardCopyService.getLKICopy or the change-zone LKI). That copy has no zone, so
+     * the identity check called the seat's own Forest "Face-down card (1)" on its payment controls. The label and the
+     * visibility come from the card the game holds under that id NOW. A tapped land on the battlefield, a sacrificed
+     * Lotus Petal in a graveyard and an exiled Elvish Spirit Guide are named. A source now hidden from the viewer (a
+     * library, the foe's hand) is "Face-down card (id)". A token that has since ceased to exist (a sacrificed
+     * Treasure) is named by its last-known face, as on the stack ({@link #isCeasedPublicObject}). Anything else the
+     * game no longer has is "Face-down card (id)".
+     */
+    static String manaSourceLabel(final Game game, final Card source, final PlayerView viewer) {
+        if (source == null) {
+            return "Unknown card";
+        }
+        final Card current = game.findById(source.getId());
+        if (current != null) {
+            return safeCardLabel(current.getView(), viewer);
+        }
+        return isCeasedPublicObject(game, source) ? visibleCardLabel(source.getView())
+                : "Face-down card (" + source.getId() + ")";
     }
 
     /** The stack instance a {@code stack[]} entry's {@code id} names, or null. */
