@@ -7098,16 +7098,26 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         if (getCounters(CounterEnumType.SHIELD) > 0) {
             String sa = "DB$ RemoveCounter | Defined$ Self | CounterType$ Shield | CounterNum$ 1";
             if (shieldCounterReplaceDamage == null) {
-                String reStr = "Event$ DamageDone | ActiveZones$ Battlefield | ValidTarget$ Card.Self | PreventionEffect$ True | AlwaysReplace$ True | Secondary$ True "
-            + "| Description$ If damage would be dealt to this permanent, prevent that damage and remove a shield counter from it.";
-                shieldCounterReplaceDamage = ReplacementHandler.parseReplacement(reStr, this, false, null);
-                shieldCounterReplaceDamage.setOverridingAbility(AbilityFactory.getAbility(sa, this));
+                final Object lz = LazyTraits.before(state, "shieldDamage");
+                try {
+                    String reStr = "Event$ DamageDone | ActiveZones$ Battlefield | ValidTarget$ Card.Self | PreventionEffect$ True | AlwaysReplace$ True | Secondary$ True "
+                + "| Description$ If damage would be dealt to this permanent, prevent that damage and remove a shield counter from it.";
+                    shieldCounterReplaceDamage = ReplacementHandler.parseReplacement(reStr, this, false, null);
+                    shieldCounterReplaceDamage.setOverridingAbility(AbilityFactory.getAbility(sa, this));
+                } finally {
+                    LazyTraits.after(lz);
+                }
             }
             if (shieldCounterReplaceDestroy == null) {
-                String reStr = "Event$ Destroy | ActiveZones$ Battlefield | ValidCard$ Card.Self | ValidCause$ SpellAbility | Secondary$ True | ShieldCounter$ True "
-            + "| Description$ If this permanent would be destroyed as the result of an effect, instead remove a shield counter from it.";
-                shieldCounterReplaceDestroy = ReplacementHandler.parseReplacement(reStr, this, false, null);
-                shieldCounterReplaceDestroy.setOverridingAbility(AbilityFactory.getAbility(sa, this));
+                final Object lz = LazyTraits.before(state, "shieldDestroy");
+                try {
+                    String reStr = "Event$ Destroy | ActiveZones$ Battlefield | ValidCard$ Card.Self | ValidCause$ SpellAbility | Secondary$ True | ShieldCounter$ True "
+                + "| Description$ If this permanent would be destroyed as the result of an effect, instead remove a shield counter from it.";
+                    shieldCounterReplaceDestroy = ReplacementHandler.parseReplacement(reStr, this, false, null);
+                    shieldCounterReplaceDestroy.setOverridingAbility(AbilityFactory.getAbility(sa, this));
+                } finally {
+                    LazyTraits.after(lz);
+                }
             }
 
             list.add(shieldCounterReplaceDamage);
@@ -7116,22 +7126,32 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         if (getCounters(CounterEnumType.STUN) > 0) {
             String sa = "DB$ RemoveCounter | Defined$ Self | CounterType$ Stun | CounterNum$ 1";
             if (stunCounterReplaceUntap == null) {
-                String reStr = "Event$ Untap | ActiveZones$ Battlefield | ValidCard$ Card.Self | Secondary$ True "
-            + "| Description$ If this permanent would become untapped, instead remove a stun counter from it.";
+                final Object lz = LazyTraits.before(state, "stun");
+                try {
+                    String reStr = "Event$ Untap | ActiveZones$ Battlefield | ValidCard$ Card.Self | Secondary$ True "
+                + "| Description$ If this permanent would become untapped, instead remove a stun counter from it.";
 
-                stunCounterReplaceUntap = ReplacementHandler.parseReplacement(reStr, this, false, null);
-                stunCounterReplaceUntap.setOverridingAbility(AbilityFactory.getAbility(sa, this));
+                    stunCounterReplaceUntap = ReplacementHandler.parseReplacement(reStr, this, false, null);
+                    stunCounterReplaceUntap.setOverridingAbility(AbilityFactory.getAbility(sa, this));
+                } finally {
+                    LazyTraits.after(lz);
+                }
             }
             list.add(stunCounterReplaceUntap);
         }
         if (getCounters(CounterEnumType.FINALITY) > 0) {
             if (finalityCounterReplaceDying == null) {
-                String reStr = "Event$ Moved | ActiveZones$ Battlefield | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Secondary$ True "
-            + " | Description$ If CARDNAME would die, exile it instead.";
-                String sa = "DB$ ChangeZone | Origin$ Battlefield | Destination$ Exile | Defined$ ReplacedCard";
+                final Object lz = LazyTraits.before(state, "finality");
+                try {
+                    String reStr = "Event$ Moved | ActiveZones$ Battlefield | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Secondary$ True "
+                + " | Description$ If CARDNAME would die, exile it instead.";
+                    String sa = "DB$ ChangeZone | Origin$ Battlefield | Destination$ Exile | Defined$ ReplacedCard";
 
-                finalityCounterReplaceDying = ReplacementHandler.parseReplacement(reStr, this, false, null);
-                finalityCounterReplaceDying.setOverridingAbility(AbilityFactory.getAbility(sa, this));
+                    finalityCounterReplaceDying = ReplacementHandler.parseReplacement(reStr, this, false, null);
+                    finalityCounterReplaceDying.setOverridingAbility(AbilityFactory.getAbility(sa, this));
+                } finally {
+                    LazyTraits.after(lz);
+                }
             }
             list.add(finalityCounterReplaceDying);
         }

@@ -41,6 +41,10 @@ public class SpellAbilityStackInstance implements IIdentifiable, IHasCardView {
     private static int maxId = 0;
     public static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.STACK_INSTANCE); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
+    /** Lane replay-record-1021 (forge.game.GlobalIds): the process-wide counter, read and restored by the AI tape. */
+    public static int peekMaxId() { return maxId; }
+    public static void dangerouslySetMaxId(final int v) { maxId = v; }
+
     // At some point I want this functioning more like Target/Target Choices
     // where the SA has an "active"
     // Stack Instance, and instead of having duplicate parameters, it adds

@@ -23,6 +23,10 @@ public class CombatView extends TrackableObject {
     // Negative IDs avoid tracker registration (only id >= 0 is registered).
     private static int nextId = -2;
 
+    /** Lane replay-record-1021 (forge.game.GlobalIds): the process-wide counter, read and restored by the AI tape. */
+    public static int peekNextId() { return nextId; }
+    public static void dangerouslySetNextId(final int v) { nextId = v; }
+
     private static int scopedOrNext() {
         int s = forge.util.IdScope.next(forge.util.IdScope.Kind.COMBAT_VIEW);
         return s != forge.util.IdScope.NONE ? s : nextId--;

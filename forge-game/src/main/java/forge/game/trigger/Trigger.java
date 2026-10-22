@@ -55,6 +55,10 @@ public abstract class Trigger extends TriggerReplacementBase {
     private static int maxId = 0;
     private static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.TRIGGER); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
+    /** Lane replay-record-1021 (forge.game.GlobalIds): the process-wide counter, read and restored by the AI tape. */
+    public static int peekMaxId() { return maxId; }
+    public static void dangerouslySetMaxId(final int v) { maxId = v; }
+
     /**
      * <p>
      * resetIDs.

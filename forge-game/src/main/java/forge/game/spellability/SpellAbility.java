@@ -78,6 +78,10 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
     private static int maxId = 0;
     private static int nextId() { int s = forge.util.IdScope.next(forge.util.IdScope.Kind.SPELL_ABILITY); return s != forge.util.IdScope.NONE ? s : ++maxId; }
 
+    /** Lane replay-record-1021 (forge.game.GlobalIds): the process-wide counter, read and restored by the AI tape. */
+    public static int peekMaxId() { return maxId; }
+    public static void dangerouslySetMaxId(final int v) { maxId = v; }
+
     public static class EmptySa extends SpellAbility {
         public EmptySa(Card sourceCard) { super(sourceCard, Cost.Zero); setActivatingPlayer(sourceCard.getController());}
         public EmptySa(ApiType api0, Card sourceCard) { super(sourceCard, Cost.Zero); setActivatingPlayer(sourceCard.getController()); api = api0;}
@@ -221,6 +225,14 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
     @Override
     public int hashCode() {
         return Objects.hash(SpellAbility.class, getId());
+    }
+
+    /**
+     * Lane replay-record-1021: give a rebuilt ability the id the live game's ability had (the AI tape's forced replay
+     * rebuilds an alternative- or optional-cost variant the AI built while deciding; ids decide equality and hash order).
+     */
+    public void dangerouslySetId(final int newId) {
+        this.id = newId;
     }
     @Override
     public boolean equals(final Object obj) {

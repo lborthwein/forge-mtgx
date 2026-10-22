@@ -132,6 +132,8 @@ public class ComputerUtil {
                 return false;
             }
         }
+        // lane replay-record-1021: the AI tape records this ability's targets and X here (a forced replay sets them)
+        AiTape.checkpoint(ai, sa, "h");
         // mtgx (AiLegalActivation): the stack refuses an activation whose targets break their own count, but only after
         // its costs are paid, and never counts it; reverse it now, before anything is paid
         if (!AiLegalActivation.legalTargeting(game, sa)) {
@@ -255,6 +257,7 @@ public class ComputerUtil {
             sa.setHostCard(game.getAction().moveToStack(source, sa));
             sa = GameActionUtil.addExtraKeywordCost(sa);
         }
+        AiTape.checkpoint(ai, sa, "s"); // lane replay-record-1021
 
         final Cost cost = sa.getPayCosts();
         final CostPayment pay = new CostPayment(cost, sa);
@@ -291,6 +294,7 @@ public class ComputerUtil {
             sa.setHostCard(game.getAction().moveToStack(source, sa));
             sa = GameActionUtil.addExtraKeywordCost(sa);
         }
+        AiTape.checkpoint(ai, sa, "n"); // lane replay-record-1021
 
         final Cost cost = sa.getPayCosts();
         final CostPayment pay = new CostPayment(cost, sa);

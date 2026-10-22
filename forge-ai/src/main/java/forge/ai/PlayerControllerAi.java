@@ -913,7 +913,7 @@ public class PlayerControllerAi extends PlayerController {
      * defers the human choice from canPlayAI (worker thread with possibly low timeout)
      * to handlePlayingSpellAbility (game thread, no timeout).
      */
-    private Consumer<SpellAbility> getDeferredTargetingPlayerAction(SpellAbility sa) {
+    Consumer<SpellAbility> getDeferredTargetingPlayerAction(SpellAbility sa) { // package: AiTapeController
         while (sa != null) {
             if (sa.hasParam("TargetingPlayer") && sa.getTargetingPlayer() != null) {
                 return root -> {
@@ -1353,6 +1353,11 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        // lane replay-record-1021: the AI tape records the order (a forced replay plays the record's)
+        final AiTape tape = AiTape.covering(player);
+        if (tape != null && activePlayerSAs != null && activePlayerSAs.size() > 1) { // one ability: no order to choose
+            return tape.order(activePlayerSAs, () -> getAi().orderPlaySa(activePlayerSAs));
+        }
         return getAi().orderPlaySa(activePlayerSAs);
     }
 
@@ -1378,6 +1383,7 @@ public class PlayerControllerAi extends PlayerController {
                         // FIXME: the new implementation (below) requires implementing setupNewTargets in the AI controller, among other possible changes, otherwise breaks AI
                         // sa.setupNewTargets(player);
                     }
+                    AiTape.checkpoint(player, sa, "c"); // lane replay-record-1021
                 }
                 // need finally add the new spell to the stack
                 getGame().getStack().add(sa);
@@ -1385,7 +1391,7 @@ public class PlayerControllerAi extends PlayerController {
         }
     }
 
-    private void chooseNewTargetsForCopy(final SpellAbility copy) {
+    void chooseNewTargetsForCopy(final SpellAbility copy) { // package: AiTapeController
         List<TargetChoices> oldTargets = new ArrayList<>();
         boolean targetingPlayer = false;
         for (SpellAbility s = copy; s != null; s = s.getSubAbility()) {
@@ -1419,7 +1425,12 @@ public class PlayerControllerAi extends PlayerController {
         }
     }
 
-    private boolean prepareSingleSa(final Card host, SpellAbility sa, boolean isMandatory) {
+    boolean prepareSingleSa(final Card host, final SpellAbility sa, final boolean isMandatory) { // package: AiTapeController
+        // lane replay-record-1021: whether the seat plays the trigger, and what it decided preparing it, are taped
+        return AiTape.prepare(player, () -> prepareSingleSaUntaped(host, sa, isMandatory));
+    }
+
+    private boolean prepareSingleSaUntaped(final Card host, SpellAbility sa, boolean isMandatory) {
         if (sa.getApi() == ApiType.Charm) {
             if (!CharmEffect.makeChoices(sa)) {
                 return false;

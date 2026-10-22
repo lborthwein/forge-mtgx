@@ -694,7 +694,19 @@ public class ComputerUtilMana {
 
             saList.removeAll(saExcludeList);
 
-            SpellAbility saPayment = saList.isEmpty() ? null : chooseManaAbility(cost, sa, ai, toPay, saList, checkPlayable || !test);
+            SpellAbility saPayment;
+            // lane replay-record-1021: the AI tape records each source the seat taps in a real payment (a forced replay
+            // taps the record's); test payments and every other player are untouched
+            final AiTape tape = test ? null : AiTape.covering(ai);
+            if (tape == null) {
+                saPayment = saList.isEmpty() ? null : chooseManaAbility(cost, sa, ai, toPay, saList, checkPlayable || !test);
+            } else {
+                final Collection<SpellAbility> options = saList;
+                final ManaCostShard shard = toPay;
+                final boolean checkCosts = checkPlayable || !test;
+                saPayment = tape.mana(options, () -> options.isEmpty() ? null
+                        : chooseManaAbility(cost, sa, ai, shard, options, checkCosts));
+            }
 
             if (saPayment != null && ComputerUtilCost.isSacrificeSelfCost(saPayment.getPayCosts()) && sa.isTargeting(saPayment.getHostCard())) {
                 // not a good idea to sac a card that you're targeting with the SA you're paying for
