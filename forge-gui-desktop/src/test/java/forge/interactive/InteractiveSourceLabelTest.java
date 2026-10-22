@@ -69,6 +69,8 @@ public class InteractiveSourceLabelTest extends AITest {
         final BlockingQueue<JsonObject> wire = new LinkedBlockingQueue<>();
         final PipedWriter client = new PipedWriter();
         final AtomicBoolean closed = new AtomicBoolean();
+        /** Set during a play: the priority loop ends once that play is done instead of asking again. */
+        volatile boolean stopLoop;
 
         /** {@code priorityLoop}: run the seat's priority loop (clicks at priority); otherwise the test drives Forge. */
         Harness(final BiConsumer<Player, Player> board, final boolean priorityLoop) throws IOException {
@@ -92,7 +94,7 @@ public class InteractiveSourceLabelTest extends AITest {
             gui.startReader();
             if (priorityLoop) {
                 onGameThread(() -> {
-                    while (!closed.get() && !gui.hasFailed() && !game.isGameOver()) {
+                    while (!closed.get() && !stopLoop && !gui.hasFailed() && !game.isGameOver()) {
                         final List<SpellAbility> chosen = controller.chooseSpellAbilityToPlay();
                         if (chosen != null) {
                             for (SpellAbility ability : chosen) {
@@ -125,6 +127,22 @@ public class InteractiveSourceLabelTest extends AITest {
 
         JsonObject request() throws InterruptedException {
             return next("request");
+        }
+
+        /** The next request while the game thread runs, or null once it has ended. */
+        JsonObject requestWhilePlaying() throws InterruptedException {
+            final long deadline = System.currentTimeMillis() + 30000;
+            while (System.currentTimeMillis() < deadline) {
+                final JsonObject m = wire.poll(200, TimeUnit.MILLISECONDS);
+                if (m == null) {
+                    if (!gameThread.isAlive()) return null;
+                    continue;
+                }
+                if ("error".equals(m.get("type").getAsString())) fail("the bridge failed: " + m);
+                if ("request".equals(m.get("type").getAsString())) return m;
+            }
+            fail("neither a request nor the end of the play");
+            return null;
         }
 
         /** The next wire message of {@code type}, skipping the others. */
@@ -226,6 +244,16 @@ public class InteractiveSourceLabelTest extends AITest {
             }
         }
         return labels;
+    }
+
+    /** The first control whose id starts with {@code prefix}, or null. */
+    private static JsonObject control(final JsonObject request, final String prefix) {
+        for (JsonElement control : request.getAsJsonArray("controls")) {
+            if (control.getAsJsonObject().get("controlId").getAsString().startsWith(prefix)) {
+                return control.getAsJsonObject();
+            }
+        }
+        return null;
     }
 
     private static List<String> controlLabels(final JsonObject request, final String type) {
@@ -373,6 +401,74 @@ public class InteractiveSourceLabelTest extends AITest {
             assertEquals(stack.get(0).getAsJsonObject().get("name").getAsString(), "Face-down spell or ability",
                     stack.toString());
             assertFalse(stack.toString().contains("Clue"), stack.toString());
+        }
+    }
+
+    /**
+     * Owner report 2026-10-22T00-12-29: the seat's own Map token, sacrificed for "{1}, {T}, Sacrifice this token: Target
+     * creature you control explores" (target: a Phyrexian Golem token), read "Hidden casting or ability" on the stack,
+     * the skin's words for the bridge's "Hidden spell or ability". Activated over the wire through Forge's own targeting
+     * and payment; then state-based actions end the sacrificed token and the entry must still be the Map Token's.
+     */
+    @Test(timeOut = 900000)
+    public void theSeatsSacrificedMapTokenIsTheStackEntrysSource() throws Exception {
+        final Card[] map = new Card[1];
+        final Card[] golem = new Card[1];
+        final Card[] forest = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            forest[0] = addCard("Forest", seat);
+            map[0] = addToken("c_a_map_sac_explore", seat);
+            golem[0] = addToken("c_3_3_a_phyrexian_golem", seat);
+            addCardToZone("Lightning Bolt", foe, ZoneType.Hand);
+        }, true)) {
+            JsonObject request = h.click(map[0]);
+            // The harness's seat is a LobbyPlayerAi, which Forge's auto-yield check refuses once the stack is non-empty:
+            // the priority loop ends after this play instead of asking again.
+            h.stopLoop = true;
+            // Forge's own questions until the ability is on the stack: the Golem is the target, the Forest pays {1},
+            // yes to the sacrifice.
+            while (request != null) {
+                final String kind = request.get("kind").getAsString();
+                System.out.println("MAP STEP: " + kind + " " + request.getAsJsonObject("prompt").get("message")
+                        + " " + request.getAsJsonArray("controls"));
+                final JsonObject action = new JsonObject();
+                final JsonObject fromPool = control(request, "payment:");
+                if ("mana".equals(kind) && fromPool != null) {
+                    // The Forest's mana waits in the pool (NoPaymentFromManaAbility, as live): pay with it.
+                    action.addProperty("type", fromPool.get("type").getAsString());
+                    action.addProperty("controlId", fromPool.get("controlId").getAsString());
+                } else if ("target".equals(kind) || "mana".equals(kind)) {
+                    action.addProperty("type", "selectCard");
+                    action.addProperty("controlId", "card:" + ("target".equals(kind) ? golem[0] : forest[0]).getId());
+                } else if ("confirm".equals(kind)) {
+                    action.addProperty("type", "confirm");
+                    action.addProperty("controlId", "confirm:yes");
+                    action.addProperty("confirm", true);
+                } else {
+                    fail("unexpected request: " + request);
+                }
+                h.send(request, action);
+                request = h.requestWhilePlaying();
+            }
+            h.gameThread.join(30000);
+            assertFalse(h.gameThread.isAlive(), "the play is done");
+            assertEquals(h.game.getStack().size(), 1, "the explore ability is on the stack");
+            // In the real game state-based actions run before the next priority: the token ceases to exist.
+            h.game.getAction().checkStateEffects(true);
+            assertEquals(h.game.findById(map[0].getId()), null, "the sacrificed token has ceased to exist");
+            for (JsonArray stack : List.of(InteractiveState.seatView(h.game, h.seat, 1).getAsJsonArray("stack"),
+                    InteractiveState.seatView(h.game, h.foe, 0).getAsJsonArray("stack"))) {
+                System.out.println("MAP STACK: " + stack);
+                assertEquals(stack.size(), 1, stack.toString());
+                final JsonObject entry = stack.get(0).getAsJsonObject();
+                assertEquals(entry.get("name").getAsString(), "Map Token", stack.toString());
+                assertEquals(entry.get("fid").getAsInt(), map[0].getId(), stack.toString());
+                assertTrue(entry.get("description").getAsString().contains("explores"), stack.toString());
+                assertTrue(stack.toString().contains("Phyrexian Golem"), "its target: " + stack);
+                assertFalse(stack.toString().contains("Face-down"), stack.toString());
+                assertFalse(stack.toString().contains("Hidden spell"), stack.toString());
+                assertFalse(stack.toString().contains("Lightning Bolt"), "the foe's hand stays hidden: " + stack);
+            }
         }
     }
 
