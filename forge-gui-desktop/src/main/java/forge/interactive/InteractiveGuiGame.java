@@ -1158,8 +1158,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     if (step.mana() == null) { continue; }
                     final int sourceId = step.mana().getSourceCard().getId();
                     sourceNumbers.computeIfAbsent(sourceId, ignored -> sourceNumbers.size() + 1);
-                    final String sourceName = InteractiveState.safeCardLabel(
-                            step.mana().getSourceCard().getView(), human.getView());
+                    final String sourceName = InteractiveState.manaSourceLabel(
+                            game, step.mana().getSourceCard(), human.getView());
                     sourceNames.computeIfAbsent(sourceName, ignored -> new LinkedHashSet<>()).add(sourceId);
                 }
             }
@@ -1179,8 +1179,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     mana.addProperty(color, mana.has(color) ? mana.get(color).getAsInt() + 1 : 1);
                     final JsonObject source = new JsonObject();
                     source.addProperty("cardId", step.mana().getSourceCard().getId());
-                    String sourceLabel = InteractiveState.safeCardLabel(
-                            step.mana().getSourceCard().getView(), human.getView());
+                    String sourceLabel = InteractiveState.manaSourceLabel(
+                            game, step.mana().getSourceCard(), human.getView());
                     if (sourceNames.get(sourceLabel).size() > 1) {
                         sourceLabel += " (source " + sourceNumbers.get(step.mana().getSourceCard().getId()) + ")";
                     }
@@ -1731,7 +1731,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     /**
      * Redact hidden card names from Forge's text for this seat ({@link InteractiveText}). When the
      * text is about a card ({@link #textSubject}: the presented prompt's card, or the card a
-     * confirmation names) and this seat may identify that card, its own name written bare is kept.
+     * confirmation names) and this seat may identify that card, its own name written bare is kept,
+     * and so are the words of its printed text (lane facedown-label-1021).
      */
     private String sanitizeText(final String text) {
         return sanitizeText(text, null);
@@ -1752,6 +1753,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final List<InteractiveText.CardLabel> labels = new ArrayList<>();
         final List<String> subjectNames = new ArrayList<>(2);
         final Set<Integer> listed = new HashSet<>();
+        // The subject's view, when this seat may identify it: its printed text shields its own words (below).
+        final CardView[] knownSubject = new CardView[1];
         game.forEachCardInGame(card -> {
             final boolean visible = authorized.contains(card.getId())
                     || InteractiveState.mayReceiveIdentity(card.getView(), human.getView());
@@ -1759,6 +1762,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             listed.add(card.getId());
             if (visible && subject != null && card.getId() == subject.getId()) {
                 subjectNames.add(card.getName());
+                knownSubject[0] = card.getView();
             }
             return true;
         });
@@ -1773,6 +1777,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 labels.add(new InteractiveText.CardLabel(unlisted.getId(), unlisted.getName(), true));
                 if (unlisted == subject) {
                     subjectNames.add(unlisted.getName());
+                    knownSubject[0] = unlisted;
                 }
             }
         }
@@ -1780,9 +1785,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (sourceVisible && source.getName() != null) {
             subjectNames.add(source.getName());
         }
+        // The printed words of the prompt's subject and of the ability's source are kept (review of #112: a subject's
+        // prompt quoting its own "an Island card" no longer reads differently when some Island is hidden).
+        final String publicText = String.join("\n", java.util.stream.Stream.of(
+                        knownSubject[0] == null ? null : InteractiveState.printedText(knownSubject[0]),
+                        sourceVisible ? InteractiveState.printedText(source) : null)
+                .filter(Objects::nonNull).toList());
         // Forge's raw target descriptors ("Select target Card.inZoneStack") are said in words.
         return InteractiveTargetText.render(InteractiveText.sanitize(result, labels, subjectNames,
-                sourceVisible ? InteractiveState.printedText(source) : null));
+                publicText.isEmpty() ? null : publicText));
     }
 
     private static String inputClassName(final Input input) {

@@ -11,6 +11,7 @@ import forge.game.ability.AbilityKey;
 import forge.game.ability.effects.CopySpellAbilityEffect;
 import forge.game.card.Card;
 import forge.game.card.CardFactory;
+import forge.game.mana.Mana;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.PlayerController.FullControlFlag;
@@ -434,7 +435,13 @@ public class InteractiveSourceLabelTest extends AITest {
                 final JsonObject action = new JsonObject();
                 final JsonObject fromPool = control(request, "payment:");
                 if ("mana".equals(kind) && fromPool != null) {
-                    // The Forest's mana waits in the pool (NoPaymentFromManaAbility, as live): pay with it.
+                    // The Forest's mana waits in the pool (NoPaymentFromManaAbility, as live): pay with it. Its
+                    // source is the seat's own Forest, named (it read "Face-down card (1)": the mana's last-known copy).
+                    final JsonObject value = fromPool.getAsJsonObject("value");
+                    assertEquals(value.getAsJsonArray("sources").get(0).getAsJsonObject().get("label").getAsString(),
+                            "Forest (" + forest[0].getId() + ")", fromPool.toString());
+                    assertEquals(value.get("sourceSummary").getAsString(), "Forest (" + forest[0].getId() + ")");
+                    assertFalse(request.toString().contains("Face-down"), request.toString());
                     action.addProperty("type", fromPool.get("type").getAsString());
                     action.addProperty("controlId", fromPool.get("controlId").getAsString());
                 } else if ("target".equals(kind) || "mana".equals(kind)) {
@@ -469,6 +476,187 @@ public class InteractiveSourceLabelTest extends AITest {
                 assertFalse(stack.toString().contains("Hidden spell"), stack.toString());
                 assertFalse(stack.toString().contains("Lightning Bolt"), "the foe's hand stays hidden: " + stack);
             }
+        }
+    }
+
+    // Delta 2 (coordinator, after the #112 review): floating mana's sources, a ceased spell copy, a prompt subject's
+    // own printed words.
+
+    /** The source Forge records on a mana {@code card} makes for {@code payer}: a last-known copy with no zone. */
+    private static Card manaSource(final Card card, final Player payer) {
+        return new Mana((byte) forge.card.MagicColor.GREEN, card, null, payer).getSourceCard();
+    }
+
+    /**
+     * Pool payment sources are named by the card the game holds under that id now: the seat's own Forest, a sacrificed
+     * Lotus Petal (graveyard), an Elvish Spirit Guide exiled from the hand, a Treasure that has ceased to exist.
+     */
+    @Test
+    public void manaSourcesAreNamedByWhatTheirCardIsNow() {
+        final Game game = initAndCreateGame();
+        final Player seat = game.getPlayers().get(1);
+        final Player foe = game.getPlayers().get(0);
+        final Card forest = addCard("Forest", seat);
+        final Card petal = addCard("Lotus Petal", seat);
+        final Card guide = addCardToZone("Elvish Spirit Guide", seat, ZoneType.Hand);
+        final Card treasure = addToken("c_a_treasure_sac", seat);
+        game.getAction().checkStateEffects(true);
+
+        final Card fromForest = manaSource(forest, seat);
+        assertEquals(fromForest.getView().getZone(), null, "Forge's last-known copy has no zone");
+        assertEquals(InteractiveState.manaSourceLabel(game, fromForest, seat.getView()), "Forest (" + forest.getId() + ")");
+
+        final Card fromPetal = manaSource(petal, seat);
+        game.getAction().moveToGraveyard(petal, null);
+        assertEquals(InteractiveState.manaSourceLabel(game, fromPetal, seat.getView()),
+                "Lotus Petal (" + petal.getId() + ")");
+        assertEquals(InteractiveState.manaSourceLabel(game, fromPetal, foe.getView()),
+                "Lotus Petal (" + petal.getId() + ")", "a graveyard is public");
+
+        final Card exiled = game.getAction().exile(guide, null, forge.game.ability.AbilityKey.newMap());
+        final Card fromGuide = manaSource(exiled, seat);
+        assertEquals(InteractiveState.manaSourceLabel(game, fromGuide, seat.getView()),
+                "Elvish Spirit Guide (" + guide.getId() + ")");
+
+        final Card fromTreasure = manaSource(treasure, seat);
+        game.getAction().moveToGraveyard(treasure, null);
+        game.getAction().checkStateEffects(true);
+        assertEquals(game.findById(treasure.getId()), null, "the Treasure has ceased to exist");
+        assertEquals(InteractiveState.manaSourceLabel(game, fromTreasure, seat.getView()),
+                "Treasure Token (" + treasure.getId() + ")");
+    }
+
+    /** Negative: a mana source whose card is now hidden from the seat stays a face-down card, by id only. */
+    @Test
+    public void aManaSourceNowHiddenFromTheSeatStaysHidden() {
+        final Game game = initAndCreateGame();
+        final Player seat = game.getPlayers().get(1);
+        final Player foe = game.getPlayers().get(0);
+        // The seat's Tropical Island, put on top of its library after it made the mana: hidden even from its owner.
+        final Card island = addCard("Tropical Island", seat);
+        // The foe's Taiga, a source of the seat's mana, now in the foe's hand (as if stolen, tapped, bounced).
+        final Card taiga = addCard("Taiga", foe);
+        game.getAction().checkStateEffects(true);
+        final Card fromIsland = manaSource(island, seat);
+        final Card fromTaiga = manaSource(taiga, seat);
+        game.getAction().moveToLibrary(island, null);
+        game.getAction().moveToHand(taiga, null);
+        assertEquals(InteractiveState.manaSourceLabel(game, fromIsland, seat.getView()),
+                "Face-down card (" + island.getId() + ")");
+        assertEquals(InteractiveState.manaSourceLabel(game, fromTaiga, seat.getView()),
+                "Face-down card (" + taiga.getId() + ")");
+        assertEquals(InteractiveState.manaSourceLabel(game, fromTaiga, foe.getView()),
+                "Taiga (" + taiga.getId() + ")", "its owner sees their own hand");
+        // A card the game no longer has, and no token or spell copy: unknown, so hidden.
+        final Card gone = manaSource(addCard("Savannah", seat), seat);
+        seat.getZone(ZoneType.Battlefield).remove(game.findById(gone.getId()));
+        assertEquals(game.findById(gone.getId()), null);
+        assertEquals(InteractiveState.manaSourceLabel(game, gone, seat.getView()), "Face-down card (" + gone.getId() + ")");
+    }
+
+    /**
+     * A spell copy that resolved and ceased to exist (CR 707.10a) while its delayed trigger waits: a storm or Twincast
+     * copy of Pact of Negation at the next upkeep. The trigger's stack entry is the copy's, Pact of Negation, to both
+     * seats. (Review of #112.)
+     */
+    @Test
+    public void aCeasedSpellCopysDelayedTriggerIsTheCopys() {
+        final Game game = initAndCreateGame();
+        final Player seat = game.getPlayers().get(1);
+        final Player foe = game.getPlayers().get(0);
+        final Card copy = ceasedCopyWithTrigger(game, seat, false);
+        for (JsonArray stack : List.of(InteractiveState.seatView(game, seat, 1).getAsJsonArray("stack"),
+                InteractiveState.seatView(game, foe, 0).getAsJsonArray("stack"))) {
+            System.out.println("PACT COPY STACK: " + stack);
+            assertEquals(stack.size(), 1, stack.toString());
+            final JsonObject entry = stack.get(0).getAsJsonObject();
+            assertEquals(entry.get("name").getAsString(), "Pact of Negation", stack.toString());
+            assertEquals(entry.get("fid").getAsInt(), copy.getId(), stack.toString());
+            assertTrue(entry.get("isCopy").getAsBoolean(), stack.toString());
+            assertFalse(stack.toString().contains("Face-down"), stack.toString());
+            assertFalse(stack.toString().contains("Hidden spell"), stack.toString());
+        }
+    }
+
+    /** Negative: a ceased spell copy that is face down stays a face-down source, for every seat. */
+    @Test
+    public void aCeasedFaceDownSpellCopyStaysHidden() {
+        final Game game = initAndCreateGame();
+        final Player seat = game.getPlayers().get(1);
+        final Player foe = game.getPlayers().get(0);
+        ceasedCopyWithTrigger(game, foe, true);
+        for (JsonArray stack : List.of(InteractiveState.seatView(game, seat, 1).getAsJsonArray("stack"),
+                InteractiveState.seatView(game, foe, 0).getAsJsonArray("stack"))) {
+            assertEquals(stack.get(0).getAsJsonObject().get("name").getAsString(), "Face-down spell or ability",
+                    stack.toString());
+            assertFalse(stack.toString().contains("Pact"), stack.toString());
+        }
+    }
+
+    /** {@code you}'s copy of Pact of Negation, gone from the stack, with its upkeep trigger's body on the stack. */
+    private Card ceasedCopyWithTrigger(final Game game, final Player you, final boolean faceDown) {
+        final Card pact = addCardToZone("Pact of Negation", you, ZoneType.Hand);
+        final SpellAbility spell = pact.getFirstSpellAbility();
+        spell.setActivatingPlayer(you);
+        final SpellAbility twincast = AbilityFactory.getAbility("DB$ CopySpellAbility | Defined$ TriggeredSpellAbility",
+                pact);
+        twincast.setActivatingPlayer(you);
+        final Card copy = CardFactory.copySpellAbilityAndPossiblyHost(twincast, spell, you).getHostCard();
+        assertTrue(copy.isCopiedSpell());
+        // It resolved: on the stack, then gone (a copy leaving the stack ceases to exist).
+        game.getStackZone().add(copy);
+        game.getStackZone().remove(copy);
+        assertEquals(game.findById(copy.getId()), null, "the copy has ceased to exist");
+        final SpellAbility upkeep = AbilityFactory.getAbility(copy, "TrigLoseGame");
+        upkeep.setActivatingPlayer(you);
+        if (faceDown) {
+            copy.turnFaceDown(true);
+            assertTrue(copy.getView().isFaceDown(), "the ceased copy is face down");
+        }
+        game.getStack().add(upkeep);
+        assertEquals(game.getStack().peek().getSourceCard(), copy);
+        return copy;
+    }
+
+    /**
+     * A prompt about a card the seat may identify keeps that card's own printed words (review of #112): a confirm about
+     * the seat's Lórien Revealed quoting "an Island card" reads the same whether or not an Island is hidden anywhere.
+     */
+    @Test(timeOut = 900000)
+    public void aPromptAboutAVisibleCardKeepsItsOwnPrintedWords() throws Exception {
+        final Card[] lorien = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            lorien[0] = addCardToZone("Lórien Revealed", seat, ZoneType.Hand);
+            addCardToZone("Island", seat, ZoneType.Library);
+            addCardToZone("Island", foe, ZoneType.Hand);
+        }, false)) {
+            final String question = "Search your library for an Island card?";
+            h.onGameThread(() -> h.gui.confirm(lorien[0].getView(), question, true, null));
+            final JsonObject ask = h.request();
+            final String message = ask.getAsJsonObject("prompt").get("message").getAsString();
+            System.out.println("SUBJECT CONFIRM: " + message);
+            assertEquals(message, "Lórien Revealed (" + lorien[0].getId() + ")\n" + question, ask.toString());
+        }
+    }
+
+    /**
+     * Negative: a hidden subject's printed text shields nothing. A confirm about the foe's Lórien Revealed (in the foe's
+     * hand) quoting "an Island card" still has the bare hidden name redacted, and the subject stays a face-down card.
+     */
+    @Test(timeOut = 900000)
+    public void aHiddenSubjectsPrintedWordsShieldNothing() throws Exception {
+        final Card[] lorien = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            lorien[0] = addCardToZone("Lórien Revealed", foe, ZoneType.Hand);
+            addCardToZone("Island", foe, ZoneType.Library);
+        }, false)) {
+            h.onGameThread(() -> h.gui.confirm(lorien[0].getView(), "Search your library for an Island card?", true, null));
+            final JsonObject ask = h.request();
+            final String message = ask.getAsJsonObject("prompt").get("message").getAsString();
+            System.out.println("HIDDEN SUBJECT CONFIRM: " + message);
+            assertEquals(message, "Face-down card (" + lorien[0].getId() + ")\nSearch your library for an Face-down card card?",
+                    ask.toString());
+            assertFalse(ask.toString().contains("Lórien"), ask.toString());
         }
     }
 

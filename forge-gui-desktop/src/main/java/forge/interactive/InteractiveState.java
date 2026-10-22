@@ -470,7 +470,7 @@ final class InteractiveState {
             final SpellAbilityStackInstance si = instanceOf(entry, instances);
             Card source = visibleCardForFid(entry, "fid", game, viewer);
             if (source == null) {
-                source = ceasedTokenSource(entry, si, game);
+                source = ceasedSource(entry, si, game);
             }
             boolean renderedTextSafe = source != null;
             if (!renderedTextSafe) {
@@ -659,23 +659,55 @@ final class InteractiveState {
     }
 
     /**
-     * The source of a stack entry that is a token which has ceased to exist (lane facedown-label-1021): a Clue or a
-     * Food sacrificed to pay for its own ability is in no zone the game lists (CR 704.5d), so {@link #visibleCardForFid}
-     * finds nothing and the entry read "Face-down spell or ability" to both seats. A token's identity is public: it
-     * was on the battlefield. A face-down token, any other card the game no longer lists, or an instance whose
+     * The source of a stack entry that has ceased to exist (lane facedown-label-1021), per {@link #isCeasedPublicObject}.
+     * A Clue or a Food sacrificed to pay for its own ability is in no zone the game lists (CR 704.5d). So is a spell
+     * copy that has resolved (CR 707.10a) while its delayed trigger waits, e.g. a storm or Twincast copy of Pact of
+     * Negation at the next upkeep. {@link #visibleCardForFid} finds nothing, and the entry read "Face-down spell or
+     * ability" to both seats. A face-down object, any other card the game no longer lists, or an instance whose
      * source is not the entry's {@code fid} gives null (fail closed).
      */
-    private static Card ceasedTokenSource(final JsonObject entry, final SpellAbilityStackInstance si, final Game game) {
+    private static Card ceasedSource(final JsonObject entry, final SpellAbilityStackInstance si, final Game game) {
         final Card source = si == null ? null : si.getSourceCard();
-        if (source == null || source.getGamePieceType() != GamePieceType.TOKEN || source.isFaceDown()
-                || source.getView().isFaceDown() || !entry.has("fid") || !entry.get("fid").isJsonPrimitive()) {
+        if (source == null || !entry.has("fid") || !entry.get("fid").isJsonPrimitive()) {
             return null;
         }
         try {
-            return entry.get("fid").getAsInt() == source.getId() && game.findById(source.getId()) == null ? source : null;
+            return entry.get("fid").getAsInt() == source.getId() && isCeasedPublicObject(game, source) ? source : null;
         } catch (RuntimeException e) {
             return null;
         }
+    }
+
+    /**
+     * A token or a spell copy, not face down, that the game no longer lists. It has ceased to exist (CR 704.5d for a
+     * token off the battlefield, CR 707.10a for a copy off the stack), and its identity was public on the battlefield
+     * or the stack. Forge never lists either in a hidden zone, so no listed hidden card qualifies.
+     */
+    static boolean isCeasedPublicObject(final Game game, final Card card) {
+        return card != null && (card.getGamePieceType() == GamePieceType.TOKEN || card.isCopiedSpell())
+                && !card.isFaceDown() && !card.getView().isFaceDown() && game.findById(card.getId()) == null;
+    }
+
+    /**
+     * A floating mana's source as {@code viewer} sees it now (lane facedown-label-1021). Forge keeps a last-known copy
+     * of the source on each mana (Mana: CardCopyService.getLKICopy or the change-zone LKI). That copy has no zone, so
+     * the identity check called the seat's own Forest "Face-down card (1)" on its payment controls. The label and the
+     * visibility come from the card the game holds under that id NOW. A tapped land on the battlefield, a sacrificed
+     * Lotus Petal in a graveyard and an exiled Elvish Spirit Guide are named. A source now hidden from the viewer (a
+     * library, the foe's hand) is "Face-down card (id)". A token that has since ceased to exist (a sacrificed
+     * Treasure) is named by its last-known face, as on the stack ({@link #isCeasedPublicObject}). Anything else the
+     * game no longer has is "Face-down card (id)".
+     */
+    static String manaSourceLabel(final Game game, final Card source, final PlayerView viewer) {
+        if (source == null) {
+            return "Unknown card";
+        }
+        final Card current = game.findById(source.getId());
+        if (current != null) {
+            return safeCardLabel(current.getView(), viewer);
+        }
+        return isCeasedPublicObject(game, source) ? visibleCardLabel(source.getView())
+                : "Face-down card (" + source.getId() + ")";
     }
 
     /** The stack instance a {@code stack[]} entry's {@code id} names, or null. */
