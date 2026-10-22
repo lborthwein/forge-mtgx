@@ -1858,17 +1858,21 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     }
 
     /**
-     * With this seat's engine gate held: is Forge parked on this seat's request (an unclaimed input request that is
-     * Forge's current input with no action on it running, or an open, unanswered modal)? {@link #parkedOn} without
-     * the request id.
+     * With this seat's engine gate held: is Forge parked on this seat's input request (unclaimed, Forge's current input,
+     * no action on it running)? {@link #parkedOn} without the request id, and never during a modal.
+     *
+     * <p>Review S1-1 (forge-mtgx#113): a modal answer takes no engine gate ({@link #acceptModal} claims and completes it
+     * on the reader thread), so holding the gate does not stop the thread parked in {@link #ask} from resuming the
+     * resolution while a deferred view is still being read. While a modal is open a deferred view is therefore not
+     * built; the decider's next published input offers it again. (The immediate offer inside {@link #ask} runs on the
+     * asking thread itself, before it waits, so nothing can resume under it.)</p>
      */
     private boolean parkedForWaitingView() {
         if (game == null || controller == null || game.isGameOver()) {
             return false;
         }
-        final ModalRequest modal = modalRequest.get();
-        if (modal != null) {
-            return !modal.claimed.get() && !modal.answer.isDone();
+        if (modalRequest.get() != null) {
+            return false;
         }
         final ActiveRequest request = activeRequest.get();
         return request != null && !request.claimed.get()
@@ -1924,8 +1928,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     /**
      * A deferred waiting view, on the EDT (where every input request is published): sent only at a safe point, with
-     * another seat's gate held and Forge parked on that seat's request. Otherwise the next request of that seat offers
-     * it again; a gate in use (a claim, a modal opening) is looked at once more a little later.
+     * another seat's gate held and Forge parked on that seat's input request (never during a modal: review S1-1).
+     * Otherwise the next request of that seat offers it again; a gate in use (a claim, a modal opening) is looked at
+     * once more a little later.
      */
     private void deferredWaitingView() {
         waitingViewScheduled.set(false);

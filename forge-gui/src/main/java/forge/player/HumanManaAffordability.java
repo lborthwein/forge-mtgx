@@ -497,68 +497,7 @@ public final class HumanManaAffordability {
      */
     public static boolean payable(final Player player, final SpellAbility ability) {
         return assess(player, ability) != Assessment.PROVEN_UNAFFORDABLE
-                && assessPayable(player, ability) != Assessment.PROVEN_UNAFFORDABLE
-                && !onlyTargetIsItsSacrificedSource(player, ability);
-    }
-
-    /**
-     * table-live-view-1022 (owner friend table 2026-10-22T19-55-39: "No valid target for Sapper's Tunnel and my friend
-     * sac'ed it without noticing"). Wasteland with no other nonbasic land in play glowed, and was activated targeting
-     * itself. Targets are chosen before costs are paid (CR 601.2c, 601.2h; 602.2b), so the source is a legal target
-     * then; the cost sacrifices it, the sacrificed card is a new object (CR 400.7), and an ability all of whose targets
-     * are illegal does not resolve (CR 608.2b). This is a PROOF that the activation can do nothing, so the
-     * {@code payable} flag says false for it (the control stays offered: Forge decides the click).
-     *
-     * <p>True only when: the ability is an activated ability of a permanent on the battlefield (no spell, mana or
-     * triggered ability); a cost part sacrifices the source itself; the seat is its activating player; some node of the
-     * ability chain targets; and EVERY targeting node asks for a fixed number of at least one target and has no legal
-     * candidate other than the source (no player, no stack object, no other card in its zones). Optional, variable,
-     * random, chosen-by-another-player or modal (Charm) targeting proves nothing. A read: Forge's own
-     * {@code canTarget} per candidate, as its legality check does. Anything that throws proves nothing.</p>
-     */
-    public static boolean onlyTargetIsItsSacrificedSource(final Player player, final SpellAbility ability) {
-        if (player == null || ability == null || ability.isSpell() || ability.isManaAbility() || ability.isTrigger()
-                || ability.isReplacementAbility() || ability.getPayCosts() == null
-                || ability.getActivatingPlayer() != player) {
-            return false;
-        }
-        final Card host = ability.getHostCard();
-        if (host == null || !host.isInZone(ZoneType.Battlefield)) return false;
-        if (ability.getPayCosts().getCostParts().stream()
-                .noneMatch(p -> p instanceof CostSacrifice && p.payCostFromSource())) {
-            return false;
-        }
-        try {
-            final forge.game.Game game = player.getGame();
-            boolean targeted = false;
-            for (SpellAbility node = ability; node != null; node = node.getSubAbility()) {
-                if (node.getApi() == ApiType.Charm) return false;
-                if (!node.usesTargeting()) continue;
-                targeted = true;
-                final forge.game.spellability.TargetRestrictions tgt = node.getTargetRestrictions();
-                if (tgt == null || !String.valueOf(tgt.getMinTargets()).matches("[1-9][0-9]{0,2}")
-                        || node.getMinTargets() < 1 || tgt.isRandomTarget() || node.hasParam("TargetingPlayer")) {
-                    return false;
-                }
-                final List<ZoneType> zones = tgt.getZone();
-                if (zones.contains(ZoneType.Stack)) {
-                    for (forge.game.spellability.SpellAbilityStackInstance si : game.getStack()) {
-                        if (node.canTargetSpellAbility(si.getSpellAbility())) return false;
-                    }
-                }
-                for (Player candidate : game.getPlayers()) {
-                    if (node.canTarget(candidate)) return false;
-                }
-                tgt.applyTargetTextChanges(node);
-                for (Card candidate : game.getCardsIn(zones)) {
-                    if (candidate.getId() == host.getId() || candidate.isInZone(ZoneType.Stack)) continue;
-                    if (node.canTarget(candidate)) return false;
-                }
-            }
-            return targeted;
-        } catch (RuntimeException unreadable) {
-            return false;
-        }
+                && assessPayable(player, ability) != Assessment.PROVEN_UNAFFORDABLE;
     }
 
     /**

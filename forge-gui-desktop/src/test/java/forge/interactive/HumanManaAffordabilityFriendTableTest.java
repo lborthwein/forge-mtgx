@@ -28,11 +28,13 @@ import forge.player.HumanManaAffordability.Assessment;
  *   tapped, Pentad Prism untapped with ONE charge counter: Miscalculation ({1}{U}) was offered and stopped on every
  *   priority. The proof counted "Remove a charge counter: Add one mana" as unbounded (UNKNOWN = payable). A source whose
  *   cost removes counters from itself is now capped by the counters it has.</li>
- *   <li>(b) 19-55-39: "No valid target for Sapper's Tunnel and my friend sac'ed it without noticing". Wasteland (the
- *   pantheon skin's Sapper's Tunnel) with no other nonbasic land in play glowed, and was activated targeting itself:
- *   its cost sacrifices the only legal target, so the ability cannot resolve. Its {@code payable} is now false.</li>
+ *   <li>19-55-39, a REGRESSION PIN (review S2-1 of forge-mtgx#113): "No valid target for Sapper's Tunnel and my friend
+ *   sac'ed it without noticing". Wasteland (the pantheon skin's Sapper's Tunnel) with no other nonbasic land in play
+ *   can target only itself. That activation is payable and legal, and its sacrifice can be the point (revolt for Fatal
+ *   Push, a land in the graveyard for delirium), so {@code payable}/{@code payableProof} stay about mana only: it
+ *   stays payable and never "unaffordable". The owner-facing guard is mtgx #1323's client confirm.</li>
  * </ul>
- * Both are proofs: anything unsure still says payable.
+ * The counter cap is a proof: anything unsure still says payable.
  */
 public class HumanManaAffordabilityFriendTableTest extends AITest {
 
@@ -162,10 +164,11 @@ public class HumanManaAffordabilityFriendTableTest extends AITest {
         assertFalse(HumanManaAffordability.payable(me, spell(counterspell)), "still one {T}: never two mana");
     }
 
-    // ------------------------------------------------------------------ (b) the cost sacrifices the only target
+    // ------------------------------------------------------------------ regression pins: mana only (review S2-1)
 
+    /** The 19-55-39 board: Wasteland can target only itself. Its destroy ability stays payable, never "unaffordable". */
     @Test
-    public void owner1022_195539_wastelandWithOnlyItselfToTargetIsNotPlayable() {
+    public void owner1022_195539_wastelandTargetingOnlyItselfStaysPayable() {
         board(PhaseType.MAIN1, true);
         mine("Swamp", false);
         final Card wasteland = mine("Wasteland", false);
@@ -173,57 +176,24 @@ public class HumanManaAffordabilityFriendTableTest extends AITest {
         theirs("Swamp", false);
         game.getAction().checkStateEffects(true);
         final SpellAbility destroy = activated(wasteland);
-        assertTrue(HumanManaAffordability.onlyTargetIsItsSacrificedSource(me, destroy));
-        assertFalse(HumanManaAffordability.payable(me, destroy), "its cost sacrifices its only target");
-        assertEquals(HumanManaAffordability.proof(me, destroy), HumanManaAffordability.Proof.UNAFFORDABLE);
-        // The land still taps for mana: the card's control stays payable, and the destroy ability is still offered.
-        assertTrue(offered(wasteland).contains(destroy), "Forge's legality is unchanged: the click is Forge's");
-        assertEquals(flag(wasteland), Boolean.TRUE, "its mana ability is payable");
-        for (SpellAbility mana : wasteland.getManaAbilities()) {
-            mana.setActivatingPlayer(me);
-            assertTrue(HumanManaAffordability.payable(me, mana));
-        }
+        assertTrue(offered(wasteland).contains(destroy), "Forge offers it: the source is a legal target before costs");
+        assertTrue(HumanManaAffordability.payable(me, destroy), "{T}, sacrifice: nothing to pay with mana");
+        assertNotEquals(HumanManaAffordability.proof(me, destroy), HumanManaAffordability.Proof.UNAFFORDABLE);
+        assertEquals(HumanManaAffordability.proof(me, destroy), HumanManaAffordability.Proof.AFFORDABLE,
+                "a {T}-and-sacrifice cost with no mana is affordable now (glow-audit-1021's constructive proof)");
+        assertEquals(flag(wasteland), Boolean.TRUE);
     }
 
+    /** A source with no mana ability (Bloodtithe Harvester, the only creature): its control stays payable too. */
     @Test
-    public void wastelandWithAnotherNonbasicToTargetIsPlayable() {
+    public void aSelfSacrificeOnlyTargetingItselfKeepsItsControlPayable() {
         board(PhaseType.MAIN1, true);
-        final Card wasteland = mine("Wasteland", false);
-        theirs("Tropical Island", false);
-        game.getAction().checkStateEffects(true);
-        final SpellAbility destroy = activated(wasteland);
-        assertFalse(HumanManaAffordability.onlyTargetIsItsSacrificedSource(me, destroy));
-        assertTrue(HumanManaAffordability.payable(me, destroy));
-    }
-
-    @Test
-    public void myOwnOtherNonbasicIsATargetToo() {
-        board(PhaseType.MAIN1, true);
-        final Card wasteland = mine("Wasteland", false);
-        mine("Ancient Tomb", false);
+        final Card harvester = mine("Bloodtithe Harvester", false);
         theirs("Swamp", false);
         game.getAction().checkStateEffects(true);
-        assertTrue(HumanManaAffordability.payable(me, activated(wasteland)), "Ancient Tomb is a legal target");
-    }
-
-    /** A player is a legal target of "any target": never proven, whatever the board. */
-    @Test
-    public void anyTargetIsNeverOnlyTheSource() {
-        board(PhaseType.MAIN1, true);
-        final Card fanatic = mine("Mogg Fanatic", false);
-        game.getAction().checkStateEffects(true);
-        final SpellAbility ping = activated(fanatic);
-        assertFalse(HumanManaAffordability.onlyTargetIsItsSacrificedSource(me, ping));
-        assertTrue(HumanManaAffordability.payable(me, ping));
-    }
-
-    /** No sacrifice of the source in the cost: no proof (the source stays a legal target). */
-    @Test
-    public void noSelfSacrificeNoProof() {
-        board(PhaseType.MAIN1, true);
-        final Card port = mine("Rishadan Port", false);
-        mine("Island", false);
-        game.getAction().checkStateEffects(true);
-        assertFalse(HumanManaAffordability.onlyTargetIsItsSacrificedSource(me, activated(port)));
+        final SpellAbility pump = activated(harvester);
+        assertTrue(HumanManaAffordability.payable(me, pump));
+        assertNotEquals(HumanManaAffordability.proof(me, pump), HumanManaAffordability.Proof.UNAFFORDABLE);
+        assertEquals(flag(harvester), Boolean.TRUE, "still a reason to stop pass-until or autopass (pass-controls.ts)");
     }
 }

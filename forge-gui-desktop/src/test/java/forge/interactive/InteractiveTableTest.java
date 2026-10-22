@@ -183,6 +183,8 @@ public class InteractiveTableTest extends AITest {
         final List<List<String>> hiddenFrom = List.of(
                 List.of("Shivan Dragon", "Llanowar Elves", "Giant Growth"),
                 List.of("Serra Angel", "Counterspell"));
+        /** Run on Forge's thread after a seat's priority input, before that seat is asked again (review S1-1 test). */
+        final BlockingQueue<Runnable> forgeTasks = new LinkedBlockingQueue<>();
         /** Every message {@link #next} has taken off the wire, in order. */
         final List<JsonObject> seen = new CopyOnWriteArrayList<>();
         final PlayerControllerHuman[] controllers = new PlayerControllerHuman[2];
@@ -240,6 +242,11 @@ public class InteractiveTableTest extends AITest {
                         }
                         continue;
                     }
+                    final Runnable task = forgeTasks.poll();
+                    if (task != null && !closed.get()) {
+                        task.run(); // then the same seat is asked again
+                        continue;
+                    }
                     seat = 1 - seat;
                 }
             }, "test Forge table thread");
@@ -278,6 +285,25 @@ public class InteractiveTableTest extends AITest {
             final JsonObject action = new JsonObject();
             action.addProperty("type", type);
             action.addProperty("controlId", controlId);
+            input.add("action", action);
+            client.write(input + "\n");
+            client.flush();
+        }
+
+        void sendConfirm(final int seat, final String requestId, final String controlId, final boolean confirm)
+                throws IOException {
+            final JsonObject input = new JsonObject();
+            input.addProperty("protocol", "mtgx-forge-interactive/1");
+            input.addProperty("session", SESSION);
+            input.addProperty("type", "input");
+            input.addProperty("seat", seat);
+            input.addProperty("requestId", requestId);
+            input.addProperty("inputId", UUID.randomUUID().toString());
+            input.addProperty("kind", "confirm");
+            final JsonObject action = new JsonObject();
+            action.addProperty("type", "confirm");
+            action.addProperty("controlId", controlId);
+            action.addProperty("confirm", confirm);
             input.add("action", action);
             client.write(input + "\n");
             client.flush();
@@ -488,6 +514,48 @@ public class InteractiveTableTest extends AITest {
             assertNotNull(t.next("request", 0, 30000));
             assertNotNull(t.next("state", 1, 30000));
             assertNull(t.next("state", 0, 1500), "seat 0 is being asked: no waiting view for it");
+        }
+    }
+
+    /**
+     * Review S1-1 (forge-mtgx#113): a modal answer takes no engine gate, so no DEFERRED waiting view is built while the
+     * deciding seat has a modal open. Seat 0 is asked (seat 1 gets its view), passes, and Forge at once changes a life
+     * total and asks seat 0 a modal: the offer inside the modal falls inside the 250 ms window and is deferred, and when
+     * the window ends nothing is sent while the modal stays open. Once seat 0 answers and is asked again, seat 1 gets
+     * its view as before, with the new life total.
+     */
+    @Test(timeOut = 900000)
+    public void noDeferredWaitingViewWhileTheDecidingSeatHasAModalOpen() throws Exception {
+        try (Table t = new Table()) {
+            final JsonObject first = t.next("request", 0, 30000);
+            assertNotNull(first, "Forge waits on seat 0");
+            final JsonObject wait1 = t.next("state", 1, 30000);
+            assertNotNull(wait1, "seat 1's first waiting view");
+            t.forgeTasks.add(() -> {
+                t.players[0].setLife(19, null); // an event that reaches seat 1: it has a view to be sent
+                t.guis[0].showConfirmDialog("Probe the modal", "A modal on seat 0", "Yes", "No", true);
+            });
+            t.send(0, first.get("requestId").getAsString(), first.get("kind").getAsString(),
+                    "passPriority", "priority:pass");
+            JsonObject modal = t.next("request", 0, 30000);
+            while (modal != null && !"modal:showConfirmDialog".equals(modal.get("inputClass").getAsString())) {
+                modal = t.next("request", 0, 30000);
+            }
+            assertNotNull(modal, "seat 0 is asked the modal: " + summary(t.seen));
+            final long gapMs = (modal.get("_atNanos").getAsLong() - wait1.get("_atNanos").getAsLong()) / 1_000_000L;
+            assertTrue(gapMs < InteractiveGuiGame.WAITING_VIEW_MIN_MS,
+                    "the modal came " + gapMs + " ms after seat 1's view: inside the window, so its offer is deferred");
+            assertNull(t.next("state", 1, 1500), "no waiting view while seat 0's modal is open: " + summary(t.seen));
+
+            t.sendConfirm(0, modal.get("requestId").getAsString(), "confirm:yes", true);
+            final JsonObject again = t.next("request", 0, 30000);
+            assertNotNull(again, "seat 0 is asked again once it answered");
+            final JsonObject wait2 = t.next("state", 1, 30000);
+            assertNotNull(wait2, "then seat 1 gets its view as before: " + summary(t.seen));
+            assertEquals(wait2.get("reason").getAsString(), InteractiveGuiGame.WAITING_VIEW_REASON);
+            assertEquals(wait2.getAsJsonObject("view").getAsJsonArray("life").get(0).getAsInt(), 19, wait2.toString());
+            assertTrue(wait2.get("_atNanos").getAsLong() > again.get("_atNanos").getAsLong(),
+                    "sent at seat 0's next request, not before");
         }
     }
 
