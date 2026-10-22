@@ -237,9 +237,18 @@ public final class HumanManaAffordability {
         }
     }
 
+    /**
+     * Can the ability untap a permanent? An Untap or UntapAll effect, a "tap or untap" effect (glow-audit-1021 review:
+     * TapOrUntap / TapOrUntapAll, a creature that untaps a land on entering or by its own ability), or an untap-symbol
+     * {Q} cost (the ability untaps its own permanent as its cost).
+     */
     private static boolean untaps(final SpellAbility sa) {
+        if (sa.getPayCosts() != null && sa.getPayCosts().getCostParts().stream().anyMatch(p -> p instanceof CostUntap)) {
+            return true;
+        }
         for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
-            if (s.getApi() == ApiType.Untap || s.getApi() == ApiType.UntapAll) return true;
+            if (s.getApi() == ApiType.Untap || s.getApi() == ApiType.UntapAll
+                    || s.getApi() == ApiType.TapOrUntap || s.getApi() == ApiType.TapOrUntapAll) return true;
         }
         return false;
     }

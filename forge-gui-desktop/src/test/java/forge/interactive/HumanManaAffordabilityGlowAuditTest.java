@@ -331,6 +331,21 @@ public class HumanManaAffordabilityGlowAuditTest extends AITest {
         assertTrue(forgePays(offered(asunder).get(0)));
     }
 
+    /**
+     * Review S1 (live in the base): a "tap or untap target permanent" ability was not counted as an untap, so with it
+     * untapped and the only Island tapped, a {U} spell was proved unaffordable and hidden. It can untap the Island first.
+     */
+    @Test
+    public void tapOrUntapAbilityKeepsTheProofOpen() {
+        board(PhaseType.MAIN1, true);
+        mine("Island", true);
+        mine("Fatestitcher", false);
+        final Card preordain = hand("Preordain");
+        settle();
+        assertEquals(flag(preordain), Boolean.TRUE, "untap the Island with the tap-or-untap ability, then tap it for {U}");
+        assertNotEquals(HumanManaAffordability.assessPayable(me, spell(preordain)), Assessment.PROVEN_UNAFFORDABLE);
+    }
+
     // ------------------------------------------------------------------ the unknown log never names a hidden card
 
     @Test
