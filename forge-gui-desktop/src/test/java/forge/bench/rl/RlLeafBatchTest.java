@@ -228,6 +228,60 @@ public class RlLeafBatchTest {
         }
     }
 
+    @Test
+    public void smallBatchesStillHonourMessageLimits() throws IOException {
+        final List<byte[]> ps = leaves(11, 8);
+        try (FakeSearchService s = service()) {
+            s.ackLeavesMax = 3;
+            try (RlSearchClient c = connect(s)) {
+                assertValues(c.values(ps), ps);
+            }
+            Assert.assertEquals(s.leafMessages, Arrays.asList(3, 3, 2));
+        }
+        try (FakeSearchService s = service()) {
+            final long cap = ps.stream().mapToLong(p -> 4L + p.length).max().getAsLong();
+            s.ackLeavesBytesMax = cap;
+            s.keepLeafFrames = true;
+            try (RlSearchClient c = connect(s)) {
+                assertValues(c.values(ps), ps);
+            }
+            Assert.assertTrue(s.leafMessages.size() > 1);
+            for (int[] f : s.leafFrames) {
+                Assert.assertTrue(f[1] - 4 <= cap, "message exceeds byte cap");
+            }
+        }
+    }
+
+    @Test
+    public void aLeafLargerThanTheMessageCapIsRefusedBeforeSending() throws IOException {
+        final List<byte[]> ps = leaves(3, 4);
+        try (FakeSearchService s = service()) {
+            s.ackLeavesBytesMax = 1;
+            try (RlSearchClient c = connect(s)) {
+                final IOException e = Assert.expectThrows(IOException.class, () -> c.values(ps));
+                Assert.assertTrue(e.getMessage().contains("leaf bytes"), e.getMessage());
+            }
+            Assert.assertEquals(s.leafFrames.size(), 0);
+        }
+    }
+
+    @Test
+    public void unsupportedOrMalformedCapabilitiesAreRefused() throws IOException {
+        try (FakeSearchService s = service(); RlSearchClient c = connect(s)) {
+            for (String value : new String[] {"-1", "2", "1.5", "4294967297", "null", "\"1\""}) {
+                final JsonObject ack = c.ack.deepCopy();
+                ack.add(RlSearchClient.ACK_LEAVES_CHUNKED, com.google.gson.JsonParser.parseString(value));
+                Assert.expectThrows(RlClient.ServerError.class, () -> c.leavesCaps(ack));
+            }
+            for (String key : new String[] {RlSearchClient.ACK_LEAVES_MAX,
+                    RlSearchClient.ACK_LEAVES_BYTES_MAX, RlSearchClient.ACK_MAX_FRAME}) {
+                final JsonObject ack = c.ack.deepCopy();
+                ack.remove(key);
+                Assert.expectThrows(RlClient.ServerError.class, () -> c.leavesCaps(ack));
+            }
+        }
+    }
+
     // ------------------------------------------------------------------------------------------------ loud failures
 
     @Test
