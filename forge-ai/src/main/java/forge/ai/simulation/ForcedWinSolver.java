@@ -1328,7 +1328,7 @@ public final class ForcedWinSolver {
         if (evalSink != null) {
             evalSink.add(e);
         }
-        if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold) {
+        if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold || cfg.honestProbes && e.worldsRun < cfg.worlds) {
             if (likelyCands != null) {
                 // not forced: a likely-win candidate like the others (Part B)
                 likelyCands.add(0, line);
