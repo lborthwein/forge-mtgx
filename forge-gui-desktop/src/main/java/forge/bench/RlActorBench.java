@@ -860,6 +860,19 @@ public final class RlActorBench {
         if (seeding != null) {
             end.add("seeded", seeding.seeded()); // G3: per seat, what was placed (or why not)
         }
+        if (game != null) {
+            final JsonArray generators = new JsonArray();
+            boolean anyGenerator = false;
+            for (Player p : game.getRegisteredPlayers()) {
+                JsonObject summary = null;
+                if (p.getController() instanceof forge.ai.CubeComboSeat) {
+                    summary = ((forge.ai.CubeComboSeat) p.getController()).cubeCombo().honestGeneratorSummary();
+                }
+                anyGenerator |= summary != null;
+                generators.add(summary);
+            }
+            if (anyGenerator) end.add("honest_generator", generators);
+        }
         out.end = end;
 
         final JsonObject t = new JsonObject();
@@ -884,6 +897,7 @@ public final class RlActorBench {
         t.add("void", end.get("void"));
         t.addProperty("reason", reason);
         t.addProperty("turns", turns);
+        if (end.has("honest_generator")) t.add("honest_generator", end.get("honest_generator"));
         t.addProperty("digest", digest);
         if (digestLb != null) {
             t.addProperty("digest_lb", digestLb);
@@ -1501,6 +1515,11 @@ public final class RlActorBench {
                     }
                     boolean eq = p.end.get("digest").getAsString().equals(t.get("digest").getAsString())
                             && p.end.get("void").isJsonNull();
+                    if (t.has("honest_generator") || p.end.has("honest_generator")) {
+                        final boolean sameSpec = generatorSpecs(t).equals(generatorSpecs(p.end));
+                        row.addProperty("generator_spec_equal", sameSpec);
+                        eq &= sameSpec;
+                    }
                     if (t.has("seeded")) {
                         // cm-curriculum-1009: a seeded tape replays only if the same pieces went to the same places
                         final boolean se = t.get("seeded").equals(p.end.get("seeded"));
@@ -1540,6 +1559,17 @@ public final class RlActorBench {
 
     /** bvw-plr-1023: the replay's label sink (one per JVM), or null. */
     static forge.bench.rl.RlReplayLabeller.Sink labelSink = null;
+
+    /** Config identity, excluding wall time and other diagnostic counters. */
+    static JsonArray generatorSpecs(final JsonObject row) {
+        final JsonArray out = new JsonArray();
+        if (row.has("honest_generator")) {
+            for (JsonElement e : row.getAsJsonArray("honest_generator")) {
+                out.add(e.isJsonNull() ? com.google.gson.JsonNull.INSTANCE : e.getAsJsonObject().get("spec"));
+            }
+        }
+        return out;
+    }
 
     /** bvw-plr-1023: a RECORD endpoint with no server: the frames go nowhere (the tapes are the output). */
     static RlSeat.Endpoint nullRecorder() {

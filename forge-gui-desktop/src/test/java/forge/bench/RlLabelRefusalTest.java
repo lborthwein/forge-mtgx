@@ -66,4 +66,24 @@ public class RlLabelRefusalTest {
         Assert.assertFalse(result.get("equal").getAsBoolean());
         Assert.assertTrue(result.get("error").getAsString().contains("TRAIN"), result.toString());
     }
+
+    @Test
+    public void generatorReplayIdentityIncludesConfigButNotTiming() {
+        JsonObject row = new JsonObject();
+        JsonObject generator = new JsonObject(), spec = new JsonObject();
+        spec.addProperty("worlds", 8);
+        generator.add("spec", spec);
+        generator.addProperty("engine_ms", 1.0);
+        JsonArray seats = new JsonArray();
+        seats.add(generator);
+        seats.add(com.google.gson.JsonNull.INSTANCE);
+        row.add("honest_generator", seats);
+        JsonObject replay = row.deepCopy();
+        replay.getAsJsonArray("honest_generator").get(0).getAsJsonObject().addProperty("engine_ms", 2.0);
+        Assert.assertEquals(RlActorBench.generatorSpecs(row), RlActorBench.generatorSpecs(replay));
+        replay.getAsJsonArray("honest_generator").get(0).getAsJsonObject().getAsJsonObject("spec")
+                .addProperty("worlds", 4);
+        Assert.assertNotEquals(RlActorBench.generatorSpecs(row), RlActorBench.generatorSpecs(replay));
+        Assert.assertNotEquals(RlActorBench.generatorSpecs(row), RlActorBench.generatorSpecs(new JsonObject()));
+    }
 }

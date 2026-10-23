@@ -132,6 +132,8 @@ public final class ForcedWinSolver {
          * information (a line that needs the top card was found on the real order and taken when the worlds agreed).
          */
         public boolean hideOwnLibrary = false;
+        /** BVW opt-in generator: affordance probes also start from a belief-redrawn, own-library-shuffled root. */
+        public boolean honestProbes = false;
         /** search-bones-1015: the width search's wall-time cap per call, ms (1500 = PF5's). */
         public long planMs = 1500;
         /**
@@ -588,7 +590,8 @@ public final class ForcedWinSolver {
         final long t1 = System.nanoTime();
         final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch ? t0 : System.nanoTime());
         engineNanos += System.nanoTime() - t1;
-        if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0) {
+        if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0
+                || cfg.honestProbes && best.worldsRun < cfg.worlds) {
             lastOutcome = "declined";
             noLineKey = key;
             if (best == null) {
@@ -1490,8 +1493,32 @@ public final class ForcedWinSolver {
 
     /** Read the position; the library's affordances are learned only when something we hold could use them. */
     Position readPosition(Game live, List<Integer> knownOrder) {
+        if (cfg.honestProbes) {
+            return forge.bench.PlayerControllerBridge.isolated(live, () -> forge.util.IdScope.detached(() -> {
+                final Game g = honestProbeRoot(live, knownOrder);
+                return reader.read(g, (Player) g.getPlayer(me.getId()), knownOrder, true);
+            }));
+        }
         final Position pos = reader.read(live, me, knownOrder, true);
         return pos;
+    }
+
+    /** The width model's probes copy this root, so no probe starts on the opponent's real hidden cards. */
+    Game honestProbeRoot(Game live, List<Integer> knownOrder) {
+        if (redraw == null || !cfg.hideOwnLibrary || cfg.exact || cfg.frameMemory) {
+            throw new IllegalStateException("refused: dishonest generator probe root");
+        }
+        synchronized (live) {
+            final GameCopier copier = new GameCopier(live, true);
+            copier.setCopyFidelity(1);
+            final Game g = copier.makeCopy();
+            final Player cm = (Player) copier.find(me);
+            final Random rng = new Random(mix(cfg.seed, 0x425657L + decisionIndex));
+            copies++;
+            redraw.apply(live, me, g, cm, rng);
+            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), rng);
+            return g;
+        }
     }
 
     /** A line's engine result. */
