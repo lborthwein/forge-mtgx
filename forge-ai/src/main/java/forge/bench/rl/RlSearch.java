@@ -1807,6 +1807,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (voided != null) {
             o.addProperty("voided", voided);
         }
+        synchronized (this) {
+            if (bigLeafBatches > 0) {
+                // bvw-p3-batch-1023: only when a leaf batch needed more than one frame, so every other summary is unchanged
+                final JsonObject lb = new JsonObject();
+                lb.addProperty("batches", bigLeafBatches);
+                lb.addProperty("frames", bigLeafFrames);
+                lb.addProperty("messages", bigLeafMessages);
+                lb.addProperty("max_leaves", bigLeafMax);
+                o.add("leaf_big", lb);
+            }
+        }
         if (obsVersion != 1) {
             // search-v2-1009: only for an obs-v2 seat, so an S1 game's summary is unchanged
             o.addProperty("obs", obsVersion);
@@ -2001,11 +2012,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             ps.add((byte[]) p);
         }
         final float[] v;
+        leafError.remove();
         try {
-            v = client().values(ps);
+            final RlSearchClient c = client();
+            final long bb = c.bigBatches, bf = c.bigFrames, bm = c.bigMessages;
+            v = c.values(ps);
+            if (c.bigBatches != bb) {
+                // bvw-p3-batch-1023: a batch above one frame, scored in several frames / messages
+                synchronized (this) {
+                    bigLeafBatches++;
+                    bigLeafFrames += c.bigFrames - bf;
+                    bigLeafMessages += c.bigMessages - bm;
+                    bigLeafMax = Math.max(bigLeafMax, ps.size());
+                }
+            }
         } catch (IOException | RuntimeException e) {
             drop();
-            System.err.println("[rlsearch] LEAVES failed: " + e);
+            // bvw-p3-batch-1023: the cause also goes to the look-ahead, whose static-fallback line names it
+            final String why = "LEAVES failed: " + e + " (" + ps.size() + " leaves, "
+                    + RlSearchClient.leavesBytes(ps, 0, ps.size()) + " leaf bytes)";
+            leafError.set(why);
+            System.err.println("[rlsearch] " + why);
             return null;
         }
         final double[] out = new double[v.length];
@@ -2013,6 +2040,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             out[i] = (Math.max(-1.0, Math.min(1.0, v[i])) + 1.0) / 2.0;
         }
         return out;
+    }
+
+    /** Why this thread's last {@link #leafValues} returned null (bvw-p3-batch-1023), or null. */
+    private final ThreadLocal<String> leafError = new ThreadLocal<>();
+    /** Leaf batches above one frame (bvw-p3-batch-1023): batches, frames, messages, the largest batch's leaves. */
+    private long bigLeafBatches = 0, bigLeafFrames = 0, bigLeafMessages = 0, bigLeafMax = 0;
+
+    @Override
+    public String leafError() {
+        return leafError.get();
     }
 
     /** The policy-piloted seat of one play-out: a bridged controller whose asks the search service answers. */
