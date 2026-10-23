@@ -621,6 +621,14 @@ public final class ForcedWinSolver {
         public final String text;
         /** Our library's known top the line relies on (its play-outs keep that many cards in place). */
         public final int knownTop;
+        /**
+         * Lane bvw-plr-1023 (read-only, nothing reads it to decide): how the line's unopposed play-out ended, the losing
+         * opponent's {@code GameLossReason} name (null when it did not win), and the copy's turn when it ended (-1).
+         */
+        public final String endReason;
+        public final int endTurn;
+        /** Lane bvw-plr-1023: the line's kind (the width search's win: storm, drain, enters, ...; "engine"). */
+        public final String how;
 
         Proposal(Eval e) {
             this.line = e.line;
@@ -632,6 +640,9 @@ public final class ForcedWinSolver {
             this.engine = "engine".equals(e.line.how);
             this.text = String.valueOf(e);
             this.knownTop = e.line.knownTop;
+            this.endReason = e.endReason;
+            this.endTurn = e.endTurn;
+            this.how = e.line.how;
         }
 
         /** Verified forced: won unopposed and in every belief world it ran (at least {@code minWorlds}), adversary on. */
@@ -1491,6 +1502,9 @@ public final class ForcedWinSolver {
         int worldsRun;
         String protection = "";
         String failures = "";
+        /** Lane bvw-plr-1023: the unopposed play-out's end (Outcome#endReason, Outcome#endTurn). */
+        String endReason;
+        int endTurn = -1;
 
         Eval(Line line) {
             this.line = line;
@@ -1558,6 +1572,8 @@ public final class ForcedWinSolver {
         final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
         final Outcome u = playout(live, line, mix(seed, 0), 0, -1, wall);
         e.pUnopposed = u.won ? 1 : 0;
+        e.endReason = u.endReason;
+        e.endTurn = u.endTurn;
         if (!u.won) {
             e.failures = "unopposed:" + u.why;
             return e;
@@ -1614,6 +1630,8 @@ public final class ForcedWinSolver {
         final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
         Outcome worst = playout(live, line, mix(seed, 0), -1, -1, wall);
         e.pUnopposed = worst.won ? 1 : 0;
+        e.endReason = worst.endReason;
+        e.endTurn = worst.endTurn;
         e.worldsRun = 1;
         if (worst.won && cfg.adversary && worst.oppHasCounter) {
             int spells = 0;
@@ -1645,6 +1663,9 @@ public final class ForcedWinSolver {
         boolean oppHasCounter;
         String why = "";
         String protectedBy;
+        /** Lane bvw-plr-1023 (read-only): the losing opponent's GameLossReason name when won, and the copy's end turn. */
+        String endReason;
+        int endTurn = -1;
     }
 
     /**
@@ -1709,6 +1730,19 @@ public final class ForcedWinSolver {
             }
             out.won = cm.hasWon() || cm.getOpponents().stream().anyMatch(Player::hasLost);
             out.protectedBy = lineAi.protectedBy;
+            if (out.won) {
+                // lane bvw-plr-1023 (read-only): how the copy ended, for label rows
+                out.endTurn = g.getPhaseHandler().getTurn();
+                // the loser left the game's players when it lost: read it from the registered players
+                for (Player o : g.getRegisteredPlayers()) {
+                    if (o != cm && o.getOutcome() != null && o.getOutcome().lossState != null) {
+                        out.endReason = o.getOutcome().lossState.name();
+                    }
+                }
+                if (out.endReason == null && cm.getOutcome() != null && cm.getOutcome().altWinSourceName != null) {
+                    out.endReason = "OpponentWon"; // an alternate win ("you win the game") with no loser recorded yet
+                }
+            }
             if (ForcedWinEngine.TRACE) {
                 final StringBuilder sb = new StringBuilder();
                 for (Player o : cm.getOpponents()) {
