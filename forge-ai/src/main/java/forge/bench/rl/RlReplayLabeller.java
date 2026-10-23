@@ -125,6 +125,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     public RlReplayLabeller(final HonestLabel.Spec spec, final int turnsWindow, final JsonObject tapeLine,
             final String jarSha, final Game game, final RlKnowledge knowledge, final CardIndex index, final int obs) {
         spec.checkHonest();
+        checkTrainTape(tapeLine);
         if (turnsWindow < 1) {
             throw new IllegalArgumentException("label turns >= 1, not " + turnsWindow);
         }
@@ -141,6 +142,15 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             feat.setVersion(obs);
             feat.reset();
             feat.setKnowledge(knowledge);
+        }
+    }
+
+    /** Labelling is TRAIN-only even though ordinary replay also supports EVAL tapes. */
+    public static void checkTrainTape(final JsonObject tape) {
+        final String mode = tape.has("mode") && !tape.get("mode").isJsonNull()
+                ? tape.get("mode").getAsString() : null;
+        if (!"train".equals(mode) && !"record".equals(mode)) {
+            throw new IllegalArgumentException("refused: value labels need a TRAIN tape (train/record), not " + mode);
         }
     }
 

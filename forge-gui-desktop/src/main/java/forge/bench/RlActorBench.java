@@ -1461,6 +1461,7 @@ public final class RlActorBench {
                 // is honest; checked again here, before the game is built)
                 if (cfg.labelSpec != null) {
                     cfg.labelSpec.checkHonest();
+                    forge.bench.rl.RlReplayLabeller.checkTrainTape(t);
                 }
                 final forge.bench.rl.RlReplayLabeller[] labs = new forge.bench.rl.RlReplayLabeller[1];
                 final int tobs = g.get("obs_schema").getAsInt();
