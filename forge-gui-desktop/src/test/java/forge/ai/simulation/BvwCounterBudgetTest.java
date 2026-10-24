@@ -77,6 +77,19 @@ public class BvwCounterBudgetTest extends SimulationTest {
         Assert.assertEquals(cj.get("evalSteps").getAsInt(), 5000);
         Assert.assertTrue(cj.get("adoptAttack").getAsBoolean());
         Assert.assertTrue(AiProfileUtil.isKnownProfile(AiProfileUtil.HONEST_FORCED_WIN_PROFILE));
+        // the step-1 lineage's counted generator profile: the same seat on counter budgets with adoptAttack
+        Assert.assertTrue(AiProfileUtil.isKnownProfile(AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE));
+        final forge.ai.LobbyPlayerAi lp = new forge.ai.LobbyPlayerAi("c", null);
+        lp.setAiProfile(AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE);
+        Assert.assertEquals(AiProfileUtil.getAIProp(lp, forge.ai.AiProps.FORCED_WIN_HONEST), "true");
+        final String spec = AiProfileUtil.getAIProp(lp, forge.ai.AiProps.FORCED_WIN_SPEC);
+        Assert.assertEquals(spec, AiProfileUtil.HONEST_FORCED_WIN_COUNTED_SPEC);
+        final ForcedWinSolver.Config cc = HonestGenerator.solver(me, fromSpec(spec)).config();
+        Assert.assertTrue(cc.counter && cc.adoptAttack && cc.engineSteps > 0 && cc.evalSteps > 0);
+        final forge.ai.LobbyPlayerAi old = new forge.ai.LobbyPlayerAi("o", null);
+        old.setAiProfile(AiProfileUtil.HONEST_FORCED_WIN_PROFILE);
+        Assert.assertEquals(AiProfileUtil.getAIProp(old, forge.ai.AiProps.FORCED_WIN_SPEC), GENERATOR_SPEC,
+                "the step-0 generator profile is unchanged");
     }
 
     @Test
