@@ -32,12 +32,37 @@ import com.google.gson.JsonObject;
  *       u32 policy_version}, then {@code f32[n]} the observation-only value v(o) in [-1, 1] of each.</li>
  * </ul>
  * Any ERROR frame throws {@link RlClient.ServerError}; transport failures throw {@link IOException}.
+ *
+ * <p>Leaf batches larger than one frame (lane bvw-p3-batch-1023; every wire/1 frame is at most {@link RlWire#MAX_FRAME}
+ * bytes, and before this lane a bigger LEAVES batch threw in {@link RlWire#frameBytes} and the search kept STATIC leaf
+ * values for that decision). A batch within the negotiated frame and message limits is sent exactly as before: one
+ * LEAVES frame, flags 0, the same bytes. A batch above either limit:
+ * <ul>
+ *   <li>to a service whose HELLO_ACK has {@code leaves_chunked = 1} (search_server.py since this lane): ONE LEAVES
+ *       message in several frames. Each frame's payload is itself a LEAVES payload over the next run of leaves (whole
+ *       leaves, in order); every frame but the last carries {@link #FLAG_LEAVES_MORE}; the service answers one VALUES
+ *       for the whole message after the last frame, so it scores the batch together. A message never exceeds the
+ *       ACK's {@code leaves_max} leaves or {@code leaves_bytes_max} LEAVES-payload bytes; a bigger batch is several
+ *       such messages in turn;</li>
+ *   <li>to an older service (no {@code leaves_chunked} in its HELLO_ACK): the batch goes as consecutive single-frame
+ *       LEAVES messages, one VALUES each (the old service answers each frame on its own; the flag is never sent to
+ *       it). Said once per connection on stderr.</li>
+ * </ul>
+ * Either way every leaf gets the network's value; a leaf that cannot fit one frame by itself, or any answer whose count
+ * does not match, throws (the caller's fallback is then loud). Values are written back in the batch's order.
  */
 public final class RlSearchClient implements Closeable {
     public static final String PROTO = "mtgx-rl-search/1";
     public static final int T_SCORE = 0x0050, T_SCORES = 0x0051, T_LEAVES = 0x0052, T_VALUES = 0x0053;
     public static final int SCORES_HEADER = 24;
     public static final int FLAG_SAMPLE = 1;
+    /** LEAVES frame flag (bvw-p3-batch-1023): more frames of the same LEAVES message follow; no answer until the last. */
+    public static final int FLAG_LEAVES_MORE = 2;
+    /** The HELLO_ACK keys of the chunked-LEAVES capability (bvw-p3-batch-1023). */
+    public static final String ACK_LEAVES_CHUNKED = "leaves_chunked", ACK_LEAVES_MAX = "leaves_max",
+            ACK_LEAVES_BYTES_MAX = "leaves_bytes_max", ACK_MAX_FRAME = "max_frame";
+    /** A LEAVES frame's own bytes on top of its leaves: the frame header (u32 len counts the u16 type + u16 flags) and u32 n. */
+    static final int LEAVES_FRAME_OVERHEAD = 4 + 4;
 
     /** One SCORES answer. */
     public static final class Scores {
@@ -57,6 +82,18 @@ public final class RlSearchClient implements Closeable {
     /** The configured read timeout, and the one the socket has now (lane forge-continue-1011). */
     private final int readTimeoutMs;
     private int appliedReadTimeoutMs;
+    /**
+     * The service's chunked-LEAVES capability from its HELLO_ACK (bvw-p3-batch-1023): its version (0 = an older service
+     * without it), the leaves and LEAVES-payload bytes it takes in one message, and the frame limit the leaves are packed
+     * to (the smaller of {@link RlWire#MAX_FRAME} and the ACK's {@code max_frame}).
+     */
+    private int leavesChunked = 0;
+    private int leavesMax = Integer.MAX_VALUE;
+    private long leavesBytesMax = Long.MAX_VALUE;
+    private int frameLimit = RlWire.MAX_FRAME;
+    private boolean saidSplit = false;
+    /** Leaf batches that needed splitting, and the frames and messages they took (bvw-p3-batch-1023). */
+    public long bigBatches, bigFrames, bigMessages;
 
     public RlSearchClient(final String hostPort, final int connectTimeoutMs, final int readTimeoutMs) throws IOException {
         final int c = hostPort.lastIndexOf(':');
@@ -113,7 +150,45 @@ public final class RlSearchClient implements Closeable {
         if (!ack.has("ok") || !ack.get("ok").getAsBoolean()) {
             throw new RlClient.ServerError("hello", "HELLO_ACK not ok: " + ack);
         }
+        leavesCaps(ack);
         return ack;
+    }
+
+    /** Read the chunked-LEAVES capability of a HELLO_ACK (absent = an older service: single frames only). */
+    void leavesCaps(final JsonObject a) throws RlClient.ServerError {
+        try {
+            final long version = a.has(ACK_LEAVES_CHUNKED) ? capLong(a, ACK_LEAVES_CHUNKED) : 0;
+            if (version != 0 && version != 1) {
+                throw new IllegalArgumentException("unsupported leaves_chunked version " + version);
+            }
+            // A versioned capability must supply its limits. Missing, fractional and overflowing numbers must not
+            // silently become unlimited messages or another protocol version through Gson's narrowing conversions.
+            final long lm = version == 1 ? capLong(a, ACK_LEAVES_MAX) : Integer.MAX_VALUE;
+            final long lb = version == 1 ? capLong(a, ACK_LEAVES_BYTES_MAX) : Long.MAX_VALUE;
+            final long mf = version == 1 || a.has(ACK_MAX_FRAME) ? capLong(a, ACK_MAX_FRAME) : RlWire.MAX_FRAME;
+            if (lm < 1 || lb < 1 || mf <= LEAVES_FRAME_OVERHEAD + 4) {
+                throw new IllegalArgumentException("LEAVES limits out of range");
+            }
+            leavesChunked = (int) version;
+            // The response is one VALUES frame, even if a future server advertises a larger message capacity.
+            leavesMax = (int) Math.min(lm, (RlWire.MAX_FRAME - 12L) / 4);
+            leavesBytesMax = lb;
+            frameLimit = (int) Math.min(RlWire.MAX_FRAME, mf);
+        } catch (RuntimeException e) {
+            throw new RlClient.ServerError("hello", "unreadable LEAVES capability in HELLO_ACK " + a + ": " + e);
+        }
+    }
+
+    private static long capLong(final JsonObject a, final String key) {
+        if (!a.has(key) || !a.get(key).isJsonPrimitive() || !a.get(key).getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException("missing or non-numeric " + key);
+        }
+        return a.get(key).getAsBigDecimal().longValueExact();
+    }
+
+    /** The service's chunked-LEAVES version (0 = none: an older service). */
+    public int leavesChunked() {
+        return leavesChunked;
     }
 
     public Scores score(final byte[] decidePayload) throws IOException {
@@ -139,23 +214,158 @@ public final class RlSearchClient implements Closeable {
         return d;
     }
 
-    /** v(o) in [-1, 1] for each DECIDE payload, in order. */
+    /**
+     * v(o) in [-1, 1] for each DECIDE payload, in order. A batch within the frame and message limits goes exactly as
+     * before; a bigger one is split (see the class comment). One call whatever the frames.
+     */
     public float[] values(final List<byte[]> decidePayloads) throws IOException {
         final long t = System.nanoTime();
-        send(T_LEAVES, 0, encodeLeaves(decidePayloads));
-        final ByteBuffer b = ByteBuffer.wrap(expect(T_VALUES).payload).order(ByteOrder.LITTLE_ENDIAN);
-        final int n = b.getInt();
-        b.getInt(); // policy_version
-        if (n != decidePayloads.size() || b.remaining() != 4 * n) {
-            throw new RlClient.ServerError("protocol", "VALUES for " + n + " leaves, sent " + decidePayloads.size());
-        }
-        final float[] v = new float[n];
-        for (int i = 0; i < n; i++) {
-            v[i] = b.getFloat();
+        final float[] v;
+        final long bytes = leavesBytes(decidePayloads, 0, decidePayloads.size());
+        if (LEAVES_FRAME_OVERHEAD + bytes <= frameLimit
+                && decidePayloads.size() <= leavesMax && bytes <= leavesBytesMax) {
+            v = new float[decidePayloads.size()];
+            send(T_LEAVES, 0, encodeLeaves(decidePayloads));
+            readValues(v, 0, decidePayloads.size());
+        } else {
+            v = bigValues(decidePayloads);
         }
         calls++;
         nanos += System.nanoTime() - t;
         return v;
+    }
+
+    /** The leaves' bytes in a LEAVES payload, {@code u32 len} each included ({@code u32 n} not). */
+    static long leavesBytes(final List<byte[]> ps, final int from, final int to) {
+        long s = 0;
+        for (int i = from; i < to; i++) {
+            s += 4L + ps.get(i).length;
+        }
+        return s;
+    }
+
+    /**
+     * The frame runs of a batch: {@code cut[j]} = the first leaf of frame j (and {@code cut[last]} = n), every frame's
+     * LEAVES payload within {@code frameLimit}. A leaf that alone cannot fit a frame throws.
+     */
+    static int[] frameCuts(final List<byte[]> ps, final int frameLimit) throws IOException {
+        final int n = ps.size();
+        final int[] cut = new int[n + 1];
+        int frames = 0;
+        long used = 0;
+        for (int i = 0; i < n; i++) {
+            final long one = 4L + ps.get(i).length;
+            if (LEAVES_FRAME_OVERHEAD + one > frameLimit) {
+                throw new IOException("LEAVES: leaf " + i + " of " + n + " is " + ps.get(i).length
+                        + " bytes and cannot fit one " + frameLimit + "-byte frame");
+            }
+            if (i == 0 || LEAVES_FRAME_OVERHEAD + used + one > frameLimit) {
+                cut[frames++] = i;
+                used = 0;
+            }
+            used += one;
+        }
+        cut[frames++] = n;
+        return java.util.Arrays.copyOf(cut, frames);
+    }
+
+    private float[] bigValues(final List<byte[]> ps) throws IOException {
+        final int n = ps.size();
+        // Validate the entire input before sending any message. A whole leaf cannot be split to satisfy either cap.
+        for (int j = 0; j < n; j++) {
+            final long one = 4L + ps.get(j).length;
+            if (one > leavesBytesMax) {
+                throw new IOException("LEAVES: leaf " + j + " of " + n + " is " + one
+                        + " leaf bytes, above the message limit " + leavesBytesMax);
+            }
+            if (LEAVES_FRAME_OVERHEAD + one > frameLimit) {
+                throw new IOException("LEAVES: leaf " + j + " of " + n + " is " + ps.get(j).length
+                        + " bytes and cannot fit one " + frameLimit + "-byte frame");
+            }
+        }
+        final float[] v = new float[n];
+        bigBatches++;
+        if (leavesChunked < 1) {
+            // an older service: one single-frame LEAVES message per frame run, each answered on its own
+            final int[] cut = frameCuts(ps, frameLimit);
+            final int frames = cut.length - 1;
+            if (!saidSplit) {
+                saidSplit = true;
+                System.err.println("[rlsearch] the search service has no chunked LEAVES (no " + ACK_LEAVES_CHUNKED
+                        + " in its HELLO_ACK): a batch of " + n + " leaves (" + leavesBytes(ps, 0, n) + " bytes) goes as "
+                        + frames + " single-frame LEAVES messages (said once per connection)");
+            }
+            for (int j = 0; j < frames; j++) {
+                send(T_LEAVES, 0, encodeLeaves(ps.subList(cut[j], cut[j + 1])));
+                readValues(v, cut[j], cut[j + 1] - cut[j]);
+                bigFrames++;
+                bigMessages++;
+            }
+            return v;
+        }
+        // chunked: one message per run of leaves within the ACK's leaves_max and leaves_bytes_max (in practice one)
+        int i = 0;
+        while (i < n) {
+            int e = i;
+            long bytes = 0;
+            while (e < n && e - i < leavesMax) {
+                final long one = 4L + ps.get(e).length;
+                if (e > i && bytes + one > leavesBytesMax) {
+                    break;
+                }
+                bytes += one;
+                e++;
+            }
+            final List<byte[]> sub = ps.subList(i, e);
+            final int[] cut = frameCuts(sub, frameLimit);
+            sendMessage(sub, cut, v, i);
+            bigFrames += cut.length - 1;
+            bigMessages++;
+            i = e;
+        }
+        return v;
+    }
+
+    /**
+     * One LEAVES message over {@code sub} in the frames {@code cut} gives ({@link #FLAG_LEAVES_MORE} on all but the last),
+     * then its one VALUES, written to {@code v[off ..]}.
+     */
+    private void sendMessage(final List<byte[]> sub, final int[] cut, final float[] v, final int off) throws IOException {
+        final int frames = cut.length - 1;
+        try {
+            for (int j = 0; j < frames; j++) {
+                send(T_LEAVES, j < frames - 1 ? FLAG_LEAVES_MORE : 0, encodeLeaves(sub.subList(cut[j], cut[j + 1])));
+            }
+        } catch (IOException e) {
+            // the service may have refused the message (ERROR, then close) while frames were still going out: its
+            // reason is the better error
+            try {
+                expect(T_VALUES);
+            } catch (RlClient.ServerError se) {
+                se.addSuppressed(e);
+                throw se;
+            } catch (IOException | RuntimeException e2) {
+                e.addSuppressed(e2);
+            }
+            throw e;
+        }
+        readValues(v, off, sub.size());
+    }
+
+    /** One VALUES answer for {@code n} leaves, written to {@code v[off .. off + n)}. */
+    private void readValues(final float[] v, final int off, final int n) throws IOException {
+        final ByteBuffer b = ByteBuffer.wrap(expect(T_VALUES).payload).order(ByteOrder.LITTLE_ENDIAN);
+        if (b.remaining() < 8) {
+            throw new RlClient.ServerError("protocol", "VALUES shorter than its header: " + b.remaining());
+        }
+        final int got = b.getInt();
+        b.getInt(); // policy_version
+        if (got != n || b.remaining() != 4L * n) {
+            throw new RlClient.ServerError("protocol", "VALUES for " + got + " leaves, sent " + n);
+        }
+        for (int i = 0; i < n; i++) {
+            v[off + i] = b.getFloat();
+        }
     }
 
     static byte[] encodeLeaves(final List<byte[]> payloads) {

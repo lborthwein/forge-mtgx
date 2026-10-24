@@ -1323,6 +1323,11 @@ public final class LookaheadSearch {
         /** Decision thread: one value per leaf payload, P(the seat wins) in [0, 1], in order; null = failed. */
         double[] leafValues(List<Object> payloads);
 
+        /** Decision thread: why the last {@link #leafValues} returned null (the static-fallback line names it), or null. */
+        default String leafError() {
+            return null;
+        }
+
         /** Play-out thread: the searching seat's controller for a policy play-out that starts with {@code first}. */
         PlayoutSeat playoutSeat(Object copyCtx, Game g, Player me, FirstAction first, long seed, LeafProbe probe);
     }
@@ -2891,7 +2896,8 @@ public final class LookaheadSearch {
     /**
      * S1 value leaf: replace one decision's static leaf values by the hooks' P(win) (terminal play-outs 1 / 0 / 0.5). One
      * call carries every non-terminal leaf, world-major then candidate-minor. On a failure the decision keeps its static
-     * values (all of them: a decision never mixes the two scales) and the fallback is counted.
+     * values (all of them: a decision never mixes the two scales) and the fallback is counted. Every fallback is said on
+     * stderr with its cause ("[lookahead] value leaf failed, static fallback: ...", bvw-p3-batch-1023).
      */
     private void valueLeaves(double[][] values, Rollout[][] outs, boolean[] ok, int k) {
         final int n = values.length;
@@ -2904,6 +2910,7 @@ public final class LookaheadSearch {
                     if (r.leafPayload == null) {
                         stats.leafFallbacks++;
                         stats.leafLastError = "a non-terminal play-out has no leaf payload";
+                        staticFallbackLine(-1);
                         return;
                     }
                     leaves.add(r.leafPayload);
@@ -2914,10 +2921,12 @@ public final class LookaheadSearch {
         double[] p = null;
         if (!leaves.isEmpty()) {
             final long t = System.nanoTime();
+            boolean threw = false;
             try {
                 p = hooks.leafValues(leaves);
             } catch (RuntimeException e) {
                 p = null;
+                threw = true;
                 stats.leafLastError = String.valueOf(e);
             }
             stats.leafNanos += System.nanoTime() - t;
@@ -2925,8 +2934,12 @@ public final class LookaheadSearch {
                 stats.leafFallbacks++;
                 if (p != null) {
                     stats.leafLastError = "leaf values: " + p.length + " for " + leaves.size() + " leaves";
+                } else if (!threw) {
+                    // bvw-p3-batch-1023: the hook's own reason (it used to be lost: "static fallback: null")
+                    final String why = hooks.leafError();
+                    stats.leafLastError = why != null ? why : "the value hook returned no values";
                 }
-                System.err.println("[lookahead] value leaf failed, static fallback: " + stats.leafLastError);
+                staticFallbackLine(leaves.size());
                 return;
             }
             stats.leafCalls++;
@@ -2943,6 +2956,15 @@ public final class LookaheadSearch {
         for (int i = 0; i < where.size(); i++) {
             values[where.get(i)[0]][where.get(i)[1]] = p[i];
         }
+    }
+
+    /**
+     * Every value-leaf static fallback, loud (bvw-p3-batch-1023): the cause, the leaves that keep static values (-1 =
+     * not collected) and the running count. The line's prefix is the one Stage A's leafq.py counts.
+     */
+    private void staticFallbackLine(int leaves) {
+        System.err.println("[lookahead] value leaf failed, static fallback: " + stats.leafLastError + " [STATIC leaf values"
+                + (leaves >= 0 ? " for " + leaves + " leaves" : "") + "; leafFallbacks " + stats.leafFallbacks + "]");
     }
 
     /**
