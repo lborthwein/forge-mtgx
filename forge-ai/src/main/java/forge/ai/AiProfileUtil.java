@@ -110,12 +110,14 @@ public class AiProfileUtil {
     /**
      * bvw-step1-build-1024: the BVW generator of the step-1 lineage: HonestForcedWin on host-independent counter budgets
      * (no wall clock; caps calibrated on the step-0 pilot games, where the ms budgets bound 3 of 7,447 decisions on the
-     * Studio) with adoptAttack (an adopted line whose first step is our attack is declared). HonestForcedWin is unchanged.
+     * Studio: engine steps max 4,457 and copied cards max 57,186 per search, play-out steps max 1,216 per evaluating
+     * decision; enginePathCards is the memory guard) with adoptAttack (an adopted line whose first step is our attack is declared). HonestForcedWin is unchanged.
      */
     public static final String HONEST_FORCED_WIN_COUNTED_PROFILE = "HonestForcedWinCounted";
     /** bvw-step1-build-1024: the counted generator's solver spec (FORCED_WIN_SPEC). */
     public static final String HONEST_FORCED_WIN_COUNTED_SPEC = "hideOwnLibrary=true,defense=false,worlds=8,cycles=true,"
-            + "threshold=1.0,budget=counter,engineSteps=6000,evalSteps=1750,adoptAttack=true";
+            + "threshold=1.0,budget=counter,engineSteps=6000,evalSteps=1750,engineCards=60000,enginePathCards=20000,"
+            + "adoptAttack=true";
     /** mtgx (lane solver-gaps-1015, Part B): Forge AI with likely-win lines alone (no forced-win search or defense). */
     public static final String LIKELY_WIN_PROFILE = "LikelyWin";
 

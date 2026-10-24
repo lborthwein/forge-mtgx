@@ -56,6 +56,10 @@ final class ForcedWinEngine {
          */
         long steps;
         int deadlineStops, capStops;
+        /** bvw-step1-build-1024 (read-only): cards in the game copies the searches made (a copy's cost, time and memory). */
+        long cards;
+        /** bvw-step1-build-1024 (read-only): branches not entered because the path's copies would exceed pathCards. */
+        int pathPrunes;
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
@@ -126,6 +130,14 @@ final class ForcedWinEngine {
         /** The wall (System.nanoTime()); 0 = none. */
         long wall;
         private final AttackGuard attackGuard = new AttackGuard();
+        /**
+         * bvw-step1-build-1024 (0 = none, the default, and then nothing changes): budget=counter's deterministic stand-in
+         * for the wall: this seat's priority answers and combat declarations in one play-out or engine move, at most.
+         * Past it the play-out (or move) is cut as at the wall (an engine loop that keeps asking the seat, such as a
+         * declaration the rules refuse for ever, ends here instead of running without bound).
+         */
+        long callLimit;
+        private long calls;
 
         GuardedAi(Game g, Player p, forge.LobbyPlayer lp) {
             super(g, p, lp);
@@ -134,6 +146,18 @@ final class ForcedWinEngine {
         GuardedAi bounded(long wall) {
             this.wall = wall;
             return this;
+        }
+
+        /** bvw-step1-build-1024: cap this seat's calls (budget=counter; 0 = none). */
+        GuardedAi callLimited(long limit) {
+            this.callLimit = limit;
+            return this;
+        }
+
+        private void checkCalls(String where) {
+            if (callLimit > 0 && ++calls > callLimit) {
+                throw new OutOfBudget("calls: " + where + " (" + callLimit + ")");
+            }
         }
 
         /** Attack declarations of this seat the rules refused. */
@@ -148,6 +172,7 @@ final class ForcedWinEngine {
 
         @Override
         public final void declareAttackers(Player attacker, Combat combat) {
+            checkCalls("attack declaration");
             if (attackGuard.next(combat, wall) == 0) {
                 declareFirst(attacker, combat);
             } else {
@@ -158,12 +183,14 @@ final class ForcedWinEngine {
         @Override
         public void declareBlockers(Player defender, Combat combat) {
             checkWall(wall, "block declaration");
+            checkCalls("block declaration");
             super.declareBlockers(defender, combat);
         }
 
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             checkWall(wall, "priority");
+            checkCalls("priority");
             return super.chooseSpellAbilityToPlay();
         }
     }
@@ -202,6 +229,19 @@ final class ForcedWinEngine {
          * past it no new node starts (budget=counter's deterministic stand-in for the engine deadline).
          */
         int totalSteps;
+        /** bvw-step1-build-1024 (0 = none): budget=counter's per-seat call cap in each move ({@link GuardedAi#callLimit}). */
+        long callLimit;
+        /**
+         * bvw-step1-build-1024 (0 = none, the default): the cards one search's game copies may hold in all; past it no new
+         * node starts. Copying dominates the engine's time and memory, so this is budget=counter's stand-in for the engine
+         * deadline (a deep loop line on a large board grows the copies; steps alone do not see it).
+         */
+        long totalCards;
+        /**
+         * bvw-step1-build-1024 (0 = none, the default): budget=counter's memory guard: the cards the copies on the current
+         * DFS path (every one alive) may hold; a deeper node is not entered (as at the depth limit).
+         */
+        long pathCards;
     }
 
     /** A search node: a game copy at our priority, with its own id scope. */
@@ -216,6 +256,8 @@ final class ForcedWinEngine {
         /** search-bones-1015 (c): the node this one was reached from, and this node's progress vector. */
         Node parent;
         long[] pv;
+        /** bvw-step1-build-1024: the cards in this node's copy. */
+        int cards;
     }
 
     // ------------------------------------------------------------------ (c) cycles with progress (search-bones-1015)
@@ -437,6 +479,7 @@ final class ForcedWinEngine {
         // the node after the last repetition that progressed: a REPEAT move to go on from
         final Node n = new Node();
         n.g = cur.g;
+        n.cards = cur.cards;
         n.me = cur.me;
         n.ids = cur.ids;
         n.turn = cur.turn;
@@ -456,7 +499,7 @@ final class ForcedWinEngine {
     private final Set<String> seen = new HashSet<>();
     private int startTurn;
     /** bvw-step1-build-1024: the move steps when this search began, and which budget stopped it (diagnostics). */
-    private long stepBase;
+    private long stepBase, cardBase, pathCards;
     private boolean stoppedByTime, stoppedByCap;
     /**
      * Part B (solver-gaps-1015): when not null, the search also keeps this turn's non-winning lines with the best static
@@ -508,6 +551,7 @@ final class ForcedWinEngine {
         try {
             final ForcedWinEngine e = new ForcedWinEngine(lim, st, deadline, seed);
             e.stepBase = st.steps;
+            e.cardBase = st.cards;
             held[0] = e;
             if (likelyOut != null) {
                 e.collect = new ArrayList<>();
@@ -520,6 +564,8 @@ final class ForcedWinEngine {
                 root.g = copier.makeCopy();
                 root.me = (Player) copier.find(liveMe);
                 st.copies++;
+                root.cards = cardCount(root.g);
+                st.cards += root.cards;
                 final Random rng = new Random(LookaheadSearch.mix(seed, 2));
                 if (lim.redraw != null) {
                     lim.redraw.apply(live, liveMe, root.g, root.me, rng); // honest-belief-1020
@@ -589,6 +635,20 @@ final class ForcedWinEngine {
         }
     }
 
+    /** bvw-step1-build-1024: the cards in a game (every player's zones and the stack): a copy's size. */
+    static int cardCount(Game g) {
+        int n = g.getStack().size();
+        for (Player p : g.getPlayers()) {
+            for (ZoneType z : COUNTED_ZONES) {
+                n += p.getCardsIn(z).size();
+            }
+        }
+        return n;
+    }
+
+    private static final ZoneType[] COUNTED_ZONES = {ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard,
+            ZoneType.Battlefield, ZoneType.Exile, ZoneType.Command};
+
     static Object cloneScope(Object captured) {
         if (!(captured instanceof AtomicInteger[] a)) {
             return captured;
@@ -609,6 +669,10 @@ final class ForcedWinEngine {
             stoppedByCap = true; // bvw-step1-build-1024: budget=counter's step cap (0 = off: never here)
             return true;
         }
+        if (lim.totalCards > 0 && st.cards - cardBase >= lim.totalCards) {
+            stoppedByCap = true; // bvw-step1-build-1024: budget=counter's copied-card cap (0 = off: never here)
+            return true;
+        }
         if (System.nanoTime() > deadline) {
             stoppedByTime = true;
             return true;
@@ -617,6 +681,19 @@ final class ForcedWinEngine {
     }
 
     private List<Step> dfs(Node node, int depth) {
+        if (lim.pathCards > 0 && pathCards + node.cards > lim.pathCards) {
+            st.pathPrunes++; // bvw-step1-build-1024: budget=counter's memory guard (0 = off: never here)
+            return null;
+        }
+        pathCards += node.cards;
+        try {
+            return dfs0(node, depth);
+        } finally {
+            pathCards -= node.cards;
+        }
+    }
+
+    private List<Step> dfs0(Node node, int depth) {
         if (out() || depth >= lim.depth) {
             return null;
         }
@@ -1185,16 +1262,19 @@ final class ForcedWinEngine {
             final Game g = copier.makeCopy();
             final Player me = (Player) copier.find(node.me);
             st.copies++;
+            final int copyCards = cardCount(g);
+            st.cards += copyCards;
             final MoveAi ai = new MoveAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn);
             // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the wall
             // (bvw-step1-build-1024: none with budget=counter: no wall and no deadline, so per-move maxSteps bounds it)
             final long wall = lim.wall != 0 ? lim.wall : deadline == Long.MAX_VALUE ? 0L : deadline;
-            ai.bounded(wall);
+            ai.bounded(wall).callLimited(lim.callLimit);
             held[0] = ai;
             me.dangerouslySetController(ai);
             for (Player o : g.getPlayers()) {
                 if (o != me) {
-                    o.dangerouslySetController(new GuardedAi(g, o, o.getController().getLobbyPlayer()).bounded(wall));
+                    o.dangerouslySetController(new GuardedAi(g, o, o.getController().getLobbyPlayer()).bounded(wall)
+                            .callLimited(lim.callLimit));
                 }
             }
             final PhaseHandler ph = g.getPhaseHandler();
@@ -1217,6 +1297,7 @@ final class ForcedWinEngine {
             }
             final Node child = new Node();
             child.g = g;
+            child.cards = copyCards;
             child.me = me;
             child.turn = ph.getTurn();
             child.ids = cloneScope(forge.util.IdScope.capture());

@@ -296,7 +296,16 @@ public final class StepSearch {
                 }
             };
             LookaheadSearch.givePriorityTo(c.getPhaseHandler(), cp);
-            bc.chooseSpellAbilityToPlay();
+            try {
+                bc.chooseSpellAbilityToPlay();
+            } catch (RuntimeException | StackOverflowError e) {
+                // the copy's own handling of the chosen answer (targets, costs) after the search: the search's result,
+                // when the tap has it, stands; an error before it is an error row
+                if (got[0] == null) {
+                    throw e;
+                }
+                res.error = "after the search: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
             final JsonObject ack = search.servedAck();
             res.backend = ack == null || !ack.has("value_backend") ? null : ack.get("value_backend");
             checkBackend(ack);

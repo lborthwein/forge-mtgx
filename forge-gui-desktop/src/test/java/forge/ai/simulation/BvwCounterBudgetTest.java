@@ -176,6 +176,38 @@ public class BvwCounterBudgetTest extends SimulationTest {
         Assert.assertEquals(LookaheadSearch.fingerprint(g), before, "labelling moved the game");
     }
 
+    @Test(timeOut = 300000)
+    public void counterCapsStopTheEngineDeterministically() {
+        // a lethal attacker against an empty board: the engine finds [ATTACK]; a 1-card budget stops it before any move
+        final Game g = BvwAdoptAttackTest.lethalBoard();
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Limits lim = new ForcedWinEngine.Limits();
+        final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+        final ForcedWinPlanner.Line free = ForcedWinEngine.search(g, me, lim, st, Long.MAX_VALUE, 7L);
+        Assert.assertNotNull(free, st.summary());
+        Assert.assertTrue(st.cards > 0 && st.steps > 0, "cards " + st.cards + " steps " + st.steps);
+        Assert.assertEquals(st.deadlineStops, 0);
+        final ForcedWinEngine.Limits capped = new ForcedWinEngine.Limits();
+        capped.totalCards = 1; // the root copy alone exceeds it
+        final ForcedWinEngine.Stats st2 = new ForcedWinEngine.Stats();
+        Assert.assertNull(ForcedWinEngine.search(g, me, capped, st2, Long.MAX_VALUE, 7L), st2.summary());
+        Assert.assertEquals(st2.capStops, 1);
+        Assert.assertEquals(st2.nodes, 0);
+        // the memory guard: a path whose copies would exceed pathCards is not entered (the root, here)
+        final ForcedWinEngine.Limits shallow = new ForcedWinEngine.Limits();
+        shallow.pathCards = 1;
+        final ForcedWinEngine.Stats st3 = new ForcedWinEngine.Stats();
+        Assert.assertNull(ForcedWinEngine.search(g, me, shallow, st3, Long.MAX_VALUE, 7L), st3.summary());
+        Assert.assertTrue(st3.pathPrunes >= 1 && st3.nodes == 0, "prunes " + st3.pathPrunes);
+        // a seat's calls past the cap end the move as the wall did
+        final ForcedWinEngine.GuardedAi ai = new ForcedWinEngine.GuardedAi(g, me, me.getController().getLobbyPlayer());
+        ai.callLimited(2);
+        ai.chooseSpellAbilityToPlay();
+        ai.chooseSpellAbilityToPlay();
+        Assert.assertThrows(ForcedWinEngine.OutOfBudget.class, ai::chooseSpellAbilityToPlay);
+        Assert.assertTrue(fromSpec("budget=counter,defense=false,engineCards=900").engineCards == 900);
+    }
+
     @Test
     public void engineStepsCapAndMeterAreReadOnly() {
         final ForcedWinEngine.Limits lim = new ForcedWinEngine.Limits();
