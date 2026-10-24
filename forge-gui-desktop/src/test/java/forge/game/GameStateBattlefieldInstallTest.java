@@ -7,6 +7,7 @@ import forge.card.CardStateName;
 import forge.card.ColorSet;
 import forge.game.card.Card;
 import forge.game.card.CounterEnumType;
+import forge.game.combat.CombatUtil;
 import forge.game.cost.Cost;
 import forge.game.event.GameEventCardChangeZone;
 import forge.game.player.DelayedReveal;
@@ -262,5 +263,83 @@ public class GameStateBattlefieldInstallTest extends AITest {
         assertEquals(named(game.getPlayers().get(0), "Bottomless Pool // Locker Room").getCurrentStateName(),
                 CardStateName.LeftSplit);
         assertTrue(asked.isEmpty(), String.join("\n", asked));
+    }
+
+    // --- review round (fork #116): choices made as a card enters come only from the record ---------------------------
+
+    /** True-Name Nemesis on the AI's side, protected from the human: its chosen player is recorded and restored. */
+    static final String TNN = String.join("\n",
+            "turn=6", "activeplayer=human", "activephase=MAIN1", "humanlife=20", "ailife=20",
+            "humanhand=Lightning Bolt", "humanlibrary=Island;Island;Island", "humanbattlefield=Mountain;Grizzly Bears",
+            "aihand=", "ailibrary=Island;Island;Island", "aibattlefield=True-Name Nemesis|ChosenPlayer:P0");
+
+    @Test
+    public void trueNameNemesisKeepsItsRecordedPlayerAndRoundTrips() {
+        applied(TNN);
+        assertChosenAndProtected(game);
+
+        // the writer records the choice, and that text installs the same way
+        final GameState dump = new GameState();
+        dump.initFromGame(game);
+        final String text = dump.toString();
+        String tnnEntry = null;
+        for (String line : text.split("\\R")) {
+            if (line.startsWith("p1battlefield=")) { // the writer keys seats p0/p1
+                for (String entry : line.substring("p1battlefield=".length()).split(";")) {
+                    if (entry.startsWith("True-Name Nemesis")) {
+                        tnnEntry = entry;
+                    }
+                }
+            }
+        }
+        assertNotNull(tnnEntry, "the dump has the Nemesis:\n" + text);
+        assertTrue(tnnEntry.contains("|ChosenPlayer:P0"), "the dump records the chosen player: " + tnnEntry);
+        applied(text);
+        assertChosenAndProtected(game);
+    }
+
+    private void assertChosenAndProtected(final Game g) {
+        assertTrue(asked.isEmpty(), String.join("\n", asked));
+        final Player human = g.getPlayers().get(0);
+        final Card tnn = named(g.getPlayers().get(1), "True-Name Nemesis");
+        assertNotNull(tnn);
+        assertEquals(tnn.getChosenPlayer(), human, "the recorded player");
+        assertFalse(CombatUtil.canBlock(tnn, named(human, "Grizzly Bears")), "the chosen player's creature can't block it");
+        final Card bolt = human.getCardsIn(ZoneType.Hand).get(0);
+        final SpellAbility sa = bolt.getFirstSpellAbility();
+        sa.setActivatingPlayer(human);
+        assertFalse(tnn.canBeTargetedBy(sa), "the chosen player's Lightning Bolt can't target it");
+    }
+
+    /**
+     * KNOWN GAP (documented in setupPlayerState): "As Tibalt enters, you get an emblem" is an entry replacement, and
+     * GameState holds no emblems, so a recorded Tibalt installs without its emblem. This pins today's behaviour; the
+     * mtgx exporters refuse such a position. Before #116 the emblem came from replaying the entry.
+     */
+    @Test
+    public void tibaltInstallsWithoutItsEmblemKnownGap() {
+        applied(POSITION.replace("aibattlefield=", "aibattlefield=Valki, God of Lies|Modal|Counters:LOYALTY=5;"));
+        assertTrue(asked.isEmpty(), String.join("\n", asked));
+        final Player ai = game.getPlayers().get(1);
+        final Card tibalt = named(ai, "Valki, God of Lies");
+        assertNotNull(tibalt);
+        assertEquals(tibalt.getCurrentStateName(), CardStateName.Backside);
+        assertEquals(tibalt.getName(), "Tibalt, Cosmic Impostor");
+        assertEquals(tibalt.getCounters(CounterEnumType.LOYALTY), 5);
+        assertEquals(names(ai, ZoneType.Command), List.of(), "no emblem: the record cannot carry one");
+    }
+
+    /**
+     * KNOWN GAP (documented in setupPlayerState): the record has no copy state, so a clone installs as itself and the
+     * end-of-install state-based check puts a 0/0 clone into the graveyard. Pinned; the mtgx exporters refuse a cloned
+     * permanent, and a CopyOf field is queued for a later jar.
+     */
+    @Test
+    public void aCloneInstallsAsItselfKnownGap() {
+        applied(POSITION.replace("aibattlefield=", "aibattlefield=Phantasmal Image;Phyrexian Metamorph;"));
+        assertTrue(asked.isEmpty(), String.join("\n", asked));
+        final Player ai = game.getPlayers().get(1);
+        assertEquals(names(ai, ZoneType.Graveyard), List.of("Phantasmal Image", "Phyrexian Metamorph"));
+        assertEquals(names(ai, ZoneType.Battlefield), AI_BATTLEFIELD);
     }
 }
