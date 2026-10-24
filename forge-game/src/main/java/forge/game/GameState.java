@@ -89,6 +89,7 @@ public class GameState {
     private final Map<Card, CardCollection> cardToChosenCards = new HashMap<>();
     private final Map<Card, String> cardToChosenType = new HashMap<>();
     private final Map<Card, String> cardToChosenType2 = new HashMap<>();
+    private final Map<Card, Player> cardToChosenPlayer = new HashMap<>();
     private final Map<Card, List<String>> cardToRememberedId = new HashMap<>();
     private final Map<Card, List<String>> cardToImprintedId = new HashMap<>();
     private final Map<Card, List<String>> cardToMergedCards = new HashMap<>();
@@ -101,7 +102,6 @@ public class GameState {
     private final Map<String, String> abilityString = new HashMap<>();
 
     private final Set<Card> cardsReferencedByID = new HashSet<>();
-    private final Set<Card> cardsWithoutETBTrigs = new HashSet<>();
 
     private String tChangePlayer = "NONE";
     private String tChangePhase = "NONE";
@@ -561,6 +561,11 @@ public class GameState {
             if (c.hasChosenType2()) {
                 newText.append("|ChosenType2:").append(c.getChosenType2());
             }
+            // "as this enters, choose a player" (True-Name Nemesis): the battlefield install runs no entry replacement,
+            // so the choice has to be in the record
+            if (c.hasChosenPlayer()) {
+                newText.append("|ChosenPlayer:").append(getPlayerString(c.getChosenPlayer()));
+            }
             if (!c.getNamedCard().isEmpty()) {
                 newText.append("|NamedCard:").append(c.getNamedCard());
             }
@@ -815,6 +820,7 @@ public class GameState {
         cardToChosenCards.clear();
         cardToChosenType.clear();
         cardToChosenType2.clear();
+        cardToChosenPlayer.clear();
         cardToMergedCards.clear();
         cardToScript.clear();
         cardAttackMap.clear();
@@ -1310,6 +1316,11 @@ public class GameState {
             c.setChosenType2(entry.getValue());
         }
 
+        // Chosen player
+        for (Entry<Card, Player> entry : cardToChosenPlayer.entrySet()) {
+            entry.getKey().setChosenPlayer(entry.getValue());
+        }
+
         // Named card
         for (Entry<Card, List<String>> entry : cardToNamedCard.entrySet()) {
             Card c = entry.getKey();
@@ -1456,12 +1467,23 @@ public class GameState {
                         c.setEntityAttachedTo(new CardCopyService(c).copyCard(true));
                     }
 
-                    if (cardsWithoutETBTrigs.contains(c)) {
-                        p.getGame().getAction().moveTo(ZoneType.Battlefield, c, null, null);
-                    } else {
-                        p.getZone(ZoneType.Hand).add(c);
-                        p.getGame().getAction().moveToPlay(c, null, null);
+                    // The record is a permanent that is already on the battlefield. It goes there from no zone,
+                    // the move |NoETBTrigs always made, which runs no ReplacementType.Moved effect and no ETB
+                    // trigger. Every card now goes this way. The old move from the hand replayed the card's entry:
+                    // a shockland asked to pay 2 life and the position lost that life, a clone asked what to copy,
+                    // and an installed Containment Priest exiled the creature. The two things the old move gave
+                    // the card are kept: its timestamp (CR 613.7d) and a Room's door state.
+                    // Choices made as a card enters therefore come only from the record (ChosenColor, ChosenType,
+                    // ChosenType2, ChosenPlayer, NamedCard, ChosenCards). Known gaps, which the record cannot carry:
+                    // - an "as this enters, you get an emblem" card (Tibalt, Cosmic Impostor) installs without its
+                    //   emblem, since GameState holds no emblems;
+                    // - a clone's copy state: a Phantasmal Image or Phyrexian Metamorph installs as itself and the
+                    //   end-of-install state-based check puts the 0/0 into the graveyard.
+                    c.setGameTimestamp(p.getGame().getNextTimestamp());
+                    if (c.isSplitCard() && c.getCastSA() == null) {
+                        c.updateRooms();
                     }
+                    p.getGame().getAction().moveToPlay(c, null, null);
 
                     c.setTapped(tapped);
                     c.setSickness(sickness);
@@ -1709,6 +1731,8 @@ public class GameState {
                     cardToChosenType.put(c, info.substring(info.indexOf(':') + 1));
                 } else if (info.startsWith("ChosenType2:")) {
                     cardToChosenType2.put(c, info.substring(info.indexOf(':') + 1));
+                } else if (info.startsWith("ChosenPlayer:")) {
+                    cardToChosenPlayer.put(c, parsePlayerString(player.getGame(), info.substring(info.indexOf(':') + 1)));
                 } else if (info.startsWith("ChosenCards:")) {
                     CardCollection chosen = new CardCollection();
                     String[] idlist = info.substring(info.indexOf(':') + 1).split(",");
@@ -1738,7 +1762,7 @@ public class GameState {
                         cardAttackMap.put(c, null);
                     }
                 } else if (info.equals("NoETBTrigs")) {
-                    cardsWithoutETBTrigs.add(c);
+                    // Still accepted, and now what every battlefield card gets (see setupPlayerState).
                 } else if (info.equals("Foretold")) {
                     c.setForetold(true);
                     c.turnFaceDown(true);
