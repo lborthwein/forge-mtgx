@@ -50,6 +50,12 @@ final class ForcedWinEngine {
         long nanos;
         /** search-bones-1015 (c): nodes pruned by the progress table, loops found, body repetitions applied. */
         int pruned, loops, loopReps, loopWins;
+        /**
+         * bvw-step1-build-1024 (read-only): move steps played (mainLoopStep calls inside moves), searches stopped by the
+         * deadline, and by a node or step cap.
+         */
+        long steps;
+        int deadlineStops, capStops;
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
@@ -191,6 +197,11 @@ final class ForcedWinEngine {
         int ownKnownTop = -1;
         /** honest-belief-1020: the solver's re-draw of the opponents' hidden cards at the root (null = off). */
         ForcedWinSolver.Redraw redraw;
+        /**
+         * bvw-step1-build-1024 (0 = none, the default, and then nothing changes): the move steps one search may play;
+         * past it no new node starts (budget=counter's deterministic stand-in for the engine deadline).
+         */
+        int totalSteps;
     }
 
     /** A search node: a game copy at our priority, with its own id scope. */
@@ -444,6 +455,9 @@ final class ForcedWinEngine {
     private final long seed;
     private final Set<String> seen = new HashSet<>();
     private int startTurn;
+    /** bvw-step1-build-1024: the move steps when this search began, and which budget stopped it (diagnostics). */
+    private long stepBase;
+    private boolean stoppedByTime, stoppedByCap;
     /**
      * Part B (solver-gaps-1015): when not null, the search also keeps this turn's non-winning lines with the best static
      * value of the position they reach (Forge's GameStateEvaluator), as likely-win candidates.
@@ -484,6 +498,7 @@ final class ForcedWinEngine {
     static Line search(Game live, Player liveMe, Limits lim, Stats st, long deadline, long seed, List<Line> likelyOut,
             int keep) {
         final long t0 = System.nanoTime();
+        final ForcedWinEngine[] held = new ForcedWinEngine[1];
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
         final Object prevCache = AiCache.captureScope();
@@ -492,6 +507,8 @@ final class ForcedWinEngine {
         forge.util.IdScope.open();
         try {
             final ForcedWinEngine e = new ForcedWinEngine(lim, st, deadline, seed);
+            e.stepBase = st.steps;
+            held[0] = e;
             if (likelyOut != null) {
                 e.collect = new ArrayList<>();
                 e.keep = Math.max(1, keep) * 3;
@@ -558,6 +575,14 @@ final class ForcedWinEngine {
             return null;
         } finally {
             st.nanos += System.nanoTime() - t0;
+            if (held[0] != null) {
+                // bvw-step1-build-1024 (diagnostics): which budget stopped this search, if any
+                if (held[0].stoppedByCap) {
+                    st.capStops++;
+                } else if (held[0].stoppedByTime) {
+                    st.deadlineStops++;
+                }
+            }
             AiCache.installScope(prevCache);
             forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
@@ -576,7 +601,19 @@ final class ForcedWinEngine {
     }
 
     private boolean out() {
-        return st.nodes >= lim.nodes || System.nanoTime() > deadline;
+        if (st.nodes >= lim.nodes) {
+            stoppedByCap = true;
+            return true;
+        }
+        if (lim.totalSteps > 0 && st.steps - stepBase >= lim.totalSteps) {
+            stoppedByCap = true; // bvw-step1-build-1024: budget=counter's step cap (0 = off: never here)
+            return true;
+        }
+        if (System.nanoTime() > deadline) {
+            stoppedByTime = true;
+            return true;
+        }
+        return false;
     }
 
     private List<Step> dfs(Node node, int depth) {
@@ -1150,7 +1187,8 @@ final class ForcedWinEngine {
             st.copies++;
             final MoveAi ai = new MoveAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn);
             // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the wall
-            final long wall = lim.wall != 0 ? lim.wall : deadline;
+            // (bvw-step1-build-1024: none with budget=counter: no wall and no deadline, so per-move maxSteps bounds it)
+            final long wall = lim.wall != 0 ? lim.wall : deadline == Long.MAX_VALUE ? 0L : deadline;
             ai.bounded(wall);
             held[0] = ai;
             me.dangerouslySetController(ai);
@@ -1167,6 +1205,7 @@ final class ForcedWinEngine {
                 checkWall(wall, "engine step");
                 ph.mainLoopStep();
                 steps++;
+                st.steps++;
             }
             final Applied a = new Applied();
             a.triggerCandidates = ai.triggers.candidates;

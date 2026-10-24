@@ -173,6 +173,12 @@ public final class RlActorBench {
         forge.ai.simulation.HonestLabel.Spec labelSpec = null;
         int labelTurns = 3;
         String labelOut = null;
+        /**
+         * bvw-step1-build-1024 (absent = step 0's window [0, turns)): the band [lo, hi) of turns before the end; and the
+         * step-1 search block (null = none: step-0 rows exactly).
+         */
+        int labelBandLo = 0;
+        forge.bench.rl.StepSearch.Spec labelSearch = null;
     }
 
     static Cfg parse(final JsonObject o) {
@@ -224,6 +230,28 @@ public final class RlActorBench {
             c.labelTurns = l.has("turns") ? l.get("turns").getAsInt() : 3;
             if (c.labelTurns < 1) {
                 throw new IllegalArgumentException("label.turns >= 1, not " + c.labelTurns);
+            }
+            if (l.has("band")) {
+                // bvw-step1-build-1024: [lo, hi) turns before the end (refused together with turns)
+                if (l.has("turns")) {
+                    throw new IllegalArgumentException("label: band or turns, not both");
+                }
+                final JsonArray b = l.getAsJsonArray("band");
+                if (b.size() != 2) {
+                    throw new IllegalArgumentException("label.band is [lo, hi)");
+                }
+                c.labelBandLo = b.get(0).getAsInt();
+                c.labelTurns = b.get(1).getAsInt();
+                if (c.labelBandLo < 0 || c.labelBandLo >= c.labelTurns) {
+                    throw new IllegalArgumentException("label.band [lo, hi) needs 0 <= lo < hi");
+                }
+            }
+            if (l.has("search") && !l.get("search").isJsonNull()) {
+                // bvw-step1-build-1024: refused unless honest and host-independent (StepSearch.Spec.parse)
+                c.labelSearch = forge.bench.rl.StepSearch.Spec.parse(l.getAsJsonObject("search"), c.labelSpec.worlds);
+                if (!c.labelSpec.counterBudgets()) {
+                    throw new IllegalArgumentException("refused: a label search needs the proof check on budget=counter");
+                }
             }
             if (!l.has("out")) {
                 throw new IllegalArgumentException("label.out (the label directory) is required");
@@ -1364,6 +1392,12 @@ public final class RlActorBench {
             labelSink = new forge.bench.rl.RlReplayLabeller.Sink(Paths.get(cfg.labelOut));
             System.err.println("[bvw-label] labelling replays: T=" + cfg.labelTurns + " K=" + cfg.labelSpec.worlds
                     + " spec " + cfg.labelSpec.sha().substring(0, 12) + " -> " + labelSink.labelsFile());
+            if (cfg.labelBandLo > 0 || cfg.labelSearch != null) {
+                // bvw-step1-build-1024
+                System.err.println("[bvw-label] band [" + cfg.labelBandLo + ", " + cfg.labelTurns + ") search "
+                        + (cfg.labelSearch == null ? "none" : cfg.labelSearch.sha().substring(0, 12) + " value "
+                        + cfg.labelSearch.valueSha));
+            }
         }
         final Map<String, List<JsonObject>> cache = new HashMap<>();
         for (int[] fl : cfg.replayLines) {
@@ -1480,8 +1514,8 @@ public final class RlActorBench {
                 final forge.bench.rl.RlReplayLabeller[] labs = new forge.bench.rl.RlReplayLabeller[1];
                 final int tobs = g.get("obs_schema").getAsInt();
                 final GameHook hook = cfg.labelSpec == null ? null : (game, seat, know) -> {
-                    labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelTurns, t, jarSha, game, know,
-                            feat.index(), tobs);
+                    labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelBandLo, cfg.labelTurns,
+                            cfg.labelSearch, t, jarSha, game, know, feat.index(), tobs);
                     game.addPriorityDecisionListener(labs[0]);
                 };
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(

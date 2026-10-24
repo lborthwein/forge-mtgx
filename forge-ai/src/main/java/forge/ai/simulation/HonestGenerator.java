@@ -45,7 +45,7 @@ public final class HonestGenerator {
         spec.addProperty("beliefCubeSha256", BeliefSampler.LIVE_CUBE_SHA256);
         spec.addProperty("beliefBasics", 8);
         spec.addProperty("beliefSingleton", false);
-        spec.add("solverCfg", new com.google.gson.Gson().toJsonTree(s.config()));
+        spec.add("solverCfg", solverCfgJson(s.config()));
         out.add("spec", spec);
         out.addProperty("decisions", s.decisions);
         out.addProperty("taken", s.taken);
@@ -55,6 +55,26 @@ public final class HonestGenerator {
         out.addProperty("engine_found", s.engineFound);
         out.addProperty("planner_ms", s.plannerNanos / 1e6);
         out.addProperty("engine_ms", s.engineNanos / 1e6);
+        if (s.config().counter || ForcedWinSolver.METER_RECEIPTS) {
+            // bvw-step1-build-1024: the game's work in counter units (outside the spec: diagnostics only)
+            out.add("meter", s.meter.toJson());
+        }
         return out;
+    }
+
+    /**
+     * The solver config as the tape records it (the generator spec replays compare). bvw-step1-build-1024: the keys
+     * added after the step-0 freeze ({@link ForcedWinSolver.Config#STEP1_DEFAULTS}) appear only when they differ from
+     * their defaults, so a step-0 (jar 30dae214) tape's spec is reproduced byte for byte by this jar.
+     */
+    public static JsonObject solverCfgJson(final ForcedWinSolver.Config c) {
+        final JsonObject o = new com.google.gson.Gson().toJsonTree(c).getAsJsonObject();
+        for (java.util.Map.Entry<String, Object> e : ForcedWinSolver.Config.STEP1_DEFAULTS.entrySet()) {
+            final com.google.gson.JsonElement v = o.get(e.getKey());
+            if (v != null && v.isJsonPrimitive() && String.valueOf(e.getValue()).equals(v.getAsString())) {
+                o.remove(e.getKey());
+            }
+        }
+        return o;
     }
 }

@@ -5708,6 +5708,11 @@ public final class LookaheadSearch {
     }
 
     /** The copy resumes exactly where the live seat stands: it holds priority, it acted first. */
+    /** bvw-step1-build-1024: {@link #givePriority} for the step-1 labeller's root copy (forge.bench.rl.StepSearch). */
+    public static void givePriorityTo(PhaseHandler ph, Player p) {
+        givePriority(ph, p);
+    }
+
     static void givePriority(PhaseHandler ph, Player p) {
         initFields();
         try {

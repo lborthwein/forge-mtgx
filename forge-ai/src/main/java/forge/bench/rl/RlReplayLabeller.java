@@ -47,6 +47,11 @@ import forge.util.IdScope;
  */
 public final class RlReplayLabeller implements PriorityDecisionListener {
     public static final String SCHEMA = "mtgx-bvw-value/1";
+    /**
+     * Lane bvw-step1-build-1024: rows with a search target (a {@code search} block): the step-0 row's fields plus the
+     * band, the proof flag, the honest S-b search's value and the row's target ({@link StepSearch}).
+     */
+    public static final String SCHEMA_STEP = "mtgx-bvw-value/2";
     static final byte[] MAGIC = {'M', 'X', 'L', '1'};
 
     /** Shared by the replay threads of one JVM. */
@@ -95,6 +100,14 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
 
     private final HonestLabel.Spec spec;
     private final int turnsWindow;
+    /** bvw-step1-build-1024: the band of turns before the end, [bandLo, turnsWindow) (bandLo 0 = step 0's window). */
+    private final int bandLo;
+    /** bvw-step1-build-1024: the step-1 search (null = none, the step-0 labeller exactly), its block's sha. */
+    private final StepSearch search;
+    private final String searchSha;
+    private final RlKnowledge knowledge;
+    private final Map<String, Integer> targets = new TreeMap<>();
+    private double searchMs = 0;
     private final JsonObject tape;
     private final long uid;
     private final int tapeTurns;
@@ -124,13 +137,33 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      */
     public RlReplayLabeller(final HonestLabel.Spec spec, final int turnsWindow, final JsonObject tapeLine,
             final String jarSha, final Game game, final RlKnowledge knowledge, final CardIndex index, final int obs) {
+        this(spec, 0, turnsWindow, null, tapeLine, jarSha, game, knowledge, index, obs);
+    }
+
+    /**
+     * bvw-step1-build-1024: the labeller of the band [{@code bandLo}, {@code bandHi}) of turns before the end; with a
+     * {@code searchSpec}, every row also gets the honest search's value and a target ({@link StepSearch}).
+     */
+    public RlReplayLabeller(final HonestLabel.Spec spec, final int bandLo, final int bandHi, final StepSearch.Spec searchSpec,
+            final JsonObject tapeLine, final String jarSha, final Game game, final RlKnowledge knowledge,
+            final CardIndex index, final int obs) {
         spec.checkHonest();
         checkTrainTape(tapeLine);
-        if (turnsWindow < 1) {
-            throw new IllegalArgumentException("label turns >= 1, not " + turnsWindow);
+        if (bandHi < 1 || bandLo < 0 || bandLo >= bandHi) {
+            throw new IllegalArgumentException("label band [lo, hi): 0 <= lo < hi, hi >= 1, not [" + bandLo + ", " + bandHi
+                    + ")");
+        }
+        if (searchSpec != null && !spec.counterBudgets()) {
+            throw new IllegalArgumentException("refused: a step-1 search target needs the proof check on budget=counter too");
         }
         this.spec = spec;
-        this.turnsWindow = turnsWindow;
+        this.turnsWindow = bandHi;
+        this.bandLo = bandLo;
+        this.knowledge = knowledge;
+        this.search = searchSpec == null || game == null ? null
+                : new StepSearch(searchSpec, index, obs, jarSha, "step1-" + Long.toUnsignedString(
+                        RlWire.parseUid(tapeLine.get("game_uid").getAsString())));
+        this.searchSha = searchSpec == null ? null : searchSpec.sha();
         this.tape = tapeLine;
         this.uid = RlWire.parseUid(tapeLine.get("game_uid").getAsString());
         this.tapeTurns = tapeLine.get("turns").getAsInt();
@@ -164,7 +197,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         final int seat = g.getRegisteredPlayers().indexOf(p);
         final int turn = g.getPhaseHandler().getTurn();
         final int tbe = tapeTurns - turn;
-        if (tbe < 0 || tbe >= turnsWindow || seat < 0 || seat > 1) {
+        if (tbe < bandLo || tbe >= turnsWindow || seat < 0 || seat > 1) {
             return;
         }
         windowDecisions++;
@@ -190,6 +223,12 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             }
             return new Object[] {payload, seats[seat].label(g, p, key), fms, f.C};
         }));
+        // bvw-step1-build-1024: the search value, in its own isolation (a copy of the live game; never moves it)
+        final StepSearch.Result sr = search == null ? null : PlayerControllerBridge.isolated(g, () -> IdScope.detached(
+                () -> search.value(g, p, knowledge, uid, key)));
+        if (sr != null) {
+            searchMs += sr.ms;
+        }
         final byte[] payload = (byte[]) got[0];
         final HonestLabel.Result r = (HonestLabel.Result) got[1];
         frameMs += (Double) got[2];
@@ -198,7 +237,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             solved++;
         }
         gates.merge(r.gate, 1, Integer::sum);
-        row(seat, ord, turn, tbe, phase, g.getStack().size(), payload, (Integer) got[3], r);
+        row(seat, ord, turn, tbe, phase, g.getStack().size(), payload, (Integer) got[3], r, sr);
     }
 
     @Override
@@ -206,10 +245,10 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     }
 
     private void row(final int seat, final int ord, final int turn, final int tbe, final String phase, final int stack,
-            final byte[] payload, final int C, final HonestLabel.Result r) {
+            final byte[] payload, final int C, final HonestLabel.Result r, final StepSearch.Result sr) {
         final JsonObject h = new JsonObject();
         h.addProperty("kind", "value");
-        h.addProperty("schema", SCHEMA);
+        h.addProperty("schema", search == null ? SCHEMA : SCHEMA_STEP);
         h.addProperty("split", "TRAIN");
         h.addProperty("game_uid", Long.toUnsignedString(uid));
         h.addProperty("seed", tape.get("seed").getAsLong());
@@ -236,6 +275,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         h.addProperty("spec_sha", specSha);
         h.addProperty("jar_sha", jarSha);
+        if (search != null) {
+            stepFields(h, tbe, r, sr);
+        }
         h.add("controllers", tape.get("controllers"));
         final JsonArray dp = new JsonArray(), ds = new JsonArray();
         for (com.google.gson.JsonElement d : tape.getAsJsonArray("decks")) {
@@ -251,12 +293,47 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         for (String k : new String[] {"game_uid", "seed", "seat", "dec_idx", "turn", "phase", "stack",
                 "turns_before_end", "tape_turns", "tape_reason", "tape_result", "label", "check", "gate", "p_win",
                 "p_loss", "worlds_win", "worlds_loss", "lost_worlds", "proposals", "how", "end_reason", "line_how",
-                "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha"}) {
+                "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
+                "target", "target_source", "search", "search_sha"}) {
             if (h.has(k)) {
                 ir.add(k, h.get(k));
             }
         }
         idx.add(ir);
+    }
+
+    /**
+     * bvw-step1-build-1024: a step row's target. A strict proof of the honest solver (all K worlds; step 0's label) is 1
+     * (win) or 0 (loss) with its proof flag; otherwise S-b's proven solver line is 1; otherwise the honest search's value
+     * of the candidate it plays; otherwise no target (null): a leaf fallback, an error, a position with no search.
+     */
+    private void stepFields(final JsonObject h, final int tbe, final HonestLabel.Result r, final StepSearch.Result sr) {
+        final JsonArray band = new JsonArray();
+        band.add(bandLo);
+        band.add(turnsWindow);
+        h.add("band", band);
+        final String proof = "win".equals(r.label) || "loss".equals(r.label) ? r.label : null;
+        h.add("proof", proof == null ? com.google.gson.JsonNull.INSTANCE : new com.google.gson.JsonPrimitive(proof));
+        final String src;
+        final double target;
+        if (proof != null) {
+            src = "proof";
+            target = "win".equals(proof) ? 1.0 : 0.0;
+        } else if (sr != null && sr.hasTarget()) {
+            src = sr.provenLine ? "search_proven_line" : "search";
+            target = sr.provenLine ? 1.0 : sr.v;
+        } else {
+            src = "none";
+            target = Double.NaN;
+        }
+        h.addProperty("target_source", src);
+        h.add("target", StepSearch.Result.num(target));
+        targets.merge(src, 1, Integer::sum);
+        h.add("search", sr == null ? com.google.gson.JsonNull.INSTANCE : sr.toJson());
+        if (sr != null && sr.backend != null) {
+            h.add("value_backend", sr.backend);
+        }
+        h.addProperty("search_sha", searchSha);
     }
 
     static byte[] record(final JsonObject header, final byte[] payload) {
@@ -319,6 +396,16 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         gr.addProperty("turns_window", turnsWindow);
         gr.addProperty("spec_sha", specSha);
         gr.addProperty("jar_sha", jarSha);
+        if (search != null) {
+            // bvw-step1-build-1024: the band, the search block and the targets by source
+            gr.addProperty("schema", SCHEMA_STEP);
+            gr.addProperty("band_lo", bandLo);
+            gr.addProperty("search_sha", searchSha);
+            gr.addProperty("search_ms", Math.round(searchMs));
+            final JsonObject tj = new JsonObject();
+            for (Map.Entry<String, Integer> e : targets.entrySet()) tj.addProperty(e.getKey(), e.getValue());
+            gr.add("targets", tj);
+        }
         if (sink != null) {
             sink.write(member, digestEqual ? idx : java.util.Collections.emptyList(), gr);
         }
