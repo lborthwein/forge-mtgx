@@ -101,7 +101,6 @@ public class GameState {
     private final Map<String, String> abilityString = new HashMap<>();
 
     private final Set<Card> cardsReferencedByID = new HashSet<>();
-    private final Set<Card> cardsWithoutETBTrigs = new HashSet<>();
 
     private String tChangePlayer = "NONE";
     private String tChangePhase = "NONE";
@@ -1456,12 +1455,17 @@ public class GameState {
                         c.setEntityAttachedTo(new CardCopyService(c).copyCard(true));
                     }
 
-                    if (cardsWithoutETBTrigs.contains(c)) {
-                        p.getGame().getAction().moveTo(ZoneType.Battlefield, c, null, null);
-                    } else {
-                        p.getZone(ZoneType.Hand).add(c);
-                        p.getGame().getAction().moveToPlay(c, null, null);
+                    // The record is a permanent that is already on the battlefield. It goes there from no zone,
+                    // the move |NoETBTrigs always made, which runs no ReplacementType.Moved effect and no ETB
+                    // trigger. Every card now goes this way. The old move from the hand replayed the card's entry:
+                    // a shockland asked to pay 2 life and the position lost that life, a clone asked what to copy,
+                    // and an installed Containment Priest exiled the creature. The two things the old move gave
+                    // the card are kept: its timestamp (CR 613.7d) and a Room's door state.
+                    c.setGameTimestamp(p.getGame().getNextTimestamp());
+                    if (c.isSplitCard() && c.getCastSA() == null) {
+                        c.updateRooms();
                     }
+                    p.getGame().getAction().moveToPlay(c, null, null);
 
                     c.setTapped(tapped);
                     c.setSickness(sickness);
@@ -1738,7 +1742,7 @@ public class GameState {
                         cardAttackMap.put(c, null);
                     }
                 } else if (info.equals("NoETBTrigs")) {
-                    cardsWithoutETBTrigs.add(c);
+                    // Still accepted, and now what every battlefield card gets (see setupPlayerState).
                 } else if (info.equals("Foretold")) {
                     c.setForetold(true);
                     c.turnFaceDown(true);
