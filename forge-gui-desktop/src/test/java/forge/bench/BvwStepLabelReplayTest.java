@@ -141,7 +141,18 @@ public class BvwStepLabelReplayTest {
                 src.merge(s, 1, Integer::sum);
                 final String label = h.get("label").getAsString();
                 final JsonElement proof = h.get("proof");
-                if (label.equals("win") || label.equals("loss")) {
+                if (s.equals(forge.bench.rl.HiddenExile.TARGET_SOURCE)) {
+                    // OPEN-6 ruling: a face-down exile hidden from the seat: no search, no target, the proof withheld
+                    Assert.assertTrue(proof.isJsonNull() && h.get("target").isJsonNull(), h.toString());
+                    Assert.assertTrue(h.getAsJsonArray("hidden_exile").size() > 0);
+                    Assert.assertEquals(h.getAsJsonObject("search").get("why").getAsString(),
+                            forge.bench.rl.HiddenExile.TARGET_SOURCE);
+                    if (label.equals("win") || label.equals("loss")) {
+                        Assert.assertEquals(h.get("unsupported_proof").getAsString(), label);
+                    } else {
+                        Assert.assertFalse(h.has("unsupported_proof"));
+                    }
+                } else if (label.equals("win") || label.equals("loss")) {
                     Assert.assertEquals(proof.getAsString(), label);
                     Assert.assertEquals(s, "proof");
                     Assert.assertEquals(h.get("target").getAsDouble(), label.equals("win") ? 1.0 : 0.0);
