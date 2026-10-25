@@ -186,6 +186,71 @@ public class BvwStepLabelReplayTest {
     }
 
     /**
+     * The seat/dec_idx swap fix (2026-10-25): with a step-0 reference (label index rows, the window [0, 2) here), a
+     * replay that reproduces the reference's positions writes its rows unchanged; a game whose positions differ from
+     * the reference (one row's seat flipped, as a replay that took a line in another priority would) writes none, and
+     * its games row says so; the other games are untouched. A game the reference does not know is void too.
+     */
+    @Test(timeOut = 1800000)
+    public void aStep0ReferenceKeepsOnlyTheSameTrajectory() throws Exception {
+        try (FakeSearchService svc = new FakeSearchService(SHA, 2)) {
+            svc.leafValue = p -> -0.2;
+            final Path a = Files.createTempDirectory(RlLabelReplayTest.out, "step-ref-a-");
+            Assert.assertEquals(RlActorBench.replay(cfg(a, svc.port()), RlLabelReplayTest.index, "test"), 0);
+            Path idx = null;
+            try (java.util.stream.Stream<Path> ls = Files.list(a)) {
+                for (Path q : (Iterable<Path>) ls::iterator) {
+                    if (q.getFileName().toString().startsWith("index-")) {
+                        idx = q;
+                    }
+                }
+            }
+            Assert.assertNotNull(idx);
+            final Map<String, JsonObject> ra = rows(a);
+            // the same positions: every game kept, rows identical
+            final Path b = Files.createTempDirectory(RlLabelReplayTest.out, "step-ref-b-");
+            final RlActorBench.Cfg cb = cfg(b, svc.port());
+            cb.reference = java.util.List.of(idx.toString());
+            cb.referenceTurns = 2;
+            Assert.assertEquals(RlActorBench.replay(cb, RlLabelReplayTest.index, "test"), 0);
+            for (JsonObject g : RlLabelReplayTest.jsonl(b, "games-")) {
+                Assert.assertTrue(g.get("trajectory_equal").getAsBoolean(), g.toString());
+            }
+            Assert.assertEquals(rows(b), ra);
+            // one row's seat flipped in the reference: its game writes nothing, the others are kept
+            final List<String> lines = Files.readAllLines(idx);
+            final JsonObject first = JsonParser.parseString(lines.get(0)).getAsJsonObject();
+            final String gone = first.get("game_uid").getAsString();
+            first.addProperty("seat", 1 - first.get("seat").getAsInt());
+            lines.set(0, forge.bench.rl.RlWire.canonicalString(first));
+            final Path bad = a.resolve("reference-tampered.jsonl");
+            Files.write(bad, lines);
+            final Path c = Files.createTempDirectory(RlLabelReplayTest.out, "step-ref-c-");
+            final RlActorBench.Cfg cc = cfg(c, svc.port());
+            cc.reference = java.util.List.of(bad.toString());
+            cc.referenceTurns = 2;
+            RlActorBench.replay(cc, RlLabelReplayTest.index, "test");
+            int voided = 0;
+            for (JsonObject g : RlLabelReplayTest.jsonl(c, "games-")) {
+                final boolean te = g.get("trajectory_equal").getAsBoolean();
+                Assert.assertEquals(te, !gone.equals(g.get("game_uid").getAsString()), g.toString());
+                if (!te) {
+                    voided++;
+                    Assert.assertEquals(g.get("rows").getAsInt(), 0);
+                    Assert.assertEquals(g.getAsJsonObject("trajectory").get("first_diff").getAsInt(),
+                            first.get("dec_idx").getAsInt());
+                }
+            }
+            Assert.assertEquals(voided, 1);
+            final Map<String, JsonObject> rc = rows(c);
+            final Map<String, JsonObject> keep = new TreeMap<>(ra);
+            keep.keySet().removeIf(k -> k.startsWith(gone + "/"));
+            Assert.assertEquals(rc, keep);
+            Assert.assertTrue(rc.size() < ra.size());
+        }
+    }
+
+    /**
      * Review #16b, perspective: every leaf frame is the searching seat's own observation, and the target is that seat's
      * P(win). The service values a leaf by the frame's seat (seat 0 +0.6, seat 1 -0.6), so a searched row of seat 0 must
      * come out near 0.8 and one of seat 1 near 0.2 (terminal worlds aside); a flipped perspective inverts them.

@@ -130,6 +130,17 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     private double solveMs = 0, frameMs = 0;
     private final Map<String, Integer> gates = new TreeMap<>();
     private final Map<String, Integer> labels = new TreeMap<>();
+    /**
+     * The seat/dec_idx swap fix (2026-10-25): with a step-0 reference (null = none), this replay's positions in the
+     * step-0 window must equal the reference's, or the game writes no rows ({@link TrajectoryRef}).
+     */
+    private TrajectoryRef.Recorder trajectory;
+
+    /** Attach the step-0 reference positions of this game ({@code ref} null: none known, the game is void). */
+    public void setReference(final java.util.TreeMap<Integer, String> ref, final int turns) {
+        this.trajectory = new TrajectoryRef.Recorder(ref, turns);
+    }
+
     /** Tests: this game's rows (headers), in order. */
     public final List<JsonObject> headers = new ArrayList<>();
     /**
@@ -218,6 +229,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         final int seat = g.getRegisteredPlayers().indexOf(p);
         final int turn = g.getPhaseHandler().getTurn();
         final int tbe = tapeTurns - turn;
+        if (trajectory != null) {
+            trajectory.add(ord, seat, turn, tbe, String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size());
+        }
         if (tbe < bandLo || tbe >= turnsWindow || seat < 0 || seat > 1) {
             return;
         }
@@ -410,8 +424,15 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      * games row says which. Returns the number of rows written.
      */
     public int finish(final Sink sink, final boolean digestEqual0, final JsonObject replayRow) throws IOException {
-        // review #9: a game whose labelling hit a fatal search error writes no rows, whatever its digest
-        final boolean digestEqual = digestEqual0 && fatal == null;
+        // review #9: a game whose labelling hit a fatal search error writes no rows, whatever its digest; with a step-0
+        // reference, nor does a game whose positions are not step 0's (the seat/dec_idx swap)
+        final JsonObject traj = trajectory == null ? null : trajectory.compare();
+        final boolean trajEqual = traj == null || traj.get("equal").getAsBoolean();
+        final boolean digestEqual = digestEqual0 && fatal == null && trajEqual;
+        if (digestEqual0 && !trajEqual) {
+            System.err.println("[bvw-label] TRAJECTORY MISMATCH game " + Long.toUnsignedString(uid) + ": " + traj
+                    + " -- its " + records.size() + " label rows are VOID (not written)");
+        }
         byte[] member = null;
         if (digestEqual && !records.isEmpty()) {
             final ByteArrayOutputStream bo = new ByteArrayOutputStream();
@@ -444,6 +465,10 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         gr.add("digest_tape", tape.get("digest"));
         gr.add("digest_replay", replayRow.get("digest_replay"));
         gr.addProperty("equal", digestEqual0);
+        if (traj != null) {
+            gr.add("trajectory", traj);
+            gr.addProperty("trajectory_equal", trajEqual);
+        }
         gr.addProperty("decisions", decisions);
         gr.addProperty("window_decisions", windowDecisions);
         gr.addProperty("rows", digestEqual ? records.size() : 0);
@@ -480,6 +505,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         if (sink != null) {
             sink.write(member, digestEqual ? idx : java.util.Collections.emptyList(), gr);
+        }
+        if (traj != null) {
+            replayRow.addProperty("trajectory_equal", trajEqual);
         }
         replayRow.addProperty("label_rows", digestEqual ? records.size() : 0);
         replayRow.addProperty("label_rows_void", digestEqual ? 0 : records.size());

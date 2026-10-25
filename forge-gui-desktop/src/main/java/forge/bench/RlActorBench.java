@@ -185,6 +185,33 @@ public final class RlActorBench {
          */
         int exileScanTurns = 0;
         String exileScanOut = null;
+        /**
+         * bvw-step1-build-1024 (the seat/dec_idx swap, 2026-10-25; null = no check): step-0 label index files whose
+         * positions (turns before the end in [0, referenceTurns)) a labelled or scanned replay must reproduce exactly,
+         * or the game writes no rows ({@code label.reference} / {@code exileScan.reference}, {@code referenceTurns}).
+         */
+        List<String> reference = null;
+        int referenceTurns = 3;
+    }
+
+    static void parseReference(final Cfg c, final JsonObject o, final String where) {
+        if (!o.has("reference") || o.get("reference").isJsonNull()) {
+            if (o.has("referenceTurns")) {
+                throw new IllegalArgumentException(where + ".referenceTurns without reference");
+            }
+            return;
+        }
+        c.reference = new ArrayList<>();
+        for (JsonElement e : o.getAsJsonArray("reference")) {
+            c.reference.add(e.getAsString());
+        }
+        if (c.reference.isEmpty()) {
+            throw new IllegalArgumentException(where + ".reference: at least one step-0 index file");
+        }
+        c.referenceTurns = o.has("referenceTurns") ? o.get("referenceTurns").getAsInt() : 3;
+        if (c.referenceTurns < 1) {
+            throw new IllegalArgumentException(where + ".referenceTurns >= 1");
+        }
     }
 
     static Cfg parse(final JsonObject o) {
@@ -272,14 +299,16 @@ public final class RlActorBench {
                 throw new IllegalArgumentException("label.out (the label directory) is required");
             }
             c.labelOut = l.get("out").getAsString();
+            parseReference(c, l, "label");
         }
         if (o.has("exileScan") && !o.get("exileScan").isJsonNull()) {
             final JsonObject x = o.getAsJsonObject("exileScan");
             for (String k : x.keySet()) {
-                if (!"turns".equals(k) && !"out".equals(k)) {
-                    throw new IllegalArgumentException("exileScan: unknown key " + k + " (turns, out)");
+                if (!"turns".equals(k) && !"out".equals(k) && !"reference".equals(k) && !"referenceTurns".equals(k)) {
+                    throw new IllegalArgumentException("exileScan: unknown key " + k + " (turns, out, reference)");
                 }
             }
+            parseReference(c, x, "exileScan");
             if (c.labelSpec != null) {
                 throw new IllegalArgumentException("refused: exileScan is a read-only scan, not with a label spec");
             }
@@ -1443,6 +1472,17 @@ public final class RlActorBench {
                 cache.put(f, RlTape.read(Paths.get(f)));
             }
         }
+        trajectoryRef = null;
+        if (cfg.reference != null) {
+            // the seat/dec_idx swap fix: the step-0 positions of exactly these games
+            final java.util.Set<String> uids = new java.util.HashSet<>();
+            for (int[] fl : cfg.replayLines) {
+                uids.add(cache.get(cfg.replayTapes.get(fl[0])).get(fl[1]).get("game_uid").getAsString());
+            }
+            trajectoryRef = forge.bench.rl.TrajectoryRef.load(cfg.reference, cfg.referenceTurns, uids);
+            System.err.println("[bvw-trajectory] step-0 reference: " + trajectoryRef.games() + " of " + uids.size()
+                    + " games, window " + cfg.referenceTurns + " turns");
+        }
         PrintWriter w = null;
         if (cfg.replayOut != null) {
             final Path o = Paths.get(cfg.replayOut);
@@ -1577,9 +1617,15 @@ public final class RlActorBench {
                 final GameHook hook = cfg.labelSpec != null ? (game, seat, know) -> {
                     labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelBandLo, cfg.labelTurns,
                             cfg.labelSearch, t, jarSha, game, know, feat.index(), tobs);
+                    if (trajectoryRef != null) {
+                        labs[0].setReference(trajectoryRef.of(t.get("game_uid").getAsString()), trajectoryRef.turns);
+                    }
                     game.addPriorityDecisionListener(labs[0]);
                 } : cfg.exileScanOut != null ? (game, seat, know) -> {
                     scans[0] = new forge.bench.rl.RlExileScan(cfg.exileScanTurns, t, game);
+                    if (trajectoryRef != null) {
+                        scans[0].setReference(trajectoryRef.of(t.get("game_uid").getAsString()), trajectoryRef.turns);
+                    }
                     game.addPriorityDecisionListener(scans[0]);
                 } : null;
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
@@ -1684,6 +1730,8 @@ public final class RlActorBench {
     static forge.bench.rl.RlReplayLabeller.Sink labelSink = null;
     /** bvw-step1-build-1024: the exile scan's per-JVM files (exileScan replays only). */
     static forge.bench.rl.RlExileScan.Sink scanSink = null;
+    /** bvw-step1-build-1024: the step-0 reference positions (null = no trajectory check). */
+    static forge.bench.rl.TrajectoryRef trajectoryRef = null;
 
     /** Config identity, excluding wall time and other diagnostic counters. */
     static JsonArray generatorSpecs(final JsonObject row) {

@@ -70,6 +70,12 @@ public final class RlExileScan implements PriorityDecisionListener {
     private final Game game;
     private final List<JsonObject> rows = new ArrayList<>();
     private int decisions = 0, flagged = 0, copies = 0;
+    /** The seat/dec_idx swap fix (2026-10-25): the step-0 reference positions (null = no check). */
+    private TrajectoryRef.Recorder trajectory;
+
+    public void setReference(final java.util.TreeMap<Integer, String> ref, final int turns) {
+        this.trajectory = new TrajectoryRef.Recorder(ref, turns);
+    }
 
     public RlExileScan(final int turnsWindow, final JsonObject tapeLine, final Game game) {
         if (turnsWindow < 1) {
@@ -91,6 +97,9 @@ public final class RlExileScan implements PriorityDecisionListener {
         final int seat = g.getRegisteredPlayers().indexOf(p);
         final int turn = g.getPhaseHandler().getTurn();
         final int tbe = tapeTurns - turn;
+        if (trajectory != null) {
+            trajectory.add(ord, seat, turn, tbe, String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size());
+        }
         if (tbe < 0 || tbe >= turnsWindow || seat < 0 || seat > 1) {
             return;
         }
@@ -102,6 +111,7 @@ public final class RlExileScan implements PriorityDecisionListener {
         r.addProperty("turn", turn);
         r.addProperty("turns_before_end", tbe);
         r.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
+        r.addProperty("stack", g.getStack().size());
         final boolean any = HiddenExile.anyFaceDownExile(g);
         r.addProperty("face_down_exile", any);
         JsonArray hidden = new JsonArray();
@@ -131,8 +141,15 @@ public final class RlExileScan implements PriorityDecisionListener {
     }
 
     /** The game is over: its rows only when the replay's digest is the tape's; the games row says which. */
-    public int finish(final Sink sink, final boolean digestEqual, final JsonObject replayRow) throws IOException {
+    public int finish(final Sink sink, final boolean digestEqual0, final JsonObject replayRow) throws IOException {
+        final JsonObject traj = trajectory == null ? null : trajectory.compare();
+        final boolean digestEqual = digestEqual0 && (traj == null || traj.get("equal").getAsBoolean());
         final JsonObject gr = new JsonObject();
+        if (traj != null) {
+            gr.add("trajectory", traj);
+            gr.addProperty("trajectory_equal", traj.get("equal").getAsBoolean());
+            gr.addProperty("digest_equal", digestEqual0);
+        }
         gr.addProperty("schema", SCHEMA);
         gr.addProperty("game_uid", Long.toUnsignedString(uid));
         gr.addProperty("equal", digestEqual);
