@@ -132,13 +132,20 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     private final Map<String, Integer> labels = new TreeMap<>();
     /**
      * The seat/dec_idx swap fix (2026-10-25): with a step-0 reference (null = none), this replay's positions in the
-     * step-0 window must equal the reference's, or the game writes no rows ({@link TrajectoryRef}).
+     * step-0 window [0, referenceTurns) must equal the reference's, or the game writes no rows ({@link TrajectoryRef}).
+     * It aligns step 0's window, not the band: band positions are this replay's own (review-align #3); every step row
+     * carries {@code state_sha} for the checks that need content.
      */
     private TrajectoryRef.Recorder trajectory;
 
     /** Attach the step-0 reference positions of this game ({@code ref} null: none known, the game is void). */
     public void setReference(final java.util.TreeMap<Integer, String> ref, final int turns) {
-        this.trajectory = new TrajectoryRef.Recorder(ref, turns);
+        setReference(ref, turns, null);
+    }
+
+    /** As above, with the reference's provenance (file sha256s, window, games known) for the games row (review-align #2). */
+    public void setReference(final java.util.TreeMap<Integer, String> ref, final int turns, final JsonObject provenance) {
+        this.trajectory = new TrajectoryRef.Recorder(ref, turns, provenance);
     }
 
     /** Tests: this game's rows (headers), in order. */
@@ -237,6 +244,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         windowDecisions++;
         final String phase = String.valueOf(g.getPhaseHandler().getPhase());
+        // review-align #3: the position's public-state hash (step rows only; read before anything else reads the game)
+        final String stateSha = search == null ? null : TrajectoryRef.stateSha(g);
         final long key = RlSearch.splitmix(uid ^ (0x6276774c4142454cL + 2L * ord + seat));
         final Object[] got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
             // the seat's own observation (its knowledge only), before anything else reads the game
@@ -281,7 +290,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             solved++;
         }
         gates.merge(r.gate, 1, Integer::sum);
-        row(seat, ord, turn, tbe, phase, g.getStack().size(), payload, (Integer) got[3], r, sr);
+        row(seat, ord, turn, tbe, phase, g.getStack().size(), stateSha, payload, (Integer) got[3], r, sr);
     }
 
     @Override
@@ -289,7 +298,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     }
 
     private void row(final int seat, final int ord, final int turn, final int tbe, final String phase, final int stack,
-            final byte[] payload, final int C, final HonestLabel.Result r, final StepSearch.Result sr) {
+            final String stateSha, final byte[] payload, final int C, final HonestLabel.Result r,
+            final StepSearch.Result sr) {
         final JsonObject h = new JsonObject();
         h.addProperty("kind", "value");
         h.addProperty("schema", search == null ? SCHEMA : SCHEMA_STEP);
@@ -301,6 +311,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         h.addProperty("turn", turn);
         h.addProperty("phase", phase);
         h.addProperty("stack", stack);
+        if (stateSha != null) {
+            h.addProperty("state_sha", stateSha);
+        }
         h.addProperty("family", RlSchema.F_PRIORITY);
         h.addProperty("C", C);
         h.addProperty("obs", feat == null ? 1 : feat.version());
@@ -338,7 +351,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 "turns_before_end", "tape_turns", "tape_reason", "tape_result", "label", "check", "gate", "p_win",
                 "p_loss", "worlds_win", "worlds_loss", "lost_worlds", "proposals", "how", "end_reason", "line_how",
                 "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
-                "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof"}) {
+                "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof",
+                "state_sha"}) {
             if (h.has(k)) {
                 ir.add(k, h.get(k));
             }
@@ -426,7 +440,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     public int finish(final Sink sink, final boolean digestEqual0, final JsonObject replayRow) throws IOException {
         // review #9: a game whose labelling hit a fatal search error writes no rows, whatever its digest; with a step-0
         // reference, nor does a game whose positions are not step 0's (the seat/dec_idx swap)
-        final JsonObject traj = trajectory == null ? null : trajectory.compare();
+        final JsonObject traj = trajectory == null ? null
+                : TrajectoryRef.compareLoudly(trajectory, Long.toUnsignedString(uid), "label");
         final boolean trajEqual = traj == null || traj.get("equal").getAsBoolean();
         final boolean digestEqual = digestEqual0 && fatal == null && trajEqual;
         if (digestEqual0 && !trajEqual) {

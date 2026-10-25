@@ -31,6 +31,11 @@ import forge.util.IdScope;
  *
  * <p>Outputs ({@link Sink}, one of each per JVM): {@code scan-<pid>.jsonl} (one row per window position of a game whose
  * replay digest equals the tape's) and {@code games-<pid>.jsonl} (one row per game).
+ *
+ * <p>With a step-0 reference ({@code exileScan.reference}, {@link TrajectoryRef}; review-align #7): rows are written only
+ * when the digest is the tape's AND the window positions are the reference's; the games row keeps {@code equal} = the
+ * digest (as without a reference) and adds {@code trajectory_equal} and its {@code trajectory} object; scan rows carry
+ * {@code stack} only then (without a reference the rows are byte for byte the plain scan's).
  */
 public final class RlExileScan implements PriorityDecisionListener {
     public static final String SCHEMA = "mtgx-bvw-exile-scan/1";
@@ -74,7 +79,11 @@ public final class RlExileScan implements PriorityDecisionListener {
     private TrajectoryRef.Recorder trajectory;
 
     public void setReference(final java.util.TreeMap<Integer, String> ref, final int turns) {
-        this.trajectory = new TrajectoryRef.Recorder(ref, turns);
+        setReference(ref, turns, null);
+    }
+
+    public void setReference(final java.util.TreeMap<Integer, String> ref, final int turns, final JsonObject provenance) {
+        this.trajectory = new TrajectoryRef.Recorder(ref, turns, provenance);
     }
 
     public RlExileScan(final int turnsWindow, final JsonObject tapeLine, final Game game) {
@@ -111,7 +120,9 @@ public final class RlExileScan implements PriorityDecisionListener {
         r.addProperty("turn", turn);
         r.addProperty("turns_before_end", tbe);
         r.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
-        r.addProperty("stack", g.getStack().size());
+        if (trajectory != null) {
+            r.addProperty("stack", g.getStack().size()); // review-align #7: only with a reference
+        }
         final boolean any = HiddenExile.anyFaceDownExile(g);
         r.addProperty("face_down_exile", any);
         JsonArray hidden = new JsonArray();
@@ -140,22 +151,30 @@ public final class RlExileScan implements PriorityDecisionListener {
     public void afterDecision(final Player p, final List<SpellAbility> chosen) {
     }
 
-    /** The game is over: its rows only when the replay's digest is the tape's; the games row says which. */
-    public int finish(final Sink sink, final boolean digestEqual0, final JsonObject replayRow) throws IOException {
-        final JsonObject traj = trajectory == null ? null : trajectory.compare();
-        final boolean digestEqual = digestEqual0 && (traj == null || traj.get("equal").getAsBoolean());
+    /**
+     * The game is over: its rows only when the replay's digest is the tape's (and, with a reference, its window
+     * positions are the reference's); the games row says which: {@code equal} is the digest only, as the labeller's.
+     */
+    public int finish(final Sink sink, final boolean digestEqual, final JsonObject replayRow) throws IOException {
+        final JsonObject traj = trajectory == null ? null
+                : TrajectoryRef.compareLoudly(trajectory, Long.toUnsignedString(uid), "exile-scan");
+        final boolean trajEqual = traj == null || traj.get("equal").getAsBoolean();
+        final boolean written = digestEqual && trajEqual;
+        if (digestEqual && !trajEqual) {
+            System.err.println("[bvw-exile-scan] TRAJECTORY MISMATCH game " + Long.toUnsignedString(uid) + ": " + traj
+                    + " -- its " + rows.size() + " scan rows are VOID (not written)");
+        }
         final JsonObject gr = new JsonObject();
         if (traj != null) {
             gr.add("trajectory", traj);
-            gr.addProperty("trajectory_equal", traj.get("equal").getAsBoolean());
-            gr.addProperty("digest_equal", digestEqual0);
+            gr.addProperty("trajectory_equal", trajEqual);
         }
         gr.addProperty("schema", SCHEMA);
         gr.addProperty("game_uid", Long.toUnsignedString(uid));
         gr.addProperty("equal", digestEqual);
-        gr.addProperty("rows", digestEqual ? rows.size() : 0);
-        gr.addProperty("rows_void", digestEqual ? 0 : rows.size());
-        gr.addProperty("flagged", digestEqual ? flagged : 0);
+        gr.addProperty("rows", written ? rows.size() : 0);
+        gr.addProperty("rows_void", written ? 0 : rows.size());
+        gr.addProperty("flagged", written ? flagged : 0);
         gr.addProperty("copies", copies);
         gr.addProperty("decisions", decisions);
         gr.addProperty("turns_window", turnsWindow);
@@ -164,9 +183,12 @@ public final class RlExileScan implements PriorityDecisionListener {
                 gr.add(k, replayRow.get(k));
             }
         }
-        sink.write(digestEqual ? rows : List.of(), gr);
-        replayRow.addProperty("exile_scan_rows", digestEqual ? rows.size() : 0);
-        replayRow.addProperty("exile_scan_flagged", digestEqual ? flagged : 0);
-        return digestEqual ? rows.size() : 0;
+        sink.write(written ? rows : List.of(), gr);
+        if (traj != null) {
+            replayRow.addProperty("trajectory_equal", trajEqual); // review-align #7
+        }
+        replayRow.addProperty("exile_scan_rows", written ? rows.size() : 0);
+        replayRow.addProperty("exile_scan_flagged", written ? flagged : 0);
+        return written ? rows.size() : 0;
     }
 }

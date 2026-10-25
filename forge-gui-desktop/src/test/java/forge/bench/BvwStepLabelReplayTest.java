@@ -37,6 +37,10 @@ public class BvwStepLabelReplayTest {
     }
 
     static JsonObject counterLabel(final Path labels) {
+        return counterLabel(labels, 0, 2);
+    }
+
+    static JsonObject counterLabel(final Path labels, final int lo, final int hi) {
         final JsonObject o = new JsonObject();
         o.addProperty("redraw", "belief");
         o.addProperty("worlds", 2);
@@ -45,8 +49,8 @@ public class BvwStepLabelReplayTest {
         o.addProperty("aiTimeoutSec", 600);
         o.addProperty("out", labels.toString());
         final com.google.gson.JsonArray band = new com.google.gson.JsonArray();
-        band.add(0);
-        band.add(2);
+        band.add(lo);
+        band.add(hi);
         o.add("band", band);
         for (String k : new String[] {"solverCfg", "lossCfg"}) {
             final JsonObject c = new JsonObject();
@@ -87,7 +91,11 @@ public class BvwStepLabelReplayTest {
     }
 
     static RlActorBench.Cfg cfg(final Path labels, final JsonObject searchBlock) {
-        final JsonObject l = counterLabel(labels);
+        return cfg(labels, searchBlock, 0, 2);
+    }
+
+    static RlActorBench.Cfg cfg(final Path labels, final JsonObject searchBlock, final int lo, final int hi) {
+        final JsonObject l = counterLabel(labels, lo, hi);
         l.add("search", searchBlock);
         final JsonObject c = new JsonObject();
         c.addProperty("aiTimeoutSec", 600);
@@ -248,6 +256,379 @@ public class BvwStepLabelReplayTest {
             Assert.assertEquals(rc, keep);
             Assert.assertTrue(rc.size() < ra.size());
         }
+    }
+
+    // ------------------------------------------------------------------------------------------------ review-align #5
+
+    /** One labelled replay of the fixture games (band [0, 2), leaves at -0.2), shared by the reference tests below. */
+    static Path baseline;
+    static Map<String, JsonObject> baselineRows;
+
+    static synchronized Path baseline() throws Exception {
+        if (baseline == null) {
+            try (FakeSearchService svc = new FakeSearchService(SHA, 2)) {
+                svc.leafValue = p -> -0.2;
+                final Path a = Files.createTempDirectory(RlLabelReplayTest.out, "step-ref-base-");
+                Assert.assertEquals(RlActorBench.replay(cfg(a, svc.port()), RlLabelReplayTest.index, "test"), 0);
+                baseline = a;
+                baselineRows = rows(a);
+            }
+        }
+        return baseline;
+    }
+
+    static Path indexFile(final Path dir) throws Exception {
+        try (java.util.stream.Stream<Path> ls = Files.list(dir)) {
+            for (Path q : (Iterable<Path>) ls::iterator) {
+                if (q.getFileName().toString().startsWith("index-")) {
+                    return q;
+                }
+            }
+        }
+        throw new AssertionError("no index file in " + dir);
+    }
+
+    static List<JsonObject> indexRows(final Path dir) throws Exception {
+        final List<JsonObject> out = new java.util.ArrayList<>();
+        for (String line : Files.readAllLines(indexFile(dir))) {
+            out.add(JsonParser.parseString(line).getAsJsonObject());
+        }
+        return out;
+    }
+
+    static Path writeRows(final Path at, final List<JsonObject> rows) throws Exception {
+        final List<String> lines = new java.util.ArrayList<>();
+        for (JsonObject r : rows) {
+            lines.add(forge.bench.rl.RlWire.canonicalString(r));
+        }
+        Files.write(at, lines);
+        return at;
+    }
+
+    /** The games of the baseline's index, in order of first appearance. */
+    static List<String> gamesOf(final List<JsonObject> rows) {
+        final List<String> g = new java.util.ArrayList<>();
+        for (JsonObject r : rows) {
+            final String u = r.get("game_uid").getAsString();
+            if (!g.contains(u)) {
+                g.add(u);
+            }
+        }
+        return g;
+    }
+
+    /** The first game (in order) other than {@code not} with a row at {@code tbe}. */
+    static String gameWith(final List<JsonObject> rows, final int tbe, final String not) {
+        for (String g : gamesOf(rows)) {
+            if (g.equals(not)) {
+                continue;
+            }
+            for (JsonObject r : rows) {
+                if (r.get("game_uid").getAsString().equals(g) && r.get("turns_before_end").getAsInt() == tbe) {
+                    return g;
+                }
+            }
+        }
+        throw new AssertionError("no game with a tbe-" + tbe + " row (but " + not + ")");
+    }
+
+    static JsonObject firstRow(final List<JsonObject> rows, final String game, final int tbe) {
+        for (JsonObject r : rows) {
+            if (r.get("game_uid").getAsString().equals(game) && r.get("turns_before_end").getAsInt() == tbe) {
+                return r;
+            }
+        }
+        throw new AssertionError("no tbe " + tbe + " row of game " + game);
+    }
+
+    static Map<String, JsonObject> gamesRows(final Path dir) throws Exception {
+        final Map<String, JsonObject> out = new TreeMap<>();
+        for (JsonObject g : RlLabelReplayTest.jsonl(dir, "games-")) {
+            out.put(g.get("game_uid").getAsString(), g);
+        }
+        return out;
+    }
+
+    static RlActorBench.Cfg withReference(final RlActorBench.Cfg c, final Path ref, final int turns) {
+        c.reference = List.of(ref.toString());
+        c.referenceTurns = turns;
+        return c;
+    }
+
+    /**
+     * (a) The window's outer edge: the baseline's own rows as the reference at referenceTurns 1 (window [0, 1) of a
+     * [0, 2) labelling): a tampered tbe-1 row is outside the window and voids nothing; a tampered tbe-0 row voids its
+     * game, at that dec. The other games keep their rows exactly, and every games row records the reference's identity.
+     */
+    @Test(timeOut = 1800000)
+    public void theReferenceWindowsOuterEdge() throws Exception {
+        final List<JsonObject> base = indexRows(baseline());
+        final List<String> games = gamesOf(base);
+        Assert.assertTrue(games.size() >= 2, "fixture games " + games);
+        final List<JsonObject> t = new java.util.ArrayList<>();
+        for (JsonObject r : base) {
+            t.add(r.deepCopy());
+        }
+        final String gOut = gameWith(t, 1, null), gIn = gameWith(t, 0, gOut);
+        final JsonObject out = firstRow(t, gOut, 1);   // outside the window
+        out.addProperty("seat", 1 - out.get("seat").getAsInt());
+        final JsonObject in = firstRow(t, gIn, 0);     // inside
+        in.addProperty("seat", 1 - in.get("seat").getAsInt());
+        final Path ref = writeRows(baseline().resolve("reference-edge.jsonl"), t);
+        try (FakeSearchService svc = new FakeSearchService(SHA, 2)) {
+            svc.leafValue = p -> -0.2;
+            final Path c = Files.createTempDirectory(RlLabelReplayTest.out, "step-ref-edge-");
+            RlActorBench.replay(withReference(cfg(c, svc.port()), ref, 1), RlLabelReplayTest.index, "test");
+            final Map<String, JsonObject> gr = gamesRows(c);
+            Assert.assertEquals(gr.keySet().size(), games.size());
+            for (Map.Entry<String, JsonObject> e : gr.entrySet()) {
+                final JsonObject tr = e.getValue().getAsJsonObject("trajectory");
+                Assert.assertEquals(tr.get("reference_turns").getAsInt(), 1);
+                Assert.assertEquals(tr.getAsJsonArray("reference_sha256").get(0).getAsString(),
+                        forge.bench.rl.BvwTrajectoryRefTest.sha256(ref));
+                Assert.assertEquals(tr.get("games_known").getAsInt(), games.size());
+                Assert.assertTrue(tr.get("stack_compared").getAsBoolean());
+                final boolean te = e.getValue().get("trajectory_equal").getAsBoolean();
+                Assert.assertEquals(te, !e.getKey().equals(gIn), e.getValue().toString());
+                if (!te) {
+                    Assert.assertEquals(tr.get("first_diff").getAsInt(), in.get("dec_idx").getAsInt());
+                    Assert.assertEquals(e.getValue().get("rows").getAsInt(), 0);
+                }
+            }
+            final Map<String, JsonObject> keep = new TreeMap<>(baselineRows);
+            keep.keySet().removeIf(k -> k.startsWith(gIn + "/"));
+            Assert.assertEquals(rows(c), keep);
+        }
+    }
+
+    /**
+     * (b) Production's geometry: the band [1, 2) is disjoint from the reference window [0, 1) (as band [3, 5) is from
+     * step 0's [0, 3)): the recorder must see the window although no row is written there. Every game stays
+     * trajectory-equal and its band rows are the baseline's tbe-1 rows (but the band and the search identity). The
+     * rows' state_sha is the baseline's, and the hash is RlSimBench.fingerprint's text (+ stack) at every position.
+     */
+    @Test(timeOut = 1800000)
+    public void aBandDisjointFromTheWindowIsCheckedOnTheWindow() throws Exception {
+        final Path ref = indexFile(baseline());
+        final int[] probes = {0, 0};
+        forge.bench.rl.RlReplayLabeller.TEST_PROBE = g -> {
+            synchronized (probes) {
+                probes[0]++;
+                if (!forge.bench.rl.TrajectoryRef.publicState(g).equals(RlSimBench.fingerprint(g))) {
+                    probes[1]++;
+                }
+            }
+        };
+        try (FakeSearchService svc = new FakeSearchService(SHA, 2)) {
+            svc.leafValue = p -> -0.2;
+            final Path c = Files.createTempDirectory(RlLabelReplayTest.out, "step-ref-band-");
+            final RlActorBench.Cfg cc = withReference(cfg(c, search(svc.port()), 1, 2), ref, 1);
+            Assert.assertEquals(RlActorBench.replay(cc, RlLabelReplayTest.index, "test"), 0);
+            for (JsonObject g : gamesRows(c).values()) {
+                Assert.assertTrue(g.get("trajectory_equal").getAsBoolean(), g.toString());
+                Assert.assertTrue(g.getAsJsonObject("trajectory").get("replay_rows").getAsInt() > 0, g.toString());
+                Assert.assertEquals(g.get("band_lo").getAsInt(), 1);
+            }
+            final Map<String, JsonObject> rc = rows(c);
+            final Map<String, JsonObject> want = new TreeMap<>();
+            for (Map.Entry<String, JsonObject> e : baselineRows.entrySet()) {
+                if (e.getValue().get("turns_before_end").getAsInt() == 1) {
+                    want.put(e.getKey(), e.getValue());
+                }
+            }
+            Assert.assertFalse(want.isEmpty());
+            Assert.assertEquals(rc.keySet(), want.keySet());
+            for (String k : rc.keySet()) {
+                final JsonObject a = rc.get(k).deepCopy(), b = want.get(k).deepCopy();
+                Assert.assertEquals(a.getAsJsonArray("band").get(0).getAsInt(), 1);
+                Assert.assertTrue(a.has("state_sha") && a.get("state_sha").getAsString().length() == 16, a.toString());
+                for (String x : new String[] {"band", "search_sha"}) {
+                    a.remove(x);
+                    b.remove(x);
+                }
+                Assert.assertEquals(a, b, k);
+            }
+        } finally {
+            forge.bench.rl.RlReplayLabeller.TEST_PROBE = null;
+        }
+        Assert.assertTrue(probes[0] > 0, "no labelled position");
+        Assert.assertEquals(probes[1], 0, "publicState != RlSimBench.fingerprint at " + probes[1] + " of " + probes[0]);
+    }
+
+    /**
+     * (c) The masking cases: a reference row dropped, a reference row added, a row's turn and a row's phase changed,
+     * one per game: each game is void, at that dec. A reference without one game's rows refuses the run before any game
+     * (review-align #6).
+     */
+    @Test(timeOut = 1800000)
+    public void droppedExtraAndMismatchedReferenceRowsVoidTheirGame() throws Exception {
+        final List<JsonObject> base = indexRows(baseline());
+        final List<String> games = gamesOf(base);
+        Assert.assertTrue(games.size() >= 4, "fixture games " + games);
+        final List<JsonObject> t = new java.util.ArrayList<>();
+        for (JsonObject r : base) {
+            t.add(r.deepCopy());
+        }
+        final Map<String, Integer> at = new TreeMap<>();
+        final JsonObject drop = firstRow(t, games.get(0), 0);
+        at.put(games.get(0), drop.get("dec_idx").getAsInt());
+        t.remove(drop);
+        final JsonObject extra = firstRow(t, games.get(1), 0).deepCopy();
+        int maxDec = 0;
+        for (JsonObject r : t) {
+            if (r.get("game_uid").getAsString().equals(games.get(1))) {
+                maxDec = Math.max(maxDec, r.get("dec_idx").getAsInt());
+            }
+        }
+        extra.addProperty("dec_idx", maxDec + 1000);
+        t.add(extra);
+        at.put(games.get(1), maxDec + 1000);
+        final JsonObject turn = firstRow(t, games.get(2), 0);
+        turn.addProperty("turn", turn.get("turn").getAsInt() + 1);
+        at.put(games.get(2), turn.get("dec_idx").getAsInt());
+        final JsonObject phase = firstRow(t, games.get(3), 0);
+        phase.addProperty("phase", "MAIN1".equals(phase.get("phase").getAsString()) ? "MAIN2" : "MAIN1");
+        at.put(games.get(3), phase.get("dec_idx").getAsInt());
+        final Path ref = writeRows(baseline().resolve("reference-masking.jsonl"), t);
+        try (FakeSearchService svc = new FakeSearchService(SHA, 2)) {
+            svc.leafValue = p -> -0.2;
+            final Path c = Files.createTempDirectory(RlLabelReplayTest.out, "step-ref-mask-");
+            RlActorBench.replay(withReference(cfg(c, svc.port()), ref, 2), RlLabelReplayTest.index, "test");
+            final Map<String, JsonObject> gr = gamesRows(c);
+            for (String u : games.subList(0, 4)) {
+                final JsonObject g = gr.get(u);
+                Assert.assertFalse(g.get("trajectory_equal").getAsBoolean(), g.toString());
+                Assert.assertEquals(g.get("rows").getAsInt(), 0);
+                Assert.assertEquals(g.getAsJsonObject("trajectory").get("first_diff").getAsInt(), (int) at.get(u),
+                        g.toString());
+            }
+            Assert.assertEquals(g0(gr, games.get(0)).get("replay_at").getAsString().equals("none"), false);
+            Assert.assertEquals(g0(gr, games.get(0)).get("reference_at").getAsString(), "none");
+            Assert.assertEquals(g0(gr, games.get(1)).get("replay_at").getAsString(), "none");
+            for (JsonObject rr : RlLabelReplayTest.jsonl(c, "replay")) {
+                if (games.subList(0, 4).contains(rr.get("game_uid").getAsString())) {
+                    Assert.assertFalse(rr.get("trajectory_equal").getAsBoolean(), rr.toString());
+                }
+            }
+            // one game's rows missing from the reference: refused before any game (no games row written)
+            final List<JsonObject> without = new java.util.ArrayList<>();
+            for (JsonObject r : base) {
+                if (!r.get("game_uid").getAsString().equals(games.get(0))) {
+                    without.add(r);
+                }
+            }
+            final Path ref2 = writeRows(baseline().resolve("reference-without-one.jsonl"), without);
+            final Path d = Files.createTempDirectory(RlLabelReplayTest.out, "step-ref-missing-");
+            Assert.assertEquals(RlActorBench.replay(withReference(cfg(d, svc.port()), ref2, 2), RlLabelReplayTest.index,
+                    "test"), 2);
+            Assert.assertTrue(RlLabelReplayTest.jsonl(d, "games-").isEmpty());
+            Assert.assertTrue(RlLabelReplayTest.records(d).isEmpty());
+        }
+    }
+
+    static JsonObject g0(final Map<String, JsonObject> gr, final String u) {
+        return gr.get(u).getAsJsonObject("trajectory");
+    }
+
+    static RlActorBench.Cfg scanCfg(final Path dir) {
+        final RlActorBench.Cfg c = RlLabelReplayTest.cfg("replay");
+        c.replayDir = RlLabelReplayTest.out.resolve("tapes").toString();
+        c.replayOut = dir.resolve("replay.jsonl").toString();
+        c.exileScanTurns = 2;
+        c.exileScanOut = dir.toString();
+        return c;
+    }
+
+    static Map<String, JsonObject> scanRows(final Path dir) throws Exception {
+        final Map<String, JsonObject> out = new TreeMap<>();
+        for (JsonObject r : RlLabelReplayTest.jsonl(dir, "scan-")) {
+            out.put(r.get("game_uid").getAsString() + "/" + r.get("dec_idx").getAsInt(), r);
+        }
+        return out;
+    }
+
+    /**
+     * (e) The exile scan with a reference (the path that re-scans step 0's misaligned games): red / green on the
+     * fixture. Without a reference the rows carry no stack (the plain scan's bytes) and the games row has no trajectory;
+     * with the baseline's index as the reference every game is kept, its rows the plain rows plus stack; with one game's
+     * row tampered that game writes no rows while its games row still says equal (the digest) and trajectory_equal false.
+     */
+    @Test(timeOut = 1800000)
+    public void anExileScanWithAReferenceWritesOnlyTheSameTrajectory() throws Exception {
+        final List<JsonObject> base = indexRows(baseline());
+        final List<String> games = gamesOf(base);
+        final Path plain = Files.createTempDirectory(RlLabelReplayTest.out, "scan-plain-");
+        Assert.assertEquals(RlActorBench.replay(scanCfg(plain), RlLabelReplayTest.index, "test"), 0);
+        final Map<String, JsonObject> rp = scanRows(plain);
+        Assert.assertFalse(rp.isEmpty());
+        for (JsonObject r : rp.values()) {
+            Assert.assertFalse(r.has("stack"), r.toString());
+        }
+        for (JsonObject g : gamesRows(plain).values()) {
+            Assert.assertTrue(g.get("equal").getAsBoolean());
+            Assert.assertFalse(g.has("trajectory_equal") || g.has("trajectory"), g.toString());
+        }
+        // green: the same positions
+        final Path green = Files.createTempDirectory(RlLabelReplayTest.out, "scan-green-");
+        Assert.assertEquals(RlActorBench.replay(withReference(scanCfg(green), indexFile(baseline()), 2),
+                RlLabelReplayTest.index, "test"), 0);
+        final Map<String, JsonObject> rg = scanRows(green);
+        Assert.assertEquals(rg.keySet(), rp.keySet());
+        for (String k : rg.keySet()) {
+            final JsonObject x = rg.get(k).deepCopy();
+            Assert.assertTrue(x.has("stack"), x.toString());
+            x.remove("stack");
+            Assert.assertEquals(x, rp.get(k), k);
+        }
+        for (JsonObject g : gamesRows(green).values()) {
+            Assert.assertTrue(g.get("equal").getAsBoolean() && g.get("trajectory_equal").getAsBoolean(), g.toString());
+        }
+        // red: one game's tbe-0 row on the other seat
+        final List<JsonObject> t = new java.util.ArrayList<>();
+        for (JsonObject r : base) {
+            t.add(r.deepCopy());
+        }
+        final JsonObject bad = firstRow(t, games.get(0), 0);
+        bad.addProperty("seat", 1 - bad.get("seat").getAsInt());
+        final Path ref = writeRows(baseline().resolve("reference-scan-red.jsonl"), t);
+        final Path red = Files.createTempDirectory(RlLabelReplayTest.out, "scan-red-");
+        Assert.assertEquals(RlActorBench.replay(withReference(scanCfg(red), ref, 2), RlLabelReplayTest.index, "test"), 0);
+        final Map<String, JsonObject> gr = gamesRows(red);
+        final JsonObject g = gr.get(games.get(0));
+        Assert.assertTrue(g.get("equal").getAsBoolean(), "equal is the digest: " + g);
+        Assert.assertFalse(g.get("trajectory_equal").getAsBoolean());
+        Assert.assertEquals(g.get("rows").getAsInt(), 0);
+        Assert.assertEquals(g.getAsJsonObject("trajectory").get("first_diff").getAsInt(), bad.get("dec_idx").getAsInt());
+        final Map<String, JsonObject> rr = scanRows(red);
+        final Map<String, JsonObject> keep = new TreeMap<>(rg);
+        keep.keySet().removeIf(k -> k.startsWith(games.get(0) + "/"));
+        Assert.assertEquals(rr, keep);
+        for (JsonObject x : RlLabelReplayTest.jsonl(red, "replay")) {
+            Assert.assertEquals(x.get("trajectory_equal").getAsBoolean(), !games.get(0).equals(x.get("game_uid")
+                    .getAsString()), x.toString());
+        }
+    }
+
+    /**
+     * Review-align #5: an exile scan whose reference has no stack (as the h6 scan rows) compares seat | turn | phase,
+     * and says so in every games row.
+     */
+    @Test(timeOut = 1800000)
+    public void aReferenceWithoutStackFallsBackLoudly() throws Exception {
+        final List<JsonObject> t = new java.util.ArrayList<>();
+        for (JsonObject r : indexRows(baseline())) {
+            final JsonObject x = r.deepCopy();
+            x.remove("stack");
+            t.add(x);
+        }
+        final Path ref = writeRows(baseline().resolve("reference-nostack.jsonl"), t);
+        final Path d = Files.createTempDirectory(RlLabelReplayTest.out, "scan-nostack-");
+        Assert.assertEquals(RlActorBench.replay(withReference(scanCfg(d), ref, 2), RlLabelReplayTest.index, "test"), 0);
+        for (JsonObject g : gamesRows(d).values()) {
+            Assert.assertTrue(g.get("trajectory_equal").getAsBoolean(), g.toString());
+            Assert.assertFalse(g.getAsJsonObject("trajectory").get("stack_compared").getAsBoolean(), g.toString());
+        }
+        Assert.assertEquals(forge.bench.rl.TrajectoryRef.NO_STACK_GAMES.get(), gamesRows(d).size());
     }
 
     /**
