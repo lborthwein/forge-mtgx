@@ -351,6 +351,8 @@ public final class ForcedWinSolver {
         public long engineRuns, engineNodes, engineSteps, engineDeadlineStops, engineCapStops;
         /** Cards in the engine's game copies; the engine's wall time (diagnostics: the ms-to-counter mapping). */
         public long engineCards, engineNanos, enginePathPrunes;
+        /** Engine searches that stopped at the node cap with nodes spent by earlier searches of this solver (review #10). */
+        public long engineLifetimeStops;
         /** Engine moves cut at the wall. */
         public long engineWallCuts;
         /** Lines evaluated; worlds run (the unopposed world 0 included); play-outs; their steps. */
@@ -376,6 +378,7 @@ public final class ForcedWinSolver {
             engineCards += sign * o.engineCards;
             engineNanos += sign * o.engineNanos;
             enginePathPrunes += sign * o.enginePathPrunes;
+            engineLifetimeStops += sign * o.engineLifetimeStops;
             engineDeadlineStops += sign * o.engineDeadlineStops;
             engineCapStops += sign * o.engineCapStops;
             engineWallCuts += sign * o.engineWallCuts;
@@ -420,6 +423,7 @@ public final class ForcedWinSolver {
             o.addProperty("engine_cards", engineCards);
             o.addProperty("engine_ms", engineNanos / 1_000_000);
             o.addProperty("engine_path_prunes", enginePathPrunes);
+            o.addProperty("engine_lifetime_stops", engineLifetimeStops);
             o.addProperty("engine_deadline_stops", engineDeadlineStops);
             o.addProperty("engine_cap_stops", engineCapStops);
             o.addProperty("engine_wall_cuts", engineWallCuts);
@@ -435,6 +439,32 @@ public final class ForcedWinSolver {
             o.addProperty("ms_bound", msBound());
             return o;
         }
+    }
+
+    /** bvw-step1-build-1024: the cards in a game (every player's zones and the stack): a copy's size. */
+    public static int cardCount(Game g) {
+        return ForcedWinEngine.cardCount(g);
+    }
+
+    /** bvw-step1-build-1024 (review #3): the least Forge AI timeout a counter-budget run accepts, seconds. */
+    public static final int COUNTER_MIN_AI_TIMEOUT_SEC = 600;
+
+    /**
+     * bvw-step1-build-1024 (review #3): Forge AI keeps two wall clocks of its own that counter budgets do not replace: the
+     * AI timeout of its spell evaluation ({@code Game.AI_TIMEOUT}, copied into every game copy) and the parallel attack
+     * planner unless {@code -Dforge.bench.sequentialAi=true}. A counter-budget run refuses to start unless both are
+     * non-binding. Null when they are; else the refusal.
+     */
+    public static String counterRuntimeRefusal(int aiTimeoutSec) {
+        if (!Boolean.getBoolean("forge.bench.sequentialAi")) {
+            return "refused: a counter-budget run needs -Dforge.bench.sequentialAi=true (Forge AI's parallel attack planner "
+                    + "has a wall clock)";
+        }
+        if (aiTimeoutSec < COUNTER_MIN_AI_TIMEOUT_SEC) {
+            return "refused: a counter-budget run needs aiTimeoutSec >= " + COUNTER_MIN_AI_TIMEOUT_SEC + " (Forge AI's spell "
+                    + "evaluation has a wall clock), not " + aiTimeoutSec;
+        }
+        return null;
     }
 
     /** bvw-step1-build-1024: this solver's work so far (read-only diagnostics; {@link Meter}). */
@@ -469,6 +499,11 @@ public final class ForcedWinSolver {
 
     public Config config() {
         return cfg;
+    }
+
+    /** bvw-step1-build-1024: the seat's game (the generator's recorded runtime). */
+    Game seatGame() {
+        return me.getGame();
     }
 
     public boolean lineActive() {
@@ -1513,7 +1548,7 @@ public final class ForcedWinSolver {
         el.redraw = redraw;
         final int en0 = engineStats.nodes, ec0 = engineStats.cut, ed0 = engineStats.deadlineStops, ek0 = engineStats.capStops;
         final long es0 = engineStats.steps, ecd0 = engineStats.cards;
-        final int ep0 = engineStats.pathPrunes;
+        final int ep0 = engineStats.pathPrunes, el0 = engineStats.lifetimeStops;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
         engineNanos += System.nanoTime() - t1;
@@ -1522,6 +1557,7 @@ public final class ForcedWinSolver {
         meter.engineSteps += engineStats.steps - es0;
         meter.engineCards += engineStats.cards - ecd0;
         meter.enginePathPrunes += engineStats.pathPrunes - ep0;
+        meter.engineLifetimeStops += engineStats.lifetimeStops - el0;
         meter.engineNanos += System.nanoTime() - t1;
         meter.engineWallCuts += engineStats.cut - ec0;
         meter.engineDeadlineStops += engineStats.deadlineStops - ed0;
@@ -1902,6 +1938,14 @@ public final class ForcedWinSolver {
                 if (wall != 0 && System.nanoTime() > wall) {
                     worst = new Outcome();
                     worst.why = "wall";
+                    break;
+                }
+                if (evalStepsSpent()) {
+                    // bvw-step1-build-1024 (review #13): budget=counter's stand-in for the wall here: the decision's
+                    // evalSteps are spent, so the remaining counter answers are not run and the line is not proven
+                    meter.evalCapStops++;
+                    worst = new Outcome();
+                    worst.why = "evalSteps";
                     break;
                 }
                 final Outcome o = playout(live, line, mix(seed, 0), -1, j, wall);

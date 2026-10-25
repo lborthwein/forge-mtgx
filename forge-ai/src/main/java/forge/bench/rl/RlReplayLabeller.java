@@ -107,7 +107,14 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     private final String searchSha;
     private final RlKnowledge knowledge;
     private final Map<String, Integer> targets = new TreeMap<>();
+    private final Map<String, Integer> searchWhy = new TreeMap<>();
     private double searchMs = 0;
+    /**
+     * Review #9: the run's fatal search error (a pin the service does not match, or no service), or null. Set by any
+     * game's labeller; the runner stops replaying and exits 2; the game it happened in writes no rows.
+     */
+    public static final java.util.concurrent.atomic.AtomicReference<String> FATAL = new java.util.concurrent.atomic.AtomicReference<>();
+    private String fatal;
     private final JsonObject tape;
     private final long uid;
     private final int tapeTurns;
@@ -156,6 +163,20 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         if (searchSpec != null && !spec.counterBudgets()) {
             throw new IllegalArgumentException("refused: a step-1 search target needs the proof check on budget=counter too");
         }
+        if (bandLo > 0 && searchSpec == null) {
+            // review #14: a band is a step-k labeller; step-0 rows come only from the turns window
+            throw new IllegalArgumentException("refused: a label band without a search block (step-0 rows use turns)");
+        }
+        if (searchSpec != null && (searchSpec.bandLo != bandLo || searchSpec.bandHi != bandHi)) {
+            throw new IllegalArgumentException("refused: the search block's band is not the labeller's");
+        }
+        if (game != null) {
+            // review #3: the game runs under the Forge AI settings a counter spec pins
+            final String no = spec.runtimeRefusal(game.getAITimeout());
+            if (no != null) {
+                throw new IllegalArgumentException(no);
+            }
+        }
         this.spec = spec;
         this.turnsWindow = bandHi;
         this.bandLo = bandLo;
@@ -191,7 +212,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     public void beforeDecision(final Player p) {
         final Game g = game;
         final int ord = decisions++;
-        if (g == null || g.isGameOver()) {
+        if (g == null || g.isGameOver() || fatal != null || FATAL.get() != null) {
             return;
         }
         final int seat = g.getRegisteredPlayers().indexOf(p);
@@ -224,10 +245,19 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             return new Object[] {payload, seats[seat].label(g, p, key), fms, f.C};
         }));
         // bvw-step1-build-1024: the search value, in its own isolation (a copy of the live game; never moves it)
-        final StepSearch.Result sr = search == null ? null : PlayerControllerBridge.isolated(g, () -> IdScope.detached(
-                () -> search.value(g, p, knowledge, uid, key)));
-        if (sr != null) {
+        StepSearch.Result sr = null;
+        if (search != null) {
+            try {
+                sr = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> search.value(g, p, knowledge, uid, key)));
+            } catch (StepSearch.PinError e) {
+                // review #9: fatal for the run; this game writes no rows
+                fatal = e.getMessage();
+                FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + e.getMessage());
+                System.err.println("[bvw-label] FATAL " + e.getMessage());
+                return;
+            }
             searchMs += sr.ms;
+            searchWhy.merge(sr.why, 1, Integer::sum);
         }
         final byte[] payload = (byte[]) got[0];
         final HonestLabel.Result r = (HonestLabel.Result) got[1];
@@ -294,7 +324,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 "turns_before_end", "tape_turns", "tape_reason", "tape_result", "label", "check", "gate", "p_win",
                 "p_loss", "worlds_win", "worlds_loss", "lost_worlds", "proposals", "how", "end_reason", "line_how",
                 "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
-                "target", "target_source", "search", "search_sha"}) {
+                "target", "target_source", "search", "search_sha", "value_backend"}) {
             if (h.has(k)) {
                 ir.add(k, h.get(k));
             }
@@ -347,7 +377,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      * The game is over and its digest checked: write its rows when {@code digestEqual}, none otherwise (loudly). The
      * games row says which. Returns the number of rows written.
      */
-    public int finish(final Sink sink, final boolean digestEqual, final JsonObject replayRow) throws IOException {
+    public int finish(final Sink sink, final boolean digestEqual0, final JsonObject replayRow) throws IOException {
+        // review #9: a game whose labelling hit a fatal search error writes no rows, whatever its digest
+        final boolean digestEqual = digestEqual0 && fatal == null;
         byte[] member = null;
         if (digestEqual && !records.isEmpty()) {
             final ByteArrayOutputStream bo = new ByteArrayOutputStream();
@@ -358,7 +390,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             }
             member = bo.toByteArray();
         }
-        if (!digestEqual) {
+        if (!digestEqual0) {
             System.err.println("[bvw-label] DIGEST MISMATCH game " + Long.toUnsignedString(uid) + ": tape "
                     + tape.get("digest") + ", replay " + replayRow.get("digest_replay") + " -- its " + records.size()
                     + " label rows are VOID (not written)");
@@ -379,7 +411,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         gr.add("digest_tape", tape.get("digest"));
         gr.add("digest_replay", replayRow.get("digest_replay"));
-        gr.addProperty("equal", digestEqual);
+        gr.addProperty("equal", digestEqual0);
         gr.addProperty("decisions", decisions);
         gr.addProperty("window_decisions", windowDecisions);
         gr.addProperty("rows", digestEqual ? records.size() : 0);
@@ -405,6 +437,14 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             final JsonObject tj = new JsonObject();
             for (Map.Entry<String, Integer> e : targets.entrySet()) tj.addProperty(e.getKey(), e.getValue());
             gr.add("targets", tj);
+            // review #9: how every search ended (score_failed / error / leaf fallbacks show here per game)
+            final JsonObject wj = new JsonObject();
+            for (Map.Entry<String, Integer> e : searchWhy.entrySet()) wj.addProperty(e.getKey(), e.getValue());
+            gr.add("search_why", wj);
+            gr.addProperty("band_hi", turnsWindow);
+            if (fatal != null) {
+                gr.addProperty("fatal", fatal);
+            }
         }
         if (sink != null) {
             sink.write(member, digestEqual ? idx : java.util.Collections.emptyList(), gr);

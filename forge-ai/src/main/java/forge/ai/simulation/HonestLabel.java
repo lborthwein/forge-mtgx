@@ -77,10 +77,17 @@ public final class HonestLabel {
          * its check's solver work ({@link ForcedWinSolver.Meter}: counter units and the stops each budget caused).
          */
         public boolean meter = false;
+        /**
+         * bvw-step1-build-1024 (review #3; null = unset, the default, and then nothing changes, the sha included): the
+         * Forge AI settings a counter-budget spec runs under, part of its identity. A counter spec must set both
+         * ({@code sequentialAi} true, {@code aiTimeoutSec} >= 600) and the runner refuses a JVM or game that differs.
+         */
+        public Boolean sequentialAi = null;
+        public Integer aiTimeoutSec = null;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed", "meter"));
+                "seed", "meter", "sequentialAi", "aiTimeoutSec"));
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
@@ -109,6 +116,8 @@ public final class HonestLabel {
             if (o.has("lossWallMs")) s.lossWallMs = o.get("lossWallMs").getAsLong();
             if (o.has("seed")) s.seed = o.get("seed").getAsLong();
             if (o.has("meter")) s.meter = o.get("meter").getAsBoolean();
+            if (o.has("sequentialAi") && !o.get("sequentialAi").isJsonNull()) s.sequentialAi = o.get("sequentialAi").getAsBoolean();
+            if (o.has("aiTimeoutSec") && !o.get("aiTimeoutSec").isJsonNull()) s.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
             s.checkHonest();
             return s;
         }
@@ -140,6 +149,29 @@ public final class HonestLabel {
             if (wc && lossWallMs > 0) {
                 throw new IllegalArgumentException("refused: a budget=counter label spec needs lossWallMs = 0 (no wall)");
             }
+            if (wc && (!Boolean.TRUE.equals(sequentialAi) || aiTimeoutSec == null
+                    || aiTimeoutSec < ForcedWinSolver.COUNTER_MIN_AI_TIMEOUT_SEC)) {
+                throw new IllegalArgumentException("refused: a budget=counter label spec pins its Forge AI settings: "
+                        + "sequentialAi true and aiTimeoutSec >= " + ForcedWinSolver.COUNTER_MIN_AI_TIMEOUT_SEC);
+            }
+        }
+
+        /**
+         * bvw-step1-build-1024 (review #3): null when this JVM and a game with {@code gameAiTimeoutSec} run this spec as
+         * pinned; else the refusal (only a counter spec pins).
+         */
+        public String runtimeRefusal(final int gameAiTimeoutSec) {
+            if (!counterBudgets()) {
+                return null;
+            }
+            final String no = ForcedWinSolver.counterRuntimeRefusal(gameAiTimeoutSec);
+            if (no != null) {
+                return no;
+            }
+            if (aiTimeoutSec != gameAiTimeoutSec) {
+                return "refused: the label spec pins aiTimeoutSec " + aiTimeoutSec + ", the run has " + gameAiTimeoutSec;
+            }
+            return null;
         }
 
         /** bvw-step1-build-1024: this solver config object asks for counter budgets. */
@@ -223,6 +255,12 @@ public final class HonestLabel {
             o.addProperty("seed", seed);
             if (meter) {
                 o.addProperty("meter", true); // bvw-step1-build-1024: only when on, so every other spec's sha is unchanged
+            }
+            if (sequentialAi != null) {
+                o.addProperty("sequentialAi", sequentialAi); // review #3: only when set (counter specs set both)
+            }
+            if (aiTimeoutSec != null) {
+                o.addProperty("aiTimeoutSec", aiTimeoutSec);
             }
             return o;
         }

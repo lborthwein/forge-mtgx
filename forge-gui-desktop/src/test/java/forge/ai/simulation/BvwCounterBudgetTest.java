@@ -66,6 +66,7 @@ public class BvwCounterBudgetTest extends SimulationTest {
         Assert.assertEquals(HonestLabel.Spec.parse(off).sha(), PILOT_SPEC_SHA, "meter=false is the frozen spec");
         // the generator's recorded spec: the HonestForcedWin profile's config, as the pilot tapes hold it
         final Game g = initAndCreateGame();
+        g.AI_TIMEOUT = 600; // review #3: a counter generator refuses a binding Forge AI timeout
         final Player me = g.getPlayers().get(0);
         final ForcedWinSolver gen = HonestGenerator.solver(me, fromSpec(GENERATOR_SPEC));
         Assert.assertEquals(HonestGenerator.solverCfgJson(gen.config()), JsonParser.parseString(PILOT_GENERATOR_CFG));
@@ -111,7 +112,28 @@ public class BvwCounterBudgetTest extends SimulationTest {
         both.getAsJsonObject("lossCfg").addProperty("budget", "counter");
         Assert.assertThrows(IllegalArgumentException.class, () -> HonestLabel.Spec.parse(both)); // lossWallMs 12000
         both.addProperty("lossWallMs", 0);
-        Assert.assertTrue(HonestLabel.Spec.parse(both).counterBudgets());
+        // review #3: a counter spec pins its Forge AI settings (in its sha), and refuses a run that differs
+        Assert.assertThrows(IllegalArgumentException.class, () -> HonestLabel.Spec.parse(both));
+        both.addProperty("sequentialAi", true);
+        Assert.assertThrows(IllegalArgumentException.class, () -> HonestLabel.Spec.parse(both));
+        both.addProperty("aiTimeoutSec", 300);
+        Assert.assertThrows(IllegalArgumentException.class, () -> HonestLabel.Spec.parse(both));
+        both.addProperty("aiTimeoutSec", 600);
+        final HonestLabel.Spec cs = HonestLabel.Spec.parse(both);
+        Assert.assertTrue(cs.counterBudgets());
+        Assert.assertNull(cs.runtimeRefusal(600), "this JVM runs -Dforge.bench.sequentialAi=true");
+        Assert.assertNotNull(cs.runtimeRefusal(5));
+        Assert.assertNotNull(cs.runtimeRefusal(900), "the pinned value, not any larger one");
+        final JsonObject other = both.deepCopy();
+        other.addProperty("aiTimeoutSec", 900);
+        Assert.assertNotEquals(HonestLabel.Spec.parse(other).sha(), cs.sha(), "the settings are in the sha");
+        Assert.assertNull(ForcedWinSolver.counterRuntimeRefusal(600));
+        Assert.assertNotNull(ForcedWinSolver.counterRuntimeRefusal(5));
+        // the generator refuses a counter config in a game whose Forge AI timeout binds
+        final Game g5 = initAndCreateGame();
+        g5.AI_TIMEOUT = 5;
+        Assert.assertThrows(IllegalArgumentException.class, () -> HonestGenerator.solver(g5.getPlayers().get(0),
+                fromSpec(GENERATOR_SPEC + ",budget=counter")));
     }
 
     /** A counter spec whose ms keys are {@code ms} (they must not matter), metered. */
@@ -122,6 +144,8 @@ public class BvwCounterBudgetTest extends SimulationTest {
         o.addProperty("seed", 7);
         o.addProperty("meter", true);
         o.addProperty("lossWallMs", 0);
+        o.addProperty("sequentialAi", true);
+        o.addProperty("aiTimeoutSec", 600);
         for (String k : new String[] {"solverCfg", "lossCfg"}) {
             final JsonObject c = new JsonObject();
             c.addProperty("hideOwnLibrary", "true");
@@ -142,6 +166,8 @@ public class BvwCounterBudgetTest extends SimulationTest {
         for (String k : new String[] {"solverCfg", "lossCfg"}) {
             o.getAsJsonObject(k).remove("budget");
         }
+        o.remove("sequentialAi");
+        o.remove("aiTimeoutSec");
         return o;
     }
 
@@ -170,6 +196,14 @@ public class BvwCounterBudgetTest extends SimulationTest {
         Assert.assertTrue(meter.get("playout_steps").getAsLong() > 0, meter.toString());
         Assert.assertEquals(label(g, me, counterSpec("1")), tiny, "counter labels repeat");
         // the ms path at the same 1 ms budget is cut by its clock (fewer worlds: no proof), and its meter says so
+        // review #16e: a counter evalSteps cap stops the line's worlds early: fewer than K worlds, no proof
+        final JsonObject capped = counterSpec("1");
+        capped.getAsJsonObject("solverCfg").addProperty("evalSteps", "1");
+        final JsonObject cappedRow = label(g, me, capped);
+        Assert.assertNotEquals(cappedRow.get("label").getAsString(), "win", cappedRow.toString());
+        Assert.assertTrue(cappedRow.get("worlds_win").getAsInt() < 8, cappedRow.toString());
+        Assert.assertTrue(cappedRow.getAsJsonObject("meter").get("eval_cap_stops").getAsLong() >= 1, cappedRow.toString());
+        Assert.assertEquals(label(g, me, capped), cappedRow, "the cut is deterministic");
         final JsonObject msTiny = label(g, me, msSpec("1"));
         Assert.assertTrue(msTiny.getAsJsonObject("meter").get("ms_bound").getAsBoolean(), msTiny.toString());
         Assert.assertNotEquals(msTiny.get("label").getAsString(), "win", msTiny.toString());
@@ -199,6 +233,12 @@ public class BvwCounterBudgetTest extends SimulationTest {
         final ForcedWinEngine.Stats st3 = new ForcedWinEngine.Stats();
         Assert.assertNull(ForcedWinEngine.search(g, me, shallow, st3, Long.MAX_VALUE, 7L), st3.summary());
         Assert.assertTrue(st3.pathPrunes >= 1 && st3.nodes == 0, "prunes " + st3.pathPrunes);
+        // review #10: a pass stopped by nodes an EARLIER search spent is counted apart from this search's own caps
+        final ForcedWinEngine.Stats st4 = new ForcedWinEngine.Stats();
+        st4.nodes = 200; // a solver whose earlier engine searches used 200 nodes
+        ForcedWinEngine.search(g, me, new ForcedWinEngine.Limits(), st4, Long.MAX_VALUE, 7L);
+        Assert.assertEquals(st4.lifetimeStops, 1, st4.summary());
+        Assert.assertTrue(st4.nodes > 200, "the pass-the-turn pass still runs: " + st4.summary());
         // a seat's calls past the cap end the move as the wall did
         final ForcedWinEngine.GuardedAi ai = new ForcedWinEngine.GuardedAi(g, me, me.getController().getLobbyPlayer());
         ai.callLimited(2);
@@ -206,6 +246,45 @@ public class BvwCounterBudgetTest extends SimulationTest {
         ai.chooseSpellAbilityToPlay();
         Assert.assertThrows(ForcedWinEngine.OutOfBudget.class, ai::chooseSpellAbilityToPlay);
         Assert.assertTrue(fromSpec("budget=counter,defense=false,engineCards=900").engineCards == 900);
+    }
+
+    static ForcedWinEngine.Limits loopLimits(final long pathCards) {
+        final ForcedWinEngine.Limits lim = new ForcedWinEngine.Limits();
+        lim.cycles = true;
+        lim.nodes = 60;
+        lim.passTurn = false;
+        lim.pathCards = pathCards;
+        return lim;
+    }
+
+    @Test(timeOut = 900000)
+    public void aFastForwardsLiveCopiesCountAgainstThePathCap() {
+        // review #11: ForcedWinSolverTest's Kiki-Jiki loop (fast-forwarded to the kill). The loop's live copies count
+        // against pathCards with the path: at the free run's peak nothing is cut; below it the cap binds, nothing live
+        // ever exceeds it, and at some cap it is the fast-forward itself that stops (the copies the old rule missed)
+        final Game g = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame("Pestermite",
+                ForcedWinSolverTest.KIKI_BF, 20, "", "Forest", 20, "human"));
+        final Player me = g.getPlayers().get(0);
+        final ForcedWinEngine.Stats free = new ForcedWinEngine.Stats();
+        final ForcedWinPlanner.Line line = ForcedWinEngine.search(g, me, loopLimits(0), free, Long.MAX_VALUE, 7L);
+        Assert.assertNotNull(line, free.summary());
+        Assert.assertTrue(free.loops >= 1 && free.peakLive > 0, free.summary());
+        final ForcedWinEngine.Stats at = new ForcedWinEngine.Stats();
+        Assert.assertEquals(String.valueOf(ForcedWinEngine.search(g, me, loopLimits(free.peakLive), at, Long.MAX_VALUE,
+                7L)), String.valueOf(line));
+        Assert.assertEquals(at.pathPrunes, 0, at.summary());
+        boolean loopStop = false;
+        final long step = Math.max(1, free.peakLive / 40);
+        for (long cap = free.peakLive - 1; cap > 0 && !loopStop; cap -= step) {
+            final ForcedWinEngine.Stats s = new ForcedWinEngine.Stats();
+            ForcedWinEngine.search(g, me, loopLimits(cap), s, Long.MAX_VALUE, 7L);
+            Assert.assertTrue(s.peakLive <= cap, "live " + s.peakLive + " > cap " + cap);
+            Assert.assertTrue(s.pathPrunes >= 1, "cap " + cap + ": " + s.summary());
+            loopStop = s.loopCardStops > 0;
+            System.err.println("[bvw-ff-cards test] cap " + cap + " peak " + s.peakLive + " loopStops " + s.loopCardStops
+                    + " prunes " + s.pathPrunes);
+        }
+        Assert.assertTrue(loopStop, "no cap stopped a fast-forward (free peak " + free.peakLive + ")");
     }
 
     @Test

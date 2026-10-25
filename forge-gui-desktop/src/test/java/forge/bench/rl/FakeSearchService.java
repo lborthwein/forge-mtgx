@@ -78,6 +78,8 @@ public final class FakeSearchService implements Closeable {
     public volatile long ackLeavesMax = 65536, ackLeavesBytesMax = 256L << 20, ackMaxFrame = RlWire.MAX_FRAME;
     /** bvw-p3-batch-1023: a broken service that advertises chunked LEAVES but answers every frame on its own. */
     public volatile boolean answerEveryFrame = false;
+    /** bvw-step1-build-1024: the HELLO_ACK's {@code value_backend} (null = none, the policy's own v(o)). */
+    public volatile JsonObject ackValueBackend = null;
     /** bvw-p3-batch-1023: every LEAVES frame seen, {flags, payload bytes, leaves}, and every answered message's leaves. */
     public final List<int[]> leafFrames = Collections.synchronizedList(new ArrayList<>());
     public final List<Integer> leafMessages = Collections.synchronizedList(new ArrayList<>());
@@ -158,6 +160,10 @@ public final class FakeSearchService implements Closeable {
             ack.addProperty("policy_sha", policySha);
             ack.addProperty("policy_version", 7);
             ack.addProperty("device", "cpu");
+            final JsonObject vb = ackValueBackend;
+            if (vb != null) {
+                ack.add("value_backend", vb.deepCopy()); // bvw-step1-build-1024: a value backend's identity, as served
+            }
             if (ackObs >= 0) {
                 ack.addProperty("obs_schema", ackObs);
             }

@@ -2182,6 +2182,43 @@ public final class LookaheadSearch {
         }
     }
 
+    /**
+     * bvw-step1-build-1024 (ruling 4; the step-1 labeller only, nothing in play calls it): the last given search's
+     * candidate {@code cand} (its index among the searched candidates) played out again in K FRESH worlds seeded by
+     * {@code salt} (never the decision's own world seeds), with the same play-outs and leaf values, our known top kept as
+     * {@code knownTop}. A departure's own K-world mean won a max over noisy means, so it is biased up; these worlds are
+     * not. Returns the per-world values, or null (a failed play-out, a budget stop, a leaf fallback).
+     */
+    public double[] reevaluate(Game live, Player me, int cand, long salt, int knownTop) {
+        final List<Cand> cs = lastCandidates;
+        if (cs == null || cand < 0 || cand >= cs.size()) {
+            return null;
+        }
+        final int k = Math.max(1, cfg.worlds);
+        final double[][] values = new double[1][k];
+        final Rollout[][] outs = new Rollout[1][k];
+        final boolean[] ok = {true};
+        final int prevTop = ownKnownTop;
+        ownKnownTop = Math.max(0, knownTop);
+        try {
+            final long fb = stats.leafFallbacks;
+            final int aborted = playAll(live, me, java.util.Collections.singletonList(cs.get(cand)), null, mix(cfg.seed, salt),
+                    new Carried[k], values, outs, ok, null);
+            if (aborted > 0 || !ok[0]) {
+                return null;
+            }
+            if (hookLeaf) {
+                valueLeaves(values, outs, ok, k);
+                if (stats.leafFallbacks != fb) {
+                    return null;
+                }
+            }
+            return values[0];
+        } finally {
+            ownKnownTop = prevTop;
+        }
+    }
+
     /** S-b: the next searched decision's world-0 seed (its recordings play in the same world 0 as its valuation). */
     public long nextWorld0Seed() {
         return mix(mix(cfg.seed, 0x5eedL + decisionIndex), 1000);

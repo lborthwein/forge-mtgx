@@ -1208,6 +1208,23 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /**
+     * bvw-step1-build-1024 (review #9): open this thread's connection (HELLO; the policySha pin is checked there) and
+     * return the service's HELLO_ACK; throws when there is no service or a pin fails.
+     */
+    JsonObject connectAck() throws IOException {
+        final RlSearchClient c = client();
+        return c.ack == null ? null : c.ack.deepCopy();
+    }
+
+    /**
+     * bvw-step1-build-1024 (ruling 4): the last search's candidate {@code cand} (its index among the searched candidates)
+     * played out again in K fresh worlds seeded by {@code salt}, valued by the same leaves: its per-world values, or null.
+     */
+    double[] reevaluate(final Game g, final Player me, final int cand, final long salt, final int knownTop) {
+        return ls.reevaluate(g, me, cand, salt, knownTop);
+    }
+
     /** bvw-step1-build-1024: the served checkpoint (HELLO_ACK policy_sha) once a connection is open, or null. */
     String servedPolicySha() {
         return servedPolicySha;

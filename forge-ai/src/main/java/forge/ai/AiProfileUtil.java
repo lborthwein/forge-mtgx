@@ -112,6 +112,10 @@ public class AiProfileUtil {
      * (no wall clock; caps calibrated on the step-0 pilot games, where the ms budgets bound 3 of 7,447 decisions on the
      * Studio: engine steps max 4,457 and copied cards max 57,186 per search, play-out steps max 1,216 per evaluating
      * decision; enginePathCards is the memory guard) with adoptAttack (an adopted line whose first step is our attack is declared). HonestForcedWin is unchanged.
+     * engineSteps and engineCards are per engine search, while the engine's node cap counts nodes over the solver's life
+     * (one solver per seat and game, as HonestForcedWin: after its first search the same-turn pass gets no nodes; metered
+     * apart as engine_lifetime_stops). It refuses to run unless forge.bench.sequentialAi is set and the game's AI timeout
+     * is at least 600 s (Forge AI's own clocks).
      */
     public static final String HONEST_FORCED_WIN_COUNTED_PROFILE = "HonestForcedWinCounted";
     /** bvw-step1-build-1024: the counted generator's solver spec (FORCED_WIN_SPEC). */

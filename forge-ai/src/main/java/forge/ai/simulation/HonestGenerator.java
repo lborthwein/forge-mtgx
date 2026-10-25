@@ -26,6 +26,13 @@ public final class HonestGenerator {
             throw new IllegalArgumentException("refused: honest generator executes forced lines only: act/forced/"
                     + "adversary=true, likely=false, threshold=1.0");
         }
+        if (cfg.counter) {
+            // review #3: counter budgets are host-independent only with Forge AI's own clocks non-binding
+            final String no = ForcedWinSolver.counterRuntimeRefusal(me.getGame().getAITimeout());
+            if (no != null) {
+                throw new IllegalArgumentException(no);
+            }
+        }
         cfg.honestProbes = true;
         final LookaheadSearch belief = new LookaheadSearch(spec.beliefConfig());
         final ForcedWinSolver s = new ForcedWinSolver(me, cfg);
@@ -46,6 +53,13 @@ public final class HonestGenerator {
         spec.addProperty("beliefBasics", 8);
         spec.addProperty("beliefSingleton", false);
         spec.add("solverCfg", solverCfgJson(s.config()));
+        if (s.config().counter) {
+            // review #3: the Forge AI settings a counter run depends on are part of the recorded spec (replays compare it)
+            final JsonObject rt = new JsonObject();
+            rt.addProperty("sequentialAi", Boolean.getBoolean("forge.bench.sequentialAi"));
+            rt.addProperty("aiTimeoutSec", aiTimeoutOf(s));
+            spec.add("runtime", rt);
+        }
         out.add("spec", spec);
         out.addProperty("decisions", s.decisions);
         out.addProperty("taken", s.taken);
@@ -60,6 +74,14 @@ public final class HonestGenerator {
             out.add("meter", s.meter.toJson());
         }
         return out;
+    }
+
+    private static int aiTimeoutOf(final ForcedWinSolver s) {
+        try {
+            return s.seatGame().getAITimeout();
+        } catch (RuntimeException e) {
+            return -1;
+        }
     }
 
     /**

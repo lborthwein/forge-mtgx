@@ -247,11 +247,20 @@ public final class RlActorBench {
                 }
             }
             if (l.has("search") && !l.get("search").isJsonNull()) {
-                // bvw-step1-build-1024: refused unless honest and host-independent (StepSearch.Spec.parse)
-                c.labelSearch = forge.bench.rl.StepSearch.Spec.parse(l.getAsJsonObject("search"), c.labelSpec.worlds);
+                // bvw-step1-build-1024: refused unless honest, host-independent and tied to the proof check
                 if (!c.labelSpec.counterBudgets()) {
                     throw new IllegalArgumentException("refused: a label search needs the proof check on budget=counter");
                 }
+                c.labelSearch = forge.bench.rl.StepSearch.Spec.parse(l.getAsJsonObject("search"), c.labelSpec,
+                        c.labelBandLo, c.labelTurns);
+            } else if (l.has("band")) {
+                // review #14: a band is a step-k labeller; step-0 rows come only from the turns window
+                throw new IllegalArgumentException("refused: a label band needs a search block (step-0 rows use turns)");
+            }
+            // review #3: a counter spec runs only under the Forge AI settings it pins
+            final String no = c.labelSpec.runtimeRefusal(c.aiTimeoutSec);
+            if (no != null) {
+                throw new IllegalArgumentException(no);
             }
             if (!l.has("out")) {
                 throw new IllegalArgumentException("label.out (the label directory) is required");
@@ -1387,6 +1396,7 @@ public final class RlActorBench {
      */
     static int replay(final Cfg cfg, final CardIndex index, final String jarSha) throws IOException {
         expandReplayDir(cfg);
+        forge.bench.rl.RlReplayLabeller.FATAL.set(null); // review #9: a fatal search error stops this replay only
         if (cfg.labelSpec != null) {
             // bvw-plr-1023: the label directory and its per-JVM files
             labelSink = new forge.bench.rl.RlReplayLabeller.Sink(Paths.get(cfg.labelOut));
@@ -1424,6 +1434,15 @@ public final class RlActorBench {
             final Thread t = new Thread(() -> {
                 final RlFeaturizer feat = new RlFeaturizer(index);
                 for (int i = next.getAndIncrement(); i < n; i = next.getAndIncrement()) {
+                    if (forge.bench.rl.RlReplayLabeller.FATAL.get() != null) {
+                        // review #9: fail fast: no more games after a fatal search error
+                        final JsonObject skip = new JsonObject();
+                        skip.addProperty("line", cfg.replayLines.get(i)[1]);
+                        skip.addProperty("equal", false);
+                        skip.addProperty("error", "skipped after a fatal search error");
+                        out[i] = RlWire.canonicalString(skip);
+                        continue;
+                    }
                     final String r = RlWire.canonicalString(replayOne(cfg, cache, cfg.replayLines.get(i), feat, jarSha));
                     System.err.println("[rlactor] replay " + r);
                     out[i] = r;
@@ -1460,7 +1479,15 @@ public final class RlActorBench {
         sum.addProperty("threads", threads);
         sum.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
         sum.addProperty("label", cfg.labelSpec != null);
+        final String fatal = forge.bench.rl.RlReplayLabeller.FATAL.get();
+        if (fatal != null) {
+            sum.addProperty("fatal", fatal); // review #9
+        }
         System.err.println("[rlactor] " + RlWire.canonicalString(sum));
+        if (fatal != null) {
+            System.err.println("[bvw-label] FATAL, the replay stopped: " + fatal);
+            return 2;
+        }
         return unequal > 0 ? 4 : 0;
     }
 
@@ -1474,8 +1501,14 @@ public final class RlActorBench {
             final JsonObject t = cache.get(f).get(fl[1]);
             row.add("game_uid", t.get("game_uid"));
             row.add("digest_tape", t.get("digest"));
+            final String noRuntime = t.has("controllers") ? counterGeneratorRefusal(t.getAsJsonArray("controllers"),
+                    cfg.aiTimeoutSec) : null;
             if (!t.get("void").isJsonNull()) {
                 row.addProperty("error", "void");
+                row.addProperty("equal", false);
+            } else if (noRuntime != null) {
+                // review #3: a counted generator's tape replays only under the Forge AI settings it was played with
+                row.addProperty("error", noRuntime);
                 row.addProperty("equal", false);
             } else {
                 final JsonObject g = new JsonObject();
@@ -1591,6 +1624,18 @@ public final class RlActorBench {
         return row;
     }
 
+    /**
+     * bvw-step1-build-1024 (review #3): a counter-budget generator seat (the HonestForcedWinCounted profile, or a
+     * forcedWin.spec override with budget=counter) refuses a run whose Forge AI clocks can bind. Null = fine.
+     */
+    static String counterGeneratorRefusal(final JsonArray controllers, final int aiTimeoutSec) {
+        boolean counter = String.valueOf(System.getProperty("forge.ai.forcedWin.spec")).contains("budget=counter");
+        for (JsonElement c : controllers) {
+            counter |= ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE).equals(c.getAsString());
+        }
+        return counter ? forge.ai.simulation.ForcedWinSolver.counterRuntimeRefusal(aiTimeoutSec) : null;
+    }
+
     /** bvw-plr-1023: the replay's label sink (one per JVM), or null. */
     static forge.bench.rl.RlReplayLabeller.Sink labelSink = null;
 
@@ -1641,6 +1686,11 @@ public final class RlActorBench {
                     System.err.println("[rlactor] local " + cfg.mode + " mode plays " + want + " seats only, not " + c);
                     return 2;
                 }
+            }
+            final String no = counterGeneratorRefusal(g.getAsJsonArray("controllers"), cfg.aiTimeoutSec);
+            if (no != null) {
+                System.err.println("[rlactor] " + no);
+                return 2;
             }
         }
         final Path tapesDir = Paths.get(cfg.tapesDir != null ? cfg.tapesDir : "tapes/" + cfg.actorId);

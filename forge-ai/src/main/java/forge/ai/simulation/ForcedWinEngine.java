@@ -56,6 +56,19 @@ final class ForcedWinEngine {
          */
         long steps;
         int deadlineStops, capStops;
+        /**
+         * bvw-step1-build-1024 (review #10): searches whose pass stopped at the node cap with nodes spent by EARLIER
+         * searches (the cap compares the solver's lifetime node count; known generator limit), counted apart from
+         * {@link #capStops} (this search's own node, step or card cap).
+         */
+        int lifetimeStops;
+        /**
+         * bvw-step1-build-1024 (review #11, read-only): fast-forwards stopped because the path's copies plus the loop's
+         * live copies would exceed pathCards (also counted in {@link #pathPrunes}), and the most cards the path and a
+         * fast-forward's live copies held at once (by the copy-time card counts pathCards uses).
+         */
+        int loopCardStops;
+        long peakLive;
         /** bvw-step1-build-1024 (read-only): cards in the game copies the searches made (a copy's cost, time and memory). */
         long cards;
         /** bvw-step1-build-1024 (read-only): branches not entered because the path's copies would exceed pathCards. */
@@ -460,7 +473,20 @@ final class ForcedWinEngine {
                     failed = true;
                     break;
                 }
-                a.child.parent = next;
+                // bvw-step1-build-1024 (review #11): the loop's live copies count against pathCards with the path: from
+                // (the DFS child, held by the returned node's parent link), the last progressed repetition, the step
+                // being replaced and the new copy. Past the cap the fast-forward stops at the last full repetition.
+                final long live = pathCards + from.cards + (cur != from ? cur.cards : 0) + (next != cur ? next.cards : 0)
+                        + a.child.cards;
+                if (lim.pathCards > 0 && live > lim.pathCards) {
+                    st.pathPrunes++;
+                    st.loopCardStops++;
+                    failed = true;
+                    break;
+                }
+                st.peakLive = Math.max(st.peakLive, live);
+                // No parent link inside the loop: only the returned node needs one (parent = from, below); a chain of
+                // links kept every repetition's game copy alive until the loop ended.
                 a.child.pv = progress(a.child.g, a.child.me);
                 a.child.passed = next.passed;
                 next = a.child;
@@ -500,7 +526,10 @@ final class ForcedWinEngine {
     private int startTurn;
     /** bvw-step1-build-1024: the move steps when this search began, and which budget stopped it (diagnostics). */
     private long stepBase, cardBase, pathCards;
-    private boolean stoppedByTime, stoppedByCap;
+    private boolean stoppedByTime, stoppedByCap, stoppedByLifetime;
+    /** bvw-step1-build-1024 (review #10): the current pass's node budget and the node count when it began. */
+    private int passCap;
+    private long passStart;
     /**
      * Part B (solver-gaps-1015): when not null, the search also keeps this turn's non-winning lines with the best static
      * value of the position they reach (Forge's GameStateEvaluator), as likely-win candidates.
@@ -588,10 +617,14 @@ final class ForcedWinEngine {
             lim.passTurn = false;
             final int nodeCap = lim.nodes;
             lim.nodes = twoTurns ? nodeCap / 2 : nodeCap;
+            e.passCap = lim.nodes;
+            e.passStart = st.nodes;
             List<Step> win = e.dfs(root, 0);
             if (win == null && twoTurns && System.nanoTime() < deadline) {
                 lim.passTurn = true;
                 lim.nodes = st.nodes + nodeCap / 2;
+                e.passCap = nodeCap / 2;
+                e.passStart = st.nodes;
                 e.seen.clear();
                 e.table.clear();
                 win = e.dfs(root, 0);
@@ -628,6 +661,9 @@ final class ForcedWinEngine {
                 } else if (held[0].stoppedByTime) {
                     st.deadlineStops++;
                 }
+                if (held[0].stoppedByLifetime) {
+                    st.lifetimeStops++;
+                }
             }
             AiCache.installScope(prevCache);
             forge.util.IdScope.install(prevIds);
@@ -662,7 +698,11 @@ final class ForcedWinEngine {
 
     private boolean out() {
         if (st.nodes >= lim.nodes) {
-            stoppedByCap = true;
+            if (st.nodes - passStart < passCap) {
+                stoppedByLifetime = true; // review #10: the cap was reached with earlier searches' nodes
+            } else {
+                stoppedByCap = true;
+            }
             return true;
         }
         if (lim.totalSteps > 0 && st.steps - stepBase >= lim.totalSteps) {
@@ -686,6 +726,7 @@ final class ForcedWinEngine {
             return null;
         }
         pathCards += node.cards;
+        st.peakLive = Math.max(st.peakLive, pathCards);
         try {
             return dfs0(node, depth);
         } finally {
@@ -793,7 +834,15 @@ final class ForcedWinEngine {
                         return fw.win;
                     }
                     if (!seenDominated(fw.node)) {
-                        final List<Step> r = dfs(fw.node, depth + 1);
+                        // review #11: while the REPEAT node is searched, its parent link keeps the DFS child's copy too
+                        final long held = fw.node.g != a.child.g ? a.child.cards : 0;
+                        pathCards += held;
+                        final List<Step> r;
+                        try {
+                            r = dfs(fw.node, depth + 1);
+                        } finally {
+                            pathCards -= held;
+                        }
                         if (r != null) {
                             return r;
                         }
