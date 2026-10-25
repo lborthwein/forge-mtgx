@@ -179,6 +179,12 @@ public final class RlActorBench {
          */
         int labelBandLo = 0;
         forge.bench.rl.StepSearch.Spec labelSearch = null;
+        /**
+         * bvw-step1-build-1024 (OPEN-6 ruling; null = off): the read-only face-down-exile scan of replayed tapes
+         * ({@link forge.bench.rl.RlExileScan}): {@code exileScan} = {"turns": T, "out": DIR}. Not with a label spec.
+         */
+        int exileScanTurns = 0;
+        String exileScanOut = null;
     }
 
     static Cfg parse(final JsonObject o) {
@@ -266,6 +272,22 @@ public final class RlActorBench {
                 throw new IllegalArgumentException("label.out (the label directory) is required");
             }
             c.labelOut = l.get("out").getAsString();
+        }
+        if (o.has("exileScan") && !o.get("exileScan").isJsonNull()) {
+            final JsonObject x = o.getAsJsonObject("exileScan");
+            for (String k : x.keySet()) {
+                if (!"turns".equals(k) && !"out".equals(k)) {
+                    throw new IllegalArgumentException("exileScan: unknown key " + k + " (turns, out)");
+                }
+            }
+            if (c.labelSpec != null) {
+                throw new IllegalArgumentException("refused: exileScan is a read-only scan, not with a label spec");
+            }
+            if (!x.has("out") || !x.has("turns") || x.get("turns").getAsInt() < 1) {
+                throw new IllegalArgumentException("exileScan needs turns >= 1 and out");
+            }
+            c.exileScanTurns = x.get("turns").getAsInt();
+            c.exileScanOut = x.get("out").getAsString();
         }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
@@ -1409,6 +1431,11 @@ public final class RlActorBench {
                         + cfg.labelSearch.valueSha));
             }
         }
+        if (cfg.exileScanOut != null) {
+            // bvw-step1-build-1024 (OPEN-6 ruling): the read-only face-down-exile scan
+            scanSink = new forge.bench.rl.RlExileScan.Sink(Paths.get(cfg.exileScanOut));
+            System.err.println("[bvw-exile-scan] scanning replays: T=" + cfg.exileScanTurns + " -> " + scanSink.scanFile());
+        }
         final Map<String, List<JsonObject>> cache = new HashMap<>();
         for (int[] fl : cfg.replayLines) {
             final String f = cfg.replayTapes.get(fl[0]);
@@ -1546,11 +1573,15 @@ public final class RlActorBench {
                 }
                 final forge.bench.rl.RlReplayLabeller[] labs = new forge.bench.rl.RlReplayLabeller[1];
                 final int tobs = g.get("obs_schema").getAsInt();
-                final GameHook hook = cfg.labelSpec == null ? null : (game, seat, know) -> {
+                final forge.bench.rl.RlExileScan[] scans = new forge.bench.rl.RlExileScan[1];
+                final GameHook hook = cfg.labelSpec != null ? (game, seat, know) -> {
                     labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelBandLo, cfg.labelTurns,
                             cfg.labelSearch, t, jarSha, game, know, feat.index(), tobs);
                     game.addPriorityDecisionListener(labs[0]);
-                };
+                } : cfg.exileScanOut != null ? (game, seat, know) -> {
+                    scans[0] = new forge.bench.rl.RlExileScan(cfg.exileScanTurns, t, game);
+                    game.addPriorityDecisionListener(scans[0]);
+                } : null;
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
                         t.get("game_uid").getAsString())), null, jarSha, hook);
                 final forge.bench.rl.RlReplayLabeller lab = labs[0];
@@ -1598,6 +1629,19 @@ public final class RlActorBench {
                         row.addProperty("error", "label: the labeller was never attached");
                         row.addProperty("equal", false);
                     }
+                    if (cfg.exileScanOut != null) {
+                        if (scans[0] == null) {
+                            row.addProperty("error", "exile scan: never attached");
+                            row.addProperty("equal", false);
+                        } else {
+                            try {
+                                scans[0].finish(scanSink, eq, row);
+                            } catch (IOException e) {
+                                row.addProperty("error", "exile scan sink: " + e);
+                                row.addProperty("equal", false);
+                            }
+                        }
+                    }
                     if (lab != null) {
                         // bvw-plr-1023: the game's label rows are written only when its digest is the tape's
                         try {
@@ -1638,6 +1682,8 @@ public final class RlActorBench {
 
     /** bvw-plr-1023: the replay's label sink (one per JVM), or null. */
     static forge.bench.rl.RlReplayLabeller.Sink labelSink = null;
+    /** bvw-step1-build-1024: the exile scan's per-JVM files (exileScan replays only). */
+    static forge.bench.rl.RlExileScan.Sink scanSink = null;
 
     /** Config identity, excluding wall time and other diagnostic counters. */
     static JsonArray generatorSpecs(final JsonObject row) {

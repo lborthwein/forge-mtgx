@@ -324,7 +324,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 "turns_before_end", "tape_turns", "tape_reason", "tape_result", "label", "check", "gate", "p_win",
                 "p_loss", "worlds_win", "worlds_loss", "lost_worlds", "proposals", "how", "end_reason", "line_how",
                 "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
-                "target", "target_source", "search", "search_sha", "value_backend"}) {
+                "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof"}) {
             if (h.has(k)) {
                 ir.add(k, h.get(k));
             }
@@ -342,28 +342,60 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         band.add(bandLo);
         band.add(turnsWindow);
         h.add("band", band);
-        final String proof = "win".equals(r.label) || "loss".equals(r.label) ? r.label : null;
-        h.add("proof", proof == null ? com.google.gson.JsonNull.INSTANCE : new com.google.gson.JsonPrimitive(proof));
-        final String src;
-        final double target;
-        if (proof != null) {
-            src = "proof";
-            target = "win".equals(proof) ? 1.0 : 0.0;
-        } else if (sr != null && sr.hasTarget()) {
-            src = sr.provenLine ? "search_proven_line" : "search";
-            target = sr.provenLine ? 1.0 : sr.v;
-        } else {
-            src = "none";
-            target = Double.NaN;
+        final StepTarget st = StepTarget.of(r.label, sr);
+        h.add("proof", st.proof == null ? com.google.gson.JsonNull.INSTANCE : new com.google.gson.JsonPrimitive(st.proof));
+        h.addProperty("target_source", st.source);
+        h.add("target", StepSearch.Result.num(st.target));
+        if (st.hiddenExile != null) {
+            // OPEN-6 ruling: no target, the proof withheld (kept for the audit as unsupported_proof)
+            h.add("hidden_exile", st.hiddenExile);
+            if (st.unsupportedProof != null) {
+                h.addProperty("unsupported_proof", st.unsupportedProof);
+            }
         }
-        h.addProperty("target_source", src);
-        h.add("target", StepSearch.Result.num(target));
-        targets.merge(src, 1, Integer::sum);
+        targets.merge(st.source, 1, Integer::sum);
         h.add("search", sr == null ? com.google.gson.JsonNull.INSTANCE : sr.toJson());
         if (sr != null && sr.backend != null) {
             h.add("value_backend", sr.backend);
         }
         h.addProperty("search_sha", searchSha);
+    }
+
+    /**
+     * A step row's target (bvw-step1-build-1024). A strict proof of the honest solver (all K worlds; step 0's label) is
+     * 1 (win) or 0 (loss) with its proof flag; otherwise S-b's proven solver line is 1; otherwise the honest search's
+     * value of the candidate it plays; otherwise none. OPEN-6 ruling: at a position with a face-down exile the seat may
+     * not look at (the search's copy, {@link HiddenExile}), nothing: target_source {@code unsupported-hidden-exile}, no
+     * target, and a proof is withheld too ({@code unsupportedProof} keeps it for the audit).
+     */
+    static final class StepTarget {
+        String proof;
+        String source;
+        double target = Double.NaN;
+        JsonArray hiddenExile;
+        String unsupportedProof;
+
+        static StepTarget of(final String label, final StepSearch.Result sr) {
+            final StepTarget t = new StepTarget();
+            final String proof = "win".equals(label) || "loss".equals(label) ? label : null;
+            if (sr != null && sr.hiddenExile != null && sr.hiddenExile.size() > 0) {
+                t.source = HiddenExile.TARGET_SOURCE;
+                t.hiddenExile = sr.hiddenExile;
+                t.unsupportedProof = proof;
+                return t;
+            }
+            t.proof = proof;
+            if (proof != null) {
+                t.source = "proof";
+                t.target = "win".equals(proof) ? 1.0 : 0.0;
+            } else if (sr != null && sr.hasTarget()) {
+                t.source = sr.provenLine ? "search_proven_line" : "search";
+                t.target = sr.provenLine ? 1.0 : sr.v;
+            } else {
+                t.source = "none";
+            }
+            return t;
+        }
     }
 
     static byte[] record(final JsonObject header, final byte[] payload) {

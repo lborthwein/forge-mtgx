@@ -234,7 +234,7 @@ public final class StepSearch {
     public static final class Result {
         /**
          * How the decision ended: searched, plan (a turn-plan was played), proven_line, or why nothing was searched
-         * (stack, uncontested, trivial, copies_capped, score_failed, reeval_failed, error, ...).
+         * (stack, uncontested, trivial, copies_capped, score_failed, reeval_failed, unsupported-hidden-exile, error, ...).
          */
         public String why = "none";
         /** The look-ahead's outcome (kept, departed, loop-guard, capped, ...), or null. */
@@ -260,6 +260,11 @@ public final class StepSearch {
         public String error;
         /** The service's value backend identity (HELLO_ACK value_backend), or null. */
         public JsonElement backend;
+        /**
+         * OPEN-6 ruling (2026-10-24): the face-down exiled cards the seat may not look at on the copy
+         * ({@link HiddenExile#scan}); non-empty = no target for this row, proof included. Null = none.
+         */
+        public JsonArray hiddenExile;
 
         /** A usable value target. */
         public boolean hasTarget() {
@@ -287,6 +292,7 @@ public final class StepSearch {
             if (ev != null) o.add("ev", ev);
             o.addProperty("ms", Math.round(ms * 10) / 10.0);
             if (error != null) o.addProperty("error", error);
+            if (hiddenExile != null) o.add("hidden_exile", hiddenExile);
             return o;
         }
 
@@ -337,6 +343,14 @@ public final class StepSearch {
                 cp = (Player) copier.find(liveP);
             }
             res.cards = ForcedWinSolver.cardCount(c);
+            // OPEN-6 ruling: a face-down exile the seat cannot see keeps its real identity in every world (the redraw
+            // covers hand and library only): no search and no target here, read on the copy from the seat's view
+            final JsonArray hidden = HiddenExile.scan(c, cp);
+            if (hidden.size() > 0) {
+                res.why = HiddenExile.TARGET_SOURCE;
+                res.hiddenExile = hidden;
+                return res;
+            }
             if ((long) res.cards * spec.worlds * spec.maxCands > spec.maxCopyCards) {
                 // review #11: the look-ahead would hold cards x worlds x candidates in copies at once
                 res.why = "copies_capped";
