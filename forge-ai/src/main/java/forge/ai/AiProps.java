@@ -165,6 +165,8 @@ public enum AiProps {
      * do. With it on, the lineage's Doomsday plan is not consulted (the solver replaces it).
      */
     FORCED_WIN_SOLVER("false"),
+    /** BVW research generator: belief-redrawn solver copies and probes, hidden own library, no solver defense. */
+    FORCED_WIN_HONEST("false"),
     /** mtgx (lane doomsday-solver-1012): the solver's spec, "worlds=6,top=3,threshold=0.5,..." (empty = defaults). */
     FORCED_WIN_SPEC(""),
     /**

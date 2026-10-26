@@ -127,13 +127,22 @@ public final class CubeComboControl {
                 // lane solver-gaps-1015, Part B: likely-win lines on their own, or added to the forced-win solver
                 cfg.forced = forced;
                 cfg.likely |= likelyOnly;
-                solver = new forge.ai.simulation.ForcedWinSolver(player, cfg);
+                if ("true".equals(AiProfileUtil.getAIProp(lobby, AiProps.FORCED_WIN_HONEST))) {
+                    solver = forge.ai.simulation.HonestGenerator.solver(player, cfg);
+                } else {
+                    solver = new forge.ai.simulation.ForcedWinSolver(player, cfg);
+                }
             }
         }
         return solver;
     }
     public int getComboSelectionChanges() { return comboSelectionChanges; }
     public int getComboTutorPlanCasts() { return comboTutorPlanCasts; }
+    /** Read-only per-game provenance and reach for the opt-in BVW generator. Never initializes a solver. */
+    public com.google.gson.JsonObject honestGeneratorSummary() {
+        return solver != null && solver.config().honestProbes
+                ? forge.ai.simulation.HonestGenerator.summary(solver) : null;
+    }
     /** The policy state for one seat in one game (package forge.bench seats use this). */
     public static CubeComboControl of(CubeComboSeat seat, Player player) {
         return new CubeComboControl(seat, player);
@@ -142,6 +151,10 @@ public final class CubeComboControl {
     CubeComboControl(CubeComboSeat seat, Player player) {
         this.seat = seat;
         this.player = player;
+        final forge.LobbyPlayer lobby = seat.asController().getLobbyPlayer();
+        if ("true".equals(AiProfileUtil.getAIProp(lobby, AiProps.FORCED_WIN_HONEST)) && lobby instanceof LobbyPlayerAi) {
+            ((LobbyPlayerAi) lobby).setFairNaming(AiFixes.Mode.ON);
+        }
         this.probeIdScope = CubeComboAi.newProbeIdScope(player);
         fastbondPlan = new CubeFastbondPlan(player);
         kikiSyrPlan = new CubeKikiSyrPlan(player);

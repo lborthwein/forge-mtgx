@@ -645,6 +645,7 @@ public final class LookaheadSearch {
         public boolean beliefOn;
         public long beliefDecisions, beliefSkipped, beliefCalls, beliefFailures, beliefNanos, beliefMaxNanos;
         public long beliefWorlds, beliefCards, beliefCreateNanos, beliefMismatch, beliefPoolSlots, beliefUnknownCards;
+        public long beliefStaticRefreshes;
         public String beliefDigest, beliefCheckpoint, beliefLastError;
         public final JsonArray beliefCoverage = new JsonArray();
         /**
@@ -891,6 +892,7 @@ public final class LookaheadSearch {
                 o.addProperty("beliefMaxMs", beliefMaxNanos / 1e6);
                 o.addProperty("beliefWorlds", beliefWorlds);
                 o.addProperty("beliefCards", beliefCards);
+                o.addProperty("beliefStaticRefreshes", beliefStaticRefreshes);
                 o.addProperty("beliefCreateMs", beliefCreateNanos / 1e6);
                 o.addProperty("beliefMismatch", beliefMismatch);
                 o.addProperty("beliefPoolSlotsMean", beliefDecisions == 0 ? 0.0 : (double) beliefPoolSlots / beliefDecisions);
@@ -7262,6 +7264,7 @@ public final class LookaheadSearch {
     private void redrawOpponentsPrior(Game live, Player liveMe, Game g, Player me, Random rng,
             Map<String, Map<String, Double>> syn, double gain, boolean fillBasics,
             java.util.Collection<String> seenBefore, double seenGain) {
+        boolean changed = false;
         final Set<String> seen = seenBefore == null || seenGain <= 0 ? Collections.emptySet() : new HashSet<>(seenBefore);
         final PlayerView myView = liveMe.getView();
         for (Player opp : me.getOpponents()) {
@@ -7364,7 +7367,9 @@ public final class LookaheadSearch {
             }
             opp.getZone(ZoneType.Hand).setCards(newHand);
             opp.getZone(ZoneType.Library).setCards(newLib);
+            changed = true;
         }
+        if (changed) refreshBeliefStatics(g);
     }
 
     /**
@@ -7380,6 +7385,7 @@ public final class LookaheadSearch {
     }
 
     private void redrawOpponents(Game live, Player liveMe, Game g, Player me, Random rng, BeliefSampler.Dist bd) {
+        boolean changed = false;
         final PlayerView myView = liveMe.getView();
         for (Player opp : me.getOpponents()) {
             final Player liveOpp = (Player) live.getPlayer(opp.getId());
@@ -7444,11 +7450,24 @@ public final class LookaheadSearch {
             }
             opp.getZone(ZoneType.Hand).setCards(newHand);
             opp.getZone(ZoneType.Library).setCards(newLib);
+            changed = true;
             synchronized (stats) {
                 stats.beliefWorlds++;
                 stats.beliefCards += hs.size() + libSlots.size();
                 stats.beliefCreateNanos += System.nanoTime() - c0;
             }
+        }
+        if (changed) refreshBeliefStatics(g);
+    }
+
+    /** Rebuild derived effects from the sampled zones, not discarded actual hidden-card objects. */
+    private void refreshBeliefStatics(Game g) {
+        // setCards does not update statics. Hidden CDAs (Pack Rat, Grist, ...) otherwise leave their old source in
+        // StaticEffects, leaking a reference outside the sampled zones and breaking the next GameCopier mapping.
+        // Recompute after all opponents are replaced, retaining effects of public and kept/revealed cards.
+        g.getAction().checkStaticAbilities(false);
+        synchronized (stats) {
+            stats.beliefStaticRefreshes++;
         }
     }
 

@@ -159,6 +159,20 @@ public final class RlActorBench {
          * repeats the pair until {@link #maxDecisions} voids the game; live, the guard answers yes after K cycles.
          */
         int loopGuard = 0;
+        /**
+         * bvw-plr-1023 (null = off, the default, and nothing changes): record mode without a server. A JSONL file of GAME
+         * messages, played in order by the actor's threads; the RECORD frames go nowhere (the tapes are the output) and
+         * each game's GAME_END row goes to {@code <tapesDir>/games-<pid>.jsonl}.
+         */
+        String gamesFile = null;
+        /**
+         * bvw-plr-1023 (null = off, the default): replay mode labels every replayed game with the honest solver
+         * ({@link forge.bench.rl.RlReplayLabeller}); {@code label} = {@link forge.ai.simulation.HonestLabel.Spec}'s keys
+         * plus {@code turns} (T, default 3) and {@code out} (the label directory). A spec that is not honest is refused.
+         */
+        forge.ai.simulation.HonestLabel.Spec labelSpec = null;
+        int labelTurns = 3;
+        String labelOut = null;
     }
 
     static Cfg parse(final JsonObject o) {
@@ -201,6 +215,20 @@ public final class RlActorBench {
         if (o.has("k8") && !o.get("k8").isJsonNull()) {
             c.k8 = o.getAsJsonObject("k8");
             k8Config(c.k8, 0L); // every key and value is checked once at JVM start (exit 2 on a bad spec)
+        }
+        if (o.has("games")) c.gamesFile = o.get("games").getAsString();
+        if (o.has("label") && !o.get("label").isJsonNull()) {
+            // bvw-plr-1023: refused (IllegalArgumentException, exit 2) unless honest: redraw=belief, hideOwnLibrary
+            final JsonObject l = o.getAsJsonObject("label");
+            c.labelSpec = forge.ai.simulation.HonestLabel.Spec.parse(l);
+            c.labelTurns = l.has("turns") ? l.get("turns").getAsInt() : 3;
+            if (c.labelTurns < 1) {
+                throw new IllegalArgumentException("label.turns >= 1, not " + c.labelTurns);
+            }
+            if (!l.has("out")) {
+                throw new IllegalArgumentException("label.out (the label directory) is required");
+            }
+            c.labelOut = l.get("out").getAsString();
         }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
@@ -414,6 +442,19 @@ public final class RlActorBench {
      */
     static Played play(final Cfg cfg, final String mode, final JsonObject g, final RlFeaturizer feat,
             final RlSeat.Endpoint ep, final RlSeat.FrameListener listener, final String jarSha) {
+        return play(cfg, mode, g, feat, ep, listener, jarSha, null);
+    }
+
+    /**
+     * bvw-plr-1023: told the game, its seat and its seat-knowledge tracker after all three are set up, before the game
+     * starts (null = none).
+     */
+    interface GameHook {
+        void start(Game game, RlSeat seat, RlKnowledge know);
+    }
+
+    static Played play(final Cfg cfg, final String mode, final JsonObject g, final RlFeaturizer feat,
+            final RlSeat.Endpoint ep, final RlSeat.FrameListener listener, final String jarSha, final GameHook hook) {
         final Played out = new Played();
         final long uid = RlWire.parseUid(g.get("game_uid").getAsString());
         final long seed = g.get("seed").getAsLong();
@@ -527,6 +568,9 @@ public final class RlActorBench {
             return out;
         }
         sc.loopGuard = loopGuard;
+        // bvw-plr-1023: the GAME's (a replayed tape's) fair_naming puts Forge's fair naming on the recorder and Forge seats
+        // (absent = false, the default: those seats keep upstream Forge AI, and nothing changes)
+        final boolean fairNaming = g.has("fair_naming") && g.get("fair_naming").getAsBoolean();
         // the observation schema: the actor's, or (replay) the tape's
         final int obsVersion = g.has("obs_schema") ? g.get("obs_schema").getAsInt() : cfg.obsSchema;
         feat.setVersion(obsVersion);
@@ -564,9 +608,9 @@ public final class RlActorBench {
                         bridged ? BenchSession.Mode.BRIDGE : BenchSession.Mode.NULL, s);
                 // "Default" unless a forge:<Profile> opponent seat names a shipped profile (gen-check-1007)
                 lp.setAiProfile(aiProfileOf(ctl[s]));
-                if (RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL) {
+                if (RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL || fairNaming) {
                     // an RL seat's delegated naming ("Forge's choice") must not read hidden zones (ICR B4 coordination);
-                    // Forge seats and recorders keep upstream Forge AI (do-no-harm)
+                    // Forge seats and recorders keep upstream Forge AI (do-no-harm) unless the GAME asks for fair naming
                     lp.setFairNaming(forge.ai.AiFixes.Mode.ON);
                 }
                 lps[s] = lp;
@@ -662,6 +706,9 @@ public final class RlActorBench {
                     rlSeats[s] = RlSeat.roleOf(ctl[s]) == RlSeat.Role.RL;
                 }
                 search.attach(game, rlSeats, seat);
+            }
+            if (hook != null) {
+                hook.start(game, seat, know); // bvw-plr-1023: the replay labeller attaches here
             }
             dg = new RlSimBench.Digest(game);
             game.subscribeToEvents(dg);
@@ -813,6 +860,19 @@ public final class RlActorBench {
         if (seeding != null) {
             end.add("seeded", seeding.seeded()); // G3: per seat, what was placed (or why not)
         }
+        if (game != null) {
+            final JsonArray generators = new JsonArray();
+            boolean anyGenerator = false;
+            for (Player p : game.getRegisteredPlayers()) {
+                JsonObject summary = null;
+                if (p.getController() instanceof forge.ai.CubeComboSeat) {
+                    summary = ((forge.ai.CubeComboSeat) p.getController()).cubeCombo().honestGeneratorSummary();
+                }
+                anyGenerator |= summary != null;
+                generators.add(summary);
+            }
+            if (anyGenerator) end.add("honest_generator", generators);
+        }
         out.end = end;
 
         final JsonObject t = new JsonObject();
@@ -837,6 +897,7 @@ public final class RlActorBench {
         t.add("void", end.get("void"));
         t.addProperty("reason", reason);
         t.addProperty("turns", turns);
+        if (end.has("honest_generator")) t.add("honest_generator", end.get("honest_generator"));
         t.addProperty("digest", digest);
         if (digestLb != null) {
             t.addProperty("digest_lb", digestLb);
@@ -872,6 +933,9 @@ public final class RlActorBench {
         if (seeding != null) {
             t.add("seeding", seeding.spec()); // G3: the spec as played (a replay re-applies it) and its outcome
             t.add("seeded", end.get("seeded"));
+        }
+        if (fairNaming) {
+            t.addProperty("fair_naming", true); // bvw-plr-1023: replays re-apply it; no key when off
         }
         if (loopGuard > 0) {
             // r4-design-1015: the guard as played (a replay re-applies it) and its hits; no key when off, so a guard-off
@@ -1086,6 +1150,9 @@ public final class RlActorBench {
             System.err.println("[rlactor] unknown mode " + cfg.mode);
             return 2;
         }
+        if (cfg.server == null && cfg.gamesFile != null && ("record".equals(cfg.mode) || "train".equals(cfg.mode))) {
+            return recordLocal(cfg, index, jarSha); // bvw-plr-1023: Forge-only games without a server
+        }
         if (cfg.server == null) {
             System.err.println("[rlactor] no server");
             return 2;
@@ -1292,6 +1359,12 @@ public final class RlActorBench {
      */
     static int replay(final Cfg cfg, final CardIndex index, final String jarSha) throws IOException {
         expandReplayDir(cfg);
+        if (cfg.labelSpec != null) {
+            // bvw-plr-1023: the label directory and its per-JVM files
+            labelSink = new forge.bench.rl.RlReplayLabeller.Sink(Paths.get(cfg.labelOut));
+            System.err.println("[bvw-label] labelling replays: T=" + cfg.labelTurns + " K=" + cfg.labelSpec.worlds
+                    + " spec " + cfg.labelSpec.sha().substring(0, 12) + " -> " + labelSink.labelsFile());
+        }
         final Map<String, List<JsonObject>> cache = new HashMap<>();
         for (int[] fl : cfg.replayLines) {
             final String f = cfg.replayTapes.get(fl[0]);
@@ -1308,6 +1381,7 @@ public final class RlActorBench {
             w = new PrintWriter(new FileWriter(o.toFile(), StandardCharsets.UTF_8, true), true);
         }
         final int n = cfg.replayLines.size();
+        final long w0 = System.nanoTime();
         final String[] out = new String[n];
         final java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
         final int threads = Math.max(1, Math.min(cfg.threads, n));
@@ -1344,6 +1418,15 @@ public final class RlActorBench {
         if (w != null) {
             w.close();
         }
+        // bvw-plr-1023: the replay's wall time and thread count (label throughput is read from them)
+        final JsonObject sum = new JsonObject();
+        sum.addProperty("type", "replay-summary");
+        sum.addProperty("lines", n);
+        sum.addProperty("unequal", unequal);
+        sum.addProperty("threads", threads);
+        sum.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
+        sum.addProperty("label", cfg.labelSpec != null);
+        System.err.println("[rlactor] " + RlWire.canonicalString(sum));
         return unequal > 0 ? 4 : 0;
     }
 
@@ -1380,13 +1463,30 @@ public final class RlActorBench {
                 }
                 // r4-design-1015: the loop guard it played (absent = off), whatever the replay actor's own loopGuard
                 g.addProperty("loop_guard", t.has("loop_guard") ? t.get("loop_guard").getAsInt() : 0);
+                if (t.has("fair_naming")) {
+                    g.add("fair_naming", t.get("fair_naming")); // bvw-plr-1023: the fair naming it played
+                }
                 g.addProperty("priv", false);
                 g.addProperty("obs_schema", t.has("schema_sha") && forge.bench.rl.RlSchemaV2.schemaSha().equals(
                         t.get("schema_sha").getAsString()) ? 2 : 1);
                 // the deck guard of the tape's own mode; the seat's behaviour is the tape mode's
                 final String tmode = t.get("mode").getAsString();
+                // bvw-plr-1023: the honest-solver labeller at both seats' priority decisions (refused unless the spec
+                // is honest; checked again here, before the game is built)
+                if (cfg.labelSpec != null) {
+                    cfg.labelSpec.checkHonest();
+                    forge.bench.rl.RlReplayLabeller.checkTrainTape(t);
+                }
+                final forge.bench.rl.RlReplayLabeller[] labs = new forge.bench.rl.RlReplayLabeller[1];
+                final int tobs = g.get("obs_schema").getAsInt();
+                final GameHook hook = cfg.labelSpec == null ? null : (game, seat, know) -> {
+                    labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelTurns, t, jarSha, game, know,
+                            feat.index(), tobs);
+                    game.addPriorityDecisionListener(labs[0]);
+                };
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
-                        t.get("game_uid").getAsString())), null, jarSha);
+                        t.get("game_uid").getAsString())), null, jarSha, hook);
+                final forge.bench.rl.RlReplayLabeller lab = labs[0];
                 if (p.guardError != null) {
                     row.addProperty("error", "deck_guard: " + p.guardError);
                     row.addProperty("equal", false);
@@ -1415,6 +1515,11 @@ public final class RlActorBench {
                     }
                     boolean eq = p.end.get("digest").getAsString().equals(t.get("digest").getAsString())
                             && p.end.get("void").isJsonNull();
+                    if (t.has("honest_generator") || p.end.has("honest_generator")) {
+                        final boolean sameSpec = generatorSpecs(t).equals(generatorSpecs(p.end));
+                        row.addProperty("generator_spec_equal", sameSpec);
+                        eq &= sameSpec;
+                    }
                     if (t.has("seeded")) {
                         // cm-curriculum-1009: a seeded tape replays only if the same pieces went to the same places
                         final boolean se = t.get("seeded").equals(p.end.get("seeded"));
@@ -1422,6 +1527,19 @@ public final class RlActorBench {
                         eq &= se;
                     }
                     row.addProperty("equal", eq);
+                    if (cfg.labelSpec != null && lab == null) {
+                        row.addProperty("error", "label: the labeller was never attached");
+                        row.addProperty("equal", false);
+                    }
+                    if (lab != null) {
+                        // bvw-plr-1023: the game's label rows are written only when its digest is the tape's
+                        try {
+                            lab.finish(labelSink, eq, row);
+                        } catch (IOException e) {
+                            row.addProperty("error", "label sink: " + e);
+                            row.addProperty("equal", false);
+                        }
+                    }
                     // the replayed game's own census (lane rl-r0-b4b-1006): a jar's asks on the exact games of a
                     // tape, e.g. the before/after of a record-mode mapping fix
                     if (p.tape != null && p.tape.has("census")) {
@@ -1437,5 +1555,122 @@ public final class RlActorBench {
             row.addProperty("equal", false);
         }
         return row;
+    }
+
+    /** bvw-plr-1023: the replay's label sink (one per JVM), or null. */
+    static forge.bench.rl.RlReplayLabeller.Sink labelSink = null;
+
+    /** Config identity, excluding wall time and other diagnostic counters. */
+    static JsonArray generatorSpecs(final JsonObject row) {
+        final JsonArray out = new JsonArray();
+        if (row.has("honest_generator")) {
+            for (JsonElement e : row.getAsJsonArray("honest_generator")) {
+                out.add(e.isJsonNull() ? com.google.gson.JsonNull.INSTANCE : e.getAsJsonObject().get("spec"));
+            }
+        }
+        return out;
+    }
+
+    /** bvw-plr-1023: a RECORD endpoint with no server: the frames go nowhere (the tapes are the output). */
+    static RlSeat.Endpoint nullRecorder() {
+        return new RlSeat.Endpoint() {
+            @Override
+            public RlWire.Decision decide(final byte[] p) throws IOException {
+                throw new IOException("record mode without a server answers no DECIDE");
+            }
+
+            @Override
+            public void record(final byte[] p) {
+            }
+        };
+    }
+
+    /**
+     * bvw-plr-1023: Forge-only games without a server ({@link Cfg#gamesFile}): record mode (recorder seats; their RECORD
+     * frames go nowhere) or train mode with Forge seats only ({@code forge}, {@code forge:<Profile>}; e.g. the cube combo
+     * profile, which recorders refuse). The GAME messages of the file, in order, over the actor's threads; tapes as in
+     * those modes; one GAME_END row per game (plus seed, controllers, decks, the GAME's meta) in
+     * {@code <tapesDir>/games-<pid>.jsonl}. Exit codes as {@link #run}.
+     */
+    static int recordLocal(final Cfg cfg, final CardIndex index, final String jarSha) throws Exception {
+        final List<JsonObject> games = new ArrayList<>();
+        for (String line : Files.readAllLines(Paths.get(cfg.gamesFile), StandardCharsets.UTF_8)) {
+            if (!line.isBlank()) {
+                games.add(JsonParser.parseString(line).getAsJsonObject());
+            }
+        }
+        // record mode: recorder seats only; train mode: Forge seats only (forge, forge:<Profile>); never an RL seat
+        final RlSeat.Role want = "record".equals(cfg.mode) ? RlSeat.Role.RECORD : RlSeat.Role.FORGE;
+        for (JsonObject g : games) {
+            for (JsonElement c : g.getAsJsonArray("controllers")) {
+                if (RlSeat.roleOf(c.getAsString()) != want) {
+                    System.err.println("[rlactor] local " + cfg.mode + " mode plays " + want + " seats only, not " + c);
+                    return 2;
+                }
+            }
+        }
+        final Path tapesDir = Paths.get(cfg.tapesDir != null ? cfg.tapesDir : "tapes/" + cfg.actorId);
+        final RlTape tape = new RlTape(tapesDir, cfg.tapeRotate);
+        final Path endLog = tapesDir.resolve("games-" + ProcessHandle.current().pid() + ".jsonl");
+        EXIT.set(0);
+        final long w0 = System.nanoTime();
+        final AtomicInteger next = new AtomicInteger();
+        final List<Thread> workers = new ArrayList<>();
+        for (int k = 0; k < cfg.threads; k++) {
+            final Thread t = new Thread(() -> {
+                final RlFeaturizer feat = new RlFeaturizer(index);
+                for (int i = next.getAndIncrement(); i < games.size(); i = next.getAndIncrement()) {
+                    final JsonObject g = games.get(i);
+                    final Played p = play(cfg, cfg.mode, g, feat, nullRecorder(), LISTENER, jarSha);
+                    if (p.guardError != null) {
+                        System.err.println("[rlactor] refusing GAME " + g.get("game_uid") + ": " + p.guardError);
+                        EXIT.compareAndSet(0, 2);
+                        return;
+                    }
+                    GAMES.incrementAndGet();
+                    if (!p.end.get("void").isJsonNull()) {
+                        VOIDS.incrementAndGet();
+                        VOID_BY.computeIfAbsent(p.end.get("void").getAsString(), x -> new AtomicLong()).incrementAndGet();
+                    }
+                    try {
+                        tape.write(p.tape);
+                        final JsonObject e = p.end.deepCopy();
+                        e.add("seed", g.get("seed"));
+                        e.add("controllers", g.get("controllers"));
+                        e.add("decks", g.get("decks"));
+                        e.add("deck_sha", g.get("deck_sha"));
+                        if (g.has("meta")) {
+                            e.add("meta", g.get("meta"));
+                        }
+                        synchronized (RlActorBench.class) {
+                            Files.write(endLog, (RlWire.canonicalString(e) + "\n").getBytes(StandardCharsets.UTF_8),
+                                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                        }
+                    } catch (IOException e) {
+                        System.err.println("[rlactor] tape write failed: " + e);
+                        EXIT.compareAndSet(0, 3);
+                        return;
+                    }
+                }
+            }, "rlrecord-w" + k);
+            t.setDaemon(true);
+            workers.add(t);
+            t.start();
+        }
+        final int hung = watchdog(workers, cfg);
+        tape.close();
+        final JsonObject s = new JsonObject();
+        s.addProperty("type", "summary");
+        s.addProperty("mode", "record-local");
+        s.addProperty("games", GAMES.get());
+        s.addProperty("voids", VOIDS.get());
+        final JsonObject vb = new JsonObject();
+        for (Map.Entry<String, AtomicLong> e : VOID_BY.entrySet()) vb.addProperty(e.getKey(), e.getValue().get());
+        s.add("void_by", vb);
+        s.addProperty("hung", hung);
+        s.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
+        s.addProperty("exit", hung > 0 ? 3 : EXIT.get());
+        System.err.println("[rlactor] " + s);
+        return hung > 0 ? 3 : EXIT.get();
     }
 }

@@ -132,6 +132,8 @@ public final class ForcedWinSolver {
          * information (a line that needs the top card was found on the real order and taken when the worlds agreed).
          */
         public boolean hideOwnLibrary = false;
+        /** BVW opt-in generator: affordance probes also start from a belief-redrawn, own-library-shuffled root. */
+        public boolean honestProbes = false;
         /** search-bones-1015: the width search's wall-time cap per call, ms (1500 = PF5's). */
         public long planMs = 1500;
         /**
@@ -588,7 +590,8 @@ public final class ForcedWinSolver {
         final long t1 = System.nanoTime();
         final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch ? t0 : System.nanoTime());
         engineNanos += System.nanoTime() - t1;
-        if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0) {
+        if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0
+                || cfg.honestProbes && best.worldsRun < cfg.worlds) {
             lastOutcome = "declined";
             noLineKey = key;
             if (best == null) {
@@ -621,6 +624,14 @@ public final class ForcedWinSolver {
         public final String text;
         /** Our library's known top the line relies on (its play-outs keep that many cards in place). */
         public final int knownTop;
+        /**
+         * Lane bvw-plr-1023 (read-only, nothing reads it to decide): how the line's unopposed play-out ended, the losing
+         * opponent's {@code GameLossReason} name (null when it did not win), and the copy's turn when it ended (-1).
+         */
+        public final String endReason;
+        public final int endTurn;
+        /** Lane bvw-plr-1023: the line's kind (the width search's win: storm, drain, enters, ...; "engine"). */
+        public final String how;
 
         Proposal(Eval e) {
             this.line = e.line;
@@ -632,6 +643,9 @@ public final class ForcedWinSolver {
             this.engine = "engine".equals(e.line.how);
             this.text = String.valueOf(e);
             this.knownTop = e.line.knownTop;
+            this.endReason = e.endReason;
+            this.endTurn = e.endTurn;
+            this.how = e.line.how;
         }
 
         /** Verified forced: won unopposed and in every belief world it ran (at least {@code minWorlds}), adversary on. */
@@ -1314,7 +1328,7 @@ public final class ForcedWinSolver {
         if (evalSink != null) {
             evalSink.add(e);
         }
-        if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold) {
+        if (e.pUnopposed < 1.0 || e.pBelief < cfg.threshold || cfg.honestProbes && e.worldsRun < cfg.worlds) {
             if (likelyCands != null) {
                 // not forced: a likely-win candidate like the others (Part B)
                 likelyCands.add(0, line);
@@ -1479,8 +1493,32 @@ public final class ForcedWinSolver {
 
     /** Read the position; the library's affordances are learned only when something we hold could use them. */
     Position readPosition(Game live, List<Integer> knownOrder) {
+        if (cfg.honestProbes) {
+            return forge.bench.PlayerControllerBridge.isolated(live, () -> forge.util.IdScope.detached(() -> {
+                final Game g = honestProbeRoot(live, knownOrder);
+                return reader.read(g, (Player) g.getPlayer(me.getId()), knownOrder, true);
+            }));
+        }
         final Position pos = reader.read(live, me, knownOrder, true);
         return pos;
+    }
+
+    /** The width model's probes copy this root, so no probe starts on the opponent's real hidden cards. */
+    Game honestProbeRoot(Game live, List<Integer> knownOrder) {
+        if (redraw == null || !cfg.hideOwnLibrary || cfg.exact || cfg.frameMemory) {
+            throw new IllegalStateException("refused: dishonest generator probe root");
+        }
+        synchronized (live) {
+            final GameCopier copier = new GameCopier(live, true);
+            copier.setCopyFidelity(1);
+            final Game g = copier.makeCopy();
+            final Player cm = (Player) copier.find(me);
+            final Random rng = new Random(mix(cfg.seed, 0x425657L + decisionIndex));
+            copies++;
+            redraw.apply(live, me, g, cm, rng);
+            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), rng);
+            return g;
+        }
     }
 
     /** A line's engine result. */
@@ -1491,6 +1529,9 @@ public final class ForcedWinSolver {
         int worldsRun;
         String protection = "";
         String failures = "";
+        /** Lane bvw-plr-1023: the unopposed play-out's end (Outcome#endReason, Outcome#endTurn). */
+        String endReason;
+        int endTurn = -1;
 
         Eval(Line line) {
             this.line = line;
@@ -1558,6 +1599,8 @@ public final class ForcedWinSolver {
         final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
         final Outcome u = playout(live, line, mix(seed, 0), 0, -1, wall);
         e.pUnopposed = u.won ? 1 : 0;
+        e.endReason = u.endReason;
+        e.endTurn = u.endTurn;
         if (!u.won) {
             e.failures = "unopposed:" + u.why;
             return e;
@@ -1614,6 +1657,8 @@ public final class ForcedWinSolver {
         final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
         Outcome worst = playout(live, line, mix(seed, 0), -1, -1, wall);
         e.pUnopposed = worst.won ? 1 : 0;
+        e.endReason = worst.endReason;
+        e.endTurn = worst.endTurn;
         e.worldsRun = 1;
         if (worst.won && cfg.adversary && worst.oppHasCounter) {
             int spells = 0;
@@ -1645,6 +1690,9 @@ public final class ForcedWinSolver {
         boolean oppHasCounter;
         String why = "";
         String protectedBy;
+        /** Lane bvw-plr-1023 (read-only): the losing opponent's GameLossReason name when won, and the copy's end turn. */
+        String endReason;
+        int endTurn = -1;
     }
 
     /**
@@ -1709,6 +1757,19 @@ public final class ForcedWinSolver {
             }
             out.won = cm.hasWon() || cm.getOpponents().stream().anyMatch(Player::hasLost);
             out.protectedBy = lineAi.protectedBy;
+            if (out.won) {
+                // lane bvw-plr-1023 (read-only): how the copy ended, for label rows
+                out.endTurn = g.getPhaseHandler().getTurn();
+                // the loser left the game's players when it lost: read it from the registered players
+                for (Player o : g.getRegisteredPlayers()) {
+                    if (o != cm && o.getOutcome() != null && o.getOutcome().lossState != null) {
+                        out.endReason = o.getOutcome().lossState.name();
+                    }
+                }
+                if (out.endReason == null && cm.getOutcome() != null && cm.getOutcome().altWinSourceName != null) {
+                    out.endReason = "OpponentWon"; // an alternate win ("you win the game") with no loser recorded yet
+                }
+            }
             if (ForcedWinEngine.TRACE) {
                 final StringBuilder sb = new StringBuilder();
                 for (Player o : cm.getOpponents()) {
