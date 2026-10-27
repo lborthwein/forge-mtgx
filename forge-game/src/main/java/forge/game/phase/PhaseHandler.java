@@ -1036,6 +1036,16 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
         }
     }
 
+    /** mtgx lane jar-glow-valki-1027: this game's no-progress guard (its memory is the current turn's only). */
+    private transient NoProgressGuard noProgressGuard;
+
+    public NoProgressGuard noProgressGuard() {
+        if (noProgressGuard == null) {
+            noProgressGuard = new NoProgressGuard();
+        }
+        return noProgressGuard;
+    }
+
     public void mainLoopStep() {
         if (givePriorityToPlayer) {
             if (DEBUG_PHASES) {
@@ -1059,6 +1069,11 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
                     game.firePriorityDecisionBefore(pPlayerPriority);
                 }
                 chosenSa = pPlayerPriority.getController().chooseSpellAbilityToPlay();
+                // mtgx lane jar-glow-valki-1027: an AI player never repeats an action that brought the game back,
+                // unchanged, to the state it was chosen in (NoProgressGuard; a human player is never guarded)
+                if (chosenSa != null && pPlayerPriority.getController().isAI()) {
+                    chosenSa = noProgressGuard().check(game, pPlayerPriority, chosenSa);
+                }
                 if (decisionListeners) {
                     game.firePriorityDecisionAfter(pPlayerPriority, chosenSa);
                 }
@@ -1088,6 +1103,9 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
                         // 117.3c If a player has priority when they cast a spell, activate an ability, [play a land]
                         // that player receives priority afterward.
                         pFirstPriority = pPlayerPriority; // all opponents have to pass before stack is allowed to resolve
+                        if (noProgressGuard != null) {
+                            noProgressGuard.played(game, pPlayerPriority); // mtgx lane jar-glow-valki-1027
+                        }
                     } else if (game.EXPERIMENTAL_RESTORE_SNAPSHOT) {
                         rollback = true;
                     }

@@ -1002,6 +1002,11 @@ public final class RlCandidates {
             if (hasX) {
                 final int top = Math.min(maxX, RlSchema.X_MAX);
                 for (int v = 0; v <= top; v++) {
+                    // mtgx lane jar-glow-valki-1027: an X at which the ability's choice has no card does nothing
+                    // (Valki, God of Lies: "a creature card exiled with Valki with mana value X"); not a candidate
+                    if (forge.ai.AiEmptyChoice.emptyAt(sa, sa.getActivatingPlayer(), v)) {
+                        continue;
+                    }
                     final Cand c = new Cand();
                     c.kind = kind;
                     c.host = host;
