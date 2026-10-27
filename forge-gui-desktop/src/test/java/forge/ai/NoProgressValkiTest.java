@@ -148,8 +148,9 @@ public class NoProgressValkiTest extends AITest {
     }
 
     /**
-     * The live seat's choice, scripted: the given ability whenever it can be played (X = 0), else pass. Counts the
-     * plays. Every other ask is Forge AI's.
+     * The live seat's choice, scripted: the given ability whenever it can be played (X = 0), else pass; and pass while
+     * its own ability is on top of the stack (the report: one Valki item on the stack at each of the owner's priorities).
+     * Counts the plays. Every other ask is Forge AI's.
      */
     static final class Repeater extends PlayerControllerAi {
         final SpellAbility pick;
@@ -164,7 +165,9 @@ public class NoProgressValkiTest extends AITest {
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             pick.setActivatingPlayer(getPlayer());
-            if (played >= max || !pick.canPlay()) {
+            final Game g = getGame();
+            if (played >= max || !pick.canPlay()
+                    || !g.getStack().isEmpty() && getPlayer().equals(g.getStack().peekAbility().getActivatingPlayer())) {
                 return null;
             }
             pick.setXManaCostPaid(0);
@@ -188,10 +191,20 @@ public class NoProgressValkiTest extends AITest {
         return r;
     }
 
+    /** Nissa's spell is still on the stack (a card that changes zones is a new object: ask the stack, by card id). */
+    private static boolean nissaOnStack(final Board b) {
+        for (forge.game.spellability.SpellAbilityStackInstance si : b.game.getStack()) {
+            if (si.getSourceCard() != null && si.getSourceCard().getId() == b.nissa.getId()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Main-loop steps until Nissa has left the stack, at most {@code cap}; returns the steps taken. */
     private static int untilNissaResolves(final Board b, final int cap) {
         int steps = 0;
-        while (steps < cap && !b.game.isGameOver() && b.nissa.isInZone(ZoneType.Stack)) {
+        while (steps < cap && !b.game.isGameOver() && nissaOnStack(b)) {
             b.game.getPhaseHandler().mainLoopStep();
             steps++;
         }
@@ -281,11 +294,26 @@ public class NoProgressValkiTest extends AITest {
         final Repeater r = repeat(b, copyAbility(b.valki, b.ai));
         final int steps = untilNissaResolves(b, 400);
         AssertJUnit.assertFalse("Nissa never resolved: Valki activated " + r.played + " times in " + steps + " steps",
-                b.nissa.isInZone(ZoneType.Stack));
+                nissaOnStack(b));
         AssertJUnit.assertEquals("one activation, then the guard passes", 1, r.played);
         AssertJUnit.assertEquals(1, b.game.getPhaseHandler().noProgressGuard().stops());
-        AssertJUnit.assertTrue(b.nissa.isInZone(ZoneType.Battlefield));
+        AssertJUnit.assertTrue(b.game.getCardState(b.nissa).isInZone(ZoneType.Battlefield));
         AssertJUnit.assertFalse("Valki is no copy of anything", b.valki.isCloned());
+    }
+
+    @Test
+    public void guardDirect() throws Exception {
+        final Board b = board();
+        b.game.getPhaseHandler().setPriority(b.ai);
+        final SpellAbility copy = copyAbility(b.valki, b.ai);
+        copy.setXManaCostPaid(0);
+        final NoProgressGuard g = new NoProgressGuard();
+        AssertJUnit.assertNotNull(g.check(b.game, b.ai, Lists.newArrayList(copy)));
+        g.played(b.ai);
+        final java.lang.reflect.Field f = NoProgressGuard.class.getDeclaredField("chosenIn");
+        f.setAccessible(true);
+        AssertJUnit.assertEquals(1, ((java.util.Map<?, ?>) f.get(g)).size());
+        AssertJUnit.assertNull(g.check(b.game, b.ai, Lists.newArrayList(copy)));
     }
 
     @Test
@@ -298,7 +326,7 @@ public class NoProgressValkiTest extends AITest {
         } finally {
             NoProgressGuard.setEnabled(true);
         }
-        AssertJUnit.assertTrue(b.nissa.isInZone(ZoneType.Stack));
+        AssertJUnit.assertTrue(nissaOnStack(b));
         AssertJUnit.assertTrue(r.played > 20);
     }
 
@@ -312,7 +340,7 @@ public class NoProgressValkiTest extends AITest {
         bear.addSpellAbility(untap);
         final Repeater r = repeat(b, untap);
         untilNissaResolves(b, 400);
-        AssertJUnit.assertFalse(b.nissa.isInZone(ZoneType.Stack));
+        AssertJUnit.assertFalse(nissaOnStack(b));
         AssertJUnit.assertEquals(1, r.played);
     }
 
@@ -329,7 +357,7 @@ public class NoProgressValkiTest extends AITest {
         untilNissaResolves(b, 400);
         AssertJUnit.assertEquals("every pump changed the board: none stopped", 6, r.played);
         AssertJUnit.assertEquals(8, bear.getNetPower());
-        AssertJUnit.assertFalse(b.nissa.isInZone(ZoneType.Stack));
+        AssertJUnit.assertFalse(nissaOnStack(b));
     }
 
     // ------------------------------------------------------------------------------------------- the effect
