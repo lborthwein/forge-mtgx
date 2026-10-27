@@ -57,6 +57,14 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     /** Shared by the replay threads of one JVM. */
     public static final class Sink {
         private final Path labels, index, games;
+        /**
+         * Lane lki-fix-port-1027: set by the replay stall watchdog ({@code forge.bench.ReplayStallWatchdog}) when it
+         * voids the unfinished games; a game that finishes after it writes nothing (its games row is the watchdog's
+         * {@code void:"stall"} row).
+         */
+        private boolean sealed = false;
+        /** Lane lki-fix-port-1027: the games rows written so far, by game uid (the watchdog reads them at the seal). */
+        private final Map<String, JsonObject> written = new java.util.LinkedHashMap<>();
 
         public Sink(final Path dir) throws IOException {
             Files.createDirectories(dir);
@@ -68,6 +76,11 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
 
         synchronized void write(final byte[] member, final List<JsonObject> idx, final JsonObject game)
                 throws IOException {
+            if (sealed) {
+                System.err.println("[bvw-label] sink sealed by the stall watchdog: game " + game.get("game_uid")
+                        + " finished after the seal; its rows are not written (its games row is void \"stall\")");
+                return;
+            }
             if (member != null) {
                 try (OutputStream o = new FileOutputStream(labels.toFile(), true)) {
                     o.write(member);
@@ -81,6 +94,22 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 Files.write(index, sb.toString().getBytes(StandardCharsets.UTF_8), java.nio.file.StandardOpenOption.CREATE,
                         java.nio.file.StandardOpenOption.APPEND);
             }
+            Files.write(games, (RlWire.canonicalString(game) + "\n").getBytes(StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            written.put(game.get("game_uid").getAsString(), game);
+        }
+
+        /**
+         * Lane lki-fix-port-1027: the stall watchdog's seal. From now on {@link #write} writes nothing; returns the games
+         * rows written before it (by game uid), so the watchdog voids exactly the games without one.
+         */
+        public synchronized Map<String, JsonObject> seal() {
+            sealed = true;
+            return new java.util.LinkedHashMap<>(written);
+        }
+
+        /** Lane lki-fix-port-1027: the watchdog's {@code void:"stall"} games row of an unfinished game (after the seal). */
+        public synchronized void writeStallGame(final JsonObject game) throws IOException {
             Files.write(games, (RlWire.canonicalString(game) + "\n").getBytes(StandardCharsets.UTF_8),
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         }

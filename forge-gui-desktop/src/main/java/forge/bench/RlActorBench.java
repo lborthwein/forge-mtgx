@@ -98,11 +98,12 @@ import forge.util.MyRandom;
  * capActions (40), gameTimeoutSec (300), maxDecisions (3000), jarSha, aiTimeoutSec (5), readTimeoutSec (120),
  * tapeRotate (1000), maxGames (0 = until stop), replay {tapes, lines [[fileIdx, line]], out}, k8 (the spec of a
  * {@code lookahead:K8} opponent seat, lane gen-check-1007), loopGuard (0 = off; the live seat's "Cancel Search?" loop
- * guard on the RL seats, lane exploit-panel-1015)}. Opponent controllers besides {@code forge}:
+ * guard on the RL seats, lane exploit-panel-1015), watchdog (replay mode: the stall watchdog,
+ * {@link ReplayStallWatchdog}; on by default, {@code false} = off)}. Opponent controllers besides {@code forge}:
  * {@code forge:<Profile>} (Forge AI under a shipped {@code res/ai} profile; train and eval) and {@code lookahead:K8}
  * (Forge AI Default plus the look-ahead with the {@code k8} spec; eval only).
  * Exit codes: 0 done; 2 config / HELLO refused / deck guard; 3 a thread died on a transport or protocol error;
- * 4 replay finished with an unequal digest.
+ * 4 replay finished with an unequal digest; 5 replay stalled (the stall watchdog voided its unfinished games).
  */
 public final class RlActorBench {
 
@@ -195,6 +196,8 @@ public final class RlActorBench {
          */
         List<String> reference = null;
         int referenceTurns = 3;
+        /** lki-fix-port-1027: replay mode's stall watchdog (on by default; {@code "watchdog": false} = off). */
+        ReplayStallWatchdog.Thresholds watchdog = new ReplayStallWatchdog.Thresholds();
     }
 
     static void parseReference(final Cfg c, final JsonObject o, final String where) {
@@ -320,6 +323,9 @@ public final class RlActorBench {
             }
             c.exileScanTurns = x.get("turns").getAsInt();
             c.exileScanOut = x.get("out").getAsString();
+        }
+        if (o.has("watchdog")) {
+            c.watchdog = ReplayStallWatchdog.Thresholds.parse(o.get("watchdog")); // lki-fix-port-1027
         }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
@@ -1524,7 +1530,8 @@ public final class RlActorBench {
         }
         final int n = cfg.replayLines.size();
         final long w0 = System.nanoTime();
-        final String[] out = new String[n];
+        // lki-fix-port-1027: shared with the stall watchdog, which writes the finished rows if it stalls the replay
+        final java.util.concurrent.atomic.AtomicReferenceArray<String> out = new java.util.concurrent.atomic.AtomicReferenceArray<>(n);
         final java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
         final int threads = Math.max(1, Math.min(cfg.threads, n));
         final List<Thread> ts = new ArrayList<>();
@@ -1538,16 +1545,34 @@ public final class RlActorBench {
                         skip.addProperty("line", cfg.replayLines.get(i)[1]);
                         skip.addProperty("equal", false);
                         skip.addProperty("error", "skipped after a fatal search error");
-                        out[i] = RlWire.canonicalString(skip);
+                        out.set(i, RlWire.canonicalString(skip));
                         continue;
                     }
                     final String r = RlWire.canonicalString(replayOne(cfg, cache, cfg.replayLines.get(i), feat, jarSha));
                     System.err.println("[rlactor] replay " + r);
-                    out[i] = r;
+                    out.set(i, r);
                 }
             }, "rlreplay-w" + k);
             ts.add(t);
             t.start();
+        }
+        // lki-fix-port-1027: the stall watchdog (GC fraction, the rlreplay-w* threads' mutator share, old gen after GC)
+        ReplayStallWatchdog wd = null;
+        if (cfg.watchdog.enabled && n > 0) {
+            final List<String> paths = new ArrayList<>();
+            for (int[] fl : cfg.replayLines) {
+                paths.add(cfg.replayTapes.get(fl[0]));
+            }
+            final Path wdir = Paths.get(cfg.watchdog.dir != null ? cfg.watchdog.dir
+                    : cfg.replayOut != null && Paths.get(cfg.replayOut).getParent() != null
+                            ? Paths.get(cfg.replayOut).getParent().toString()
+                    : cfg.labelOut != null ? cfg.labelOut : ".");
+            wd = ReplayStallWatchdog.start(cfg.watchdog, ts, wdir, replayed, paths, cfg.replayLines, out,
+                    cfg.labelSpec != null ? labelSink : null,
+                    cfg.labelSearch != null ? forge.bench.rl.RlReplayLabeller.SCHEMA_STEP
+                            : forge.bench.rl.RlReplayLabeller.SCHEMA, w, jarSha);
+            System.err.println("[rlactor] stall watchdog " + RlWire.canonicalString(cfg.watchdog.toJson()) + " -> "
+                    + wd.progressFile());
         }
         for (Thread t : ts) {
             try {
@@ -1557,8 +1582,12 @@ public final class RlActorBench {
                 throw new IOException("replay interrupted", e);
             }
         }
+        if (wd != null && !wd.close()) {
+            return ReplayStallWatchdog.EXIT_STALL; // the watchdog wrote every row (a stall exits the JVM before this)
+        }
         int unequal = 0;
-        for (String r : out) {
+        for (int i = 0; i < n; i++) {
+            final String r = out.get(i);
             if (r == null || !com.google.gson.JsonParser.parseString(r).getAsJsonObject().get("equal").getAsBoolean()) {
                 unequal++;
             }
@@ -1577,10 +1606,15 @@ public final class RlActorBench {
         sum.addProperty("threads", threads);
         sum.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
         sum.addProperty("label", cfg.labelSpec != null);
+        sum.add("watchdog", cfg.watchdog.toJson()); // lki-fix-port-1027
+        if (wd != null) {
+            sum.addProperty("watchdog_samples", wd.samples());
+        }
         if (trajectoryRef != null) {
             // review-align #2 / #9: the trajectory check's outcome and its noStack fallbacks, per replay
             int trajVoid = 0;
-            for (String r : out) {
+            for (int i = 0; i < n; i++) {
+                final String r = out.get(i);
                 final JsonObject o = r == null ? null : com.google.gson.JsonParser.parseString(r).getAsJsonObject();
                 if (o != null && o.has("trajectory_equal") && !o.get("trajectory_equal").getAsBoolean()) {
                     trajVoid++;
