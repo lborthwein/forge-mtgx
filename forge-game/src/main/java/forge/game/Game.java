@@ -221,13 +221,32 @@ public class Game {
         return true;
     }
 
+    /**
+     * mtgx (lane lki-leak-1027): the last-known-information zones of the current last-state snapshot. Each LKI card of a
+     * snapshot points at its snapshot zone, and that zone held every LKI card of the snapshot, so one LKI card kept after
+     * its snapshot was replaced (the cards that left the battlefield or the graveyard this turn, a change-zone LKI, a
+     * trigger's run parameters) kept the whole snapshot alive: one battlefield or graveyard copy per departure. The next
+     * snapshot releases the old zones' card lists (the game's own snapshot and the ones {@link #copyLastState(ZoneType)}
+     * made for cost and zone-change tables since); the LKI cards keep their zone and every other field, so a snapshot
+     * reads exactly as before until the next one is taken.
+     */
+    private final List<Zone> lastStateZones = new ArrayList<>(4);
+
     public void copyLastState() {
+        for (final Zone z : lastStateZones) {
+            z.releaseLastKnownCards();
+        }
+        lastStateZones.clear();
         lastStateBattlefield.clear();
         lastStateGraveyard.clear();
         Map<Integer, Card> cachedMap = Maps.newHashMap();
         for (final Player p : getPlayers()) {
-            lastStateBattlefield.addAll(p.getZone(ZoneType.Battlefield).getLKICopy(cachedMap));
-            lastStateGraveyard.addAll(p.getZone(ZoneType.Graveyard).getLKICopy(cachedMap));
+            final Zone bf = p.getZone(ZoneType.Battlefield).getLKICopy(cachedMap);
+            final Zone gy = p.getZone(ZoneType.Graveyard).getLKICopy(cachedMap);
+            lastStateBattlefield.addAll(bf);
+            lastStateGraveyard.addAll(gy);
+            lastStateZones.add(bf);
+            lastStateZones.add(gy);
         }
     }
 
@@ -235,7 +254,9 @@ public class Game {
         CardCollection result = new CardCollection();
         Map<Integer, Card> cachedMap = Maps.newHashMap();
         for (final Player p : getPlayers()) {
-            result.addAll(p.getZone(type).getLKICopy(cachedMap));
+            final Zone z = p.getZone(type).getLKICopy(cachedMap);
+            result.addAll(z);
+            lastStateZones.add(z); // lane lki-leak-1027: released with the game's snapshot at the next copyLastState()
         }
         return result;
     }

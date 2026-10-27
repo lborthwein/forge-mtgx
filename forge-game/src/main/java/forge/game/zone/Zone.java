@@ -288,6 +288,14 @@ public class Zone implements java.io.Serializable, Iterable<Card> {
         return zoneType.toString();
     }
 
+    /**
+     * mtgx (lane lki-leak-1027): empty the card list of a last-known-information zone ({@link #getLKICopy}) once its
+     * snapshot is superseded, without moving the cards or firing events; its LKI cards still name it as their zone.
+     */
+    public final void releaseLastKnownCards() {
+        cardList.clear();
+    }
+
     public Zone getLKICopy(Map<Integer, Card> cachedMap) {
         Zone result = new Zone(zoneType, game);
 
