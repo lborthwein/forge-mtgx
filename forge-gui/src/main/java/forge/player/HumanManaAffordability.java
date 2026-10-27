@@ -849,6 +849,11 @@ public final class HumanManaAffordability {
                         continue;
                     }
                     if ((p instanceof CostSacrifice || p instanceof CostExile) && p.payCostFromSource()) continue;
+                    // glow-valki-1027 (owner report 2026-10-27T20-34-32: Wall of Roots the only untapped source, Questing
+                    // Beast and Nissa glowing): a counter the cost puts on the card itself (Wall of Roots' -0/-1) uses up
+                    // nothing the matching counts. It made the whole proof unknown; now it is admitted, and the
+                    // ability's activation limit (below) bounds how often it is used.
+                    if (p instanceof CostPutCounter put && put.payCostFromSource()) continue;
                     if (p instanceof CostTapType t && tapType == null) {
                         tapType = t;
                         continue;
@@ -857,17 +862,22 @@ public final class HumanManaAffordability {
                 }
                 final boolean once = tap || pay.getCostParts().stream().anyMatch(p -> (p instanceof CostSacrifice
                         || p instanceof CostExile) && p.payCostFromSource());
+                // glow-valki-1027: "Activate only once each turn" (ActivationLimit, GameActivationLimit) bounds the
+                // activations to those left: Wall of Roots makes one {G} a turn, none once used this turn.
+                final int left = activationsLeft(card, source);
+                if (left == LIMIT_UNREADABLE) return unknown("source-limit", card);
                 int activations = 1;
                 if (tapType != null) {
                     final Integer tappable = tappableFor(tapType, source, player);
                     if (tappable == null) return unknown("source-cost:TapType", card);
                     activations = once ? Math.min(1, tappable) : tappable;
-                } else if (!once && counterCap == null) {
+                } else if (!once && counterCap == null && left == NO_LIMIT) {
                     return unknown("source-repeatable", card);
                 } else if (!once) {
-                    activations = counterCap;
+                    activations = counterCap != null ? counterCap : left;
                 }
                 if (counterCap != null) activations = Math.min(activations, counterCap);
+                if (left != NO_LIMIT) activations = Math.min(activations, left);
                 if (source.getManaPart() == null) return unknown("source-mana-part", card);
                 if (source.hasParam("Each")) return unknown("source-each", card);
                 boolean plainTail = true;
@@ -980,6 +990,37 @@ public final class HumanManaAffordability {
             return colourImpossible(player, ability, shards, hooks, extra) ? Assessment.PROVEN_UNAFFORDABLE : Assessment.UNKNOWN;
         }
         return Assessment.PROVEN_UNAFFORDABLE;
+    }
+
+    /** {@link #activationsLeft}: the ability has no activation limit. */
+    static final int NO_LIMIT = Integer.MAX_VALUE;
+    /** {@link #activationsLeft}: a limit the proof cannot evaluate. */
+    static final int LIMIT_UNREADABLE = -1;
+
+    /**
+     * glow-valki-1027: how many more times {@code source} may be activated: its {@code ActivationLimit} this turn and its
+     * {@code GameActivationLimit} this game, less the activations already made, as Forge's own
+     * {@code SpellAbilityRestriction.canPlay} counts them (a mana ability's activations are recorded when it resolves,
+     * MagicStack.add). {@link #NO_LIMIT} without either; {@link #LIMIT_UNREADABLE} when a limit cannot be evaluated.
+     * Activations only ever add up during a payment, so the count left now bounds the payment.
+     */
+    static int activationsLeft(final Card card, final SpellAbility source) {
+        final forge.game.spellability.SpellAbilityRestriction r = source.getRestrictions();
+        if (r == null || r.getLimitToCheck() == null && r.getGameLimitToCheck() == null) return NO_LIMIT;
+        try {
+            int left = NO_LIMIT;
+            if (r.getLimitToCheck() != null) {
+                final int limit = forge.game.ability.AbilityUtils.calculateAmount(card, r.getLimitToCheck(), source);
+                left = Math.min(left, Math.max(0, limit - source.getActivationsThisTurn()));
+            }
+            if (r.getGameLimitToCheck() != null) {
+                final int limit = forge.game.ability.AbilityUtils.calculateAmount(card, r.getGameLimitToCheck(), source);
+                left = Math.min(left, Math.max(0, limit - source.getActivationsThisGame()));
+            }
+            return left;
+        } catch (RuntimeException unreadable) {
+            return LIMIT_UNREADABLE;
+        }
     }
 
     /**
