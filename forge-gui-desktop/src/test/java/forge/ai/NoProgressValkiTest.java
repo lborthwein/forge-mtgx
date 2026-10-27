@@ -308,12 +308,26 @@ public class NoProgressValkiTest extends AITest {
         final SpellAbility copy = copyAbility(b.valki, b.ai);
         copy.setXManaCostPaid(0);
         final NoProgressGuard g = new NoProgressGuard();
-        AssertJUnit.assertNotNull(g.check(b.game, b.ai, Lists.newArrayList(copy)));
-        g.played(b.ai);
         final java.lang.reflect.Field f = NoProgressGuard.class.getDeclaredField("chosenIn");
         f.setAccessible(true);
+        // an attempt that changed nothing (a failed, rolled-back play) is not remembered: Forge's retries stay as they were
+        AssertJUnit.assertNotNull(g.check(b.game, b.ai, Lists.newArrayList(copy)));
+        g.played(b.game, b.ai);
+        AssertJUnit.assertEquals(0, ((java.util.Map<?, ?>) f.get(g)).size());
+        AssertJUnit.assertNotNull(g.check(b.game, b.ai, Lists.newArrayList(copy)));
+        // played (on the stack): remembered; once it resolves back to the same state, the same choice is a pass
+        b.game.getStack().addAndUnfreeze(copy);
+        g.played(b.game, b.ai);
         AssertJUnit.assertEquals(1, ((java.util.Map<?, ?>) f.get(g)).size());
+        b.game.getStack().resolveStack();
+        b.game.getPhaseHandler().setPriority(b.ai);
         AssertJUnit.assertNull(g.check(b.game, b.ai, Lists.newArrayList(copy)));
+        // another action in that state is still allowed
+        final Card bear = addCard("Grizzly Bears", b.ai);
+        final SpellAbility untap = AbilityFactory.getAbility("AB$ Untap | Cost$ 0 | Defined$ Self | SpellDescription$ Untap.", bear);
+        bear.addSpellAbility(untap);
+        untap.setActivatingPlayer(b.ai);
+        AssertJUnit.assertNotNull(g.check(b.game, b.ai, Lists.newArrayList(untap)));
     }
 
     @Test

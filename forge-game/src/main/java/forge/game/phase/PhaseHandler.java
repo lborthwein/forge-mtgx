@@ -1104,7 +1104,7 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
                         // that player receives priority afterward.
                         pFirstPriority = pPlayerPriority; // all opponents have to pass before stack is allowed to resolve
                         if (noProgressGuard != null) {
-                            noProgressGuard.played(pPlayerPriority); // mtgx lane jar-glow-valki-1027
+                            noProgressGuard.played(game, pPlayerPriority); // mtgx lane jar-glow-valki-1027
                         }
                     } else if (game.EXPERIMENTAL_RESTORE_SNAPSHOT) {
                         rollback = true;

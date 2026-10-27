@@ -35,10 +35,14 @@ import forge.game.zone.ZoneType;
  * later chooses the same action ({@link #actionKey}: the host card, the ability's description and X) in a state with the
  * same fingerprint, the action led back to where it started -- it and everything after it changed nothing -- so the
  * player passes instead (always legal, and the same outcome as the action that changes nothing). Each action is tried
- * at most once per distinct state; a loop through it is cut at its second turn.
+ * at most once per distinct state; a loop through it is cut at its second turn. Only an action whose play changed the
+ * state is remembered: a failed attempt that was rolled back (Forge AI retries those itself, up to its own bound) is not.
+ * A free loop that does change something, e.g. the storm count of a recast loop, is left to the guards that bound it
+ * (AiRecastGuard, preventRunAwayActivations).
  *
  * <p>The fingerprint ({@link #fingerprint}) is the game state as play sees it: turn, step, the active and priority
- * players, each player's life, counters, mana pool and zones (card ids in order), each permanent's controller, tapped,
+ * players, each player's life, counters, mana pool, zones (card ids in order) and this turn's lands played, spells cast
+ * (a storm count is progress), cards drawn and life gained and lost, each permanent's controller, tapped,
  * sick, phased and face-down flags, counters, damage, power, toughness, state, attachments and choices, the stack
  * (source, activator, description, targets), combat, the monarch and the initiative. It leaves out what an action
  * changes without progress: stack instance ids, timestamps, the log, and counts of abilities activated. A state it
@@ -117,14 +121,25 @@ public final class NoProgressGuard {
         return null;
     }
 
-    /** {@code player} played the action {@link #check} just let through: remember it with the state it was chosen in. */
-    public void played(final Player player) {
-        if (pendingKey != null && player != null && player.equals(pendingPlayer)) {
-            chosenIn.computeIfAbsent(pendingFp, k -> new HashSet<>()).add(pendingKey);
+    /**
+     * {@code player} played the action {@link #check} just let through: remember it with the state it was chosen in,
+     * if playing it changed that state (put it on the stack, paid a cost, moved a card). An attempt that changed
+     * nothing -- a payment or target choice that failed and was rolled back; Forge AI's controller reports it played
+     * either way -- is not remembered, so Forge's own retry behaviour is untouched.
+     */
+    public void played(final Game game, final Player player) {
+        try {
+            if (pendingKey != null && player != null && player.equals(pendingPlayer)
+                    && !pendingFp.equals("P" + player.getId() + "\n" + fingerprint(game))) {
+                chosenIn.computeIfAbsent(pendingFp, k -> new HashSet<>()).add(pendingKey);
+            }
+        } catch (RuntimeException unreadable) {
+            // not remembered: the action stays allowed
+        } finally {
+            pendingPlayer = null;
+            pendingFp = null;
+            pendingKey = null;
         }
-        pendingPlayer = null;
-        pendingFp = null;
-        pendingKey = null;
     }
 
     /** The action: each chosen ability's host card id, description and announced X. */
@@ -160,7 +175,9 @@ public final class NoProgressGuard {
                 .append(" M").append(id(game.getMonarch())).append(" I").append(id(game.getHasInitiative())).append('\n');
         for (Player p : game.getPlayers()) {
             sb.append("P").append(p.getId()).append(" life=").append(p.getLife()).append(" lost=").append(p.hasLost())
-                    .append(" lands=").append(p.getLandsPlayedThisTurn()).append(" c=").append(counters(p))
+                    .append(" lands=").append(p.getLandsPlayedThisTurn()).append(" cast=").append(p.getSpellsCastThisTurn())
+                    .append(" drawn=").append(p.getNumDrawnThisTurn()).append(" gained=").append(p.getLifeGainedThisTurn())
+                    .append(" lostLife=").append(p.getLifeLostThisTurn()).append(" c=").append(counters(p))
                     .append(" pool=[");
             for (var mana : p.getManaPool()) {
                 sb.append(mana).append(',');
