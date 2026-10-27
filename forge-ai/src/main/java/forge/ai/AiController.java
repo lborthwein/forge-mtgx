@@ -910,6 +910,11 @@ public class AiController {
             }
             return AiPlayDecision.StopRunawayActivations;
         }
+        // mtgx (lane jar-glow-valki-1027): an ability whose effect chooses a card that no X gives it (Valki, God of Lies
+        // with nothing exiled with it) does nothing; Forge AI does not choose it (AiEmptyChoice)
+        if (AiEmptyChoice.emptyForEveryX(sa, player)) {
+            return AiPlayDecision.CantPlayAi;
+        }
         if (!checkAiSpecificRestrictions(sa)) {
             return AiPlayDecision.CantPlayAi;
         }

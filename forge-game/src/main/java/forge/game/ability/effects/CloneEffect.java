@@ -30,11 +30,15 @@ public class CloneEffect extends SpellAbilityEffect {
         Card cardToCopy = host;
         if (sa.hasParam("Defined")) {
             List<Card> cloneSources = AbilityUtils.getDefinedCards(host, sa.getParam("Defined"), sa);
-            if (!cloneSources.isEmpty()) {
-                cardToCopy = cloneSources.get(0);
-            }
+            // mtgx lane jar-glow-valki-1027: a Defined that names no card copies nothing (resolve returns), so the
+            // description names no card either. It used to fall back to the host: Valki, God of Lies, whose card is
+            // chosen only on resolution (Defined$ ChosenCard), read "Valki becomes a copy of Valki" on the stack.
+            cardToCopy = cloneSources.isEmpty() ? null : cloneSources.get(0);
         } else if (sa.usesTargeting()) {
             cardToCopy = sa.getTargetCard();
+        }
+        if (cardToCopy == null) {
+            return "";
         }
 
         List<Card> cloneTargets = AbilityUtils.getDefinedCards(host, sa.getParam("CloneTarget"), sa);
