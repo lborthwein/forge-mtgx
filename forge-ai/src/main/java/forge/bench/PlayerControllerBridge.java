@@ -20,6 +20,7 @@ package forge.bench;
 import com.google.common.collect.*;
 import forge.LobbyPlayer;
 import forge.ai.AiCostDecision;
+import forge.ai.AiEmptyChoice;
 import forge.ai.ComputerUtilAbility;
 import forge.ai.ComputerUtilCost;
 import forge.ai.ComputerUtilMana;
@@ -1222,12 +1223,29 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                     bump(diag, DIAG_NO_TARGET);
                     continue;
                 }
+                // mtgx lane jar-glow-valki-1027 (owner game forge-mvr55yi8): an ability that chooses a card no
+                // announceable X gives it does nothing (Valki, God of Lies with nothing exiled with it: the policy seat
+                // activated it at X=0 over and over). Like a spell with no legal target, it is not offered.
+                if (emptyChoice(sa, p)) {
+                    bump(diag, DIAG_NO_TARGET);
+                    counters.instrument("menu.emptyChoice");
+                    continue;
+                }
                 out.add(sa);
             }
         } catch (RuntimeException e) {
             JsonRpcChannel.logErr("legalSpellAbilities failed; offering pass only", e);
         }
         return out;
+    }
+
+    /** {@link AiEmptyChoice#emptyForEveryX} up to the announce ceiling; a check that throws offers the ability. */
+    private static boolean emptyChoice(final SpellAbility sa, final Player p) {
+        try {
+            return AiEmptyChoice.emptyForEveryX(sa, p, StateEncoder.maxAnnounceableX(sa));
+        } catch (RuntimeException unreadable) {
+            return false;
+        }
     }
 
     // ---- menu census (protocol v2.5) --------------------------------------------

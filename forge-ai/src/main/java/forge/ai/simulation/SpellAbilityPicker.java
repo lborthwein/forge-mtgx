@@ -340,6 +340,11 @@ public class SpellAbilityPicker {
         if (!sa.canPlay()) {
             return AiPlayDecision.CantPlaySa;
         }
+        // mtgx (lane jar-glow-valki-1027): an ability that chooses a card no X gives it does nothing (AiEmptyChoice); the
+        // look-ahead's candidates come from here, so it never offers one
+        if (forge.ai.AiEmptyChoice.emptyForEveryX(sa, player)) {
+            return AiPlayDecision.CantPlaySa;
+        }
 
         // Note: Can't just check condition on the top ability, because it may have
         // sub-abilities without conditions (e.g. wild slash's main ability has a
