@@ -556,6 +556,7 @@ final class InteractiveState {
                 redactPrivateCard(cardObject);
             } else {
                 addNamedCards(cardObject, game);
+                addCurrentRoom(cardObject, card);
                 // Looking at an owned face-down card does not authorize the new provenance facts.
                 if (!card.isFaceDown()) {
                     InteractiveCardFacts.addTokenAndCopy(cardObject, card);
@@ -596,6 +597,24 @@ final class InteractiveState {
             }
         } catch (RuntimeException e) {
             // An id that does not resolve names nothing.
+        }
+    }
+
+    /**
+     * The room a dungeon is in, as {@code currentRoom}: Forge's own room name (the {@code RoomName$} of the dungeon's
+     * script; for Undercity "Secret Entrance", "Forge", "Lost Well", "Trap!", "Arena", "Stash", "Archive", "Catacombs" or
+     * "Throne of the Dead Three"). Lane undercity-room-1027, owner report 2026-10-27T19-40-28: after ventures into Secret
+     * Entrance and then Forge, the table still offered Secret Entrance as the next room. No room was on the wire, and the
+     * browser reads a dungeon with no room as one nobody has ventured into. A dungeon is a public command-zone object
+     * whose state is its room, and Forge's desktop shows the room on the card ({@code CardDetailUtil}). Absent for
+     * anything in no room: every non-dungeon object, and a dungeon nobody has ventured into yet. Only on an object whose
+     * identity the viewer may already receive; the bench StateEncoder is untouched (it also feeds the bridge's state,
+     * the search's payloads and the label dumps).
+     */
+    private static void addCurrentRoom(final JsonObject cardObject, final Card card) {
+        final String room = card.getCurrentRoom();
+        if (room != null && !room.isEmpty()) {
+            cardObject.addProperty("currentRoom", room);
         }
     }
 
