@@ -148,7 +148,8 @@ public final class NoProgressGuard {
         for (SpellAbility sa : chosen) {
             final Card host = sa.getHostCard();
             sb.append(host == null ? -1 : host.getId()).append('|').append(sa.getDescription())
-                    .append("|X=").append(sa.getXManaCostPaid()).append(sa.isSpell() ? "|spell" : "|ability").append(';');
+                    .append("|X=").append(sa.getXManaCostPaid() == null ? 0 : sa.getXManaCostPaid()) // unset X pays as 0
+                    .append(sa.isSpell() ? "|spell" : "|ability").append(';');
         }
         return sb.toString();
     }
