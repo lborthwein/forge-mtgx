@@ -32,16 +32,18 @@ import forge.game.zone.ZoneType;
  *
  * <p>The rule, at the one place every AI priority decision passes ({@link PhaseHandler#mainLoopStep}): when an AI player
  * chooses an action, the guard remembers it with a fingerprint of the game state it was chosen in. When the same player
- * later chooses the same action ({@link #actionKey}: the host card, the ability's description and X) in a state with the
- * same fingerprint, the action led back to where it started -- it and everything after it changed nothing -- so the
- * player passes instead (always legal, and the same outcome as the action that changes nothing). Each action is tried
+ * later chooses the same action ({@link #actionKey}: the host card, the ability's description, X, modes and targets) in
+ * a state with the same fingerprint, the action led back to where it started -- it and everything after it changed
+ * nothing -- so the player passes instead. Passing is always legal; it is not quite the same as the no-op (review
+ * S3-1): the no-op would have handed priority back to the player, the pass may end the step. The chooser is not asked
+ * for its next-best action; the choosers' own filters (AiEmptyChoice) are what keep a known no-op out. Each action is tried
  * at most once per distinct state; a loop through it is cut at its second turn. Only an action whose play changed the
  * state is remembered: a failed attempt that was rolled back (Forge AI retries those itself, up to its own bound) is not.
  * A free loop that does change something, e.g. the storm count of a recast loop, is left to the guards that bound it
  * (AiRecastGuard, preventRunAwayActivations).
  *
  * <p>The fingerprint ({@link #fingerprint}) is the game state as play sees it: turn, step, the active and priority
- * players, each player's life, counters, mana pool, zones (card ids in order) and this turn's lands played, spells cast
+ * players, the storm count, each player's life, counters, mana pool, zones (card ids in order) and this turn's lands played, spells cast
  * (a storm count is progress), cards drawn and life gained and lost, each permanent's controller, tapped,
  * sick, phased and face-down flags, counters, damage, power, toughness, state, attachments and choices, the stack
  * (source, activator, description, targets), combat, the monarch and the initiative. It leaves out what an action
@@ -142,14 +144,30 @@ public final class NoProgressGuard {
         }
     }
 
-    /** The action: each chosen ability's host card id, description and announced X. */
+    /**
+     * The action: each chosen ability's host card id, description and announced X, and for it and every sub-ability
+     * (a charm's chosen modes are its sub-abilities) the effect, the description and the chosen targets (review S3-2:
+     * a no-op re-equip onto the creature the equipment is on must not block equipping another one).
+     */
     static String actionKey(final List<SpellAbility> chosen) {
         final StringBuilder sb = new StringBuilder();
         for (SpellAbility sa : chosen) {
             final Card host = sa.getHostCard();
             sb.append(host == null ? -1 : host.getId()).append('|').append(sa.getDescription())
                     .append("|X=").append(sa.getXManaCostPaid() == null ? 0 : sa.getXManaCostPaid()) // unset X pays as 0
-                    .append(sa.isSpell() ? "|spell" : "|ability").append(';');
+                    .append(sa.isSpell() ? "|spell" : "|ability");
+            for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                sb.append("|>").append(s.getApi());
+                if (s != sa) {
+                    sb.append(':').append(s.getDescription());
+                }
+                if (s.getTargets() != null) {
+                    for (Object t : s.getTargets()) {
+                        sb.append('@').append(t instanceof SpellAbility ? "S" + id(((SpellAbility) t).getHostCard()) : id(t));
+                    }
+                }
+            }
+            sb.append(';');
         }
         return sb.toString();
     }
@@ -173,7 +191,10 @@ public final class NoProgressGuard {
         final PhaseHandler ph = game.getPhaseHandler();
         sb.append("T").append(ph.getTurn()).append(' ').append(ph.getPhase())
                 .append(" A").append(id(ph.getPlayerTurn())).append(" PR").append(id(ph.getPriorityPlayer()))
-                .append(" M").append(id(game.getMonarch())).append(" I").append(id(game.getHasInitiative())).append('\n');
+                .append(" M").append(id(game.getMonarch())).append(" I").append(id(game.getHasInitiative()))
+                // review S2-1: the storm count (every spell cast this turn) is progress: a free recast loop that raises
+                // it (Displacer Kitten + Venser + a 0-cost spell, a catalogued cube combo) is never cut here
+                .append(" N").append(game.getStack().getSpellsCastThisTurn().size()).append('\n');
         for (Player p : game.getPlayers()) {
             sb.append("P").append(p.getId()).append(" life=").append(p.getLife()).append(" lost=").append(p.hasLost())
                     .append(" lands=").append(p.getLandsPlayedThisTurn()).append(" cast=").append(p.getSpellsCastThisTurn())

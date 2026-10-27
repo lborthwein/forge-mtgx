@@ -330,6 +330,120 @@ public class NoProgressValkiTest extends AITest {
         AssertJUnit.assertNotNull(g.check(b.game, b.ai, Lists.newArrayList(untap)));
     }
 
+    /** Casts the named card from its hand whenever it can (nothing of its own on top of the stack), up to max. */
+    static final class Caster extends PlayerControllerAi {
+        final String name;
+        final int max;
+        int cast;
+
+        Caster(final Game g, final Player p, final LobbyPlayer lp, final String name, final int max) {
+            super(g, p, lp);
+            this.name = name;
+            this.max = max;
+        }
+
+        @Override
+        public List<SpellAbility> chooseSpellAbilityToPlay() {
+            final Game g = getGame();
+            if (cast >= max || !g.getStack().isEmpty() && getPlayer().equals(g.getStack().peekAbility().getActivatingPlayer())) {
+                return null;
+            }
+            for (Card c : getPlayer().getCardsIn(ZoneType.Hand)) {
+                if (c.getName().equals(name)) {
+                    final SpellAbility sa = c.getFirstSpellAbility();
+                    sa.setActivatingPlayer(getPlayer());
+                    return sa.canPlay() ? Lists.newArrayList(sa) : null;
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public boolean playChosenSpellAbility(final SpellAbility sa) {
+            final boolean ok = super.playChosenSpellAbility(sa);
+            if (ok) {
+                cast++;
+            }
+            return ok;
+        }
+    }
+
+    /**
+     * Review S2-1: Displacer Kitten + Venser, Shaper Savant + Lotus Petal (a catalogued cube combo, "infinite storm
+     * count"). Each cast: Kitten blinks Venser, Venser returns the Petal from the stack to the hand. Every iteration
+     * ends in the same board, with the storm count one higher: progress, never cut.
+     */
+    @Test
+    public void stormLoopIsNeverCut() {
+        final Game game = initAndCreateGame();
+        final Player ai = game.getPlayers().get(1);
+        final Player opp = game.getPlayers().get(0);
+        fillLibrary(ai, 10);
+        fillLibrary(opp, 10);
+        addCard("Displacer Kitten", ai).setSickness(false);
+        addCard("Venser, Shaper Savant", ai).setSickness(false);
+        addCards("Island", 2, ai);
+        addCard("Runeclaw Bear", opp);
+        addCards("Swamp", 2, opp);
+        addCardToZone("Lotus Petal", ai, ZoneType.Hand);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, ai);
+        game.getAction().checkStateEffects(true);
+        opp.dangerouslySetController(new Passer(game, opp, opp.getLobbyPlayer()));
+        final Caster caster = new Caster(game, ai, ai.getLobbyPlayer(), "Lotus Petal", 10);
+        ai.dangerouslySetController(caster);
+        int steps = 0;
+        while (steps < 2000 && !game.isGameOver() && game.getPhaseHandler().is(PhaseType.MAIN1)
+                && (caster.cast < 10 || !game.getStack().isEmpty())) {
+            game.getPhaseHandler().mainLoopStep();
+            steps++;
+        }
+        AssertJUnit.assertEquals("cast ten times", 10, caster.cast);
+        AssertJUnit.assertEquals("storm count 10", 10, game.getStack().getSpellsCastThisTurn().size());
+        AssertJUnit.assertEquals("no guard stop in a storm loop", 0, game.getPhaseHandler().noProgressGuard().stops());
+        AssertJUnit.assertTrue("still in main 1", game.getPhaseHandler().is(PhaseType.MAIN1));
+        AssertJUnit.assertTrue("Venser returned the Petal each time",
+                ai.getCardsIn(ZoneType.Hand).anyMatch(c -> c.getName().equals("Lotus Petal")));
+    }
+
+    /**
+     * Review S3-2: an equip onto the creature the equipment is already on changes nothing; once it came back, the same
+     * equip is stopped, but equipping another creature in that state is a different action.
+     */
+    @Test
+    public void aNoopReEquipDoesNotBlockAnotherEquip() {
+        final Board b = board();
+        b.game.getPhaseHandler().setPriority(b.ai);
+        final Card on = addCard("Grizzly Bears", b.ai);
+        final Card other = addCard("Runeclaw Bear", b.ai);
+        final Card splitter = addCard("Bonesplitter", b.ai);
+        splitter.attachToEntity(on, null);
+        b.game.getAction().checkStateEffects(true);
+        SpellAbility equip = null;
+        for (SpellAbility sa : splitter.getSpellAbilities()) {
+            if (sa.getApi() == ApiType.Attach) {
+                equip = sa;
+            }
+        }
+        AssertJUnit.assertNotNull(equip);
+        equip.setActivatingPlayer(b.ai);
+        equip.resetTargets();
+        equip.getTargets().add(on);
+        final NoProgressGuard g = new NoProgressGuard();
+        AssertJUnit.assertNotNull(g.check(b.game, b.ai, Lists.newArrayList(equip)));
+        b.game.getStack().addAndUnfreeze(equip);
+        g.played(b.game, b.ai);
+        b.game.getStack().resolveStack();
+        b.game.getPhaseHandler().setPriority(b.ai);
+        AssertJUnit.assertEquals(on, splitter.getEntityAttachedTo());
+        equip.resetTargets();
+        equip.getTargets().add(on);
+        AssertJUnit.assertNull("the same no-op equip, again in the same state", g.check(b.game, b.ai, Lists.newArrayList(equip)));
+        equip.resetTargets();
+        equip.getTargets().add(other);
+        AssertJUnit.assertNotNull("equip onto another creature is another action",
+                g.check(b.game, b.ai, Lists.newArrayList(equip)));
+    }
+
     @Test
     public void guardOffReproducesTheLoop() {
         final Board b = board();
