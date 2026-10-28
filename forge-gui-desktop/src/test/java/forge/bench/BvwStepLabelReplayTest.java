@@ -106,6 +106,7 @@ public class BvwStepLabelReplayTest {
         base.labelBandLo = rc.labelBandLo;
         base.labelTurns = rc.labelTurns;
         base.labelSearch = rc.labelSearch;
+        base.watchdog.enabled = false; // lki-fix-port-1027 (review S3-4): no stall watchdog in these label replays
         return base;
     }
 

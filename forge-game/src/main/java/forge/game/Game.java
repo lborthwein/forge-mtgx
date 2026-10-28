@@ -221,13 +221,33 @@ public class Game {
         return true;
     }
 
+    /**
+     * mtgx (lane lki-leak-1027): the last-known-information zones of the current last-state snapshot. Each LKI card of a
+     * snapshot points at its snapshot zone, and that zone held every LKI card of the snapshot, so one LKI card kept after
+     * its snapshot was replaced (the cards that left the battlefield or the graveyard this turn, a change-zone LKI, a
+     * trigger's run parameters) kept the whole snapshot alive: one battlefield or graveyard copy per departure. The next
+     * snapshot releases the old zones' card lists; the LKI cards keep their zone and every other field, so the game's
+     * snapshot reads exactly as before until the next one is taken. The zones {@link #copyLastState(ZoneType)} makes for
+     * cost and zone-change tables are released at once (lane lki-fix-port-1027, review S3-2): their readers use the
+     * returned collection, never the zone.
+     */
+    private final List<Zone> lastStateZones = new ArrayList<>(4);
+
     public void copyLastState() {
+        for (final Zone z : lastStateZones) {
+            z.releaseLastKnownCards();
+        }
+        lastStateZones.clear();
         lastStateBattlefield.clear();
         lastStateGraveyard.clear();
         Map<Integer, Card> cachedMap = Maps.newHashMap();
         for (final Player p : getPlayers()) {
-            lastStateBattlefield.addAll(p.getZone(ZoneType.Battlefield).getLKICopy(cachedMap));
-            lastStateGraveyard.addAll(p.getZone(ZoneType.Graveyard).getLKICopy(cachedMap));
+            final Zone bf = p.getZone(ZoneType.Battlefield).getLKICopy(cachedMap);
+            final Zone gy = p.getZone(ZoneType.Graveyard).getLKICopy(cachedMap);
+            lastStateBattlefield.addAll(bf);
+            lastStateGraveyard.addAll(gy);
+            lastStateZones.add(bf);
+            lastStateZones.add(gy);
         }
     }
 
@@ -235,7 +255,11 @@ public class Game {
         CardCollection result = new CardCollection();
         Map<Integer, Card> cachedMap = Maps.newHashMap();
         for (final Player p : getPlayers()) {
-            result.addAll(p.getZone(type).getLKICopy(cachedMap));
+            final Zone z = p.getZone(type).getLKICopy(cachedMap);
+            result.addAll(z);
+            // lane lki-fix-port-1027 (review S3-2): the cost / zone-change table reads `result`, not the zone: release it
+            // now (a sacrifice's LKI from here goes to Player.sacrificedThisTurn and would keep the whole zone otherwise)
+            z.releaseLastKnownCards();
         }
         return result;
     }

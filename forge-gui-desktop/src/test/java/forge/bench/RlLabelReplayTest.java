@@ -189,6 +189,7 @@ public class RlLabelReplayTest {
         c.mode = mode;
         c.rlRoot = root.toString();
         c.aiTimeoutSec = 600;
+        c.watchdog.enabled = false; // lki-fix-port-1027 (review S3-4): these replays test labels, not the stall watchdog
         return c;
     }
 
