@@ -174,6 +174,19 @@ public class CardCopyService {
         }
     }
 
+    /**
+     * mtgx lane forge-fix-p1p2-1028 (anomaly audit 1028 P2): copy both faces of a transforming card onto {@code to}, its
+     * front face to its front face and its back face to its back face, and which face is up, as the copied-spell branch
+     * of {@link #copyCopiableCharacteristics} does (707.10g). For a game copier's copy of a transforming token (an
+     * Incubator token, a token copy of a transformed card): built from its current face alone, the copy had no back face,
+     * could not be put on it ("tried to switch to non-existant state"), and could neither transform nor give an LKI copy.
+     */
+    public void copyTransformingFaces(final Card to) {
+        copyState(copyFrom, CardStateName.Original, to, CardStateName.Original);
+        copyState(copyFrom, CardStateName.Backside, to, CardStateName.Backside);
+        to.setBackSide(copyFrom.isBackSide());
+    }
+
     // ========================================================
     // LKI functions
 
@@ -258,7 +271,10 @@ public class CardCopyService {
             newCopy.getState(CardStateName.Original).copyFrom(copyFrom.getState(CardStateName.Original), true);
             newCopy.addAlternateState(CardStateName.Flipped, false);
             newCopy.getState(CardStateName.Flipped).copyFrom(copyFrom.getState(CardStateName.Flipped), true);
-        } else if (copyFrom.isTransformable()) {
+        } else if (copyFrom.isTransformable() && copyFrom.getState(CardStateName.Backside) != null) {
+            // mtgx lane forge-fix-p1p2-1028 (anomaly audit 1028 P2): isTransformable reads the card's rules, which a
+            // card without its own paper card finds by name (a token named for a double-faced card's face), so it can
+            // say "transformable" for a card that has no back face; such a card falls through to its face-up state.
             newCopy.getState(CardStateName.Original).copyFrom(copyFrom.getState(CardStateName.Original), true);
             newCopy.addAlternateState(CardStateName.Backside, false);
             newCopy.getState(CardStateName.Backside).copyFrom(copyFrom.getState(CardStateName.Backside), true);
