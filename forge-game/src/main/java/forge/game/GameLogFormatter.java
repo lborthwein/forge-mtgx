@@ -330,6 +330,109 @@ public class GameLogFormatter extends IGameEventVisitor.Base<GameLogEntry> {
         return new GameLogEntry(ev.type(), ev.message(), ev.sourceCard());
     }
 
+    @Override
+    public GameLogEntry visit(GameEventZoneChangeReplaced ev) {
+        return new GameLogEntry(GameLogEntryType.ZONE_CHANGE, describeReplacedZoneChange(ev), ev.source());
+    }
+
+    /** Zones whose face-up cards everyone sees (CR 400.2). */
+    private static final java.util.Set<ZoneType> PUBLIC_ZONES = java.util.EnumSet.of(ZoneType.Battlefield,
+            ZoneType.Graveyard, ZoneType.Exile, ZoneType.Stack, ZoneType.Command);
+
+    /**
+     * The player-facing sentence for a replaced or prevented zone change, in US English, e.g. "Containment Priest
+     * exiles Hullbreacher instead of letting it enter the battlefield." The moved card is named only when it is face
+     * up and was in, or ended up in, a public zone; otherwise it is "a card". A card that replaces its own move
+     * (flashback, a commander going to the command zone) gets the passive form: "Faithless Looting is exiled instead
+     * of going to its owner's graveyard."
+     */
+    public static String describeReplacedZoneChange(final GameEventZoneChangeReplaced ev) {
+        final CardView card = ev.card();
+        final boolean cardPublic = card != null && !card.isFaceDown()
+                && (PUBLIC_ZONES.contains(ev.from()) || PUBLIC_ZONES.contains(ev.actual()));
+        final String cardName = cardPublic && !card.getName().isEmpty() ? card.getName() : "a card";
+        final CardView source = ev.source();
+        final boolean self = source == null || card != null && source.getId() == card.getId();
+        final String sourceName = self ? null
+                : source.isFaceDown() || source.getName().isEmpty() ? "A face-down permanent" : source.getName();
+
+        if (ev.prevented()) {
+            return self ? capitalize(cardName) + " stays where it is instead of " + gerund(ev.intended()) + "."
+                    : sourceName + " keeps " + cardName + " from " + gerund(ev.intended()) + ".";
+        }
+        return self ? capitalize(cardName) + " " + passive(ev.actual()) + " instead of " + gerund(ev.intended()) + "."
+                : sourceName + " " + active(ev.actual(), cardName) + " instead of letting it "
+                        + infinitive(ev.intended()) + ".";
+    }
+
+    private static String capitalize(final String s) {
+        return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    }
+
+    private static String infinitive(final ZoneType zone) {
+        if (zone == null) {
+            return "change zones";
+        }
+        return switch (zone) {
+            case Battlefield -> "enter the battlefield";
+            case Graveyard -> "go to its owner's graveyard";
+            case Hand -> "go to its owner's hand";
+            case Library -> "be put into its owner's library";
+            case Exile -> "be exiled";
+            case Stack -> "go on the stack";
+            case Command -> "go to the command zone";
+            default -> "change zones";
+        };
+    }
+
+    private static String gerund(final ZoneType zone) {
+        if (zone == null) {
+            return "changing zones";
+        }
+        return switch (zone) {
+            case Battlefield -> "entering the battlefield";
+            case Graveyard -> "going to its owner's graveyard";
+            case Hand -> "going to its owner's hand";
+            case Library -> "being put into its owner's library";
+            case Exile -> "being exiled";
+            case Stack -> "going on the stack";
+            case Command -> "going to the command zone";
+            default -> "changing zones";
+        };
+    }
+
+    private static String active(final ZoneType zone, final String card) {
+        if (zone == null) {
+            return "moves " + card;
+        }
+        return switch (zone) {
+            case Exile -> "exiles " + card;
+            case Graveyard -> "puts " + card + " into its owner's graveyard";
+            case Hand -> "returns " + card + " to its owner's hand";
+            case Library -> "puts " + card + " into its owner's library";
+            case Battlefield -> "puts " + card + " onto the battlefield";
+            case Command -> "puts " + card + " into the command zone";
+            case Stack -> "puts " + card + " on the stack";
+            default -> "moves " + card;
+        };
+    }
+
+    private static String passive(final ZoneType zone) {
+        if (zone == null) {
+            return "is moved";
+        }
+        return switch (zone) {
+            case Exile -> "is exiled";
+            case Graveyard -> "is put into its owner's graveyard";
+            case Hand -> "is returned to its owner's hand";
+            case Library -> "is put into its owner's library";
+            case Battlefield -> "is put onto the battlefield";
+            case Command -> "is put into the command zone";
+            case Stack -> "is put on the stack";
+            default -> "is moved";
+        };
+    }
+
     @Subscribe
     public void recieve(GameEvent ev) {
         GameLogEntry le = ev.visit(this);
