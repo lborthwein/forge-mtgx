@@ -173,6 +173,17 @@ public class GameCopierTransformTokenTest extends SimulationTest {
         assertLki(copier.find(b), "Reflection of Kiki-Jiki");
         // the copied token's own copy ability is there (it is a Reflection)
         abilityOf(c, ApiType.CopyPermanent);
+        // review #133: both faces came across; the front face is the source token's, and it transforms back to it
+        AssertJUnit.assertNotNull(c.getState(CardStateName.Original));
+        final String front = token.getState(CardStateName.Original).getName();
+        AssertJUnit.assertEquals(front, c.getState(CardStateName.Original).getName());
+        AssertJUnit.assertTrue(c.isBackSide());
+        final Object[] r = capture(() -> c.changeCardState("Transform", null, null));
+        AssertJUnit.assertFalse((String) r[1], ((String) r[1]).contains("non-existant state"));
+        AssertJUnit.assertTrue("transformed back", (Boolean) r[0]);
+        AssertJUnit.assertEquals(CardStateName.Original, c.getCurrentStateName());
+        AssertJUnit.assertEquals(front, c.getName());
+        AssertJUnit.assertEquals("the original token is untouched", "Reflection of Kiki-Jiki", token.getName());
     }
 
     /**
