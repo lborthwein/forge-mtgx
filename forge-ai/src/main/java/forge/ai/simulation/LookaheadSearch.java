@@ -7211,23 +7211,25 @@ public final class LookaheadSearch {
         return pool;
     }
 
-    /** Our registered main deck's card names (a player knows their own deck), once. */
+    /**
+     * Our registered main deck's card names (a player knows their own deck), once per searching seat. belief-jar-1027: a
+     * bench game whose one search serves both seats used to keep the FIRST searching seat's deck for both, so the other
+     * seat's singleton pool left out its opponent's cards and kept its own. One seat per search (live): unchanged.
+     */
     private Set<String> ownDeckNames(Player liveMe) {
-        Set<String> d = ownDeckNames;
-        if (d == null) {
-            d = new HashSet<>();
+        return ownDeckNames.computeIfAbsent(liveMe.getId(), id -> {
+            final Set<String> d = new HashSet<>();
             final forge.deck.Deck deck = liveMe.getRegisteredPlayer() == null ? null : liveMe.getRegisteredPlayer().getDeck();
             if (deck != null && deck.has(forge.deck.DeckSection.Main)) {
                 for (Map.Entry<forge.item.PaperCard, Integer> e : deck.get(forge.deck.DeckSection.Main)) {
                     d.add(e.getKey().getName());
                 }
             }
-            ownDeckNames = d;
-        }
-        return d;
+            return d;
+        });
     }
 
-    private volatile Set<String> ownDeckNames;
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Set<String>> ownDeckNames = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * honest-belief-1020: the basics multiplicity M: {@link Config#beliefBasics}, raised only when the pool would have
