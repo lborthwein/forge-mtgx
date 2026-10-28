@@ -488,6 +488,8 @@ public final class StepSearch {
          * the most decisions a finished seat sent.
          */
         public long[] playoutStats;
+        /** Review #130 S3-3 (0 unless refused; never in the row's JSON): true-world re-plays refused for fair naming. */
+        public long trueFairNamingRefusals;
         /**
          * OPEN-6 ruling (2026-10-24): the face-down exiled cards the seat may not look at on the copy
          * ({@link HiddenExile#scan}); non-empty = no target for this row, proof included. Null = none.
@@ -759,6 +761,12 @@ public final class StepSearch {
             res.error = e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
             if (search != null) {
+                final long refused = search.lookaheadStats().trueFairNamingRefusals;
+                if (refused > 0) {
+                    // review #130 S3-3: a run-level signal (the step-3 smoke asserts none); the row is unchanged
+                    res.trueFairNamingRefusals = refused;
+                    System.err.println("[fair-naming-refusals] uid " + uid + " key " + key + " refused " + refused);
+                }
                 final RlSearch.Config sc = search.config();
                 if (sc.playoutLoopGuard > 0 || sc.playoutMaxDecisions > 0) {
                     // step3-playout-fixes-1028: the row's play-out seat counts, on stderr only (the row is unchanged)
