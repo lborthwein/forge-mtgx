@@ -167,6 +167,16 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      */
     private TrajectoryRef.Recorder trajectory;
 
+    /**
+     * Review #124 S2-2 (null = none: the seats re-ran): the decision log's verdict on this replay ({@code mode, source,
+     * complete, exact}); the games row carries it and every index row its {@code decision_log_exact}.
+     */
+    private JsonObject decisionLog;
+
+    public void setDecisionLog(final JsonObject verdict) {
+        this.decisionLog = verdict;
+    }
+
     /** Attach the step-0 reference positions of this game ({@code ref} null: none known, the game is void). */
     public void setReference(final java.util.TreeMap<Integer, String> ref, final int turns) {
         setReference(ref, turns, null);
@@ -512,6 +522,14 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         if (traj != null) {
             gr.add("trajectory", traj);
             gr.addProperty("trajectory_equal", trajEqual);
+        }
+        if (decisionLog != null) {
+            gr.add("decision_log", decisionLog); // review #124 S2-2
+            if (decisionLog.has("exact")) {
+                for (JsonObject ir : idx) {
+                    ir.add("decision_log_exact", decisionLog.get("exact"));
+                }
+            }
         }
         gr.addProperty("decisions", decisions);
         gr.addProperty("window_decisions", windowDecisions);

@@ -211,6 +211,11 @@ public final class RlActorBench {
         String decisionLogOut = null;
         /** bvw-decision-log-1027: replay: logs an earlier {@code "record"} replay wrote (used for digest-equal games). */
         List<String> decisionLogs = null;
+        /**
+         * Review #124 S2-3 (null = none): a later step's label index files whose rows' {@code state_sha} a RECORD replay
+         * checks at their own positions ({@code decisionLogReference.stateRows}); a log with a mismatch is not accepted.
+         */
+        List<String> decisionLogStateRows = null;
     }
 
     static void parseReference(final Cfg c, final JsonObject o, final String where) {
@@ -344,8 +349,9 @@ public final class RlActorBench {
             // bvw-decision-log-1027: checked once, at JVM start (exit 2 on a bad value)
             c.decisionLog = o.get("decisionLog").getAsString();
             final boolean replay = "replay".equals(c.mode);
+            // review #124 S2-4: "forced" = every replayed game is forced from its log; a game without one is void
             final java.util.Set<String> ok = new java.util.TreeSet<>(replay
-                    ? java.util.Arrays.asList("auto", "rerun", "record") : java.util.Arrays.asList("off", "record"));
+                    ? java.util.Arrays.asList("auto", "rerun", "record", "forced") : java.util.Arrays.asList("off", "record"));
             if (!ok.contains(c.decisionLog)) {
                 throw new IllegalArgumentException("decisionLog in " + c.mode + " mode is one of " + ok + ", not "
                         + c.decisionLog);
@@ -368,6 +374,29 @@ public final class RlActorBench {
         }
         if (c.decisionLogs != null && (!"replay".equals(c.mode) || "rerun".equals(c.decisionLog))) {
             throw new IllegalArgumentException("decisionLogs are read by a replay that may force them (not rerun)");
+        }
+        if (o.has("decisionLogReference") && !o.get("decisionLogReference").isJsonNull()) {
+            // review #124 S2-3: a record replay's own trajectory check against step 0, and a later step's state_sha rows
+            if (!"record".equals(c.decisionLog) || !"replay".equals(c.mode)) {
+                throw new IllegalArgumentException("decisionLogReference is for decisionLog record in replay mode");
+            }
+            if (c.reference != null) {
+                throw new IllegalArgumentException("decisionLogReference: the label's or exile scan's reference is already "
+                        + "the trajectory check; give stateRows there only");
+            }
+            final JsonObject x = o.getAsJsonObject("decisionLogReference");
+            for (String k : x.keySet()) {
+                if (!"reference".equals(k) && !"referenceTurns".equals(k) && !"stateRows".equals(k)) {
+                    throw new IllegalArgumentException("decisionLogReference: unknown key " + k);
+                }
+            }
+            parseReference(c, x, "decisionLogReference");
+            if (x.has("stateRows")) {
+                c.decisionLogStateRows = new ArrayList<>();
+                for (JsonElement e : x.getAsJsonArray("stateRows")) {
+                    c.decisionLogStateRows.add(e.getAsString());
+                }
+            }
         }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
@@ -1554,13 +1583,6 @@ public final class RlActorBench {
         }
         // bvw-decision-log-1027: logs an earlier "record" replay wrote (forced for their digest-equal games), and this
         // replay's own sink when it records
-        DecisionLog.SIDECAR = cfg.decisionLogs == null ? null : DecisionLog.loadSidecars(cfg.decisionLogs);
-        DecisionLog.SINK = "record".equals(cfg.decisionLog) ? new DecisionLog.Sink(Paths.get(cfg.decisionLogOut)) : null;
-        if (DecisionLog.SIDECAR != null || DecisionLog.SINK != null) {
-            System.err.println("[decision-log] replay: " + (DecisionLog.SIDECAR == null ? "" : DecisionLog.SIDECAR.size()
-                    + " logged games from " + cfg.decisionLogs.size() + " file(s)") + (DecisionLog.SINK == null ? ""
-                    : " recording -> " + DecisionLog.SINK.file()));
-        }
         final Map<String, List<JsonObject>> cache = new HashMap<>();
         for (int[] fl : cfg.replayLines) {
             final String f = cfg.replayTapes.get(fl[0]);
@@ -1568,12 +1590,40 @@ public final class RlActorBench {
                 cache.put(f, RlTape.read(Paths.get(f)));
             }
         }
+        final java.util.Set<String> wantedUids = new java.util.HashSet<>();
+        for (int[] fl : cfg.replayLines) {
+            wantedUids.add(forge.bench.rl.TrajectoryRef.canonicalUid(
+                    cache.get(cfg.replayTapes.get(fl[0])).get(fl[1]).get("game_uid").getAsString()));
+        }
+        DecisionLog.SIDECAR = cfg.decisionLogs == null ? null : DecisionLog.loadSidecars(cfg.decisionLogs, wantedUids);
+        DecisionLog.SINK = "record".equals(cfg.decisionLog) ? new DecisionLog.Sink(Paths.get(cfg.decisionLogOut)) : null;
+        stateRows = cfg.decisionLogStateRows == null ? null : loadStateRows(cfg.decisionLogStateRows, wantedUids);
+        if (DecisionLog.SIDECAR != null || DecisionLog.SINK != null) {
+            System.err.println("[decision-log] replay: " + (DecisionLog.SIDECAR == null ? "" : DecisionLog.SIDECAR.size()
+                    + " logged games of " + wantedUids.size() + " from " + cfg.decisionLogs.size() + " file(s)")
+                    + (DecisionLog.SINK == null ? "" : " recording -> " + DecisionLog.SINK.file())
+                    + (stateRows == null ? "" : "; state_sha rows for " + stateRows.size() + " games"));
+        }
         trajectoryRef = null;
         forge.bench.rl.TrajectoryRef.NO_STACK_GAMES.set(0);
         final List<JsonObject> replayed = new ArrayList<>();
         for (int[] fl : cfg.replayLines) {
             replayed.add(cache.get(cfg.replayTapes.get(fl[0])).get(fl[1]));
         }
+        if ("record".equals(cfg.decisionLog) && cfg.reference == null) {
+            // review #124 S2-3: an HonestForcedWin tape's re-run is host-dependent; its log is never written unchecked
+            int hfw = 0;
+            for (JsonObject t : replayed) {
+                hfw += honestForcedWinTape(t) && !t.has(DecisionLog.KEY) ? 1 : 0;
+            }
+            if (hfw > 0) {
+                System.err.println("[decision-log] refused: a record replay of " + hfw + " HonestForcedWin tape(s) needs the "
+                        + "step-0 trajectory reference (decisionLogReference, label.reference or exileScan.reference)");
+                return 2;
+            }
+        }
+        final JsonObject coverage = coverage(cfg, replayed); // review #124 S2-4: logs by archetype
+        System.err.println("[decision-log] coverage " + RlWire.canonicalString(coverage));
         final String noRef = referenceRefusal(cfg, replayed);
         if (noRef != null) {
             // review-align #2: a step-1 search run on step-0 tapes is never run without the trajectory check
@@ -1697,6 +1747,7 @@ public final class RlActorBench {
         sum.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
         sum.addProperty("label", cfg.labelSpec != null);
         sum.add("watchdog", cfg.watchdog.toJson()); // lki-fix-port-1027
+        sum.add("decision_log_coverage", coverage); // review #124 S2-4
         if (wd != null) {
             sum.addProperty("watchdog_samples", wd.samples());
         }
@@ -1745,6 +1796,11 @@ public final class RlActorBench {
             if (!t.get("void").isJsonNull()) {
                 row.addProperty("error", "void");
                 row.addProperty("equal", false);
+            } else if ("forced".equals(cfg.decisionLog) && !forced) {
+                // review #124 S2-4: forced-only: a game without a log is void, never re-run
+                row.addProperty("void", DecisionLog.MISSING);
+                row.addProperty("error", DecisionLog.MISSING);
+                row.addProperty("equal", false);
             } else if (noRuntime != null) {
                 // review #3: a counted generator's tape replays only under the Forge AI settings it was played with
                 row.addProperty("error", noRuntime);
@@ -1786,7 +1842,7 @@ public final class RlActorBench {
                 final forge.bench.rl.RlReplayLabeller[] labs = new forge.bench.rl.RlReplayLabeller[1];
                 final int tobs = g.get("obs_schema").getAsInt();
                 final forge.bench.rl.RlExileScan[] scans = new forge.bench.rl.RlExileScan[1];
-                final GameHook hook = cfg.labelSpec != null ? (game, seat, know) -> {
+                final GameHook hook0 = cfg.labelSpec != null ? (game, seat, know) -> {
                     labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelBandLo, cfg.labelTurns,
                             cfg.labelSearch, t, jarSha, game, know, feat.index(), tobs);
                     if (trajectoryRef != null) {
@@ -1802,6 +1858,22 @@ public final class RlActorBench {
                     }
                     game.addPriorityDecisionListener(scans[0]);
                 } : null;
+                // review #124 S2-3: a record replay's checks (the trajectory against step 0 when no labeller or scan
+                // runs it; a later step's state_sha rows), read-only
+                final String cuid = forge.bench.rl.TrajectoryRef.canonicalUid(t.get("game_uid").getAsString());
+                final boolean ownTrajectory = cfg.labelSpec == null && cfg.exileScanOut == null && trajectoryRef != null;
+                final Map<String, String> rowsHere = stateRows == null ? null : stateRows.get(cuid);
+                final DecisionLogCheck[] checks = new DecisionLogCheck[1];
+                final GameHook hook = dl == null || dl.mode != DecisionLog.Mode.RECORD || (!ownTrajectory && rowsHere == null)
+                        ? hook0 : (game, seat, know) -> {
+                    if (hook0 != null) {
+                        hook0.start(game, seat, know);
+                    }
+                    checks[0] = new DecisionLogCheck(game, t, ownTrajectory ? new forge.bench.rl.TrajectoryRef.Recorder(
+                            trajectoryRef.of(t.get("game_uid").getAsString()), trajectoryRef.turns,
+                            trajectoryRef.provenance()) : null, rowsHere);
+                    game.addPriorityDecisionListener(checks[0]);
+                };
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
                         t.get("game_uid").getAsString())), null, jarSha, hook, dl);
                 final forge.bench.rl.RlReplayLabeller lab = labs[0];
@@ -1848,6 +1920,10 @@ public final class RlActorBench {
                         row.addProperty("decision_log_source", dlSource(t, dl));
                         if (forced) {
                             eq &= p.decisionLog.complete();
+                            // review #124 S2-2: and LookaheadBench's digest of the game, when the tape has one
+                            if (t.has("digest_lb") && p.end.has("digest_lb")) {
+                                eq &= t.get("digest_lb").getAsString().equals(p.end.get("digest_lb").getAsString());
+                            }
                         }
                     }
                     if (forced) {
@@ -1882,7 +1958,14 @@ public final class RlActorBench {
                             }
                         }
                     }
+                    if (checks[0] != null) {
+                        checks[0].finish(t.get("game_uid").getAsString(), row);
+                    }
                     if (lab != null) {
+                        if (p.decisionLog != null) {
+                            // review #124 S2-2: the log's verdict on the games and index rows
+                            lab.setDecisionLog(p.decisionLog.labelVerdict(dlSource(t, dl)));
+                        }
                         // bvw-plr-1023: the game's label rows are written only when its digest is the tape's
                         try {
                             lab.finish(labelSink, eq, row);
@@ -2003,6 +2086,63 @@ public final class RlActorBench {
             counter |= ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE).equals(c.getAsString());
         }
         return counter ? forge.ai.simulation.ForcedWinSolver.counterRuntimeRefusal(aiTimeoutSec) : null;
+    }
+
+    /** Review #124 S2-3: a later step's state_sha rows, by canonical uid, then seat | dec_idx (null = none). */
+    static Map<String, Map<String, String>> stateRows = null;
+
+    /** Review #124 S2-3: the state_sha of each (seat, dec_idx) row of {@code files} for the games in {@code wanted}. */
+    static Map<String, Map<String, String>> loadStateRows(final List<String> files, final java.util.Set<String> wanted)
+            throws IOException {
+        final Map<String, Map<String, String>> m = new HashMap<>();
+        for (String f : files) {
+            for (String line : Files.readAllLines(Paths.get(f), StandardCharsets.UTF_8)) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                final JsonObject r = JsonParser.parseString(line).getAsJsonObject();
+                if (!r.has("state_sha") || r.get("state_sha").isJsonNull()) {
+                    continue;
+                }
+                final String uid = forge.bench.rl.TrajectoryRef.canonicalUid(r.get("game_uid").getAsString());
+                if (wanted.contains(uid)) {
+                    m.computeIfAbsent(uid, x -> new HashMap<>()).put(r.get("seat").getAsInt() + "|"
+                            + r.get("dec_idx").getAsInt(), r.get("state_sha").getAsString());
+                }
+            }
+        }
+        return m;
+    }
+
+    /**
+     * Review #124 S2-4: how many of the replayed games carry a log (on the tape or in a decisionLogs file), by archetype
+     * (each seat's deck family: {@code cur-<family>-NNNN.dck}).
+     */
+    static JsonObject coverage(final Cfg cfg, final List<JsonObject> replayed) {
+        final Map<String, int[]> by = new TreeMap<>();
+        int logged = 0;
+        for (JsonObject t : replayed) {
+            final boolean has = !"rerun".equals(cfg.decisionLog) && (t.has(DecisionLog.KEY) || DecisionLog.sidecarFor(t) != null);
+            logged += has ? 1 : 0;
+            for (JsonElement d : t.getAsJsonArray("decks")) {
+                final String name = Paths.get(d.getAsJsonObject().get("path").getAsString()).getFileName().toString();
+                final String fam = name.replaceAll("^cur-", "").replaceAll("-\\d+\\.dck$", "").replaceAll("\\.dck$", "");
+                final int[] c = by.computeIfAbsent(fam, x -> new int[2]);
+                c[has ? 0 : 1]++;
+            }
+        }
+        final JsonObject o = new JsonObject();
+        o.addProperty("games", replayed.size());
+        o.addProperty("logged", logged);
+        final JsonObject fams = new JsonObject();
+        for (Map.Entry<String, int[]> e : by.entrySet()) {
+            final JsonObject x = new JsonObject();
+            x.addProperty("logged", e.getValue()[0]);
+            x.addProperty("missing", e.getValue()[1]);
+            fams.add(e.getKey(), x);
+        }
+        o.add("by_archetype_seat", fams);
+        return o;
     }
 
     /** bvw-plr-1023: the replay's label sink (one per JVM), or null. */

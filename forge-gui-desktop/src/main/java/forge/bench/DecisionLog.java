@@ -41,6 +41,8 @@ final class DecisionLog {
     static final String KEY = "decision_log";
     /** The void reason of a forced replay that diverged from its log. */
     static final String VOID = "decision_log_divergence";
+    /** Review #124 S2-4: the void reason of a game a forced-only replay ({@code "decisionLog": "forced"}) has no log for. */
+    static final String MISSING = "decision_log_missing";
 
     enum Mode { RECORD, FORCED }
 
@@ -220,6 +222,19 @@ final class DecisionLog {
         return o;
     }
 
+    /** Review #124 S2-2: the verdict the label games and index rows carry ({@code mode, source, complete, exact}). */
+    JsonObject labelVerdict(final String source) {
+        final JsonObject r = replayJson();
+        final JsonObject o = new JsonObject();
+        o.addProperty("mode", mode == Mode.FORCED ? "forced" : "record");
+        o.addProperty("source", source);
+        if (mode == Mode.FORCED) {
+            o.add("complete", r.get("complete"));
+            o.add("exact", r.get("exact"));
+        }
+        return o;
+    }
+
     /** FORCED: every seat used its whole log and none diverged. */
     boolean complete() {
         final JsonObject r = replayJson();
@@ -249,23 +264,70 @@ final class DecisionLog {
         return r.getAsJsonObject(KEY);
     }
 
+    /** Every file's lines, all of them kept (tests). */
     static java.util.Map<String, JsonObject> loadSidecars(final List<String> files) throws java.io.IOException {
+        return loadSidecars(files, null);
+    }
+
+    /**
+     * The accepted logs of {@code files} for the games in {@code wanted} (canonical uids; null = every game). Review
+     * #124 S2-7: the files are streamed a line at a time and only the wanted games' logs are kept, so a replay's heap
+     * holds its own games' logs only (a step-3 harness gives each shard its own sidecar file, 1:1, or a superset).
+     * Review #124 S2-3: a log is accepted only from a digest-equal replay whose trajectory check against step 0 ran and
+     * passed when its tape needed one ({@code reference_required}: an HonestForcedWin tape), and whose band positions
+     * matched step 2's state_sha wherever they were checked.
+     */
+    static java.util.Map<String, JsonObject> loadSidecars(final List<String> files, final java.util.Set<String> wanted)
+            throws java.io.IOException {
         final java.util.Map<String, JsonObject> m = new java.util.HashMap<>();
         for (String f : files) {
-            for (JsonObject r : forge.bench.rl.RlTape.read(java.nio.file.Paths.get(f))) {
-                final boolean ok = r.get("equal").getAsBoolean()
-                        && (!r.has("trajectory_equal") || r.get("trajectory_equal").getAsBoolean());
-                if (!ok || !r.has(KEY)) {
-                    continue;
-                }
-                final String uid = forge.bench.rl.TrajectoryRef.canonicalUid(r.get("game_uid").getAsString());
-                final JsonObject prev = m.putIfAbsent(uid, r);
-                if (prev != null && !prev.get("digest_replay").equals(r.get("digest_replay"))) {
-                    throw new IllegalArgumentException("decision logs: game " + uid + " has two logs of different games");
+            try (java.io.BufferedReader rd = new java.io.BufferedReader(new java.io.InputStreamReader(
+                    new java.util.zip.GZIPInputStream(java.nio.file.Files.newInputStream(java.nio.file.Paths.get(f))),
+                    StandardCharsets.UTF_8))) {
+                while (true) {
+                    final String line;
+                    try {
+                        line = rd.readLine();
+                    } catch (java.io.EOFException e) {
+                        break; // a file cut short by a killed JVM: the lines before the cut
+                    }
+                    if (line == null) {
+                        break;
+                    }
+                    if (line.isEmpty()) {
+                        continue;
+                    }
+                    final JsonObject r = JsonParser.parseString(line).getAsJsonObject();
+                    final String uid = forge.bench.rl.TrajectoryRef.canonicalUid(r.get("game_uid").getAsString());
+                    if (wanted != null && !wanted.contains(uid)) {
+                        continue;
+                    }
+                    if (!accepted(r)) {
+                        continue;
+                    }
+                    final JsonObject prev = m.putIfAbsent(uid, r);
+                    if (prev != null && !prev.get("digest_replay").equals(r.get("digest_replay"))) {
+                        throw new IllegalArgumentException("decision logs: game " + uid + " has two logs of different games");
+                    }
                 }
             }
         }
         return m;
+    }
+
+    /** Review #124 S2-3: may this sidecar line's log be forced? */
+    static boolean accepted(final JsonObject r) {
+        if (!r.has(KEY) || !r.get("equal").getAsBoolean()) {
+            return false;
+        }
+        final boolean need = r.has("reference_required") && r.get("reference_required").getAsBoolean();
+        if (need && !(r.has("trajectory_equal") && r.get("trajectory_equal").getAsBoolean())) {
+            return false;
+        }
+        if (r.has("trajectory_equal") && !r.get("trajectory_equal").getAsBoolean()) {
+            return false;
+        }
+        return !r.has("state_sha_mismatch") || r.get("state_sha_mismatch").getAsInt() == 0;
     }
 
     /** Shared by the replay threads of one JVM; every line is gzip sync-flushed (a killed JVM's file stays readable). */
@@ -298,8 +360,13 @@ final class DecisionLog {
             o.add("digest_tape", t.get("digest"));
             o.add("digest_replay", row.get("digest_replay"));
             o.addProperty("equal", equal);
-            if (row.has("trajectory_equal")) {
-                o.add("trajectory_equal", row.get("trajectory_equal"));
+            // review #124 S2-3: an HonestForcedWin tape's re-run is host-dependent; its log counts only with the
+            // trajectory check against step 0 (and step 2's state_sha where checked)
+            o.addProperty("reference_required", RlActorBench.honestForcedWinTape(t));
+            for (String k : new String[] {"trajectory_equal", "state_sha_checked", "state_sha_mismatch"}) {
+                if (row.has(k)) {
+                    o.add(k, row.get(k));
+                }
             }
             o.add(KEY, dl.tapeJson());
             w.write(forge.bench.rl.RlWire.canonicalString(o));

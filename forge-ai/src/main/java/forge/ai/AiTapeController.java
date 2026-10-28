@@ -995,6 +995,12 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
             for (JsonElement x : o.getAsJsonArray("i")) {
                 out.add(offered.get(x.getAsInt()));
             }
+            if (sa != null) {
+                // review #124 S1: live, PlayerControllerAi answers with sa.getChosenList() (CharmAi set it while it
+                // deliberated, or doTrigger here); the forced answer sets it too, so the charm's chosen modes are on the
+                // ability as live (the observation's stack MODE facts read them; charm triggers too, via forcedPrepare)
+                sa.setChosenList(new ArrayList<>(out));
+            }
             return out;
         });
     }
@@ -1263,17 +1269,22 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
             final List<SpellAbility> rest = new ArrayList<>(activePlayerSAs);
             for (JsonObject n = tape.peekChild(); n != null && "cfg".equals(AiTape.str(n, "k")) && "s".equals(AiTape.str(n, "m"));
                  n = tape.peekChild()) {
-                final int h = n.getAsJsonObject("a").get("h").getAsInt();
-                SpellAbility direct = null;
+                final JsonObject cfg = n.getAsJsonObject("a");
+                final int h = cfg.get("h").getAsInt();
+                // review #124 S2-1: the record's own trigger: by its ability id when the record has it (format 2), and
+                // never one of several look-alikes of that host
+                final List<SpellAbility> like = new ArrayList<>();
                 for (SpellAbility sa : rest) {
-                    if (sa != null && sa.isTrigger() && !sa.isCopied() && sa.getHostCard() != null && sa.getHostCard().getId() == h) {
-                        direct = sa;
-                        break;
+                    if (sa != null && sa.isTrigger() && !sa.isCopied() && sa.getHostCard() != null && sa.getHostCard().getId() == h
+                            && (!cfg.has("id") || sa.getId() == cfg.get("id").getAsInt())) {
+                        like.add(sa);
                     }
                 }
-                if (direct == null) {
-                    throw tape.diverge("orderAndPlaySimultaneousSa: the record played card " + h + "'s trigger first; none is offered");
+                if (like.size() != 1) {
+                    throw tape.diverge("orderAndPlaySimultaneousSa: the record played card " + h + "'s trigger"
+                            + (cfg.has("id") ? " " + cfg.get("id").getAsInt() : "") + " first; " + like.size() + " match");
                 }
+                final SpellAbility direct = like.get(0);
                 rest.remove(direct);
                 final SpellAbility d = direct;
                 CubeComboAi.probeIds(getPlayer(), () -> {

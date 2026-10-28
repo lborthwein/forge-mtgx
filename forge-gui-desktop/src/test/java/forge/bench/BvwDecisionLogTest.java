@@ -268,7 +268,13 @@ public class BvwDecisionLogTest {
     @Test
     public void aReplayThatReRunsCanLogItsSeatsForLaterForcedReplays() throws Exception {
         final Path logs = Files.createTempDirectory(out, "sidecar-");
-        final RlActorBench.Cfg c = replayCfg(offTapes, "record", "record");
+        // review #124 S2-3: a record replay of HonestForcedWin tapes (the counted games 0 and 3) needs the step-0
+        // trajectory reference: refused without one (exit 2), before any game
+        final RlActorBench.Cfg refused = replayCfg(offTapes, "record", "record-refused");
+        refused.decisionLogOut = logs.toString();
+        Assert.assertEquals(RlActorBench.replay(refused, index, "test"), 2);
+        // the cube combo and Default games need none
+        final RlActorBench.Cfg c = linesCfg(offTapes, new int[] {1, 2}, "record", "record");
         c.decisionLogOut = logs.toString();
         Assert.assertEquals(RlActorBench.replay(c, index, "test"), 0);
         final List<String> files = new ArrayList<>();
@@ -277,12 +283,27 @@ public class BvwDecisionLogTest {
         }
         Assert.assertEquals(files.size(), 1);
         final List<JsonObject> side = RlTape.read(Paths.get(files.get(0)));
-        Assert.assertEquals(side.size(), games.size());
+        Assert.assertEquals(side.size(), 2);
         for (JsonObject s : side) {
             Assert.assertTrue(s.get("equal").getAsBoolean());
+            Assert.assertFalse(s.get("reference_required").getAsBoolean(), "not an HonestForcedWin tape");
+            Assert.assertTrue(DecisionLog.accepted(s));
             Assert.assertEquals(s.get("digest_replay"), s.get("digest_tape"));
         }
-        final RlActorBench.Cfg f = replayCfg(offTapes, null, "from-sidecar");
+        // a log a record replay of an HonestForcedWin tape wrote is accepted only with its trajectory check passed
+        final JsonObject hfw = side.get(0).deepCopy();
+        hfw.addProperty("reference_required", true);
+        Assert.assertFalse(DecisionLog.accepted(hfw), "no trajectory check");
+        hfw.addProperty("trajectory_equal", false);
+        Assert.assertFalse(DecisionLog.accepted(hfw));
+        hfw.addProperty("trajectory_equal", true);
+        Assert.assertTrue(DecisionLog.accepted(hfw));
+        hfw.addProperty("state_sha_mismatch", 1);
+        Assert.assertFalse(DecisionLog.accepted(hfw), "a later step's state_sha differs");
+        // review #124 S2-7: only the wanted games' logs are kept
+        Assert.assertEquals(DecisionLog.loadSidecars(files, java.util.Set.of(
+                forge.bench.rl.TrajectoryRef.canonicalUid(side.get(0).get("game_uid").getAsString()))).size(), 1);
+        final RlActorBench.Cfg f = linesCfg(offTapes, new int[] {1, 2}, null, "from-sidecar");
         f.decisionLogs = files;
         Assert.assertEquals(RlActorBench.replay(f, index, "test"), 0);
         for (JsonObject r : rows(f)) {
@@ -291,6 +312,42 @@ public class BvwDecisionLogTest {
             Assert.assertTrue(r.getAsJsonObject(DecisionLog.KEY).get("exact").getAsBoolean(), r.toString());
         }
         DecisionLog.SIDECAR = null;
+    }
+
+    /** A replay config of lines {@code lines} of the tape file in {@code tapes}. */
+    static RlActorBench.Cfg linesCfg(final Path tapes, final int[] lines, final String decisionLog, final String name)
+            throws Exception {
+        final RlActorBench.Cfg c = replayCfg(tapes, decisionLog, name);
+        c.replayDir = null;
+        c.replayTapes.add(tapes.resolve("tapes-00000.jsonl.gz").toString());
+        for (int l : lines) {
+            c.replayLines.add(new int[] {0, l});
+        }
+        return c;
+    }
+
+    @Test
+    public void aForcedOnlyReplayVoidsAGameWithoutALogAndNeverReRunsIt() throws Exception {
+        final RlActorBench.Cfg c = replayCfg(offTapes, "forced", "forced-only-off");
+        Assert.assertEquals(RlActorBench.replay(c, index, "test"), 4);
+        for (JsonObject r : rows(c)) {
+            Assert.assertFalse(r.get("equal").getAsBoolean());
+            Assert.assertEquals(r.get("void").getAsString(), DecisionLog.MISSING, r.toString());
+            Assert.assertFalse(r.has("digest_replay"), "no game was played");
+        }
+        final RlActorBench.Cfg on = replayCfg(onTapes, "forced", "forced-only-on");
+        Assert.assertEquals(RlActorBench.replay(on, index, "test"), 0);
+        // coverage by archetype (each seat's deck family)
+        final JsonObject cov = RlActorBench.coverage(on, on.replayLines.isEmpty() ? java.util.List.of() : onLines());
+        Assert.assertEquals(cov.get("logged").getAsInt(), games.size());
+        // review #124 S3-4: a record of another format is refused, never read as this one
+        final JsonObject old = on.replayLines.isEmpty() ? null : onLines().get(0).getAsJsonObject(DecisionLog.KEY).deepCopy();
+        old.addProperty("format", 1);
+        Assert.expectThrows(IllegalArgumentException.class, () -> DecisionLog.forced(old));
+    }
+
+    static List<JsonObject> onLines() throws Exception {
+        return RlTape.read(onTapes.resolve("tapes-00000.jsonl.gz"));
     }
 
     @Test

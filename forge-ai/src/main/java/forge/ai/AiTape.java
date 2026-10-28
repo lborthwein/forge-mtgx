@@ -57,7 +57,12 @@ public final class AiTape {
     public enum Mode { RECORD, FORCED }
 
     public static final String PREFIX = "[ai-tape] ";
-    public static final int FORMAT = 1;
+    /**
+     * 2 (review #124 S3-4): the research bench's records (seat-tagged, cross-seat deliberation excluded, trigger orders
+     * and checkpoints with ability ids, copies with cp/ph/ex, scoped trait builds with sci). A format-1 record is refused
+     * by the bench's decision log, never read as this one.
+     */
+    public static final int FORMAT = 2;
     /**
      * Lane bvw-decision-log-1027: the first id of a decode's detached scope. A bench game's own ids start at 1e9 (its
      * IdScope) and a cube combo seat's probe ids at 1.1e9, so "built by this decode" is this range, not "id >= 1e9".
@@ -86,6 +91,7 @@ public final class AiTape {
     private static final DecisionTap.Tap DISPATCH = new DecisionTap.Tap() {
         @Override
         public boolean covers(final Player payer) {
+            refuseDiverged(payer);
             for (AiTape t : installed) {
                 if (t.covers(payer)) {
                     return true;
@@ -97,6 +103,7 @@ public final class AiTape {
         @Override
         public PaymentDecision cost(final Player payer, final CostPart part, final int index, final SpellAbility ability,
                 final Supplier<PaymentDecision> decide) {
+            refuseDiverged(payer);
             for (AiTape t : installed) {
                 if (t.covers(payer)) {
                     return t.cost(payer, part, index, ability, decide);
@@ -106,6 +113,22 @@ public final class AiTape {
         }
     };
 
+    /**
+     * Review #124 S3-3: a hook of a seat whose FORCED (not resumed) tape diverged throws that divergence again on the game
+     * thread, as its controller does ({@link #refuseAfterDivergence}): a payment, mana source, target or trigger order is
+     * never decided live in the record's place.
+     */
+    static void refuseDiverged(final Player p) {
+        if (p == null) {
+            return;
+        }
+        for (AiTape t : installed) {
+            if (t.seat == p && t.game == p.getGame()) {
+                t.refuseAfterDivergence();
+            }
+        }
+    }
+
     /** The first installed tape, or null (every game without one: nothing anywhere changes). */
     public static AiTape current() {
         return installed.isEmpty() ? null : installed.get(0);
@@ -113,6 +136,7 @@ public final class AiTape {
 
     /** The tape when {@code p}'s decisions, on this thread, are taped (record or forced) and a hook may act; else null. */
     public static AiTape covering(final Player p) {
+        refuseDiverged(p);
         for (AiTape t : installed) {
             if (t.covers(p) && t.hookHere()) {
                 return t;
@@ -940,7 +964,9 @@ public final class AiTape {
             if (cursors.isEmpty() && decodeDepth == 0) {
                 return null; // the engine's, between decisions, as in the record
             }
-            final int[] late = cursors.isEmpty() ? null : goneBuilds.remove(lazyKey(card, kind, state));
+            // review #124 S3-1: only on the game's own card (a copy's state shared with it), never on another copy
+            final int[] late = cursors.isEmpty() || game.findById(card) != st.getCard() ? null
+                    : goneBuilds.remove(lazyKey(card, kind, state));
             if (late != null) {
                 // bvw-decision-log-1027: the record built this trait on a copy that shares this state (gone above); the
                 // live game's card had it from then. Built now on the ids that build took, never on new ones.
@@ -1213,7 +1239,14 @@ public final class AiTape {
     void config(final SpellAbility sa, final String where) {
         if (recordsNow("cfg", where)) {
             final Object r = begin("cfg", where, false);
-            end(r, safe(() -> AiTapeCodec.config(game, seat, sa)));
+            end(r, safe(() -> {
+                final JsonElement c = AiTapeCodec.config(game, seat, sa);
+                if (c.isJsonObject()) {
+                    // review #124 S2-1: the ability's id, so a forced replay finds the record's own trigger, not a look-alike
+                    c.getAsJsonObject().addProperty("id", sa.getId());
+                }
+                return c;
+            }));
             return;
         }
         final JsonObject e = takeChoice("cfg", where);
