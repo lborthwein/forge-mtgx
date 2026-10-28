@@ -1025,10 +1025,33 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         // increase it does not see). An X the seat cannot pay was refused and the priority went to Forge AI, even with
         // a smaller X payable. Step down to the largest payable X (not below the stated minimum) first; only when no X
         // is payable does the re-check after targeting refuse.
+        //
+        // Review #132 S2-1: targets left on the chain by an earlier test (Forge AI's canPlayAI, a previous menu) are
+        // priced by canPayCost (Ward, per-target cost increases), so the step-down must not see them: Banefire with a
+        // stale Ward {2} target stepped down to X = 0. ensureTargets re-targets the chain after this anyway.
+        clearChainTargets(chosen);
         final int asked = clamped;
-        while (clamped > floor && !canPayForSeat(chosen)) {
-            clamped--;
-            chosen.setXManaCostPaid(clamped);
+        if (!canPayForSeat(chosen)) {
+            // Review #132 S2-2: never land on an X that does nothing. An X at which the ability chooses nothing
+            // (AiEmptyChoice: Valki with no exiled creature of that mana value) is skipped, and an X > 0 that can only
+            // step down to 0 (Walking Ballista as a 0/0, a zero-X tutor) is refused as before; a stated minimum keeps
+            // the floor above 0, so it is never the case there.
+            int down = asked - 1;
+            while (down >= floor) {
+                chosen.setXManaCostPaid(down);
+                if (!emptyAtX(chosen, down) && canPayForSeat(chosen)) {
+                    break;
+                }
+                down--;
+            }
+            if (down < floor || (down == 0 && asked > 0)) {
+                chosen.setXManaCostPaid(asked);
+                counters.instrument("x.noUsefulPayableX");
+                refuse("chooseSpellAbilityToPlay", "announced x=" + asked + " is unpayable and no payable X"
+                        + (down == 0 && asked > 0 ? " above 0" : "") + " does something: " + chosen);
+                return false;
+            }
+            clamped = down;
         }
         if (clamped != asked) {
             counters.instrument("x.steppedDown");
@@ -1080,6 +1103,24 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             return false;
         }
         return true;
+    }
+
+    /** Clears the targets of every ability on {@code root}'s chain (stale targets are priced by canPayCost). */
+    private static void clearChainTargets(final SpellAbility root) {
+        for (SpellAbility cur = root; cur != null; cur = cur.getSubAbility()) {
+            if (cur.usesTargeting()) {
+                cur.clearTargets();
+            }
+        }
+    }
+
+    /** {@link AiEmptyChoice#emptyAt}; a check that throws is not empty. */
+    private boolean emptyAtX(final SpellAbility sa, final int x) {
+        try {
+            return AiEmptyChoice.emptyAt(sa, getPlayer(), x);
+        } catch (RuntimeException unreadable) {
+            return false;
+        }
     }
 
     /**

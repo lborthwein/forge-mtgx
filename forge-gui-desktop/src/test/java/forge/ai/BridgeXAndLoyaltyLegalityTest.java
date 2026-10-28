@@ -59,6 +59,8 @@ public class BridgeXAndLoyaltyLegalityTest extends AITest {
         final List<String> refusals = new ArrayList<>();
         Predicate<SpellAbility> pick = sa -> false;
         Integer x;
+        /** When set, this seat's targets asks are answered with this player (else Forge decides). */
+        Player targetPlayer;
         int priorityAsks;
         boolean offered;
     }
@@ -100,6 +102,16 @@ public class BridgeXAndLoyaltyLegalityTest extends AITest {
             @Override
             public JsonObject answer(final Game g, final Player p, final String method, final String kind,
                     final JsonObject body, final Object menuObjects) {
+                if (p == s.me && "targets".equals(kind) && s.targetPlayer != null) {
+                    final JsonObject ref = new JsonObject();
+                    ref.addProperty("kind", "player");
+                    ref.addProperty("id", s.targetPlayer.getId());
+                    final com.google.gson.JsonArray choices = new com.google.gson.JsonArray();
+                    choices.add(ref);
+                    final JsonObject o = new JsonObject();
+                    o.add("choices", choices);
+                    return o;
+                }
                 if (p != s.me || !"priority".equals(kind) || !(menuObjects instanceof List)) {
                     return null; // delegate: Forge decides (targets, the opponent, ...)
                 }
@@ -197,10 +209,11 @@ public class BridgeXAndLoyaltyLegalityTest extends AITest {
 
     /**
      * Finale of Devastation ({X}{G}{G}) with Forest, Forest and Mishra's Workshop (three colourless, artifact spells only):
-     * the estimate counts five mana (X ceiling 3), only X = 0 is payable. The answer X = 3 is stepped down to 0 and played.
+     * the estimate counts five mana (X ceiling 3), only X = 0 is payable. Review #132 S2-2: an asked X > 0 that can only
+     * step down to 0 is refused as before (the priority goes to Forge AI), not played as a zero-X tutor.
      */
     @Test
-    public void finaleColourRestrictedSourceStepsDownToZero() {
+    public void finaleColourRestrictedSourceOnlyZeroPayableIsRefused() {
         final Seat s = seat();
         addCard("Forest", s.me);
         addCard("Forest", s.me);
@@ -209,10 +222,115 @@ public class BridgeXAndLoyaltyLegalityTest extends AITest {
         final Card finale = addCardToZone("Finale of Devastation", s.me, ZoneType.Hand);
         s.pick = spellOf(finale);
         s.x = 3;
+        assertRefusedAboveZero(s, finale);
+    }
+
+    /**
+     * The answer was refused with "no payable X above 0" (the priority then goes to Forge AI, which decides on its own,
+     * possibly the same card at an X of its choosing; that is Forge's answer, not the seat's).
+     */
+    private static void assertRefusedAboveZero(final Seat s, final Card host) {
+        ready(s);
+        s.bridge.chooseSpellAbilityToPlay();
+        AssertJUnit.assertTrue("the pick was not in the priority menu", s.offered);
+        AssertJUnit.assertEquals(String.valueOf(s.refusals), 1, s.refusals.size());
+        AssertJUnit.assertTrue(s.refusals.get(0), s.refusals.get(0).contains("no payable X above 0"));
+    }
+
+    /**
+     * Walking Ballista asked X = 1 on Talisman of Curiosity alone (one mana; the estimate says three, so X = 1 is within
+     * the ceiling, and X = 1 needs two): only X = 0 (a 0/0) is payable, refused as before.
+     */
+    @Test
+    public void ballistaOnlyZeroPayableIsRefused() {
+        final Seat s = seat();
+        addCard("Talisman of Curiosity", s.me);
+        final Card ballista = addCardToZone("Walking Ballista", s.me, ZoneType.Hand);
+        s.pick = spellOf(ballista);
+        s.x = 1;
+        assertRefusedAboveZero(s, ballista);
+    }
+
+    /** One of the opponent's creature cards exiled with Valki (as its enter trigger does). */
+    private Card exileWithValki(final Seat s, final Card valki, final String name) {
+        final Card c = addCardToZone(name, s.opp, ZoneType.Hand);
+        final Card moved = s.game.getAction().exile(c, null, null);
+        moved.setExiledWith(valki);
+        moved.setExiledBy(s.me);
+        valki.addExiledCard(moved);
+        return moved;
+    }
+
+    private static Predicate<SpellAbility> valkiCopy(final Card valki) {
+        return sa -> sa.getHostCard() == valki && sa.getApi() == ApiType.ChooseCard;
+    }
+
+    /**
+     * Valki, God of Lies with mana value 1 and 3 creatures exiled with it (none of mana value 2), Forest and Talisman of
+     * Curiosity (two mana; the estimate says four): X = 3 is asked, unpayable; X = 2 is payable but chooses nothing and
+     * is skipped; X = 1 is announced.
+     */
+    @Test
+    public void valkiStepDownSkipsAnEmptyX() {
+        final Seat s = seat();
+        addCard("Forest", s.me);
+        addCard("Talisman of Curiosity", s.me);
+        final Card valki = addCard("Valki, God of Lies", s.me);
+        valki.setSickness(false);
+        exileWithValki(s, valki, "Llanowar Elves");
+        exileWithValki(s, valki, "Wood Elves");
+        s.pick = valkiCopy(valki);
+        s.x = 3;
         final SpellAbility sa = choose(s);
-        AssertJUnit.assertEquals(Integer.valueOf(0), sa.getXManaCostPaid());
+        AssertJUnit.assertEquals(Integer.valueOf(1), sa.getXManaCostPaid());
+    }
+
+    /** Valki with only a mana value 3 creature exiled, on the same two mana: no payable X chooses anything: refused. */
+    @Test
+    public void valkiWithNoUsefulPayableXIsRefused() {
+        final Seat s = seat();
+        addCard("Forest", s.me);
+        addCard("Talisman of Curiosity", s.me);
+        final Card valki = addCard("Valki, God of Lies", s.me);
+        valki.setSickness(false);
+        exileWithValki(s, valki, "Wood Elves");
+        s.pick = valkiCopy(valki);
+        s.x = 3;
+        ready(s);
+        final List<SpellAbility> got = s.bridge.chooseSpellAbilityToPlay();
+        AssertJUnit.assertTrue(s.offered);
+        AssertJUnit.assertEquals(String.valueOf(s.refusals), 1, s.refusals.size());
+        AssertJUnit.assertTrue(s.refusals.get(0), s.refusals.get(0).contains("does something"));
+        AssertJUnit.assertFalse(got != null && got.stream().anyMatch(valkiCopy(valki)));
+    }
+
+    /**
+     * Review #132 S2-1: Banefire ({X}{R}) on three Mountains with a stale target on its chain (the opponent's Kopala,
+     * Warden of Waves: spells that target a Merfolk it controls cost {2} more), left there by an earlier test. canPayCost
+     * prices the stale target's cost increase, so X = 2 ({2}{R}, three mana) read as five mana and stepped down to X = 0.
+     * The chain's targets are cleared first: X = 2 is announced as asked, and the seat then targets the opponent.
+     */
+    @Test
+    public void staleTargetCostIncreaseDoesNotStepDown() {
+        final Seat s = seat();
+        for (int i = 0; i < 3; i++) {
+            addCard("Mountain", s.me);
+        }
+        final Card kopala = addCard("Kopala, Warden of Waves", s.opp);
+        final Card banefire = addCardToZone("Banefire", s.me, ZoneType.Hand);
+        for (SpellAbility sa : banefire.getSpellAbilities()) {
+            sa.setActivatingPlayer(s.me);
+            sa.getTargets().add(kopala);
+        }
+        s.pick = spellOf(banefire);
+        s.x = 2;
+        s.targetPlayer = s.opp;
+        final SpellAbility sa = choose(s);
+        AssertJUnit.assertEquals(Integer.valueOf(2), sa.getXManaCostPaid());
+        AssertJUnit.assertTrue(sa.getTargets().contains(s.opp));
+        AssertJUnit.assertFalse(sa.getTargets().contains(kopala));
         playAndResolve(s, sa);
-        AssertJUnit.assertTrue("Finale resolved", s.game.getCardState(finale).isInZone(ZoneType.Graveyard));
+        AssertJUnit.assertEquals(18, s.opp.getLife());
     }
 
     /**
@@ -360,6 +478,62 @@ public class BridgeXAndLoyaltyLegalityTest extends AITest {
         @SuppressWarnings("unchecked")
         final List<SpellAbility> seat = (List<SpellAbility>) legal.invoke(s.bridge);
         AssertJUnit.assertTrue(seat.stream().anyMatch(minusOne(emp)));
+    }
+
+    // ------------------------------------------------------------------------------------------------ the flag (S3-5)
+
+    @Test
+    public void keepPwUltimatesRestoresAfterAnExceptionAndWhenNested() {
+        AssertJUnit.assertFalse(ComputerUtilCost.isKeepPwUltimates());
+        try {
+            ComputerUtilCost.withKeepPwUltimates(() -> {
+                AssertJUnit.assertTrue(ComputerUtilCost.isKeepPwUltimates());
+                throw new IllegalStateException("boom");
+            });
+            AssertJUnit.fail("the exception was swallowed");
+        } catch (IllegalStateException expected) {
+            // restored below
+        }
+        AssertJUnit.assertFalse("restored after an exception", ComputerUtilCost.isKeepPwUltimates());
+        // nested: the inner call leaves the outer setting on, and the outer one restores off
+        ComputerUtilCost.withKeepPwUltimates(() -> {
+            ComputerUtilCost.withKeepPwUltimates(() -> Boolean.TRUE);
+            AssertJUnit.assertTrue("the inner call must not turn the outer one off", ComputerUtilCost.isKeepPwUltimates());
+            return null;
+        });
+        AssertJUnit.assertFalse(ComputerUtilCost.isKeepPwUltimates());
+        // a caller that set it itself (the look-ahead's first play-out priority) keeps it
+        ComputerUtilCost.setKeepPwUltimates(true);
+        try {
+            ComputerUtilCost.withKeepPwUltimates(() -> null);
+            AssertJUnit.assertTrue(ComputerUtilCost.isKeepPwUltimates());
+        } finally {
+            ComputerUtilCost.setKeepPwUltimates(false);
+        }
+    }
+
+    /** After a bridge menu build, a Forge AI check on the same thread still has the coin (no opposing creatures: refused). */
+    @Test
+    public void forgeAiStillGetsTheCoinAfterABridgeMenuBuild() throws Exception {
+        final Seat s = seat();
+        final Card emp = emperorAtLoyaltyOne(s);
+        ready(s);
+        final Method legal = PlayerControllerBridge.class.getDeclaredMethod("legalSpellAbilities");
+        legal.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        final List<SpellAbility> menu = (List<SpellAbility>) legal.invoke(s.bridge);
+        AssertJUnit.assertTrue(menu.stream().anyMatch(minusOne(emp)));
+        AssertJUnit.assertFalse(ComputerUtilCost.isKeepPwUltimates());
+        SpellAbility m1 = null;
+        for (SpellAbility sa : emp.getSpellAbilities()) {
+            if (minusOne(emp).test(sa)) {
+                m1 = sa;
+            }
+        }
+        AssertJUnit.assertNotNull(m1);
+        m1.setActivatingPlayer(s.me);
+        AssertJUnit.assertFalse("Forge AI's own canPayCost keeps its planeswalker preference",
+                ComputerUtilCost.canPayCost(m1, s.me, false));
     }
 
     private static BenchSession sessionOf(final Seat s) throws Exception {
