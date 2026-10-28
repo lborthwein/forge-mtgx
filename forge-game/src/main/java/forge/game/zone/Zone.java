@@ -288,16 +288,26 @@ public class Zone implements java.io.Serializable, Iterable<Card> {
         return zoneType.toString();
     }
 
+    /** mtgx (lane lki-fix-port-1027, review S3-3): true only on a last-known-information zone made by {@link #getLKICopy}. */
+    private boolean lastKnown = false;
+
     /**
-     * mtgx (lane lki-leak-1027): empty the card list of a last-known-information zone ({@link #getLKICopy}) once its
-     * snapshot is superseded, without moving the cards or firing events; its LKI cards still name it as their zone.
+     * mtgx (lanes lki-leak-1027, lki-fix-port-1027): empty the card list of a last-known-information zone
+     * ({@link #getLKICopy}) once its snapshot is superseded, without moving the cards or firing events; its LKI cards
+     * still name it as their zone. Any other zone (a player's zone, the game's stack zone) is never touched: only a plain
+     * {@code Zone} made by {@link #getLKICopy}, with no player, is released. Returns whether this zone was released.
      */
-    public final void releaseLastKnownCards() {
+    public final boolean releaseLastKnownCards() {
+        if (!lastKnown || getClass() != Zone.class || getPlayer() != null) {
+            return false;
+        }
         cardList.clear();
+        return true;
     }
 
     public Zone getLKICopy(Map<Integer, Card> cachedMap) {
         Zone result = new Zone(zoneType, game);
+        result.lastKnown = true; // mtgx (lane lki-fix-port-1027): the only zones releaseLastKnownCards() empties
 
         result.setCards(CardCopyService.getLKICopyList(getCards(), cachedMap));
 
