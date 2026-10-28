@@ -170,8 +170,6 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     private final List<JsonObject> idx = new ArrayList<>();
     /** Priority decisions seen (both seats, from the start), those in the window, and those a solver check ran at. */
     private int decisions = 0, windowDecisions = 0, solved = 0;
-    /** bvw-step2-fork-1027 (S2T): the rows OPR ran at (at most one per seat). */
-    private int oprRows = 0;
     private double solveMs = 0, frameMs = 0;
     private final Map<String, Integer> gates = new TreeMap<>();
     private final Map<String, Integer> labels = new TreeMap<>();
@@ -336,7 +334,6 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             searchWhy.merge(sr.why, 1, Integer::sum);
             if (sr.s2t != null && sr.s2t.oprRan) {
                 oprDone[seat] = true;
-                oprRows++;
             }
         }
         final byte[] payload = (byte[]) got[0];

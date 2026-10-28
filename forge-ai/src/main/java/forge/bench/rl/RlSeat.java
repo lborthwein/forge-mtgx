@@ -379,11 +379,30 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
     @Override
     public JsonObject answer(final Game g, final Player player, final String method, final String kind,
             final JsonObject body, final Object objs) {
-        if (loopGuard == null) {
-            return answer0(g, player, method, kind, body, objs);
+        final JsonObject a = loopGuard == null ? answer0(g, player, method, kind, body, objs)
+                : guarded(g, player, method, kind, body, objs);
+        final Map<String, Integer> fl = forgeLog;
+        if (fl != null) {
+            // review #123 S3-1 (true-world re-plays only): every ask by method, and those Forge AI answered by family
+            synchronized (fl) {
+                if (method != null && askLog != null) {
+                    askLog.merge(method, 1, Integer::sum);
+                }
+                if (a == null || isDelegate(a)) {
+                    fl.merge(RlSchema.familyName(RlSchema.familyOf(kind, method)), 1, Integer::sum);
+                }
+            }
         }
-        return guarded(g, player, method, kind, body, objs);
+        return a;
     }
+
+    /**
+     * Review #123 S3-1 (null = off, the default, and then nothing is recorded): the census of a true-world play-out
+     * seat: the asks Forge AI answered (no answer, or a delegate), by family; every ask by method ({@link #askLog}).
+     * Shared by the re-play's seats; guarded by {@code forgeLog}'s monitor. Never changes an answer.
+     */
+    public volatile Map<String, Integer> forgeLog = null;
+    public volatile Map<String, Integer> askLog = null;
 
     /** Times the loop guard answered a "Cancel Search?" confirm yes (0 without the guard). */
     public int loopGuardHits() {

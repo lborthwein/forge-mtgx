@@ -10,10 +10,12 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import forge.bench.PlayerControllerBridge;
 import forge.bench.rl.FakeSearchService;
 import forge.bench.rl.RlKnowledge;
+import forge.bench.rl.RlSearch;
 import forge.bench.rl.StepSearch;
 import forge.game.Game;
 import forge.game.card.Card;
@@ -232,5 +234,46 @@ public class BvwS2tTargetTest extends SimulationTest {
             }
         }
         Assert.assertTrue(moved >= 10, "the libraries were not shuffled: " + moved);
+    }
+
+    /**
+     * Review #123 S2-1: a true world keeps every library card some seat knows where it is (their scried top, a card at
+     * the bottom, ours) and shuffles only the others; the seat knowledge (a scry seen by the tracker) says which.
+     */
+    @Test(timeOut = 1800000)
+    public void aTrueWorldKeepsTheLibraryCardsASeatKnows() throws Exception {
+        initAndCreateGame();
+        final Game live = ForcedWinSolverTest.game("Default", "Default", position());
+        final Player liveMe = live.getPlayers().get(0);
+        final Player liveOpp = liveMe.getOpponents().get(0);
+        final List<Card> theirs = new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library));
+        final List<Card> ours = new ArrayList<>(liveMe.getCardsIn(ZoneType.Library));
+        // the seat knowledge: they looked at their top two (a scry), we know our third card
+        final RlKnowledge know = new RlKnowledge(live);
+        know.attach();
+        know.onLook(live, liveOpp, theirs.subList(0, 2), ZoneType.Library);
+        know.onLook(live, liveMe, ours.subList(2, 3), ZoneType.Library);
+        final RlSearch rs = new RlSearch(RlSearch.Config.parse(JsonParser.parseString(
+                "{\"server\":\"127.0.0.1:1\",\"worlds\":1}").getAsJsonObject()), 1L, 1L, null, know, "test", "t");
+        final java.util.function.Predicate<Card> known = rs.knownToAnySeat(live);
+        Assert.assertTrue(known.test(theirs.get(0)) && known.test(theirs.get(1)) && known.test(ours.get(2)));
+        Assert.assertFalse(known.test(theirs.get(2)) || known.test(ours.get(0)));
+        final LookaheadSearch ls = belief("uniform", null);
+        int moved = 0;
+        for (int i = 0; i < 6; i++) {
+            final Object[] c = copy(live, liveMe);
+            final Game g = (Game) c[0];
+            final Player me = (Player) c[1];
+            ls.trueShuffle(live, liveMe, g, me, new Random(91 + i), known);
+            final List<Card> t = new ArrayList<>(me.getOpponents().get(0).getCardsIn(ZoneType.Library));
+            final List<Card> o = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+            Assert.assertEquals(t.get(0).getId(), theirs.get(0).getId(), "their known top moved");
+            Assert.assertEquals(t.get(1).getId(), theirs.get(1).getId(), "their known second card moved");
+            Assert.assertEquals(o.get(2).getId(), ours.get(2).getId(), "our known card moved");
+            for (int j = 0; j < t.size(); j++) {
+                moved += t.get(j).getId() != theirs.get(j).getId() ? 1 : 0;
+            }
+        }
+        Assert.assertTrue(moved > 10, "their unknown library cards were not shuffled: " + moved);
     }
 }

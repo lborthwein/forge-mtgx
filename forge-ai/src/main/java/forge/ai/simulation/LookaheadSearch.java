@@ -1404,6 +1404,14 @@ public final class LookaheadSearch {
         default PlayoutSeat opponentSeat(Object copyCtx, Game g, Player opp, long seed) {
             return null;
         }
+
+        /**
+         * Review #123 S2-1 (decision thread, true-world re-plays only): which library cards of {@code live} some seat
+         * knows (its seat knowledge, e.g. after a scry), or null (Forge's visibility only).
+         */
+        default java.util.function.Predicate<Card> knownToAnySeat(Game live) {
+            return null;
+        }
     }
 
     private SearchHooks hooks = null;
@@ -2321,6 +2329,11 @@ public final class LookaheadSearch {
         public int worlds, failed, capped;
         /** Null = usable; else why not: no_candidate, aborted, failed (a world failed), leaf_fallback. */
         public String why;
+        /**
+         * Review #123 S3-1 (set by the hooks' owner; null otherwise): the asks Forge AI answered in these play-outs, by
+         * family, and the controller calls that never reached a policy seat, by method.
+         */
+        public com.google.gson.JsonObject forge;
     }
 
     /**
@@ -2362,6 +2375,7 @@ public final class LookaheadSearch {
         worldMode = mode;
         oprTurns = mode == WORLD_OPR ? capTurns : 0;
         oprSteps = mode == WORLD_OPR ? capSteps : 0;
+        trueKnown = mode == WORLD_BELIEF ? null : hooks.knownToAnySeat(live);
         try {
             final long fb = stats.leafFallbacks;
             final int aborted = playAll(live, me, java.util.Collections.singletonList(cs.get(cand)), null, mix(cfg.seed, salt),
@@ -2391,7 +2405,17 @@ public final class LookaheadSearch {
                 return out;
             }
             if (!ok[0]) {
+                // review #123 S3-6: which world failed and why
                 out.why = "failed";
+                for (int w = 0; w < k; w++) {
+                    final Rollout r = outs[0][w];
+                    if (r != null && !r.ok) {
+                        final String f = r.seatFailure != null ? r.seatFailure : r.failDetail;
+                        out.why = "failed: world " + w + " " + failureClass(r)
+                                + (f == null ? "" : " " + (f.length() > 120 ? f.substring(0, 120) : f));
+                        break;
+                    }
+                }
                 return out;
             }
             if (hookLeaf) {
@@ -2417,6 +2441,7 @@ public final class LookaheadSearch {
             worldMode = prevMode;
             oprTurns = 0;
             oprSteps = 0;
+            trueKnown = null;
         }
     }
 
@@ -2427,40 +2452,56 @@ public final class LookaheadSearch {
      * in the copy's order. The real hidden cards seed only this starting state.
      */
     void trueShuffle(Game live, Player liveMe, Game g, Player me, Random rng) {
+        trueShuffle(live, liveMe, g, me, rng, trueKnown);
+    }
+
+    /** As above with {@code knownBySeat} (null = Forge's visibility only): the library cards some seat knows. */
+    void trueShuffle(Game live, Player liveMe, Game g, Player me, Random rng, java.util.function.Predicate<Card> knownBySeat) {
         final List<PlayerView> views = new ArrayList<>();
         for (Player lp : live.getRegisteredPlayers()) {
             views.add(lp.getView());
         }
         for (Player q : g.getRegisteredPlayers()) {
-            final Player lq = (Player) live.getPlayer(q.getId());
             final List<Card> lib = new ArrayList<>(q.getCardsIn(ZoneType.Library));
-            int known = 0;
-            if (lq != null) {
-                for (Card lc : new ArrayList<>(lq.getCardsIn(ZoneType.Library))) {
-                    boolean seen = false;
+            // review #123 S2-1: every library card SOME seat knows (Forge shows it to a player, the seat-knowledge
+            // tracker knows it: scry, Brainstorm, a pile), and our own placed top, stays where it is; the others are
+            // shuffled among the other positions (so the forked seat knowledge still agrees with the order)
+            final boolean[] keep = new boolean[lib.size()];
+            final List<Card> rest = new ArrayList<>();
+            for (int i = 0; i < lib.size(); i++) {
+                final Card lc = live.findById(lib.get(i).getId());
+                boolean k = q == me && i < ownKnownTop;
+                if (!k && lc != null) {
                     for (PlayerView v : views) {
                         if (lc.getView().canBeShownTo(v)) {
-                            seen = true;
+                            k = true;
                             break;
                         }
                     }
-                    if (!seen) {
-                        break;
+                    if (!k && knownBySeat != null && knownBySeat.test(lc)) {
+                        k = true;
                     }
-                    known++;
+                }
+                keep[i] = k;
+                if (!k) {
+                    rest.add(lib.get(i));
                 }
             }
-            if (q == me) {
-                known = Math.max(known, ownKnownTop);
-            }
-            known = Math.min(known, lib.size());
-            final List<Card> rest = new ArrayList<>(lib.subList(known, lib.size()));
             Collections.shuffle(rest, rng);
-            final List<Card> nl = new ArrayList<>(lib.subList(0, known));
-            nl.addAll(rest);
+            final List<Card> nl = new ArrayList<>(lib.size());
+            int r = 0;
+            for (int i = 0; i < lib.size(); i++) {
+                nl.add(keep[i] ? lib.get(i) : rest.get(r++));
+            }
             q.getZone(ZoneType.Library).setCards(nl);
         }
     }
+
+    /**
+     * Review #123 S2-1: during a true-world re-play, whether some seat knows a library card of the live position (the
+     * hooks' seat knowledge, {@link SearchHooks#knownToAnySeat}); null = Forge's visibility only.
+     */
+    private volatile java.util.function.Predicate<Card> trueKnown = null;
 
     /** S-b: the next searched decision's world-0 seed (its recordings play in the same world 0 as its valuation). */
     public long nextWorld0Seed() {
@@ -5600,6 +5641,10 @@ public final class LookaheadSearch {
                             // search-bones-1015: the top of our library we placed ourselves (pile memory) stays in place
                             restoreOwnTop(liveMe, p.me, ownKnownTop);
                         }
+                        if (beliefWorldDecks()) {
+                            // review #123 S1-1: the opponent's registered decklist is a hidden card list too
+                            worldDecks(p.g, p.me);
+                        }
                     }
                     MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(worldSeed, 3)));
                 }
@@ -7705,10 +7750,64 @@ public final class LookaheadSearch {
      * ({@link #opponentRedrawPrior}, this game's shown cards only) with belief "codraft", else {@link #opponentRedraw}.
      */
     public ForcedWinSolver.Redraw solverRedraw() {
-        if (cfg.codraft()) {
-            return opponentRedrawPrior(cfg.beliefPriorTable, cfg.beliefPriorGain);
+        final ForcedWinSolver.Redraw base = cfg.codraft() ? opponentRedrawPrior(cfg.beliefPriorTable, cfg.beliefPriorGain)
+                : opponentRedraw();
+        if (base == null || !beliefWorldDecks()) {
+            return base;
         }
-        return opponentRedraw();
+        // review #123 S1-1 (S2T): the solver's belief worlds carry the world's own decklist for the opponent too
+        return (live, liveMe, g, me, rng) -> {
+            base.apply(live, liveMe, g, me, rng);
+            worldDecks(g, me);
+        };
+    }
+
+    /**
+     * Review #123 S1-1 (S2T only: {@link Config#opponentPolicy}; step 1's worlds are unchanged): a belief world gives each
+     * opponent the world's own decklist ({@link #worldDecks}). Off in the T re-play and OPR, whose real decklist is
+     * that seat's own knowledge.
+     */
+    boolean beliefWorldDecks() {
+        return cfg.opponentPolicy && beliefCube != null && !cfg.beliefShadow && !TEST_REAL_DECKS;
+    }
+
+    /** Tests only (the honesty test's deck mutant; false otherwise): belief worlds keep the real decklists. */
+    public static volatile boolean TEST_REAL_DECKS = false;
+
+    private static volatile java.lang.reflect.Field rpDeck;
+
+    /**
+     * Review #123 S1-1: in belief world {@code g}, each opponent's registered deck (the decklist its own frames, NAME
+     * candidates and Forge-decided asks read) becomes the world's own: one main section of every non-token card it owns
+     * in this world (its visible cards and its redrawn hand and library), no other section, no key cards or hints. The
+     * real decklist names cards we have not seen; it never reaches a belief-world decision or frame.
+     */
+    static void worldDecks(Game g, Player me) {
+        for (Player opp : me.getOpponents()) {
+            final forge.game.player.RegisteredPlayer rp = opp.getRegisteredPlayer();
+            if (rp == null) {
+                continue;
+            }
+            final forge.deck.Deck d = new forge.deck.Deck("belief-world");
+            final forge.deck.CardPool main = d.getOrCreate(forge.deck.DeckSection.Main);
+            for (Card c : g.getCardsInGame()) {
+                if (c.getOwner() == opp && !c.isToken() && c.getPaperCard() instanceof forge.item.PaperCard) {
+                    main.add((forge.item.PaperCard) c.getPaperCard());
+                }
+            }
+            try {
+                java.lang.reflect.Field f = rpDeck;
+                if (f == null) {
+                    f = forge.game.player.RegisteredPlayer.class.getDeclaredField("currentDeck");
+                    f.setAccessible(true);
+                    rpDeck = f;
+                }
+                f.set(rp, d);
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                // refuse the world rather than let the real decklist through
+                throw new IllegalStateException("S2T: cannot give the belief world its own decklist: " + e, e);
+            }
+        }
     }
 
     /**
@@ -7824,8 +7923,11 @@ public final class LookaheadSearch {
                 }
             }
             for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
-                if (si.getActivatingPlayer() == liveOpp && si.getSourceCard() != null && si.getSourceCard().getPaperCard() != null) {
-                    shown.add(si.getSourceCard().getPaperCard().getName());
+                // review #123 S3-4: a face-down spell (a morph cast face down) or one we cannot see shows nothing
+                final Card sc = si.getSourceCard();
+                if (si.getActivatingPlayer() == liveOpp && sc != null && sc.getPaperCard() != null && !sc.isFaceDown()
+                        && sc.getView().canBeShownTo(myView)) {
+                    shown.add(sc.getPaperCard().getName());
                 }
             }
             // deck-guess-1021: the cards of their earlier games link their co-draft partners too

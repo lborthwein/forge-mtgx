@@ -386,6 +386,11 @@ public final class StepSearch {
         public double oprV = Double.NaN;
         public int oprScored, oprCapped, oprFailed;
         public boolean oprRan;
+        /**
+         * Review #123 S3-1: the true-world census of the T re-play and of OPR ({asks: Forge-answered asks by family,
+         * calls: controller calls that never reached a policy seat by method, refused: refused policy answers}).
+         */
+        public JsonObject tForge, oprForge;
 
         /** The row's {@code s2t} object for {@code variant}. */
         public JsonObject toJson(final String variant) {
@@ -412,6 +417,12 @@ public final class StepSearch {
             }
             if (tWhy != null) {
                 o.addProperty("t_why", tWhy);
+            }
+            if (tForge != null) {
+                o.add("t_forge", tForge);
+            }
+            if (oprForge != null) {
+                o.add("opr_forge", oprForge);
             }
             if (worlds != null) {
                 o.add("worlds", pairsJson(worlds));
@@ -668,12 +679,8 @@ public final class StepSearch {
                 // ruling 4: a departure (another candidate or a plan) is re-played in K fresh worlds, here, before the
                 // copy handles the answer (the copy is still the decision's position)
                 if (r != null && r.givenIndex.length > 0 && r.chosen != 0) {
-                    int j = -1;
-                    for (int x = 0; x < r.givenIndex.length; x++) {
-                        if (r.givenIndex[x] == r.chosen) {
-                            j = x;
-                        }
-                    }
+                    // review #123 S3-2: one match rule (the unique searched candidate of the chosen index, else none)
+                    final int j = searchedIndex(r, r.chosen);
                     final int kt = st != null ? st.knownTop : ps.knownTop(c);
                     if (j >= 0 && pairs) {
                         // S2T: the same fresh worlds (same seeds, same leaves), with their leaf pairs
@@ -691,13 +698,7 @@ public final class StepSearch {
                 if (s2t && r != null && r.givenIndex.length > 0) {
                     // bvw-step2-fork-1027 (S2T): after the belief-world search and its fresh re-evaluation are fixed,
                     // the chosen candidate's T re-play (true worlds) and, for the seat's OPR row, its roll-outs
-                    int jj = -1;
-                    for (int x = 0; x < r.givenIndex.length; x++) {
-                        if (r.givenIndex[x] == Math.max(0, r.chosen)) {
-                            jj = x;
-                            break;
-                        }
-                    }
+                    final int jj = searchedIndex(r, Math.max(0, r.chosen));
                     if (jj >= 0) {
                         got[9] = jj;
                         final int kt = st != null ? st.knownTop : ps.knownTop(c);
@@ -778,6 +779,23 @@ public final class StepSearch {
         return got[5] instanceof double[] ? mean((double[]) got[5]) : Double.NaN;
     }
 
+    /**
+     * Review #123 S3-2: the searched candidate whose given index is {@code chosen}, or -1 when none or more than one is
+     * (S-t's macros share their base's given index; a step-1 or S2T block has none, so the match is unique there).
+     */
+    static int searchedIndex(final LookaheadSearch.GivenResult r, final int chosen) {
+        int j = -1;
+        for (int x = 0; x < r.givenIndex.length; x++) {
+            if (r.givenIndex[x] == chosen) {
+                if (j >= 0) {
+                    return -1;
+                }
+                j = x;
+            }
+        }
+        return j;
+    }
+
     static double mean(final double[] v) {
         if (v == null || v.length == 0) {
             return Double.NaN;
@@ -842,7 +860,11 @@ public final class StepSearch {
             s.hSym = hp == null ? Double.NaN : clamp01(meanSym(hp));
         }
         final LookaheadSearch.Replay t = (LookaheadSearch.Replay) got[7];
+        if (t == null && spec.trueK > 0) {
+            s.tWhy = "not_run"; // review #123 S3-6: the tap stopped before the T re-play
+        }
         if (t != null) {
+            s.tForge = t.forge;
             if (t.why != null) {
                 s.tWhy = t.why;
             } else {
@@ -859,6 +881,7 @@ public final class StepSearch {
         final LookaheadSearch.Replay o = (LookaheadSearch.Replay) got[8];
         if (o != null) {
             s.oprRan = true;
+            s.oprForge = o.forge;
             s.oprFailed = o.failed;
             s.oprCapped = o.capped;
             double sum = 0;

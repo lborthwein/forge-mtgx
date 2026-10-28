@@ -167,9 +167,35 @@ public class BvwS2tHonestyTest extends SimulationTest {
         String why;
     }
 
+    /** Two registered decklists (review #123 S1-1): a decklist is a list of hidden cards for the other seat. */
+    static final String DECK_A = "Counterspell;Hill Giant;Craw Wurm;Raging Goblin;Island;Island;Shock;Giant Growth;"
+            + "Mountain;Mountain;Mountain;Swamp;Plains;Grizzly Bears";
+    static final String DECK_B = "Serra Angel;Dark Ritual;Island;Craw Wurm;Lightning Bolt;Llanowar Elves;Forest;Forest;"
+            + "Swamp;Swamp;Mountain;Mountain;Hill Giant;Shivan Dragon";
+
+    /** Sets seat {@code seat}'s registered main deck to {@code names} (";"-separated; null = leave it). */
+    static void deck(final Game g, final int seat, final String names) {
+        if (names == null) {
+            return;
+        }
+        final forge.deck.CardPool main = g.getRegisteredPlayers().get(seat).getRegisteredPlayer().getDeck()
+                .getOrCreate(forge.deck.DeckSection.Main);
+        main.clear();
+        for (String n : names.split(";")) {
+            main.add(forge.StaticData.instance().getCommonCards().getCard(n));
+        }
+    }
+
     static Run run(final StepSearch ss, final Policy pol, final String state, final boolean opr) {
+        return run(ss, pol, state, opr, null, null);
+    }
+
+    static Run run(final StepSearch ss, final Policy pol, final String state, final boolean opr, final String ourDeck,
+            final String theirDeck) {
         pol.log.clear();
         final Game g = ForcedWinSolverTest.game("Default", "Default", state);
+        deck(g, 0, ourDeck);
+        deck(g, 1, theirDeck);
         final Player me = g.getPlayers().get(0);
         final RlKnowledge know = new RlKnowledge(g);
         know.v2 = true;
@@ -207,20 +233,39 @@ public class BvwS2tHonestyTest extends SimulationTest {
             svc.leafValue = leaves(-1);
             final StepSearch ss = new StepSearch(spec(svc.port(), "H-sym", false, false), BvwStepSearchHonestyTest.index(), 2,
                     "test", "s2t-honesty-h");
-            final Run real = run(ss, pol, frame(OUR_HAND, OUR_LIB, OUR_BF, THEIR_HAND_A, THEIR_LIB_A, THEIR_BF), false);
+            final Run real = run(ss, pol, frame(OUR_HAND, OUR_LIB, OUR_BF, THEIR_HAND_A, THEIR_LIB_A, THEIR_BF), false, DECK_A,
+                    DECK_A);
             System.err.println("[s2t-honesty H] " + real.search + " " + real.s2t + " decides " + real.seat0.size() + "/"
                     + real.seat1.size());
             Assert.assertTrue("searched".equals(real.why) || "plan".equals(real.why), real.search.toString());
             Assert.assertFalse(real.seat1.isEmpty(), "the opponent's play-out seat never asked the policy");
-            final Run hidden = run(ss, pol, frame(OUR_HAND, OUR_LIB_PERMUTED, OUR_BF, THEIR_HAND_B, THEIR_LIB_B, THEIR_BF),
-                    false);
-            Assert.assertEquals(hidden.search, real.search, "the S2T belief-world search depends on hidden cards");
-            Assert.assertEquals(hidden.s2t, real.s2t);
-            Assert.assertEquals(hidden.seat0, real.seat0, "our seat's frames depend on hidden cards");
-            Assert.assertEquals(hidden.seat1, real.seat1, "the opponent seat's frames depend on the real hidden cards");
+            // other real hidden cards for them (hand, library AND their registered decklist), our library permuted
+            final String other = frame(OUR_HAND, OUR_LIB_PERMUTED, OUR_BF, THEIR_HAND_B, THEIR_LIB_B, THEIR_BF);
+            final Run hidden = run(ss, pol, other, false, DECK_A, DECK_B);
+            assertSame(hidden, real);
+            // their decklist alone (review #123 S1-1)
+            assertSame(run(ss, pol, frame(OUR_HAND, OUR_LIB, OUR_BF, THEIR_HAND_A, THEIR_LIB_A, THEIR_BF), false, DECK_A,
+                    DECK_B), real);
             final Run visible = run(ss, pol, frame("Grizzly Bears;Shock;Llanowar Elves", OUR_LIB, OUR_BF, THEIR_HAND_A,
-                    THEIR_LIB_A, THEIR_BF), false);
+                    THEIR_LIB_A, THEIR_BF), false, DECK_A, DECK_A);
             Assert.assertNotEquals(visible.seat0, real.seat0, "a visible change left the frames unchanged: the test cannot see");
+            // the deck mutant: belief worlds keep the real decklist -> the opponent seat's frames read it, and this fails
+            LookaheadSearch.TEST_REAL_DECKS = true;
+            try {
+                final Run ma = run(ss, pol, frame(OUR_HAND, OUR_LIB, OUR_BF, THEIR_HAND_A, THEIR_LIB_A, THEIR_BF), false,
+                        DECK_A, DECK_A);
+                final Run mb = run(ss, pol, other, false, DECK_A, DECK_B);
+                boolean caught = false;
+                try {
+                    assertSame(mb, ma);
+                } catch (AssertionError e) {
+                    caught = true;
+                    System.err.println("[s2t-honesty] the deck mutant is caught: " + e.getMessage());
+                }
+                Assert.assertTrue(caught, "the honesty check did not catch belief worlds that keep the real decklist");
+            } finally {
+                LookaheadSearch.TEST_REAL_DECKS = false;
+            }
         }
     }
 
@@ -235,21 +280,22 @@ public class BvwS2tHonestyTest extends SimulationTest {
                     "test", "s2t-honesty-t0");
             final String sa = frame(OUR_HAND, OUR_LIB, OUR_BF, THEIR_HAND_A, THEIR_LIB_A, THEIR_BF);
             final String sb = frame(OUR_HAND, OUR_LIB, OUR_BF, THEIR_HAND_B, THEIR_LIB_B, THEIR_BF);
-            final Run a = run(ss, pol, sa, true);
+            final Run a = run(ss, pol, sa, true, DECK_A, DECK_A);
             System.err.println("[s2t-honesty T0] " + a.search + " " + a.s2t + " decides " + a.seat0.size() + "/"
                     + a.seat1.size());
             Assert.assertTrue(a.s2t.has("true_worlds"), "the T re-play did not run: " + a.s2t);
             Assert.assertTrue(a.s2t.get("opr").isJsonObject(), "OPR did not run: " + a.s2t);
             Assert.assertFalse(a.seat0.isEmpty());
             Assert.assertFalse(a.seat1.isEmpty(), "the opponent's play-out seat never asked the policy");
-            final Run b = run(ss, pol, sb, true);
+            // their other real hand, library and decklist
+            final Run b = run(ss, pol, sb, true, DECK_A, DECK_B);
             assertBlind(a, b, 0);
             // the visible control: a creature on their battlefield changes our frames
             final Run v = run(ss, pol, frame(OUR_HAND, OUR_LIB, OUR_BF, THEIR_HAND_A, THEIR_LIB_A, THEIR_BF + ";Hill Giant"),
-                    true);
+                    true, DECK_A, DECK_A);
             Assert.assertNotEquals(v.seat0, a.seat0, "a visible change left our frames unchanged: the test cannot see");
             // the mutant: our play-out seat's frames read the hidden cards (privileged block) -> this check must fail
-            assertMutantCaught(ss, pol, sa, sb, 0);
+            assertMutantCaught(ss, pol, sa, sb, 0, DECK_A, DECK_A, DECK_A, DECK_B);
         }
     }
 
@@ -267,20 +313,29 @@ public class BvwS2tHonestyTest extends SimulationTest {
             final String sa = frame("Shock;Serra Angel;Craw Wurm", OUR_LIB, OUR_BF, THEIR_HAND_A, THEIR_LIB_A, THEIR_BF);
             final String sb = frame("Shock;Shivan Dragon;Mahamoti Djinn", OUR_LIB_B, OUR_BF, THEIR_HAND_A, THEIR_LIB_A,
                     THEIR_BF);
-            final Run a = run(ss, pol, sa, true);
+            final Run a = run(ss, pol, sa, true, DECK_A, DECK_A);
             System.err.println("[s2t-honesty T1] " + a.search + " " + a.s2t + " decides " + a.seat0.size() + "/"
                     + a.seat1.size());
             Assert.assertFalse(a.search.get("departed").getAsBoolean(), "our constant leaf must keep the pass: " + a.search);
             Assert.assertTrue(a.s2t.has("true_worlds"), "the T re-play did not run: " + a.s2t);
             Assert.assertTrue(a.s2t.get("opr").isJsonObject(), "OPR did not run: " + a.s2t);
             Assert.assertFalse(a.seat1.isEmpty(), "the opponent's play-out seat never asked the policy");
-            final Run b = run(ss, pol, sb, true);
+            // our other real hand, library and decklist
+            final Run b = run(ss, pol, sb, true, DECK_B, DECK_A);
             assertBlind(a, b, 1);
             final Run v = run(ss, pol, frame("Shock;Serra Angel;Craw Wurm", OUR_LIB, OUR_BF + ";Hill Giant", THEIR_HAND_A,
-                    THEIR_LIB_A, THEIR_BF), true);
+                    THEIR_LIB_A, THEIR_BF), true, DECK_A, DECK_A);
             Assert.assertNotEquals(v.seat1, a.seat1, "a visible change left their frames unchanged: the test cannot see");
-            assertMutantCaught(ss, pol, sa, sb, 1);
+            assertMutantCaught(ss, pol, sa, sb, 1, DECK_A, DECK_A, DECK_B, DECK_A);
         }
+    }
+
+    /** Belief worlds only: the whole search, its s2t object and every DECIDE of both seats are the same. */
+    static void assertSame(final Run b, final Run a) {
+        Assert.assertEquals(b.search, a.search, "the S2T belief-world search depends on hidden cards");
+        Assert.assertEquals(b.s2t, a.s2t, "the S2T belief-world variants depend on hidden cards");
+        Assert.assertEquals(b.seat0, a.seat0, "our seat's frames depend on hidden cards");
+        Assert.assertEquals(b.seat1, a.seat1, "the opponent seat's frames depend on the real hidden cards");
     }
 
     /** Seat {@code seat}'s decisions and leaf values are the same in runs a and b (only the OTHER seat's hidden cards differ). */
@@ -295,11 +350,12 @@ public class BvwS2tHonestyTest extends SimulationTest {
     }
 
     /** The mutant (a play-out seat's frames carry the hidden cards) must make {@link #assertBlind} fail. */
-    static void assertMutantCaught(final StepSearch ss, final Policy pol, final String sa, final String sb, final int seat) {
+    static void assertMutantCaught(final StepSearch ss, final Policy pol, final String sa, final String sb, final int seat,
+            final String ourA, final String theirA, final String ourB, final String theirB) {
         RlSearch.TEST_LEAK_PRIV = true;
         try {
-            final Run ma = run(ss, pol, sa, true);
-            final Run mb = run(ss, pol, sb, true);
+            final Run ma = run(ss, pol, sa, true, ourA, theirA);
+            final Run mb = run(ss, pol, sb, true, ourB, theirB);
             boolean caught = false;
             try {
                 assertBlind(ma, mb, seat);

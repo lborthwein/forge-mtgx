@@ -2207,10 +2207,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
         PlayoutController(final Game g, final Player p, final forge.LobbyPlayer lp, final BenchSession session,
                 final int seat, final LookaheadSearch.LeafProbe probe, final boolean keepUltimatesFirst) {
-            super(g, p, lp, session, BenchSession.Mode.BRIDGE, seat, new CallCounter());
+            this(g, p, lp, session, seat, probe, keepUltimatesFirst, new CallCounter());
+        }
+
+        private PlayoutController(final Game g, final Player p, final forge.LobbyPlayer lp, final BenchSession session,
+                final int seat, final LookaheadSearch.LeafProbe probe, final boolean keepUltimatesFirst,
+                final CallCounter calls) {
+            super(g, p, lp, session, BenchSession.Mode.BRIDGE, seat, calls);
             this.probe = probe;
             this.keepUltimatesFirst = keepUltimatesFirst;
+            this.calls = calls;
         }
+
+        /** Review #123 S3-1: every controller entry point of this seat, by method (the true-world census). */
+        final CallCounter calls;
 
         /**
          * Block search (block-search-1019): the searched declaration, declared at this copy's first declare-blockers step
@@ -2461,6 +2471,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         session.setLocalAnswerer(rs);
         final PlayoutController pc = new PlayoutController(g, me, me.getController().getLobbyPlayer(), session, seat, probe,
                 (cfg.copyFidelity == 1 || cfg.copyFidelity == 2 && ls.fidelityPass()) && !first.pass && !planned);
+        census(rs, pc); // review #123 S3-1: true-world re-plays only (a no-op otherwise)
         if (first.plan instanceof PlanSearch.LinePlan) {
             // search-bones-1015 (S-b): the solver line's follower in front of the copy's policy seat
             pc.planHook = PlanSearch.copyLineHook(me, followConfig(), (PlanSearch.LinePlan) first.plan, first);
@@ -2542,6 +2553,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         session.setLocalAnswerer(rs);
         final PlayoutController pc = new PlayoutController(g, opp, opp.getController().getLobbyPlayer(), session, seat,
                 null, false);
+        census(rs, pc); // review #123 S3-1
         synchronized (this) {
             opponentSeats++;
         }
@@ -2574,9 +2586,93 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         ls.getConfig().leafOpp = on || cfg.leafSym;
     }
 
-    /** bvw-step2-fork-1027: {@link LookaheadSearch#replayCandidate} of the last search's candidate {@code cand}. */
+    /**
+     * bvw-step2-fork-1027: {@link LookaheadSearch#replayCandidate} of the last search's candidate {@code cand}; a
+     * true-world re-play (T, OPR) also records the census of its play-out seats (review #123 S3-1).
+     */
     LookaheadSearch.Replay replayCandidate(final Game g, final Player me, final int cand, final long salt, final int knownTop,
             final int worlds, final int mode, final int capTurns, final int capSteps) {
-        return ls.replayCandidate(g, me, cand, salt, knownTop, worlds, mode, capTurns, capSteps);
+        if (mode == LookaheadSearch.WORLD_BELIEF) {
+            return ls.replayCandidate(g, me, cand, salt, knownTop, worlds, mode, capTurns, capSteps);
+        }
+        final java.util.Map<String, Integer> forge = new TreeMap<>(), asked = new TreeMap<>();
+        final List<CallCounter> counters = new ArrayList<>();
+        censusForge = forge;
+        censusAsked = asked;
+        censusCounters = counters;
+        final LookaheadSearch.Replay r;
+        try {
+            r = ls.replayCandidate(g, me, cand, salt, knownTop, worlds, mode, capTurns, capSteps);
+        } finally {
+            censusForge = null;
+            censusAsked = null;
+            censusCounters = null;
+        }
+        // the controller entry points that never asked a policy seat (Forge AI answered them): calls minus asks
+        final java.util.Map<String, Integer> calls = new TreeMap<>(), refused = new TreeMap<>();
+        synchronized (counters) {
+            for (CallCounter cc : counters) {
+                final JsonObject cj = cc.toJson();
+                for (Map.Entry<String, JsonElement> e : cj.getAsJsonObject("calls").entrySet()) {
+                    calls.merge(e.getKey(), e.getValue().getAsInt(), Integer::sum);
+                }
+                // a policy answer the bridge refused: Forge AI answered it
+                for (Map.Entry<String, JsonElement> e : cj.getAsJsonObject("delegatedRefused").entrySet()) {
+                    refused.merge(e.getKey(), e.getValue().getAsInt(), Integer::sum);
+                }
+            }
+        }
+        final JsonObject fa = new JsonObject(), fc = new JsonObject();
+        synchronized (forge) {
+            for (Map.Entry<String, Integer> e : forge.entrySet()) {
+                fa.addProperty(e.getKey(), e.getValue());
+            }
+            for (Map.Entry<String, Integer> e : calls.entrySet()) {
+                final int n = e.getValue() - asked.getOrDefault(e.getKey(), 0);
+                if (n > 0) {
+                    fc.addProperty(e.getKey(), n);
+                }
+            }
+        }
+        final JsonObject fr = new JsonObject();
+        for (Map.Entry<String, Integer> e : refused.entrySet()) {
+            fr.addProperty(e.getKey(), e.getValue());
+        }
+        final JsonObject o = new JsonObject();
+        o.add("asks", fa);
+        o.add("calls", fc);
+        o.add("refused", fr);
+        r.forge = o;
+        return r;
+    }
+
+    /** Review #123 S3-1: the census of the true-world re-play in progress (null otherwise; decision thread sets it). */
+    private volatile java.util.Map<String, Integer> censusForge, censusAsked;
+    private volatile List<CallCounter> censusCounters;
+
+    private void census(final RlSeat rs, final PlayoutController pc) {
+        final java.util.Map<String, Integer> f = censusForge, a = censusAsked;
+        final List<CallCounter> cs = censusCounters;
+        if (f == null || a == null || cs == null) {
+            return;
+        }
+        rs.forgeLog = f;
+        rs.askLog = a;
+        synchronized (cs) {
+            cs.add(pc.calls);
+        }
+    }
+
+    /**
+     * Review #123 S2-1: some seat knows this library card of the live position (a fork of the replay's seat knowledge,
+     * so the live tracker is never settled from here), for the T re-play's library shuffle.
+     */
+    @Override
+    public java.util.function.Predicate<forge.game.card.Card> knownToAnySeat(final Game live) {
+        if (liveKnow == null) {
+            return null;
+        }
+        final RlKnowledge k = liveKnow.forkFor(live);
+        return c -> k.knows(0, c) || k.knows(1, c);
     }
 }
