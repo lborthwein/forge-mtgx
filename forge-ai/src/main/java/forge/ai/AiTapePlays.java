@@ -142,7 +142,7 @@ final class AiTapePlays {
         if (copied) {
             // bvw-decision-log-1027: the AI played a copy of one of the card's abilities: copy that one again here (in
             // the decode scope; it takes the live copy's ids below), never a look-alike of another id
-            final SpellAbility base = original(host, seat, o.get("cp").getAsInt(), found);
+            final SpellAbility base = original(host, seat, o.get("cp").getAsInt(), d, found);
             if (base == null) {
                 throw new IllegalStateException("card " + hostId + " no longer has ability " + o.get("cp").getAsInt()
                         + ", which the record's play (" + d + ") was a copy of");
@@ -202,8 +202,13 @@ final class AiTapePlays {
         return sa;
     }
 
-    /** bvw-decision-log-1027: the card's ability of id {@code id} (among {@code found} first), or null. */
-    private static SpellAbility original(final Card host, final Player seat, final int id, final List<SpellAbility> found) {
+    /**
+     * bvw-decision-log-1027: the card's ability of id {@code id} (among {@code found} first); else its one ability whose
+     * description is {@code d} (an ability a static grants is rebuilt, on new ids, whenever statics are re-applied, which
+     * the AI's deliberation does on the live game; the copy is of its content); else null.
+     */
+    private static SpellAbility original(final Card host, final Player seat, final int id, final String d,
+            final List<SpellAbility> found) {
         for (SpellAbility c : found) {
             if (c.getId() == id) {
                 return c;
@@ -218,7 +223,16 @@ final class AiTapePlays {
                     return c;
                 }
             }
-            return null;
+            SpellAbility like = null;
+            for (SpellAbility c : all) {
+                if (AiTapeCodec.descOf(c).equals(d) && c != like) {
+                    if (like != null && like.getId() != c.getId()) {
+                        return null; // two look-alikes: not the record's to pick
+                    }
+                    like = c;
+                }
+            }
+            return like;
         });
     }
 
@@ -262,14 +276,25 @@ final class AiTapePlays {
             if (nm && !v.hasParam("WithoutManaCost")) {
                 v = v.copyWithNoManaCost(seat);
             }
-            if (!oc.isEmpty()) {
+            // bvw-decision-log-1027: a candidate may carry optional costs already (an alternative-cost variant is built
+            // with AltCost); only the record's other ones are added, and one the record's play did not have refuses it
+            final List<String> have = new ArrayList<>();
+            for (OptionalCost c0 : v.getRootAbility().getOptionalCosts()) {
+                have.add(c0.name());
+            }
+            if (!oc.containsAll(have)) {
+                continue;
+            }
+            final List<String> missing = new ArrayList<>(oc);
+            missing.removeAll(have);
+            if (!missing.isEmpty()) {
                 final List<OptionalCostValue> vals = new ArrayList<>();
                 for (OptionalCostValue ocv : GameActionUtil.getOptionalCostValues(v)) {
-                    if (oc.contains(ocv.getType().name())) {
+                    if (missing.contains(ocv.getType().name())) {
                         vals.add(ocv);
                     }
                 }
-                if (vals.size() != oc.size()) {
+                if (vals.size() != missing.size()) {
                     continue;
                 }
                 v = GameActionUtil.addOptionalCosts(v, vals);

@@ -1255,8 +1255,32 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
             inner.orderAndPlaySimultaneousSa(activePlayerSAs);
             return Boolean.TRUE;
         }, () -> {
+            // bvw-decision-log-1027: a trigger the seat's policy played itself before the native order (the forced-win
+            // solver's forced trigger target: its playStack's "s" checkpoint is the first thing the record has), played
+            // first again, in the policy's own id scope as live
+            final List<SpellAbility> rest = new ArrayList<>(activePlayerSAs);
+            for (JsonObject n = tape.peekChild(); n != null && "cfg".equals(AiTape.str(n, "k")) && "s".equals(AiTape.str(n, "m"));
+                 n = tape.peekChild()) {
+                final int h = n.getAsJsonObject("a").get("h").getAsInt();
+                SpellAbility direct = null;
+                for (SpellAbility sa : rest) {
+                    if (sa != null && sa.isTrigger() && !sa.isCopied() && sa.getHostCard() != null && sa.getHostCard().getId() == h) {
+                        direct = sa;
+                        break;
+                    }
+                }
+                if (direct == null) {
+                    throw tape.diverge("orderAndPlaySimultaneousSa: the record played card " + h + "'s trigger first; none is offered");
+                }
+                rest.remove(direct);
+                final SpellAbility d = direct;
+                CubeComboAi.probeIds(getPlayer(), () -> {
+                    ComputerUtil.playStack(d, getPlayer(), getGame());
+                    return null;
+                });
+            }
             // PlayerControllerAi.orderAndPlaySimultaneousSa: the order and every trigger's targets are the record's
-            final List<SpellAbility> order = activePlayerSAs.size() > 1 ? inner.orderSimultaneousSa(activePlayerSAs) : activePlayerSAs;
+            final List<SpellAbility> order = rest.size() > 1 ? inner.orderSimultaneousSa(rest) : rest;
             for (final SpellAbility sa : order) {
                 if (sa.isTrigger() && !sa.isCopied()) {
                     if (forcedPrepare(sa.getHostCard(), sa)) {

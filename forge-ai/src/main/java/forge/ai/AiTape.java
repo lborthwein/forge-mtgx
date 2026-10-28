@@ -397,7 +397,46 @@ public final class AiTape {
         if (Thread.currentThread() != gameThread || divergence != null) {
             return false;
         }
-        return mode == Mode.RECORD ? open.isEmpty() || open.peek().exec : cursors.isEmpty() || cursors.peek().exec;
+        if (!(mode == Mode.RECORD ? open.isEmpty() || open.peek().exec : cursors.isEmpty() || cursors.peek().exec)) {
+            return false;
+        }
+        // bvw-decision-log-1027: nor while another taped seat of this game is deciding a choice: its AI's deliberation
+        // asks this seat's controller too (a cost reduction's choice of static ability, an opponent's targets), and a
+        // forced replay, which does not deliberate, never asks those
+        return !otherSeatDeciding();
+    }
+
+    /** bvw-decision-log-1027: the innermost open frame of another tape of this game, on this thread, is a choice. */
+    private boolean otherSeatDeciding() {
+        for (AiTape t : installed) {
+            if (t != this && t.game == game && t.gameThread == Thread.currentThread() && t.choiceOpen()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean choiceOpen() {
+        return mode == Mode.RECORD ? !open.isEmpty() && !open.peek().exec : !cursors.isEmpty() && !cursors.peek().exec;
+    }
+
+    /**
+     * bvw-decision-log-1027 (forced): the next recorded entry of the open execution that is not a trait build, or null.
+     * A forced body reads it to follow an execution the seat's policy shaped (the forced-win solver plays its forced
+     * trigger before the native order runs).
+     */
+    JsonObject peekChild() {
+        if (mode != Mode.FORCED || cursors.isEmpty()) {
+            return null;
+        }
+        final Cur c = cursors.peek();
+        for (int i = c.i; i < c.list.size(); i++) {
+            final JsonObject n = c.list.get(i).getAsJsonObject();
+            if (!LAZY.equals(str(n, "k"))) {
+                return n;
+            }
+        }
+        return null;
     }
 
     boolean hookHere() {
