@@ -89,7 +89,7 @@ import java.util.function.Supplier;
  * Everything that is not a decision (reveals, notifications, the AI's state, the cost decision maker itself) is the
  * inner controller's in both modes. Without a tape this class is never created.
  */
-public final class AiTapeController extends PlayerControllerAi implements AiCostDecision.PaymentDecisions {
+public class AiTapeController extends PlayerControllerAi implements AiCostDecision.PaymentDecisions {
     private final PlayerControllerAi inner;
     private final AiTape tape;
 
@@ -104,6 +104,15 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
         return inner;
     }
 
+    /**
+     * Lane bvw-decision-log-1027: the taping controller for {@code inner}: a cube combo seat (the bench's HonestForcedWin
+     * generator seats) keeps answering as one ({@link AiTapeCubeComboController}: CubeComboAi reads its policy through
+     * {@code controller instanceof CubeComboSeat}); every other seat gets this class.
+     */
+    public static AiTapeController wrap(final PlayerControllerAi inner, final AiTape tape) {
+        return inner instanceof CubeComboSeat ? new AiTapeCubeComboController(inner, tape) : new AiTapeController(inner, tape);
+    }
+
     private Game g() {
         return getGame();
     }
@@ -113,6 +122,18 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     /** A choice: recorded with its answer, or (forced) answered from the record without asking the inner controller. */
     private <T> T choice(final String m, final Supplier<T> live, final Function<T, JsonElement> enc,
             final Function<JsonElement, T> dec) {
+        return choice(m, null, live, enc, dec);
+    }
+
+    /**
+     * {@code witness} (bvw-decision-log-1027; null = none): what the inner controller shows its observers when it makes
+     * this decision live (a delayed reveal; the cards it looks at to arrange them: the bench seat's knowledge, the
+     * review's knowledge hook, Forge AI's card memory). A forced replay runs it where the record's decision was, so the
+     * seat's observers see what they saw live; the decision itself is still the record's.
+     */
+    private <T> T choice(final String m, final Runnable witness, final Supplier<T> live, final Function<T, JsonElement> enc,
+            final Function<JsonElement, T> dec) {
+        tape.refuseAfterDivergence();
         if (!tape.controllerHere()) {
             return live.get();
         }
@@ -142,6 +163,9 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
             return v;
         }
         final JsonObject e = tape.takeChoice("m", m);
+        if (witness != null) {
+            witness.run();
+        }
         final T v;
         try {
             // decoding only checks and looks up (legality, candidates): whatever it builds takes scoped ids, never the
@@ -163,6 +187,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
      */
     private <T> T exec(final String m, final Supplier<T> live, final Supplier<T> forced, final Function<T, JsonElement> enc,
             final Function<JsonElement, T> shortcut) {
+        tape.refuseAfterDivergence();
         if (!tape.controllerHere()) {
             return live.get();
         }
@@ -304,7 +329,14 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
         return l;
     }
 
+    /** bvw-decision-log-1027: a choice's delayed reveal as its forced witness (PlayerControllerAi reveals it first). */
+    private Runnable revealOf(final DelayedReveal delayedReveal) {
+        return delayedReveal == null ? null : () -> inner.reveal(delayedReveal);
+    }
+
     // ------------------------------------------------------------------ not decisions: always the inner controller's
+
+    @Override public void witnessLook(final List<Card> cards, final ZoneType destination) { inner.witnessLook(cards, destination); }
 
     @Override public boolean isAI() { return inner.isAI(); }
     @Override public AiController getAi() { return inner.getAi(); }
@@ -642,7 +674,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     @Override
     public <T extends GameEntity> T chooseSingleEntityForEffect(final FCollectionView<T> optionList, final DelayedReveal delayedReveal,
             final SpellAbility sa, final String title, final boolean isOptional, final Player targetedPlayer, final Map<String, Object> params) {
-        return choice("chooseSingleEntityForEffect",
+        return choice("chooseSingleEntityForEffect", revealOf(delayedReveal),
                 () -> inner.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional, targetedPlayer, params),
                 this::one, e -> amongOne(listOf(optionList), e));
     }
@@ -651,7 +683,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     public <T extends GameEntity> List<T> chooseEntitiesForEffect(final FCollectionView<T> optionList, final int min, final int max,
             final DelayedReveal delayedReveal, final SpellAbility sa, final String title, final Player targetedPlayer,
             final Map<String, Object> params) {
-        return choice("chooseEntitiesForEffect",
+        return choice("chooseEntitiesForEffect", revealOf(delayedReveal),
                 () -> inner.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title, targetedPlayer, params),
                 this::cards, e -> among(listOf(optionList), e));
     }
@@ -670,18 +702,20 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
 
     @Override
     public CardCollectionView orderMoveToZoneList(final CardCollectionView cards, final ZoneType destinationZone, final SpellAbility source) {
-        return choice("orderMoveToZoneList", () -> inner.orderMoveToZoneList(cards, destinationZone, source), this::cards,
-                e -> amongCards(cards, e));
+        return choice("orderMoveToZoneList", () -> inner.witnessLook(cards == null ? null : listOf(cards), destinationZone),
+                () -> inner.orderMoveToZoneList(cards, destinationZone, source), this::cards, e -> amongCards(cards, e));
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(final CardCollection topN) {
-        return choice("arrangeForScry", () -> inner.arrangeForScry(topN), this::pile2, e -> unpile2(topN, e));
+        return choice("arrangeForScry", () -> inner.witnessLook(topN == null ? null : listOf(topN), ZoneType.Library),
+                () -> inner.arrangeForScry(topN), this::pile2, e -> unpile2(topN, e));
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(final CardCollection topN) {
-        return choice("arrangeForSurveil", () -> inner.arrangeForSurveil(topN), this::pile2, e -> unpile2(topN, e));
+        return choice("arrangeForSurveil", () -> inner.witnessLook(topN == null ? null : listOf(topN), ZoneType.Library),
+                () -> inner.arrangeForSurveil(topN), this::pile2, e -> unpile2(topN, e));
     }
 
     private JsonElement pile2(final ImmutablePair<CardCollection, CardCollection> p) {
@@ -818,7 +852,7 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
     public Card chooseSingleCardForZoneChange(final ZoneType destination, final List<ZoneType> origin, final SpellAbility sa,
             final CardCollection fetchList, final DelayedReveal delayedReveal, final String selectPrompt, final boolean isOptional,
             final Player decider) {
-        return choice("chooseSingleCardForZoneChange",
+        return choice("chooseSingleCardForZoneChange", revealOf(delayedReveal),
                 () -> inner.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider),
                 this::one, e -> amongOne(listOf(fetchList), e));
     }

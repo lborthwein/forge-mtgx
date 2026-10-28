@@ -28,7 +28,8 @@ final class AiTapePlays {
     private AiTapePlays() {
     }
 
-    private static final int SCOPED = 1_000_000_000;
+    /** The AI tape's per-link parameter the forced-win solver edits on its copies (Gitaxian Probe's life payment). */
+    private static final String PHYREXIAN = "AIPhyrexianPayment";
 
     static JsonObject encode(final Game g, final Player seat, final SpellAbility sa) {
         final JsonObject o = new JsonObject();
@@ -74,6 +75,23 @@ final class AiTapePlays {
             sid.add(s.getId());
         }
         o.add("sid", sid);
+        if (sa.getCopyRoot() != 0) {
+            // bvw-decision-log-1027: a copy the AI made (the forced-win solver's line steps): the original it copies,
+            // and per chain link what such a copy may carry that the original does not (reads only)
+            o.addProperty("cp", sa.getCopyRoot());
+            final JsonArray ph = new JsonArray(), ex = new JsonArray();
+            boolean anyEx = false;
+            for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                ph.add(s.getMapParams().get(PHYREXIAN));
+                final String x = s.getManaPart() == null ? null : s.getManaPart().getExpressChoice();
+                anyEx |= x != null && !x.isEmpty();
+                ex.add(x == null || x.isEmpty() ? null : x);
+            }
+            o.add("ph", ph);
+            if (anyEx) {
+                o.add("ex", ex);
+            }
+        }
         o.add("cfg", AiTapeCodec.config(g, seat, sa));
         return o;
     }
@@ -99,7 +117,7 @@ final class AiTapePlays {
         }
         final boolean nm = o.has("nm") && o.get("nm").getAsBoolean();
         final int sid0 = o.has("sid") && o.getAsJsonArray("sid").size() > 0 ? o.getAsJsonArray("sid").get(0).getAsInt() : -1;
-        final List<SpellAbility> found = IdScope.detached(() -> find(host, seat, d, oc, nm));
+        final List<SpellAbility> found = IdScope.detached(AiTape.DECODE_BASE, () -> find(host, seat, d, oc, nm));
         if (found.isEmpty()) {
             throw new IllegalStateException("card " + hostId + " offers no ability like the record's (" + d + ")");
         }
@@ -114,10 +132,25 @@ final class AiTapePlays {
         }
         if (pick == null) {
             for (SpellAbility c : found) {
-                if (c.getId() >= SCOPED) {
+                if (AiTape.decodeId(c.getId())) {
                     pick = c;
                     break;
                 }
+            }
+        }
+        final boolean copied = pick == null && o.has("cp");
+        if (copied) {
+            // bvw-decision-log-1027: the AI played a copy of one of the card's abilities: copy that one again here (in
+            // the decode scope; it takes the live copy's ids below), never a look-alike of another id
+            final SpellAbility base = original(host, seat, o.get("cp").getAsInt(), found);
+            if (base == null) {
+                throw new IllegalStateException("card " + hostId + " no longer has ability " + o.get("cp").getAsInt()
+                        + ", which the record's play (" + d + ") was a copy of");
+            }
+            pick = IdScope.detached(AiTape.DECODE_BASE, () -> base.copy(seat));
+            if (!AiTapeCodec.descOf(pick).equals(d)) {
+                throw new IllegalStateException("card " + hostId + "'s ability " + o.get("cp").getAsInt()
+                        + " copies to another ability than the record's (" + d + ")");
             }
         }
         if (pick == null && sid0 >= 0 && !idsShifted) {
@@ -130,10 +163,13 @@ final class AiTapePlays {
             final JsonArray sid = o.getAsJsonArray("sid");
             int i = 0;
             for (SpellAbility s = sa; s != null && i < sid.size(); s = s.getSubAbility(), i++) {
-                if (s.getId() >= SCOPED) {
+                if (AiTape.decodeId(s.getId())) {
                     s.dangerouslySetId(sid.get(i).getAsInt());
                 }
             }
+        }
+        if (copied) {
+            copyFields(sa, o);
         }
         sa.setActivatingPlayer(seat);
         if (o.has("x")) {
@@ -159,11 +195,53 @@ final class AiTapePlays {
         if (o.has("cfe")) {
             sa.setCastFromPlayEffect(true);
         }
-        AiTapeCodec.applyConfig(g, seat, sa, o.get("cfg"));
+        AiTapeCodec.applyConfig(g, seat, sa, o.get("cfg"), true);
         if (!sa.canPlay()) {
             throw new IllegalStateException("card " + hostId + "'s recorded ability (" + d + ") cannot be played now");
         }
         return sa;
+    }
+
+    /** bvw-decision-log-1027: the card's ability of id {@code id} (among {@code found} first), or null. */
+    private static SpellAbility original(final Card host, final Player seat, final int id, final List<SpellAbility> found) {
+        for (SpellAbility c : found) {
+            if (c.getId() == id) {
+                return c;
+            }
+        }
+        return IdScope.detached(AiTape.DECODE_BASE, () -> {
+            final List<SpellAbility> all = new ArrayList<>(host.getAllPossibleAbilities(seat, false));
+            all.addAll(host.getSpellAbilities());
+            all.addAll(host.getManaAbilities());
+            for (SpellAbility c : all) {
+                if (c.getId() == id) {
+                    return c;
+                }
+            }
+            return null;
+        });
+    }
+
+    /** bvw-decision-log-1027: what the record's copy carried per chain link ({@link #encode}'s ph / ex), set on ours. */
+    private static void copyFields(final SpellAbility sa, final JsonObject o) {
+        final JsonArray ph = o.has("ph") ? o.getAsJsonArray("ph") : null;
+        final JsonArray ex = o.has("ex") ? o.getAsJsonArray("ex") : null;
+        int i = 0;
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility(), i++) {
+            if (ph != null && i < ph.size()) {
+                if (ph.get(i).isJsonNull()) {
+                    s.getMapParams().remove(PHYREXIAN);
+                } else {
+                    s.getMapParams().put(PHYREXIAN, ph.get(i).getAsString());
+                }
+            }
+            if (ex != null && i < ex.size() && !ex.get(i).isJsonNull()) {
+                if (s.getManaPart() == null) {
+                    throw new IllegalStateException("the record's copy chose a mana colour on a link without mana");
+                }
+                s.getManaPart().setExpressChoice(ex.get(i).getAsString());
+            }
+        }
     }
 
     private static List<SpellAbility> find(final Card host, final Player seat, final String d, final List<String> oc, final boolean nm) {

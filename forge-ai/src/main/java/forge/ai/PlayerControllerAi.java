@@ -90,6 +90,17 @@ public class PlayerControllerAi extends PlayerController {
         this.knowledgeHook = hook;
     }
 
+    /**
+     * Lane bvw-decision-log-1027: what this seat's observers see when it looks at {@code cards} to arrange them (scry,
+     * surveil, an ordered move), as its own arranging methods report it first, without deciding anything. The AI tape's
+     * forced replay calls it where the record's decision was (the decision is the record's).
+     */
+    public void witnessLook(final List<Card> cards, final ZoneType destination) {
+        if (knowledgeHook != null && cards != null) {
+            knowledgeHook.onLook(cards, destination);
+        }
+    }
+
     /** fairNaming memory ({@link FairNaming#observe}); filled only when this player's option is not off. */
     Set<String> getFairNamingSeen() {
         return fairNamingSeen;
