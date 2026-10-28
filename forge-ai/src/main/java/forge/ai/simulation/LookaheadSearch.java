@@ -698,6 +698,8 @@ public final class LookaheadSearch {
                 leafNanos, playoutSeatFailures, searchCpuNanos;
         /** bvw-step2-fork-1027 (S2T): logging-only opponent leaf calls that failed (reported only when > 0). */
         public long leafOppFailures;
+        /** Step-3 hygiene: true-world re-plays refused because fair naming was not on for every player. */
+        public long trueFairNamingRefusals;
         /** S-t (lane cm-choice-search-1009; reported only when a decision expanded choices): decisions with macro
          *  candidates, macro candidates played, macro departures. */
         public long givenMacroDecisions, givenMacros, givenMacroDepartures, givenMacroRedundant;
@@ -2365,6 +2367,19 @@ public final class LookaheadSearch {
         if (mode != WORLD_BELIEF && !(hookPlayout && cfg.opponentPolicy)) {
             // the honesty refusal: a true world needs every seat to be a policy seat on its own observation
             throw new IllegalStateException("refused: a true-world re-play needs policy seats on both sides");
+        }
+        if (mode != WORLD_BELIEF) {
+            // step-3 hygiene (review #123 recheck): a Forge-decided naming ask of either seat may read the other's real
+            // cards (upstream AI scores their whole deck); fair naming restricts it to cards that seat has seen
+            for (Player q : live.getRegisteredPlayers()) {
+                if (forge.ai.FairNaming.mode(q) != AiFixes.Mode.ON) {
+                    out.why = "refused: fair naming is not on for " + q.getName();
+                    synchronized (stats) {
+                        stats.trueFairNamingRefusals++;
+                    }
+                    return out;
+                }
+            }
         }
         final double[][] values = new double[1][k];
         final Rollout[][] outs = new Rollout[1][k];
@@ -7695,23 +7710,26 @@ public final class LookaheadSearch {
         return pool;
     }
 
-    /** Our registered main deck's card names (a player knows their own deck), once. */
+    /**
+     * Our registered main deck's card names (a player knows their own deck), once per searching seat (ported from the
+     * belief line's 5ace8b520d9, belief-jar-1027: a search serving both seats used to keep the FIRST seat's deck for
+     * both, so the other seat's singleton pool left out its opponent's cards and kept its own).
+     */
     private Set<String> ownDeckNames(Player liveMe) {
-        Set<String> d = ownDeckNames;
-        if (d == null) {
-            d = new HashSet<>();
+        return ownDeckNames.computeIfAbsent(liveMe.getId(), id -> {
+            final Set<String> d = new HashSet<>();
             final forge.deck.Deck deck = liveMe.getRegisteredPlayer() == null ? null : liveMe.getRegisteredPlayer().getDeck();
             if (deck != null && deck.has(forge.deck.DeckSection.Main)) {
                 for (Map.Entry<forge.item.PaperCard, Integer> e : deck.get(forge.deck.DeckSection.Main)) {
                     d.add(e.getKey().getName());
                 }
             }
-            ownDeckNames = d;
-        }
-        return d;
+            return d;
+        });
     }
 
-    private volatile Set<String> ownDeckNames;
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Set<String>> ownDeckNames =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * honest-belief-1020: the basics multiplicity M: {@link Config#beliefBasics}, raised only when the pool would have

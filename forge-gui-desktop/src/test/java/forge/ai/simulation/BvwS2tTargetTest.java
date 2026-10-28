@@ -45,7 +45,11 @@ public class BvwS2tTargetTest extends SimulationTest {
     }
 
     static StepSearch.Result search(final StepSearch ss, final String state, final boolean opr) {
-        final Game g = ForcedWinSolverTest.game("Default", "Default", state);
+        return search(ss, ForcedWinSolverTest.game("Default", "Default", state), opr, forge.ai.AiFixes.Mode.ON);
+    }
+
+    static StepSearch.Result search(final StepSearch ss, final Game g, final boolean opr, final forge.ai.AiFixes.Mode fair) {
+        BvwS2tHonestyTest.fairNaming(g, fair);
         final Player me = g.getPlayers().get(0);
         final RlKnowledge know = new RlKnowledge(g);
         know.v2 = true;
@@ -275,5 +279,61 @@ public class BvwS2tTargetTest extends SimulationTest {
             }
         }
         Assert.assertTrue(moved > 10, "their unknown library cards were not shuffled: " + moved);
+    }
+
+    /** Step-3 hygiene: a true-world re-play needs Forge's fair naming ON for every player, else it is refused. */
+    @Test(timeOut = 1800000)
+    public void aTrueWorldNeedsFairNamingForEveryPlayer() throws Exception {
+        initAndCreateGame();
+        try (FakeSearchService svc = new FakeSearchService(SHA, 2)) {
+            svc.scriptRaw = new BvwS2tHonestyTest.Policy(-1);
+            svc.leafValue = BvwS2tHonestyTest.leaves(-1);
+            final StepSearch ss = new StepSearch(BvwS2tHonestyTest.spec(svc.port(), "T-sym", false, false),
+                    BvwStepSearchHonestyTest.index(), 2, "test", "s2t-fair");
+            final StepSearch.Result on = search(ss, ForcedWinSolverTest.game("Default", "Default", position()), false,
+                    forge.ai.AiFixes.Mode.ON);
+            Assert.assertNull(on.s2t.tWhy, on.s2t.toJson("T-sym").toString());
+            Assert.assertFalse(Double.isNaN(on.s2t.tSym));
+            final StepSearch.Result off = search(ss, ForcedWinSolverTest.game("Default", "Default", position()), false,
+                    forge.ai.AiFixes.Mode.OFF);
+            Assert.assertTrue(off.s2t.tWhy != null && off.s2t.tWhy.startsWith("refused: fair naming"),
+                    off.s2t.toJson("T-sym").toString());
+            Assert.assertTrue(Double.isNaN(off.s2t.tSym) && !off.hasTarget(), "a refused T re-play gives no T-sym target");
+        }
+    }
+
+    /**
+     * Step-3 hygiene: an opponent's face-down permanent our seat cannot see keeps its real identity in every belief world,
+     * so an S2T row there gets OPEN-6's treatment (no search, no target); a step-1 block is unchanged.
+     */
+    @Test(timeOut = 1800000)
+    public void anOpponentsFaceDownPermanentIsHandledLikeOpen6() throws Exception {
+        initAndCreateGame();
+        try (FakeSearchService svc = new FakeSearchService(SHA, 2)) {
+            svc.scriptRaw = new BvwS2tHonestyTest.Policy(-1);
+            svc.leafValue = BvwS2tHonestyTest.leaves(-1);
+            final java.util.function.Supplier<Game> faceDown = () -> {
+                final Game g = ForcedWinSolverTest.game("Default", "Default", position());
+                for (Card c : g.getPlayers().get(1).getCardsIn(ZoneType.Battlefield)) {
+                    if ("Grizzly Bears".equals(c.getName())) {
+                        c.turnFaceDown(true);
+                    }
+                }
+                return g;
+            };
+            final Game probe = faceDown.get();
+            final Object[] cp = copy(probe, probe.getPlayers().get(0));
+            Assert.assertEquals(forge.bench.rl.HiddenExile.scanFaceDownPermanents((Game) cp[0], (Player) cp[1]).size(), 1);
+            final Object[] cq = copy(probe, probe.getPlayers().get(1));
+            Assert.assertEquals(forge.bench.rl.HiddenExile.scanFaceDownPermanents((Game) cq[0], (Player) cq[1]).size(), 0,
+                    "our own face-down permanent is not hidden from us");
+            final StepSearch.Result s2t = search(new StepSearch(BvwS2tHonestyTest.spec(svc.port(), "H-sym", false, false),
+                    BvwStepSearchHonestyTest.index(), 2, "test", "s2t-fd"), faceDown.get(), false, forge.ai.AiFixes.Mode.ON);
+            Assert.assertEquals(s2t.why, forge.bench.rl.HiddenExile.TARGET_SOURCE, s2t.toJson().toString());
+            Assert.assertFalse(s2t.hasTarget());
+            final StepSearch.Result one = search(new StepSearch(BvwStepSearchHonestyTest.spec(svc.port()),
+                    BvwStepSearchHonestyTest.index(), 2, "test", "step1-fd"), faceDown.get(), false, forge.ai.AiFixes.Mode.ON);
+            Assert.assertNotEquals(one.why, forge.bench.rl.HiddenExile.TARGET_SOURCE, "a step-1 block is unchanged");
+        }
     }
 }

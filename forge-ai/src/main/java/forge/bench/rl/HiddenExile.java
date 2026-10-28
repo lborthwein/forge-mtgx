@@ -68,6 +68,42 @@ public final class HiddenExile {
         return out;
     }
 
+    /**
+     * Step-3 hygiene (review #123 recheck; S2T blocks only): on a copy, one entry per face-down permanent (or face-down
+     * spell on the stack) of another player that {@code seat} may not look at: {@code {"owner": "opponent", "zone":
+     * zone}}. The redraw re-draws hidden hand and library cards only, so such a card keeps its real identity in every
+     * world, as a face-down exile does (OPEN-6). Empty when there is none. Nothing here names a hidden card.
+     */
+    public static JsonArray scanFaceDownPermanents(final Game copy, final Player seat) {
+        final JsonArray out = new JsonArray();
+        for (Player p : copy.getPlayers()) {
+            if (p == seat) {
+                continue;
+            }
+            for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Command}) {
+                for (Card c : p.getCardsIn(z)) {
+                    if (c.isFaceDown() && !c.mayPlayerLook(seat) && !c.getView().canFaceDownBeShownTo(seat.getView())) {
+                        final JsonObject e = new JsonObject();
+                        e.addProperty("owner", "opponent");
+                        e.addProperty("zone", z.name());
+                        out.add(e);
+                    }
+                }
+            }
+        }
+        for (forge.game.spellability.SpellAbilityStackInstance si : copy.getStack()) {
+            final Card c = si.getSourceCard();
+            if (c != null && c.getController() != seat && c.isFaceDown() && !c.mayPlayerLook(seat)
+                    && !c.getView().canFaceDownBeShownTo(seat.getView())) {
+                final JsonObject e = new JsonObject();
+                e.addProperty("owner", "opponent");
+                e.addProperty("zone", "Stack");
+                out.add(e);
+            }
+        }
+        return out;
+    }
+
     /** The exiler's card name (its printed name; an adventure state counts as its card), or null when unknown. */
     static String exiler(final Card by) {
         if (by == null) {

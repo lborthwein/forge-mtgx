@@ -354,6 +354,11 @@ public final class StepSearch {
                 }
                 return s;
             }
+            if (c.beliefSingleton) {
+                // step-3 hygiene (the coordinator's ruling after the review #123 recheck): S2T blocks draw from the
+                // whole pool, as the proof check and step 1 do
+                throw new IllegalArgumentException("refused: an S2T teacher needs rlsearch.beliefSingleton false");
+            }
             if (!"policy".equals(c.opponent)) {
                 // the honesty refusal: no Forge AI seat in an S2T play-out (above all in a true world: T, OPR)
                 throw new IllegalArgumentException("refused: an S2T teacher needs rlsearch.opponent \"policy\" (the "
@@ -587,6 +592,11 @@ public final class StepSearch {
             // OPEN-6 ruling: a face-down exile the seat cannot see keeps its real identity in every world (the redraw
             // covers hand and library only): no search and no target here, read on the copy from the seat's view
             final JsonArray hidden = HiddenExile.scan(c, cp);
+            if (spec.s2t()) {
+                // step-3 hygiene (review #123 recheck): an opponent's face-down permanent we cannot see keeps its real
+                // identity in every belief world, as a face-down exile does: OPEN-6's ruling applies
+                hidden.addAll(HiddenExile.scanFaceDownPermanents(c, cp));
+            }
             if (hidden.size() > 0) {
                 res.why = HiddenExile.TARGET_SOURCE;
                 res.hiddenExile = hidden;

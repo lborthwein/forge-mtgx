@@ -130,6 +130,8 @@ public class BvwS2tSpecTest {
             b -> b.getAsJsonObject("rlsearch").addProperty("leaf", "static"),
             b -> b.getAsJsonObject("rlsearch").addProperty("playout", "forge"),
             b -> b.getAsJsonObject("rlsearch").addProperty("opponent", "human"),
+            // step-3 hygiene: S2T blocks draw from the whole pool
+            b -> b.getAsJsonObject("rlsearch").addProperty("beliefSingleton", true),
         };
         for (int i = 0; i < muts.length; i++) {
             final JsonObject b = s2t();
