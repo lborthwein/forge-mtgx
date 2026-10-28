@@ -142,6 +142,11 @@ public final class AiTapeController extends PlayerControllerAi implements AiCost
             return v;
         }
         final JsonObject e = tape.takeChoice("m", m);
+        if (inner instanceof ForcedChoiceObserver o) {
+            // lane lessons-forge-jar-1027: a lesson's scripted seat re-plans this decision (without acting) so its place in
+            // the script is the live seat's; no other seat implements it
+            o.beforeForcedChoice(m);
+        }
         final T v;
         try {
             // decoding only checks and looks up (legality, candidates): whatever it builds takes scoped ids, never the
