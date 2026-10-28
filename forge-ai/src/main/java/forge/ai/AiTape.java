@@ -603,6 +603,7 @@ public final class AiTape {
         final int at = cursors.isEmpty() ? forcedTop : cursors.peek().i;
         if (cursors.isEmpty()) {
             currentTop = forcedTop;
+            goneBuilds.clear(); // bvw-decision-log-1027: a copy's build is reused within its own top-level entry only
         }
         if (at >= list.size()) {
             throw diverge("the record has no " + what(k, m) + " here: " + (cursors.isEmpty()
@@ -747,6 +748,45 @@ public final class AiTape {
     }
     private int lazyMissed;
     private int lazyGone;
+    /**
+     * bvw-decision-log-1027: trait builds the record made on a copy (gone in the replay), by card | kind | state, with
+     * the ids that build took: the scope counters it started from. A copy can share its CardState with the card the
+     * engine makes next (moving a card to the stack copies it), so the live game's real card had the trait already; a
+     * replay that has to build it there builds it on those ids, as the record did ({@link #lazyLate}).
+     */
+    private final java.util.Map<String, int[]> goneBuilds = new java.util.HashMap<>();
+    private int lazyLate;
+
+    private static String lazyKey(final int card, final String kind, final String state) {
+        return card + "|" + kind + "|" + state;
+    }
+
+    /** The scope counters a recorded build started from ({@link #goneBuilds}); null when the record cannot say. */
+    private int[] buildIds(final JsonObject n, final String start) {
+        if (n.has("sc")) {
+            if (!n.has("sci")) {
+                return null; // a fresh look-ahead scope: no ids of the game's to reuse
+            }
+            final JsonArray sci = n.getAsJsonArray("sci");
+            final int[] a = new int[sci.size()];
+            for (int i = 0; i < a.length; i++) {
+                a[i] = sci.get(i).getAsInt();
+            }
+            return a;
+        }
+        if (start == null) {
+            return null;
+        }
+        final String[] p = start.split("\\.");
+        if (p.length < 11) {
+            return null;
+        }
+        final int[] a = new int[7];
+        for (int i = 0; i < 7; i++) {
+            a[i] = Integer.parseUnsignedInt(p[4 + i], 16);
+        }
+        return a;
+    }
 
     private static final class LazyTok {
         final AiTape tape;
@@ -858,6 +898,16 @@ public final class AiTape {
             if (cursors.isEmpty() && decodeDepth == 0) {
                 return null; // the engine's, between decisions, as in the record
             }
+            final int[] late = cursors.isEmpty() ? null : goneBuilds.remove(lazyKey(card, kind, state));
+            if (late != null) {
+                // bvw-decision-log-1027: the record built this trait on a copy that shares this state (gone above); the
+                // live game's card had it from then. Built now on the ids that build took, never on new ones.
+                lazyLate++;
+                lazyDepth++;
+                final Object prevScope = forge.util.IdScope.capture();
+                forge.util.IdScope.install(forge.util.IdScope.scopeAt(late));
+                return new LazyTok(this, null, null, prevScope, true, card);
+            }
             if (decodeDepth > 0) {
                 // bvw-decision-log-1027: a decode's own lookup built it (the record's builds of this decision are already
                 // made): e.g. on the temporary clone state an alternative cost's candidate puts the card in. Built in the
@@ -926,6 +976,7 @@ public final class AiTape {
                 return;
             }
             final int at = c.i;
+            final String start = n.has("pre") ? str(n, "pre") : lastPost; // where the record's build started
             final forge.game.card.Card card = n.has("cp") ? null : game.findById(n.get("a").getAsInt());
             final String st = str(n, "st");
             final forge.game.card.CardState state = card == null ? null
@@ -947,6 +998,10 @@ public final class AiTape {
                     // a copy only the AI's deliberation made, or a card it imagined (a token), never the game's own: not
                     // built on the game's card, and the ids its trait took are the record's next state, restored there
                     lazyGone++;
+                    final int[] ids = buildIds(n, start);
+                    if (ids != null) {
+                        goneBuilds.put(lazyKey(n.get("a").getAsInt(), str(n, "m"), str(n, "st")), ids);
+                    }
                 } else {
                     // the replay's card had it already: the replay is not exact
                     lazyMissed("a recorded trait build the replay could not make (" + str(n, "m") + ")");
@@ -1020,6 +1075,7 @@ public final class AiTape {
             o.addProperty("ahead", ahead);
             o.addProperty("lazyMissed", lazyMissed);
             o.addProperty("lazyGone", lazyGone);
+            o.addProperty("lazyLate", lazyLate);
             if (divergence != null) {
                 o.addProperty("divergence", divergence);
             }
