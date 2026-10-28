@@ -190,12 +190,20 @@ public class BvwS2tHonestyTest extends SimulationTest {
         return run(ss, pol, state, opr, null, null);
     }
 
+    /** Every player's Forge fair naming (step-3 hygiene: a true world needs it ON for every player). */
+    static void fairNaming(final Game g, final forge.ai.AiFixes.Mode mode) {
+        for (Player p : g.getRegisteredPlayers()) {
+            ((forge.ai.LobbyPlayerAi) p.getLobbyPlayer()).setFairNaming(mode);
+        }
+    }
+
     static Run run(final StepSearch ss, final Policy pol, final String state, final boolean opr, final String ourDeck,
             final String theirDeck) {
         pol.log.clear();
         final Game g = ForcedWinSolverTest.game("Default", "Default", state);
         deck(g, 0, ourDeck);
         deck(g, 1, theirDeck);
+        fairNaming(g, forge.ai.AiFixes.Mode.ON);
         final Player me = g.getPlayers().get(0);
         final RlKnowledge know = new RlKnowledge(g);
         know.v2 = true;

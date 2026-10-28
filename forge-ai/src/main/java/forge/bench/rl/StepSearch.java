@@ -354,6 +354,11 @@ public final class StepSearch {
                 }
                 return s;
             }
+            if (c.beliefSingleton) {
+                // step-3 hygiene (the coordinator's ruling after the review #123 recheck): S2T blocks draw from the
+                // whole pool, as the proof check and step 1 do
+                throw new IllegalArgumentException("refused: an S2T teacher needs rlsearch.beliefSingleton false");
+            }
             if (!"policy".equals(c.opponent)) {
                 // the honesty refusal: no Forge AI seat in an S2T play-out (above all in a true world: T, OPR)
                 throw new IllegalArgumentException("refused: an S2T teacher needs rlsearch.opponent \"policy\" (the "
@@ -478,6 +483,14 @@ public final class StepSearch {
         /** The service's value backend identity (HELLO_ACK value_backend), or null. */
         public JsonElement backend;
         /**
+         * step3-playout-fixes-1028 (null unless a step-3 play-out key is on; never in the row's JSON): this row's search
+         * play-out seats ({@link RlSearch#playoutSeatStats}): loop-guard answers, reduced-cap ends, default-cap ends,
+         * the most decisions a finished seat sent.
+         */
+        public long[] playoutStats;
+        /** Review #130 S3-3 (0 unless refused; never in the row's JSON): true-world re-plays refused for fair naming. */
+        public long trueFairNamingRefusals;
+        /**
          * OPEN-6 ruling (2026-10-24): the face-down exiled cards the seat may not look at on the copy
          * ({@link HiddenExile#scan}); non-empty = no target for this row, proof included. Null = none.
          */
@@ -587,6 +600,11 @@ public final class StepSearch {
             // OPEN-6 ruling: a face-down exile the seat cannot see keeps its real identity in every world (the redraw
             // covers hand and library only): no search and no target here, read on the copy from the seat's view
             final JsonArray hidden = HiddenExile.scan(c, cp);
+            if (spec.s2t()) {
+                // step-3 hygiene (review #123 recheck): an opponent's face-down permanent we cannot see keeps its real
+                // identity in every belief world, as a face-down exile does: OPEN-6's ruling applies
+                hidden.addAll(HiddenExile.scanFaceDownPermanents(c, cp));
+            }
             if (hidden.size() > 0) {
                 res.why = HiddenExile.TARGET_SOURCE;
                 res.hiddenExile = hidden;
@@ -743,6 +761,20 @@ public final class StepSearch {
             res.error = e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
             if (search != null) {
+                final long refused = search.lookaheadStats().trueFairNamingRefusals;
+                if (refused > 0) {
+                    // review #130 S3-3: a run-level signal (the step-3 smoke asserts none); the row is unchanged
+                    res.trueFairNamingRefusals = refused;
+                    System.err.println("[fair-naming-refusals] uid " + uid + " key " + key + " refused " + refused);
+                }
+                final RlSearch.Config sc = search.config();
+                if (sc.playoutLoopGuard > 0 || sc.playoutMaxDecisions > 0) {
+                    // step3-playout-fixes-1028: the row's play-out seat counts, on stderr only (the row is unchanged)
+                    res.playoutStats = search.playoutSeatStats();
+                    System.err.println("[playout-seats] uid " + uid + " key " + key + " guard_hits " + res.playoutStats[0]
+                            + " cap_ends " + res.playoutStats[1] + " default_cap_ends " + res.playoutStats[2]
+                            + " max_sent_finished " + res.playoutStats[3]);
+                }
                 search.close();
             }
             res.ms = (System.nanoTime() - t0) / 1e6;

@@ -235,6 +235,25 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String beliefPrior;
         public String beliefPriorSha256;
         public double beliefPriorGain = 20.0;
+        // ---- step3-playout-fixes-1028 (BVW step 3; every key off by default, and then nothing changes)
+        /**
+         * The "Cancel Search?" loop guard ({@link RlLoopGuard}) on every search play-out seat (ours and, with opponent
+         * "policy", the opponent's): K no-answers in a row to the same one-at-a-time zone-change card ask and its confirm,
+         * then the guard answers the confirm yes. 0 = off (the seats keep no guard, as before).
+         */
+        public int playoutLoopGuard = 0;
+        /**
+         * The backstop: each search play-out seat (ours and the opponent's) ends its copy after this many sent decisions
+         * instead of the seat default 3,000 (the play-out fails, {@code max_decisions}, as before); OPR roll-outs keep
+         * the default. Also puts the decision's budget stop on the opponent seat's service requests. 0 = off.
+         */
+        public int playoutMaxDecisions = 0;
+        /**
+         * The T and fresh re-plays ({@link LookaheadSearch#replayCandidate}, {@link LookaheadSearch#reevaluate}) locate a
+         * may-play candidate by its base description too ({@link LookaheadSearch#sameMayPlay}), as the main search's
+         * level-2 pass does; only after the exact and prefix matches failed. false = off.
+         */
+        public boolean replayMayPlayLoose = false;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -243,7 +262,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "opponent", "leafSym", "beliefPrior",
-                "beliefPriorSha256", "beliefPriorGain"));
+                "beliefPriorSha256", "beliefPriorGain", "playoutLoopGuard", "playoutMaxDecisions", "replayMayPlayLoose"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -306,6 +325,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 c.beliefPriorSha256 = o.get("beliefPriorSha256").getAsString();
             }
             if (o.has("beliefPriorGain")) c.beliefPriorGain = o.get("beliefPriorGain").getAsDouble();
+            if (o.has("playoutLoopGuard")) c.playoutLoopGuard = o.get("playoutLoopGuard").getAsInt();
+            if (o.has("playoutMaxDecisions")) c.playoutMaxDecisions = o.get("playoutMaxDecisions").getAsInt();
+            if (o.has("replayMayPlayLoose")) c.replayMayPlayLoose = o.get("replayMayPlayLoose").getAsBoolean();
             c.check();
             return c;
         }
@@ -387,6 +409,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (beliefBasics < 0 || beliefBasics > 64) {
                 throw new IllegalArgumentException("search.beliefBasics must be 0..64, not " + beliefBasics);
+            }
+            // step3-playout-fixes-1028
+            if (playoutLoopGuard < 0 || playoutLoopGuard > 16) {
+                throw new IllegalArgumentException("search.playoutLoopGuard must be 0 (off) .. 16, not " + playoutLoopGuard);
+            }
+            if (playoutMaxDecisions != 0 && (playoutMaxDecisions < 100 || playoutMaxDecisions > 3000)) {
+                throw new IllegalArgumentException("search.playoutMaxDecisions must be 0 (off) or 100..3000, not "
+                        + playoutMaxDecisions);
+            }
+            if ((playoutLoopGuard > 0 || playoutMaxDecisions > 0 || replayMayPlayLoose) && !"policy".equals(playout)) {
+                throw new IllegalArgumentException("search.playoutLoopGuard / playoutMaxDecisions / replayMayPlayLoose "
+                        + "need playout=policy");
             }
             choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
@@ -470,6 +504,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (leafSym) {
                 o.addProperty("leafSym", true); // bvw-step2-fork-1027: only when on
+            }
+            // step3-playout-fixes-1028: only when on, so every other spec's JSON is unchanged
+            if (playoutLoopGuard > 0) {
+                o.addProperty("playoutLoopGuard", playoutLoopGuard);
+            }
+            if (playoutMaxDecisions > 0) {
+                o.addProperty("playoutMaxDecisions", playoutMaxDecisions);
+            }
+            if (replayMayPlayLoose) {
+                o.addProperty("replayMayPlayLoose", true);
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -687,6 +731,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.opponentPolicy = "policy".equals(cfg.opponent);
         lc.leafSym = cfg.leafSym;
         lc.leafOpp = cfg.leafSym;
+        lc.replayMayPlayLoose = cfg.replayMayPlayLoose; // step3-playout-fixes-1028
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)
             lc.stack = true;
@@ -1943,6 +1988,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // sc-wallguard-1009: only when the budget stopped a play-out seat, so an unbudgeted summary is unchanged
             o.addProperty("playout_budget_stops", budgetStops.get());
         }
+        if (ls.getStats().trueFairNamingRefusals > 0) {
+            // review #130 S3-3: only when a true-world re-play was refused, so every other summary is unchanged
+            o.addProperty("true_fair_naming_refusals", ls.getStats().trueFairNamingRefusals);
+        }
+        if (cfg.playoutLoopGuard > 0 || cfg.playoutMaxDecisions > 0) {
+            // step3-playout-fixes-1028: only with a step-3 play-out key, so every other summary is unchanged
+            final long[] ps = playoutSeatStats();
+            final JsonObject po = new JsonObject();
+            po.addProperty("loop_guard_hits", ps[0]);
+            po.addProperty("cap_ends", ps[1]);
+            po.addProperty("default_cap_ends", ps[2]);
+            po.addProperty("max_sent_finished", ps[3]);
+            o.add("playout_seats", po);
+        }
         if (voided != null) {
             o.addProperty("voided", voided);
         }
@@ -2279,6 +2338,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /** step3-playout-fixes-1028: every entry of {@code match} is an exact match (not the loose may-play path). */
+    static boolean looseMatchExact(final List<Integer> match, final RlCandidates.Menu m, final List<SpellAbility> objs,
+            final LookaheadSearch.FirstAction first) {
+        for (int i : match) {
+            final int ch = choiceOf(m, i);
+            if (!(ch == 0 ? first.pass : ch > 0 && ch <= objs.size() && first.matches(objs.get(ch - 1)))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * Lane copy-fidelity-1010 (diagnostics, appended to the failure): what the play-out's first menu offered from the
      * searched candidate's card, and where the copy stood.
@@ -2324,8 +2395,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         for (int s = 0; s < ctl.length; s++) {
             ctl[s] = s == seat ? "rl:playout" : "forge";
         }
-        final RlSeat.Config sc = new RlSeat.Config();
-        sc.mode = "eval";
+        final RlSeat.Config sc = playoutSeatConfig(first);
         final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
@@ -2400,6 +2470,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                             match.add(i);
                         }
                     }
+                }
+                if (match.size() > 1 && first.mayPlayUnique && !looseMatchExact(match, m, objs, first)) {
+                    // step3-playout-fixes-1028 (review #130 S3-2): a re-play's loose may-play match must be unique
+                    why[0] = "the searched candidate is ambiguous in the play-out's menu (" + match.size()
+                            + " may-play entries)" + menuMiss(gg, m, objs, first);
+                    return -1;
                 }
                 if (match.isEmpty()) {
                     why[0] = "the searched candidate is not in the play-out's menu" + menuMiss(gg, m, objs, first);
@@ -2485,6 +2561,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
             @Override
             public String failure() {
+                noteSeatEnd(rs, sc);
                 if (rs.fatal != null) {
                     return rs.fatal;
                 }
@@ -2512,6 +2589,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      */
     @Override
     public LookaheadSearch.PlayoutSeat opponentSeat(final Object copyCtx, final Game g, final Player opp, final long seed) {
+        return opponentSeat(copyCtx, g, opp, seed, null);
+    }
+
+    /**
+     * As above; {@code first} is the play-out's own first action (its decision's budget and whether it is an OPR
+     * roll-out), null = none (the step-2 seat exactly).
+     */
+    @Override
+    public LookaheadSearch.PlayoutSeat opponentSeat(final Object copyCtx, final Game g, final Player opp, final long seed,
+            final LookaheadSearch.FirstAction first) {
         final CopyCtx cc = (CopyCtx) copyCtx;
         final int seat = g.getRegisteredPlayers().indexOf(opp);
         if (seat < 0) {
@@ -2526,14 +2613,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         for (int s = 0; s < ctl.length; s++) {
             ctl[s] = s == seat ? "rl:playout-opp" : "forge";
         }
-        final RlSeat.Config sc = new RlSeat.Config();
-        sc.mode = "eval";
+        final RlSeat.Config sc = playoutSeatConfig(first);
+        // step3-playout-fixes-1028 (playoutMaxDecisions; off: no stop, as step 2): the decision's budget stop
+        final boolean stopOnBudget = cfg.playoutMaxDecisions > 0 && first != null;
         final RlFeaturizer feat = new RlFeaturizer(index);
         feat.setVersion(obsVersion);
         feat.setKnowledge(cc.know);
         final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
             @Override
             public RlWire.Decision decide(final byte[] p) throws IOException {
+                if (stopOnBudget) {
+                    budgetStop(first);
+                }
                 try {
                     return client().decide(p, cfg.playoutSample);
                 } catch (IOException | RuntimeException e) {
@@ -2565,6 +2656,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
             @Override
             public String failure() {
+                noteSeatEnd(rs, sc);
                 return rs.fatal != null ? rs.fatal : rs.voidReason;
             }
         };
@@ -2572,6 +2664,60 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
 
     /** S2T: opponent policy seats built (play-outs whose opponent was the policy). */
     private int opponentSeats = 0;
+
+    // ------------------------------------------------------------------------------------------------ step 3 play-out seats
+
+    /**
+     * step3-playout-fixes-1028: a search play-out seat's run-level knobs (ours and the opponent's). With every key off
+     * these are the step-2 seat's exactly ({@code new RlSeat.Config()}, mode eval: no loop guard, 3,000 decisions).
+     * {@code playoutLoopGuard} K puts the "Cancel Search?" guard on the seat; {@code playoutMaxDecisions} N caps the
+     * seat at N sent decisions, except in an OPR roll-out (12 turns to the end of a game; its own turn and step caps).
+     */
+    RlSeat.Config playoutSeatConfig(final LookaheadSearch.FirstAction first) {
+        final RlSeat.Config sc = new RlSeat.Config();
+        sc.mode = "eval";
+        if (cfg.playoutLoopGuard > 0) {
+            sc.loopGuard = cfg.playoutLoopGuard;
+            sc.loopGuardLog = false; // counted in the summary instead of one stderr line per hit
+        }
+        if (cfg.playoutMaxDecisions > 0 && (first == null || !first.oprRollout)) {
+            sc.maxDecisions = cfg.playoutMaxDecisions;
+        }
+        return sc;
+    }
+
+    /** step3-playout-fixes-1028: loop-guard answers, reduced-cap ends, and the most decisions a finished seat sent. */
+    private final java.util.concurrent.atomic.AtomicLong playoutGuardHits = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong playoutCapEnds = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong playoutDefaultCapEnds = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicInteger playoutMaxSent = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.Set<RlSeat> playoutSeatsNoted = java.util.Collections.newSetFromMap(
+            new java.util.WeakHashMap<>());
+
+    /** Once per seat (failure() may be read more than once): its counts into the step-3 play-out statistics. */
+    private void noteSeatEnd(final RlSeat rs, final RlSeat.Config sc) {
+        synchronized (playoutSeatsNoted) {
+            if (!playoutSeatsNoted.add(rs)) {
+                return;
+            }
+        }
+        playoutGuardHits.addAndGet(rs.loopGuardHits());
+        if ("max_decisions".equals(rs.voidReason)) {
+            (sc.maxDecisions < new RlSeat.Config().maxDecisions ? playoutCapEnds : playoutDefaultCapEnds).incrementAndGet();
+        } else if (rs.voidReason == null && rs.fatal == null) {
+            playoutMaxSent.accumulateAndGet(rs.totalSent(), Math::max);
+        }
+    }
+
+    /** This search's spec. */
+    public Config config() {
+        return cfg;
+    }
+
+    /** Tests and the summary: {guard hits, reduced-cap ends, default-cap ends, most decisions of a finished seat}. */
+    public long[] playoutSeatStats() {
+        return new long[] {playoutGuardHits.get(), playoutCapEnds.get(), playoutDefaultCapEnds.get(), playoutMaxSent.get()};
+    }
 
     /** S2T: the opponent policy seats built so far (tests). */
     public synchronized int opponentSeats() {
