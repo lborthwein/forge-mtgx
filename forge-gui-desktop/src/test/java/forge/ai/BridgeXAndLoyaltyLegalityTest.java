@@ -261,6 +261,16 @@ public class BridgeXAndLoyaltyLegalityTest extends AITest {
         return moved;
     }
 
+    private static SpellAbility valkiCopyOf(final Card valki, final Player p) {
+        for (SpellAbility sa : valki.getSpellAbilities()) {
+            if (sa.getApi() == ApiType.ChooseCard) {
+                sa.setActivatingPlayer(p);
+                return sa;
+            }
+        }
+        throw new AssertionError("no Valki copy ability");
+    }
+
     private static Predicate<SpellAbility> valkiCopy(final Card valki) {
         return sa -> sa.getHostCard() == valki && sa.getApi() == ApiType.ChooseCard;
     }
@@ -298,7 +308,13 @@ public class BridgeXAndLoyaltyLegalityTest extends AITest {
         s.x = 3;
         ready(s);
         final List<SpellAbility> got = s.bridge.chooseSpellAbilityToPlay();
-        AssertJUnit.assertTrue(s.offered);
+        if (!s.offered) {
+            // fix 3: with the payable ceiling (X <= 2) the menu's empty-choice filter already sees no useful X and does
+            // not offer it (with the estimate's ceiling, 4, it was offered and the step-down refused it)
+            AssertJUnit.assertTrue(String.valueOf(s.refusals), s.refusals.isEmpty());
+            AssertJUnit.assertEquals(2, forge.bench.StateEncoder.maxAnnounceableX(valkiCopyOf(valki, s.me)));
+            return;
+        }
         AssertJUnit.assertEquals(String.valueOf(s.refusals), 1, s.refusals.size());
         AssertJUnit.assertTrue(s.refusals.get(0), s.refusals.get(0).contains("does something"));
         AssertJUnit.assertFalse(got != null && got.stream().anyMatch(valkiCopy(valki)));
@@ -395,6 +411,48 @@ public class BridgeXAndLoyaltyLegalityTest extends AITest {
         s.x = 3;
         final SpellAbility sa = choose(s);
         AssertJUnit.assertEquals(Integer.valueOf(1), sa.getXManaCostPaid());
+    }
+
+    // ------------------------------------------------------------------------------------------------ the X ceiling
+
+    /**
+     * Fix 3 (a separate commit: it changes the observation): the published X ceiling ({@code x.max}, {@code
+     * x.maxAnnounce}) is the largest X the seat can pay, not the mana estimate's.
+     */
+    @Test
+    public void xCeilingIsTheLargestPayableX() {
+        final Seat s = seat();
+        addCard("Forest", s.me);
+        addCard("Forest", s.me);
+        final Card tal = addCard("Talisman of Curiosity", s.me);
+        final Card gsz = addCardToZone("Green Sun's Zenith", s.me, ZoneType.Hand);
+        final Card ballista = addCardToZone("Walking Ballista", s.me, ZoneType.Hand);
+        final Card finale = addCardToZone("Finale of Devastation", s.me, ZoneType.Hand);
+        ready(s);
+        final SpellAbility g = gsz.getFirstSpellAbility();
+        final SpellAbility b = ballista.getFirstSpellAbility();
+        final SpellAbility f = finale.getFirstSpellAbility();
+        for (SpellAbility sa : new SpellAbility[] {g, b, f}) {
+            sa.setActivatingPlayer(s.me);
+        }
+        // three mana (the estimate says five): GSZ X 2, Ballista X 1 (two {X}), Finale X 1
+        AssertJUnit.assertEquals(2, forge.bench.StateEncoder.xManaCeiling(g));
+        AssertJUnit.assertEquals(2, forge.bench.StateEncoder.maxAnnounceableX(g));
+        AssertJUnit.assertEquals(2, forge.bench.StateEncoder.xManaCeiling(b));
+        AssertJUnit.assertEquals(1, forge.bench.StateEncoder.maxAnnounceableX(b));
+        AssertJUnit.assertEquals(1, forge.bench.StateEncoder.maxAnnounceableX(f));
+        AssertJUnit.assertNull("the announced X is put back", g.getXManaCostPaid());
+        // AIXMax (Forge AI: no more than the best green creature in the library, here none) is not a limit
+        // Mishra's Workshop's mana is for artifact spells only: no X for GSZ beyond the Forests' and Talisman's
+        addCard("Mishra's Workshop", s.me);
+        AssertJUnit.assertEquals(2, forge.bench.StateEncoder.maxAnnounceableX(g));
+        // ... but Ballista (an artifact) can use it: six mana, X 3
+        AssertJUnit.assertEquals(3, forge.bench.StateEncoder.maxAnnounceableX(b));
+        // Thalia taxes the noncreature GSZ by one
+        addCard("Thalia, Guardian of Thraben", s.opp);
+        AssertJUnit.assertEquals(1, forge.bench.StateEncoder.maxAnnounceableX(g));
+        tal.setTapped(true);
+        AssertJUnit.assertEquals(0, forge.bench.StateEncoder.maxAnnounceableX(g));
     }
 
     // ------------------------------------------------------------------------------------------------ planeswalkers

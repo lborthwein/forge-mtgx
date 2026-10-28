@@ -29,6 +29,7 @@ import forge.card.MagicColor;
 import forge.card.mana.ManaAtom;
 import forge.game.Game;
 import forge.game.GameEntity;
+import forge.game.ability.AbilityUtils;
 import forge.game.ability.ApiType;
 import forge.game.ability.effects.CharmEffect;
 import forge.game.card.Card;
@@ -666,7 +667,9 @@ public final class StateEncoder {
             return o;
         }
         o.addProperty("min", 0);
-        o.addProperty("max", xManaCeiling(sa));
+        // review #132 S3: the payable ceiling is computed once per item (each value of X it tries is a payment test)
+        final int max = xManaCeiling(sa);
+        o.addProperty("max", max);
         // Protocol v2.3: `max` is mana-for-X and is NOT divided by the number of {X}
         // symbols; `symbols` says how many there are, so a host can compute the payable X
         // itself. Both are published because the TS lane's D-1 instrument is calibrated on
@@ -674,16 +677,34 @@ public final class StateEncoder {
         // to, so a host that trusts it cannot over-announce.
         final int symbols = xSymbolCount(sa);
         o.addProperty("symbols", symbols);
-        o.addProperty("maxAnnounce", maxAnnounceableX(sa));
+        o.addProperty("maxAnnounce", max / symbols);
         return o;
     }
 
-    /** Mana available for X: the affordability estimate minus the cost's fixed pips. */
+    /**
+     * Mana available for X (the published {@code x.max}; {@code x.maxAnnounce} is this divided by the {X} symbols).
+     *
+     * <p>mtgx lane forge-fix-p1p2-1028 (anomaly audit 1028 P1, fix 3): for an ability with {X} in its mana cost this is
+     * Forge's own payability test, as Forge AI's {@code ComputerUtilCost.setMaxXValue} finds its X: the largest X that
+     * canPayManaCost pays ({@link #payableX}, with the cost's own adjustments: Thalia, Sphere of
+     * Resistance, Spellbinder; the colours and restrictions of each source; an {@code XMax}), times the {X} symbols. The
+     * estimate it replaces ({@code getAvailableManaEstimate} minus the fixed pips) counted a Talisman's "Combo G U" as
+     * three mana, Mishra's Workshop's artifact-only mana as general mana and saw no cost increase, so it offered X the seat
+     * could not pay. Other X (a non-mana cost part) keep the estimate. The ability's announced X is put back.
+     */
     public static int xManaCeiling(final SpellAbility sa) {
         try {
             final Player p = sa.getActivatingPlayer();
             if (p == null) {
                 return 0;
+            }
+            if (sa.costHasManaX()) {
+                final Integer keep = sa.getXManaCostPaid();
+                try {
+                    return payableX(sa, p) * xSymbolCount(sa);
+                } finally {
+                    sa.setXManaCostPaid(keep);
+                }
             }
             final int available = ComputerUtilMana.getAvailableManaEstimate(p);
             final int fixed = sa.getPayCosts() == null || sa.getPayCosts().hasNoManaCost()
@@ -693,6 +714,27 @@ public final class StateEncoder {
             JsonRpcChannel.logErr("X ceiling estimate failed", e);
             return 0;
         }
+    }
+
+    /** Upper bound on the X {@link #payableX} tries (an unbounded mana source must not spin forever). */
+    static final int X_CAP = 99;
+
+    /**
+     * The largest X whose mana cost the player can pay: {@link ComputerUtilMana#determineLeftoverMana}'s loop (Forge AI's
+     * {@code setMaxXValue}), bounded by the card's {@code XMax} (a rule) but NOT by {@code AIXMax}, which is Forge AI's
+     * preference (Green Sun's Zenith: never more than the greatest mana value it could find; an X past it is legal and
+     * Finale of Devastation's X 10 pump needs it). canPayManaCost with extra mana i prices the cost at X = i.
+     */
+    static int payableX(final SpellAbility sa, final Player p) {
+        int max = X_CAP;
+        if (sa.hasParam("XMax")) {
+            max = Math.min(max, AbilityUtils.calculateAmount(sa.getHostCard(), sa.getParam("XMax"), sa));
+        }
+        int x = 0;
+        while (x < max && ComputerUtilMana.canPayManaCost(sa, p, x + 1, sa.isTrigger())) {
+            x++;
+        }
+        return x;
     }
 
     /** How many {X} symbols the mana cost carries. Walking Ballista is 2. */

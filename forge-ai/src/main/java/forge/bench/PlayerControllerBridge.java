@@ -1007,6 +1007,9 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                     + " for an ability with no {X}: " + chosen);
             return false;
         }
+        // Review #132 S2-1, with the payable ceiling: stale targets on the chain are priced by the payment test, so they
+        // are cleared before the ceiling is computed (and the step-down below).
+        clearChainTargets(chosen);
         final int ceiling = StateEncoder.maxAnnounceableX(chosen);
         int clamped = Math.max(0, Math.min(x, ceiling));
         int floor = 0;
@@ -1029,14 +1032,16 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         // Review #132 S2-1: targets left on the chain by an earlier test (Forge AI's canPlayAI, a previous menu) are
         // priced by canPayCost (Ward, per-target cost increases), so the step-down must not see them: Banefire with a
         // stale Ward {2} target stepped down to X = 0. ensureTargets re-targets the chain after this anyway.
-        clearChainTargets(chosen);
         final int asked = clamped;
-        if (!canPayForSeat(chosen)) {
+        // With the payable ceiling the clamp itself is the step-down: an answer above it was cut to the largest payable
+        // X, so the same S2-2 rules apply to the cut value (an empty X is skipped, a cut to 0 from X > 0 is refused).
+        final boolean cut = x > clamped;
+        if (!canPayForSeat(chosen) || cut && (emptyAtX(chosen, clamped) || clamped == 0 && x > 0)) {
             // Review #132 S2-2: never land on an X that does nothing. An X at which the ability chooses nothing
             // (AiEmptyChoice: Valki with no exiled creature of that mana value) is skipped, and an X > 0 that can only
             // step down to 0 (Walking Ballista as a 0/0, a zero-X tutor) is refused as before; a stated minimum keeps
             // the floor above 0, so it is never the case there.
-            int down = asked - 1;
+            int down = cut ? clamped : asked - 1;
             while (down >= floor) {
                 chosen.setXManaCostPaid(down);
                 if (!emptyAtX(chosen, down) && canPayForSeat(chosen)) {
@@ -1044,11 +1049,11 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                 }
                 down--;
             }
-            if (down < floor || (down == 0 && asked > 0)) {
+            if (down < floor || (down == 0 && x > 0)) {
                 chosen.setXManaCostPaid(asked);
                 counters.instrument("x.noUsefulPayableX");
                 refuse("chooseSpellAbilityToPlay", "announced x=" + asked + " is unpayable and no payable X"
-                        + (down == 0 && asked > 0 ? " above 0" : "") + " does something: " + chosen);
+                        + (down == 0 && x > 0 ? " above 0" : "") + " does something: " + chosen);
                 return false;
             }
             clamped = down;
