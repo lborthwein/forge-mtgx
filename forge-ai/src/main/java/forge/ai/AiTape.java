@@ -761,6 +761,28 @@ public final class AiTape {
         return card + "|" + kind + "|" + state;
     }
 
+    /**
+     * bvw-decision-log-1027: the cursor's next entry, a build on a copy only the AI's deliberation made, is gone: the
+     * record's state after it restored (as {@link #applyLazyAhead} does for one).
+     */
+    private void skipGone(final Cur c) {
+        final JsonObject n = c.list.get(c.i).getAsJsonObject();
+        final String start = n.has("pre") ? str(n, "pre") : lastPost;
+        c.i++;
+        final String post = str(n, "post");
+        if (post != null) {
+            if (!post.equals(sync())) {
+                ahead += restore(post);
+            }
+            lastPost = post;
+        }
+        lazyGone++;
+        final int[] ids = buildIds(n, start);
+        if (ids != null) {
+            goneBuilds.put(lazyKey(n.get("a").getAsInt(), str(n, "m"), str(n, "st")), ids);
+        }
+    }
+
     /** The scope counters a recorded build started from ({@link #goneBuilds}); null when the record cannot say. */
     private int[] buildIds(final JsonObject n, final String start) {
         if (n.has("sc")) {
@@ -886,6 +908,26 @@ public final class AiTape {
         JsonObject e = null;
         if (!cursors.isEmpty()) {
             final Cur c = cursors.peek();
+            // bvw-decision-log-1027: past the record's pending builds on copies only the AI's deliberation made (gone in a
+            // replay), to this build's own entry: the record may have built this trait on a copy that shares its state
+            // (and so the card's) after building another copy's; a real build of another trait is never skipped
+            int j = c.i;
+            while (j < c.list.size()) {
+                final JsonObject n = c.list.get(j).getAsJsonObject();
+                if (!LAZY.equals(str(n, "k"))) {
+                    break;
+                }
+                if (kind.equals(str(n, "m")) && n.get("a").getAsInt() == card && java.util.Objects.equals(state, str(n, "st"))) {
+                    while (c.i < j) {
+                        skipGone(c);
+                    }
+                    break;
+                }
+                if (!n.has("cp")) {
+                    break;
+                }
+                j++;
+            }
             if (c.i < c.list.size()) {
                 final JsonObject n = c.list.get(c.i).getAsJsonObject();
                 if (LAZY.equals(str(n, "k")) && kind.equals(str(n, "m")) && n.get("a").getAsInt() == card
