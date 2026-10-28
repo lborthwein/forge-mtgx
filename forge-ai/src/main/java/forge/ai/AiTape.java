@@ -858,6 +858,13 @@ public final class AiTape {
             if (cursors.isEmpty() && decodeDepth == 0) {
                 return null; // the engine's, between decisions, as in the record
             }
+            if (decodeDepth > 0) {
+                // bvw-decision-log-1027: a decode's own lookup built it (the record's builds of this decision are already
+                // made): e.g. on the temporary clone state an alternative cost's candidate puts the card in. Built in the
+                // decode's scope, never on the game's ids. Had it been the card's real state, the record's own build of it
+                // later finds it built, and that counts as a recorded build the replay could not make.
+                return null;
+            }
             lazyMissed("a trait built where the record built none (" + kind + ")");
         }
         lazyDepth++;
