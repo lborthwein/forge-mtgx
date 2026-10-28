@@ -6,6 +6,7 @@ import forge.LobbyPlayer;
 import forge.ai.AIOption;
 import forge.ai.LobbyPlayerAi;
 import forge.card.CardRarity;
+import forge.card.CardStateName;
 import forge.card.CardRules;
 import forge.card.CardType;
 import forge.game.*;
@@ -923,8 +924,23 @@ public class GameCopier {
     private static final boolean USE_FROM_PAPER_CARD = true;
     private Card createCardCopy(Game newGame, Player newOwner, Card c, Player aiPlayer) {
         if (c.isToken() && !c.isImmutable()) {
-            Card result = new TokenInfo(c).makeOneToken(newOwner, c.getId());
-            new CardCopyService(c).copyCopiableCharacteristics(result, null, null);
+            final Card result;
+            if (c.getState(CardStateName.Original) != null && c.getState(CardStateName.Backside) != null
+                    && !c.isFlipCard()) {
+                // mtgx lane forge-fix-p1p2-1028 (anomaly audit 1028 P2): a transforming token (an Incubator token, a
+                // token copy of a transformed card) keeps both faces, which is up, and its paper card (its rules: what
+                // makes it transformable). Built from its current face alone, the copy had no back face: setState below
+                // failed ("non-existant state", 3.75 M lines in the step-1 corpus), the copy could not transform, and an
+                // LKI copy of it threw (CardCopyService.getLKICopy) or had the wrong face.
+                result = new Card(c.getId(), c.getPaperCard(), newGame);
+                result.setOwner(newOwner);
+                result.setGamePieceType(c.getGamePieceType());
+                result.setImageKey(c.getImageKey());
+                new CardCopyService(c).copyTransformingFaces(result);
+            } else {
+                result = new TokenInfo(c).makeOneToken(newOwner, c.getId());
+                new CardCopyService(c).copyCopiableCharacteristics(result, null, null);
+            }
             // copyCopiableCharacteristics clones each ability WITH its current targets, and those
             // targets are objects of the ORIGINAL game (e.g. a Map token the live AI just chose to
             // activate at the live Germ). Left in place, resolving that ability in the copy acts on
