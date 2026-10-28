@@ -226,9 +226,10 @@ public class Game {
      * snapshot points at its snapshot zone, and that zone held every LKI card of the snapshot, so one LKI card kept after
      * its snapshot was replaced (the cards that left the battlefield or the graveyard this turn, a change-zone LKI, a
      * trigger's run parameters) kept the whole snapshot alive: one battlefield or graveyard copy per departure. The next
-     * snapshot releases the old zones' card lists (the game's own snapshot and the ones {@link #copyLastState(ZoneType)}
-     * made for cost and zone-change tables since); the LKI cards keep their zone and every other field, so a snapshot
-     * reads exactly as before until the next one is taken.
+     * snapshot releases the old zones' card lists; the LKI cards keep their zone and every other field, so the game's
+     * snapshot reads exactly as before until the next one is taken. The zones {@link #copyLastState(ZoneType)} makes for
+     * cost and zone-change tables are released at once (lane lki-fix-port-1027, review S3-2): their readers use the
+     * returned collection, never the zone.
      */
     private final List<Zone> lastStateZones = new ArrayList<>(4);
 
@@ -256,7 +257,9 @@ public class Game {
         for (final Player p : getPlayers()) {
             final Zone z = p.getZone(type).getLKICopy(cachedMap);
             result.addAll(z);
-            lastStateZones.add(z); // lane lki-leak-1027: released with the game's snapshot at the next copyLastState()
+            // lane lki-fix-port-1027 (review S3-2): the cost / zone-change table reads `result`, not the zone: release it
+            // now (a sacrifice's LKI from here goes to Player.sacrificedThisTurn and would keep the whole zone otherwise)
+            z.releaseLastKnownCards();
         }
         return result;
     }
