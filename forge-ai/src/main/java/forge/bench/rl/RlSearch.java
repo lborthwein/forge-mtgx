@@ -218,6 +218,23 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
         public List<String> beliefSeen;
+        // ---- bvw-step2-fork-1027 (S2T, the symmetric teacher; every key off by default, and then nothing changes)
+        /**
+         * S2T: "forge" (the default) = every play-out's opponent is Forge AI; "policy" = the same policy seat as ours
+         * (bridged, this service, its own observation only). Policy play-outs only.
+         */
+        public String opponent = "forge";
+        /** S2T: the value leaf is (v_s + 1 - v_o) / 2 at the same state, both seats' own frames (leaf "value" only). */
+        public boolean leafSym = false;
+        /**
+         * S2T, belief "codraft": the co-draft table file ({@code {"syn": {a: {b: score}}}}; {@code classpath:} = a jar
+         * resource), its sha256 pin and the prior's gain. Every world (and the plans' solver worlds) draws the opponent's
+         * hidden cards from the belief pool with weights {@code 1 + gain * max_s syn[s][card]^2} over the cards they showed
+         * in this game.
+         */
+        public String beliefPrior;
+        public String beliefPriorSha256;
+        public double beliefPriorGain = 20.0;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -225,7 +242,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "opponent", "leafSym", "beliefPrior",
+                "beliefPriorSha256", "beliefPriorGain"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -281,6 +299,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
+            if (o.has("opponent")) c.opponent = o.get("opponent").getAsString();
+            if (o.has("leafSym")) c.leafSym = o.get("leafSym").getAsBoolean();
+            if (o.has("beliefPrior") && !o.get("beliefPrior").isJsonNull()) c.beliefPrior = o.get("beliefPrior").getAsString();
+            if (o.has("beliefPriorSha256") && !o.get("beliefPriorSha256").isJsonNull()) {
+                c.beliefPriorSha256 = o.get("beliefPriorSha256").getAsString();
+            }
+            if (o.has("beliefPriorGain")) c.beliefPriorGain = o.get("beliefPriorGain").getAsDouble();
             c.check();
             return c;
         }
@@ -337,11 +362,28 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (blockSamples < 0 || blockSamples > 64 || blockTop < 1 || blockTop > 8) {
                 throw new IllegalArgumentException("search: 0 <= blockSamples <= 64, 1 <= blockTop <= 8");
             }
-            if (!"off".equals(belief) && !"uniform".equals(belief)) {
-                throw new IllegalArgumentException("search.belief must be off or uniform, not " + belief);
+            if (!"off".equals(belief) && !"uniform".equals(belief) && !"codraft".equals(belief)) {
+                throw new IllegalArgumentException("search.belief must be off, uniform or codraft, not " + belief);
             }
-            if ("uniform".equals(belief) && beliefCube == null && beliefPool == null) {
-                throw new IllegalArgumentException("search.belief=uniform needs beliefCube (or the event's pool)");
+            if (("uniform".equals(belief) || "codraft".equals(belief)) && beliefCube == null && beliefPool == null) {
+                throw new IllegalArgumentException("search.belief=" + belief + " needs beliefCube (or the event's pool)");
+            }
+            // bvw-step2-fork-1027 (S2T)
+            if ("codraft".equals(belief) && (beliefPrior == null || beliefPriorSha256 == null || !(beliefPriorGain >= 0))) {
+                throw new IllegalArgumentException("search.belief=codraft needs beliefPrior, its beliefPriorSha256 pin and "
+                        + "beliefPriorGain >= 0");
+            }
+            if (!"codraft".equals(belief) && (beliefPrior != null || beliefPriorSha256 != null)) {
+                throw new IllegalArgumentException("search.beliefPrior is for belief=codraft only");
+            }
+            if (!"forge".equals(opponent) && !"policy".equals(opponent)) {
+                throw new IllegalArgumentException("search.opponent must be forge or policy, not " + opponent);
+            }
+            if ("policy".equals(opponent) && !"policy".equals(playout)) {
+                throw new IllegalArgumentException("search.opponent=policy needs playout=policy");
+            }
+            if (leafSym && !"value".equals(leaf)) {
+                throw new IllegalArgumentException("search.leafSym needs leaf=value");
             }
             if (beliefBasics < 0 || beliefBasics > 64) {
                 throw new IllegalArgumentException("search.beliefBasics must be 0..64, not " + beliefBasics);
@@ -416,6 +458,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
                 o.addProperty("beliefBasics", beliefBasics);
                 o.addProperty("beliefSingleton", beliefSingleton);
+                if ("codraft".equals(belief)) {
+                    // bvw-step2-fork-1027: only with codraft
+                    o.addProperty("beliefPrior", beliefPrior);
+                    o.addProperty("beliefPriorSha256", beliefPriorSha256);
+                    o.addProperty("beliefPriorGain", beliefPriorGain);
+                }
+            }
+            if (!"forge".equals(opponent)) {
+                o.addProperty("opponent", opponent); // bvw-step2-fork-1027: only when on
+            }
+            if (leafSym) {
+                o.addProperty("leafSym", true); // bvw-step2-fork-1027: only when on
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -483,7 +537,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             SolverDriver d = null;
             if (cfg.forcedWin != null) {
                 d = new SolverDriver(p, SolverDriver.config(cfg.forcedWin));
-                d.solver().redraw = ls.opponentRedraw(); // honest-belief-1020 (null when belief is off)
+                d.solver().redraw = ls.solverRedraw(); // honest-belief-1020 (null when belief is off); S2T: codraft
                 solverDrivers.put(p.getId(), d);
                 b.planHook = d;
             }
@@ -623,7 +677,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefSingleton = cfg.beliefSingleton;
             lc.beliefPool = cfg.beliefPool;
             lc.beliefSeen = cfg.beliefSeen; // deck-guess-1021
+            if ("codraft".equals(cfg.belief)) {
+                // bvw-step2-fork-1027 (S2T): the co-draft deck prior, its table pinned by sha256
+                lc.beliefPriorTable = PlanSearch.loadSynPinned(cfg.beliefPrior, cfg.beliefPriorSha256);
+                lc.beliefPriorGain = cfg.beliefPriorGain;
+            }
         }
+        // bvw-step2-fork-1027 (S2T): the opponent's play-out seat and the symmetric leaf
+        lc.opponentPolicy = "policy".equals(cfg.opponent);
+        lc.leafSym = cfg.leafSym;
+        lc.leafOpp = cfg.leafSym;
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)
             lc.stack = true;
@@ -2290,7 +2353,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return ((PlanSearch.Recorder) first.recorder).sample(frame, s);
             }
         };
-        final RlSeat rs = new RlSeat(cc.feat, ep, sc, seed, ctl, false);
+        final RlSeat rs = new RlSeat(cc.feat, ep, sc, seed, ctl, TEST_LEAK_PRIV);
         rs.setGame(g);
         rs.seenNames = cc.know::opponentSeen;
         final String[] why = {null};
@@ -2420,5 +2483,100 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 return rs.voidReason;
             }
         };
+    }
+
+    // ------------------------------------------------------------------------------------------------ S2T (step 2)
+
+    /**
+     * Tests only (bvw-step2-fork-1027, the honesty test's mutant; false otherwise): the play-out policy seats' frames carry
+     * the privileged block (the hidden cards). The honesty test must FAIL with it on. Never set outside tests.
+     */
+    public static volatile boolean TEST_LEAK_PRIV = false;
+
+    /**
+     * bvw-step2-fork-1027 (S2T, spec key {@code opponent} "policy"): the play-out opponent's seat, the same policy and
+     * service as ours: a bridged controller whose asks go to the service as DECIDE frames of ITS OWN observation (its
+     * seat's knowledge in the copy's tracker, its own featurizer), greedy like our play-out seat (or sampled with
+     * {@code playoutSample}), no first action, no plan, no leaf probe, no solver. Its faults fail the play-out.
+     */
+    @Override
+    public LookaheadSearch.PlayoutSeat opponentSeat(final Object copyCtx, final Game g, final Player opp, final long seed) {
+        final CopyCtx cc = (CopyCtx) copyCtx;
+        final int seat = g.getRegisteredPlayers().indexOf(opp);
+        if (seat < 0) {
+            return null;
+        }
+        final BenchSession session = new BenchSession(new JsonRpcChannel(InputStream.nullInputStream(),
+                OutputStream.nullOutputStream()));
+        session.setEncodeState(false);
+        session.setLiveGame(g);
+        session.setKnowledgeObserver(cc.know);
+        final String[] ctl = new String[g.getRegisteredPlayers().size()];
+        for (int s = 0; s < ctl.length; s++) {
+            ctl[s] = s == seat ? "rl:playout-opp" : "forge";
+        }
+        final RlSeat.Config sc = new RlSeat.Config();
+        sc.mode = "eval";
+        final RlFeaturizer feat = new RlFeaturizer(index);
+        feat.setVersion(obsVersion);
+        feat.setKnowledge(cc.know);
+        final RlSeat.Endpoint ep = new RlSeat.Endpoint() {
+            @Override
+            public RlWire.Decision decide(final byte[] p) throws IOException {
+                try {
+                    return client().decide(p, cfg.playoutSample);
+                } catch (IOException | RuntimeException e) {
+                    drop();
+                    throw e;
+                }
+            }
+
+            @Override
+            public void record(final byte[] p) throws IOException {
+                throw new IOException("a play-out seat never records");
+            }
+        };
+        final RlSeat rs = new RlSeat(feat, ep, sc, seed, ctl, TEST_LEAK_PRIV);
+        rs.setGame(g);
+        rs.seenNames = cc.know::opponentSeen;
+        session.setLocalAnswerer(rs);
+        final PlayoutController pc = new PlayoutController(g, opp, opp.getController().getLobbyPlayer(), session, seat,
+                null, false);
+        synchronized (this) {
+            opponentSeats++;
+        }
+        return new LookaheadSearch.PlayoutSeat() {
+            @Override
+            public PlayerControllerAi controller() {
+                return pc;
+            }
+
+            @Override
+            public String failure() {
+                return rs.fatal != null ? rs.fatal : rs.voidReason;
+            }
+        };
+    }
+
+    /** S2T: opponent policy seats built (play-outs whose opponent was the policy). */
+    private int opponentSeats = 0;
+
+    /** S2T: the opponent policy seats built so far (tests). */
+    public synchronized int opponentSeats() {
+        return opponentSeats;
+    }
+
+    /**
+     * bvw-step2-fork-1027 (S2T logging): the leaves also take the opponent's own frame (v_o) for the leaf pairs; with
+     * {@code leafSym} off the decision's leaves are step 1's exactly and v_o comes from a second call afterwards.
+     */
+    void setLeafPairs(final boolean on) {
+        ls.getConfig().leafOpp = on || cfg.leafSym;
+    }
+
+    /** bvw-step2-fork-1027: {@link LookaheadSearch#replayCandidate} of the last search's candidate {@code cand}. */
+    LookaheadSearch.Replay replayCandidate(final Game g, final Player me, final int cand, final long salt, final int knownTop,
+            final int worlds, final int mode, final int capTurns, final int capSteps) {
+        return ls.replayCandidate(g, me, cand, salt, knownTop, worlds, mode, capTurns, capSteps);
     }
 }
