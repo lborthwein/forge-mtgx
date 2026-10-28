@@ -82,9 +82,30 @@ public final class StepSearch {
         public final int bandLo, bandHi;
         final JsonObject identity;
         final int maxCands;
+        /**
+         * bvw-step2-fork-1027 (S2T; null = a step-1 block): the teacher variant whose value is the row's target,
+         * {@link #VARIANTS}. In the identity (key {@code target}).
+         */
+        public final String variant;
+        /** S2T: the T re-play's worlds K' (T-sym's {@code k}; a smoke run's T with another variant: 8); 0 = none. */
+        public final int trueK;
+        /** S2T: the own-policy roll-out reference (key {@code opr}, in the identity): roll-outs, turn cap, step cap; k 0 = none. */
+        public final int oprK, oprTurns, oprSteps;
+        /**
+         * S2T, key {@code smoke} (NOT in the identity): compute and log every variant (T-sym, H-sym, H-asym) and the
+         * per-world leaf pairs; the spec variant's target is bit-identical with it on or off.
+         */
+        public final boolean smoke;
 
         private Spec(final JsonObject json, final int worlds, final String valueSha, final boolean control,
                 final int maxCopyCards, final int bandLo, final int bandHi, final JsonObject identity, final int maxCands) {
+            this(json, worlds, valueSha, control, maxCopyCards, bandLo, bandHi, identity, maxCands, null, 0, 0, 0, 0, false);
+        }
+
+        private Spec(final JsonObject json, final int worlds, final String valueSha, final boolean control,
+                final int maxCopyCards, final int bandLo, final int bandHi, final JsonObject identity, final int maxCands,
+                final String variant, final int trueK, final int oprK, final int oprTurns, final int oprSteps,
+                final boolean smoke) {
             this.json = json;
             this.worlds = worlds;
             this.valueSha = valueSha;
@@ -94,10 +115,27 @@ public final class StepSearch {
             this.bandHi = bandHi;
             this.identity = identity;
             this.maxCands = maxCands;
+            this.variant = variant;
+            this.trueK = trueK;
+            this.oprK = oprK;
+            this.oprTurns = oprTurns;
+            this.oprSteps = oprSteps;
+            this.smoke = smoke;
         }
 
+        /** bvw-step2-fork-1027: an S2T block (a {@code target} variant); its rows are schema mtgx-bvw-value/3. */
+        public boolean s2t() {
+            return variant != null;
+        }
+
+        /** S2T: the teacher variants (the row's target is the spec variant's value). */
+        public static final java.util.List<String> VARIANTS = java.util.Collections.unmodifiableList(
+                java.util.Arrays.asList("T-sym", "H-sym", "H-asym"));
+        /** S2T: the T re-play's worlds in a smoke run whose variant is not T-sym. */
+        public static final int SMOKE_TRUE_K = 8;
+
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("rlsearch", "valueSha",
-                "control", "maxCopyCards"));
+                "control", "maxCopyCards", "target", "opr", "smoke"));
 
         /**
          * The spec, or IllegalArgumentException ("refused: ...") unless honest, host-independent and tied to the proof
@@ -121,9 +159,14 @@ public final class StepSearch {
             final int k = label.worlds;
             final JsonObject rs = o.getAsJsonObject("rlsearch");
             final RlSearch.Config c = RlSearch.Config.parse(rs.deepCopy());
-            if (!"uniform".equals(c.belief) || c.beliefCube == null) {
-                throw new IllegalArgumentException("refused: the step-1 search needs belief \"uniform\" with a beliefCube "
-                        + "(every world's hidden cards from the observation-only pool), not " + c.belief);
+            if (!("uniform".equals(c.belief) || "codraft".equals(c.belief)) || c.beliefCube == null) {
+                throw new IllegalArgumentException("refused: the step-1 search needs belief \"uniform\" (or S2T's "
+                        + "\"codraft\") with a beliefCube (every world's hidden cards from the observation-only pool), not "
+                        + c.belief);
+            }
+            if ("codraft".equals(c.belief)) {
+                // bvw-step2-fork-1027 (S2T): the co-draft table's pin is checked at the start (refused: exit 2)
+                PlanSearch.loadSynPinned(c.beliefPrior, c.beliefPriorSha256);
             }
             // review #15: the search's belief pool is the proof check's
             if (!c.beliefCube.equals(label.beliefCube) || !java.util.Objects.equals(c.beliefCubeSha256, label.beliefCubeSha256)
@@ -182,6 +225,8 @@ public final class StepSearch {
             if (bandLo < 0 || bandLo >= bandHi) {
                 throw new IllegalArgumentException("label.search: band [lo, hi) needs 0 <= lo < hi");
             }
+            // bvw-step2-fork-1027 (S2T): the target variant, the OPR reference and the smoke flag, refused unless honest
+            final S2tKeys sk = S2tKeys.parse(o, c);
             // the identity: the block without its transport and per-job value pin, plus the band and the runtime
             final JsonObject id = new JsonObject();
             final JsonObject rsn = rs.deepCopy();
@@ -201,8 +246,16 @@ public final class StepSearch {
             rt.addProperty("sequentialAi", label.sequentialAi);
             rt.addProperty("aiTimeoutSec", label.aiTimeoutSec);
             id.add("runtime", rt);
+            if (sk.target != null) {
+                // S2T: the variant and the OPR reference are in the identity; the smoke flag is not
+                id.add("target", sk.target.deepCopy());
+                if (sk.opr != null) {
+                    id.add("opr", sk.opr.deepCopy());
+                }
+            }
             final int maxCands = Math.max(2, c.breadth) + ps.samples + ps.maxLines;
-            return new Spec(o.deepCopy(), k, vs, control, maxCopyCards, bandLo, bandHi, id, maxCands);
+            return new Spec(o.deepCopy(), k, vs, control, maxCopyCards, bandLo, bandHi, id, maxCands, sk.variant, sk.trueK,
+                    sk.oprK, sk.oprTurns, sk.oprSteps, sk.smoke);
         }
 
         RlSearch.Config config() {
@@ -227,6 +280,159 @@ public final class StepSearch {
             } catch (java.security.NoSuchAlgorithmException e) {
                 throw new IllegalStateException(e);
             }
+        }
+    }
+
+    /**
+     * bvw-step2-fork-1027 (S2T): the block's {@code target} / {@code opr} / {@code smoke} keys, refused unless honest and
+     * consistent. Any S2T play-out key (opponent "policy", leafSym, belief "codraft") or {@code opr} / {@code smoke}
+     * needs an explicit {@code target}; every variant needs the opponent's play-out seat to be the policy (no Forge AI
+     * seat, in particular none in a true world); T-sym and H-sym need the symmetric leaf, H-asym the plain one.
+     */
+    static final class S2tKeys {
+        JsonObject target, opr;
+        String variant;
+        int trueK, oprK, oprTurns, oprSteps;
+        boolean smoke;
+
+        static S2tKeys parse(final JsonObject o, final RlSearch.Config c) {
+            final S2tKeys s = new S2tKeys();
+            final boolean playoutKeys = "policy".equals(c.opponent) || c.leafSym || "codraft".equals(c.belief);
+            if (o.has("target") && !o.get("target").isJsonNull()) {
+                if (!o.get("target").isJsonObject()) {
+                    throw new IllegalArgumentException("label.search.target is {\"variant\": ..., \"k\": ...}");
+                }
+                s.target = o.getAsJsonObject("target");
+                for (String key : s.target.keySet()) {
+                    if (!"variant".equals(key) && !"k".equals(key)) {
+                        throw new IllegalArgumentException("label.search.target: unknown key " + key);
+                    }
+                }
+                s.variant = s.target.has("variant") ? s.target.get("variant").getAsString() : null;
+                if (!Spec.VARIANTS.contains(s.variant)) {
+                    throw new IllegalArgumentException("label.search.target.variant must be one of " + Spec.VARIANTS
+                            + ", not " + s.variant);
+                }
+                if ("T-sym".equals(s.variant)) {
+                    if (!s.target.has("k") || s.target.get("k").getAsInt() < 1 || s.target.get("k").getAsInt() > 64) {
+                        throw new IllegalArgumentException("label.search.target: T-sym needs its true worlds k in 1..64");
+                    }
+                    s.trueK = s.target.get("k").getAsInt();
+                } else if (s.target.has("k")) {
+                    throw new IllegalArgumentException("label.search.target: k is T-sym's (its true worlds)");
+                }
+            }
+            if (o.has("opr") && !o.get("opr").isJsonNull()) {
+                if (!o.get("opr").isJsonObject()) {
+                    throw new IllegalArgumentException("label.search.opr is {\"k\", \"maxTurns\", \"maxSteps\"}");
+                }
+                s.opr = o.getAsJsonObject("opr");
+                for (String key : s.opr.keySet()) {
+                    if (!"k".equals(key) && !"maxTurns".equals(key) && !"maxSteps".equals(key)) {
+                        throw new IllegalArgumentException("label.search.opr: unknown key " + key);
+                    }
+                }
+                if (!s.opr.has("k") || !s.opr.has("maxTurns") || !s.opr.has("maxSteps")) {
+                    throw new IllegalArgumentException("label.search.opr needs k, maxTurns and maxSteps");
+                }
+                s.oprK = s.opr.get("k").getAsInt();
+                s.oprTurns = s.opr.get("maxTurns").getAsInt();
+                s.oprSteps = s.opr.get("maxSteps").getAsInt();
+                if (s.oprK < 1 || s.oprK > 16 || s.oprTurns < 1 || s.oprTurns > 60 || s.oprSteps < 100
+                        || s.oprSteps > 1_000_000) {
+                    throw new IllegalArgumentException("label.search.opr: 1 <= k <= 16, 1 <= maxTurns <= 60, "
+                            + "100 <= maxSteps <= 1000000");
+                }
+            }
+            if (o.has("smoke") && !o.get("smoke").isJsonNull()) {
+                s.smoke = o.get("smoke").getAsBoolean();
+            }
+            if (s.target == null) {
+                if (playoutKeys || s.opr != null || o.has("smoke")) {
+                    throw new IllegalArgumentException("refused: an S2T search block (opponent policy, leafSym, codraft, "
+                            + "opr or smoke) names its target variant (label.search.target)");
+                }
+                return s;
+            }
+            if (!"policy".equals(c.opponent)) {
+                // the honesty refusal: no Forge AI seat in an S2T play-out (above all in a true world: T, OPR)
+                throw new IllegalArgumentException("refused: an S2T teacher needs rlsearch.opponent \"policy\" (the "
+                        + "same policy seat on both sides; no Forge AI seat reads a true world)");
+            }
+            final boolean sym = !"H-asym".equals(s.variant);
+            if (c.leafSym != sym) {
+                throw new IllegalArgumentException("refused: variant " + s.variant + " needs rlsearch.leafSym " + sym);
+            }
+            if (s.smoke && s.trueK == 0) {
+                s.trueK = Spec.SMOKE_TRUE_K;
+            }
+            return s;
+        }
+    }
+
+    /** bvw-step2-fork-1027 (S2T): one row's variant values, re-play results and leaf pairs. */
+    public static final class S2t {
+        /** The variants' values (NaN = not computed or failed). */
+        public double tSym = Double.NaN, hSym = Double.NaN, hAsym = Double.NaN;
+        /** The spec variant's value (the row's search target before the proof precedence), NaN = none. */
+        public double target = Double.NaN;
+        /** The variants were computed (the search played the chosen candidate out). */
+        public boolean computed;
+        /** Why the T re-play gave no value (null = fine, or not run). */
+        public String tWhy;
+        /** The H target worlds' and the T worlds' [v_s, v_o, terminal] (smoke only; null otherwise). */
+        public double[][] worlds, trueWorlds;
+        /** OPR (null = not run): mean of the scored roll-outs, and the counts. */
+        public double oprV = Double.NaN;
+        public int oprScored, oprCapped, oprFailed;
+        public boolean oprRan;
+
+        /** The row's {@code s2t} object for {@code variant}. */
+        public JsonObject toJson(final String variant) {
+            final JsonObject o = new JsonObject();
+            o.addProperty("variant", variant);
+            if (computed) {
+                final JsonObject t = new JsonObject();
+                t.add("T-sym", Result.num(tSym));
+                t.add("H-sym", Result.num(hSym));
+                t.add("H-asym", Result.num(hAsym));
+                o.add("targets", t);
+            } else {
+                o.add("targets", com.google.gson.JsonNull.INSTANCE);
+            }
+            if (oprRan) {
+                final JsonObject r = new JsonObject();
+                r.add("v", Result.num(oprV));
+                r.addProperty("scored", oprScored);
+                r.addProperty("capped", oprCapped);
+                r.addProperty("failed", oprFailed);
+                o.add("opr", r);
+            } else {
+                o.add("opr", com.google.gson.JsonNull.INSTANCE);
+            }
+            if (tWhy != null) {
+                o.addProperty("t_why", tWhy);
+            }
+            if (worlds != null) {
+                o.add("worlds", pairsJson(worlds));
+            }
+            if (trueWorlds != null) {
+                o.add("true_worlds", pairsJson(trueWorlds));
+            }
+            return o;
+        }
+
+        /** [v_s, v_o, terminal] per world (terminal null for a leaf). */
+        static JsonArray pairsJson(final double[][] p) {
+            final JsonArray a = new JsonArray();
+            for (int w = 0; w < p[0].length; w++) {
+                final JsonArray x = new JsonArray();
+                x.add(Result.num(p[0][w]));
+                x.add(Result.num(p[1][w]));
+                x.add(Result.num(p[2][w]));
+                a.add(x);
+            }
+            return a;
         }
     }
 
@@ -265,10 +471,22 @@ public final class StepSearch {
          * ({@link HiddenExile#scan}); non-empty = no target for this row, proof included. Null = none.
          */
         public JsonArray hiddenExile;
+        /** bvw-step2-fork-1027 (S2T blocks only; null otherwise): the variants, re-plays and pairs of this row. */
+        public S2t s2t;
 
         /** A usable value target. */
         public boolean hasTarget() {
+            if (s2t != null) {
+                // S2T: the spec variant's value (a departure whose fresh belief worlds failed keeps its T-sym value)
+                return !leafFallback && (provenLine || ("searched".equals(why) || "plan".equals(why)
+                        || "reeval_failed".equals(why)) && !Double.isNaN(s2t.target));
+            }
             return !leafFallback && (provenLine || ("searched".equals(why) || "plan".equals(why)) && !Double.isNaN(v));
+        }
+
+        /** The row's search target value: the spec variant's (S2T) or the search's value (step 1). */
+        public double targetValue() {
+            return s2t != null ? s2t.target : v;
         }
 
         public JsonObject toJson() {
@@ -323,6 +541,8 @@ public final class StepSearch {
 
     /** The fresh worlds' salt of a departure's re-evaluation (never one of the decision's own world seeds). */
     static final long FRESH_SALT = 0x4652455348574CL;
+    /** bvw-step2-fork-1027 (S2T): the T re-play's and OPR's world salts (fixed salts of the position's search seed). */
+    static final long TRUE_SALT = 0x5452554557524CL, OPR_SALT = 0x4F50525245464CL;
 
     /**
      * The search value of {@code liveP}'s position in {@code live} (its priority, the replay about to ask its
@@ -330,6 +550,16 @@ public final class StepSearch {
      * {@link PinError} (a pinned identity the service does not match, or no service), which must stop the run.
      */
     public Result value(final Game live, final Player liveP, final RlKnowledge liveKnow, final long uid, final long key) {
+        return value(live, liveP, liveKnow, uid, key, false, false);
+    }
+
+    /**
+     * As above; S2T ({@link Spec#s2t}): {@code oprWanted} = this row may be the seat's OPR row (the labeller's: the
+     * seat has none yet in this game), {@code proofTarget} = the proof check already gives this row a target. OPR then
+     * runs here when the row has a target and a searched candidate. Both are ignored by a step-1 block.
+     */
+    public Result value(final Game live, final Player liveP, final RlKnowledge liveKnow, final long uid, final long key,
+            final boolean oprWanted, final boolean proofTarget) {
         final long t0 = System.nanoTime();
         final Result res = new Result();
         RlSearch search = null;
@@ -418,7 +648,14 @@ public final class StepSearch {
                     || !ps.driver.solver().config().counter) {
                 throw new IllegalStateException("refused: a dishonest or wall-clock step-1 solver");
             }
-            final Object[] got = new Object[6];
+            final Object[] got = new Object[10];
+            // bvw-step2-fork-1027 (S2T): the leaf pairs (always with the symmetric leaf; a smoke run logs them anyway)
+            final boolean s2t = spec.s2t();
+            final boolean pairs = s2t && (cfg.leafSym || spec.smoke);
+            if (s2t && spec.smoke) {
+                search.setLeafPairs(true);
+            }
+            final long seed0 = seedOf(uid, key);
             search.tap = (why, st, r, given, ans) -> {
                 if (got[0] != null) {
                     return;
@@ -438,9 +675,41 @@ public final class StepSearch {
                         }
                     }
                     final int kt = st != null ? st.knownTop : ps.knownTop(c);
-                    got[5] = j < 0 ? null : s0.reevaluate(c, cp, j, RlSearch.splitmix(seedOf(uid, key) ^ FRESH_SALT), kt);
+                    if (j >= 0 && pairs) {
+                        // S2T: the same fresh worlds (same seeds, same leaves), with their leaf pairs
+                        final LookaheadSearch.Replay fr = s0.replayCandidate(c, cp, j, RlSearch.splitmix(seedOf(uid, key)
+                                ^ FRESH_SALT), kt, spec.worlds, LookaheadSearch.WORLD_BELIEF, 0, 0);
+                        got[6] = fr;
+                        got[5] = fr.why == null ? fr.values : null;
+                    } else {
+                        got[5] = j < 0 ? null : s0.reevaluate(c, cp, j, RlSearch.splitmix(seedOf(uid, key) ^ FRESH_SALT), kt);
+                    }
                     if (got[5] == null) {
                         got[5] = "failed";
+                    }
+                }
+                if (s2t && r != null && r.givenIndex.length > 0) {
+                    // bvw-step2-fork-1027 (S2T): after the belief-world search and its fresh re-evaluation are fixed,
+                    // the chosen candidate's T re-play (true worlds) and, for the seat's OPR row, its roll-outs
+                    int jj = -1;
+                    for (int x = 0; x < r.givenIndex.length; x++) {
+                        if (r.givenIndex[x] == Math.max(0, r.chosen)) {
+                            jj = x;
+                            break;
+                        }
+                    }
+                    if (jj >= 0) {
+                        got[9] = jj;
+                        final int kt = st != null ? st.knownTop : ps.knownTop(c);
+                        if (spec.trueK > 0) {
+                            got[7] = s0.replayCandidate(c, cp, jj, RlSearch.splitmix(seed0 ^ TRUE_SALT), kt, spec.trueK,
+                                    LookaheadSearch.WORLD_TRUE, 0, 0);
+                        }
+                        if (oprWanted && spec.oprK > 0 && !r.leafFallback
+                                && (proofTarget || !Double.isNaN(variantValue(r, jj, got, cfg.leafSym)))) {
+                            got[8] = s0.replayCandidate(c, cp, jj, RlSearch.splitmix(seed0 ^ OPR_SALT), kt, spec.oprK,
+                                    LookaheadSearch.WORLD_OPR, spec.oprTurns, spec.oprSteps);
+                        }
                     }
                 }
             };
@@ -462,6 +731,9 @@ public final class StepSearch {
                 throw new PinError("refused: the step-1 search service failed a SCORE (" + cfg.server + ")");
             }
             fill(res, got);
+            if (s2t) {
+                fillS2t(res, got, cfg.leafSym);
+            }
         } catch (PinError e) {
             throw e;
         } catch (RuntimeException | StackOverflowError e) {
@@ -488,6 +760,119 @@ public final class StepSearch {
         if (spec.valueSha == null ? got != null : !spec.valueSha.equals(got)) {
             throw new PinError("refused: the search service's value backend is " + got + ", the spec pins "
                     + (spec.valueSha == null ? "none (control)" : spec.valueSha));
+        }
+    }
+
+    /**
+     * S2T, in the tap (before the result is filled): the spec variant's value of the chosen candidate {@code jj}, NaN =
+     * none: T-sym = its T re-play's mean, H-* = its value in the decision's worlds (kept) or its fresh worlds (departed).
+     */
+    private double variantValue(final LookaheadSearch.GivenResult r, final int jj, final Object[] got, final boolean leafSym) {
+        if ("T-sym".equals(spec.variant)) {
+            final LookaheadSearch.Replay t = (LookaheadSearch.Replay) got[7];
+            return t == null || t.why != null ? Double.NaN : leafSym ? mean(t.values) : meanSym(t.pairs);
+        }
+        if (r.chosen == 0) {
+            return jj < r.ev.length ? r.ev[jj] : Double.NaN;
+        }
+        return got[5] instanceof double[] ? mean((double[]) got[5]) : Double.NaN;
+    }
+
+    static double mean(final double[] v) {
+        if (v == null || v.length == 0) {
+            return Double.NaN;
+        }
+        double s = 0;
+        for (double x : v) {
+            s += x;
+        }
+        return s / v.length;
+    }
+
+    /** The symmetric mean (v_s + 1 - v_o) / 2 over worlds of {v_s, v_o, terminal} pairs, NaN when any is missing. */
+    static double meanSym(final double[][] p) {
+        if (p == null || p[0].length == 0) {
+            return Double.NaN;
+        }
+        double s = 0;
+        for (int w = 0; w < p[0].length; w++) {
+            s += (p[0][w] + 1.0 - p[1][w]) / 2.0;
+        }
+        return s / p[0].length;
+    }
+
+    static double clamp01(final double v) {
+        return Double.isNaN(v) ? Double.NaN : Math.max(0.0, Math.min(1.0, v));
+    }
+
+    /** One candidate's {v_s, v_o, terminal} per world out of the search's pairs (null = none). */
+    static double[][] column(final double[][][] pairs, final int c) {
+        if (pairs == null || c >= pairs[0].length) {
+            return null;
+        }
+        return new double[][] {pairs[0][c].clone(), pairs[1][c].clone(), pairs[2][c].clone()};
+    }
+
+    /**
+     * bvw-step2-fork-1027 (S2T): the row's variants. The search's own value is the native H variant (H-sym with the
+     * symmetric leaf, H-asym without); the other H variant comes from the same worlds' leaf pairs; T-sym from the T
+     * re-play (its own leaves when symmetric, else its pairs). The spec variant's value is the row's search target.
+     * OPR: the mean of the scored roll-outs (a roll-out at its cap is counted, not scored).
+     */
+    private void fillS2t(final Result res, final Object[] got, final boolean leafSym) {
+        final S2t s = new S2t();
+        res.s2t = s;
+        final LookaheadSearch.GivenResult r = got[0] == null ? null : (LookaheadSearch.GivenResult) got[2];
+        if (got[9] == null || r == null || res.leafFallback) {
+            return;
+        }
+        final int jj = (Integer) got[9];
+        s.computed = true;
+        double[][] hp = null;
+        if (!res.departed) {
+            hp = column(r.pairs, jj);
+        } else if (got[6] != null && got[5] instanceof double[]) {
+            hp = ((LookaheadSearch.Replay) got[6]).pairs;
+        }
+        if (leafSym) {
+            s.hSym = res.v;
+            s.hAsym = hp == null ? Double.NaN : clamp01(mean(hp[0]));
+        } else {
+            s.hAsym = res.v;
+            s.hSym = hp == null ? Double.NaN : clamp01(meanSym(hp));
+        }
+        final LookaheadSearch.Replay t = (LookaheadSearch.Replay) got[7];
+        if (t != null) {
+            if (t.why != null) {
+                s.tWhy = t.why;
+            } else {
+                s.tSym = clamp01(leafSym ? mean(t.values) : meanSym(t.pairs));
+                if (spec.smoke) {
+                    s.trueWorlds = t.pairs;
+                }
+            }
+        }
+        if (spec.smoke) {
+            s.worlds = hp;
+        }
+        s.target = "T-sym".equals(spec.variant) ? s.tSym : "H-sym".equals(spec.variant) ? s.hSym : s.hAsym;
+        final LookaheadSearch.Replay o = (LookaheadSearch.Replay) got[8];
+        if (o != null) {
+            s.oprRan = true;
+            s.oprFailed = o.failed;
+            s.oprCapped = o.capped;
+            double sum = 0;
+            int n = 0;
+            if (o.why == null && o.values != null) {
+                for (double v : o.values) {
+                    if (!Double.isNaN(v)) {
+                        sum += v;
+                        n++;
+                    }
+                }
+            }
+            s.oprScored = n;
+            s.oprV = n == 0 ? Double.NaN : sum / n;
         }
     }
 
