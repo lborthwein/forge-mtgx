@@ -1252,10 +1252,9 @@ public final class AiTape {
         }
         final JsonObject e = take("prep", null);
         final boolean want = e.get("a").getAsBoolean();
-        if (!want) {
-            done(e);
-            return false;
-        }
+        // bvw-decision-log-1027: a declined trigger runs its non-AI preparation too, as live did before declining: a
+        // charm's modes (this tape's child), another player's targets (that player's own tape: they declined). A
+        // trigger the AI itself declined asks nothing there.
         enter(e, true);
         final boolean got;
         boolean ok = false;
@@ -1273,11 +1272,27 @@ public final class AiTape {
             }
         }
         leave(e);
+        if (!want) {
+            done(e);
+            return false;
+        }
         if (!got) {
             throw diverge("a trigger the record prepared could not be prepared in the replay");
         }
         done(e);
         return true;
+    }
+
+    /** bvw-decision-log-1027: did this entry's run decide anything (a child that is not a trait build)? */
+    static boolean hasDecisions(final JsonObject e) {
+        if (e.has("sub")) {
+            for (JsonElement c : e.getAsJsonArray("sub")) {
+                if (!LAZY.equals(str(c.getAsJsonObject(), "k"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** PlayerControllerAi.prepareSingleSa and the policy seat's own: {@code body} (recorded) unless {@code p} is not taped. */

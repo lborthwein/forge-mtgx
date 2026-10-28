@@ -207,7 +207,9 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
         final JsonElement a = e.get("a");
         try {
             AiTapeCodec.checkEncodable(a);
-            if (shortcut != null) {
+            // bvw-decision-log-1027: a recorded result the replay need not run, unless the live run decided something
+            // (a declined trigger whose preparation asked another seat): then it runs, as live
+            if (shortcut != null && !AiTape.hasDecisions(e)) {
                 final T s = shortcut.apply(a);
                 if (s != null) {
                     tape.applyLazySub(e);
