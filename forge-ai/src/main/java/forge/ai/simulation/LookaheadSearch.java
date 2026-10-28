@@ -708,6 +708,10 @@ public final class LookaheadSearch {
                 leafNanos, playoutSeatFailures, searchCpuNanos;
         /** bvw-step2-fork-1027 (S2T): logging-only opponent leaf calls that failed (reported only when > 0). */
         public long leafOppFailures;
+        /** Step-3 hygiene: true-world re-plays refused because fair naming was not on for every player. Always 0 on
+         *  research/bvw-step2-keys-1028: the refusal itself is in the excluded hygiene commit 8043ba81bf3; the field
+         *  exists only so the S3-3 report (b387c8c1318) compiles. */
+        public long trueFairNamingRefusals;
         /** S-t (lane cm-choice-search-1009; reported only when a decision expanded choices): decisions with macro
          *  candidates, macro candidates played, macro departures. */
         public long givenMacroDecisions, givenMacros, givenMacroDepartures, givenMacroRedundant;
@@ -1275,6 +1279,12 @@ public final class LookaheadSearch {
         public boolean mayPlayLoose = false;
         /** step3-playout-fixes-1028: this play-out is an OPR roll-out ({@link #WORLD_OPR}; its seats keep their cap). */
         public boolean oprRollout = false;
+        /**
+         * step3-playout-fixes-1028 (review #130 S3-2; set only by {@link Config#replayMayPlayLoose} outside a fidelity
+         * pass): the loose match compares the text before the LAST " by " exactly ({@link #sameMayPlayText}), and the
+         * play-out seat accepts it only when exactly one menu entry matches.
+         */
+        public boolean mayPlayUnique = false;
         /** Lane search-bones-1015 (S-b): the turn-plan this play-out follows (null = a single first action). */
         public final Object plan;
         /** S-b: what became of the plan in this play-out: 0 = not finished, 1 = played to its end, 2 = broke. */
@@ -1325,7 +1335,8 @@ public final class LookaheadSearch {
          */
         public boolean matchesMayPlay(SpellAbility sa) {
             return mayPlayLoose && sa != null && !pass && sa.getHostCard() != null && sa.getHostCard().getId() == hostId
-                    && sa.isLandAbility() == land && sameMayPlay(desc, sa);
+                    && sa.isLandAbility() == land && (mayPlayUnique ? sa.getMayPlay() != null
+                    && sameMayPlayText(desc, sa.getDescription()) : sameMayPlay(desc, sa));
         }
     }
 
@@ -4893,6 +4904,14 @@ public final class LookaheadSearch {
 
     /** As {@link #locate(Game, Player, Cand)}; with {@code mayPlayLoose} (copy fidelity), last a may-play match. */
     static SpellAbility locate(Game g, Player p, Cand c, boolean mayPlayLoose) {
+        return locate(g, p, c, mayPlayLoose, false);
+    }
+
+    /**
+     * As above; with {@code unique} (step3-playout-fixes-1028, review #130 S3-2: the re-plays' key) the loose match is
+     * {@link #sameMayPlayText} and is accepted only when exactly one ability matches (else null: candidate_not_in_copy).
+     */
+    static SpellAbility locate(Game g, Player p, Cand c, boolean mayPlayLoose, boolean unique) {
         final Card host = g.findById(c.hostId);
         if (host == null) {
             return null;
@@ -4909,6 +4928,17 @@ public final class LookaheadSearch {
                 return sa;
             }
         }
+        if (mayPlayLoose && unique) {
+            SpellAbility one = null;
+            int n = 0;
+            for (SpellAbility sa : all) {
+                if (sa.isLandAbility() == c.land && sa.getMayPlay() != null && sameMayPlayText(c.desc, sa.getDescription())) {
+                    one = sa;
+                    n++;
+                }
+            }
+            return n == 1 ? one : null;
+        }
         if (mayPlayLoose) {
             for (SpellAbility sa : all) {
                 if (sa.isLandAbility() == c.land && sameMayPlay(c.desc, sa)) {
@@ -4917,6 +4947,16 @@ public final class LookaheadSearch {
             }
         }
         return null;
+    }
+
+    /**
+     * step3-playout-fixes-1028 (review #130 S3-2): the may-play suffix starts at the LAST " by " (rules text may contain
+     * " by " itself: "dealt damage by", "reduced by"). True when {@code copy} and the searched {@code desc} have the same
+     * text before their last " by " and differ after it (the effect's source as printed).
+     */
+    static boolean sameMayPlayText(String desc, String copy) {
+        final int i = copy.lastIndexOf(" by ");
+        return i > 0 && desc.lastIndexOf(" by ") == i && desc.regionMatches(0, copy, 0, i + 4) && !desc.equals(copy);
     }
 
     /**
@@ -5691,11 +5731,13 @@ public final class LookaheadSearch {
                     p.firstAction = new FirstAction(c);
                     p.firstAction.budget = p.budget;
                     // step3-playout-fixes-1028 (replayMayPlayLoose): a re-play's level-0 copy matches may-play loosely too
-                    final boolean loose = fidelityPass() || cfg.replayMayPlayLoose && replaying;
+                    final boolean unique = !fidelityPass() && cfg.replayMayPlayLoose && replaying;
+                    final boolean loose = fidelityPass() || unique;
                     p.firstAction.mayPlayLoose = loose;
+                    p.firstAction.mayPlayUnique = unique;
                     p.firstAction.oprRollout = p.noLeaf;
                     p.playoutSeed = mix(worldSeed, 5);
-                    if (!c.pass && c.plan == null && c.block == null && locate(p.g, p.me, c, loose) == null) {
+                    if (!c.pass && c.plan == null && c.block == null && locate(p.g, p.me, c, loose, unique) == null) {
                         p.failed = true;
                         p.missWhy = locateMiss(p.g, p.me, c);
                     }

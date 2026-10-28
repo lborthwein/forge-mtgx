@@ -1988,6 +1988,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             // sc-wallguard-1009: only when the budget stopped a play-out seat, so an unbudgeted summary is unchanged
             o.addProperty("playout_budget_stops", budgetStops.get());
         }
+        if (ls.getStats().trueFairNamingRefusals > 0) {
+            // review #130 S3-3: only when a true-world re-play was refused, so every other summary is unchanged
+            o.addProperty("true_fair_naming_refusals", ls.getStats().trueFairNamingRefusals);
+        }
         if (cfg.playoutLoopGuard > 0 || cfg.playoutMaxDecisions > 0) {
             // step3-playout-fixes-1028: only with a step-3 play-out key, so every other summary is unchanged
             final long[] ps = playoutSeatStats();
@@ -2334,6 +2338,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
     }
 
+    /** step3-playout-fixes-1028: every entry of {@code match} is an exact match (not the loose may-play path). */
+    static boolean looseMatchExact(final List<Integer> match, final RlCandidates.Menu m, final List<SpellAbility> objs,
+            final LookaheadSearch.FirstAction first) {
+        for (int i : match) {
+            final int ch = choiceOf(m, i);
+            if (!(ch == 0 ? first.pass : ch > 0 && ch <= objs.size() && first.matches(objs.get(ch - 1)))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * Lane copy-fidelity-1010 (diagnostics, appended to the failure): what the play-out's first menu offered from the
      * searched candidate's card, and where the copy stood.
@@ -2454,6 +2470,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                             match.add(i);
                         }
                     }
+                }
+                if (match.size() > 1 && first.mayPlayUnique && !looseMatchExact(match, m, objs, first)) {
+                    // step3-playout-fixes-1028 (review #130 S3-2): a re-play's loose may-play match must be unique
+                    why[0] = "the searched candidate is ambiguous in the play-out's menu (" + match.size()
+                            + " may-play entries)" + menuMiss(gg, m, objs, first);
+                    return -1;
                 }
                 if (match.isEmpty()) {
                     why[0] = "the searched candidate is not in the play-out's menu" + menuMiss(gg, m, objs, first);

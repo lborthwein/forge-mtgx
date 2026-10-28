@@ -260,6 +260,55 @@ public class BvwStep3PlayoutTest extends SimulationTest {
         }
     }
 
+    /**
+     * Review #130 S3-2: two may-play permissions on one card (Brazen Borrower on an adventure, plus a second "you may
+     * cast it" effect from the same source): in the re-play's level-0 copy both read "... by <an effect>", so the loose
+     * match is ambiguous and the re-play fails (candidate_not_in_copy) rather than pick one.
+     */
+    @Test(timeOut = 3600000)
+    public void twoMayPlayPermissionsOnOneCardAreAmbiguousAndFail() throws Exception {
+        initAndCreateGame();
+        final Looper pol = new Looper(index(), "Brazen Borrower");
+        try (FakeSearchService svc = service(pol)) {
+            final forge.game.Game g = ForcedWinSolverTest.game("Default", "Default", borrower());
+            final forge.game.card.Card bb = g.getCardsIn(forge.game.zone.ZoneType.Exile).get(0);
+            Assert.assertEquals(bb.getName(), "Brazen Borrower");
+            final forge.game.spellability.SpellAbility again = forge.game.ability.AbilityFactory.getAbility("DB$ Effect | "
+                    + "RememberObjects$ Self | StaticAbilities$ Play | ForgetOnMoved$ Exile | Duration$ Permanent", bb);
+            again.setSVar("Play", "Mode$ Continuous | MayPlay$ True | EffectZone$ Command | Affected$ Card.IsRemembered+"
+                    + "nonAdventure | AffectedZone$ Exile | Description$ You may cast the card.");
+            again.setActivatingPlayer(bb.getOwner());
+            again.resolve();
+            // research/bvw-step2-keys-1028 (hygiene 8043ba81bf3 excluded): step 2's BvwS2tTargetTest.search takes a state
+            // string only, so its body is inlined here for the mutated game (no fair-naming setter, as step 2's fixtures)
+            final StepSearch ss = new StepSearch(spec(svc.port(), LOOSE), index(), 2, "test", "borrower-two");
+            final forge.game.player.Player me = g.getPlayers().get(0);
+            final forge.bench.rl.RlKnowledge know = new forge.bench.rl.RlKnowledge(g);
+            know.v2 = true;
+            know.attach();
+            final StepSearch.Result r = forge.bench.PlayerControllerBridge.isolated(g, () -> forge.util.IdScope.detached(
+                    () -> ss.value(g, me, know, 2988000001L, 4242L, false, false)));
+            System.err.println("[step3-playout] borrower-two t_why " + r.s2t.tWhy + " " + r.toJson());
+            Assert.assertNotNull(r.s2t.tWhy, "two loose matches must not resolve to one");
+            Assert.assertTrue(r.s2t.tWhy.contains("candidate_not_in_copy") || r.s2t.tWhy.contains("ambiguous"), r.s2t.tWhy);
+        }
+    }
+
+    /** Review #130 S3-2: the may-play suffix is cut at the LAST " by "; rules text with " by " does not widen the match. */
+    @Test
+    public void theMayPlaySuffixStartsAtTheLastBy() {
+        final String live = "Deals 2 damage to each creature dealt damage by a source this turn by Light Up the Stage (5)";
+        Assert.assertTrue(LookaheadSearch.sameMayPlayText(live,
+                "Deals 2 damage to each creature dealt damage by a source this turn by Light Up the Stage's Effect (9)"));
+        Assert.assertFalse(LookaheadSearch.sameMayPlayText(live,
+                "Deals 3 damage to each creature dealt damage by a source this turn by Light Up the Stage's Effect (9)"));
+        // a first-" by " cut would take "Deals 2 damage to each creature dealt damage by " as the base and match this
+        Assert.assertFalse(LookaheadSearch.sameMayPlayText(live,
+                "Deals 2 damage to each creature dealt damage by an opponent's Effect (9)"));
+        Assert.assertFalse(LookaheadSearch.sameMayPlayText(live, live), "the exact text is the exact match's");
+        Assert.assertFalse(LookaheadSearch.sameMayPlayText("Plains", "Plains by Urza (3)"));
+    }
+
     @Test
     public void everyKeyOffKeepsTheSpecAndEachKeyIsInTheIdentity() throws Exception {
         final StepSearch.Spec base = spec(1, "");
