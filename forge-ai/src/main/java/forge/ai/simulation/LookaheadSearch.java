@@ -1341,13 +1341,25 @@ public final class LookaheadSearch {
             this.ctx = ctx;
         }
 
+        /**
+         * S2T: the opponent's frame, or null when taking it failed (never a failure of the play-out: without leafSym the
+         * play-out and its value are step 1's whether v_o is logged or not; with it a missing frame is a fallback).
+         */
+        Object captureOpp(Game g) {
+            try {
+                return hooks.captureLeaf(ctx, g, opp);
+            } catch (RuntimeException e) {
+                return null;
+            }
+        }
+
         /** The searching seat has priority in play-out {@code g}: take the leaf there if the horizon turn has begun. */
         public void onPriority(Game g, Player me) {
             if (!done && watch != null && watch.reached) {
                 payload = hooks.captureLeaf(ctx, g, me);
                 if (opp != null) {
                     // S2T: the opponent's own observation at the same state (its seat's frame, never ours)
-                    payloadOpp = hooks.captureLeaf(ctx, g, opp);
+                    payloadOpp = captureOpp(g);
                 }
                 done = true;
             }
@@ -3264,7 +3276,7 @@ public final class LookaheadSearch {
             for (int c = 0; c < n; c++) {
                 final Rollout r = outs[c][w];
                 if (ok[c] && r != null && r.ok && Double.isNaN(r.pTerminal)) {
-                    if (r.leafPayload == null || r.leafPayloadOpp == null) {
+                    if (r.leafPayload == null || cfg.leafSym && r.leafPayloadOpp == null) {
                         stats.leafFallbacks++;
                         stats.leafLastError = r.leafPayload == null ? "a non-terminal play-out has no leaf payload"
                                 : "a non-terminal play-out has no opponent leaf payload";
@@ -3272,7 +3284,7 @@ public final class LookaheadSearch {
                         return;
                     }
                     leaves.add(r.leafPayload);
-                    opp.add(r.leafPayloadOpp);
+                    opp.add(r.leafPayloadOpp); // null (no v_o) only without leafSym
                     where.add(new int[] {c, w});
                 }
             }
@@ -3312,18 +3324,33 @@ public final class LookaheadSearch {
             if (cfg.leafSym) {
                 po = Arrays.copyOfRange(p, m, 2 * m);
             } else {
-                // logging only: the opponent's frames after the decision's values are fixed
-                try {
-                    po = hooks.leafValues(opp);
-                } catch (RuntimeException e) {
-                    po = null;
+                // logging only: the opponent's frames after the decision's values are fixed (a missing one: no v_o)
+                final List<Object> have = new ArrayList<>();
+                for (Object x : opp) {
+                    if (x != null) {
+                        have.add(x);
+                    }
                 }
-                if (po == null || po.length != m) {
-                    po = null;
+                double[] got = null;
+                if (!have.isEmpty()) {
+                    try {
+                        got = hooks.leafValues(have);
+                    } catch (RuntimeException e) {
+                        got = null;
+                    }
+                }
+                if (have.size() < m) {
                     stats.leafOppFailures++;
-                } else {
+                }
+                if (!have.isEmpty() && (got == null || got.length != have.size())) {
+                    stats.leafOppFailures++;
+                } else if (!have.isEmpty()) {
                     stats.leafCalls++;
-                    stats.leafLeaves += m;
+                    stats.leafLeaves += have.size();
+                    po = new double[m];
+                    for (int i = 0, j = 0; i < m; i++) {
+                        po[i] = opp.get(i) == null ? Double.NaN : got[j++];
+                    }
                 }
             }
         }
@@ -5850,7 +5877,7 @@ public final class LookaheadSearch {
                             // no priority of the seat within the extra steps (or a capped play-out): the leaf is here
                             probe.payload = hooks.captureLeaf(p.hookCtx, g, me);
                             if (probe.opp != null) {
-                                probe.payloadOpp = hooks.captureLeaf(p.hookCtx, g, probe.opp); // S2T
+                                probe.payloadOpp = probe.captureOpp(g); // S2T
                             }
                             probe.done = true;
                             r.leafLate = true;
