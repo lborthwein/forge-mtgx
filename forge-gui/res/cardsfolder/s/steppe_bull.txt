@@ -1,0 +1,5 @@
+Name:Steppe Bull
+ManaCost:2 G G
+Types:Creature Ox
+PT:4/4
+Oracle:
