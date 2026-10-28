@@ -218,6 +218,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
         public List<String> beliefSeen;
+        /**
+         * belief-jar-1027 ("fixed" = the default, and then nothing changes): "twoStage" = the honest worlds draw the
+         * opponent's hidden basics first ({@link LookaheadSearch.Config#basics}); {@link #basicsShare} its deck share
+         * (NaN = {@link LookaheadSearch#BASICS_SHARE_BOT}).
+         */
+        public String basics = "fixed";
+        public double basicsShare = Double.NaN;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -225,7 +232,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "basics", "basicsShare"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -281,6 +288,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
+            if (o.has("basics")) c.basics = o.get("basics").getAsString(); // belief-jar-1027
+            if (o.has("basicsShare")) c.basicsShare = o.get("basicsShare").getAsDouble();
             c.check();
             return c;
         }
@@ -345,6 +354,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (beliefBasics < 0 || beliefBasics > 64) {
                 throw new IllegalArgumentException("search.beliefBasics must be 0..64, not " + beliefBasics);
+            }
+            // belief-jar-1027
+            if (!"fixed".equals(basics) && !"twoStage".equals(basics)) {
+                throw new IllegalArgumentException("search.basics must be fixed or twoStage, not " + basics);
+            }
+            if ("twoStage".equals(basics) && !"uniform".equals(belief)) {
+                throw new IllegalArgumentException("search.basics=twoStage needs belief=uniform");
+            }
+            if (!Double.isNaN(basicsShare) && !(basicsShare > 0 && basicsShare < 1)) {
+                throw new IllegalArgumentException("search.basicsShare must be in (0, 1), not " + basicsShare);
             }
             choiceFamilySet = ChoiceWindow.parseFamilies(choiceFamilies);
             AiFixes.Mode.parse(deadEtb);
@@ -416,6 +435,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
                 o.addProperty("beliefBasics", beliefBasics);
                 o.addProperty("beliefSingleton", beliefSingleton);
+                if ("twoStage".equals(basics)) {
+                    // belief-jar-1027: only when on, so every other spec's JSON is unchanged
+                    o.addProperty("basics", basics);
+                    o.addProperty("basicsShare", Double.isNaN(basicsShare) ? LookaheadSearch.BASICS_SHARE_BOT : basicsShare);
+                }
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -623,6 +647,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefSingleton = cfg.beliefSingleton;
             lc.beliefPool = cfg.beliefPool;
             lc.beliefSeen = cfg.beliefSeen; // deck-guess-1021
+            lc.basics = cfg.basics; // belief-jar-1027
+            lc.basicsShare = cfg.basicsShare;
         }
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)

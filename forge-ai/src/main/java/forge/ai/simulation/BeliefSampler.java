@@ -227,6 +227,12 @@ public final class BeliefSampler {
         public boolean uniform;
         public boolean fallback;
         public int oppId;
+        /**
+         * belief-jar-1027 (null = off, the default, and then nothing changes): the decision's two-stage world plan
+         * ({@code basics=twoStage}). When set, a world's hidden cards come from {@link Two#draw}, not from this
+         * distribution's slots.
+         */
+        public Two two;
 
         public Dist(List<String> pool, double[] itemW, int basics, int n, int libHidden) {
             this.pool = pool;
@@ -293,6 +299,79 @@ public final class BeliefSampler {
         /** Inclusion probability of every slot: w_i e_{n-1}(w without i) / e_n(w). Sums to n. */
         public double[] marginals() {
             return BeliefSampler.marginals(w, n, suffix);
+        }
+    }
+
+    /**
+     * belief-jar-1027: a two-stage world draw of one opponent's hidden cards (lane opponent-belief-1027's basic-land share
+     * fix). Today's worlds hold ~21 % lands against 37-42 % in real decks (the cube pool has 8 slots per basic among ~580).
+     * Stage 1: the hidden basics, {@code hb = clamp(expectedBasics, 0, hidden)} rounded stochastically, each basic's type
+     * drawn from {@link #demand} (their shown cards' coloured pips + 1.5 per colour their visible mana produces + 0.2).
+     * Stage 2: the rest from the nonbasic pool, a conditional Bernoulli draw of exactly {@code hidden - hb} cards with odds
+     * weights {@link #w} (1 = uniform; the posterior's {@code exp(z)}). The names are then shuffled: the first
+     * {@link #need} are the hidden hand, the rest the hidden library (top first).
+     */
+    public static final class Two {
+        public final List<String> nonbasic;
+        public final double[] w;
+        public final double expectedBasics;
+        public final double[] demand;
+        public final int need;
+        public final int libNeed;
+        public final boolean posterior;
+        public int oppId;
+
+        public Two(List<String> nonbasic, double[] w, double expectedBasics, double[] demand, int need, int libNeed,
+                boolean posterior) {
+            this.nonbasic = nonbasic;
+            this.w = w;
+            this.expectedBasics = expectedBasics;
+            this.demand = demand;
+            this.need = need;
+            this.libNeed = libNeed;
+            this.posterior = posterior;
+        }
+
+        /** Stage 1's basics count for this world: {@code clamp(expectedBasics, 0, total)}, rounded with one draw. */
+        public int basics(Random rng) {
+            final int total = need + libNeed;
+            final double x = Math.min(Math.max(expectedBasics, 0.0), total);
+            final int lo = (int) Math.floor(x);
+            final double frac = x - lo;
+            final double u = rng.nextDouble();
+            int hb = lo + (u < frac ? 1 : 0);
+            if (total - hb > nonbasic.size()) {
+                hb = total - nonbasic.size(); // a small pool: basics fill what the nonbasics cannot
+            }
+            return Math.min(hb, total);
+        }
+
+        /** One world's hidden names: {@link #need} hand cards then {@link #libNeed} library cards (top first). */
+        public List<String> draw(Random rng) {
+            final int hb = basics(rng);
+            final int m = need + libNeed - hb;
+            final List<String> out = new ArrayList<>(need + libNeed);
+            if (m > 0) {
+                final Dist d = new Dist(nonbasic, w, 0, m, 0);
+                for (int i : d.sampleHand(rng)) {
+                    out.add(nonbasic.get(i));
+                }
+            }
+            double tot = 0;
+            for (double x : demand) {
+                tot += x;
+            }
+            for (int j = 0; j < hb; j++) {
+                double u = rng.nextDouble() * tot;
+                int b = 0;
+                while (b < BASICS.length - 1 && u >= demand[b]) {
+                    u -= demand[b];
+                    b++;
+                }
+                out.add(BASICS[b]);
+            }
+            Collections.shuffle(out, rng);
+            return out;
         }
     }
 
