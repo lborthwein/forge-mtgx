@@ -483,6 +483,12 @@ public final class StepSearch {
         /** The service's value backend identity (HELLO_ACK value_backend), or null. */
         public JsonElement backend;
         /**
+         * step3-playout-fixes-1028 (null unless a step-3 play-out key is on; never in the row's JSON): this row's search
+         * play-out seats ({@link RlSearch#playoutSeatStats}): loop-guard answers, reduced-cap ends, default-cap ends,
+         * the most decisions a finished seat sent.
+         */
+        public long[] playoutStats;
+        /**
          * OPEN-6 ruling (2026-10-24): the face-down exiled cards the seat may not look at on the copy
          * ({@link HiddenExile#scan}); non-empty = no target for this row, proof included. Null = none.
          */
@@ -753,6 +759,14 @@ public final class StepSearch {
             res.error = e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
             if (search != null) {
+                final RlSearch.Config sc = search.config();
+                if (sc.playoutLoopGuard > 0 || sc.playoutMaxDecisions > 0) {
+                    // step3-playout-fixes-1028: the row's play-out seat counts, on stderr only (the row is unchanged)
+                    res.playoutStats = search.playoutSeatStats();
+                    System.err.println("[playout-seats] uid " + uid + " key " + key + " guard_hits " + res.playoutStats[0]
+                            + " cap_ends " + res.playoutStats[1] + " default_cap_ends " + res.playoutStats[2]
+                            + " max_sent_finished " + res.playoutStats[3]);
+                }
                 search.close();
             }
             res.ms = (System.nanoTime() - t0) / 1e6;

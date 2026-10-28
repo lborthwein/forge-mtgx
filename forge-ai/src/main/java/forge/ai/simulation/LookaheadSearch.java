@@ -337,6 +337,13 @@ public final class LookaheadSearch {
         public boolean leafOpp = false;
         /** S2T: a value leaf is (v_s + 1 - v_o) / 2 (needs {@link #leafOpp}); terminal play-outs stay 1 / 0 / 0.5. */
         public boolean leafSym = false;
+        /**
+         * step3-playout-fixes-1028 (false = off, and then nothing changes): the re-plays ({@link #replayCandidate},
+         * {@link #reevaluate}) copy at level 0, where a face-up exiled may-play card's description names the effect card
+         * instead of its source; they also match such a candidate by its base description ({@link #sameMayPlay}), as the
+         * level-2 pass does, after the exact and prefix matches failed.
+         */
+        public boolean replayMayPlayLoose = false;
 
         /** S2T: the belief is the co-draft deck prior. */
         public boolean codraft() {
@@ -502,6 +509,9 @@ public final class LookaheadSearch {
             }
             if (leafSym) {
                 o.addProperty("leafSym", true);
+            }
+            if (replayMayPlayLoose) {
+                o.addProperty("replayMayPlayLoose", true); // step3-playout-fixes-1028: only when on
             }
             if (rankerOn()) {
                 final JsonObject r = new JsonObject();
@@ -1265,6 +1275,8 @@ public final class LookaheadSearch {
         Budget budget;
         /** Copy fidelity: a may-play spell may also match by its base description ({@link #matchesMayPlay}). */
         public boolean mayPlayLoose = false;
+        /** step3-playout-fixes-1028: this play-out is an OPR roll-out ({@link #WORLD_OPR}; its seats keep their cap). */
+        public boolean oprRollout = false;
         /** Lane search-bones-1015 (S-b): the turn-plan this play-out follows (null = a single first action). */
         public final Object plan;
         /** S-b: what became of the plan in this play-out: 0 = not finished, 1 = played to its end, 2 = broke. */
@@ -1405,6 +1417,14 @@ public final class LookaheadSearch {
          */
         default PlayoutSeat opponentSeat(Object copyCtx, Game g, Player opp, long seed) {
             return null;
+        }
+
+        /**
+         * step3-playout-fixes-1028: as {@link #opponentSeat(Object, Game, Player, long)}, with the play-out's own first
+         * action (its decision's budget, whether it is an OPR roll-out). The default ignores it.
+         */
+        default PlayoutSeat opponentSeat(Object copyCtx, Game g, Player opp, long seed, FirstAction first) {
+            return opponentSeat(copyCtx, g, opp, seed);
         }
 
         /**
@@ -2293,7 +2313,9 @@ public final class LookaheadSearch {
         final Rollout[][] outs = new Rollout[1][k];
         final boolean[] ok = {true};
         final int prevTop = ownKnownTop;
+        final boolean prevReplaying = replaying;
         ownKnownTop = Math.max(0, knownTop);
+        replaying = true;
         try {
             final long fb = stats.leafFallbacks;
             final int aborted = playAll(live, me, java.util.Collections.singletonList(cs.get(cand)), null, mix(cfg.seed, salt),
@@ -2310,6 +2332,7 @@ public final class LookaheadSearch {
             return values[0];
         } finally {
             ownKnownTop = prevTop;
+            replaying = prevReplaying;
         }
     }
 
@@ -2319,6 +2342,8 @@ public final class LookaheadSearch {
     public static final int WORLD_BELIEF = 0, WORLD_TRUE = 1, WORLD_OPR = 2;
     /** The world mode of the re-play in progress (decision thread only; WORLD_BELIEF outside {@link #replayCandidate}). */
     private volatile int worldMode = WORLD_BELIEF;
+    /** step3-playout-fixes-1028: a re-play ({@link #replayCandidate}, {@link #reevaluate}) is in progress (decision thread). */
+    private volatile boolean replaying = false;
     /** OPR: the cap of the roll-outs in progress (turns past the start, main-loop steps). */
     private volatile int oprTurns = 0, oprSteps = 0;
 
@@ -2386,8 +2411,10 @@ public final class LookaheadSearch {
         final boolean[] ok = {true};
         final int prevTop = ownKnownTop;
         final int prevMode = worldMode;
+        final boolean prevReplaying = replaying;
         ownKnownTop = Math.max(0, knownTop);
         worldMode = mode;
+        replaying = true;
         oprTurns = mode == WORLD_OPR ? capTurns : 0;
         oprSteps = mode == WORLD_OPR ? capSteps : 0;
         trueKnown = mode == WORLD_BELIEF ? null : hooks.knownToAnySeat(live);
@@ -2454,6 +2481,7 @@ public final class LookaheadSearch {
         } finally {
             ownKnownTop = prevTop;
             worldMode = prevMode;
+            replaying = prevReplaying;
             oprTurns = 0;
             oprSteps = 0;
             trueKnown = null;
@@ -5677,9 +5705,12 @@ public final class LookaheadSearch {
                     // only that the candidate exists in the copy. The seed is the world's: common random numbers.
                     p.firstAction = new FirstAction(c);
                     p.firstAction.budget = p.budget;
-                    p.firstAction.mayPlayLoose = fidelityPass();
+                    // step3-playout-fixes-1028 (replayMayPlayLoose): a re-play's level-0 copy matches may-play loosely too
+                    final boolean loose = fidelityPass() || cfg.replayMayPlayLoose && replaying;
+                    p.firstAction.mayPlayLoose = loose;
+                    p.firstAction.oprRollout = p.noLeaf;
                     p.playoutSeed = mix(worldSeed, 5);
-                    if (!c.pass && c.plan == null && c.block == null && locate(p.g, p.me, c, fidelityPass()) == null) {
+                    if (!c.pass && c.plan == null && c.block == null && locate(p.g, p.me, c, loose) == null) {
                         p.failed = true;
                         p.missWhy = locateMiss(p.g, p.me, c);
                     }
@@ -5786,7 +5817,7 @@ public final class LookaheadSearch {
                 if (o != me) {
                     if (cfg.opponentPolicy) {
                         // bvw-step2-fork-1027 (S2T): the opponent is the same policy seat (its own observation only)
-                        final PlayoutSeat os = hookPlayout ? hooks.opponentSeat(p.hookCtx, g, o, p.playoutSeed) : null;
+                        final PlayoutSeat os = hookPlayout ? hooks.opponentSeat(p.hookCtx, g, o, p.playoutSeed, p.firstAction) : null;
                         if (os == null) {
                             throw new IllegalStateException("S2T: no policy seat for the play-out's opponent");
                         }

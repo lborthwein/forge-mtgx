@@ -65,9 +65,15 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         public int maxDecisions = 3000;
         /**
          * Live play (lane forge-live-fixes-1012; 0 = off, the default, and then nothing changes): the "Cancel Search?"
-         * loop guard's K ({@link RlLoopGuard}). Set only by the live seat ({@link RlLiveSeat.Spec#loopGuard}).
+         * loop guard's K ({@link RlLoopGuard}). Set by the live seat ({@link RlLiveSeat.Spec#loopGuard}), the bench's main
+         * seat, and (step3-playout-fixes-1028, spec key {@code playoutLoopGuard}) the search's play-out seats.
          */
         public int loopGuard = 0;
+        /**
+         * step3-playout-fixes-1028: the guard's one stderr line per answer (true, the default, as before); a search
+         * play-out seat counts its answers instead ({@link #loopGuardHits}).
+         */
+        public boolean loopGuardLog = true;
     }
 
     /** Thrown out of the game thread's answer path never; the runner reads {@link #fatal} instead. */
@@ -440,7 +446,9 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
             o.addProperty("answer", "yes");
             o.addProperty("decisions", decIdx);
             o.addProperty("hits", loopGuard.hits);
-            System.err.println("[loop-guard] " + o);
+            if (cfg.loopGuardLog) {
+                System.err.println("[loop-guard] " + o);
+            }
             final JsonObject yes = new JsonObject();
             yes.addProperty("yes", true);
             return yes;
