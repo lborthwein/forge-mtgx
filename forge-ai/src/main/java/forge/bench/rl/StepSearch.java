@@ -131,6 +131,15 @@ public final class StepSearch {
                 throw new IllegalArgumentException("refused: the step-1 search's belief pool (beliefCube, beliefCubeSha256, "
                         + "beliefBasics, beliefSingleton) must be the proof check's");
             }
+            // belief-jar-1027: and so must its basics draw
+            final double labelShare = Double.isNaN(label.basicsShare) ? forge.ai.simulation.LookaheadSearch.BASICS_SHARE_BOT
+                    : label.basicsShare;
+            final double searchShare = Double.isNaN(c.basicsShare) ? forge.ai.simulation.LookaheadSearch.BASICS_SHARE_BOT
+                    : c.basicsShare;
+            if (!c.basics.equals(label.basics) || "twoStage".equals(c.basics) && labelShare != searchShare) {
+                throw new IllegalArgumentException("refused: the step-1 search's basics (basics, basicsShare) must be the "
+                        + "proof check's");
+            }
             if (c.plans == null) {
                 throw new IllegalArgumentException("refused: the step-1 search is S-b: it needs plans");
             }

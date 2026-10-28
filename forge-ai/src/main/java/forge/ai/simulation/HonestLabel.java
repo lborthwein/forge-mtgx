@@ -69,6 +69,13 @@ public final class HonestLabel {
         public int beliefBasics = 8;
         /** Singleton pool (our deck and their seen cards left out): only for decks drafted together from one cube. */
         public boolean beliefSingleton = false;
+        /**
+         * belief-jar-1027 ("fixed" = the default, and then nothing changes, the spec's sha included): "twoStage" = the
+         * checks' belief worlds draw the opponent's hidden basics first ({@link LookaheadSearch.Config#basics}), with
+         * {@link #basicsShare} (NaN = {@link LookaheadSearch#BASICS_SHARE_BOT}).
+         */
+        public String basics = "fixed";
+        public double basicsShare = Double.NaN;
         /** The position's wall budget for the loss worlds, ms (0 = none): worlds not started by then are not run. */
         public long lossWallMs = 0;
         public long seed = 1023L;
@@ -87,7 +94,7 @@ public final class HonestLabel {
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed", "meter", "sequentialAi", "aiTimeoutSec"));
+                "seed", "meter", "sequentialAi", "aiTimeoutSec", "basics", "basicsShare"));
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
@@ -118,6 +125,8 @@ public final class HonestLabel {
             if (o.has("meter")) s.meter = o.get("meter").getAsBoolean();
             if (o.has("sequentialAi") && !o.get("sequentialAi").isJsonNull()) s.sequentialAi = o.get("sequentialAi").getAsBoolean();
             if (o.has("aiTimeoutSec") && !o.get("aiTimeoutSec").isJsonNull()) s.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
+            if (o.has("basics")) s.basics = o.get("basics").getAsString(); // belief-jar-1027
+            if (o.has("basicsShare")) s.basicsShare = o.get("basicsShare").getAsDouble();
             s.checkHonest();
             return s;
         }
@@ -140,6 +149,12 @@ public final class HonestLabel {
             }
             if (worlds < 1 || worlds > 64 || beliefBasics < 1) {
                 throw new IllegalArgumentException("label: worlds in [1, 64], beliefBasics >= 1");
+            }
+            if (!"fixed".equals(basics) && !"twoStage".equals(basics)) {
+                throw new IllegalArgumentException("label: basics must be fixed or twoStage, not " + basics);
+            }
+            if (!Double.isNaN(basicsShare) && !(basicsShare > 0 && basicsShare < 1)) {
+                throw new IllegalArgumentException("label: basicsShare must be in (0, 1), not " + basicsShare);
             }
             // bvw-step1-build-1024: budget=counter in both checks or in neither; a counter spec reads no wall clock
             final boolean wc = counter(solverCfg), lc = counter(lossCfg);
@@ -235,6 +250,8 @@ public final class HonestLabel {
             c.beliefCubeSha256 = beliefCubeSha256;
             c.beliefBasics = beliefBasics;
             c.beliefSingleton = beliefSingleton;
+            c.basics = basics; // belief-jar-1027
+            c.basicsShare = basicsShare;
             c.threads = 1;
             c.worlds = worlds;
             return c;
@@ -255,6 +272,11 @@ public final class HonestLabel {
             o.addProperty("seed", seed);
             if (meter) {
                 o.addProperty("meter", true); // bvw-step1-build-1024: only when on, so every other spec's sha is unchanged
+            }
+            if ("twoStage".equals(basics)) {
+                // belief-jar-1027: only when on, so every other spec's sha is unchanged
+                o.addProperty("basics", basics);
+                o.addProperty("basicsShare", Double.isNaN(basicsShare) ? LookaheadSearch.BASICS_SHARE_BOT : basicsShare);
             }
             if (sequentialAi != null) {
                 o.addProperty("sequentialAi", sequentialAi); // review #3: only when set (counter specs set both)
