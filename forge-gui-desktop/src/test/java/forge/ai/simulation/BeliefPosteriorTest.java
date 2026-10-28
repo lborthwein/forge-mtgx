@@ -457,6 +457,38 @@ public class BeliefPosteriorTest extends SimulationTest {
         forge.util.IdScope.close();
     }
 
+    /**
+     * Keys off too: one search serving both seats (a bench game) keeps each seat's OWN deck out of its singleton pool.
+     * The live jar kept the first searching seat's deck for both, so the other seat never drew its opponent's real
+     * cards' names and drew its own.
+     */
+    @Test
+    public void eachSeatKeepsItsOwnDeckOutOfItsPool() throws Exception {
+        Deck d0 = new Deck();
+        d0.getMain().add("Hill Giant", 1);
+        d0.getMain().add("Mountain", 39);
+        Deck d1 = new Deck();
+        d1.getMain().add("Serra Angel", 1);
+        d1.getMain().add("Forest", 39);
+        Game game = board(gameWithDecks(d0, d1));
+        forge.util.IdScope.open();
+        LookaheadSearch s = new LookaheadSearch(cfg("uniform"));
+        final Player p0 = game.getPlayers().get(0), p1 = game.getPlayers().get(1);
+        worldOf(game, p0, s, new Random(1)); // seat 0 searches first
+        boolean giant = false;
+        for (int i = 0; i < 60; i++) {
+            List<String> w = worldOf(game, p1, s, new Random(60 + i));
+            AssertJUnit.assertFalse("seat 1's own Serra Angel in its opponent's world", w.contains("Serra Angel"));
+            giant |= w.contains("Hill Giant");
+        }
+        AssertJUnit.assertTrue("seat 1 may draw its opponent's Hill Giant", giant);
+        for (int i = 0; i < 30; i++) {
+            AssertJUnit.assertFalse("seat 0's own Hill Giant", worldOf(game, p0, s, new Random(200 + i)).contains("Hill Giant"));
+        }
+        s.shutdown();
+        forge.util.IdScope.close();
+    }
+
     /** Seat {@code me}'s world: its opponent's hidden hand and library after a main-world re-draw. */
     private static List<String> worldOf(Game game, Player me, LookaheadSearch s, Random rng) {
         GameCopier c = new GameCopier(game, true);
