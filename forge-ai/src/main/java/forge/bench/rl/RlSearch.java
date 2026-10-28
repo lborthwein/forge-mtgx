@@ -233,6 +233,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String beliefPosteriorSha256;
         /** belief-jar-1027, bench only (-1 = every seat): the keys apply to this seat's searches only. */
         public int beliefSeat = -1;
+        /**
+         * belief-jar-1027 (review S1-1): the modelled opponent's lineage tokens (draft / pod / saved deck / match), set per
+         * game by the live seat from the host's {@code beliefLineage}; not a JSON key.
+         */
+        public List<String> beliefLineage;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -689,6 +694,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefPosterior = cfg.beliefPosterior;
             lc.beliefPosteriorSha256 = cfg.beliefPosteriorSha256;
             lc.beliefSeat = cfg.beliefSeat;
+            lc.beliefLineage = cfg.beliefLineage;
         }
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)

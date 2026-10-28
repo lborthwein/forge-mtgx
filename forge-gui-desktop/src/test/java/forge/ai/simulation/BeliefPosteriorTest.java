@@ -73,16 +73,23 @@ public class BeliefPosteriorTest extends SimulationTest {
      * Returns {path, sha256}.
      */
     private static String[] posteriorFile(double wPmi, double share, List<String> deckHashes, List<String> groups) throws Exception {
-        final int n = POOL.length;
+        return posteriorFile(wPmi, share, deckHashes, groups, 0.0, POOL);
+    }
+
+    /** As above with a world-level uniform mixture share and a vocabulary (POOL or a part of it). */
+    private static String[] posteriorFile(double wPmi, double share, List<String> deckHashes, List<String> groups, double mix,
+            String[] vocab) throws Exception {
+        final int n = vocab.length;
         final JsonObject o = new JsonObject();
         o.addProperty("schema", "mtgx-belief-posterior/1");
         o.addProperty("name", "test");
         final JsonArray voc = new JsonArray();
-        for (String x : POOL) {
+        for (String x : vocab) {
             voc.add(x);
         }
         o.add("vocab", voc);
         o.addProperty("basicsShare", share);
+        o.addProperty("mixUniform", mix);
         o.addProperty("unknownLogit", -5.0);
         final JsonObject st = new JsonObject();
         final JsonArray base = new JsonArray();
@@ -98,15 +105,17 @@ public class BeliefPosteriorTest extends SimulationTest {
         h.addProperty("alpha", 1.0);
         h.addProperty("lam", 3.0);
         final JsonArray cnt = new JsonArray();
-        for (String x : POOL) {
+        for (String x : vocab) {
             cnt.add("Shock".equals(x) || "Lightning Bolt".equals(x) ? 9 : 1);
         }
         h.add("count", cnt);
         final JsonArray pairs = new JsonArray();
-        final int shock = Arrays.asList(POOL).indexOf("Shock"), bolt = Arrays.asList(POOL).indexOf("Lightning Bolt");
-        pairs.add(Math.min(shock, bolt));
-        pairs.add(Math.max(shock, bolt));
-        pairs.add(9);
+        final int shock = Arrays.asList(vocab).indexOf("Shock"), bolt = Arrays.asList(vocab).indexOf("Lightning Bolt");
+        if (shock >= 0 && bolt >= 0) {
+            pairs.add(Math.min(shock, bolt));
+            pairs.add(Math.max(shock, bolt));
+            pairs.add(9);
+        }
         h.add("pairs", pairs);
         h.addProperty("wPmi", wPmi);
         h.addProperty("wPop", 0.0);
@@ -351,51 +360,50 @@ public class BeliefPosteriorTest extends SimulationTest {
         forge.util.IdScope.close();
     }
 
+    private static Deck deckOf(Object... nameCount) {
+        Deck d = new Deck();
+        for (int i = 0; i < nameCount.length; i += 2) {
+            d.getMain().add((String) nameCount[i], (Integer) nameCount[i + 1]);
+        }
+        return d;
+    }
+
+    private static List<String> names(Deck d) {
+        final List<String> out = new ArrayList<>();
+        for (Map.Entry<forge.item.PaperCard, Integer> e : d.getMain()) {
+            for (int i = 0; i < e.getValue(); i++) {
+                out.add(e.getKey().getName());
+            }
+        }
+        return out;
+    }
+
     /**
-     * HONESTY: a posterior whose training manifest holds this game's deck (or a group the host names: its pod) is refused
-     * for the game; its worlds then draw uniformly (two-stage), and the refusal is counted.
+     * HONESTY by LINEAGE (review S1-1, owner ruling 10-27): the posterior is refused for a game when the training manifest
+     * holds the MODELLED OPPONENT's exact deck or a lineage token the host names for it (here its pod); never for our own
+     * deck. Its worlds then draw uniformly (two-stage), and the refusal is counted.
      */
     @Test
-    public void aPosteriorTrainedOnThisGamesDeckOrPodIsRefused() throws Exception {
-        Deck mine = new Deck();
-        mine.getMain().add("Mountain", 20);
-        mine.getMain().add("Hill Giant", 20);
-        Deck theirs = new Deck();
-        theirs.getMain().add("Forest", 16);
-        theirs.getMain().add("Craw Wurm", 12);
-        theirs.getMain().add("Raging Goblin", 11);
-        theirs.getMain().add("Shock", 1);
-        final List<String> theirNames = new ArrayList<>();
-        for (int i = 0; i < 12; i++) {
-            theirNames.add("Craw Wurm");
-        }
-        for (int i = 0; i < 11; i++) {
-            theirNames.add("Raging Goblin");
-        }
-        theirNames.add("Shock");
-        for (int i = 0; i < 16; i++) {
-            theirNames.add("Forest");
-        }
-        final String theirHash = BeliefPosterior.deckHash(theirNames);
-        // (1) the deck in the manifest
-        final String[] fd = posteriorFile(2.0, 0.5, Collections.singletonList(theirHash), Collections.emptyList());
-        // (2) the pod in the manifest (the host names it)
-        final String[] fp = posteriorFile(2.0, 0.5, Collections.singletonList("0000000000000000"),
-                Collections.singletonList("pod:d2p-0042"));
-        // (3) neither
-        final String[] fn = posteriorFile(2.0, 0.5, Collections.singletonList("0000000000000000"),
-                Collections.singletonList("pod:other"));
-        for (int t = 0; t < 3; t++) {
+    public void aPosteriorTrainedOnTheOpponentsLineageIsRefused() throws Exception {
+        Deck mine = deckOf("Mountain", 20, "Hill Giant", 20);
+        Deck theirs = deckOf("Forest", 16, "Craw Wurm", 12, "Raging Goblin", 11, "Shock", 1);
+        final String theirHash = BeliefPosterior.deckHash(names(theirs));
+        final String myHash = BeliefPosterior.deckHash(names(mine));
+        final String[][] cases = {
+            posteriorFile(2.0, 0.5, Collections.singletonList(theirHash), Collections.emptyList()),            // their exact deck
+            posteriorFile(2.0, 0.5, Collections.singletonList("0000000000000000"), Collections.singletonList("pod:d2p-0042")), // their pod
+            posteriorFile(2.0, 0.5, Collections.singletonList(myHash), Collections.singletonList("pod:other")),   // OUR deck only
+        };
+        for (int t = 0; t < cases.length; t++) {
             Game game = board(gameWithDecks(mine, theirs));
             forge.util.IdScope.open();
-            final String[] f = t == 0 ? fd : t == 1 ? fp : fn;
             LookaheadSearch.Config c = cfg("posterior");
             set(c, "basics", "twoStage");
-            set(c, "beliefPosterior", f[0]);
-            set(c, "beliefPosteriorSha256", f[1]);
-            set(c, "beliefGroups", Arrays.asList("pod:d2p-0042", "game:7"));
+            set(c, "beliefPosterior", cases[t][0]);
+            set(c, "beliefPosteriorSha256", cases[t][1]);
+            set(c, "beliefLineage", Arrays.asList("pod:d2p-0042", "match:7"));
             LookaheadSearch on = new LookaheadSearch(c);
-            final String why = on.checkPosteriorHonest(game);
+            final String why = on.checkPosteriorHonest(game, game.getPlayers().get(1));
             int bolt = 0;
             final ForcedWinSolver.Redraw rd = on::redraw;
             for (int i = 0; i < 300; i++) {
@@ -405,12 +413,12 @@ public class BeliefPosteriorTest extends SimulationTest {
             }
             if (t < 2) {
                 AssertJUnit.assertNotNull("refused (" + t + ")", why);
-                AssertJUnit.assertTrue(why, why.contains("training manifest") && why.contains(t == 0 ? "seat 1" : "pod:d2p-0042"));
+                AssertJUnit.assertTrue(why, why.contains("modelled opponent") && why.contains(t == 0 ? "exact deck" : "lineage (pod)"));
+                AssertJUnit.assertFalse("a refusal never names an id: " + why, why.contains("d2p-0042"));
                 AssertJUnit.assertEquals(1, on.getStats().posteriorRefused);
-                // uniform two-stage: Bolt in 7 of 11 nonbasic slots' worth, about 0.64 of worlds
                 AssertJUnit.assertTrue("refused: Bolt about uniform (" + bolt + "/300)", bolt > 150 && bolt < 240);
             } else {
-                AssertJUnit.assertNull(why);
+                AssertJUnit.assertNull("our own deck in the manifest is no reason: " + why, why);
                 AssertJUnit.assertEquals(0, on.getStats().posteriorRefused);
                 AssertJUnit.assertTrue("served: Bolt " + bolt + "/300", bolt > 270);
             }
@@ -420,6 +428,123 @@ public class BeliefPosteriorTest extends SimulationTest {
         // the canonical deck hash: basics left out, order and split-card spelling ignored
         AssertJUnit.assertEquals(BeliefPosterior.deckHash(Arrays.asList("Shock", "Fire // Ice", "Forest")),
                 BeliefPosterior.deckHash(Arrays.asList("Fire", "Shock")));
+    }
+
+    /**
+     * On the SHIPPED resource (its manifest's canary, a synthetic entry that is no training deck): a one-card edit of the
+     * same saved deck (same deck: token) is REFUSED; a deck from another draft that shares 27 of the canary's 28 nonbasic
+     * cards (Jaccard 0.93) is ALLOWED (cross-draft overlap is legitimate knowledge); the exact canary list is refused.
+     */
+    @Test
+    public void theShippedResourceRefusesByLineageNotSimilarity() throws Exception {
+        final BeliefPosterior p = BeliefPosterior.load(BeliefPosterior.LIVE, BeliefPosterior.LIVE_SHA256);
+        AssertJUnit.assertEquals(40, p.canaryDeck.size());
+        final List<String> edit = new ArrayList<>(p.canaryDeck);
+        final int k = edit.indexOf(edit.stream().filter(x -> !BeliefSampler.isBasic(x)).findFirst().get());
+        edit.set(k, "Lightning Bolt".equals(edit.get(k)) ? "Counterspell" : "Lightning Bolt");
+        final Deck theirsEdited = new Deck();
+        for (String x : edit) {
+            theirsEdited.getMain().add(BeliefSampler.resolve(x), 1);
+        }
+        final Deck theirsExact = new Deck();
+        for (String x : p.canaryDeck) {
+            theirsExact.getMain().add(BeliefSampler.resolve(x), 1);
+        }
+        final Deck mine = deckOf("Mountain", 20, "Hill Giant", 20);
+        final Object[][] cases = {
+            {theirsEdited, Arrays.asList("deck:belief-canary-1027", "match:9"), Boolean.TRUE},   // same saved deck, one card edited
+            {theirsEdited, Arrays.asList("draft:another-draft-1027"), Boolean.FALSE},             // similar, another draft
+            {theirsExact, null, Boolean.TRUE},                                                    // the same list
+        };
+        for (Object[] cs : cases) {
+            Game game = gameWithDecks(mine, (Deck) cs[0]);
+            LookaheadSearch.Config c = cfgCube("posterior");
+            set(c, "basics", "twoStage");
+            set(c, "beliefPosteriorSha256", BeliefPosterior.LIVE_SHA256);
+            set(c, "beliefLineage", cs[1]);
+            LookaheadSearch on = new LookaheadSearch(c);
+            final String why = on.checkPosteriorHonest(game, game.getPlayers().get(1));
+            AssertJUnit.assertEquals(cs[1] + " -> " + why, ((Boolean) cs[2]).booleanValue(), why != null);
+            // the canary deck as OUR deck is never a reason
+            Game swapped = gameWithDecks((Deck) cs[0], mine);
+            AssertJUnit.assertNull(new LookaheadSearch(c).checkPosteriorHonest(swapped, swapped.getPlayers().get(1)));
+            on.shutdown();
+        }
+    }
+
+    /**
+     * Review S2-1: with mixUniform m, every world draws from the posterior with probability 1 - m, else uniformly, so a
+     * card's frequency is (1 - m) P_post + m P_unif and a card the posterior rules out keeps m x the uniform mass.
+     */
+    @Test
+    public void theMixtureKeepsUniformMass() throws Exception {
+        final String[] f = posteriorFile(2.0, 0.5, Collections.emptyList(), Collections.emptyList(), 0.5, POOL);
+        Game game = board(initAndCreateGame());
+        forge.util.IdScope.open();
+        LookaheadSearch.Config c = cfg("posterior");
+        set(c, "basics", "twoStage");
+        set(c, "beliefPosterior", f[0]);
+        set(c, "beliefPosteriorSha256", f[1]);
+        LookaheadSearch on = new LookaheadSearch(c);
+        final List<String> nb = new ArrayList<>(Arrays.asList(POOL));
+        nb.remove("Shock");
+        final double[] wp = BeliefSampler.weights(on.posterior().logits(nb, Collections.singleton("Shock")));
+        final double[] pp = new BeliefSampler.Dist(nb, wp, 0, 7, 0).marginals();
+        final double[] ones = new double[nb.size()];
+        Arrays.fill(ones, 1.0);
+        final double[] pu = new BeliefSampler.Dist(nb, ones, 0, 7, 0).marginals();
+        final int worlds = 1200;
+        final Map<String, Integer> count = new HashMap<>();
+        final ForcedWinSolver.Redraw rd = on::redraw;
+        for (int i = 0; i < worlds; i++) {
+            for (String x : world(game, rd, new Random(11000 + i))) {
+                if (!isLand(x)) {
+                    count.merge(x, 1, Integer::sum);
+                }
+            }
+        }
+        for (int i = 0; i < nb.size(); i++) {
+            final double want = 0.5 * pp[i] + 0.5 * pu[i];
+            final double got = count.getOrDefault(nb.get(i), 0) / (double) worlds;
+            AssertJUnit.assertEquals(nb.get(i), want, got, 4 * Math.sqrt(want * (1 - want) / worlds) + 1e-3);
+        }
+        final long mixed = on.getStats().posteriorMixWorlds;
+        AssertJUnit.assertTrue("about half the worlds uniform: " + mixed, mixed > 520 && mixed < 680);
+        on.shutdown();
+        forge.util.IdScope.close();
+    }
+
+    /**
+     * Review S2-2: a pool the posterior's vocabulary covers below 95 % gets no posterior (an out-of-vocabulary card would
+     * outrank most of the vocabulary); the worlds draw uniformly, two-stage, and the guard is reported.
+     */
+    @Test
+    public void thePoolGuardTurnsAnUncoveredPosteriorOff() throws Exception {
+        final String[] half = Arrays.copyOfRange(POOL, 0, 6);
+        final String[] f = posteriorFile(2.0, 0.5, Collections.emptyList(), Collections.emptyList(), 0.0, half);
+        Game game = board(initAndCreateGame());
+        forge.util.IdScope.open();
+        LookaheadSearch.Config c = cfg("posterior");
+        set(c, "basics", "twoStage");
+        set(c, "beliefPosterior", f[0]);
+        set(c, "beliefPosteriorSha256", f[1]);
+        LookaheadSearch on = new LookaheadSearch(c);
+        AssertJUnit.assertTrue(on.getStats().posteriorPoolGuard);
+        AssertJUnit.assertEquals(0.5, on.getStats().posteriorCoverage, 1e-9);
+        final ForcedWinSolver.Redraw rd = on::redraw;
+        world(game, rd, new Random(5));
+        AssertJUnit.assertEquals(0, on.getStats().posteriorMixWorlds);
+        AssertJUnit.assertTrue(on.getStats().toJson().get("posteriorPoolGuard").getAsBoolean());
+        // the jar's own pool (the mush cube) passes it
+        LookaheadSearch.Config c2 = cfgCube("posterior");
+        set(c2, "basics", "twoStage");
+        set(c2, "beliefPosteriorSha256", BeliefPosterior.LIVE_SHA256);
+        LookaheadSearch live = new LookaheadSearch(c2);
+        AssertJUnit.assertFalse(live.getStats().posteriorPoolGuard);
+        AssertJUnit.assertEquals(1.0, live.getStats().posteriorCoverage, 1e-9);
+        on.shutdown();
+        live.shutdown();
+        forge.util.IdScope.close();
     }
 
     /**

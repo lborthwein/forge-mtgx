@@ -99,6 +99,7 @@ public final class InteractiveMain {
             config = InteractiveProtocol.readConfig(configLine);
             eventPool = InteractiveProtocol.readBeliefPool(configLine); // honest-belief-1020
             beliefSeen = InteractiveProtocol.readBeliefSeen(configLine); // deck-guess-1021
+            beliefLineage = InteractiveProtocol.readBeliefLineage(configLine); // belief-jar-1027
             puzzle = InteractivePuzzle.read(com.google.gson.JsonParser.parseString(configLine).getAsJsonObject());
             validateDeckFiles(config.decks());
         } catch (InteractiveProtocol.ProtocolException e) {
@@ -798,6 +799,10 @@ public final class InteractiveMain {
                 final InteractiveProtocol.BeliefPool pool = settledPool(); // honest-belief-1020
                 lp.live().setBeliefPool(pool == null ? null : pool.names(), pool != null && pool.singleton());
                 lp.live().setBeliefSeen(beliefSeen); // deck-guess-1021
+                lp.live().setBeliefLineage(beliefLineage); // belief-jar-1027
+                if (beliefLineage != null) {
+                    System.err.println("[belief-lineage] seat=" + i + " tokens=" + beliefLineage.size()); // count only, never ids
+                }
                 if (beliefSeen != null) {
                     System.err.println("[belief-seen] seat=" + i + " names=" + beliefSeen.size()); // count only, never names
                 }
@@ -815,6 +820,9 @@ public final class InteractiveMain {
 
     /** deck-guess-1021: the opponent's cards from earlier games of this match (the config's beliefSeen), or null. */
     static volatile java.util.List<String> beliefSeen;
+
+    /** belief-jar-1027: the human seat's deck lineage tokens (the config's beliefLineage), or null. */
+    static volatile java.util.List<String> beliefLineage;
 
     /** honest-belief-1020: this session's event card pool (the config's beliefPool), or null: the jar's live pool. */
     static volatile InteractiveProtocol.BeliefPool eventPool;

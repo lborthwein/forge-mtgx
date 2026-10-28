@@ -21,7 +21,6 @@ import com.google.gson.JsonParser;
 
 import forge.deck.Deck;
 import forge.deck.DeckSection;
-import forge.game.Game;
 import forge.game.player.Player;
 import forge.item.PaperCard;
 
@@ -43,15 +42,25 @@ import forge.item.PaperCard;
  * {@code exp(z)}, so constant terms (the lane's k/10 and bias features) do not matter. A card outside the vocabulary gets
  * {@link #unknownLogit} and no pair terms; a shown card outside it is no evidence.
  *
- * <p>HONESTY: the posterior is fitted on past decks only. Its {@code manifest} lists every training deck (a hash of its
- * nonbasic names) and group (pod, draft, game); {@link #refusal} names the reason a game may not use it (one of its
- * registered decks, or a group the host names, is in the manifest).
+ * <p>HONESTY, by LINEAGE (owner ruling 2026-10-27: "the cube is only so big, and lots of archetype decks in a given color
+ * have a lot of overlap with one another. Memorizing a deck may well be closer to the truth than not"): the posterior is
+ * fitted on past decks only, and its {@code manifest} lists every training deck's LINEAGE: salted hashes of the tokens
+ * {@code draft:<draft id>}, {@code pod:<pod id>}, {@code deck:<saved deck id>} (its edit history included),
+ * {@code game:<recorded game id>}, plus each training deck's exact nonbasic list (the same list is the same deck).
+ * {@link #refusal} refuses a game for the MODELLED OPPONENT only: when one of the lineage tokens the host names for their
+ * deck (draft, pod, saved deck, match) or their exact list is in the manifest. A merely similar deck from another draft
+ * is allowed: cross-draft archetype overlap is legitimate knowledge.
+ *
+ * <p>Review S2-1: {@link #mixUniform} is the share of worlds drawn uniformly (a world-level mixture), so the posterior
+ * never rules a true card out. Review S2-2: a pool the vocabulary covers below {@link #MIN_COVERAGE} gets no posterior.
  */
 public final class BeliefPosterior {
     public static final String SCHEMA = "mtgx-belief-posterior/1";
     /** The jar's posterior: fitted on all 110 human decks of the round-2 corpus, static parts on mush TRAIN pods + 17Lands fold 0. */
     public static final String LIVE = "classpath:/forge/ai/simulation/belief-posterior-human-mush.json";
-    public static final String LIVE_SHA256 = "0f4d886f53535a9515b0acc5cd8de6d0405ff7a07d5010b7823be01024e5e2a8";
+    public static final String LIVE_SHA256 = "fc0be24802586085bc276051415ea51385b0af4100f9f69b502fa457864a1437";
+    /** Review S2-2: the share of a pool's nonbasic cards the vocabulary must cover for the posterior to apply. */
+    public static final double MIN_COVERAGE = 0.95;
 
     public final String sha256;
     public final String name;
@@ -59,6 +68,11 @@ public final class BeliefPosterior {
     /** Mean basics per deck card of the human training decks (the two-stage basics' default deck share). */
     public final double basicsShare;
     public final double unknownLogit;
+    /** Review S2-1: the share of worlds drawn uniformly instead of from the posterior (0 = none). */
+    public final double mixUniform;
+    /** The manifest's canary (a synthetic entry, never a training deck), for tests: its deck list and lineage tokens. */
+    public final List<String> canaryDeck;
+    public final List<String> canaryLineage;
     public final int manifestDecks;
     public final int manifestGroups;
     private final Map<String, Integer> index = new HashMap<>();
@@ -120,6 +134,10 @@ public final class BeliefPosterior {
         }
         this.basicsShare = o.get("basicsShare").getAsDouble();
         this.unknownLogit = o.get("unknownLogit").getAsDouble();
+        this.mixUniform = o.has("mixUniform") && !o.get("mixUniform").isJsonNull() ? o.get("mixUniform").getAsDouble() : 0.0;
+        if (!(mixUniform >= 0 && mixUniform < 1)) {
+            throw new IllegalStateException("belief posterior: mixUniform must be in [0, 1), not " + mixUniform);
+        }
         // static parts
         final JsonObject st = o.getAsJsonObject("static");
         final JsonArray base = st.getAsJsonArray("base");
@@ -221,6 +239,32 @@ public final class BeliefPosterior {
         }
         this.manifestDecks = deckHashes.size();
         this.manifestGroups = groupHashes.size();
+        final List<String> cd = new ArrayList<>(), cl = new ArrayList<>();
+        if (man.has("canary") && man.get("canary").isJsonObject()) {
+            for (JsonElement x : man.getAsJsonObject("canary").getAsJsonArray("deck")) {
+                cd.add(x.getAsString());
+            }
+            for (JsonElement x : man.getAsJsonObject("canary").getAsJsonArray("lineage")) {
+                cl.add(x.getAsString());
+            }
+        }
+        this.canaryDeck = Collections.unmodifiableList(cd);
+        this.canaryLineage = Collections.unmodifiableList(cl);
+    }
+
+    /** Review S2-2: the share of the given nonbasic names the vocabulary covers (1 for an empty list). */
+    public double coverage(final Collection<String> names) {
+        int n = 0, in = 0;
+        for (String x : names) {
+            if (x == null || BeliefSampler.isBasic(x)) {
+                continue;
+            }
+            n++;
+            if (indexOf(x) >= 0) {
+                in++;
+            }
+        }
+        return n == 0 ? 1.0 : (double) in / n;
     }
 
     /** A card name's front face (an alias or split-card spelling matches it). */
@@ -331,23 +375,24 @@ public final class BeliefPosterior {
     }
 
     /**
-     * Null when the game may use this posterior; else why not: one of the game's registered decks, or one of the given
-     * groups (the host's pod / draft / game ids), is in the training manifest.
+     * Null when the game may use this posterior against {@code opp}; else why not (HONESTY by lineage): one of the
+     * lineage tokens the host names for {@code opp}'s deck (draft, pod, saved deck, match) is in the training manifest, or
+     * {@code opp}'s registered deck is exactly a training deck (the same nonbasic list is the same deck). Our own deck and
+     * any merely similar deck are not reasons. A refusal names the token kind or "exact deck", never an id.
      */
-    public String refusal(final Game live, final Collection<String> groups) {
-        final List<Player> ps = live.getRegisteredPlayers();
-        for (int s = 0; s < ps.size(); s++) {
-            final List<String> d = mainDeckNames(ps.get(s));
-            if (d != null && hasDeck(deckHash(d))) {
-                return "the posterior's training manifest holds seat " + s + "'s deck (" + deckHash(d) + ")";
-            }
-        }
-        if (groups != null) {
-            for (String g : groups) {
-                if (g != null && hasGroup(g)) {
-                    return "the posterior's training manifest holds this game's group " + g;
+    public String refusal(final Player opp, final Collection<String> lineage) {
+        if (lineage != null) {
+            for (String t : lineage) {
+                if (t != null && hasGroup(t.trim())) {
+                    final int c = t.indexOf(':');
+                    return "the posterior's training manifest holds the modelled opponent's lineage ("
+                            + (c > 0 ? t.substring(0, c) : "token") + ")";
                 }
             }
+        }
+        final List<String> d = mainDeckNames(opp);
+        if (d != null && hasDeck(deckHash(d))) {
+            return "the posterior's training manifest holds the modelled opponent's exact deck";
         }
         return null;
     }

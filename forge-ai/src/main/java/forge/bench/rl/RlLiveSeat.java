@@ -477,6 +477,15 @@ public final class RlLiveSeat {
         spec.search.beliefSeen = seen;
     }
 
+    /**
+     * belief-jar-1027 (review S1-1): the human opponent's lineage tokens for the next {@link #bind} (the host's
+     * {@code beliefLineage}: {@code draft:<id>}, {@code pod:<id>}, {@code deck:<saved deck id>}, {@code match:<id>}; null =
+     * none). Read only by belief=posterior's honesty check: a lineage in the posterior's training manifest refuses it.
+     */
+    public void setBeliefLineage(final java.util.List<String> lineage) {
+        spec.search.beliefLineage = lineage;
+    }
+
     public void bind(final Game g, final int seatIndex, final long seed, final LookaheadSearch.Config k8,
             final AiFixes.Mode k8AiFixes) {
         this.game = g;
