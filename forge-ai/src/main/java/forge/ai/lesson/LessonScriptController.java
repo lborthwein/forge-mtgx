@@ -40,12 +40,14 @@ import forge.game.zone.ZoneType;
  * game. Every question the script cannot name (a trigger's target, a damage order) is the wrapped Forge AI's.
  *
  * <p><b>Drift.</b> The player may take another line (owner, report 05-32-02). A scripted action whose objects are gone
- * when it is due (a named payment source, target, attacker or blocker no longer on the battlefield under its
- * controller, tapped, or unable to act; a cast the named sources cannot pay) is never forced: the step is spent, the
- * seat is handed to the wrapped Forge AI, which answers that very decision and every one after it, and a
- * {@code [lesson-script]} line says so. A card the script means to play or cast that is not in hand yet, or a spell that
- * cannot be cast at this moment (its timing), is not drift: the step waits, as the client's lesson partner waits. A block
- * pair whose attacker is not attacking is skipped (the player chose not to attack with it).</p>
+ * when it is due is never forced: the step is spent, the seat is handed to the wrapped Forge AI, which answers that very
+ * decision and every one after it, and a {@code [lesson-script]} line says so. Gone means: a named payment source not
+ * on its battlefield untapped (or a creature source summoning sick), a named target not there or not a legal target, a
+ * named attacker or blocker no longer on its battlefield, a cast the named sources cannot pay, a declaration Forge
+ * would refuse. Not drift, as the client's lesson partner: a card to play or cast not in hand yet, or a spell not
+ * castable at this moment (its timing): the step waits; a named attacker there but unable to attack now (tapped, sick):
+ * it stays home and the rest attack; a block pair whose attacker is not attacking, or whose blocker is already
+ * blocking, tapped or unable to block that attacker: the pair is skipped.</p>
  *
  * <p><b>Payment.</b> A scripted cast is paid with its named sources: {@link ComputerUtilMana}'s real payment loop asks
  * {@link #chooseManaSource} for each source it taps ({@link ScriptedManaSources}); a shard no named source can pay is Forge
@@ -195,7 +197,9 @@ public final class LessonScriptController extends PlayerControllerAi implements 
         for (Card c : chosen) {
             combat.addAttacker(c, defender);
         }
-        if (!chosen.isEmpty() && !CombatUtil.validateAttackers(combat)) {
+        // never an invalid declaration (the phase handler would ask again forever): a requirement the script did not
+        // meet ("attacks each combat if able") is the wrapped Forge AI's to meet
+        if (!CombatUtil.validateAttackers(combat)) {
             combat.clearAttackers();
             drift(-1, "attack", "invalid");
             super.declareAttackers(attacker, combat);
@@ -212,7 +216,7 @@ public final class LessonScriptController extends PlayerControllerAi implements 
         for (Card[] pair : chosen) {
             combat.addBlocker(pair[1], pair[0]);
         }
-        if (!chosen.isEmpty() && CombatUtil.validateBlocks(combat, defender) != null) {
+        if (CombatUtil.validateBlocks(combat, defender) != null) {
             for (Card[] pair : chosen) {
                 combat.removeBlockAssignment(pair[1], pair[0]);
             }
@@ -376,14 +380,21 @@ public final class LessonScriptController extends PlayerControllerAi implements 
         }
         final GameEntity defender = defenderOf(combat);
         final List<Card> chosen = new ArrayList<>();
+        final Set<Card> named = new HashSet<>();
         for (String name : names) {
-            final Card c = first(getPlayer().getCardsIn(ZoneType.Battlefield), name,
-                    x -> x.isCreature() && !chosen.contains(x) && !combat.isAttacking(x));
-            if (c == null || defender == null || !CombatUtil.canAttack(c, defender)) {
-                driftToBot(step, "attack", c == null ? "attacker" : "cannot-attack");
+            // gone from the battlefield (the player removed it): drift; there but unable to attack now (tapped, sick):
+            // it stays home and the rest attack, as the client's partner does with the legal attackers it names
+            final Card any = first(getPlayer().getCardsIn(ZoneType.Battlefield), name, x -> x.isCreature() && !named.contains(x));
+            if (any == null || defender == null) {
+                driftToBot(step, "attack", "attacker");
                 return null;
             }
-            chosen.add(c);
+            final Card c = first(getPlayer().getCardsIn(ZoneType.Battlefield), name, x -> x.isCreature() && !named.contains(x)
+                    && !combat.isAttacking(x) && CombatUtil.canAttack(x, defender));
+            named.add(c != null ? c : any);
+            if (c != null) {
+                chosen.add(c);
+            }
         }
         if (step >= 0) {
             spend(step, "attack");
@@ -430,11 +441,16 @@ public final class LessonScriptController extends PlayerControllerAi implements 
                 continue; // the player did not attack with it: no block to make
             }
             final Card a = attacker;
-            final Card blocker = first(getPlayer().getCardsIn(ZoneType.Battlefield), pair.blocker(),
-                    x -> x.isCreature() && !usedBlockers.contains(x) && !combat.isBlocking(x));
-            if (blocker == null || !CombatUtil.canBlock(a, blocker, combat)) {
-                driftToBot(step, "block", blocker == null ? "blocker" : "cannot-block");
+            if (first(getPlayer().getCardsIn(ZoneType.Battlefield), pair.blocker(), Card::isCreature) == null) {
+                driftToBot(step, "block", "blocker"); // gone from the battlefield (the player removed it)
                 return null;
+            }
+            // there, but already blocking for an earlier pair, tapped, or unable to block this attacker (a flier): the
+            // pair is skipped, as the client's partner skips a pair the engine does not offer
+            final Card blocker = first(getPlayer().getCardsIn(ZoneType.Battlefield), pair.blocker(),
+                    x -> x.isCreature() && !usedBlockers.contains(x) && !combat.isBlocking(x) && CombatUtil.canBlock(a, x, combat));
+            if (blocker == null) {
+                continue;
             }
             usedBlockers.add(blocker);
             chosen.add(new Card[] {blocker, a});

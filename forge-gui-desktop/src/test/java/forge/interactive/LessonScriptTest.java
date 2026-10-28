@@ -320,6 +320,21 @@ public class LessonScriptTest extends AITest {
         assertEquals(board(ai(game)), "life=7 bf=[Centaur Courser, Forest, Grizzly Bears|T, Llanowar Elves|T] hand=[] gy=[]");
     }
 
+    /** A named attacker that is there but tapped stays home (as the client's partner); the rest attack; no drift. */
+    @Test
+    public void aTappedNamedAttackerStaysHomeAndTheRestAttack() throws Exception {
+        freshIds();
+        MyRandom.setRandom(new Random(1040));
+        final Game game = lesson(state("turn=4", "activeplayer=ai", "activephase=MAIN1", "humanlife=8", "ailife=7",
+                        "humanhand=", HUMAN_LIBRARY, "humanbattlefield=Plains",
+                        "aihand=", AI_LIBRARY, "aibattlefield=Forest;Grizzly Bears|Tapped;Llanowar Elves"),
+                "attack=Grizzly Bears;Llanowar Elves", "rest=pass");
+        playUntil(game, at(5, PhaseType.MAIN1), "the player's next main phase");
+        assertEquals(board(human(game)), "life=7 bf=[Plains] hand=[Plains] gy=[]");
+        assertEquals(seat(ai(game)).drifts(), 0);
+        assertFalse(seat(ai(game)).handedToBot());
+    }
+
     /** Stage E (e6's block pairs): the first pair whose attacker attacks takes the blocker; a used blocker's pair is skipped. */
     @Test
     public void stageEBlockPairsInOrder() throws Exception {
