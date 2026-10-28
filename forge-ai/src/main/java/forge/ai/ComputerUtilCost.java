@@ -47,6 +47,26 @@ public class ComputerUtilCost {
         KEEP_PW_ULTIMATES.set(on);
     }
 
+    /** Whether {@link #setKeepPwUltimates} is on for this thread. */
+    public static boolean isKeepPwUltimates() {
+        return KEEP_PW_ULTIMATES.get();
+    }
+
+    /**
+     * mtgx (lane forge-fix-p1p2-1028, anomaly audit P1/P3): {@code body} with the planeswalker coin off on this thread,
+     * the previous setting put back after (so a caller that already set it, the look-ahead's first play-out priority,
+     * keeps it).
+     */
+    public static <T> T withKeepPwUltimates(final java.util.function.Supplier<T> body) {
+        final boolean before = KEEP_PW_ULTIMATES.get();
+        KEEP_PW_ULTIMATES.set(Boolean.TRUE);
+        try {
+            return body.get();
+        } finally {
+            KEEP_PW_ULTIMATES.set(before);
+        }
+    }
+
 
     public static boolean checkExileFromGraveCost(final Cost cost, final Player payer, final SpellAbility sa) {
         CardCollection payingCards = new CardCollection();

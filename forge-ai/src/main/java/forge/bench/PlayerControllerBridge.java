@@ -1009,15 +1009,32 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         }
         final int ceiling = StateEncoder.maxAnnounceableX(chosen);
         int clamped = Math.max(0, Math.min(x, ceiling));
+        int floor = 0;
         // CR 601.2b: an X with a stated minimum may not be announced below it.
         try {
             if (chosen.getPayCosts() != null && chosen.getPayCosts().getCostMana() != null) {
-                clamped = Math.max(clamped, Math.min(ceiling, chosen.getPayCosts().getCostMana().getXMin()));
+                floor = Math.min(ceiling, chosen.getPayCosts().getCostMana().getXMin());
+                clamped = Math.max(clamped, floor);
             }
         } catch (RuntimeException e) {
             // no stated minimum available; the [0, ceiling] clamp stands
         }
         chosen.setXManaCostPaid(clamped);
+        // mtgx lane forge-fix-p1p2-1028 (anomaly audit 1028 P1): the ceiling is an estimate of the mana available, and
+        // it can be above what the seat can pay (a Talisman counted as three mana, colour-restricted sources, a cost
+        // increase it does not see). An X the seat cannot pay was refused and the priority went to Forge AI, even with
+        // a smaller X payable. Step down to the largest payable X (not below the stated minimum) first; only when no X
+        // is payable does the re-check after targeting refuse.
+        final int asked = clamped;
+        while (clamped > floor && !canPayForSeat(chosen)) {
+            clamped--;
+            chosen.setXManaCostPaid(clamped);
+        }
+        if (clamped != asked) {
+            counters.instrument("x.steppedDown");
+            JsonRpcChannel.log("stepped announced X " + asked + " -> " + clamped + " (the largest payable X) for "
+                    + chosen);
+        }
         counters.instrument("x.announced");
         if (clamped > 0) {
             counters.instrument("x.announcedNonZero");
@@ -1058,11 +1075,30 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
             }
             cur = cur.getSubAbility();
         }
-        if (!ComputerUtilCost.canPayCost(root, getPlayer(), root.isTrigger())) {
+        if (!canPayForSeat(root)) {
             refuse("chooseSpellAbilityToPlay", "cost became unpayable after targeting: " + root);
             return false;
         }
         return true;
+    }
+
+    /**
+     * The affordability test behind this seat's priority menu and its post-targeting re-check (mtgx lane
+     * forge-fix-p1p2-1028, anomaly audit 1028 P1/P3). Forge's {@link ComputerUtilCost#canPayCost} also holds Forge AI's
+     * own preference "try not to lose the planeswalker": a loyalty ability that costs all the walker's loyalty (The
+     * Wandering Emperor's -1 at loyalty 1, an ultimate at exactly its loyalty) is refused when the opponent has no
+     * creatures, and otherwise on a 50 % coin drawn from the game's random stream. For a seat whose answers are played
+     * (an RL or policy seat, a remote host) that is a preference, not a rule, and it made the seat's own choice fall back
+     * to Forge AI's about half the time (and flip in and out of the look-ahead's menus per world). So such a seat checks
+     * with the coin off ({@link ComputerUtilCost#withKeepPwUltimates}), and no random draw is taken. A recorder
+     * (observe-only) keeps Forge's own test, so a recorded menu is still the one Forge alone would build.
+     */
+    private boolean canPayForSeat(final SpellAbility sa) {
+        final Player p = getPlayer();
+        if (observeOnly()) {
+            return ComputerUtilCost.canPayCost(sa, p, sa.isTrigger());
+        }
+        return ComputerUtilCost.withKeepPwUltimates(() -> ComputerUtilCost.canPayCost(sa, p, sa.isTrigger()));
     }
 
     private static JsonObject menuDiagJson(final int[] diag, final int offered) {
@@ -1215,7 +1251,7 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
                     bump(diag, DIAG_TIMING);
                     continue;
                 }
-                if (!ComputerUtilCost.canPayCost(sa, p, sa.isTrigger())) {
+                if (!canPayForSeat(sa)) {
                     bump(diag, DIAG_UNAFFORDABLE);
                     continue;
                 }
