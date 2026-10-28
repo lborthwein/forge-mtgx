@@ -198,6 +198,19 @@ public final class RlActorBench {
         int referenceTurns = 3;
         /** lki-fix-port-1027: replay mode's stall watchdog (on by default; {@code "watchdog": false} = off). */
         ReplayStallWatchdog.Thresholds watchdog = new ReplayStallWatchdog.Thresholds();
+        /**
+         * bvw-decision-log-1027 ({@link DecisionLog}; null = the mode's default). Generation (train / record / eval):
+         * {@code "off"} (the default: nothing changes) or {@code "record"} (every decision of both Forge seats goes on
+         * the tape line, key {@code decision_log}). Replay: {@code "auto"} (the default: a tape line, or a
+         * {@link #decisionLogs} file, that carries a log is replayed FORCED from it, never re-searched; a tape without
+         * one re-runs its seats, as before), {@code "rerun"} (re-run the seats, whatever the tape carries) or
+         * {@code "record"} (re-run the seats of a tape without a log and write their log to {@link #decisionLogOut}).
+         */
+        String decisionLog = null;
+        /** bvw-decision-log-1027: replay {@code "record"}: the directory of {@code decision-logs-<pid>.jsonl.gz}. */
+        String decisionLogOut = null;
+        /** bvw-decision-log-1027: replay: logs an earlier {@code "record"} replay wrote (used for digest-equal games). */
+        List<String> decisionLogs = null;
     }
 
     static void parseReference(final Cfg c, final JsonObject o, final String where) {
@@ -326,6 +339,35 @@ public final class RlActorBench {
         }
         if (o.has("watchdog")) {
             c.watchdog = ReplayStallWatchdog.Thresholds.parse(o.get("watchdog")); // lki-fix-port-1027
+        }
+        if (o.has("decisionLog") && !o.get("decisionLog").isJsonNull()) {
+            // bvw-decision-log-1027: checked once, at JVM start (exit 2 on a bad value)
+            c.decisionLog = o.get("decisionLog").getAsString();
+            final boolean replay = "replay".equals(c.mode);
+            final java.util.Set<String> ok = new java.util.TreeSet<>(replay
+                    ? java.util.Arrays.asList("auto", "rerun", "record") : java.util.Arrays.asList("off", "record"));
+            if (!ok.contains(c.decisionLog)) {
+                throw new IllegalArgumentException("decisionLog in " + c.mode + " mode is one of " + ok + ", not "
+                        + c.decisionLog);
+            }
+        }
+        if (o.has("decisionLogOut") && !o.get("decisionLogOut").isJsonNull()) {
+            c.decisionLogOut = o.get("decisionLogOut").getAsString();
+        }
+        if (o.has("decisionLogs") && !o.get("decisionLogs").isJsonNull()) {
+            c.decisionLogs = new ArrayList<>();
+            for (JsonElement e : o.getAsJsonArray("decisionLogs")) {
+                c.decisionLogs.add(e.getAsString());
+            }
+        }
+        if ("record".equals(c.decisionLog) && "replay".equals(c.mode) && c.decisionLogOut == null) {
+            throw new IllegalArgumentException("decisionLog record in replay mode needs decisionLogOut");
+        }
+        if (c.decisionLogOut != null && !("record".equals(c.decisionLog) && "replay".equals(c.mode))) {
+            throw new IllegalArgumentException("decisionLogOut is for decisionLog record in replay mode");
+        }
+        if (c.decisionLogs != null && (!"replay".equals(c.mode) || "rerun".equals(c.decisionLog))) {
+            throw new IllegalArgumentException("decisionLogs are read by a replay that may force them (not rerun)");
         }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
@@ -527,6 +569,7 @@ public final class RlActorBench {
         RlKnowledge knowledge; // the game's seat-knowledge tracker (tests)
         RlSearch search;       // S1: the game's look-ahead (null when off)
         forge.ai.LobbyPlayerAi[] lobbies; // gen-check-1007: each seat's lobby player (tests)
+        DecisionLog decisionLog; // bvw-decision-log-1027: the game's log (record or forced), or null
     }
 
     static final ThreadMXBean TMX = ManagementFactory.getThreadMXBean();
@@ -552,6 +595,15 @@ public final class RlActorBench {
 
     static Played play(final Cfg cfg, final String mode, final JsonObject g, final RlFeaturizer feat,
             final RlSeat.Endpoint ep, final RlSeat.FrameListener listener, final String jarSha, final GameHook hook) {
+        // bvw-decision-log-1027: a generation run's decisionLog "record" logs every game (a replay chooses per tape)
+        return play(cfg, mode, g, feat, ep, listener, jarSha, hook,
+                "record".equals(cfg.decisionLog) && !"replay".equals(cfg.mode) ? DecisionLog.record() : null);
+    }
+
+    /** bvw-decision-log-1027: {@code dl} (null = none, as before) records or forces both Forge seats' decisions. */
+    static Played play(final Cfg cfg, final String mode, final JsonObject g, final RlFeaturizer feat,
+            final RlSeat.Endpoint ep, final RlSeat.FrameListener listener, final String jarSha, final GameHook hook,
+            final DecisionLog dl) {
         final Played out = new Played();
         final long uid = RlWire.parseUid(g.get("game_uid").getAsString());
         final long seed = g.get("seed").getAsLong();
@@ -611,6 +663,16 @@ public final class RlActorBench {
                     k8Config(k8spec, 0L);
                 } catch (RuntimeException e) {
                     out.guardError = "controller " + ctl[s] + ": " + e.getMessage();
+                    return out;
+                }
+            }
+        }
+        if (dl != null) {
+            // bvw-decision-log-1027: the log tapes Forge seats (forge, forge:<Profile>); a bridged seat's answers are its
+            // dec rows, and the K8 seat is not taped here
+            for (int s = 0; s < 2; s++) {
+                if (K8_CONTROLLER.equals(ctl[s]) || RlSeat.roleOf(ctl[s]) != RlSeat.Role.FORGE) {
+                    out.guardError = "decision log: seat " + s + " (" + ctl[s] + ") is not a Forge seat";
                     return out;
                 }
             }
@@ -727,7 +789,9 @@ public final class RlActorBench {
         rules.setSimTimeout(cfg.gameTimeoutSec);
         final Match match = new Match(rules, seats, "rl-sim");
 
-        final Random gameRandom = new Random(seed);
+        // bvw-decision-log-1027: a logged game's random stream is TrackedRandom (new Random(seed)'s stream, its state
+        // readable: the log syncs it); without a log, as before
+        final Random gameRandom = dl != null ? new forge.ai.simulation.PlayoutKeys.TrackedRandom(seed) : new Random(seed);
         MyRandom.setThreadRandom(gameRandom);
         IdScope.open();
         AiCache.openScope();
@@ -813,6 +877,12 @@ public final class RlActorBench {
             // LookaheadBench row (panel N / K rows, pf1 rows) compare digest for digest
             dgLb = new LookaheadBench.Digest(game);
             game.subscribeToEvents(dgLb);
+            if (dl != null) {
+                // bvw-decision-log-1027: both seats' taping controllers, last (every seat bound, every listener on)
+                out.decisionLog = dl;
+                dl.install(game, (forge.ai.simulation.PlayoutKeys.TrackedRandom) gameRandom, new int[] {0, 1});
+                dl.bindGameThread();
+            }
             RUNNING.put(Thread.currentThread(), new Object[] {game,
                     System.currentTimeMillis() + cfg.gameTimeoutSec * 1000L, uid});
             match.startGame(game, null);
@@ -825,6 +895,9 @@ public final class RlActorBench {
             }
         } finally {
             RUNNING.remove(Thread.currentThread());
+            if (dl != null) {
+                dl.finish(); // bvw-decision-log-1027: the tapes' end lines; uninstalled
+            }
             if (game != null && !game.isGameOver()) {
                 game.setGameOver(GameEndReason.Draw);
             }
@@ -853,6 +926,8 @@ public final class RlActorBench {
             voidReason = "timeout";
         } else if (seat.voidReason != null) {
             voidReason = seat.voidReason;
+        } else if (dl != null && dl.divergence() != null) {
+            voidReason = DecisionLog.VOID; // bvw-decision-log-1027: the game stopped at its log's divergence
         } else if (crash != null || game == null) {
             voidReason = "crash";
         }
@@ -1039,6 +1114,9 @@ public final class RlActorBench {
             // tape is unchanged
             t.addProperty("loop_guard", loopGuard);
             t.addProperty("loop_guard_hits", seat.loopGuardHits());
+        }
+        if (dl != null && dl.mode == DecisionLog.Mode.RECORD) {
+            t.add(DecisionLog.KEY, dl.tapeJson()); // bvw-decision-log-1027: no key without a log
         }
         out.tape = t;
 
@@ -1474,6 +1552,15 @@ public final class RlActorBench {
             scanSink = new forge.bench.rl.RlExileScan.Sink(Paths.get(cfg.exileScanOut));
             System.err.println("[bvw-exile-scan] scanning replays: T=" + cfg.exileScanTurns + " -> " + scanSink.scanFile());
         }
+        // bvw-decision-log-1027: logs an earlier "record" replay wrote (forced for their digest-equal games), and this
+        // replay's own sink when it records
+        DecisionLog.SIDECAR = cfg.decisionLogs == null ? null : DecisionLog.loadSidecars(cfg.decisionLogs);
+        DecisionLog.SINK = "record".equals(cfg.decisionLog) ? new DecisionLog.Sink(Paths.get(cfg.decisionLogOut)) : null;
+        if (DecisionLog.SIDECAR != null || DecisionLog.SINK != null) {
+            System.err.println("[decision-log] replay: " + (DecisionLog.SIDECAR == null ? "" : DecisionLog.SIDECAR.size()
+                    + " logged games from " + cfg.decisionLogs.size() + " file(s)") + (DecisionLog.SINK == null ? ""
+                    : " recording -> " + DecisionLog.SINK.file()));
+        }
         final Map<String, List<JsonObject>> cache = new HashMap<>();
         for (int[] fl : cfg.replayLines) {
             final String f = cfg.replayTapes.get(fl[0]);
@@ -1603,6 +1690,9 @@ public final class RlActorBench {
         if (w != null) {
             w.close();
         }
+        if (DecisionLog.SINK != null) {
+            DecisionLog.SINK.close(); // bvw-decision-log-1027
+        }
         // bvw-plr-1023: the replay's wall time and thread count (label throughput is read from them)
         final JsonObject sum = new JsonObject();
         sum.addProperty("type", "replay-summary");
@@ -1652,8 +1742,12 @@ public final class RlActorBench {
             final JsonObject t = cache.get(f).get(fl[1]);
             row.add("game_uid", t.get("game_uid"));
             row.add("digest_tape", t.get("digest"));
-            final String noRuntime = t.has("controllers") ? counterGeneratorRefusal(t.getAsJsonArray("controllers"),
-                    cfg.aiTimeoutSec) : null;
+            // bvw-decision-log-1027: the game's log (the tape's own, or an earlier record replay's for this exact game):
+            // replayed FORCED, so its seats decide nothing and their budgets cannot bind; without one, as before
+            final DecisionLog dl = decisionLogFor(cfg, t);
+            final boolean forced = dl != null && dl.mode == DecisionLog.Mode.FORCED;
+            final String noRuntime = t.has("controllers") && !forced ? counterGeneratorRefusal(
+                    t.getAsJsonArray("controllers"), cfg.aiTimeoutSec) : null;
             if (!t.get("void").isJsonNull()) {
                 row.addProperty("error", "void");
                 row.addProperty("equal", false);
@@ -1715,7 +1809,7 @@ public final class RlActorBench {
                     game.addPriorityDecisionListener(scans[0]);
                 } : null;
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
-                        t.get("game_uid").getAsString())), null, jarSha, hook);
+                        t.get("game_uid").getAsString())), null, jarSha, hook, dl);
                 final forge.bench.rl.RlReplayLabeller lab = labs[0];
                 if (p.guardError != null) {
                     row.addProperty("error", "deck_guard: " + p.guardError);
@@ -1745,7 +1839,27 @@ public final class RlActorBench {
                     }
                     boolean eq = p.end.get("digest").getAsString().equals(t.get("digest").getAsString())
                             && p.end.get("void").isJsonNull();
-                    if (t.has("honest_generator") || p.end.has("honest_generator")) {
+                    if (p.decisionLog != null || cfg.decisionLog != null) {
+                        // bvw-decision-log-1027: the replay's own CPU (game thread + its other threads), for the forced
+                        // vs re-run comparison; only in runs that use the log (other rows are unchanged)
+                        row.add("cpu_ms", p.end.get("cpu_ms"));
+                        if (p.end.has("cpu_other_ms")) {
+                            row.add("cpu_other_ms", p.end.get("cpu_other_ms"));
+                        }
+                    }
+                    if (p.decisionLog != null) {
+                        // bvw-decision-log-1027: a forced replay is equal only when every seat used its whole log and
+                        // none diverged (a divergence is void, never re-searched)
+                        row.add(DecisionLog.KEY, p.decisionLog.replayJson());
+                        row.addProperty("decision_log_source", dlSource(t, dl));
+                        if (forced) {
+                            eq &= p.decisionLog.complete();
+                        }
+                    }
+                    if (forced) {
+                        // the generator did not run: its spec is the log's (no honest_generator summary to compare)
+                        row.addProperty("generator", "forced");
+                    } else if (t.has("honest_generator") || p.end.has("honest_generator")) {
                         final boolean sameSpec = generatorSpecs(t).equals(generatorSpecs(p.end));
                         row.addProperty("generator_spec_equal", sameSpec);
                         eq &= sameSpec;
@@ -1783,6 +1897,15 @@ public final class RlActorBench {
                             row.addProperty("equal", false);
                         }
                     }
+                    if (dl != null && dl.mode == DecisionLog.Mode.RECORD && DecisionLog.SINK != null) {
+                        // bvw-decision-log-1027: the re-run seats' log, for later forced replays of this exact game
+                        try {
+                            DecisionLog.SINK.write(t, f, fl[1], row, eq, dl);
+                        } catch (IOException e) {
+                            row.addProperty("error", "decision log sink: " + e);
+                            row.addProperty("equal", false);
+                        }
+                    }
                     // the replayed game's own census (lane rl-r0-b4b-1006): a jar's asks on the exact games of a
                     // tape, e.g. the before/after of a record-mode mapping fix
                     if (p.tape != null && p.tape.has("census")) {
@@ -1798,6 +1921,33 @@ public final class RlActorBench {
             row.addProperty("equal", false);
         }
         return row;
+    }
+
+    /**
+     * bvw-decision-log-1027: the log a replay of tape line {@code t} plays: FORCED from the line's own
+     * {@link DecisionLog#KEY} or from an earlier record replay's log of this exact game (uid and digest); RECORD (replay
+     * {@code "record"}, a line without a log); null (re-run, as before: {@code "rerun"}, or no log).
+     */
+    static DecisionLog decisionLogFor(final Cfg cfg, final JsonObject t) {
+        final String mode = cfg.decisionLog == null ? "auto" : cfg.decisionLog;
+        if ("rerun".equals(mode)) {
+            return null;
+        }
+        if (t.has(DecisionLog.KEY) && t.get(DecisionLog.KEY).isJsonObject()) {
+            return DecisionLog.forced(t.getAsJsonObject(DecisionLog.KEY));
+        }
+        final JsonObject side = DecisionLog.sidecarFor(t);
+        if (side != null) {
+            return DecisionLog.forced(side);
+        }
+        return "record".equals(mode) ? DecisionLog.record() : null;
+    }
+
+    static String dlSource(final JsonObject t, final DecisionLog dl) {
+        if (dl.mode == DecisionLog.Mode.RECORD) {
+            return "recorded";
+        }
+        return t.has(DecisionLog.KEY) ? "tape" : "sidecar";
     }
 
     /**

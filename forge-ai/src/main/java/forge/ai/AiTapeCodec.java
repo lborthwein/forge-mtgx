@@ -472,6 +472,18 @@ public final class AiTapeCodec {
     }
 
     static void applyConfig(final Game g, final Player seat, final SpellAbility sa, final JsonElement e) {
+        applyConfig(g, seat, sa, e, false);
+    }
+
+    /**
+     * {@code charmModesLater} (bvw-decision-log-1027; the priority decision's own config only): a charm the AI chose
+     * carries the modes its deliberation attached; a forced replay does not deliberate, and the play re-chooses the
+     * modes (the recorded chooseModeForAbility) and sets their targets (the recorded "h" checkpoint). Then only the
+     * charm's own part is set here. A play that does not re-choose them leaves those recorded decisions unused: a
+     * divergence at the play, never a silent difference.
+     */
+    static void applyConfig(final Game g, final Player seat, final SpellAbility sa, final JsonElement e,
+            final boolean charmModesLater) {
         checkEncodable(e);
         final JsonObject o = e.getAsJsonObject();
         final int host = o.get("h").getAsInt();
@@ -483,7 +495,9 @@ public final class AiTapeCodec {
         for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
             links++;
         }
-        if (links != o.get("n").getAsInt()) {
+        final boolean modesLater = charmModesLater && sa.getApi() == forge.game.ability.ApiType.Charm
+                && links < o.get("n").getAsInt();
+        if (links != o.get("n").getAsInt() && !modesLater) {
             throw new IllegalStateException("the record's ability has " + o.get("n").getAsInt() + " parts, the game's " + links);
         }
         if (o.has("x")) {
