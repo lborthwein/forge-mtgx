@@ -108,6 +108,11 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             return new java.util.LinkedHashMap<>(written);
         }
 
+        /** Lane lki-fix-port-1027: whether the stall watchdog sealed this sink (tests). */
+        synchronized boolean sealed() {
+            return sealed;
+        }
+
         /** Lane lki-fix-port-1027: the watchdog's {@code void:"stall"} games row of an unfinished game (after the seal). */
         public synchronized void writeStallGame(final JsonObject game) throws IOException {
             Files.write(games, (RlWire.canonicalString(game) + "\n").getBytes(StandardCharsets.UTF_8),

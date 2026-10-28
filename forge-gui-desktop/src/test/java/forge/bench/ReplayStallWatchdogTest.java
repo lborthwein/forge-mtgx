@@ -148,22 +148,14 @@ public class ReplayStallWatchdogTest {
 
     @Test
     public void theJvmSamplerReadsThisJvm() throws Exception {
-        final long[] sink = new long[1];
-        final Thread busy = new Thread(() -> {
-            final long end = System.nanoTime() + 400_000_000L;
-            long x = 0;
-            while (System.nanoTime() < end) {
-                x += System.nanoTime() % 7;
-            }
-            sink[0] = x;
-        }, "rlreplay-w0");
+        final Thread busy = spinner();
         busy.start();
         final ReplayStallWatchdog.JvmSampler s = new ReplayStallWatchdog.JvmSampler(Collections.singletonList(busy));
         Assert.assertNull(s.sample(), "the first call is the baseline");
         Thread.sleep(200);
         System.gc();
         final ReplayStallWatchdog.Sample a = s.sample();
-        busy.join();
+        stop(busy);
         Assert.assertNotNull(a);
         Assert.assertEquals(a.workers, 1);
         Assert.assertTrue(a.gcFraction >= 0 && a.gcFraction <= 1, a.toJson().toString());
@@ -171,6 +163,28 @@ public class ReplayStallWatchdogTest {
         final ReplayStallWatchdog.Sample b = s.sample();
         Assert.assertEquals(b.workers, 0, "a finished game thread is not counted");
         Assert.assertTrue(Double.isNaN(b.mutatorShare));
+        s.close();
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean STOP = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** A busy game thread that runs until {@link #stop} (alive at every sample, however loaded the machine is). */
+    static Thread spinner() {
+        STOP.set(false);
+        return new Thread(() -> {
+            long x = 0;
+            while (!STOP.get()) {
+                x += System.nanoTime() % 7;
+            }
+            if (x == 42) {
+                System.out.print("");
+            }
+        }, "rlreplay-w0");
+    }
+
+    static void stop(final Thread t) throws InterruptedException {
+        STOP.set(true);
+        t.join();
     }
 
     // ------------------------------------------------------------------------------------------- the stall itself
@@ -205,10 +219,35 @@ public class ReplayStallWatchdogTest {
     /** A sampler that answers {@code script} in order, then healthy samples (null first: the baseline). */
     static ReplayStallWatchdog.Sampler scripted(final ReplayStallWatchdog.Sample... script) {
         final AtomicInteger k = new AtomicInteger(-1);
-        return () -> {
-            final int i = k.getAndIncrement();
-            return i < 0 ? null : i < script.length ? script[i] : healthy();
+        return new ReplayStallWatchdog.Sampler() {
+            @Override
+            public ReplayStallWatchdog.Sample sample() {
+                final int i = k.getAndIncrement();
+                return i < 0 ? null : i < script.length ? script[i] : healthy();
+            }
+
+            @Override
+            public List<String> collectors() {
+                return List.of("G1 Young Generation", "G1 Old Generation");
+            }
         };
+    }
+
+    static ReplayStallWatchdog.Thresholds runOf(final int consecutive) {
+        final ReplayStallWatchdog.Thresholds th = new ReplayStallWatchdog.Thresholds();
+        th.consecutive = consecutive;
+        return th;
+    }
+
+    static boolean waitFor(final java.util.function.BooleanSupplier c, final long ms) throws InterruptedException {
+        final long end = System.currentTimeMillis() + ms;
+        while (!c.getAsBoolean()) {
+            if (System.currentTimeMillis() > end) {
+                return false;
+            }
+            Thread.sleep(5);
+        }
+        return true;
     }
 
     @Test
@@ -308,6 +347,7 @@ public class ReplayStallWatchdogTest {
             }
             final JsonObject pr = JsonParser.parseString(Files.readString(wd.progressFile())).getAsJsonObject();
             Assert.assertEquals(pr.get("type").getAsString(), "replay-progress");
+            Assert.assertEquals(pr.getAsJsonArray("collectors").toString(), "[\"G1 Young Generation\",\"G1 Old Generation\"]");
             Assert.assertEquals(pr.get("starved_run").getAsInt(), 3);
             Assert.assertEquals(pr.get("samples").getAsInt(), 5);
         }
@@ -333,5 +373,153 @@ public class ReplayStallWatchdogTest {
         // after close, a stall can no longer happen
         wd.fire();
         Assert.assertEquals(exit.get(), -1);
+    }
+
+    /**
+     * Review S2-1: which games finished is read from one snapshot taken before the seal. A game that finishes during
+     * the wait for a labelled game's row (its row appears after the snapshot, its labels were refused by the seal) is
+     * voided "stall"; the labelled game's row that comes back during the wait is kept.
+     */
+    @Test
+    public void aGameFinishingDuringTheWaitIsVoided() throws Exception {
+        final Path dir = Files.createTempDirectory("stall-wd-wait");
+        final RlReplayLabeller.Sink sink = new RlReplayLabeller.Sink(dir.resolve("labels"));
+        final List<JsonObject> tapes = List.of(tape("1"), tape("2"), tape("3"));
+        final List<int[]> ls = List.of(new int[] {0, 1}, new int[] {0, 2}, new int[] {0, 3});
+        final AtomicReferenceArray<String> out = new AtomicReferenceArray<>(3);
+        final JsonObject g2 = new JsonObject();
+        g2.addProperty("game_uid", "2");
+        g2.addProperty("equal", true);
+        SinkTestAccess.writeGame(sink, g2); // game 2: labelled before the seal, its replay row not back yet
+        final AtomicInteger exit = new AtomicInteger(-1);
+        final Path replay = dir.resolve("replay.jsonl");
+        try (PrintWriter w = new PrintWriter(new FileWriter(replay.toFile(), StandardCharsets.UTF_8, true), true)) {
+            final ReplayStallWatchdog wd = new ReplayStallWatchdog(runOf(1), scripted(starved()), 20, dir, tapes,
+                    List.of("a.gz", "a.gz", "a.gz"), ls, out, sink, RlReplayLabeller.SCHEMA_STEP, w, "jar0", exit::set);
+            wd.lateRowGraceMs = 10_000;
+            final Thread late = new Thread(() -> {
+                try {
+                    // the stall has taken its snapshot and sealed the sink; it now waits for game 2's row
+                    if (!waitFor(() -> SinkTestAccess.isSealed(sink), 10_000)) {
+                        return;
+                    }
+                    out.set(0, "{\"equal\":true,\"game_uid\":\"1\",\"line\":1}"); // game 1 finishes during the wait
+                    Thread.sleep(300);
+                    out.set(1, "{\"equal\":true,\"game_uid\":\"2\",\"line\":2}"); // game 2's row comes back
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            late.start();
+            wd.startThread();
+            Assert.assertTrue(waitFor(() -> exit.get() >= 0, 20_000), "the stall fired");
+            late.join();
+            Assert.assertEquals(exit.get(), ReplayStallWatchdog.EXIT_STALL);
+            final List<JsonObject> rows = lines(replay);
+            Assert.assertEquals(rows.size(), 3, rows.toString());
+            Assert.assertEquals(rows.get(0).get("void").getAsString(), "stall", "game 1's late row is ignored");
+            Assert.assertFalse(rows.get(0).get("equal").getAsBoolean());
+            Assert.assertTrue(rows.get(1).get("equal").getAsBoolean(), "game 2 was labelled before the seal: finished");
+            Assert.assertFalse(rows.get(1).has("void"));
+            Assert.assertEquals(rows.get(2).get("void").getAsString(), "stall");
+            final List<JsonObject> games = lines(sink.gamesFile());
+            Assert.assertEquals(games.size(), 3, games.toString());
+            Assert.assertEquals(games.get(0).get("game_uid").getAsString(), "2");
+            Assert.assertEquals(games.get(1).get("game_uid").getAsString(), "1");
+            Assert.assertEquals(games.get(1).get("void").getAsString(), "stall");
+            Assert.assertEquals(games.get(2).get("game_uid").getAsString(), "3");
+            final JsonObject st = JsonParser.parseString(Files.readString(wd.stallFile())).getAsJsonObject();
+            Assert.assertEquals(st.getAsJsonArray("games_voided").toString(), "[\"1\",\"3\"]");
+            Assert.assertEquals(st.get("games_done").getAsInt(), 1);
+        }
+    }
+
+    /** Review S2-2: if the stall's outputs fail, the JVM still exits 5, and the stall does not count as written. */
+    @Test
+    public void aFailingStallStillExitsFive() throws Exception {
+        final Path dir = Files.createTempDirectory("stall-wd-fail");
+        final JsonObject broken = tape("5");
+        broken.remove("game_uid"); // the stall cannot name this game: its outputs throw
+        final AtomicInteger exit = new AtomicInteger(-1);
+        final ReplayStallWatchdog wd = new ReplayStallWatchdog(runOf(1), scripted(starved()), 20, dir, List.of(broken),
+                List.of("a.gz"), List.<int[]>of(new int[] {0, 1}), new AtomicReferenceArray<>(1), null,
+                RlReplayLabeller.SCHEMA, null, null, exit::set);
+        wd.startThread();
+        Assert.assertTrue(waitFor(() -> exit.get() >= 0, 20_000), "the stall exited");
+        Assert.assertEquals(exit.get(), ReplayStallWatchdog.EXIT_STALL);
+        Assert.assertFalse(Files.exists(wd.stallFile()));
+        Assert.assertTrue(wd.close(), "nothing was written: fired stays false");
+    }
+
+    /** Review S3-6: a sample that throws (an MXBean error, an OOM under the very pressure watched) is skipped. */
+    @Test
+    public void aFailingSampleIsSkipped() throws Exception {
+        final Path dir = Files.createTempDirectory("stall-wd-throw");
+        final AtomicInteger k = new AtomicInteger(-1);
+        final ReplayStallWatchdog.Sampler sampler = () -> {
+            final int i = k.getAndIncrement();
+            if (i == 0) {
+                throw new IllegalStateException("test: MXBean failure");
+            }
+            if (i == 1) {
+                throw new OutOfMemoryError("test: heap");
+            }
+            return i < 0 ? null : starved();
+        };
+        final AtomicInteger exit = new AtomicInteger(-1);
+        final ReplayStallWatchdog wd = new ReplayStallWatchdog(runOf(2), sampler, 20, dir, List.of(tape("6")),
+                List.of("a.gz"), List.<int[]>of(new int[] {0, 1}), new AtomicReferenceArray<>(1), null,
+                RlReplayLabeller.SCHEMA, null, null, exit::set);
+        wd.startThread();
+        Assert.assertTrue(waitFor(() -> exit.get() >= 0, 20_000), "the watchdog survived both failures and fired");
+        Assert.assertEquals(exit.get(), ReplayStallWatchdog.EXIT_STALL);
+        Assert.assertEquals(wd.samples(), 2, "the two failed samples counted as no sample");
+    }
+
+    /** Review S3-8: the samples are defined on G1, Parallel and Serial; any other collector refuses to arm. */
+    @Test
+    public void armsOnlyUnderG1ParallelOrSerial() {
+        Assert.assertNull(ReplayStallWatchdog.armRefusal(List.of("G1 Young Generation", "G1 Old Generation")));
+        Assert.assertNull(ReplayStallWatchdog.armRefusal(List.of("G1 Young Generation", "G1 Concurrent GC",
+                "G1 Old Generation")));
+        Assert.assertNull(ReplayStallWatchdog.armRefusal(List.of("PS Scavenge", "PS MarkSweep")));
+        Assert.assertNull(ReplayStallWatchdog.armRefusal(List.of("Copy", "MarkSweepCompact")));
+        Assert.assertNotNull(ReplayStallWatchdog.armRefusal(List.of("ZGC Cycles", "ZGC Pauses")));
+        Assert.assertNotNull(ReplayStallWatchdog.armRefusal(List.of("Shenandoah Pauses", "Shenandoah Cycles")));
+        Assert.assertNotNull(ReplayStallWatchdog.armRefusal(List.of()));
+        // this test JVM (G1 by default) arms
+        final List<String> here = new ReplayStallWatchdog.JvmSampler(List.of()).collectors();
+        Assert.assertNull(ReplayStallWatchdog.armRefusal(here), here.toString());
+    }
+
+    /** Review S3-4: closing removes the GC listeners; closing twice is harmless. */
+    @Test
+    public void closingRemovesTheGcListeners() {
+        final ReplayStallWatchdog.JvmSampler s = new ReplayStallWatchdog.JvmSampler(List.of());
+        Assert.assertTrue(s.listenerCount() > 0, "one listener per collector");
+        s.close();
+        Assert.assertEquals(s.listenerCount(), 0);
+        s.close();
+        Assert.assertEquals(s.listenerCount(), 0);
+    }
+
+    /** Review S3-5: armed before the game threads start; an unstarted thread is simply not counted yet. */
+    @Test
+    public void unstartedGameThreadsAreNotCounted() throws Exception {
+        final Thread t = spinner();
+        final ReplayStallWatchdog.JvmSampler s = new ReplayStallWatchdog.JvmSampler(List.of(t));
+        Assert.assertNull(s.sample());
+        final ReplayStallWatchdog.Sample before = s.sample();
+        Assert.assertEquals(before.workers, 0);
+        Assert.assertTrue(Double.isNaN(before.mutatorShare));
+        t.start();
+        Thread.sleep(50);
+        s.sample(); // its first reading
+        Thread.sleep(150);
+        final ReplayStallWatchdog.Sample after = s.sample();
+        stop(t);
+        Assert.assertEquals(after.workers, 1);
+        Assert.assertTrue(after.mutatorShare > 0, after.toJson().toString());
+        s.close();
     }
 }

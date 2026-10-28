@@ -1553,10 +1553,10 @@ public final class RlActorBench {
                     out.set(i, r);
                 }
             }, "rlreplay-w" + k);
-            ts.add(t);
-            t.start();
+            ts.add(t); // started below, after the stall watchdog (review S3-5)
         }
-        // lki-fix-port-1027: the stall watchdog (GC fraction, the rlreplay-w* threads' mutator share, old gen after GC)
+        // lki-fix-port-1027: the stall watchdog (GC fraction, the rlreplay-w* threads' mutator share, old gen after GC),
+        // armed before the game threads start (review S3-5); null when the collector is not G1 / Parallel / Serial
         ReplayStallWatchdog wd = null;
         if (cfg.watchdog.enabled && n > 0) {
             final List<String> paths = new ArrayList<>();
@@ -1571,8 +1571,13 @@ public final class RlActorBench {
                     cfg.labelSpec != null ? labelSink : null,
                     cfg.labelSearch != null ? forge.bench.rl.RlReplayLabeller.SCHEMA_STEP
                             : forge.bench.rl.RlReplayLabeller.SCHEMA, w, jarSha);
-            System.err.println("[rlactor] stall watchdog " + RlWire.canonicalString(cfg.watchdog.toJson()) + " -> "
-                    + wd.progressFile());
+            if (wd != null) {
+                System.err.println("[rlactor] stall watchdog " + RlWire.canonicalString(cfg.watchdog.toJson()) + " -> "
+                        + wd.progressFile());
+            }
+        }
+        for (Thread t : ts) {
+            t.start();
         }
         for (Thread t : ts) {
             try {
@@ -1607,6 +1612,7 @@ public final class RlActorBench {
         sum.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
         sum.addProperty("label", cfg.labelSpec != null);
         sum.add("watchdog", cfg.watchdog.toJson()); // lki-fix-port-1027
+        sum.addProperty("watchdog_armed", wd != null); // review S3-8: false when disabled or under another collector
         if (wd != null) {
             sum.addProperty("watchdog_samples", wd.samples());
         }

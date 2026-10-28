@@ -13,4 +13,8 @@ public final class SinkTestAccess {
     public static void writeGame(final RlReplayLabeller.Sink sink, final JsonObject gamesRow) throws IOException {
         sink.write(null, Collections.emptyList(), gamesRow);
     }
+
+    public static boolean isSealed(final RlReplayLabeller.Sink sink) {
+        return sink.sealed();
+    }
 }

@@ -70,6 +70,12 @@ import forge.bench.rl.TrajectoryRef;
  * {@code {"enabled": false}} turns it off): {@code enabled, intervalSec, consecutive, gcFractionMin, mutatorShareMax,
  * oldAfterGcMin, dir} (default dir: replay.out's directory, else label.out, else the working directory). It reads
  * MXBeans only: no game, random stream or decision is touched.
+ *
+ * <p>Review of #121 (lane lki-fix-port-1027): it arms only under the G1, Parallel or Serial collector (their pause
+ * times and old-generation pools are what the samples read; the collector names are in every progress file); it starts
+ * before the game threads; a sample that throws is logged and skipped; the stall decides which games finished from one
+ * snapshot of the rows taken before the label sink is sealed, and it exits 5 even if writing the rows fails; closing it
+ * removes its GC listeners.
  */
 public final class ReplayStallWatchdog {
     /** The replay's exit code after a stall. */
@@ -175,6 +181,34 @@ public final class ReplayStallWatchdog {
     /** The interval since the previous call; null on the first call (the baseline). */
     public interface Sampler {
         Sample sample();
+
+        /** The JVM's collector names (recorded in every progress file). */
+        default List<String> collectors() {
+            return Collections.emptyList();
+        }
+
+        /** Stops listening (review S3-4: the GC listeners are removed when the replay closes the watchdog). */
+        default void close() {
+        }
+    }
+
+    /** Review S3-8: the collectors whose pause times and old-generation pools the samples are defined on. */
+    static final java.util.Set<String> KNOWN_COLLECTORS = java.util.Set.of(
+            "G1 Young Generation", "G1 Old Generation", "G1 Concurrent GC", // G1 (the concurrent bean: JDK 20+)
+            "PS Scavenge", "PS MarkSweep", // Parallel
+            "Copy", "MarkSweepCompact"); // Serial
+
+    /** Null when the watchdog may arm under these collectors (G1, Parallel or Serial only), else why it may not. */
+    static String armRefusal(final List<String> collectors) {
+        if (collectors.isEmpty()) {
+            return "no garbage collector MXBeans";
+        }
+        for (String c : collectors) {
+            if (!KNOWN_COLLECTORS.contains(c)) {
+                return "collector " + c + " (of " + collectors + ") is not G1, Parallel or Serial";
+            }
+        }
+        return null;
     }
 
     /** The trigger, pure: {@code consecutive} starved samples in a row. Any other sample restarts the count. */
@@ -214,6 +248,8 @@ public final class ReplayStallWatchdog {
         private final Object oldLock = new Object();
         /** The lowest old-generation occupancy after a GC since the last sample (NaN: no GC since). */
         private double minOld = Double.NaN;
+        /** The GC listeners this sampler added, by emitter (removed by {@link #close}). */
+        private final Map<NotificationEmitter, javax.management.NotificationListener> listeners = new java.util.LinkedHashMap<>();
 
         JvmSampler(final List<Thread> workers) {
             this.workers = workers;
@@ -224,7 +260,7 @@ public final class ReplayStallWatchdog {
                 if (!(b instanceof NotificationEmitter)) {
                     continue;
                 }
-                ((NotificationEmitter) b).addNotificationListener((n, hb) -> {
+                final javax.management.NotificationListener l = (n, hb) -> {
                     if (!GarbageCollectionNotificationInfo.GARBAGE_COLLECTION_NOTIFICATION.equals(n.getType())) {
                         return;
                     }
@@ -236,8 +272,36 @@ public final class ReplayStallWatchdog {
                             minOld = Double.isNaN(minOld) ? occ : Math.min(minOld, occ);
                         }
                     }
-                }, null, null);
+                };
+                ((NotificationEmitter) b).addNotificationListener(l, null, null);
+                listeners.put((NotificationEmitter) b, l);
             }
+        }
+
+        @Override
+        public List<String> collectors() {
+            final List<String> names = new ArrayList<>();
+            for (GarbageCollectorMXBean b : gcBeans) {
+                names.add(b.getName());
+            }
+            return names;
+        }
+
+        /** The GC listeners still registered (tests). */
+        synchronized int listenerCount() {
+            return listeners.size();
+        }
+
+        @Override
+        public synchronized void close() {
+            for (Map.Entry<NotificationEmitter, javax.management.NotificationListener> e : listeners.entrySet()) {
+                try {
+                    e.getKey().removeNotificationListener(e.getValue());
+                } catch (javax.management.ListenerNotFoundException ignored) {
+                    // already gone
+                }
+            }
+            listeners.clear();
         }
 
         /** Old-generation pools ("G1 Old Gen", or any "Old Gen" / "Tenured" pool): used / max; NaN when there is none. */
@@ -349,14 +413,25 @@ public final class ReplayStallWatchdog {
     }
 
     /**
-     * Starts the watchdog of one replay: {@code workers} are its {@code rlreplay-w*} threads; game {@code i} is
-     * {@code tapes.get(i)} (from {@code tapePaths.get(i)}, line {@code lines.get(i)[1]}) and its row lands in
-     * {@code out[i]}. A stall exits the JVM with {@link #EXIT_STALL}.
+     * Starts the watchdog of one replay, BEFORE its game threads start (review S3-5): {@code workers} are its
+     * {@code rlreplay-w*} threads (started or not); game {@code i} is {@code tapes.get(i)} (from
+     * {@code tapePaths.get(i)}, line {@code lines.get(i)[1]}) and its row lands in {@code out[i]}. A stall exits the
+     * JVM with {@link #EXIT_STALL}. Returns null, and says why on stderr, when it may not arm (review S3-8: a
+     * collector other than G1, Parallel or Serial).
      */
     public static ReplayStallWatchdog start(final Thresholds th, final List<Thread> workers, final Path dir,
             final List<JsonObject> tapes, final List<String> tapePaths, final List<int[]> lines,
             final AtomicReferenceArray<String> out, final RlReplayLabeller.Sink sink, final String gamesSchema,
             final PrintWriter replayOut, final String jarSha) throws IOException {
+        final List<String> collectors = new ArrayList<>();
+        for (GarbageCollectorMXBean b : ManagementFactory.getGarbageCollectorMXBeans()) {
+            collectors.add(b.getName());
+        }
+        final String refusal = armRefusal(collectors);
+        if (refusal != null) {
+            System.err.println("[rlactor] stall watchdog NOT armed: " + refusal);
+            return null;
+        }
         Files.createDirectories(dir);
         final ReplayStallWatchdog w = new ReplayStallWatchdog(th, new JvmSampler(workers), th.intervalSec * 1000L, dir,
                 tapes, tapePaths, lines, out, sink, gamesSchema, replayOut, jarSha, code -> {
@@ -383,6 +458,11 @@ public final class ReplayStallWatchdog {
         if (thread != null) {
             thread.interrupt();
         }
+        try {
+            sampler.close(); // review S3-4: the GC listeners go with the replay
+        } catch (RuntimeException e) {
+            System.err.println("[rlactor] watchdog: closing the sampler: " + e);
+        }
         return !fired;
     }
 
@@ -399,38 +479,56 @@ public final class ReplayStallWatchdog {
     }
 
     private void loop() {
-        sampler.sample(); // the baseline
+        try {
+            sampler.sample(); // the baseline
+        } catch (Throwable t) {
+            log("the baseline sample failed", t);
+        }
         while (true) {
             try {
                 Thread.sleep(intervalMs);
             } catch (InterruptedException e) {
                 return;
             }
-            final Sample s = sampler.sample();
-            final boolean stall;
-            synchronized (this) {
-                if (closed) {
-                    return;
+            boolean stall = false;
+            try {
+                final Sample s = sampler.sample();
+                synchronized (this) {
+                    if (closed) {
+                        return;
+                    }
+                    if (s != null) {
+                        final boolean starved = judge.starved(s);
+                        stall = judge.offer(s);
+                        samples++;
+                        final JsonObject j = s.toJson();
+                        j.addProperty("t", Instant.now().toString());
+                        j.addProperty("starved", starved);
+                        recent.addLast(j);
+                        while (recent.size() > th.consecutive) {
+                            recent.removeFirst();
+                        }
+                        writeProgress(j);
+                    }
                 }
-                if (s == null) {
-                    continue;
-                }
-                final boolean starved = judge.starved(s);
-                stall = judge.offer(s);
-                samples++;
-                final JsonObject j = s.toJson();
-                j.addProperty("t", Instant.now().toString());
-                j.addProperty("starved", starved);
-                recent.addLast(j);
-                while (recent.size() > th.consecutive) {
-                    recent.removeFirst();
-                }
-                writeProgress(j);
+            } catch (Throwable t) {
+                // review S3-6: a failed sample (an OOM under the very pressure it watches, an MXBean error) is logged and
+                // skipped; it counts as no sample, so it neither extends nor restarts the starved run
+                log("a sample failed (skipped)", t);
+                continue;
             }
             if (stall) {
                 fire();
                 return;
             }
+        }
+    }
+
+    private static void log(final String what, final Throwable t) {
+        try {
+            System.err.println("[rlactor] watchdog: " + what + ": " + t);
+        } catch (Throwable ignored) {
+            // nothing more to do
         }
     }
 
@@ -453,6 +551,11 @@ public final class ReplayStallWatchdog {
         p.addProperty("games", out.length());
         p.addProperty("games_done", gamesDone());
         p.add("watchdog", th.toJson());
+        final JsonArray gcs = new JsonArray();
+        for (String c : sampler.collectors()) {
+            gcs.add(c);
+        }
+        p.add("collectors", gcs); // review S3-8
         if (jarSha != null) {
             p.addProperty("jar_sha", jarSha);
         }
@@ -473,106 +576,135 @@ public final class ReplayStallWatchdog {
         return TrajectoryRef.canonicalUid(tape.get("game_uid").getAsString());
     }
 
-    /** The stall: void the unfinished games, write every row and STALL-<pid>.json, exit 5. */
+    /**
+     * The stall: void the unfinished games, write every row and STALL-<pid>.json, exit 5.
+     *
+     * <p>Review S2-1: which games finished is decided from ONE snapshot of the rows, taken before the label sink is
+     * sealed. A game finished iff its row is in that snapshot, or its labels and games row were written before the seal
+     * (then its replay row is waited for, bounded). A row that comes back later for any other game is ignored, and that
+     * game is voided "stall" (its labels, if any, were refused by the seal). Review S2-2: whatever fails here, the JVM
+     * exits 5; {@code fired} is set only once the rows are written.
+     */
     synchronized void fire() {
         if (closed) {
             return;
         }
-        fired = true;
-        final String at = Instant.now().toString();
-        final Map<String, JsonObject> labelled = sink == null ? Collections.emptyMap() : sink.seal();
-        final int n = out.length();
-        // a game whose labels were written just before the seal is finished: wait (bounded) for its replay row
-        final long until = System.nanoTime() + lateRowGraceMs * 1_000_000L;
-        for (int i = 0; i < n; i++) {
-            while (out.get(i) == null && labelled.containsKey(uid(tapes.get(i))) && System.nanoTime() < until) {
-                try {
-                    Thread.sleep(50);
-                } catch (InterruptedException e) {
-                    break;
-                }
-            }
-        }
-        final JsonObject stall = new JsonObject();
-        stall.addProperty("pid", pid);
-        stall.addProperty("t", at);
-        stall.addProperty("samples", samples);
-        final List<String> rows = new ArrayList<>(n);
-        final JsonArray voided = new JsonArray();
-        int done = 0;
-        for (int i = 0; i < n; i++) {
-            final String r = out.get(i);
-            if (r != null) {
-                rows.add(r);
-                done++;
-                continue;
-            }
-            final JsonObject t = tapes.get(i);
-            final String u = uid(t);
-            final JsonObject row = new JsonObject();
-            row.addProperty("tape", tapePaths.get(i));
-            row.addProperty("line", lines.get(i)[1]);
-            row.add("game_uid", t.get("game_uid"));
-            row.add("digest_tape", t.get("digest"));
-            final JsonObject g = labelled.get(u);
-            if (g != null) {
-                // finished (its labels and games row are written) but its replay row did not come back in time
-                row.add("digest_replay", g.get("digest_replay"));
-                row.add("equal", g.get("equal"));
-                if (g.has("trajectory_equal")) {
-                    row.add("trajectory_equal", g.get("trajectory_equal"));
-                }
-                row.addProperty("error", "stall: the replay row was not back before the exit (the game's labels are "
-                        + "written)");
-                rows.add(RlWire.canonicalString(row));
-                done++;
-                continue;
-            }
-            row.addProperty("equal", false);
-            row.addProperty("void", "stall");
-            row.addProperty("error", "stall: the watchdog voided this unfinished game");
-            rows.add(RlWire.canonicalString(row));
-            voided.add(u);
-            if (sink != null) {
-                try {
-                    sink.writeStallGame(stallGameRow(t, u, stall));
-                } catch (IOException e) {
-                    System.err.println("[rlactor] watchdog: label games file: " + e);
-                }
-            }
-        }
-        if (replayOut != null) {
-            for (String r : rows) {
-                replayOut.println(r);
-            }
-            replayOut.flush();
-        }
-        final JsonObject f = new JsonObject();
-        f.addProperty("type", "replay-stall");
-        f.addProperty("pid", pid);
-        f.addProperty("t", at);
-        f.addProperty("exit", EXIT_STALL);
-        f.add("watchdog", th.toJson());
-        final JsonArray rs = new JsonArray();
-        for (JsonObject s : recent) {
-            rs.add(s);
-        }
-        f.add("starved_samples", rs);
-        f.addProperty("games", n);
-        f.addProperty("games_done", done);
-        f.add("games_voided", voided);
-        if (jarSha != null) {
-            f.addProperty("jar_sha", jarSha);
-        }
         try {
+            final String at = Instant.now().toString();
+            final int n = out.length();
+            final String[] snapshot = new String[n];
+            for (int i = 0; i < n; i++) {
+                snapshot[i] = out.get(i);
+            }
+            final Map<String, JsonObject> labelled = sink == null ? Collections.emptyMap() : sink.seal();
+            // a game labelled before the seal but not in the snapshot is finished: wait (bounded) for its replay row
+            final long until = System.nanoTime() + lateRowGraceMs * 1_000_000L;
+            for (int i = 0; i < n; i++) {
+                if (snapshot[i] != null || !labelled.containsKey(uid(tapes.get(i)))) {
+                    continue;
+                }
+                while (out.get(i) == null && System.nanoTime() < until) {
+                    try {
+                        Thread.sleep(50);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+            }
+            final JsonObject stall = new JsonObject();
+            stall.addProperty("pid", pid);
+            stall.addProperty("t", at);
+            stall.addProperty("samples", samples);
+            final List<String> rows = new ArrayList<>(n);
+            final List<JsonObject> stallGames = new ArrayList<>();
+            final JsonArray voided = new JsonArray();
+            int done = 0;
+            for (int i = 0; i < n; i++) {
+                if (snapshot[i] != null) {
+                    rows.add(snapshot[i]);
+                    done++;
+                    continue;
+                }
+                final JsonObject t = tapes.get(i);
+                final String u = uid(t);
+                final JsonObject g = labelled.get(u);
+                if (g != null) {
+                    final String late = out.get(i);
+                    if (late != null) {
+                        rows.add(late); // labelled before the seal: finished, its row came back during the wait
+                    } else {
+                        // finished (its labels and games row are written) but its replay row did not come back in time
+                        final JsonObject row = rowHead(i, t);
+                        row.add("digest_replay", g.get("digest_replay"));
+                        row.add("equal", g.get("equal"));
+                        if (g.has("trajectory_equal")) {
+                            row.add("trajectory_equal", g.get("trajectory_equal"));
+                        }
+                        row.addProperty("error", "stall: the replay row was not back before the exit (the game's labels "
+                                + "are written)");
+                        rows.add(RlWire.canonicalString(row));
+                    }
+                    done++;
+                    continue;
+                }
+                // unfinished at the snapshot: voided, whatever comes back later
+                final JsonObject row = rowHead(i, t);
+                row.addProperty("equal", false);
+                row.addProperty("void", "stall");
+                row.addProperty("error", "stall: the watchdog voided this unfinished game");
+                rows.add(RlWire.canonicalString(row));
+                voided.add(u);
+                stallGames.add(stallGameRow(t, u, stall));
+            }
+            if (sink != null) {
+                for (JsonObject gr : stallGames) {
+                    sink.writeStallGame(gr);
+                }
+            }
+            if (replayOut != null) {
+                for (String r : rows) {
+                    replayOut.println(r);
+                }
+                replayOut.flush();
+            }
+            fired = true; // review S2-2: only once every row is written
+            final JsonObject f = new JsonObject();
+            f.addProperty("type", "replay-stall");
+            f.addProperty("pid", pid);
+            f.addProperty("t", at);
+            f.addProperty("exit", EXIT_STALL);
+            f.add("watchdog", th.toJson());
+            final JsonArray rs = new JsonArray();
+            for (JsonObject s : recent) {
+                rs.add(s);
+            }
+            f.add("starved_samples", rs);
+            f.addProperty("games", n);
+            f.addProperty("games_done", done);
+            f.add("games_voided", voided);
+            if (jarSha != null) {
+                f.addProperty("jar_sha", jarSha);
+            }
             atomicWrite(stallFile(), RlWire.canonicalString(f) + "\n");
-        } catch (IOException e) {
-            System.err.println("[rlactor] watchdog: STALL file: " + e);
+            System.err.println("[rlactor] STALL: " + th.consecutive + " starved samples in a row (gc >= "
+                    + th.gcFractionMin + ", mutator <= " + th.mutatorShareMax + ", old after GC >= " + th.oldAfterGcMin
+                    + "); " + done + " of " + n + " games finished, " + voided.size() + " voided \"stall\"; exit "
+                    + EXIT_STALL + " -> " + stallFile());
+        } catch (Throwable t) {
+            log("the stall's outputs failed (exiting " + EXIT_STALL + " anyway; rows written: " + fired + ")", t);
+        } finally {
+            exit.accept(EXIT_STALL);
         }
-        System.err.println("[rlactor] STALL: " + th.consecutive + " starved samples in a row (gc >= " + th.gcFractionMin
-                + ", mutator <= " + th.mutatorShareMax + ", old after GC >= " + th.oldAfterGcMin + "); " + done + " of "
-                + n + " games finished, " + voided.size() + " voided \"stall\"; exit " + EXIT_STALL + " -> " + stallFile());
-        exit.accept(EXIT_STALL);
+    }
+
+    /** A replay row's identity fields for game {@code i}. */
+    private JsonObject rowHead(final int i, final JsonObject t) {
+        final JsonObject row = new JsonObject();
+        row.addProperty("tape", tapePaths.get(i));
+        row.addProperty("line", lines.get(i)[1]);
+        row.add("game_uid", t.get("game_uid"));
+        row.add("digest_tape", t.get("digest"));
+        return row;
     }
 
     /** The label games row of an unfinished game: the tape's identity fields, {@code void:"stall"}, no rows. */
