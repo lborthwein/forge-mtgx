@@ -47,7 +47,9 @@ import forge.bench.rl.TrajectoryRef;
  * <ul>
  * <li>{@code gc}, the G1 GC fraction: the JVM collectors' summed collection (pause) time / wall time;</li>
  * <li>{@code mutator}, the mutator share of the live {@code rlreplay-w*} game threads: their summed CPU time / (wall time
- * x their number);</li>
+ * x their number); bvw-tail-fix-1027: a labeller's row threads ({@code rlreplay-wK-rowN}, the band searches of a game
+ * with {@code rowThreads} > 1, whose game thread waits for them) count as game threads, and while any is live the
+ * share is of min(their number, the JVM's available processors);</li>
  * <li>{@code old_after_gc}, the old generation's occupancy (used / max) after a GC: the lowest after any GC of the
  * interval (GC notifications).</li>
  * </ul>
@@ -251,7 +253,20 @@ public final class ReplayStallWatchdog {
         /** The GC listeners this sampler added, by emitter (removed by {@link #close}). */
         private final Map<NotificationEmitter, javax.management.NotificationListener> listeners = new java.util.LinkedHashMap<>();
 
+        /**
+         * bvw-tail-fix-1027: the labeller's live row threads (counted with the game threads) and the CPUs the share is
+         * of when any is live.
+         */
+        private final java.util.function.Supplier<List<Thread>> rowThreads;
+        private final int cpus;
+
         JvmSampler(final List<Thread> workers) {
+            this(workers, RlReplayLabeller::liveRowThreads, Runtime.getRuntime().availableProcessors());
+        }
+
+        JvmSampler(final List<Thread> workers, final java.util.function.Supplier<List<Thread>> rowThreads, final int cpus) {
+            this.rowThreads = rowThreads;
+            this.cpus = cpus;
             this.workers = workers;
             if (tmx.isThreadCpuTimeSupported() && !tmx.isThreadCpuTimeEnabled()) {
                 tmx.setThreadCpuTimeEnabled(true);
@@ -346,20 +361,37 @@ public final class ReplayStallWatchdog {
                     }
                 }
             }
+            // bvw-tail-fix-1027: a game whose band searches run on row threads waits for them; they are its mutators
+            final java.util.Set<Long> rows = new java.util.HashSet<>();
+            for (Thread t : rowThreads.get()) {
+                if (t.isAlive()) {
+                    final long c = tmx.getThreadCpuTime(t.getId());
+                    if (c >= 0) {
+                        cpu.put(t.getId(), c);
+                        rows.add(t.getId());
+                    }
+                }
+            }
             Sample s = null;
             if (prevNanos >= 0) {
                 final double wallNs = Math.max(1, now - prevNanos);
                 long dCpu = 0;
-                int live = 0;
+                int live = 0, rowLive = 0;
                 for (Map.Entry<Long, Long> e : cpu.entrySet()) {
                     final Long p = prevCpu.get(e.getKey());
                     if (p != null) {
                         dCpu += Math.max(0, e.getValue() - p);
                         live++;
+                        if (rows.contains(e.getKey())) {
+                            rowLive++;
+                        }
                     }
                 }
+                // with row threads: the share of the CPUs they can run on (more threads than CPUs never all run at
+                // once); without any, exactly as before
+                final int slots = rowLive == 0 ? live : Math.min(live, Math.max(1, cpus));
                 s = new Sample(wallNs / 1e9, Math.min(1.0, (gcMs - prevGcMs) * 1e6 / wallNs),
-                        live == 0 ? Double.NaN : Math.min(1.0, dCpu / (wallNs * live)), old, live, gcCount - prevGcCount);
+                        live == 0 ? Double.NaN : Math.min(1.0, dCpu / (wallNs * slots)), old, live, gcCount - prevGcCount);
             }
             prevNanos = now;
             prevGcMs = gcMs;

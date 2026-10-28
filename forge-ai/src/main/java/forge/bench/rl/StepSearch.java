@@ -134,8 +134,23 @@ public final class StepSearch {
         /** S2T: the T re-play's worlds in a smoke run whose variant is not T-sym. */
         public static final int SMOKE_TRUE_K = 8;
 
+        /**
+         * bvw-tail-fix-1027 (FLAG-3H), key {@code rowThreads} (NOT in the identity, a runtime key like {@code smoke}): how
+         * many of one game's band searches run at once, each on its own copy of the position, while the replay goes on
+         * ({@link RlReplayLabeller}); 1 (the default, the key absent) = one after the other on the replay thread, as
+         * before. Every row is bit-identical whatever the value.
+         */
+        int rowThreads = 1;
+
+        /** bvw-tail-fix-1027: the block's {@code rowThreads} (1 = inline). */
+        public int rowThreads() {
+            return rowThreads;
+        }
+
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("rlsearch", "valueSha",
-                "control", "maxCopyCards", "target", "opr", "smoke"));
+                "control", "maxCopyCards", "target", "opr", "smoke", "rowThreads"));
+        /** bvw-tail-fix-1027: the largest {@code rowThreads}. */
+        public static final int MAX_ROW_THREADS = 64;
 
         /**
          * The spec, or IllegalArgumentException ("refused: ...") unless honest, host-independent and tied to the proof
@@ -254,8 +269,25 @@ public final class StepSearch {
                 }
             }
             final int maxCands = Math.max(2, c.breadth) + ps.samples + ps.maxLines;
-            return new Spec(o.deepCopy(), k, vs, control, maxCopyCards, bandLo, bandHi, id, maxCands, sk.variant, sk.trueK,
-                    sk.oprK, sk.oprTurns, sk.oprSteps, sk.smoke);
+            final Spec spec = new Spec(o.deepCopy(), k, vs, control, maxCopyCards, bandLo, bandHi, id, maxCands, sk.variant,
+                    sk.trueK, sk.oprK, sk.oprTurns, sk.oprSteps, sk.smoke);
+            spec.rowThreads = rowThreads(o);
+            return spec;
+        }
+
+        /** bvw-tail-fix-1027: the block's {@code rowThreads} (absent or null = 1), an integer in 1..{@link #MAX_ROW_THREADS}. */
+        static int rowThreads(final JsonObject o) {
+            if (!o.has("rowThreads") || o.get("rowThreads").isJsonNull()) {
+                return 1;
+            }
+            final JsonElement e = o.get("rowThreads");
+            if (!e.isJsonPrimitive() || !e.getAsJsonPrimitive().isNumber()
+                    || e.getAsDouble() != Math.rint(e.getAsDouble())
+                    || e.getAsDouble() < 1 || e.getAsDouble() > MAX_ROW_THREADS) {
+                throw new IllegalArgumentException("label.search.rowThreads is an integer in 1.." + MAX_ROW_THREADS
+                        + ", not " + e);
+            }
+            return (int) e.getAsDouble();
         }
 
         RlSearch.Config config() {
@@ -571,18 +603,93 @@ public final class StepSearch {
      */
     public Result value(final Game live, final Player liveP, final RlKnowledge liveKnow, final long uid, final long key,
             final boolean oprWanted, final boolean proofTarget) {
+        return run(prepare(live, liveP, liveKnow, false), uid, key, () -> oprWanted, proofTarget);
+    }
+
+    /**
+     * bvw-tail-fix-1027 (FLAG-3H): a position's search split at its copy. {@link #prepare} copies the live position on
+     * the replay thread, inside the caller's isolation, while the live game waits; {@link #run} searches the copy, on
+     * that thread ({@link #value}) or on a row thread ({@link #onThisThread}). The copy, the seat knowledge it reads and
+     * the isolation's random stream, id scope and AI cache scope are the ones the inline search uses at that point, so
+     * the result is the inline one bit for bit.
+     */
+    public static final class Prepared {
         final long t0 = System.nanoTime();
-        final Result res = new Result();
-        RlSearch search = null;
+        long prepNs;
+        Game c;
+        Player cp;
+        /** The seat knowledge the search forks: the live tracker (inline) or a fork of it at the decision (snapshot). */
+        RlKnowledge know;
+        /** The copy failed (the row is an error row, as inline). */
+        Throwable error;
+        /** The caller's isolation at the copy: its scratch random stream, IdScope and AI cache scope. */
+        java.util.Random random;
+        Object ids, aiCache;
+
+        /**
+         * Runs {@code body} on this thread under the copy's isolation (the row thread installs what the replay thread
+         * had at the copy), then puts this thread's own back.
+         */
+        public <T> T onThisThread(final java.util.function.Supplier<T> body) {
+            final java.util.Random r0 = forge.util.MyRandom.getThreadRandom();
+            final Object i0 = forge.util.IdScope.capture(), a0 = forge.ai.AiCache.captureScope();
+            forge.util.MyRandom.setThreadRandom(random);
+            forge.util.IdScope.install(ids);
+            forge.ai.AiCache.installScope(aiCache);
+            try {
+                return body.get();
+            } finally {
+                forge.ai.AiCache.installScope(a0);
+                forge.util.IdScope.install(i0);
+                forge.util.MyRandom.setThreadRandom(r0);
+            }
+        }
+    }
+
+    /**
+     * bvw-tail-fix-1027: the copy of {@code liveP}'s position (the first step of {@link #value}). Call it where the inline
+     * search would start: on the replay thread, inside the label's isolation. {@code snapshot} = the search runs later,
+     * while the replay goes on: it then reads a fork of {@code liveKnow} taken now (never moves; a fork of it is the fork
+     * the live tracker would give now) instead of the live tracker. Never throws.
+     */
+    public Prepared prepare(final Game live, final Player liveP, final RlKnowledge liveKnow, final boolean snapshot) {
+        final Prepared pr = new Prepared();
         try {
-            final Game c;
-            final Player cp;
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1); // per-turn records and history: the copy's menu is the live one
-                c = copier.makeCopy();
-                cp = (Player) copier.find(liveP);
+                pr.c = copier.makeCopy();
+                pr.cp = (Player) copier.find(liveP);
             }
+            pr.know = snapshot ? liveKnow.forkFor(pr.c) : liveKnow;
+        } catch (RuntimeException | StackOverflowError e) {
+            pr.error = e;
+        }
+        pr.random = forge.util.MyRandom.getThreadRandom();
+        pr.ids = forge.util.IdScope.capture();
+        pr.aiCache = forge.ai.AiCache.captureScope();
+        pr.prepNs = System.nanoTime() - pr.t0;
+        return pr;
+    }
+
+    /**
+     * bvw-tail-fix-1027: the search of a {@link #prepare}d position (the rest of {@link #value}). {@code oprWanted} is
+     * asked only at the point where OPR would run (a row thread may wait there for the seat's earlier rows).
+     */
+    public Result run(final Prepared pr, final long uid, final long key, final java.util.function.BooleanSupplier oprWanted,
+            final boolean proofTarget) {
+        final long t1 = System.nanoTime();
+        final Result res = new Result();
+        RlSearch search = null;
+        try {
+            if (pr.error instanceof RuntimeException) {
+                throw (RuntimeException) pr.error;
+            } else if (pr.error != null) {
+                throw (StackOverflowError) pr.error;
+            }
+            final Game c = pr.c;
+            final Player cp = pr.cp;
+            final RlKnowledge liveKnow = pr.know;
             res.cards = ForcedWinSolver.cardCount(c);
             // OPEN-6 ruling: a face-down exile the seat cannot see keeps its real identity in every world (the redraw
             // covers hand and library only): no search and no target here, read on the copy from the seat's view
@@ -706,8 +813,11 @@ public final class StepSearch {
                             got[7] = s0.replayCandidate(c, cp, jj, RlSearch.splitmix(seed0 ^ TRUE_SALT), kt, spec.trueK,
                                     LookaheadSearch.WORLD_TRUE, 0, 0);
                         }
-                        if (oprWanted && spec.oprK > 0 && !r.leafFallback
-                                && (proofTarget || !Double.isNaN(variantValue(r, jj, got, cfg.leafSym)))) {
+                        // bvw-tail-fix-1027: whether this is the seat's OPR row is asked last (inline a constant; on a
+                        // row thread it waits for the seat's earlier rows), only when the row could be one
+                        if (spec.oprK > 0 && !r.leafFallback
+                                && (proofTarget || !Double.isNaN(variantValue(r, jj, got, cfg.leafSym)))
+                                && oprWanted.getAsBoolean()) {
                             got[8] = s0.replayCandidate(c, cp, jj, RlSearch.splitmix(seed0 ^ OPR_SALT), kt, spec.oprK,
                                     LookaheadSearch.WORLD_OPR, spec.oprTurns, spec.oprSteps);
                         }
@@ -745,7 +855,8 @@ public final class StepSearch {
             if (search != null) {
                 search.close();
             }
-            res.ms = (System.nanoTime() - t0) / 1e6;
+            // bvw-tail-fix-1027: the copy plus the search, never the time a row waited for its thread
+            res.ms = (pr.prepNs + (System.nanoTime() - t1)) / 1e6;
         }
         return res;
     }

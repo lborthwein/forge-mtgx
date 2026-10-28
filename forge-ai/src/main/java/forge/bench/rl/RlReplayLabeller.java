@@ -148,6 +148,60 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     private final String variant;
     private final boolean[] oprDone = new boolean[2];
     private final int oprK;
+    /**
+     * bvw-tail-fix-1027 (FLAG-3H; the search block's {@code rowThreads}, 1 = inline as before): this game's band searches
+     * run on a pool of that many row threads, each on its own copy of the position made at the decision, while the
+     * replay goes on ({@link #submitRow}). The rows come back in decision order ({@link #drainRows}), every one equal to
+     * the inline row bit for bit: a search reads only its copy, a fork of the seat knowledge taken at the decision and
+     * its own seeds; the isolation it runs under is the one the inline search had. At most {@code 2 x rowThreads}
+     * positions are in flight (each holds its copy): the replay waits at the next band decision past that.
+     */
+    private final int rowThreads;
+    /** The row pool (null until the first band search), its in-flight slots and the rows not yet written, in order. */
+    private java.util.concurrent.ThreadPoolExecutor rowPool;
+    private java.util.concurrent.Semaphore rowSlots;
+    private final java.util.ArrayDeque<RowJob> rowJobs = new java.util.ArrayDeque<>();
+    /**
+     * Per seat: completes with whether some row of the seat submitted so far ran its OPR (the inline {@link #oprDone}
+     * at the next row). A row asks it only where OPR would run, so it waits there for the seat's earlier rows.
+     */
+    @SuppressWarnings("unchecked")
+    private final java.util.concurrent.CompletableFuture<Boolean>[] oprAfter = new java.util.concurrent.CompletableFuture[] {
+        java.util.concurrent.CompletableFuture.completedFuture(false),
+        java.util.concurrent.CompletableFuture.completedFuture(false)};
+    /** A row search that died of an error the inline search would have thrown into the game: its rows are void. */
+    private String rowCrash;
+    /** bvw-tail-fix-1027: every live row thread of the JVM (the replay stall watchdog counts their CPU). */
+    private static final java.util.Set<Thread> ROW_THREADS = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** bvw-tail-fix-1027: the JVM's live row threads (the stall watchdog's mutator share counts them). */
+    public static List<Thread> liveRowThreads() {
+        return new ArrayList<>(ROW_THREADS);
+    }
+
+    /** bvw-tail-fix-1027: one band position whose search runs on a row thread; the rest of its row, kept until then. */
+    private static final class RowJob {
+        final int seat, ord, turn, tbe, stack, window;
+        final String phase, stateSha;
+        final Object[] got;
+        final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        StepSearch.Result sr;
+        StepSearch.PinError pin;
+        Throwable crash;
+
+        RowJob(final int seat, final int ord, final int turn, final int tbe, final String phase, final int stack,
+                final String stateSha, final Object[] got, final int window) {
+            this.seat = seat;
+            this.ord = ord;
+            this.turn = turn;
+            this.tbe = tbe;
+            this.phase = phase;
+            this.stack = stack;
+            this.stateSha = stateSha;
+            this.got = got;
+            this.window = window;
+        }
+    }
     private final RlKnowledge knowledge;
     private final Map<String, Integer> targets = new TreeMap<>();
     private final Map<String, Integer> searchWhy = new TreeMap<>();
@@ -248,6 +302,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         this.searchSha = searchSpec == null ? null : searchSpec.sha();
         this.variant = searchSpec == null ? null : searchSpec.variant;
         this.oprK = searchSpec == null ? 0 : searchSpec.oprK;
+        this.rowThreads = searchSpec == null ? 1 : searchSpec.rowThreads();
         this.tape = tapeLine;
         this.uid = RlWire.parseUid(tapeLine.get("game_uid").getAsString());
         this.tapeTurns = tapeLine.get("turns").getAsInt();
@@ -275,6 +330,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     public void beforeDecision(final Player p) {
         final Game g = game;
         final int ord = decisions++;
+        if (rowPool != null) {
+            drainRows(false); // bvw-tail-fix-1027: the band rows whose searches are done, in decision order
+        }
         if (g == null || g.isGameOver() || fatal != null || FATAL.get() != null) {
             return;
         }
@@ -312,6 +370,11 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             }
             return new Object[] {payload, seats[seat].label(g, p, key), fms, f.C};
         }));
+        if (search != null && rowThreads > 1) {
+            // bvw-tail-fix-1027 (FLAG-3H): the copy now, its search on a row thread, its row in decision order
+            submitRow(g, p, seat, ord, turn, tbe, phase, stateSha, key, got);
+            return;
+        }
         // bvw-step1-build-1024: the search value, in its own isolation (a copy of the live game; never moves it)
         StepSearch.Result sr = null;
         if (search != null) {
@@ -345,6 +408,147 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         gates.merge(r.gate, 1, Integer::sum);
         row(seat, ord, turn, tbe, phase, g.getStack().size(), stateSha, payload, (Integer) got[3], r, sr);
+    }
+
+    /**
+     * bvw-tail-fix-1027 (FLAG-3H): the band position's copy, made now (inside the isolation the inline search runs in,
+     * whose random stream, id scope and AI cache scope the row thread then installs), and its search queued on the
+     * row pool. Waits here while {@code 2 x rowThreads} positions are in flight.
+     */
+    private void submitRow(final Game g, final Player p, final int seat, final int ord, final int turn, final int tbe,
+            final String phase, final String stateSha, final long key, final Object[] got) {
+        if (rowPool == null) {
+            startRowPool();
+        }
+        final String plabel = ((HonestLabel.Result) got[1]).label;
+        final boolean proofTarget = "win".equals(plabel) || "loss".equals(plabel);
+        final RowJob job = new RowJob(seat, ord, turn, tbe, phase, g.getStack().size(), stateSha, got, windowDecisions);
+        // the inline oprWanted (S2T, the seat has no OPR row yet) from the seat's earlier rows, asked where OPR would run
+        final java.util.concurrent.CompletableFuture<Boolean> prev = oprAfter[seat];
+        final java.util.concurrent.CompletableFuture<Boolean> done = new java.util.concurrent.CompletableFuture<>();
+        oprAfter[seat] = done;
+        final java.util.function.BooleanSupplier oprWanted = variant != null && oprK > 0 ? () -> !prev.join() : () -> false;
+        rowSlots.acquireUninterruptibly();
+        final StepSearch.Prepared pr;
+        try {
+            pr = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> search.prepare(g, p, knowledge, true)));
+        } catch (RuntimeException | Error e) {
+            rowSlots.release();
+            prev.thenAccept(done::complete);
+            throw e;
+        }
+        rowJobs.addLast(job);
+        rowPool.execute(() -> {
+            StepSearch.Result sr = null;
+            try {
+                sr = pr.onThisThread(() -> search.run(pr, uid, key, oprWanted, proofTarget));
+                job.sr = sr;
+            } catch (StepSearch.PinError e) {
+                job.pin = e;
+            } catch (Throwable e) {
+                job.crash = e;
+            } finally {
+                final boolean ran = sr != null && sr.s2t != null && sr.s2t.oprRan;
+                prev.thenAccept(d -> done.complete(d || ran));
+                rowSlots.release();
+                job.done.countDown();
+            }
+        });
+    }
+
+    /**
+     * bvw-tail-fix-1027: writes the band rows whose searches are done, in decision order ({@code all}: waits for every
+     * one), exactly as the inline path does after its search. A fatal search error stops the game's labelling at that
+     * row, as inline; the rows after it are dropped.
+     */
+    private void drainRows(final boolean all) {
+        while (!rowJobs.isEmpty()) {
+            final RowJob j = rowJobs.peekFirst();
+            if (!all && j.done.getCount() > 0) {
+                return;
+            }
+            boolean interrupted = false;
+            while (true) {
+                try {
+                    j.done.await(); // at once when done; the row thread's writes happen-before
+                    break;
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            rowJobs.pollFirst();
+            if (fatal != null || rowCrash != null) {
+                continue; // the inline labeller stopped at that row: nothing after it is a row
+            }
+            if (j.pin != null) {
+                // review #9: fatal for the run; this game writes no rows (inline: no decision after it is labelled)
+                fatal = j.pin.getMessage();
+                FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + j.pin.getMessage());
+                System.err.println("[bvw-label] FATAL " + j.pin.getMessage());
+                windowDecisions = j.window;
+                continue;
+            }
+            if (j.crash != null) {
+                rowCrash = "dec " + j.ord + ": " + j.crash;
+                System.err.println("[bvw-label] ROW SEARCH FAILED game " + Long.toUnsignedString(uid) + " " + rowCrash
+                        + " -- the game's label rows are VOID (not written)");
+                continue;
+            }
+            final StepSearch.Result sr = j.sr;
+            searchMs += sr.ms;
+            searchWhy.merge(sr.why, 1, Integer::sum);
+            if (sr.s2t != null && sr.s2t.oprRan) {
+                oprDone[j.seat] = true;
+            }
+            final byte[] payload = (byte[]) j.got[0];
+            final HonestLabel.Result r = (HonestLabel.Result) j.got[1];
+            frameMs += (Double) j.got[2];
+            solveMs += r.ms;
+            if (!"none".equals(r.check)) {
+                solved++;
+            }
+            gates.merge(r.gate, 1, Integer::sum);
+            row(j.seat, j.ord, j.turn, j.tbe, j.phase, j.stack, j.stateSha, payload, (Integer) j.got[3], r, sr);
+        }
+    }
+
+    /**
+     * bvw-tail-fix-1027: the game's row pool. Daemon threads named after the replay thread ({@code rlreplay-wK-rowN}),
+     * all started at once so every row goes through one FIFO queue: rows start in decision order, so a row waiting for
+     * its seat's earlier rows (OPR) never waits for one that has no thread. Nothing is inherited from the replay thread
+     * (each row installs its copy's isolation).
+     */
+    private void startRowPool() {
+        final String base = Thread.currentThread().getName();
+        final java.util.concurrent.atomic.AtomicInteger n = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.ThreadPoolExecutor ex = new java.util.concurrent.ThreadPoolExecutor(rowThreads,
+                rowThreads, 0L, java.util.concurrent.TimeUnit.MILLISECONDS, new java.util.concurrent.LinkedBlockingQueue<>(),
+                task -> {
+                    final Thread t = new Thread(() -> {
+                        forge.util.MyRandom.setThreadRandom(null);
+                        IdScope.install(null);
+                        forge.ai.AiCache.installScope(null);
+                        ROW_THREADS.add(Thread.currentThread());
+                        try {
+                            task.run();
+                        } finally {
+                            ROW_THREADS.remove(Thread.currentThread());
+                        }
+                    }, base + "-row" + n.incrementAndGet());
+                    t.setDaemon(true);
+                    return t;
+                });
+        ex.prestartAllCoreThreads();
+        rowSlots = new java.util.concurrent.Semaphore(2 * rowThreads);
+        rowPool = ex;
+    }
+
+    /** bvw-tail-fix-1027: the block's rows at once (1 = inline). */
+    public int rowThreads() {
+        return rowThreads;
     }
 
     @Override
@@ -497,12 +701,18 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      * games row says which. Returns the number of rows written.
      */
     public int finish(final Sink sink, final boolean digestEqual0, final JsonObject replayRow) throws IOException {
+        if (rowPool != null) {
+            // bvw-tail-fix-1027: every band row of the game, in decision order, before anything reads them
+            drainRows(true);
+            rowPool.shutdown();
+        }
         // review #9: a game whose labelling hit a fatal search error writes no rows, whatever its digest; with a step-0
-        // reference, nor does a game whose positions are not step 0's (the seat/dec_idx swap)
+        // reference, nor does a game whose positions are not step 0's (the seat/dec_idx swap); bvw-tail-fix-1027: nor
+        // one whose row search died of an error the inline search would have thrown into the game
         final JsonObject traj = trajectory == null ? null
                 : TrajectoryRef.compareLoudly(trajectory, Long.toUnsignedString(uid), "label");
         final boolean trajEqual = traj == null || traj.get("equal").getAsBoolean();
-        final boolean digestEqual = digestEqual0 && fatal == null && trajEqual;
+        final boolean digestEqual = digestEqual0 && fatal == null && trajEqual && rowCrash == null;
         if (digestEqual0 && !trajEqual) {
             System.err.println("[bvw-label] TRAJECTORY MISMATCH game " + Long.toUnsignedString(uid) + ": " + traj
                     + " -- its " + records.size() + " label rows are VOID (not written)");
@@ -575,6 +785,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             gr.addProperty("band_hi", turnsWindow);
             if (fatal != null) {
                 gr.addProperty("fatal", fatal);
+            }
+            if (rowCrash != null) {
+                gr.addProperty("row_crash", rowCrash); // bvw-tail-fix-1027 (absent on every other games row)
             }
         }
         if (sink != null) {
