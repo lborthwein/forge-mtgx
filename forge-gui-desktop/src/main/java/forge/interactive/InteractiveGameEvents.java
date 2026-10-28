@@ -68,6 +68,8 @@ final class InteractiveGameEvents {
             }
         } else if (event instanceof GameEventCardChangeZone e) {
             zoneChanged(result, game, e, viewer);
+        } else if (event instanceof GameEventZoneChangeReplaced e) {
+            zoneChangeReplaced(result, game, e, viewer);
         } else if (event instanceof GameEventCardCounters e) {
             countersChanged(result, game, e, viewer);
         } else if (event instanceof GameEventPlayerLivesChanged e) {
@@ -227,6 +229,68 @@ final class InteractiveGameEvents {
         if (card != null) {
             facts(result, game, card, null);
             seatOf(result, game, card.getController(), "controllerSeat");
+        }
+    }
+
+    /**
+     * {@code zone_change_replaced} (owner report 2026-10-28T22-48-42): a replacement effect changed where a card was
+     * going, or stopped it moving. Containment Priest exiled a creature that Touch the Spirit Realm was returning to
+     * the battlefield, and the log and the board showed nothing. Sent once the replacement has applied, after any
+     * {@code zone_changed} of the replacing move itself.
+     *
+     * <ul>
+     * <li>{@code fromZone}, {@code intendedZone}, {@code toZone}: Forge's zone names (the zone it was leaving, the
+     * one it was headed for, the one it is in now; {@code toZone} is {@code fromZone} for a prevented move). The
+     * same {@code fromZone} / {@code toZone} keys as a {@code zone_changed}, so a host that keeps those as protocol
+     * needs only {@code intendedZone} added. {@code prevented}: the move did not happen at all.</li>
+     * <li>The affected card, as a {@code zone_changed} names it: {@code card}, and {@code fid}, {@code ownerSeat},
+     * {@code controllerSeat}, {@code isToken}, {@code isCopy} when the viewer may see it where it now is; the name
+     * alone when it left a public zone face up. A hidden card gives neither.</li>
+     * <li>The replacing source (for an effect object, the card that created it): {@code source}, {@code sourceFid},
+     * {@code sourceControllerSeat}, only when the viewer may see that card where it is.</li>
+     * </ul>
+     *
+     * <p>No {@code playerSeat}: who applied it is not claimed. No prose: the client words it.</p>
+     */
+    private static void zoneChangeReplaced(final JsonObject result, final Game game,
+                                           final GameEventZoneChangeReplaced e, final PlayerView viewer) {
+        kind(result, "zone_change_replaced");
+        if (e.from() != null) {
+            result.addProperty("fromZone", e.from().name());
+        }
+        if (e.intended() != null) {
+            result.addProperty("intendedZone", e.intended().name());
+        }
+        if (e.actual() != null) {
+            result.addProperty("toZone", e.actual().name());
+        }
+        result.addProperty("prevented", e.prevented());
+
+        final Card moved = cardOf(game, e.card());
+        final Card shown = e.actual() == null ? null : publicIn(game, e.card(), e.actual(), viewer);
+        final boolean publicOrigin = e.from() != null && PUBLIC_ORIGINS.contains(e.from()) && e.card() != null
+                && !e.card().isFaceDown() && moved != null && !moved.isFaceDown();
+        if (shown != null || publicOrigin) {
+            final String name = nameOf(shown != null ? shown.getView() : e.card());
+            if (name != null) {
+                result.addProperty("card", name);
+            }
+        }
+        if (shown != null) {
+            facts(result, game, shown, null);
+            seatOf(result, game, shown.getController(), "controllerSeat");
+        }
+
+        final Card source = cardOf(game, e.source());
+        final ZoneType sourceZone = source == null || source.getZone() == null ? null : source.getZone().getZoneType();
+        final Card sourceShown = publicIn(game, e.source(), sourceZone, viewer);
+        if (sourceShown != null) {
+            final String name = nameOf(sourceShown.getView());
+            if (name != null) {
+                result.addProperty("source", name);
+            }
+            result.addProperty("sourceFid", sourceShown.getId());
+            seatOf(result, game, sourceShown.getController(), "sourceControllerSeat");
         }
     }
 

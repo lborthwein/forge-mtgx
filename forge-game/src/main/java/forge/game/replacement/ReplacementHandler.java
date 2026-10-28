@@ -35,6 +35,7 @@ import forge.game.GameEntityCounterTable;
 import forge.game.GameLogEntryType;
 import forge.game.IHasSVars;
 import forge.game.event.GameEventAddLog;
+import forge.game.event.GameEventZoneChangeReplaced;
 import forge.game.ability.AbilityFactory;
 import forge.game.ability.AbilityKey;
 import forge.game.ability.AbilityUtils;
@@ -243,6 +244,9 @@ public class ReplacementHandler {
         if (!StringUtils.isEmpty(message)) {
             game.fireEvent(new GameEventAddLog(GameLogEntryType.EFFECT_REPLACED, message));
         }
+        if (event == ReplacementType.Moved && res != ReplacementResult.Updated) {
+            reportReplacedZoneChange(chosenRE, runParams, res);
+        }
 
         // if its updated, try to call event again
         if (res == ReplacementResult.Updated) {
@@ -275,6 +279,40 @@ public class ReplacementHandler {
         chosenRE.setOtherChoices(null);
 
         return res;
+    }
+
+    /**
+     * Report a zone change that {@code re} replaced or prevented ({@link GameEventZoneChangeReplaced}), so the game
+     * log, and any client, can say which effect sent the card where (owner report 2026-10-28T22-48-42: Containment
+     * Priest exiled a creature that Touch the Spirit Realm was returning, and nothing said so). Only a move that did
+     * not end where it was headed is reported: an "enters tapped" or "enters with counters" effect updates the move
+     * and the card still arrives. Read-only: it looks cards up and fires an event; it creates no object, id or
+     * timestamp and asks no one anything.
+     */
+    private void reportReplacedZoneChange(final ReplacementEffect re, final Map<AbilityKey, Object> runParams,
+                                          final ReplacementResult res) {
+        if (!(runParams.get(AbilityKey.Affected) instanceof Card affected)
+                || !(runParams.get(AbilityKey.Destination) instanceof ZoneType intended)) {
+            return;
+        }
+        final ZoneType from = runParams.get(AbilityKey.Origin) instanceof ZoneType z ? z : null;
+        final Card now = game.getCardState(affected, null);
+        final ZoneType actual = now == null || now.getZone() == null ? null : now.getZone().getZoneType();
+        final boolean prevented = res == ReplacementResult.Prevented || res == ReplacementResult.Skipped;
+        if (!prevented && (actual == null || actual == intended)) {
+            // it got there after all (another way in), or it no longer exists: nothing to explain
+            return;
+        }
+        Card source = re.getHostCard();
+        if (source != null && source.isImmutable() && source.getEffectSource() != null) {
+            // an effect object: name the card that created it
+            source = source.getEffectSource();
+        }
+        if (source != null) {
+            source = game.getCardState(source, source);
+        }
+        game.fireEvent(new GameEventZoneChangeReplaced(CardView.get(now == null ? affected : now),
+                source == null ? null : CardView.get(source), from, intended, actual == null && prevented ? from : actual, prevented));
     }
 
     /**
