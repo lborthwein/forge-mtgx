@@ -1,0 +1,14 @@
+[metadata]
+Code=XCLT
+Date=2026-10-27
+Name=Cube of Legends Training
+Type=Other
+
+[cards]
+1 C Rampart Sentry
+2 C Temple Spearman
+3 C Weary Foe's End
+4 C Noonday Glare
+5 C Steppe Gazelle
+6 C Steppe Bull
+7 C Wildborn Surge

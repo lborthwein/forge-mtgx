@@ -1,0 +1,5 @@
+Name:Steppe Gazelle
+ManaCost:1 G
+Types:Creature Antelope
+PT:2/2
+Oracle:
