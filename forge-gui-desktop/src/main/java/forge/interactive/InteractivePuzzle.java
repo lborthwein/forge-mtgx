@@ -47,6 +47,14 @@ import java.util.regex.Pattern;
  * <p>The terminal carries {@code puzzle: {goal, goalMet, reason}}: reason {@code solved} (a win goal met),
  * {@code survived} (a survive goal met), {@code turn_limit} (lost to the goal's own turn limit), {@code conceded},
  * {@code draw}, or {@code lost} (any other loss).</p>
+ *
+ * <p>LESSONS (lane lessons-forge-jar-1027). J1, a lesson position: {@code goal: 'none'} (no {@code turns}) installs the
+ * position with no goal card and no turn limit; the game ends only as any game does, and the terminal's reason is
+ * {@code won}, {@code lost}, {@code conceded} or {@code draw} ({@code goalMet} false: there is no goal). Every other rule
+ * of a puzzle position holds: the same keys, structure, card cap and card check, the same install. J2, the scripted AI
+ * seat: {@code script} is the .pzl's {@code [script]} section ({@link forge.ai.lesson.LessonScript}), played by the AI
+ * seat ({@link forge.ai.lesson.LessonScriptController}) over the classic Forge AI; it never reaches the wire. Without
+ * these two fields nothing here changes.</p>
  */
 final class InteractivePuzzle {
     static final String FIELD = "puzzle";
@@ -62,8 +70,21 @@ final class InteractivePuzzle {
     private InteractivePuzzle() {
     }
 
-    /** The config's puzzle: Forge's [state] lines, its goal and its absolute turn limit. */
-    record Spec(String state, String goal, int turns) {
+    /** Lane lessons-forge-jar-1027 (J1): a lesson position's goal: no goal card, no turn limit. */
+    static final String NO_GOAL = "none";
+
+    /**
+     * The config's puzzle: Forge's [state] lines, its goal and its absolute turn limit (0 for {@link #NO_GOAL}), and a
+     * lesson's {@code [script]} section text (lane lessons-forge-jar-1027, J2) or null.
+     */
+    record Spec(String state, String goal, int turns, String script) {
+        Spec(final String state, final String goal, final int turns) {
+            this(state, goal, turns, null);
+        }
+
+        boolean hasGoal() {
+            return !NO_GOAL.equals(goal);
+        }
     }
 
     /** A refusal of the puzzle itself (the position, not the protocol). */
@@ -100,7 +121,7 @@ final class InteractivePuzzle {
         }
         final JsonObject p = json.getAsJsonObject(FIELD);
         for (String key : p.keySet()) {
-            if (!Set.of("state", "goal", "turns").contains(key)) {
+            if (!Set.of("state", "goal", "turns", "script").contains(key)) {
                 throw refuse("puzzle has an unknown field: " + key);
             }
         }
@@ -111,20 +132,37 @@ final class InteractivePuzzle {
         }
         final JsonElement goal = p.get("goal");
         if (goal == null || !goal.isJsonPrimitive() || !goal.getAsJsonPrimitive().isString()
-                || !Set.of("win", "survive").contains(goal.getAsString())) {
-            throw refuse("puzzle.goal must be 'win' or 'survive'");
+                || !Set.of("win", "survive", NO_GOAL).contains(goal.getAsString())) {
+            throw refuse("puzzle.goal must be 'win', 'survive' or 'none'");
         }
         final JsonElement turns = p.get("turns");
         final int t;
-        try {
-            if (turns == null || !turns.isJsonPrimitive() || !turns.getAsJsonPrimitive().isNumber()) {
-                throw new NumberFormatException();
+        if (NO_GOAL.equals(goal.getAsString())) {
+            // J1: a lesson position has no turn limit to give
+            if (turns != null && !turns.isJsonNull()) {
+                throw refuse("a puzzle with goal 'none' has no turns");
             }
-            t = new java.math.BigDecimal(turns.getAsString()).intValueExact();
-        } catch (RuntimeException e) {
-            throw refuse("puzzle.turns must be an integer");
+            t = 0;
+        } else {
+            try {
+                if (turns == null || !turns.isJsonPrimitive() || !turns.getAsJsonPrimitive().isNumber()) {
+                    throw new NumberFormatException();
+                }
+                t = new java.math.BigDecimal(turns.getAsString()).intValueExact();
+            } catch (RuntimeException e) {
+                throw refuse("puzzle.turns must be an integer");
+            }
         }
-        final Spec spec = new Spec(state.getAsString(), goal.getAsString(), t);
+        final JsonElement script = p.get("script");
+        String scriptText = null;
+        if (script != null && !script.isJsonNull()) {
+            if (!script.isJsonPrimitive() || !script.getAsJsonPrimitive().isString()) {
+                throw refuse("puzzle.script must be the [script] section's text");
+            }
+            scriptText = script.getAsString();
+            parseScript(scriptText); // its structure, refused here (phase and card names at the game start)
+        }
+        final Spec spec = new Spec(state.getAsString(), goal.getAsString(), t, scriptText);
         lines(spec, 0, false); // the structure, refused here before any Forge singleton is up
         return spec;
     }
@@ -222,7 +260,7 @@ final class InteractivePuzzle {
         if (phases) {
             phaseOf("activephase", phase);
         }
-        if (spec.turns() < turn || spec.turns() > turn + MAX_TURNS_AHEAD) {
+        if (spec.hasGoal() && (spec.turns() < turn || spec.turns() > turn + MAX_TURNS_AHEAD)) {
             throw refuse("puzzle.turns must be from the position's turn (" + turn + ") to " + (turn + MAX_TURNS_AHEAD));
         }
         return out;
@@ -393,25 +431,90 @@ final class InteractivePuzzle {
     /** Forge's Puzzle for this spec, its goal owned by {@code humanSeat}'s player (whatever its controller says). */
     static Position position(final Spec spec, final List<String> lines, final int humanSeat) {
         final Map<String, List<String>> sections = new LinkedHashMap<>();
-        sections.put("metadata", List.of("Name:mtgx puzzle", "Goal:" + (spec.goal().equals("win") ? "Win" : "Survive"),
-                "Turns:" + spec.turns()));
+        sections.put("metadata", spec.hasGoal()
+                ? List.of("Name:mtgx puzzle", "Goal:" + (spec.goal().equals("win") ? "Win" : "Survive"), "Turns:" + spec.turns())
+                : List.of("Name:mtgx lesson", "Goal:None"));
         sections.put("state", lines);
-        return new Position(sections, humanSeat);
+        return new Position(sections, humanSeat, spec.hasGoal());
     }
 
-    /** A Forge {@link Puzzle} whose goal effect goes to the configured browser seat. */
+    /** A Forge {@link Puzzle} whose goal effect goes to the configured browser seat (none for a lesson position, J1). */
     static final class Position extends Puzzle {
         private final int humanSeat;
+        private final boolean goal;
 
-        Position(final Map<String, List<String>> sections, final int humanSeat) {
+        Position(final Map<String, List<String>> sections, final int humanSeat, final boolean goal) {
             super(sections);
             this.humanSeat = humanSeat;
+            this.goal = goal;
         }
 
         @Override
         public void addGoalEnforcement(final Game game) {
+            if (!goal) {
+                return; // J1: no goal card, no turn limit
+            }
             addGoalEnforcement(game, InteractiveMain.playerAtSeat(game, humanSeat));
         }
+    }
+
+    // ------------------------------------------------------------------ J2: the lesson script
+
+    /** The script's structure ({@link forge.ai.lesson.LessonScript#parse}); the detail stays on stderr (it may name cards). */
+    static forge.ai.lesson.LessonScript parseScript(final String text) throws InteractiveProtocol.ProtocolException {
+        try {
+            return forge.ai.lesson.LessonScript.parse(text);
+        } catch (forge.ai.lesson.LessonScript.Malformed e) {
+            System.err.println("[forge.interactive] lesson script refused: " + e.getMessage());
+            throw refuse("puzzle.script is malformed");
+        }
+    }
+
+    /**
+     * Seat the spec's script on the AI seat of {@code game} (after the game is created, before the AI tape is installed,
+     * so a recording tape wraps the scripted seat). Every card the script names must be one Forge's database knows, and
+     * every phase one Forge's phase table knows; a refusal is {@code invalid_puzzle}. Null without a script.
+     */
+    static forge.ai.lesson.LessonScriptController seatScript(final Spec spec, final Game game, final int humanSeat)
+            throws InteractiveProtocol.ProtocolException {
+        if (spec == null || spec.script() == null) {
+            return null;
+        }
+        final forge.ai.lesson.LessonScript script = checkedScript(spec.script());
+        final Player ai = InteractiveMain.playerAtSeat(game, 1 - humanSeat);
+        if (ai == null || !(ai.getController() instanceof forge.ai.PlayerControllerAi)) {
+            throw refuse("a lesson script needs the AI seat");
+        }
+        try {
+            return forge.ai.lesson.LessonScriptController.seat(game, ai, script);
+        } catch (forge.ai.lesson.LessonScript.Malformed e) {
+            System.err.println("[forge.interactive] lesson script refused: " + e.getMessage());
+            throw refuse("puzzle.script is malformed");
+        }
+    }
+
+    /** The script parsed, its card names checked against Forge's database (needs the card database). */
+    static forge.ai.lesson.LessonScript checkedScript(final String text) throws InteractiveProtocol.ProtocolException {
+        final forge.ai.lesson.LessonScript script = parseScript(text);
+        for (String name : script.names()) {
+            final PaperCard pc = StaticData.instance().getCommonCards().getCard(name);
+            if (pc == null || pc.getRules().isUnsupported()) {
+                System.err.println("[forge.interactive] lesson script refused: unknown or unsupported card: " + clip(name));
+                throw refuse("puzzle.script names an unknown or unsupported card");
+            }
+        }
+        for (String phase : script.phases()) {
+            final PhaseType t;
+            try {
+                t = PhaseType.smartValueOf(phase);
+            } catch (RuntimeException e) {
+                throw refuse("puzzle.script names a phase Forge does not know");
+            }
+            if (t == null) {
+                throw refuse("puzzle.script names a phase Forge does not know");
+            }
+        }
+        return script;
     }
 
     /**
@@ -463,10 +566,15 @@ final class InteractivePuzzle {
                 mine = e.getValue().getOutcome();
             }
         }
-        final boolean met = !outcome.isDraw() && mine != null && mine.hasWon();
+        final boolean won = !outcome.isDraw() && mine != null && mine.hasWon();
+        final boolean met = won && spec.hasGoal();
         o.addProperty("goalMet", met);
         final String reason;
-        if (met) {
+        if (!spec.hasGoal()) {
+            // J1: a lesson position has no goal; the game ended as any game does
+            reason = won ? "won" : outcome.isDraw() ? "draw"
+                    : mine != null && mine.lossState == GameLossReason.Conceded ? "conceded" : "lost";
+        } else if (met) {
             reason = spec.goal().equals("win") ? "solved" : "survived";
         } else if (outcome.isDraw()) {
             reason = "draw";

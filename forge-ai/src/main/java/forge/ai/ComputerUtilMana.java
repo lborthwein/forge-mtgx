@@ -698,14 +698,20 @@ public class ComputerUtilMana {
             // lane replay-record-1021: the AI tape records each source the seat taps in a real payment (a forced replay
             // taps the record's); test payments and every other player are untouched
             final AiTape tape = test ? null : AiTape.covering(ai);
-            if (tape == null) {
+            // lane lessons-forge-jar-1027: a lesson's scripted seat names the sources of its scripted casts (null for
+            // every other seat, and in every test payment: then this is Forge AI's own choice, unchanged)
+            final ScriptedManaSources scripted = test ? null : ScriptedManaSources.of(ai);
+            if (tape == null && scripted == null) {
                 saPayment = saList.isEmpty() ? null : chooseManaAbility(cost, sa, ai, toPay, saList, checkPlayable || !test);
             } else {
                 final Collection<SpellAbility> options = saList;
                 final ManaCostShard shard = toPay;
                 final boolean checkCosts = checkPlayable || !test;
-                saPayment = tape.mana(options, () -> options.isEmpty() ? null
-                        : chooseManaAbility(cost, sa, ai, shard, options, checkCosts));
+                final java.util.function.Supplier<SpellAbility> own = () -> options.isEmpty() ? null
+                        : chooseManaAbility(cost, sa, ai, shard, options, checkCosts);
+                final java.util.function.Supplier<SpellAbility> choose = scripted == null ? own
+                        : () -> options.isEmpty() ? null : scripted.chooseManaSource(sa, options, own);
+                saPayment = tape == null ? choose.get() : tape.mana(options, choose);
             }
 
             if (saPayment != null && ComputerUtilCost.isSacrificeSelfCost(saPayment.getPayCosts()) && sa.isTargeting(saPayment.getHostCard())) {

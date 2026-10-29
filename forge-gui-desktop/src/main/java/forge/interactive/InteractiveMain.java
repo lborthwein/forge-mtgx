@@ -101,6 +101,10 @@ public final class InteractiveMain {
             seatNames = InteractiveProtocol.readSeatNames(configLine); // votes-seatnames-1029
             beliefSeen = InteractiveProtocol.readBeliefSeen(configLine); // deck-guess-1021
             puzzle = InteractivePuzzle.read(com.google.gson.JsonParser.parseString(configLine).getAsJsonObject());
+            if (puzzle != null && puzzle.script() != null && (lookaheadSpec() != null || policySpec() != null)) {
+                // lane lessons-forge-jar-1027 (J2): the scripted seat wraps the classic Forge AI only
+                throw InteractivePuzzle.refuse("a lesson script plays on the classic AI seat (strength standard)");
+            }
             validateDeckFiles(config.decks());
         } catch (InteractiveProtocol.ProtocolException e) {
             InteractiveProtocol.writeBootFatal(protocolOut,
@@ -194,6 +198,8 @@ public final class InteractiveMain {
             final Game game = match.createGame();
             // lane forge-continue-1011: a rebuild remembers the live AI_TIMEOUT for its handover and runs at 600 s
             final InteractiveContinuation continuation = rebuild ? InteractiveContinuation.forGame(game) : null;
+            // lane lessons-forge-jar-1027 (J2): a lesson's scripted AI seat, before the tape (which then wraps it)
+            InteractivePuzzle.seatScript(puzzle, game, config.humanSeat());
             bindAiFixes(registered);
             bindLookahead(registered, game, config.seed(), "forced".equals(tapeMode));
             bindPolicy(registered, game, config.seed());
