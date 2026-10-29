@@ -144,7 +144,7 @@ public class TrainingCardsTest extends AITest {
         Assert.assertEquals(countCardsWithName(game, "Rampart Sentry"), 1);
     }
 
-    /** Tap all creatures your opponents control with toughness 2 or less: toughness counts, power does not. */
+    /** Tap each creature an opponent controls with toughness 2 or less: toughness counts, power does not. */
     @Test
     public void noondayGlareTapsOpposingCreaturesWithToughnessTwoOrLess() {
         final Game game = initAndCreateGame();
@@ -159,7 +159,7 @@ public class TrainingCardsTest extends AITest {
         game.getAction().checkStateEffects(true);
         Assert.assertEquals(big.getNetToughness(), 3);
         final SpellAbility sa = sorcery("Noonday Glare", "{2}{W}",
-                "Tap all creatures your opponents control with toughness 2 or less.", me);
+                "Tap each creature an opponent controls with toughness 2 or less.", me);
         sorceryTiming(game, sa, me, opp);
         Assert.assertFalse(sa.usesTargeting(), "it targets nothing");
 
@@ -171,7 +171,7 @@ public class TrainingCardsTest extends AITest {
         Assert.assertFalse(mine.isTapped(), "my own creature: untapped");
     }
 
-    /** Target creature gets +4/+4 until end of turn: it lasts through the end step and is gone the next turn. */
+    /** Until end of turn, target creature gets +4/+4: it lasts through the end step and is gone the next turn. */
     @Test
     public void wildbornSurgeLastsUntilEndOfTurn() {
         final Game game = initAndCreateGame();
@@ -181,7 +181,7 @@ public class TrainingCardsTest extends AITest {
         fillLibrary(opp, 5);
         final Card gazelle = addCard("Steppe Gazelle", me);
         final Card theirs = addCard("Rampart Sentry", opp);
-        final SpellAbility sa = sorcery("Wildborn Surge", "{1}{G}", "Target creature gets +4/+4 until end of turn.", me);
+        final SpellAbility sa = sorcery("Wildborn Surge", "{1}{G}", "Until end of turn, target creature gets +4/+4.", me);
         sorceryTiming(game, sa, me, opp);
         Assert.assertTrue(sa.canTarget(gazelle), "my creature is a target");
         Assert.assertTrue(sa.canTarget(theirs), "an opposing creature is a target");
