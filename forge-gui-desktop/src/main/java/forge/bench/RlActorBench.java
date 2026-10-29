@@ -221,6 +221,16 @@ public final class RlActorBench {
          * checks at their own positions ({@code decisionLogReference.stateRows}); a log with a mismatch is not accepted.
          */
         List<String> decisionLogStateRows = null;
+        /**
+         * Review #137 S2-2 (null = none): step 0's LABEL replay rows ({@code replay-*.jsonl}: game_uid, equal,
+         * digest_lb_replay), {@code decisionLogReference.labelReplays}. A game's step-0 labels were made on that replay's
+         * game, whose LookaheadBench digest can differ from the tape's (78 of 18,808 equal step-0 label replays); a
+         * record pass's log must reproduce that one ({@code digest_lb_reference}).
+         */
+        List<String> decisionLogLabelReplays = null;
+        /** Review #137 S3: the record pass's tier and attempt, written on every sidecar line (null / 0 = not given). */
+        String decisionLogTier = null;
+        int decisionLogAttempt = 0;
     }
 
     static void parseReference(final Cfg c, final JsonObject o, final String where) {
@@ -397,7 +407,8 @@ public final class RlActorBench {
             }
             final JsonObject x = o.getAsJsonObject("decisionLogReference");
             for (String k : x.keySet()) {
-                if (!"reference".equals(k) && !"referenceTurns".equals(k) && !"stateRows".equals(k)) {
+                if (!"reference".equals(k) && !"referenceTurns".equals(k) && !"stateRows".equals(k)
+                        && !"labelReplays".equals(k)) {
                     throw new IllegalArgumentException("decisionLogReference: unknown key " + k);
                 }
             }
@@ -408,6 +419,22 @@ public final class RlActorBench {
                     c.decisionLogStateRows.add(e.getAsString());
                 }
             }
+            if (x.has("labelReplays")) {
+                c.decisionLogLabelReplays = new ArrayList<>();
+                for (JsonElement e : x.getAsJsonArray("labelReplays")) {
+                    c.decisionLogLabelReplays.add(e.getAsString());
+                }
+            }
+        }
+        if (o.has("decisionLogTier") && !o.get("decisionLogTier").isJsonNull()) {
+            c.decisionLogTier = o.get("decisionLogTier").getAsString();
+        }
+        if (o.has("decisionLogAttempt") && !o.get("decisionLogAttempt").isJsonNull()) {
+            c.decisionLogAttempt = o.get("decisionLogAttempt").getAsInt();
+        }
+        if ((c.decisionLogTier != null || c.decisionLogAttempt != 0)
+                && !("record".equals(c.decisionLog) && "replay".equals(c.mode))) {
+            throw new IllegalArgumentException("decisionLogTier / decisionLogAttempt are for decisionLog record in replay mode");
         }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
@@ -1609,6 +1636,22 @@ public final class RlActorBench {
         DecisionLog.SIDECAR = cfg.decisionLogs == null ? null : DecisionLog.loadSidecars(cfg.decisionLogs, wantedUids);
         DecisionLog.SINK = "record".equals(cfg.decisionLog) ? new DecisionLog.Sink(Paths.get(cfg.decisionLogOut)) : null;
         stateRows = cfg.decisionLogStateRows == null ? null : loadStateRows(cfg.decisionLogStateRows, wantedUids);
+        labelLb = cfg.decisionLogLabelReplays == null ? null : loadLabelLb(cfg.decisionLogLabelReplays, wantedUids);
+        if (DecisionLog.SINK != null) {
+            // review #137 S3: every sidecar line names the pass (tier, attempt), its jar and its reference files
+            final JsonObject prov = new JsonObject();
+            if (cfg.decisionLogTier != null) {
+                prov.addProperty("tier", cfg.decisionLogTier);
+            }
+            if (cfg.decisionLogAttempt != 0) {
+                prov.addProperty("attempt", cfg.decisionLogAttempt);
+            }
+            prov.addProperty("jar_sha", jarSha);
+            prov.add("reference_sha256", shas(cfg.reference));
+            prov.add("state_rows_sha256", shas(cfg.decisionLogStateRows));
+            prov.add("label_replays_sha256", shas(cfg.decisionLogLabelReplays));
+            DecisionLog.SINK.provenance = prov;
+        }
         if (DecisionLog.SIDECAR != null || DecisionLog.SINK != null) {
             System.err.println("[decision-log] replay: " + (DecisionLog.SIDECAR == null ? "" : DecisionLog.SIDECAR.size()
                     + " logged games of " + wantedUids.size() + " from " + cfg.decisionLogs.size() + " file(s)")
@@ -1939,7 +1982,11 @@ public final class RlActorBench {
                             eq &= p.decisionLog.complete();
                             // review #124 S2-2: and LookaheadBench's digest of the game, when the tape has one
                             if (t.has("digest_lb") && p.end.has("digest_lb")) {
-                                eq &= t.get("digest_lb").getAsString().equals(p.end.get("digest_lb").getAsString());
+                                // review #137 S2-2: a sidecar log's game is the one its pass verified (step 0's label
+                                // replay's digest_lb where that differed from the tape's)
+                                final String side = "sidecar".equals(dlSource(t, dl)) ? DecisionLog.sidecarLb(t) : null;
+                                eq &= (side != null ? side : t.get("digest_lb").getAsString())
+                                        .equals(p.end.get("digest_lb").getAsString());
                             }
                         }
                     }
@@ -1994,7 +2041,15 @@ public final class RlActorBench {
                     if (dl != null && dl.mode == DecisionLog.Mode.RECORD && DecisionLog.SINK != null) {
                         // bvw-decision-log-1027: the re-run seats' log, for later forced replays of this exact game
                         try {
-                            DecisionLog.SINK.write(t, f, fl[1], row, eq, dl);
+                            // review #137 S3: the row's final verdict (label and scan finish included), not the local eq
+                            if (labelLb != null) {
+                                final String ref = labelLb.get(forge.bench.rl.TrajectoryRef.canonicalUid(
+                                        t.get("game_uid").getAsString()));
+                                if (ref != null) {
+                                    row.addProperty("digest_lb_reference", ref);
+                                }
+                            }
+                            DecisionLog.SINK.write(t, f, fl[1], row, row.get("equal").getAsBoolean(), dl);
                         } catch (IOException e) {
                             row.addProperty("error", "decision log sink: " + e);
                             row.addProperty("equal", false);
@@ -2107,6 +2162,55 @@ public final class RlActorBench {
 
     /** Review #124 S2-3: a later step's state_sha rows, by canonical uid, then seat | dec_idx (null = none). */
     static Map<String, Map<String, String>> stateRows = null;
+    /** Review #137 S2-2: step 0's label replay digest_lb per canonical uid (decisionLogReference.labelReplays), or null. */
+    static Map<String, String> labelLb = null;
+
+    /** Step 0's label replay rows: the LookaheadBench digest of each equal replay of a wanted game. */
+    static Map<String, String> loadLabelLb(final List<String> files, final java.util.Set<String> wanted) throws IOException {
+        final Map<String, String> m = new HashMap<>();
+        for (String f : files) {
+            for (String line : Files.readAllLines(Paths.get(f), StandardCharsets.UTF_8)) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                final JsonObject r = JsonParser.parseString(line).getAsJsonObject();
+                if (!r.has("digest_lb_replay") || r.get("digest_lb_replay").isJsonNull()
+                        || !r.has("equal") || !r.get("equal").getAsBoolean()) {
+                    continue;
+                }
+                final String uid = forge.bench.rl.TrajectoryRef.canonicalUid(r.get("game_uid").getAsString());
+                if (wanted.contains(uid)) {
+                    final String prev = m.put(uid, r.get("digest_lb_replay").getAsString());
+                    if (prev != null && !prev.equals(r.get("digest_lb_replay").getAsString())) {
+                        throw new IllegalArgumentException("labelReplays: game " + uid + " has two label replays of different games");
+                    }
+                }
+            }
+        }
+        return m;
+    }
+
+    /** The files' sha256 (hex), in order; null when there are none. */
+    static JsonElement shas(final List<String> files) {
+        if (files == null) {
+            return com.google.gson.JsonNull.INSTANCE;
+        }
+        final JsonArray a = new JsonArray();
+        for (String f : files) {
+            try {
+                final java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                final byte[] d = md.digest(Files.readAllBytes(Paths.get(f)));
+                final StringBuilder sb = new StringBuilder();
+                for (byte b : d) {
+                    sb.append(String.format("%02x", b));
+                }
+                a.add(sb.toString());
+            } catch (IOException | java.security.NoSuchAlgorithmException e) {
+                throw new IllegalStateException("sha256 of " + f + ": " + e, e);
+            }
+        }
+        return a;
+    }
 
     /** Review #124 S2-3: the state_sha of each (seat, dec_idx) row of {@code files} for the games in {@code wanted}. */
     static Map<String, Map<String, String>> loadStateRows(final List<String> files, final java.util.Set<String> wanted)
@@ -2123,8 +2227,13 @@ public final class RlActorBench {
                 }
                 final String uid = forge.bench.rl.TrajectoryRef.canonicalUid(r.get("game_uid").getAsString());
                 if (wanted.contains(uid)) {
-                    m.computeIfAbsent(uid, x -> new HashMap<>()).put(r.get("seat").getAsInt() + "|"
-                            + r.get("dec_idx").getAsInt(), r.get("state_sha").getAsString());
+                    // review #137 S2-1: keyed by the position; the row's seat is part of what must match there
+                final String prev = m.computeIfAbsent(uid, x -> new HashMap<>()).put(String.valueOf(r.get("dec_idx").getAsInt()),
+                        r.get("seat").getAsInt() + "|" + r.get("state_sha").getAsString());
+                if (prev != null && !prev.equals(r.get("seat").getAsInt() + "|" + r.get("state_sha").getAsString())) {
+                    throw new IllegalArgumentException("stateRows: game " + uid + " has two different rows at dec_idx "
+                            + r.get("dec_idx").getAsInt());
+                }
                 }
             }
         }

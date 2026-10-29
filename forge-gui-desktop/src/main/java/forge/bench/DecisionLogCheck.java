@@ -23,7 +23,11 @@ final class DecisionLogCheck implements PriorityDecisionListener {
     private final Game game;
     private final int tapeTurns;
     private final TrajectoryRef.Recorder trajectory;
-    /** seat | dec_idx -> the later step's state_sha, or null. */
+    /**
+     * dec_idx -> "seat|state_sha" of the later step's row, or null. Review #137 S2-1: keyed by the position alone, so a
+     * replay whose seat at that position differs is a mismatch (not an unchecked row), and every expected row must be
+     * reached ({@code state_sha_expected}; a game that ends before a row's position fails it).
+     */
     private final Map<String, String> stateRows;
     private int decisions = 0, checked = 0, mismatch = 0;
     private String firstMismatch;
@@ -49,10 +53,10 @@ final class DecisionLogCheck implements PriorityDecisionListener {
                     game.getStack().size());
         }
         if (stateRows != null) {
-            final String want = stateRows.get(seat + "|" + ord);
+            final String want = stateRows.get(String.valueOf(ord));
             if (want != null) {
                 checked++;
-                final String got = TrajectoryRef.stateSha(game);
+                final String got = seat + "|" + TrajectoryRef.stateSha(game);
                 if (!want.equals(got)) {
                     mismatch++;
                     if (firstMismatch == null) {
@@ -75,6 +79,7 @@ final class DecisionLogCheck implements PriorityDecisionListener {
             row.addProperty("trajectory_equal", traj.get("equal").getAsBoolean());
         }
         if (stateRows != null) {
+            row.addProperty("state_sha_expected", stateRows.size());
             row.addProperty("state_sha_checked", checked);
             row.addProperty("state_sha_mismatch", mismatch);
             if (firstMismatch != null) {

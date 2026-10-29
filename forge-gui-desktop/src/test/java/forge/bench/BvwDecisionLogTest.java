@@ -236,6 +236,120 @@ public class BvwDecisionLogTest {
         Assert.assertThrows(IllegalArgumentException.class, () -> RlActorBench.parse(o));
     }
 
+    /**
+     * Review #137 S2-1: later-step state rows are keyed by position; a different seat there is a mismatch, and a row the
+     * game never reaches leaves checked below expected (not accepted). Two plays of the counted generator's game 0.
+     */
+    @Test
+    public void stateRowsAreCheckedByPositionSeatIncludedAndAllMustBeReached() {
+        final JsonObject g = games.get(0);
+        final List<String[]> seen = new ArrayList<>();
+        RlActorBench.play(cfg("train"), "train", g, new RlFeaturizer(index), RlActorBench.nullRecorder(), null, "test",
+                (game, seat, know) -> game.addPriorityDecisionListener(new forge.game.PriorityDecisionListener() {
+                    int ord = 0;
+
+                    @Override
+                    public void beforeDecision(final forge.game.player.Player p) {
+                        final int o = ord++;
+                        if (!game.isGameOver()) {
+                            seen.add(new String[] {String.valueOf(o), game.getRegisteredPlayers().indexOf(p) + "|"
+                                    + forge.bench.rl.TrajectoryRef.stateSha(game)});
+                        }
+                    }
+
+                    @Override
+                    public void afterDecision(final forge.game.player.Player p,
+                            final List<forge.game.spellability.SpellAbility> chosen) {
+                    }
+                }));
+        Assert.assertTrue(seen.size() > 20, "positions: " + seen.size());
+        final Map<String, String> good = new java.util.HashMap<>(), swapped = new java.util.HashMap<>(),
+                late = new java.util.HashMap<>();
+        for (int i = 5; i < 20; i += 3) {
+            good.put(seen.get(i)[0], seen.get(i)[1]);
+        }
+        swapped.putAll(good);
+        final String[] x = seen.get(8);
+        final String other = (x[1].startsWith("0|") ? "1|" : "0|") + x[1].substring(2);
+        swapped.put(x[0], other);
+        late.putAll(good);
+        late.put(String.valueOf(seen.size() + 1000), "0|0000000000000000");
+        final DecisionLogCheck[] c = new DecisionLogCheck[3];
+        RlActorBench.play(cfg("train"), "train", g, new RlFeaturizer(index), RlActorBench.nullRecorder(), null, "test",
+                (game, seat, know) -> {
+                    c[0] = new DecisionLogCheck(game, off.get(0), null, good);
+                    c[1] = new DecisionLogCheck(game, off.get(0), null, swapped);
+                    c[2] = new DecisionLogCheck(game, off.get(0), null, late);
+                    for (DecisionLogCheck k : c) {
+                        game.addPriorityDecisionListener(k);
+                    }
+                });
+        final JsonObject[] rows = new JsonObject[3];
+        for (int i = 0; i < 3; i++) {
+            rows[i] = new JsonObject();
+            rows[i].add(DecisionLog.KEY, new JsonObject());
+            rows[i].addProperty("equal", true);
+            c[i].finish("x", rows[i]);
+        }
+        Assert.assertEquals(rows[0].get("state_sha_checked").getAsInt(), good.size(), rows[0].toString());
+        Assert.assertEquals(rows[0].get("state_sha_mismatch").getAsInt(), 0, rows[0].toString());
+        Assert.assertTrue(DecisionLog.accepted(rows[0]));
+        Assert.assertEquals(rows[1].get("state_sha_mismatch").getAsInt(), 1, "the other seat at that position: " + rows[1]);
+        Assert.assertFalse(DecisionLog.accepted(rows[1]));
+        Assert.assertEquals(rows[2].get("state_sha_expected").getAsInt(), good.size() + 1);
+        Assert.assertEquals(rows[2].get("state_sha_checked").getAsInt(), good.size(), "a row past the game's end: " + rows[2]);
+        Assert.assertFalse(DecisionLog.accepted(rows[2]), "an unreached row is not accepted");
+    }
+
+    /** Review #137 S2-2 / S3: the reference's LookaheadBench digest, lb-less sidecars, and two different accepted logs. */
+    @Test
+    public void sidecarsNeedTheExpectedLookaheadDigestAndOneLogPerGame() throws Exception {
+        final JsonObject r = new JsonObject();
+        r.add(DecisionLog.KEY, on.get(0).getAsJsonObject(DecisionLog.KEY));
+        r.addProperty("equal", true);
+        r.addProperty("trajectory_equal", true);
+        r.addProperty("digest_lb_tape", "98c3bf10ec48ff6f");
+        r.addProperty("digest_lb_replay", "c8d61f5f32680097");
+        Assert.assertFalse(DecisionLog.accepted(r), "not the tape's game, and no reference says otherwise");
+        r.addProperty("digest_lb_reference", "c8d61f5f32680097");
+        Assert.assertTrue(DecisionLog.accepted(r), "the game step 0's labels were made on (its label replay's digest)");
+        // a tape with digest_lb takes no sidecar line without digest_lb_replay (an older, lb-less pass)
+        final JsonObject t = on.get(0).deepCopy();
+        Assert.assertTrue(t.has("digest_lb"), "the bench writes digest_lb");
+        final JsonObject side = new JsonObject();
+        side.add("game_uid", t.get("game_uid"));
+        side.add("digest_tape", t.get("digest"));
+        side.add("digest_replay", t.get("digest"));
+        side.addProperty("equal", true);
+        side.add(DecisionLog.KEY, t.getAsJsonObject(DecisionLog.KEY));
+        final Map<String, JsonObject> was = DecisionLog.SIDECAR;
+        try {
+            final Map<String, JsonObject> m = new java.util.HashMap<>();
+            m.put(forge.bench.rl.TrajectoryRef.canonicalUid(t.get("game_uid").getAsString()), side);
+            DecisionLog.SIDECAR = m;
+            Assert.assertNull(DecisionLog.sidecarFor(t), "lb-less sidecar line refused");
+            side.add("digest_lb_replay", t.get("digest_lb"));
+            Assert.assertNotNull(DecisionLog.sidecarFor(t));
+        } finally {
+            DecisionLog.SIDECAR = was;
+        }
+        // two accepted logs of one game: the same entries pass (diagnostics aside), different ones refuse the run
+        final JsonObject a = side.deepCopy(), b = side.deepCopy();
+        Assert.assertTrue(DecisionLog.sameLog(a, b));
+        final JsonObject e0 = b.getAsJsonObject(DecisionLog.KEY).getAsJsonArray("entries").get(0).getAsJsonObject();
+        e0.add("d", new JsonObject());
+        Assert.assertTrue(DecisionLog.sameLog(a, b), "per-decision diagnostics aside");
+        e0.addProperty("post", "0.0.0");
+        Assert.assertFalse(DecisionLog.sameLog(a, b));
+        final Path dir = Files.createTempDirectory(out, "dup-");
+        final Path f = dir.resolve("decision-logs-1.jsonl.gz");
+        try (java.io.Writer w = new java.io.OutputStreamWriter(new java.util.zip.GZIPOutputStream(Files.newOutputStream(f)),
+                StandardCharsets.UTF_8)) {
+            w.write(RlWire.canonicalString(a) + "\n" + RlWire.canonicalString(b) + "\n");
+        }
+        Assert.assertThrows(IllegalArgumentException.class, () -> DecisionLog.loadSidecars(List.of(f.toString())));
+    }
+
     /** bvw-tape-decisions-1028: a record pass's log whose LookaheadBench digest differs from the tape's is not accepted. */
     @Test
     public void aSidecarLogNeedsTheLookaheadDigestToo() {

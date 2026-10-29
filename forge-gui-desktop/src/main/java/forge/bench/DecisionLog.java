@@ -318,7 +318,34 @@ final class DecisionLog {
         if (r == null || !r.get("digest_tape").getAsString().equals(t.get("digest").getAsString())) {
             return null;
         }
+        // review #137 S2-2: a tape with a LookaheadBench digest takes only a log whose replay digest is known and is the
+        // expected one (step 0's label replay's when the pass had it, else the tape's)
+        if (t.has("digest_lb") && !t.get("digest_lb").isJsonNull()) {
+            final String want = expectedLb(r) != null ? expectedLb(r) : t.get("digest_lb").getAsString();
+            if (!r.has("digest_lb_replay") || r.get("digest_lb_replay").isJsonNull()
+                    || !want.equals(r.get("digest_lb_replay").getAsString())) {
+                return null;
+            }
+        }
         return r.getAsJsonObject(KEY);
+    }
+
+    /** The LookaheadBench digest a sidecar line's replay had to reproduce: the reference's, else the tape's (or null). */
+    static String expectedLb(final JsonObject r) {
+        for (String k : new String[] {"digest_lb_reference", "digest_lb_tape"}) {
+            if (r.has(k) && !r.get(k).isJsonNull()) {
+                return r.get(k).getAsString();
+            }
+        }
+        return null;
+    }
+
+    /** The LookaheadBench digest a forced replay of this tape line's sidecar log must reach, or null (none known). */
+    static String sidecarLb(final JsonObject t) {
+        final java.util.Map<String, JsonObject> m = SIDECAR;
+        final JsonObject r = m == null ? null : m.get(forge.bench.rl.TrajectoryRef.canonicalUid(t.get("game_uid").getAsString()));
+        return r == null || !r.has("digest_lb_replay") || r.get("digest_lb_replay").isJsonNull() ? null
+                : r.get("digest_lb_replay").getAsString();
     }
 
     /** Every file's lines, all of them kept (tests). */
@@ -363,8 +390,10 @@ final class DecisionLog {
                         continue;
                     }
                     final JsonObject prev = m.putIfAbsent(uid, r);
-                    if (prev != null && !prev.get("digest_replay").equals(r.get("digest_replay"))) {
-                        throw new IllegalArgumentException("decision logs: game " + uid + " has two logs of different games");
+                    // review #137 S3: two accepted logs of one game must be the same log (its entries byte for byte, the
+                    // per-decision diagnostics aside), else the run is refused
+                    if (prev != null && !sameLog(prev, r)) {
+                        throw new IllegalArgumentException("decision logs: game " + uid + " has two accepted logs that differ");
                     }
                 }
             }
@@ -373,8 +402,32 @@ final class DecisionLog {
     }
 
     /** Review #124 S2-3: may this sidecar line's log be forced? */
+    /** Two sidecar lines' logs: the same entries (canonical JSON, each entry's diagnostics "d" left out) and seats. */
+    static boolean sameLog(final JsonObject a, final JsonObject b) {
+        return canonLog(a.getAsJsonObject(KEY)).equals(canonLog(b.getAsJsonObject(KEY)));
+    }
+
+    private static String canonLog(final JsonObject log) {
+        final JsonObject c = new JsonObject();
+        c.add("format", log.get("format"));
+        c.add("seats", log.get("seats"));
+        final JsonArray es = new JsonArray();
+        for (JsonElement e : log.getAsJsonArray("entries")) {
+            final JsonObject o = e.getAsJsonObject().deepCopy();
+            o.remove("d");
+            es.add(o);
+        }
+        c.add("entries", es);
+        return forge.bench.rl.RlWire.canonicalString(c);
+    }
+
     static boolean accepted(final JsonObject r) {
         if (!r.has(KEY) || !r.get("equal").getAsBoolean()) {
+            return false;
+        }
+        // review #137 S2-1: every expected later-step row was reached and matched (seat and state_sha)
+        if (r.has("state_sha_expected")
+                && (!r.has("state_sha_checked") || r.get("state_sha_checked").getAsInt() != r.get("state_sha_expected").getAsInt())) {
             return false;
         }
         final boolean need = r.has("reference_required") && r.get("reference_required").getAsBoolean();
@@ -387,8 +440,11 @@ final class DecisionLog {
         // bvw-tape-decisions-1028: and LookaheadBench's finer digest of the game, when both are known (a slow-core record
         // pass of 2988739350 matched the digest and step 0's trajectory but not digest_lb: not step 0's game, refused,
         // as a forced replay of it is unequal by review #124 S2-2)
-        if (r.has("digest_lb_tape") && r.has("digest_lb_replay") && !r.get("digest_lb_tape").isJsonNull()
-                && !r.get("digest_lb_tape").equals(r.get("digest_lb_replay"))) {
+        // review #137 S2-2: against step 0's label replay's digest when the pass had it (its labels were made on that
+        // game), else the tape's
+        final String wantLb = expectedLb(r);
+        if (wantLb != null && (!r.has("digest_lb_replay") || r.get("digest_lb_replay").isJsonNull()
+                || !wantLb.equals(r.get("digest_lb_replay").getAsString()))) {
             return false;
         }
         return !r.has("state_sha_mismatch") || r.get("state_sha_mismatch").getAsInt() == 0;
@@ -398,6 +454,8 @@ final class DecisionLog {
     static final class Sink implements java.io.Closeable {
         private final java.nio.file.Path file;
         private java.io.Writer w;
+        /** Review #137 S3: tier, attempt, jar_sha and the reference files' sha256, on every line (null = none). */
+        volatile JsonObject provenance;
 
         Sink(final java.nio.file.Path dir) throws java.io.IOException {
             java.nio.file.Files.createDirectories(dir);
@@ -433,7 +491,16 @@ final class DecisionLog {
             // review #124 S2-3: an HonestForcedWin tape's re-run is host-dependent; its log counts only with the
             // trajectory check against step 0 (and step 2's state_sha where checked)
             o.addProperty("reference_required", RlActorBench.honestForcedWinTape(t));
-            for (String k : new String[] {"trajectory_equal", "state_sha_checked", "state_sha_mismatch"}) {
+            if (row.has("digest_lb_reference")) {
+                o.add("digest_lb_reference", row.get("digest_lb_reference")); // review #137 S2-2
+            }
+            if (provenance != null) {
+                for (java.util.Map.Entry<String, JsonElement> e : provenance.entrySet()) {
+                    o.add(e.getKey(), e.getValue());
+                }
+            }
+            for (String k : new String[] {"trajectory_equal", "state_sha_expected", "state_sha_checked", "state_sha_mismatch",
+                    "state_sha_first_mismatch"}) {
                 if (row.has(k)) {
                     o.add(k, row.get(k));
                 }
