@@ -441,7 +441,7 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         this.driver = new SolverDriver(me, sc);
         // honest-belief-1020: the solver's verification worlds and engine root draw the opponent's hidden cards from the
         // search's belief pool (null = belief off: as before)
-        this.driver.solver().redraw = rs.ls().opponentRedraw();
+        this.driver.solver().redraw = rs.ls().solverRedraw(); // bvw-step2-fork-1027: codraft = the co-draft prior
         this.followCfg = sc;
         this.threat = spec.opp ? new forge.ai.simulation.ThreatCheck(spec.oppConfig()) : null;
         if (spec.defend) {
@@ -582,6 +582,54 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
                 return m;
             } catch (java.io.IOException | RuntimeException e) {
                 throw new IllegalArgumentException("plans.defendCfg.prior: " + k + ": " + e, e);
+            }
+        });
+    }
+
+    private static final Map<String, Map<String, Map<String, Double>>> SYN_PINNED = new java.util.HashMap<>();
+
+    /**
+     * bvw-step2-fork-1027 (S2T, belief "codraft"): the co-draft table at {@code path} ({@code classpath:} = a jar
+     * resource), refused (IllegalArgumentException) unless its bytes hash to {@code sha256}; loaded once per path and pin.
+     */
+    public static synchronized Map<String, Map<String, Double>> loadSynPinned(final String path, final String sha256) {
+        if (path == null || sha256 == null || !sha256.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("refused: a co-draft prior needs its path and a sha256 pin");
+        }
+        return SYN_PINNED.computeIfAbsent(path + "@" + sha256, k -> {
+            try {
+                final byte[] raw;
+                if (path.startsWith("classpath:")) {
+                    try (java.io.InputStream in = PlanSearch.class.getResourceAsStream(path.substring("classpath:".length()))) {
+                        if (in == null) {
+                            throw new java.io.IOException("no resource " + path);
+                        }
+                        raw = in.readAllBytes();
+                    }
+                } else {
+                    raw = java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(path));
+                }
+                final StringBuilder hex = new StringBuilder();
+                for (byte b : java.security.MessageDigest.getInstance("SHA-256").digest(raw)) {
+                    hex.append(String.format("%02x", b & 0xff));
+                }
+                if (!hex.toString().equals(sha256)) {
+                    throw new IllegalArgumentException("refused: the co-draft prior " + path + " hashes to " + hex
+                            + ", the spec pins " + sha256);
+                }
+                final JsonObject o = com.google.gson.JsonParser.parseString(new String(raw, java.nio.charset.StandardCharsets.UTF_8))
+                        .getAsJsonObject().getAsJsonObject("syn");
+                final Map<String, Map<String, Double>> m = new java.util.HashMap<>();
+                for (Map.Entry<String, com.google.gson.JsonElement> e : o.entrySet()) {
+                    final Map<String, Double> row = new java.util.HashMap<>();
+                    for (Map.Entry<String, com.google.gson.JsonElement> f : e.getValue().getAsJsonObject().entrySet()) {
+                        row.put(f.getKey(), f.getValue().getAsDouble());
+                    }
+                    m.put(e.getKey(), row);
+                }
+                return java.util.Collections.unmodifiableMap(m);
+            } catch (java.io.IOException | java.security.NoSuchAlgorithmException e) {
+                throw new IllegalArgumentException("search.beliefPrior: " + path + ": " + e, e);
             }
         });
     }

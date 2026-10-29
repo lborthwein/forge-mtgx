@@ -52,6 +52,11 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      * band, the proof flag, the honest S-b search's value and the row's target ({@link StepSearch}).
      */
     public static final String SCHEMA_STEP = "mtgx-bvw-value/2";
+    /**
+     * bvw-step2-fork-1027 (S2T, a search block with a {@code target} variant): the /2 fields plus {@code s2t} (the
+     * variant, every variant's value, OPR on the seat's first band row with a target, a smoke run's per-world pairs).
+     */
+    public static final String SCHEMA_STEP3 = "mtgx-bvw-value/3";
     static final byte[] MAGIC = {'M', 'X', 'L', '1'};
 
     /** Shared by the replay threads of one JVM. */
@@ -139,6 +144,10 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     /** bvw-step1-build-1024: the step-1 search (null = none, the step-0 labeller exactly), its block's sha. */
     private final StepSearch search;
     private final String searchSha;
+    /** bvw-step2-fork-1027 (S2T; null = a step-1 block): the spec variant, and each seat's OPR row done in this game. */
+    private final String variant;
+    private final boolean[] oprDone = new boolean[2];
+    private final int oprK;
     private final RlKnowledge knowledge;
     private final Map<String, Integer> targets = new TreeMap<>();
     private final Map<String, Integer> searchWhy = new TreeMap<>();
@@ -237,6 +246,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 : new StepSearch(searchSpec, index, obs, jarSha, "step1-" + Long.toUnsignedString(
                         RlWire.parseUid(tapeLine.get("game_uid").getAsString())));
         this.searchSha = searchSpec == null ? null : searchSpec.sha();
+        this.variant = searchSpec == null ? null : searchSpec.variant;
+        this.oprK = searchSpec == null ? 0 : searchSpec.oprK;
         this.tape = tapeLine;
         this.uid = RlWire.parseUid(tapeLine.get("game_uid").getAsString());
         this.tapeTurns = tapeLine.get("turns").getAsInt();
@@ -304,8 +315,14 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         // bvw-step1-build-1024: the search value, in its own isolation (a copy of the live game; never moves it)
         StepSearch.Result sr = null;
         if (search != null) {
+            // bvw-step2-fork-1027 (S2T): this row may be the seat's OPR row; a proof already gives it a target
+            final boolean oprWanted = variant != null && oprK > 0 && !oprDone[seat];
+            final String plabel = ((HonestLabel.Result) got[1]).label;
+            final boolean proofTarget = "win".equals(plabel) || "loss".equals(plabel);
             try {
-                sr = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> search.value(g, p, knowledge, uid, key)));
+                sr = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> variant == null
+                        ? search.value(g, p, knowledge, uid, key)
+                        : search.value(g, p, knowledge, uid, key, oprWanted, proofTarget)));
             } catch (StepSearch.PinError e) {
                 // review #9: fatal for the run; this game writes no rows
                 fatal = e.getMessage();
@@ -315,6 +332,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             }
             searchMs += sr.ms;
             searchWhy.merge(sr.why, 1, Integer::sum);
+            if (sr.s2t != null && sr.s2t.oprRan) {
+                oprDone[seat] = true;
+            }
         }
         final byte[] payload = (byte[]) got[0];
         final HonestLabel.Result r = (HonestLabel.Result) got[1];
@@ -336,7 +356,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             final StepSearch.Result sr) {
         final JsonObject h = new JsonObject();
         h.addProperty("kind", "value");
-        h.addProperty("schema", search == null ? SCHEMA : SCHEMA_STEP);
+        h.addProperty("schema", search == null ? SCHEMA : variant != null ? SCHEMA_STEP3 : SCHEMA_STEP);
         h.addProperty("split", "TRAIN");
         h.addProperty("game_uid", Long.toUnsignedString(uid));
         h.addProperty("seed", tape.get("seed").getAsLong());
@@ -386,7 +406,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 "p_loss", "worlds_win", "worlds_loss", "lost_worlds", "proposals", "how", "end_reason", "line_how",
                 "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
                 "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof",
-                "state_sha"}) {
+                "state_sha", "s2t"}) {
             if (h.has(k)) {
                 ir.add(k, h.get(k));
             }
@@ -421,6 +441,10 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             h.add("value_backend", sr.backend);
         }
         h.addProperty("search_sha", searchSha);
+        if (variant != null) {
+            // bvw-step2-fork-1027 (S2T): the variant, every variant's value, OPR, a smoke run's pairs
+            h.add("s2t", sr != null && sr.s2t != null ? sr.s2t.toJson(variant) : new StepSearch.S2t().toJson(variant));
+        }
     }
 
     /**
@@ -452,7 +476,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 t.target = "win".equals(proof) ? 1.0 : 0.0;
             } else if (sr != null && sr.hasTarget()) {
                 t.source = sr.provenLine ? "search_proven_line" : "search";
-                t.target = sr.provenLine ? 1.0 : sr.v;
+                // bvw-step2-fork-1027: the spec variant's value for an S2T block (sr.v for step 1)
+                t.target = sr.provenLine ? 1.0 : sr.targetValue();
             } else {
                 t.source = "none";
             }
@@ -536,7 +561,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         gr.addProperty("jar_sha", jarSha);
         if (search != null) {
             // bvw-step1-build-1024: the band, the search block and the targets by source
-            gr.addProperty("schema", SCHEMA_STEP);
+            gr.addProperty("schema", variant != null ? SCHEMA_STEP3 : SCHEMA_STEP);
             gr.addProperty("band_lo", bandLo);
             gr.addProperty("search_sha", searchSha);
             gr.addProperty("search_ms", Math.round(searchMs));

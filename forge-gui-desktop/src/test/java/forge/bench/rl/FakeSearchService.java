@@ -70,6 +70,11 @@ public final class FakeSearchService implements Closeable {
      * null for the random legal steps.
      */
     public volatile java.util.function.Function<RlWire.Decide, short[]> script = null;
+    /**
+     * bvw-step2-fork-1027 (null = off): a scripted policy that also sees the DECIDE payload's raw bytes (a policy that is
+     * a function of the frame alone, e.g. a hash of it); asked before {@link #script}.
+     */
+    public volatile java.util.function.BiFunction<RlWire.Decide, byte[], short[]> scriptRaw = null;
     public final AtomicLong hellos = new AtomicLong(), scores = new AtomicLong(), decides = new AtomicLong(),
             leaves = new AtomicLong(), errors = new AtomicLong();
     /** bvw-p3-batch-1023: advertise and serve chunked LEAVES (the default, as search_server.py now); false = an older service. */
@@ -238,7 +243,8 @@ public final class FakeSearchService implements Closeable {
                     x.status = RlWire.ST_OK;
                     x.policyVersion = 7;
                     final java.util.function.Function<RlWire.Decide, short[]> sc = script;
-                    final short[] scripted = sc == null ? null : sc.apply(d);
+                    final java.util.function.BiFunction<RlWire.Decide, byte[], short[]> sr = scriptRaw;
+                    final short[] scripted = sr != null ? sr.apply(d, f.payload) : sc == null ? null : sc.apply(d);
                     x.steps = scripted != null ? scripted
                             : FakeRlServer.randomSteps(d, new Random(FakeRlServer.mix(11, d.gameUid, d.decIdx)));
                     RlWire.writeFrame(out, RlWire.T_DECISION, 0, RlWire.encodeDecision(x));
