@@ -218,6 +218,17 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
         }
     }
 
+    /**
+     * Lane bvw-decision-log-1027: the id of the ability this one is a copy of (the root original of a copy chain; an LKI
+     * copy keeps its own id and is not one), 0 when it is not a copy. Never read by the engine or the AI: the AI tape
+     * names a copy the AI played (the forced-win solver's line steps are copies) by it.
+     */
+    private int copyRoot = 0;
+
+    public int getCopyRoot() {
+        return copyRoot;
+    }
+
     @Override
     public final int getId() {
         return id;
@@ -1267,6 +1278,9 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
         try {
             clone = (SpellAbility) clone();
             clone.id = lki ? id : nextId();
+            if (!lki && copyRoot == 0) {
+                clone.copyRoot = id; // bvw-decision-log-1027: a copy chain names its root original (clone() kept ours)
+            }
 
             // don't use setHostCard to not trigger the not copied parts yet
 

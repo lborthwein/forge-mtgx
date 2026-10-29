@@ -257,6 +257,16 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         observeReveal(cards, zone, own);
     }
 
+    /**
+     * Lane bvw-decision-log-1027: the AI tape's forced replay of this seat's scry / surveil / ordered move: the look its
+     * arranging method reports first ({@link #observeLook}), then PlayerControllerAi's.
+     */
+    @Override
+    public void witnessLook(final List<Card> cards, final ZoneType destination) {
+        observeLook(cards, destination);
+        super.witnessLook(cards, destination);
+    }
+
     private void observeLook(final Iterable<Card> cards, final ZoneType destination) {
         final BenchSession.KnowledgeObserver o = session.getKnowledgeObserver();
         if (o == null || !isLiveGame() || cards == null) {
