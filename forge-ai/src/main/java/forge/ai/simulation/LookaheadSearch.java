@@ -317,6 +317,46 @@ public final class LookaheadSearch {
          * server sets it per game.
          */
         public java.util.List<String> beliefSeen = null;
+        /**
+         * belief-jar-1027 ("fixed" = the default, and then nothing changes): "twoStage" = every honest world (main worlds,
+         * the solver's re-draw, the defender's deck prior) draws the opponent's hidden BASICS first, as many as their deck
+         * should still hide ({@link #basicsShare} x their deck size minus the basics we can see), then fills the rest from
+         * the nonbasic pool ({@link BeliefSampler.Two}). Needs belief=uniform or posterior.
+         */
+        public String basics = "fixed";
+        /**
+         * belief-jar-1027: the two-stage basics' share of a deck (basics per deck card); NaN (the default) = the
+         * posterior's (with belief=posterior), else {@link LookaheadSearch#BASICS_SHARE_HUMAN}.
+         */
+        public double basicsShare = Double.NaN;
+        /**
+         * belief-jar-1027: belief=posterior's resource ({@code mtgx-belief-posterior/1}, {@code classpath:} = a jar
+         * resource; null = {@link BeliefPosterior#LIVE}) and its pin (required). belief=posterior = belief=uniform's pool
+         * with the posterior's odds weights on its nonbasic cards; it needs basics=twoStage.
+         */
+        public String beliefPosterior = null;
+        public String beliefPosteriorSha256 = null;
+        /**
+         * belief-jar-1027, bench only (-1 = every seat, the default): the keys (posterior, twoStage) apply to the draws of
+         * this seat's searches only; any other seat draws as with the keys off (an asymmetric do-no-harm game).
+         */
+        public int beliefSeat = -1;
+        /**
+         * belief-jar-1027 (review S1-1, owner ruling: LINEAGE): the modelled opponent's lineage tokens that the host names
+         * ({@code draft:<id>}, {@code pod:<id>}, {@code deck:<saved deck id>}, {@code match:<id>}; the host's
+         * {@code beliefLineage}); a posterior whose training manifest holds one is refused for the game. Not a spec key.
+         */
+        public java.util.List<String> beliefLineage = null;
+
+        /** belief-jar-1027: the two-stage basics are on. */
+        public boolean twoStage() {
+            return "twoStage".equals(basics);
+        }
+
+        /** belief-jar-1027: belief=posterior. */
+        public boolean posteriorOn() {
+            return "posterior".equals(belief);
+        }
 
         /** A belief is computed at searched decisions (acting or shadow). */
         public boolean beliefOn() {
@@ -463,6 +503,20 @@ public final class LookaheadSearch {
                 }
                 if (!beliefSingleton) {
                     o.addProperty("beliefSingleton", false);
+                }
+                if (twoStage()) {
+                    // belief-jar-1027: only when on, so every other config's JSON is unchanged
+                    o.addProperty("basics", basics);
+                    if (!Double.isNaN(basicsShare)) {
+                        o.addProperty("basicsShare", basicsShare);
+                    }
+                }
+                if (posteriorOn()) {
+                    o.addProperty("beliefPosterior", beliefPosterior == null ? BeliefPosterior.LIVE : beliefPosterior);
+                    o.addProperty("beliefPosteriorSha256", beliefPosteriorSha256);
+                }
+                if (beliefSeat >= 0) {
+                    o.addProperty("beliefSeat", beliefSeat);
                 }
             }
             if (rankerOn()) {
@@ -647,6 +701,16 @@ public final class LookaheadSearch {
         public long beliefWorlds, beliefCards, beliefCreateNanos, beliefMismatch, beliefPoolSlots, beliefUnknownCards;
         public String beliefDigest, beliefCheckpoint, beliefLastError;
         public final JsonArray beliefCoverage = new JsonArray();
+        /**
+         * belief-jar-1027 (reported only with basics=twoStage): worlds drawn in two stages, their hidden basics and cards,
+         * games whose posterior was refused (its training manifest holds the game's deck or group), the posterior's pin.
+         */
+        public boolean twoStageOn;
+        public long twoStageWorlds, twoStageBasics, twoStageCards, posteriorRefused, posteriorMixWorlds, posteriorUnderflows;
+        public String posteriorSha256, posteriorRefusal;
+        /** Review S2-2: the pool's vocabulary coverage, and whether the pool guard turned the posterior off. */
+        public double posteriorCoverage = Double.NaN;
+        public boolean posteriorPoolGuard;
         /**
          * S1 (reported only when {@link #decideGiven} ran): its decisions (given candidate sets), those with a non-empty
          * stack it skipped, the uncontested ones (under two candidates), the value-leaf calls, leaves, fallbacks to the
@@ -901,6 +965,22 @@ public final class LookaheadSearch {
                     o.addProperty("beliefLastError", beliefLastError);
                 }
                 o.add("beliefCoverage", beliefCoverage);
+                if (twoStageOn) {
+                    o.addProperty("twoStageWorlds", twoStageWorlds);
+                    o.addProperty("twoStageBasics", twoStageBasics);
+                    o.addProperty("twoStageCards", twoStageCards);
+                    if (posteriorSha256 != null) {
+                        o.addProperty("posteriorSha256", posteriorSha256);
+                        o.addProperty("posteriorRefused", posteriorRefused);
+                        o.addProperty("posteriorCoverage", posteriorCoverage);
+                        o.addProperty("posteriorPoolGuard", posteriorPoolGuard);
+                        o.addProperty("posteriorMixWorlds", posteriorMixWorlds);
+                        o.addProperty("posteriorUnderflows", posteriorUnderflows);
+                        if (posteriorRefusal != null) {
+                            o.addProperty("posteriorRefusal", posteriorRefusal);
+                        }
+                    }
+                }
             }
             if (labelsOn) {
                 final JsonObject l = new JsonObject();
@@ -1156,6 +1236,18 @@ public final class LookaheadSearch {
     private int tutorIndex = 0;
     private final BeliefClient beliefClient;
     private final BeliefSampler.Cube beliefCube;
+    /** belief-jar-1027: belief=posterior's model (null otherwise). */
+    private final BeliefPosterior posterior;
+    /**
+     * belief-jar-1027: the live game the posterior's honesty check ran for, and its refusal per modelled opponent (by
+     * player id; "" = the game may use it against that opponent).
+     */
+    private volatile Game posteriorChecked;
+    private final java.util.concurrent.ConcurrentHashMap<Integer, String> posteriorRefusals = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Review S2-2: the pool guard passed (the vocabulary covers >= 95 % of the pool's nonbasic cards). */
+    private boolean posteriorPoolOk;
+    /** belief-jar-1027: the human decks' mean basics per deck card (110 decks of lane opponent-belief-1027: 11.85 of 40). */
+    public static final double BASICS_SHARE_HUMAN = 0.29636;
     /** EI ranker seat: the service client (null for the placebo or when off) and the seat's registered forty. */
     private final RankerClient ranker;
     private JsonObject rankerDeck = null;
@@ -1491,9 +1583,27 @@ public final class LookaheadSearch {
         } else {
             ranker = null;
         }
+        if (!"fixed".equals(cfg.basics) && !cfg.twoStage()) {
+            throw new IllegalStateException("basics must be fixed or twoStage: " + cfg.basics);
+        }
+        if (cfg.twoStage() && !"uniform".equals(cfg.belief) && !cfg.posteriorOn()) {
+            throw new IllegalStateException("basics=twoStage needs belief=uniform or posterior (an honest pool), not " + cfg.belief);
+        }
+        if (cfg.posteriorOn() && !cfg.twoStage()) {
+            throw new IllegalStateException("belief=posterior needs basics=twoStage (the posterior weighs the nonbasic cards only)");
+        }
+        if (!Double.isNaN(cfg.basicsShare) && !(cfg.basicsShare > 0 && cfg.basicsShare < 1)) {
+            throw new IllegalStateException("basicsShare must be in (0, 1): " + cfg.basicsShare);
+        }
+        if (cfg.beliefSeat < -1) {
+            throw new IllegalStateException("beliefSeat must be -1 (every seat) or a seat index: " + cfg.beliefSeat);
+        }
         if (cfg.beliefOn()) {
-            if (!"off".equals(cfg.belief) && !"human".equals(cfg.belief) && !"uniform".equals(cfg.belief)) {
-                throw new IllegalStateException("belief must be off, human or uniform: " + cfg.belief);
+            if (!"off".equals(cfg.belief) && !"human".equals(cfg.belief) && !"uniform".equals(cfg.belief) && !cfg.posteriorOn()) {
+                throw new IllegalStateException("belief must be off, human, uniform or posterior: " + cfg.belief);
+            }
+            if (cfg.beliefShadow && (cfg.posteriorOn() || cfg.twoStage())) {
+                throw new IllegalStateException("beliefShadow does not combine with belief=posterior or basics=twoStage");
             }
             if (cfg.reuse) {
                 // A carried world keeps live card ids; a belief world holds cards the live game does not have.
@@ -1504,10 +1614,26 @@ public final class LookaheadSearch {
             }
             beliefCube = checkBelief(cfg);
             beliefClient = cfg.beliefHuman() ? new BeliefClient(cfg.beliefUrl, cfg.beliefTimeoutMs) : null;
+            posterior = cfg.posteriorOn() ? BeliefPosterior.load(cfg.beliefPosterior == null ? BeliefPosterior.LIVE
+                    : cfg.beliefPosterior, cfg.beliefPosteriorSha256) : null;
             stats.beliefOn = true;
+            stats.twoStageOn = cfg.twoStage();
+            stats.posteriorSha256 = posterior == null ? null : posterior.sha256;
+            if (posterior != null) {
+                // review S2-2: an out-of-vocabulary card would outrank most of the vocabulary; the posterior serves only a
+                // pool it covers (the mush cube: 100 %)
+                stats.posteriorCoverage = posterior.coverage(beliefCube.names);
+                posteriorPoolOk = stats.posteriorCoverage >= BeliefPosterior.MIN_COVERAGE;
+                if (!posteriorPoolOk) {
+                    stats.posteriorPoolGuard = true;
+                    System.err.println("[belief-posterior] pool guard: the vocabulary covers " + Math.round(stats.posteriorCoverage * 1000) / 10.0
+                            + " % of the pool (< " + Math.round(BeliefPosterior.MIN_COVERAGE * 100) + " %); the posterior is off, worlds draw uniformly (two-stage)");
+                }
+            }
         } else {
             beliefCube = null;
             beliefClient = null;
+            posterior = null;
         }
     }
 
@@ -7021,6 +7147,9 @@ public final class LookaheadSearch {
             stats.beliefSkipped++;
             return null;
         }
+        if (keysOn(live, liveMe)) {
+            return beliefTwo(live, liveMe, liveOpp, hid, index, turn, onStack, t0);
+        }
         int openMana = 0;
         for (Card c : liveOpp.getCardsIn(ZoneType.Battlefield)) {
             if (c.isLand() && !c.isTapped()) {
@@ -7145,23 +7274,25 @@ public final class LookaheadSearch {
         return pool;
     }
 
-    /** Our registered main deck's card names (a player knows their own deck), once. */
+    /**
+     * Our registered main deck's card names (a player knows their own deck), once per searching seat. belief-jar-1027: a
+     * bench game whose one search serves both seats used to keep the FIRST searching seat's deck for both, so the other
+     * seat's singleton pool left out its opponent's cards and kept its own. One seat per search (live): unchanged.
+     */
     private Set<String> ownDeckNames(Player liveMe) {
-        Set<String> d = ownDeckNames;
-        if (d == null) {
-            d = new HashSet<>();
+        return ownDeckNames.computeIfAbsent(liveMe.getId(), id -> {
+            final Set<String> d = new HashSet<>();
             final forge.deck.Deck deck = liveMe.getRegisteredPlayer() == null ? null : liveMe.getRegisteredPlayer().getDeck();
             if (deck != null && deck.has(forge.deck.DeckSection.Main)) {
                 for (Map.Entry<forge.item.PaperCard, Integer> e : deck.get(forge.deck.DeckSection.Main)) {
                     d.add(e.getKey().getName());
                 }
             }
-            ownDeckNames = d;
-        }
-        return d;
+            return d;
+        });
     }
 
-    private volatile Set<String> ownDeckNames;
+    private final java.util.concurrent.ConcurrentHashMap<Integer, Set<String>> ownDeckNames = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * honest-belief-1020: the basics multiplicity M: {@link Config#beliefBasics}, raised only when the pool would have
@@ -7308,6 +7439,11 @@ public final class LookaheadSearch {
             }
             // deck-guess-1021: the cards of their earlier games link their co-draft partners too
             shown.addAll(seen);
+            if (keysOn(live, liveMe)) {
+                priorTwo(live, liveMe, liveOpp, opp, g, rng, syn, gain, fillBasics, seen, seenGain, shown, keep, libKnownTop,
+                        need, libNeed);
+                continue;
+            }
             final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
             final double[] w = new double[pool.size()];
             final boolean[] linked = new boolean[pool.size()];
@@ -7408,6 +7544,26 @@ public final class LookaheadSearch {
             if (need == 0 && libNeed == 0) {
                 continue;
             }
+            if (keysOn(live, liveMe)) {
+                // belief-jar-1027: the two-stage draw (the decision's plan when it describes this copy, else this copy's own)
+                BeliefSampler.Two two = bd == null ? null : bd.two;
+                if (two == null || opp.getId() != two.oppId || need != two.need || libNeed != two.libNeed) {
+                    if (two != null && opp.getId() == two.oppId) {
+                        synchronized (stats) {
+                            stats.beliefMismatch++;
+                        }
+                    }
+                    if (liveOpp == null) {
+                        throw new IllegalStateException("belief: no live player for opponent " + opp.getId());
+                    }
+                    two = twoFor(live, liveMe, liveOpp, need, libNeed, null);
+                }
+                final long uf = two.underflows.get();
+                final int[] kind = new int[1];
+                placeTwo(opp, g, keep, libKnownTop, need, two.draw(rng, kind));
+                countTwo(two, kind[0], uf);
+                continue;
+            }
             BeliefSampler.Dist d = bd;
             if (d == null || opp.getId() != d.oppId || need != d.n || libNeed != d.libHidden) {
                 if (d != null && opp.getId() == d.oppId) {
@@ -7448,6 +7604,417 @@ public final class LookaheadSearch {
                 stats.beliefWorlds++;
                 stats.beliefCards += hs.size() + libSlots.size();
                 stats.beliefCreateNanos += System.nanoTime() - c0;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ belief-jar-1027: two-stage worlds, posterior
+
+    /**
+     * belief-jar-1027: whether the keys (basics=twoStage, belief=posterior) apply to the draws of {@code liveMe}'s
+     * searches: always when on, except that a bench's {@link Config#beliefSeat} limits them to one seat.
+     */
+    boolean keysOn(final Game live, final Player liveMe) {
+        if (beliefCube == null || !cfg.twoStage()) {
+            return false;
+        }
+        return cfg.beliefSeat < 0 || live.getRegisteredPlayers().indexOf(liveMe) == cfg.beliefSeat;
+    }
+
+    /**
+     * belief-jar-1027 HONESTY (by lineage, review S1-1): the posterior may serve this live game against {@code liveOpp}
+     * unless its training manifest holds that opponent's lineage ({@link Config#beliefLineage}) or their exact deck
+     * ({@link BeliefPosterior#refusal}); our own deck is no reason. Checked once per game and opponent; a refusal is one
+     * {@code [belief-posterior] refused} line and that opponent's worlds draw uniformly (two-stage). Null = may use it.
+     */
+    public String checkPosteriorHonest(final Game live, final Player liveOpp) {
+        if (posterior == null || liveOpp == null) {
+            return null;
+        }
+        if (posteriorChecked != live) {
+            synchronized (this) {
+                if (posteriorChecked != live) {
+                    posteriorRefusals.clear();
+                    posteriorChecked = live;
+                }
+            }
+        }
+        final String r = posteriorRefusals.computeIfAbsent(liveOpp.getId(), id -> {
+            final String why = posterior.refusal(liveOpp, cfg.beliefLineage);
+            if (why != null) {
+                synchronized (stats) {
+                    stats.posteriorRefused++;
+                    stats.posteriorRefusal = why;
+                }
+                System.err.println("[belief-posterior] refused: " + why + "; this opponent's worlds draw uniformly (two-stage)");
+            }
+            return why == null ? "" : why;
+        });
+        return r.isEmpty() ? null : r;
+    }
+
+    /** belief-jar-1027: the check for every opponent of {@code liveMe} (RlSearch.attach, before the game starts). */
+    public String checkPosteriorHonest(final Game live) {
+        String first = null;
+        for (Player p : live.getRegisteredPlayers()) {
+            for (Player o : p.getOpponents()) {
+                final String r = checkPosteriorHonest(live, o);
+                if (first == null) {
+                    first = r;
+                }
+            }
+        }
+        return first;
+    }
+
+    private boolean posteriorFor(final Game live, final Player liveOpp) {
+        return posterior != null && posteriorPoolOk && checkPosteriorHonest(live, liveOpp) == null;
+    }
+
+    /** Review S3-7: the posterior's odds weights, floored at 1e-6 of the top one (no draw underflows). */
+    private static double[] postWeights(final double[] z) {
+        final double[] w = BeliefSampler.weights(z);
+        for (int i = 0; i < w.length; i++) {
+            w[i] = Math.max(w[i], 1e-6);
+        }
+        return w;
+    }
+
+    /** belief-jar-1027: the posterior (null unless belief=posterior); tests read it. */
+    BeliefPosterior posterior() {
+        return posterior;
+    }
+
+    /** belief-jar-1027: the two-stage basics' deck share. */
+    double basicsShare() {
+        if (!Double.isNaN(cfg.basicsShare)) {
+            return cfg.basicsShare;
+        }
+        return posterior != null ? posterior.basicsShare : BASICS_SHARE_HUMAN;
+    }
+
+    /**
+     * belief-jar-1027: the names of {@code liveOpp}'s cards the seat has seen this game, as the defender's prior reads
+     * them: non-token, face-up cards it can see outside their library, and their spells on the stack.
+     */
+    private static Set<String> shownNames(final Game live, final Player liveMe, final Player liveOpp) {
+        final PlayerView myView = liveMe.getView();
+        final Set<String> shown = new HashSet<>();
+        for (Card c : live.getCardsInGame()) {
+            if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
+                    && c.getView().canBeShownTo(myView) && !c.isInZone(ZoneType.Library)) {
+                shown.add(c.getPaperCard().getName());
+            }
+        }
+        for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
+            // review S3-6: their own, face-up, visible card (not a copy, not our stolen card)
+            final Card sc = si.getSourceCard();
+            if (si.getActivatingPlayer() == liveOpp && sc != null && sc.getOwner() == liveOpp && !sc.isToken()
+                    && !sc.isCopiedSpell() && !sc.isFaceDown() && sc.getPaperCard() != null && sc.getView().canBeShownTo(myView)) {
+                shown.add(sc.getPaperCard().getName());
+            }
+        }
+        return shown;
+    }
+
+    /**
+     * belief-jar-1027: the opponent's expected hidden basics, {@code share x deck size - the basics the seat can see}
+     * (deck size = every non-token card they own: public), and the colour demand that splits them by type: the coloured
+     * pips of their seen nonbasic cards + 1.5 per colour their visible mana sources produce + 0.2 (lane
+     * opponent-belief-1027's basics fix).
+     */
+    private double[] basicsPlan(final Game live, final Player liveMe, final Player liveOpp, final double[] demand) {
+        final PlayerView myView = liveMe.getView();
+        int size = 0;
+        int seenBasics = 0;
+        final boolean[] colour = new boolean[5];
+        final String wubrg = "WUBRG";
+        Arrays.fill(demand, 0.2);
+        for (Card c : live.getCardsInGame()) {
+            // review S3-1: the deck's own cards only (no tokens, copied spells, effects or command-zone objects)
+            if (c.getOwner() != liveOpp || c.isToken() || c.isCopiedSpell() || c.isImmutable() || c.isInZone(ZoneType.Command)) {
+                continue;
+            }
+            size++;
+            if (c.isFaceDown() || c.getPaperCard() == null || !c.getView().canBeShownTo(myView)) {
+                continue;
+            }
+            final String nm = c.getPaperCard().getName();
+            final boolean onBf = c.isInZone(ZoneType.Battlefield);
+            if (BeliefSampler.isBasic(nm)) {
+                seenBasics++;
+                if (onBf) {
+                    colour[Arrays.asList(BeliefSampler.BASICS).indexOf(nm)] = true;
+                }
+                continue;
+            }
+            if (!c.isInZone(ZoneType.Library) && c.getManaCost() != null) {
+                final String mc = c.getManaCost().toString();
+                for (int i = 0; i < mc.length(); i++) {
+                    final int b = wubrg.indexOf(mc.charAt(i));
+                    if (b >= 0) {
+                        demand[b] += 1;
+                    }
+                }
+            }
+            if (onBf && (c.isLand() || c.isArtifact() && !c.isCreature() || c.isCreature() && c.getCMC() <= 2)) {
+                for (SpellAbility sa : c.getManaAbilities()) {
+                    if (sa.getManaPart() == null) {
+                        continue;
+                    }
+                    final String prod = sa.getManaPart().getOrigProduced();
+                    if (prod == null) {
+                        continue;
+                    }
+                    final boolean any = prod.contains("Any");
+                    for (String tok : prod.split("[\\s,]+")) {
+                        final int b = tok.length() == 1 ? wubrg.indexOf(tok.charAt(0)) : -1;
+                        if (b >= 0) {
+                            colour[b] = true;
+                        }
+                    }
+                    if (any) {
+                        Arrays.fill(colour, true);
+                    }
+                }
+            }
+        }
+        for (int b = 0; b < 5; b++) {
+            if (colour[b]) {
+                demand[b] += 1.5;
+            }
+        }
+        return new double[] {basicsShare() * size - seenBasics, size};
+    }
+
+    /**
+     * belief-jar-1027: one opponent's two-stage plan: the belief pool's nonbasic cards with odds weights (the posterior's
+     * {@code exp(z)} given the cards they showed, when belief=posterior serves this game; else 1), and the basics plan.
+     * {@code weights} (or null) overrides the weights (the defender's prior).
+     */
+    private BeliefSampler.Two twoFor(final Game live, final Player liveMe, final Player liveOpp, final int need,
+            final int libNeed, final double[] weights) {
+        final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
+        final List<String> nb = new ArrayList<>(pool.size());
+        for (String x : pool) {
+            if (!BeliefSampler.isBasic(x)) {
+                nb.add(x);
+            }
+        }
+        double[] w = weights;
+        final boolean post = weights == null && posteriorFor(live, liveOpp);
+        if (w == null) {
+            if (post) {
+                w = postWeights(posterior.logits(nb, shownNames(live, liveMe, liveOpp)));
+            } else {
+                w = new double[nb.size()];
+                Arrays.fill(w, 1.0);
+            }
+        }
+        final double[] dem = new double[5];
+        final double[] plan = basicsPlan(live, liveMe, liveOpp, dem);
+        final BeliefSampler.Two t = new BeliefSampler.Two(nb, w, plan[0], dem, need, libNeed, post);
+        t.oppId = liveOpp.getId();
+        if (post) {
+            t.mix = posterior.mixUniform; // review S2-1: a share of uniform worlds (wAlt null = uniform)
+        }
+        return t;
+    }
+
+    /** belief-jar-1027: one world's hidden names into the copy's opponent: the hand first (after its seen cards), then the library. */
+    private void placeTwo(final Player opp, final Game g, final List<Card> keep, final List<Card> libKnownTop,
+            final int need, final List<String> names) {
+        final long c0 = System.nanoTime();
+        final List<Card> newHand = new ArrayList<>(keep);
+        final List<Card> newLib = new ArrayList<>(libKnownTop);
+        int basics = 0;
+        for (int k = 0; k < names.size(); k++) {
+            final String nm = names.get(k);
+            if (BeliefSampler.isBasic(nm)) {
+                basics++;
+            }
+            final Card nc = beliefCard(nm, opp, g);
+            if (k < need) {
+                newHand.add(nc);
+            } else {
+                newLib.add(nc);
+            }
+        }
+        opp.getZone(ZoneType.Hand).setCards(newHand);
+        opp.getZone(ZoneType.Library).setCards(newLib);
+        synchronized (stats) {
+            stats.beliefWorlds++;
+            stats.beliefCards += names.size();
+            stats.beliefCreateNanos += System.nanoTime() - c0;
+            stats.twoStageWorlds++;
+            stats.twoStageBasics += basics;
+            stats.twoStageCards += names.size();
+        }
+    }
+
+    /** belief-jar-1027: the decision's belief with the keys on (a holder of the two-stage plan, see {@link BeliefSampler.Dist#two}). */
+    private BeliefSampler.Dist beliefTwo(final Game live, final Player liveMe, final Player liveOpp, final int[] hid,
+            final int index, final int turn, final boolean onStack, final long t0) {
+        final BeliefSampler.Two two = twoFor(live, liveMe, liveOpp, hid[0], hid[1], null);
+        final BeliefSampler.Dist bd = new BeliefSampler.Dist(two.nonbasic, two.w, 0, 0, 0);
+        bd.two = two;
+        bd.uniform = !two.posterior;
+        bd.oppId = liveOpp.getId();
+        stats.beliefDecisions++;
+        stats.beliefPoolSlots += two.nonbasic.size();
+        if (stats.beliefCoverage.size() < 400) {
+            final JsonObject e = new JsonObject();
+            e.addProperty("d", index);
+            e.addProperty("turn", turn);
+            e.addProperty("oppActive", live.getPhaseHandler().getPlayerTurn() == liveOpp);
+            e.addProperty("stack", onStack);
+            e.addProperty("n", hid[0]);
+            e.addProperty("lib", hid[1]);
+            e.addProperty("slots", two.nonbasic.size());
+            e.addProperty("basicsExp", Math.round(two.expectedBasics * 100) / 100.0);
+            e.addProperty("posterior", two.posterior);
+            if (two.posterior) {
+                final Integer[] ord = new Integer[two.w.length];
+                for (int i = 0; i < ord.length; i++) {
+                    ord[i] = i;
+                }
+                Arrays.sort(ord, (a, b) -> Double.compare(two.w[b], two.w[a]));
+                final JsonArray top = new JsonArray();
+                for (int i = 0; i < Math.min(3, ord.length); i++) {
+                    top.add(two.nonbasic.get(ord[i]) + ":" + Math.round(two.w[ord[i]] * 1000) / 1000.0);
+                }
+                e.add("top", top);
+            }
+            e.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
+            stats.beliefCoverage.add(e);
+        }
+        return bd;
+    }
+
+    /**
+     * belief-jar-1027: the defender's deck-prior world with the keys on. The base prior's co-draft weights (and its
+     * earlier-games boost) over the nonbasic pool, or, when belief=posterior serves the game, the posterior's weights
+     * given what they showed (earlier games' cards included) with each earlier-game card at {@code seenGain} x the top
+     * card. Two-stage basics; then, with {@code fillBasics}, a drawn nonbasic card that is not linked becomes a basic as
+     * in the base prior. The posterior keeps the base prior's NUMBER of linked cards (the defender's probe budget) and
+     * links the cards it weighs highest, plus every earlier-game card.
+     */
+    private void priorTwo(final Game live, final Player liveMe, final Player liveOpp, final Player opp, final Game g,
+            final Random rng, final Map<String, Map<String, Double>> syn, final double gain, final boolean fillBasics,
+            final Set<String> seen, final double seenGain, final Set<String> shown, final List<Card> keep,
+            final List<Card> libKnownTop, final int need, final int libNeed) {
+        final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
+        final List<String> nb = new ArrayList<>(pool.size());
+        for (String x : pool) {
+            if (!BeliefSampler.isBasic(x)) {
+                nb.add(x);
+            }
+        }
+        double[] w = new double[nb.size()];
+        boolean[] linked = new boolean[nb.size()];
+        int nLinked = 0;
+        for (int i = 0; i < w.length; i++) {
+            double best = 0;
+            for (String a : shown) {
+                final Map<String, Double> row = syn.get(a);
+                final Double v = row == null ? null : row.get(nb.get(i));
+                if (v != null && v > best) {
+                    best = v;
+                }
+            }
+            w[i] = 1.0 + gain * best * best;
+            linked[i] = best > 0;
+            if (best > 0) {
+                nLinked++;
+            }
+            if (!seen.isEmpty() && seen.contains(nb.get(i))) {
+                w[i] = Math.max(w[i], seenGain * (1.0 + gain));
+                linked[i] = true;
+            }
+        }
+        double[] alt = null;
+        boolean[] altLinked = null;
+        final boolean post = posteriorFor(live, liveOpp);
+        if (post) {
+            // review S2-1: the base prior stays the mixture's alternative (its own weights and links)
+            alt = w.clone();
+            altLinked = linked.clone();
+            final double[] pw = postWeights(posterior.logits(nb, shown));
+            for (int i = 0; i < pw.length; i++) {
+                if (!seen.isEmpty() && seen.contains(nb.get(i))) {
+                    pw[i] = Math.max(pw[i], seenGain);
+                }
+            }
+            final Integer[] ord = new Integer[pw.length];
+            for (int i = 0; i < ord.length; i++) {
+                ord[i] = i;
+            }
+            Arrays.sort(ord, (a, b) -> Double.compare(pw[b], pw[a]));
+            final boolean[] pl = new boolean[pw.length];
+            for (int r = 0; r < Math.min(nLinked, ord.length); r++) {
+                pl[ord[r]] = true;
+            }
+            for (int i = 0; i < pl.length; i++) {
+                if (!seen.isEmpty() && seen.contains(nb.get(i))) {
+                    pl[i] = true;
+                }
+            }
+            w = pw;
+            linked = pl;
+        }
+        normalizeMax(w);
+        final BeliefSampler.Two two = twoFor(live, liveMe, liveOpp, need, libNeed, w);
+        if (alt != null) {
+            normalizeMax(alt);
+            two.wAlt = alt;
+            two.mix = posterior.mixUniform;
+        }
+        final int[] kind = new int[1];
+        final long uf = two.underflows.get();
+        final List<String> names = two.draw(rng, kind);
+        countTwo(two, kind[0], uf);
+        if (kind[0] == 1 && altLinked != null) {
+            linked = altLinked; // a world drawn from the base prior keeps the base prior's links
+        }
+        if (fillBasics) {
+            final Map<String, Integer> itemOf = new java.util.HashMap<>();
+            for (int i = 0; i < nb.size(); i++) {
+                itemOf.put(nb.get(i), i);
+            }
+            for (int k = 0; k < names.size(); k++) {
+                final String nm = names.get(k);
+                if (!BeliefSampler.isBasic(nm)) {
+                    final Integer it = itemOf.get(nm);
+                    if (it == null || !linked[it]) {
+                        names.set(k, two.basicType(rng)); // review S3-4: a colour-aware basic
+                    }
+                }
+            }
+        }
+        placeTwo(opp, g, keep, libKnownTop, need, names);
+    }
+
+    /** belief-jar-1027: a posterior world drawn from the mixture's alternative, and draws that underflowed. */
+    private void countTwo(final BeliefSampler.Two two, final int kind, final long underflowsBefore) {
+        if (!two.posterior) {
+            return;
+        }
+        synchronized (stats) {
+            if (kind == 1) {
+                stats.posteriorMixWorlds++;
+            }
+            stats.posteriorUnderflows += two.underflows.get() - underflowsBefore;
+        }
+    }
+
+    private static void normalizeMax(final double[] w) {
+        double max = 0;
+        for (double x : w) {
+            max = Math.max(max, x);
+        }
+        if (max > 0) {
+            for (int i = 0; i < w.length; i++) {
+                w[i] /= max;
             }
         }
     }

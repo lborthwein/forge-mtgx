@@ -227,6 +227,12 @@ public final class BeliefSampler {
         public boolean uniform;
         public boolean fallback;
         public int oppId;
+        /**
+         * belief-jar-1027 (null = off, the default, and then nothing changes): the decision's two-stage world plan
+         * ({@code basics=twoStage}, optionally {@code belief=posterior}). When set, a world's hidden cards come from
+         * {@link Two#draw}, not from this distribution's slots.
+         */
+        public Two two;
 
         public Dist(List<String> pool, double[] itemW, int basics, int n, int libHidden) {
             this.pool = pool;
@@ -252,6 +258,12 @@ public final class BeliefSampler {
 
         public int slots() {
             return w.length;
+        }
+
+        /** belief-jar-1027 review S3-7: the n-of-J polynomial is a positive finite number (else a draw would be forced). */
+        public boolean drawable() {
+            final double e = suffix[0][n];
+            return n == 0 || e > 0 && !Double.isInfinite(e) && !Double.isNaN(e);
         }
 
         /** Draw exactly n slots (ascending slot order) from the conditional Bernoulli distribution. */
@@ -293,6 +305,132 @@ public final class BeliefSampler {
         /** Inclusion probability of every slot: w_i e_{n-1}(w without i) / e_n(w). Sums to n. */
         public double[] marginals() {
             return BeliefSampler.marginals(w, n, suffix);
+        }
+    }
+
+    /**
+     * belief-jar-1027: a two-stage world draw of one opponent's hidden cards (lane opponent-belief-1027's basic-land share
+     * fix). Today's worlds hold ~21 % lands against 37-42 % in real decks (the cube pool has 8 slots per basic among ~580).
+     * Stage 1: the hidden basics, {@code hb = clamp(expectedBasics, 0, hidden)} rounded stochastically, each basic's type
+     * drawn from {@link #demand} (their shown cards' coloured pips + 1.5 per colour their visible mana produces + 0.2).
+     * Stage 2: the rest from the nonbasic pool, a conditional Bernoulli draw of exactly {@code hidden - hb} cards with odds
+     * weights {@link #w} (1 = uniform; the posterior's {@code exp(z)}). The names are then shuffled: the first
+     * {@link #need} are the hidden hand, the rest the hidden library (top first).
+     */
+    public static final class Two {
+        public final List<String> nonbasic;
+        public final double[] w;
+        public final double expectedBasics;
+        public final double[] demand;
+        public final int need;
+        public final int libNeed;
+        public final boolean posterior;
+        /**
+         * belief-jar-1027 review S2-1: the probability that a world draws its nonbasic cards with {@link #wAlt} instead of
+         * {@link #w} (a world-level mixture: P(card) = (1 - mix) P_w + mix P_alt, so a true card the posterior rules out
+         * keeps the alternative's mass). 0 = never.
+         */
+        public double mix;
+        /** The mixture's alternative weights (null = uniform). */
+        public double[] wAlt;
+        public int oppId;
+        /** Worlds whose weighted draw underflowed and fell back to uniform (review S3-7). */
+        public final java.util.concurrent.atomic.AtomicLong underflows = new java.util.concurrent.atomic.AtomicLong();
+        /** Review S3-9: the conditional Bernoulli tables per (weights, m), built once per plan. */
+        private final java.util.concurrent.ConcurrentHashMap<Long, Dist> dists = new java.util.concurrent.ConcurrentHashMap<>();
+        private double[] ones;
+
+        public Two(List<String> nonbasic, double[] w, double expectedBasics, double[] demand, int need, int libNeed,
+                boolean posterior) {
+            this.nonbasic = nonbasic;
+            this.w = w;
+            this.expectedBasics = expectedBasics;
+            this.demand = demand;
+            this.need = need;
+            this.libNeed = libNeed;
+            this.posterior = posterior;
+        }
+
+        /** Stage 1's basics count for this world: {@code clamp(expectedBasics, 0, total)}, rounded with one draw. */
+        public int basics(Random rng) {
+            final int total = need + libNeed;
+            final double x = Math.min(Math.max(expectedBasics, 0.0), total);
+            final int lo = (int) Math.floor(x);
+            final double frac = x - lo;
+            final double u = rng.nextDouble();
+            int hb = lo + (u < frac ? 1 : 0);
+            if (total - hb > nonbasic.size()) {
+                hb = total - nonbasic.size(); // a small pool: basics fill what the nonbasics cannot
+            }
+            return Math.min(hb, total);
+        }
+
+        /** One basic land type drawn by {@link #demand}. */
+        public String basicType(Random rng) {
+            double tot = 0;
+            for (double x : demand) {
+                tot += x;
+            }
+            double u = rng.nextDouble() * tot;
+            int b = 0;
+            while (b < BASICS.length - 1 && u >= demand[b]) {
+                u -= demand[b];
+                b++;
+            }
+            return BASICS[b];
+        }
+
+        private double[] ones() {
+            double[] o = ones;
+            if (o == null) {
+                o = new double[nonbasic.size()];
+                java.util.Arrays.fill(o, 1.0);
+                ones = o;
+            }
+            return o;
+        }
+
+        /** The table for weights {@code kind} (0 = w, 1 = wAlt or uniform, 2 = uniform) and size m, cached. */
+        private Dist dist(int kind, int m) {
+            return dists.computeIfAbsent(((long) kind << 32) | m, k -> {
+                final double[] ws = kind == 0 ? w : kind == 1 && wAlt != null ? wAlt : ones();
+                return new Dist(nonbasic, ws, 0, m, 0);
+            });
+        }
+
+        /** One world's hidden names: {@link #need} hand cards then {@link #libNeed} library cards (top first). */
+        public List<String> draw(Random rng) {
+            return draw(rng, null);
+        }
+
+        /** As {@link #draw(Random)}; {@code kindOut[0]} (when given) = 1 for a world drawn from the mixture's alternative. */
+        public List<String> draw(Random rng, int[] kindOut) {
+            final int hb = basics(rng);
+            final int m = need + libNeed - hb;
+            final List<String> out = new ArrayList<>(need + libNeed);
+            if (m > 0) {
+                int kind = 0;
+                if (mix > 0) {
+                    kind = rng.nextDouble() < mix ? 1 : 0;
+                }
+                if (kindOut != null) {
+                    kindOut[0] = kind;
+                }
+                Dist d = dist(kind, m);
+                if (!d.drawable()) {
+                    // review S3-7: the weighted polynomials underflowed; this world draws uniformly (counted)
+                    underflows.incrementAndGet();
+                    d = dist(2, m);
+                }
+                for (int i : d.sampleHand(rng)) {
+                    out.add(nonbasic.get(i));
+                }
+            }
+            for (int j = 0; j < hb; j++) {
+                out.add(basicType(rng));
+            }
+            Collections.shuffle(out, rng);
+            return out;
         }
     }
 

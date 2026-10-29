@@ -218,6 +218,26 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public List<String> beliefPool;
         /** deck-guess-1021: the opponent's cards from earlier games of this match, set per game by the live seat; not a JSON key. */
         public List<String> beliefSeen;
+        /**
+         * belief-jar-1027 ("fixed" = the default, and then nothing changes): "twoStage" = the honest worlds draw the
+         * opponent's hidden basics first ({@link LookaheadSearch.Config#basics}); {@link #basicsShare} its deck share
+         * (NaN = the default).
+         */
+        public String basics = "fixed";
+        public double basicsShare = Double.NaN;
+        /**
+         * belief-jar-1027: belief=posterior's resource (null = the jar's {@link forge.ai.simulation.BeliefPosterior#LIVE})
+         * and its pin (required with belief=posterior).
+         */
+        public String beliefPosterior;
+        public String beliefPosteriorSha256;
+        /** belief-jar-1027, bench only (-1 = every seat): the keys apply to this seat's searches only. */
+        public int beliefSeat = -1;
+        /**
+         * belief-jar-1027 (review S1-1): the modelled opponent's lineage tokens (draft / pod / saved deck / match), set per
+         * game by the live seat from the host's {@code beliefLineage}; not a JSON key.
+         */
+        public List<String> beliefLineage;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "breadth",
                 "horizon", "threads", "maxSteps", "leafExtraSteps", "departZ", "margin", "leaf", "playout",
@@ -225,7 +245,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "basics", "basicsShare",
+                "beliefPosterior", "beliefPosteriorSha256", "beliefSeat"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -281,6 +302,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (o.has("beliefBasics")) c.beliefBasics = o.get("beliefBasics").getAsInt();
             if (o.has("beliefSingleton")) c.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
+            // belief-jar-1027
+            if (o.has("basics")) c.basics = o.get("basics").getAsString();
+            if (o.has("basicsShare")) c.basicsShare = o.get("basicsShare").getAsDouble();
+            if (o.has("beliefPosterior") && !o.get("beliefPosterior").isJsonNull()) c.beliefPosterior = o.get("beliefPosterior").getAsString();
+            if (o.has("beliefPosteriorSha256") && !o.get("beliefPosteriorSha256").isJsonNull()) {
+                c.beliefPosteriorSha256 = o.get("beliefPosteriorSha256").getAsString();
+            }
+            if (o.has("beliefSeat")) c.beliefSeat = o.get("beliefSeat").getAsInt();
             c.check();
             return c;
         }
@@ -337,11 +366,30 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (blockSamples < 0 || blockSamples > 64 || blockTop < 1 || blockTop > 8) {
                 throw new IllegalArgumentException("search: 0 <= blockSamples <= 64, 1 <= blockTop <= 8");
             }
-            if (!"off".equals(belief) && !"uniform".equals(belief)) {
-                throw new IllegalArgumentException("search.belief must be off or uniform, not " + belief);
+            if (!"off".equals(belief) && !"uniform".equals(belief) && !"posterior".equals(belief)) {
+                throw new IllegalArgumentException("search.belief must be off, uniform or posterior, not " + belief);
             }
-            if ("uniform".equals(belief) && beliefCube == null && beliefPool == null) {
-                throw new IllegalArgumentException("search.belief=uniform needs beliefCube (or the event's pool)");
+            if (("uniform".equals(belief) || "posterior".equals(belief)) && beliefCube == null && beliefPool == null) {
+                throw new IllegalArgumentException("search.belief=" + belief + " needs beliefCube (or the event's pool)");
+            }
+            // belief-jar-1027
+            if (!"fixed".equals(basics) && !"twoStage".equals(basics)) {
+                throw new IllegalArgumentException("search.basics must be fixed or twoStage, not " + basics);
+            }
+            if ("twoStage".equals(basics) && "off".equals(belief)) {
+                throw new IllegalArgumentException("search.basics=twoStage needs belief=uniform or posterior");
+            }
+            if ("posterior".equals(belief) && !"twoStage".equals(basics)) {
+                throw new IllegalArgumentException("search.belief=posterior needs basics=twoStage");
+            }
+            if ("posterior".equals(belief) && (beliefPosteriorSha256 == null || !beliefPosteriorSha256.matches("[0-9a-f]{64}"))) {
+                throw new IllegalArgumentException("search.belief=posterior needs beliefPosteriorSha256 (64 hex)");
+            }
+            if (!Double.isNaN(basicsShare) && !(basicsShare > 0 && basicsShare < 1)) {
+                throw new IllegalArgumentException("search.basicsShare must be in (0, 1), not " + basicsShare);
+            }
+            if (beliefSeat < -1 || beliefSeat > 1) {
+                throw new IllegalArgumentException("search.beliefSeat must be -1 (every seat), 0 or 1, not " + beliefSeat);
             }
             if (beliefBasics < 0 || beliefBasics > 64) {
                 throw new IllegalArgumentException("search.beliefBasics must be 0..64, not " + beliefBasics);
@@ -416,6 +464,20 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
                 o.addProperty("beliefBasics", beliefBasics);
                 o.addProperty("beliefSingleton", beliefSingleton);
+                // belief-jar-1027: only when on, so every other spec's JSON is unchanged
+                if ("twoStage".equals(basics)) {
+                    o.addProperty("basics", basics);
+                    if (!Double.isNaN(basicsShare)) {
+                        o.addProperty("basicsShare", basicsShare);
+                    }
+                }
+                if ("posterior".equals(belief)) {
+                    o.addProperty("beliefPosterior", beliefPosterior == null ? forge.ai.simulation.BeliefPosterior.LIVE : beliefPosterior);
+                    o.addProperty("beliefPosteriorSha256", beliefPosteriorSha256);
+                }
+                if (beliefSeat >= 0) {
+                    o.addProperty("beliefSeat", beliefSeat);
+                }
             }
             if (choices > 0) {
                 // cm-choice-search-1009: only when S-t is on, so an S1 spec's JSON is unchanged
@@ -467,6 +529,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * keys is set, so every other spec's game is unchanged.
      */
     public void attach(final Game g, final boolean[] rlSeat, final RlSeat seat) {
+        if ("posterior".equals(cfg.belief)) {
+            // belief-jar-1027 HONESTY: the posterior's manifest check, before the game starts (a refusal is logged once)
+            ls.checkPosteriorHonest(g);
+        }
         if (cfg.forcedWin == null && cfg.plans == null) {
             return;
         }
@@ -623,6 +689,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             lc.beliefSingleton = cfg.beliefSingleton;
             lc.beliefPool = cfg.beliefPool;
             lc.beliefSeen = cfg.beliefSeen; // deck-guess-1021
+            lc.basics = cfg.basics; // belief-jar-1027
+            lc.basicsShare = cfg.basicsShare;
+            lc.beliefPosterior = cfg.beliefPosterior;
+            lc.beliefPosteriorSha256 = cfg.beliefPosteriorSha256;
+            lc.beliefSeat = cfg.beliefSeat;
+            lc.beliefLineage = cfg.beliefLineage;
         }
         if (cfg.plans != null && PlanSearch.Spec.parse(cfg.plans).opp) {
             // search-bones-1015 (d): S-b's respond points are stack decisions (copies carry the stack)

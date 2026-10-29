@@ -371,6 +371,32 @@ final class InteractiveProtocol {
         return List.copyOf(names);
     }
 
+    /**
+     * belief-jar-1027 (review S1-1, owner ruling: refuse by LINEAGE): the human seat's deck lineage, optional in the
+     * config line: {@code beliefLineage} = tokens {@code draft:<draft id>}, {@code pod:<pod id>},
+     * {@code deck:<saved deck id>} (the saved deck the human plays, whose edits keep its id), {@code match:<match id>}.
+     * Null when absent. An old jar ignores the key. The AI seat's belief=posterior refuses itself for the game when one
+     * of these is in its training manifest (the same salted hash the manifest uses).
+     */
+    static List<String> readBeliefLineage(final String line) throws ProtocolException {
+        final JsonObject json = parseObject(line, "invalid_config", "config");
+        if (!json.has("beliefLineage") || json.get("beliefLineage").isJsonNull()) {
+            return null;
+        }
+        if (!json.get("beliefLineage").isJsonArray() || json.getAsJsonArray("beliefLineage").size() > 64) {
+            throw new ProtocolException("invalid_config", "beliefLineage must be an array of at most 64 tokens");
+        }
+        final List<String> out = new ArrayList<>();
+        for (JsonElement value : json.getAsJsonArray("beliefLineage")) {
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()
+                    || !value.getAsString().matches("(draft|pod|deck|match):[^\\s]{1,200}")) {
+                throw new ProtocolException("invalid_config", "each beliefLineage entry must be draft:, pod:, deck: or match: and an id");
+            }
+            out.add(value.getAsString());
+        }
+        return List.copyOf(out);
+    }
+
     private static boolean isSeatNumber(final JsonElement value, final int seat) {
         return value.isJsonPrimitive() && value.getAsJsonPrimitive().isNumber() && value.getAsDouble() == seat;
     }

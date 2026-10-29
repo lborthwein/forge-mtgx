@@ -265,6 +265,18 @@ public final class RlLiveSeat {
                     case "blocks": c.blocks = blockKey(k, v, 0, 1); break;
                     case "blocks.samples": c.blockSamples = blockKey(k, v, 0, 64); break;
                     case "blocks.top": c.blockTop = blockKey(k, v, 1, 8); break;
+                    // belief-jar-1027 (absent = off: belief=uniform, fixed basics): the opponent-deck posterior and the
+                    // two-stage basics. Honest either way: the worlds still draw from the observation-only pool.
+                    case "belief":
+                        if (!"uniform".equals(v) && !"posterior".equals(v)) {
+                            throw new IllegalArgumentException("policySearch: belief must be uniform or posterior live, not " + v);
+                        }
+                        c.belief = v;
+                        break;
+                    case "beliefPosterior": c.beliefPosterior = v; break;
+                    case "beliefPosteriorSha256": c.beliefPosteriorSha256 = v.toLowerCase(Locale.ROOT); break;
+                    case "basics": c.basics = v; break;
+                    case "basicsShare": c.basicsShare = Double.parseDouble(v); break;
                     default:
                         if (k.startsWith("plans.")) {
                             planKey(c, k, v); // sb-live-1018: S-b, flat keys
@@ -282,9 +294,10 @@ public final class RlLiveSeat {
             if (s.loopGuard < 0) {
                 throw new IllegalArgumentException("policySearch: loopGuard >= 0 (0 = off)");
             }
-            if (c.plans != null && c.plans.has("defend") && c.plans.get("defend").getAsBoolean() && !"uniform".equals(c.belief)) {
+            if (c.plans != null && c.plans.has("defend") && c.plans.get("defend").getAsBoolean() && !"uniform".equals(c.belief)
+                    && !"posterior".equals(c.belief)) {
                 // strong-opp-1020 (review S3-3): the defense reads the honest belief, or it would fall back to their real deck
-                throw new IllegalArgumentException("policySearch: plans.defend needs the honest belief (belief=uniform)");
+                throw new IllegalArgumentException("policySearch: plans.defend needs the honest belief (belief=uniform or posterior)");
             }
             if (c.plans != null) {
                 // sb-live-1018: live S-b never searches on our real library order (the r6 leak fix)
@@ -462,6 +475,15 @@ public final class RlLiveSeat {
      */
     public void setBeliefSeen(final java.util.List<String> seen) {
         spec.search.beliefSeen = seen;
+    }
+
+    /**
+     * belief-jar-1027 (review S1-1): the human opponent's lineage tokens for the next {@link #bind} (the host's
+     * {@code beliefLineage}: {@code draft:<id>}, {@code pod:<id>}, {@code deck:<saved deck id>}, {@code match:<id>}; null =
+     * none). Read only by belief=posterior's honesty check: a lineage in the posterior's training manifest refuses it.
+     */
+    public void setBeliefLineage(final java.util.List<String> lineage) {
+        spec.search.beliefLineage = lineage;
     }
 
     public void bind(final Game g, final int seatIndex, final long seed, final LookaheadSearch.Config k8,
