@@ -80,4 +80,81 @@ public class InteractiveLostPlayerTest extends AITest {
         assertFalse(InteractiveState.seatView(game, winner, 1).toString().contains("Titan of Industry")
                 && !hidden.getView().canBeShownTo(winner.getView()), "a hidden hand card is never named");
     }
+
+    /**
+     * Lane own-cards-after-loss-1028 (owner report 2026-10-28T23-24-50): once seat 0 had lost, its own terminal view
+     * showed its battlefield as "Face-down card" and an empty hand beside handSize 5 ({@code Game#findById} walks
+     * in-game players only, so the sanitizer could not resolve the loser's cards). A seat sees its own cards after it
+     * loses; the opponent still sees the loser's public zones only, and the loser still never sees the winner's hand.
+     */
+    @Test
+    public void aSeatSeesItsOwnCardsAfterLosingToDamage() {
+        assertOwnCardsAfterLoss(false);
+    }
+
+    @Test
+    public void aSeatSeesItsOwnCardsAfterLosingToDecking() {
+        assertOwnCardsAfterLoss(true);
+    }
+
+    private void assertOwnCardsAfterLoss(final boolean decking) {
+        final Game game = initAndCreateGame();
+        final Player loser = game.getRegisteredPlayers().get(0);
+        final Player winner = game.getRegisteredPlayers().get(1);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, loser, 5);
+        addCard("Forest", loser);
+        addCard("Llanowar Elves", loser);
+        addCardToZone("Black Lotus", loser, ZoneType.Graveyard);
+        addCardToZone("Titan of Industry", loser, ZoneType.Hand);
+        addCardToZone("Ancestral Recall", loser, ZoneType.Hand);
+        addCard("Island", winner);
+        addCardToZone("Craterhoof Behemoth", winner, ZoneType.Hand);
+        if (!decking) {
+            addCardToZone("Plains", loser, ZoneType.Library);
+        }
+
+        if (decking) {
+            assertTrue(loser.getCardsIn(ZoneType.Library).isEmpty(), "an empty library to draw from");
+            loser.drawCard();
+        } else {
+            loser.setLife(0, null);
+        }
+        game.getAction().checkStateEffects(true);
+        assertTrue(loser.hasLost(), decking ? "drawing from an empty library loses" : "0 life loses");
+        assertFalse(game.getPlayers().contains(loser), "the loser has left the in-game players");
+
+        // the loser's own terminal view: its hand and battlefield by name, nothing redacted
+        final JsonObject own = InteractiveState.seatView(game, loser, 0);
+        final JsonObject mine = seat(own, 0);
+        assertTrue(mine.get("lost").getAsBoolean());
+        assertEquals(mine.get("handSize").getAsInt(), 2);
+        assertEquals(names(mine.getAsJsonArray("hand")), java.util.Set.of("Titan of Industry", "Ancestral Recall"),
+                "the loser sees its own hand");
+        assertEquals(names(mine.getAsJsonArray("battlefield")), java.util.Set.of("Forest", "Llanowar Elves"),
+                "the loser sees its own battlefield");
+        assertEquals(names(mine.getAsJsonArray("graveyard")), java.util.Set.of("Black Lotus"));
+        assertFalse(own.toString().contains("identityRedacted"), "nothing of the loser's own is redacted: " + own);
+        // the winner's hand stays hidden from the loser
+        final JsonObject foe = seat(own, 1);
+        assertEquals(foe.getAsJsonArray("hand").size(), 0, "the winner's hand is not listed for the loser");
+        assertFalse(own.toString().contains("Craterhoof Behemoth"), "the winner's hand card is never named");
+
+        // the winner's view of the loser: public zones by name, the hand still hidden
+        final JsonObject theirs = InteractiveState.seatView(game, winner, 1);
+        final JsonObject loserSeen = seat(theirs, 0);
+        assertEquals(loserSeen.getAsJsonArray("hand").size(), 0, "the loser's hand stays hidden from the winner");
+        assertEquals(loserSeen.get("handSize").getAsInt(), 2);
+        assertFalse(theirs.toString().contains("Titan of Industry"), "a hidden hand card is never named");
+        assertFalse(theirs.toString().contains("Ancestral Recall"), "a hidden hand card is never named");
+        assertEquals(names(loserSeen.getAsJsonArray("battlefield")), java.util.Set.of("Forest", "Llanowar Elves"),
+                "the loser's battlefield is public");
+    }
+
+    private static java.util.Set<String> names(final JsonArray zone) {
+        final java.util.Set<String> out = new java.util.HashSet<>();
+        for (int i = 0; i < zone.size(); i++) {
+            out.add(zone.get(i).getAsJsonObject().get("name").getAsString());
+        }
+        return out;
+    }
 }
