@@ -30,6 +30,7 @@ import forge.game.combat.CombatUtil;
 import forge.game.event.GameEvent;
 import forge.game.event.GameEventGameFinished;
 import forge.game.event.GameEventGameOutcome;
+import forge.game.event.GameEventVote;
 import forge.game.phase.PhaseType;
 import forge.game.player.DelayedReveal;
 import forge.game.player.IHasIcon;
@@ -146,6 +147,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private final ThreadLocal<CardView> textSubject = new ThreadLocal<>();
     /** Decision facts (`request.context`) for the request being built on this thread, or null. */
     private final ThreadLocal<JsonObject> requestContext = new ThreadLocal<>();
+    /** The objects behind a list choice's item ids ("choice:0" ...) for the request being built on this thread. */
+    private final ThreadLocal<Map<String, ?>> choiceOptions = new ThreadLocal<>();
+    /** The vote in progress (owner report 2026-10-29T18-03-47); see {@link InteractiveVotes}. */
+    private final InteractiveVotes votes = new InteractiveVotes();
+    /** The names players read in place of Forge's engine names; see {@link InteractiveSeatNames}. */
+    private volatile InteractiveSeatNames seatNames = new InteractiveSeatNames(null);
     private volatile String okLabel = "OK";
     private volatile String cancelLabel = "Cancel";
     private volatile boolean okEnabled;
@@ -211,11 +218,25 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         this.game = Objects.requireNonNull(game);
         this.human = Objects.requireNonNull(human);
+        votes.clear();
         this.controller = Objects.requireNonNull(controller);
     }
 
     int seat() {
         return humanSeat;
+    }
+
+    /** The config line's {@code seatNames} (null or absent: the defaults of {@link InteractiveSeatNames}). */
+    void setSeatNames(final List<String> names) {
+        setSeatNames(names, null);
+    }
+
+    /**
+     * As {@link #setSeatNames(List)}, with the config's {@code names} ({@code hostNames}): a table seat's engine name
+     * that the host chose is a display name already and is never rewritten (review #138 S2-1).
+     */
+    void setSeatNames(final List<String> names, final List<String> hostNames) {
+        seatNames = new InteractiveSeatNames(names, hostNames);
     }
 
     /** How many times this seat enumerated controls for a request (tests). */
@@ -591,7 +612,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (request.input != controller.getInputProxy().getInput()) {
             activeRequest.compareAndSet(request, null);
             lastInputFingerprint = "";
-            finishInput(input, pending, false, "request no longer matches Forge's current input");
+            finishInput(input, pending, false, "request no longer matches the current decision");
             schedulePresentedInputPublish();
             return;
         }
@@ -635,7 +656,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         if (!inFlightInputs.add(request.input)) {
             request.claimed.set(false);
-            finishInput(input, pending, false, "another action is still executing for this Forge input");
+            finishInput(input, pending, false, "another action is still executing for this decision");
             return;
         }
         actions.execute(() -> {
@@ -643,7 +664,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             try {
                 if (request.input != controller.getInputProxy().getInput()) {
                     finishInput(input, pending, false,
-                            "request no longer matches Forge's current input");
+                            "request no longer matches the current decision");
                     activeRequest.compareAndSet(request, null);
                     lastInputFingerprint = "";
                     settleAction(request.input, null);
@@ -904,7 +925,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
             final SpellAbility targeting = input instanceof InputSelectTargets ? controller.getTargetingAbility() : null;
             final JsonObject body;
-            requestContext.set(targeting == null ? null : targetContext(targeting, controlTargets(controls)));
+            JsonObject context = targeting == null ? null : targetContext(targeting, controlTargets(controls));
+            context = addOptionalPayment(context, input);
+            requestContext.set(context);
             try {
                 body = requestBody(requestId, kind,
                         inputClassName(input), "Forge", cleanPrompt,
@@ -1212,7 +1235,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     return ActionResult.reject("card is no longer visible/selectable");
                 }
                 return controller.selectCard(current.getView(), null, null)
-                        ? ActionResult.accept() : ActionResult.reject("Forge rejected card selection");
+                        ? ActionResult.accept() : ActionResult.reject("The game rejected card selection");
             }));
             return true;
         });
@@ -1420,7 +1443,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     return ActionResult.reject("This mana activation can no longer be undone");
                 }
                 if (!controller.tryUndoLastAction()) {
-                    return ActionResult.reject("Forge could not undo this mana activation");
+                    return ActionResult.reject("That mana activation could not be undone");
                 }
                 if (input instanceof InputPayMana payment
                         && controller.getInputProxy().getInput() == input) {
@@ -1500,7 +1523,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 return ActionResult.reject("card is no longer a legal choice");
             }
             return controller.selectCard(chosen.getView(), null, null)
-                    ? ActionResult.accept() : ActionResult.reject("Forge rejected card selection");
+                    ? ActionResult.accept() : ActionResult.reject("The game rejected card selection");
         }));
     }
 
@@ -1534,7 +1557,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                         public int getY() { return 0; }
                     };
                     return controller.selectCard(current.getView(), null, remove)
-                            ? ActionResult.accept() : ActionResult.reject("Forge rejected attacker removal");
+                            ? ActionResult.accept() : ActionResult.reject("The game rejected attacker removal");
                 }));
                 continue;
             }
@@ -1571,10 +1594,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                         controller.selectPlayer(player.getView(), null);
                     } else if (defender instanceof Card card) {
                         if (!controller.selectCard(card.getView(), null, null))
-                            return ActionResult.reject("Forge rejected attack defender");
+                            return ActionResult.reject("The game rejected attack defender");
                     } else return ActionResult.reject("unsupported attack defender kind");
                     return controller.selectCard(current.getView(), null, null)
-                            ? ActionResult.accept() : ActionResult.reject("Forge rejected attacker assignment");
+                            ? ActionResult.accept() : ActionResult.reject("The game rejected attacker assignment");
                 }));
             }
         }
@@ -1616,7 +1639,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                         public int getY() { return 0; }
                     };
                     return controller.selectCard(current.getView(), null, remove)
-                            ? ActionResult.accept() : ActionResult.reject("Forge rejected block removal");
+                            ? ActionResult.accept() : ActionResult.reject("The game rejected block removal");
                 }));
             }
             for (Card attacker : combat.getAttackers()) {
@@ -1648,10 +1671,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     // One user-selected pair, executed by the two existing Forge input
                     // operations under the request's in-flight guard. No policy chooses it.
                     if (!controller.selectCard(currentAttacker.getView(), null, null)) {
-                        return ActionResult.reject("Forge rejected attacker selection");
+                        return ActionResult.reject("The game rejected attacker selection");
                     }
                     return controller.selectCard(currentBlocker.getView(), null, null)
-                            ? ActionResult.accept() : ActionResult.reject("Forge rejected block assignment");
+                            ? ActionResult.accept() : ActionResult.reject("The game rejected block assignment");
                 }));
             }
         }
@@ -1711,13 +1734,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             }
             prompt.add("paymentSource", source);
         }
-        if (title != null && !title.isBlank()) {
+        // "Forge" is the engine's placeholder title, never a heading a player should read
+        if (title != null && !title.isBlank() && !FORGE_PLACEHOLDER_TITLE.equals(title)) {
             prompt.addProperty("title", sanitizeText(title));
         }
         // Forge's generic dialogs sometimes put all instructions in the title.
         // Keep the wire prompt meaningful even when their message is blank.
         final String promptMessage = message != null && !message.isBlank() ? message
-                : title != null && !title.isBlank() ? title : "Choose an action";
+                : title != null && !title.isBlank() && !FORGE_PLACEHOLDER_TITLE.equals(title) ? title
+                : "Choose an action";
         // revealMessage already sanitizes its heading and appends only the
         // explicitly offered objects. Re-scrubbing by hidden duplicate names
         // would erase the very identities Forge authorized us to reveal.
@@ -1732,9 +1757,32 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         prompt.addProperty("cancellable", cancellable);
         body.add("prompt", prompt);
         body.add("controls", controls);
-        final JsonObject context = requestContext.get();
+        JsonObject context = requestContext.get();
+        if (votes.isOpen() && game != null && human != null) {
+            // owner report 2026-10-29T18-03-47: every request while a vote is open says who voted for what
+            context = context == null ? new JsonObject() : context.deepCopy();
+            votes.addContext(context, game, human.getView(), controls, choiceOptions.get(), seatNames, humanSeat);
+        }
         if (context != null) {
             body.add("context", context);
+        }
+        // Forge's engine names ("Default Forge", "Browser Player") never reach a player: seat display names
+        if (game != null) {
+            final InteractiveSeatNames names = seatNames;
+            final Set<String> cardItems = new HashSet<>();
+            final Map<String, ?> options = choiceOptions.get();
+            if (options != null) {
+                options.forEach((id, option) -> {
+                    if (option instanceof CardView) {
+                        cardItems.add(id);
+                    }
+                });
+            }
+            names.renderTree(prompt, game, humanSeat);
+            names.renderTree(controls, game, humanSeat, cardItems);
+            if (context != null) {
+                names.renderTree(context, game, humanSeat);
+            }
         }
         return body;
     }
@@ -2158,6 +2206,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         actions.shutdownNow();
     }
 
+    /** The title Forge gives a prompt that has none of its own. */
+    private static final String FORGE_PLACEHOLDER_TITLE = "Forge";
+
     private static JsonObject control(final String id, final String type, final String label) {
         final JsonObject control = new JsonObject();
         control.addProperty("controlId", id);
@@ -2282,6 +2333,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     @Subscribe
     public void receiveGameEvent(final GameEvent event) {
+        if (event instanceof GameEventVote vote && !isReadOnlyQueryEcho()) {
+            votes.onEvent(vote, human == null ? null : human.getView());
+        }
+        if (event instanceof GameEventGameOutcome) {
+            votes.clear(); // review #138 S3-4: a game that ends mid-vote leaves no vote open
+        }
         if (event instanceof GameEventGameOutcome && controller != null) {
             controller.macros().cancelCurrentMacro();
             controller.getInputQueue().onGameOver(true);
@@ -2391,12 +2448,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     @Override
     public void flashIncorrectAction() {
-        emitNotice("warning", "Forge rejected that action", "incorrect-action");
+        emitNotice("warning", "The game rejected that action", "incorrect-action");
     }
 
     @Override
     public void alertUser() {
-        emitNotice("notice", "Forge requires your attention", "alert");
+        emitNotice("notice", "The game needs your attention", "alert");
     }
 
     @Override
@@ -2726,7 +2783,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     @Override
     public void message(final String message, final String title) {
-        awaitAcknowledgement(title, message, "modal:message");
+        // owner report 2026-10-29T18-03-47: another player's vote, in words, with the votes so far
+        final String vote = game == null || human == null ? null
+                : votes.announce(message, game, human.getView(), seatNames, humanSeat);
+        awaitAcknowledgement(title, vote != null ? vote : message, "modal:message");
     }
 
     @Override
@@ -2769,6 +2829,19 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     @Override
     public Integer chooseManaX(final String message, final int min, final int max,
                               final boolean exact, final String detail, final boolean cancellable) {
+        return chooseManaX(message, min, max, exact, detail, cancellable, null);
+    }
+
+    /**
+     * {@code value.manaMax} (owner report 2026-10-29T17-59-25): the most X the seat's mana could pay after the fixed
+     * mana part ({@code HumanManaX.manaMax}), also when {@code affordability} is "unknown" (a non-mana cost part:
+     * Fiend Artisan's tap and sacrifice). Absent when not computed. {@code max} is unchanged: Forge still accepts any
+     * X in min..max, and a hint never refuses one.
+     */
+    @Override
+    public Integer chooseManaX(final String message, final int min, final int max,
+                              final boolean exact, final String detail, final boolean cancellable,
+                              final Integer manaMax) {
         final JsonObject number = control("mana-x", "number", sanitizeText(message));
         number.addProperty("min", min);
         number.addProperty("max", max);
@@ -2776,6 +2849,10 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         metadata.addProperty("semantic", "mana-x");
         metadata.addProperty("affordability", exact ? "exact" : "unknown");
         metadata.addProperty("detail", detail);
+        if (manaMax != null && manaMax >= 0) {
+            // as computed (at most max): review #138 S3-3, no clamp up to min
+            metadata.addProperty("manaMax", Math.min(max, manaMax));
+        }
         number.add("value", metadata);
         final JsonArray controls = new JsonArray();
         controls.add(number);
@@ -3051,7 +3128,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             final JsonObject eventBody = new JsonObject();
             eventBody.addProperty("class", event);
             eventBody.addProperty("severity", severity);
-            eventBody.addProperty("message", sanitizeText(message));
+            eventBody.addProperty("message", game == null ? sanitizeText(message)
+                    : seatNames.render(sanitizeText(message), game, humanSeat));
             body.add("event", eventBody);
             if (game != null && human != null) {
                 body.add("view", visibleState());
@@ -3160,6 +3238,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final SpellAbility targeting = targetingChoice(message, options);
         final JsonObject answer;
         requestContext.set(targeting == null ? null : targetContext(targeting, itemTargets(byId)));
+        choiceOptions.set(byId);
         try {
             answer = ask("choice", inputClass, title, message, min, max,
                     min == 0, controls, action -> {
@@ -3168,6 +3247,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     });
         } finally {
             requestContext.remove();
+            choiceOptions.remove();
         }
         if ("cancel".equals(string(answer, "type"))) {
             return Collections.emptyList();
@@ -3281,7 +3361,58 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (perOption.size() > 0) {
             context.add("targetOption", perOption);
         }
+        addOptionalOnResolve(context, ability);
         return context;
+    }
+
+    /**
+     * {@code optionalPayment} (owner report 2026-10-28T06-34-45, Chain Lightning's "may pay {R}{R}": "my option is to
+     * pay or cancel, when it should be pay or decline"): a mana payment Forge asks while an effect resolves (an
+     * "unless" cost, echo, cumulative upkeep, a "you may pay") is optional, and its cancel DECLINES the payment (the
+     * effect goes on as unpaid); it does not undo anything. Absent for a cast's or an activation's payment (cancel
+     * backs out of the cast) and for a mandatory payment (CR 118.3c). Read only. Returns the context, created if
+     * needed.
+     */
+    private static JsonObject addOptionalPayment(final JsonObject context, final Input input) {
+        if (!(input instanceof InputPayMana payment) || !payment.isEffectPayment() || payment.isMandatoryPayment()) {
+            return context;
+        }
+        final JsonObject result = context == null ? new JsonObject() : context;
+        result.addProperty("optionalPayment", true);
+        return result;
+    }
+
+    /**
+     * {@code optionalOnResolve} (owner report 2026-10-29T17-50-18, Reclamation Sage): the targets of an optional
+     * trigger ("you may": OptionalDecider, or a trigger with a cost to pay) are chosen when it is put on the stack, and
+     * whether to use it is asked only as it resolves ("Use triggered ability ...?"). True when that question is still
+     * to come, so a client can say a target chosen now commits to nothing; {@code optionalDeciderSeat} is the seat that
+     * will be asked, when Forge has named it. Absent for a mandatory trigger, a spell and an activated ability. Read
+     * only: nothing is decided here.
+     */
+    private void addOptionalOnResolve(final JsonObject context, final SpellAbility ability) {
+        if (ability == null) {
+            return;
+        }
+        final SpellAbility root = ability.getRootAbility();
+        final boolean optional = ability.isOptionalTrigger() || root != null && root.isOptionalTrigger()
+                || ability instanceof forge.game.trigger.WrappedAbility wrapped && wrapped.getDecider() != null;
+        if (!optional) {
+            return;
+        }
+        context.addProperty("optionalOnResolve", true);
+        Player decider = ability instanceof forge.game.trigger.WrappedAbility wrapped ? wrapped.getDecider() : null;
+        if (decider == null && root instanceof forge.game.trigger.WrappedAbility wrappedRoot) {
+            decider = wrappedRoot.getDecider();
+        }
+        if (decider == null && ability.getTrigger() != null
+                && "You".equals(ability.getTrigger().getParam("OptionalDecider"))) {
+            decider = ability.getActivatingPlayer();
+        }
+        final int seat = seatOf(decider);
+        if (seat >= 0) {
+            context.addProperty("optionalDeciderSeat", seat);
+        }
     }
 
     /** Per-control target facts of an InputSelectTargets request. */

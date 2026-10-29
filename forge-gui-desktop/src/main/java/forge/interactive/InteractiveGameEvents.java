@@ -119,6 +119,8 @@ final class InteractiveGameEvents {
         } else if (event instanceof GameEventMulligan e) {
             kind(result, "mulligan");
             seat(result, game, e.player());
+        } else if (event instanceof GameEventVote e) {
+            vote(result, game, e, viewer);
         } else if (event instanceof GameEventTurnPhase e && e.phase() != null) {
             // table-live-view-1022 (owner friend table 2026-10-22T19-53-19): the step the game enters, to every seat.
             // The other person's tracker showed their previous step until its own next request. Whose turn it is,
@@ -291,6 +293,89 @@ final class InteractiveGameEvents {
             }
             result.addProperty("sourceFid", sourceShown.getId());
             seatOf(result, game, sourceShown.getController(), "sourceControllerSeat");
+        }
+    }
+
+    /**
+     * A vote (owner report 2026-10-29T18-03-47), one event per stage of {@link GameEventVote}:
+     * <ul>
+     * <li>{@code vote_started}: {@code source} (the card holding the vote, named as a log names a card) and
+     * {@code sourceFid} when the viewer may see it, {@code order} (the voting seats, in order), {@code secret}.</li>
+     * <li>{@code vote_turn}: a player's turn to vote begins: {@code playerSeat}, {@code votes} (how many it casts).</li>
+     * <li>{@code vote_cast}, the game-log line of each vote ("AI Player votes for Craterhoof Behemoth."):
+     * {@code playerSeat} (whose vote it is), {@code chooserSeat} (vote control: the seat that chose it),
+     * {@code secret}; and, unless the vote is secret and not the viewer's own, {@code choiceKind} (card / player /
+     * option), {@code choice} (the choice in words), {@code choiceFid} (a card the viewer may see) or
+     * {@code choiceSeat} (a player).</li>
+     * <li>{@code vote_ended}: {@code source}, {@code sourceFid}, {@code secret}.</li>
+     * </ul>
+     * No prose: the client words it with its own seat names.
+     */
+    private static void vote(final JsonObject result, final Game game, final GameEventVote e,
+                             final PlayerView viewer) {
+        kind(result, switch (e.stage()) {
+            case STARTED -> "vote_started";
+            case VOTER -> "vote_turn";
+            case CAST -> "vote_cast";
+            case ENDED -> "vote_ended";
+        });
+        result.addProperty("secret", e.secret());
+        if (e.stage() == GameEventVote.Stage.VOTER) {
+            seat(result, game, e.voter());
+            result.addProperty("votes", e.voteAmount());
+            return;
+        }
+        if (e.stage() != GameEventVote.Stage.CAST) {
+            if (e.source() != null) {
+                result.addProperty("source", label(e.source(), game, viewer));
+                final Card source = publicIn(game, e.source(), e.source().getZone(), viewer);
+                if (source != null) {
+                    result.addProperty("sourceFid", source.getId());
+                }
+            }
+            if (e.stage() == GameEventVote.Stage.STARTED) {
+                final JsonArray order = new JsonArray();
+                for (PlayerView player : e.order()) {
+                    final int seat = InteractiveVotes.seatOf(game, player);
+                    if (seat >= 0) {
+                        order.add(seat);
+                    }
+                }
+                result.add("order", order);
+            }
+            return;
+        }
+        seat(result, game, e.voter());
+        if (e.chooser() != null) {
+            final int chooser = InteractiveVotes.seatOf(game, e.chooser());
+            if (chooser >= 0) {
+                result.addProperty("chooserSeat", chooser);
+            }
+        }
+        final boolean own = viewer != null && e.voter() != null && e.voter().getId() == viewer.getId();
+        if (e.secret() && !own) {
+            return;
+        }
+        if (e.choiceCard() != null) {
+            result.addProperty("choiceKind", "card");
+            final Card card = cardOf(game, e.choiceCard());
+            final ZoneType zone = card == null || card.getZone() == null ? null : card.getZone().getZoneType();
+            final Card shown = publicIn(game, e.choiceCard(), zone, viewer);
+            result.addProperty("choice", shown == null ? "a card" : nameOf(shown.getView()));
+            if (shown != null) {
+                result.addProperty("choiceFid", shown.getId());
+            }
+        } else if (e.choicePlayer() != null) {
+            result.addProperty("choiceKind", "player");
+            final int seat = InteractiveVotes.seatOf(game, e.choicePlayer());
+            if (seat >= 0) {
+                result.addProperty("choiceSeat", seat);
+            }
+        } else {
+            result.addProperty("choiceKind", "option");
+            if (e.choiceLabel() != null) {
+                result.addProperty("choice", e.choiceLabel());
+            }
         }
     }
 

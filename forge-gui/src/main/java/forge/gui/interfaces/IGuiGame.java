@@ -197,6 +197,11 @@ public interface IGuiGame {
     default Integer chooseManaX(String message, int min, int max, boolean exact, String detail, boolean cancellable) {
         throw new UnsupportedOperationException("Typed mana X is not implemented by this GUI");
     }
+    /** As above, with {@code manaMax}: the most X the seat's mana could pay (a hint; null when not computed). */
+    default Integer chooseManaX(String message, int min, int max, boolean exact, String detail, boolean cancellable,
+                                Integer manaMax) {
+        return chooseManaX(message, min, max, exact, detail, cancellable);
+    }
     default void notifyUnableToPayManaX(String message) { message(message, "Forge"); }
 
     /**

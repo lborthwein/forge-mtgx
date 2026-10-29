@@ -72,6 +72,16 @@ public abstract class InputPayMana extends InputSyncronizedBase {
         }
     }
 
+    /** A payment asked while an effect resolves (an "unless" cost, echo, a "you may pay"), not a cast's. */
+    public final boolean isEffectPayment() {
+        return effect;
+    }
+
+    /** A payment that must be made (CR 118.3c, a forced cast paid from the pool). */
+    public final boolean isMandatoryPayment() {
+        return mandatory;
+    }
+
     @Override
     protected void onStop() {
         getController().clearActionableCards();

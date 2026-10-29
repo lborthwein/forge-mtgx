@@ -414,9 +414,12 @@ public class PlayerControllerHuman extends PlayerController implements IGameCont
                 getGui().notifyUnableToPayManaX("You cannot pay the cost for any allowed value of X. That action was cancelled.");
                 return null;
             }
+            // owner report 2026-10-29T17-59-25: the most X the mana could pay, also when the range is not exact
+            final Integer manaMax = range.exact() ? Integer.valueOf(range.max())
+                    : HumanManaX.manaMax(player, ability, range.max());
             return getGui().chooseManaX(localizer.getMessage("lblChooseAnnounceForCard", announceTitle,
                     host.getTranslatedName()), range.min(), range.max(), range.exact(), range.reason(),
-                    cost == null || !cost.isMandatory());
+                    cost == null || !cost.isMandatory(), manaMax);
         }
         if (cost != null && cost.isMandatory()) {
             return chooseNumber(ability, localizer.getMessage("lblChooseAnnounceForCard", announceTitle,
