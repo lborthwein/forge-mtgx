@@ -98,11 +98,12 @@ import forge.util.MyRandom;
  * capActions (40), gameTimeoutSec (300), maxDecisions (3000), jarSha, aiTimeoutSec (5), readTimeoutSec (120),
  * tapeRotate (1000), maxGames (0 = until stop), replay {tapes, lines [[fileIdx, line]], out}, k8 (the spec of a
  * {@code lookahead:K8} opponent seat, lane gen-check-1007), loopGuard (0 = off; the live seat's "Cancel Search?" loop
- * guard on the RL seats, lane exploit-panel-1015)}. Opponent controllers besides {@code forge}:
+ * guard on the RL seats, lane exploit-panel-1015), watchdog (replay mode: the stall watchdog,
+ * {@link ReplayStallWatchdog}; on by default, {@code false} = off)}. Opponent controllers besides {@code forge}:
  * {@code forge:<Profile>} (Forge AI under a shipped {@code res/ai} profile; train and eval) and {@code lookahead:K8}
  * (Forge AI Default plus the look-ahead with the {@code k8} spec; eval only).
  * Exit codes: 0 done; 2 config / HELLO refused / deck guard; 3 a thread died on a transport or protocol error;
- * 4 replay finished with an unequal digest.
+ * 4 replay finished with an unequal digest; 5 replay stalled (the stall watchdog voided its unfinished games).
  */
 public final class RlActorBench {
 
@@ -173,6 +174,50 @@ public final class RlActorBench {
         forge.ai.simulation.HonestLabel.Spec labelSpec = null;
         int labelTurns = 3;
         String labelOut = null;
+        /**
+         * bvw-step1-build-1024 (absent = step 0's window [0, turns)): the band [lo, hi) of turns before the end; and the
+         * step-1 search block (null = none: step-0 rows exactly).
+         */
+        int labelBandLo = 0;
+        forge.bench.rl.StepSearch.Spec labelSearch = null;
+        /**
+         * bvw-step1-build-1024 (OPEN-6 ruling; null = off): the read-only face-down-exile scan of replayed tapes
+         * ({@link forge.bench.rl.RlExileScan}): {@code exileScan} = {"turns": T, "out": DIR}. Not with a label spec.
+         */
+        int exileScanTurns = 0;
+        String exileScanOut = null;
+        /**
+         * bvw-step1-build-1024 (the seat/dec_idx swap, 2026-10-25; null = no check): step-0 label index files whose
+         * positions (turns before the end in [0, referenceTurns)) a labelled or scanned replay must reproduce exactly,
+         * or the game writes no rows ({@code label.reference} / {@code exileScan.reference}, {@code referenceTurns}).
+         * It aligns step 0's window, not the band (review-align #3). A label search on HonestForcedWin tapes must set
+         * it, with referenceTurns = {@link forge.bench.rl.TrajectoryRef#STEP0_WINDOW}, and the reference must know every
+         * replayed game (review-align #2, #6): {@link #referenceRefusal}.
+         */
+        List<String> reference = null;
+        int referenceTurns = 3;
+        /** lki-fix-port-1027: replay mode's stall watchdog (on by default; {@code "watchdog": false} = off). */
+        ReplayStallWatchdog.Thresholds watchdog = new ReplayStallWatchdog.Thresholds();
+    }
+
+    static void parseReference(final Cfg c, final JsonObject o, final String where) {
+        if (!o.has("reference") || o.get("reference").isJsonNull()) {
+            if (o.has("referenceTurns")) {
+                throw new IllegalArgumentException(where + ".referenceTurns without reference");
+            }
+            return;
+        }
+        c.reference = new ArrayList<>();
+        for (JsonElement e : o.getAsJsonArray("reference")) {
+            c.reference.add(e.getAsString());
+        }
+        if (c.reference.isEmpty()) {
+            throw new IllegalArgumentException(where + ".reference: at least one step-0 index file");
+        }
+        c.referenceTurns = o.has("referenceTurns") ? o.get("referenceTurns").getAsInt() : 3;
+        if (c.referenceTurns < 1) {
+            throw new IllegalArgumentException(where + ".referenceTurns >= 1");
+        }
     }
 
     static Cfg parse(final JsonObject o) {
@@ -225,10 +270,62 @@ public final class RlActorBench {
             if (c.labelTurns < 1) {
                 throw new IllegalArgumentException("label.turns >= 1, not " + c.labelTurns);
             }
+            if (l.has("band")) {
+                // bvw-step1-build-1024: [lo, hi) turns before the end (refused together with turns)
+                if (l.has("turns")) {
+                    throw new IllegalArgumentException("label: band or turns, not both");
+                }
+                final JsonArray b = l.getAsJsonArray("band");
+                if (b.size() != 2) {
+                    throw new IllegalArgumentException("label.band is [lo, hi)");
+                }
+                c.labelBandLo = b.get(0).getAsInt();
+                c.labelTurns = b.get(1).getAsInt();
+                if (c.labelBandLo < 0 || c.labelBandLo >= c.labelTurns) {
+                    throw new IllegalArgumentException("label.band [lo, hi) needs 0 <= lo < hi");
+                }
+            }
+            if (l.has("search") && !l.get("search").isJsonNull()) {
+                // bvw-step1-build-1024: refused unless honest, host-independent and tied to the proof check
+                if (!c.labelSpec.counterBudgets()) {
+                    throw new IllegalArgumentException("refused: a label search needs the proof check on budget=counter");
+                }
+                c.labelSearch = forge.bench.rl.StepSearch.Spec.parse(l.getAsJsonObject("search"), c.labelSpec,
+                        c.labelBandLo, c.labelTurns);
+            } else if (l.has("band")) {
+                // review #14: a band is a step-k labeller; step-0 rows come only from the turns window
+                throw new IllegalArgumentException("refused: a label band needs a search block (step-0 rows use turns)");
+            }
+            // review #3: a counter spec runs only under the Forge AI settings it pins
+            final String no = c.labelSpec.runtimeRefusal(c.aiTimeoutSec);
+            if (no != null) {
+                throw new IllegalArgumentException(no);
+            }
             if (!l.has("out")) {
                 throw new IllegalArgumentException("label.out (the label directory) is required");
             }
             c.labelOut = l.get("out").getAsString();
+            parseReference(c, l, "label");
+        }
+        if (o.has("exileScan") && !o.get("exileScan").isJsonNull()) {
+            final JsonObject x = o.getAsJsonObject("exileScan");
+            for (String k : x.keySet()) {
+                if (!"turns".equals(k) && !"out".equals(k) && !"reference".equals(k) && !"referenceTurns".equals(k)) {
+                    throw new IllegalArgumentException("exileScan: unknown key " + k + " (turns, out, reference)");
+                }
+            }
+            parseReference(c, x, "exileScan");
+            if (c.labelSpec != null) {
+                throw new IllegalArgumentException("refused: exileScan is a read-only scan, not with a label spec");
+            }
+            if (!x.has("out") || !x.has("turns") || x.get("turns").getAsInt() < 1) {
+                throw new IllegalArgumentException("exileScan needs turns >= 1 and out");
+            }
+            c.exileScanTurns = x.get("turns").getAsInt();
+            c.exileScanOut = x.get("out").getAsString();
+        }
+        if (o.has("watchdog")) {
+            c.watchdog = ReplayStallWatchdog.Thresholds.parse(o.get("watchdog")); // lki-fix-port-1027
         }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
@@ -1359,17 +1456,68 @@ public final class RlActorBench {
      */
     static int replay(final Cfg cfg, final CardIndex index, final String jarSha) throws IOException {
         expandReplayDir(cfg);
+        forge.bench.rl.RlReplayLabeller.FATAL.set(null); // review #9: a fatal search error stops this replay only
         if (cfg.labelSpec != null) {
             // bvw-plr-1023: the label directory and its per-JVM files
             labelSink = new forge.bench.rl.RlReplayLabeller.Sink(Paths.get(cfg.labelOut));
             System.err.println("[bvw-label] labelling replays: T=" + cfg.labelTurns + " K=" + cfg.labelSpec.worlds
                     + " spec " + cfg.labelSpec.sha().substring(0, 12) + " -> " + labelSink.labelsFile());
+            if (cfg.labelBandLo > 0 || cfg.labelSearch != null) {
+                // bvw-step1-build-1024
+                System.err.println("[bvw-label] band [" + cfg.labelBandLo + ", " + cfg.labelTurns + ") search "
+                        + (cfg.labelSearch == null ? "none" : cfg.labelSearch.sha().substring(0, 12) + " value "
+                        + cfg.labelSearch.valueSha));
+            }
+        }
+        if (cfg.exileScanOut != null) {
+            // bvw-step1-build-1024 (OPEN-6 ruling): the read-only face-down-exile scan
+            scanSink = new forge.bench.rl.RlExileScan.Sink(Paths.get(cfg.exileScanOut));
+            System.err.println("[bvw-exile-scan] scanning replays: T=" + cfg.exileScanTurns + " -> " + scanSink.scanFile());
         }
         final Map<String, List<JsonObject>> cache = new HashMap<>();
         for (int[] fl : cfg.replayLines) {
             final String f = cfg.replayTapes.get(fl[0]);
             if (!cache.containsKey(f)) {
                 cache.put(f, RlTape.read(Paths.get(f)));
+            }
+        }
+        trajectoryRef = null;
+        forge.bench.rl.TrajectoryRef.NO_STACK_GAMES.set(0);
+        final List<JsonObject> replayed = new ArrayList<>();
+        for (int[] fl : cfg.replayLines) {
+            replayed.add(cache.get(cfg.replayTapes.get(fl[0])).get(fl[1]));
+        }
+        final String noRef = referenceRefusal(cfg, replayed);
+        if (noRef != null) {
+            // review-align #2: a step-1 search run on step-0 tapes is never run without the trajectory check
+            System.err.println("[bvw-trajectory] " + noRef);
+            return 2;
+        }
+        if (cfg.reference != null) {
+            // the seat/dec_idx swap fix: the step-0 positions of exactly these games (canonical uids, review-align #9)
+            final java.util.Set<String> uids = new java.util.TreeSet<>();
+            for (JsonObject t : replayed) {
+                uids.add(forge.bench.rl.TrajectoryRef.canonicalUid(t.get("game_uid").getAsString()));
+            }
+            trajectoryRef = forge.bench.rl.TrajectoryRef.load(cfg.reference, cfg.referenceTurns, uids);
+            System.err.println("[bvw-trajectory] step-0 reference: " + trajectoryRef.games() + " of " + uids.size()
+                    + " games, window " + cfg.referenceTurns + " turns, " + RlWire.canonicalString(
+                    trajectoryRef.provenance()) + (trajectoryRef.rowsWithoutStack() > 0 ? "; " + trajectoryRef
+                    .rowsWithoutStack() + " reference rows WITHOUT stack (their games: seat|turn|phase only)" : ""));
+            if (trajectoryRef.games() < uids.size()) {
+                // review-align #6: a game without reference rows would be labelled in full, then voided: refused
+                final List<String> missing = new ArrayList<>();
+                for (String u : uids) {
+                    if (!trajectoryRef.knows(u)) {
+                        missing.add(u);
+                    }
+                }
+                System.err.println("[bvw-trajectory] refused: the reference knows " + trajectoryRef.games() + " of the "
+                        + uids.size() + " replayed games (window " + cfg.referenceTurns + " turns); missing "
+                        + missing.size() + ": " + missing.subList(0, Math.min(10, missing.size()))
+                        + (missing.size() > 10 ? " ..." : ""));
+                trajectoryRef = null;
+                return 2;
             }
         }
         PrintWriter w = null;
@@ -1382,7 +1530,8 @@ public final class RlActorBench {
         }
         final int n = cfg.replayLines.size();
         final long w0 = System.nanoTime();
-        final String[] out = new String[n];
+        // lki-fix-port-1027: shared with the stall watchdog, which writes the finished rows if it stalls the replay
+        final java.util.concurrent.atomic.AtomicReferenceArray<String> out = new java.util.concurrent.atomic.AtomicReferenceArray<>(n);
         final java.util.concurrent.atomic.AtomicInteger next = new java.util.concurrent.atomic.AtomicInteger();
         final int threads = Math.max(1, Math.min(cfg.threads, n));
         final List<Thread> ts = new ArrayList<>();
@@ -1390,12 +1539,44 @@ public final class RlActorBench {
             final Thread t = new Thread(() -> {
                 final RlFeaturizer feat = new RlFeaturizer(index);
                 for (int i = next.getAndIncrement(); i < n; i = next.getAndIncrement()) {
+                    if (forge.bench.rl.RlReplayLabeller.FATAL.get() != null) {
+                        // review #9: fail fast: no more games after a fatal search error
+                        final JsonObject skip = new JsonObject();
+                        skip.addProperty("line", cfg.replayLines.get(i)[1]);
+                        skip.addProperty("equal", false);
+                        skip.addProperty("error", "skipped after a fatal search error");
+                        out.set(i, RlWire.canonicalString(skip));
+                        continue;
+                    }
                     final String r = RlWire.canonicalString(replayOne(cfg, cache, cfg.replayLines.get(i), feat, jarSha));
                     System.err.println("[rlactor] replay " + r);
-                    out[i] = r;
+                    out.set(i, r);
                 }
             }, "rlreplay-w" + k);
-            ts.add(t);
+            ts.add(t); // started below, after the stall watchdog (review S3-5)
+        }
+        // lki-fix-port-1027: the stall watchdog (GC fraction, the rlreplay-w* threads' mutator share, old gen after GC),
+        // armed before the game threads start (review S3-5); null when the collector is not G1 / Parallel / Serial
+        ReplayStallWatchdog wd = null;
+        if (cfg.watchdog.enabled && n > 0) {
+            final List<String> paths = new ArrayList<>();
+            for (int[] fl : cfg.replayLines) {
+                paths.add(cfg.replayTapes.get(fl[0]));
+            }
+            final Path wdir = Paths.get(cfg.watchdog.dir != null ? cfg.watchdog.dir
+                    : cfg.replayOut != null && Paths.get(cfg.replayOut).getParent() != null
+                            ? Paths.get(cfg.replayOut).getParent().toString()
+                    : cfg.labelOut != null ? cfg.labelOut : ".");
+            wd = ReplayStallWatchdog.start(cfg.watchdog, ts, wdir, replayed, paths, cfg.replayLines, out,
+                    cfg.labelSpec != null ? labelSink : null,
+                    cfg.labelSearch != null ? forge.bench.rl.RlReplayLabeller.SCHEMA_STEP
+                            : forge.bench.rl.RlReplayLabeller.SCHEMA, w, jarSha);
+            if (wd != null) {
+                System.err.println("[rlactor] stall watchdog " + RlWire.canonicalString(cfg.watchdog.toJson()) + " -> "
+                        + wd.progressFile());
+            }
+        }
+        for (Thread t : ts) {
             t.start();
         }
         for (Thread t : ts) {
@@ -1406,8 +1587,12 @@ public final class RlActorBench {
                 throw new IOException("replay interrupted", e);
             }
         }
+        if (wd != null && !wd.close()) {
+            return ReplayStallWatchdog.EXIT_STALL; // the watchdog wrote every row (a stall exits the JVM before this)
+        }
         int unequal = 0;
-        for (String r : out) {
+        for (int i = 0; i < n; i++) {
+            final String r = out.get(i);
             if (r == null || !com.google.gson.JsonParser.parseString(r).getAsJsonObject().get("equal").getAsBoolean()) {
                 unequal++;
             }
@@ -1426,7 +1611,34 @@ public final class RlActorBench {
         sum.addProperty("threads", threads);
         sum.addProperty("wall_s", (System.nanoTime() - w0) / 1e9);
         sum.addProperty("label", cfg.labelSpec != null);
+        sum.add("watchdog", cfg.watchdog.toJson()); // lki-fix-port-1027
+        sum.addProperty("watchdog_armed", wd != null); // review S3-8: false when disabled or under another collector
+        if (wd != null) {
+            sum.addProperty("watchdog_samples", wd.samples());
+        }
+        if (trajectoryRef != null) {
+            // review-align #2 / #9: the trajectory check's outcome and its noStack fallbacks, per replay
+            int trajVoid = 0;
+            for (int i = 0; i < n; i++) {
+                final String r = out.get(i);
+                final JsonObject o = r == null ? null : com.google.gson.JsonParser.parseString(r).getAsJsonObject();
+                if (o != null && o.has("trajectory_equal") && !o.get("trajectory_equal").getAsBoolean()) {
+                    trajVoid++;
+                }
+            }
+            sum.addProperty("trajectory_void", trajVoid);
+            sum.addProperty("no_stack_games", forge.bench.rl.TrajectoryRef.NO_STACK_GAMES.get());
+            sum.add("reference", trajectoryRef.provenance());
+        }
+        final String fatal = forge.bench.rl.RlReplayLabeller.FATAL.get();
+        if (fatal != null) {
+            sum.addProperty("fatal", fatal); // review #9
+        }
         System.err.println("[rlactor] " + RlWire.canonicalString(sum));
+        if (fatal != null) {
+            System.err.println("[bvw-label] FATAL, the replay stopped: " + fatal);
+            return 2;
+        }
         return unequal > 0 ? 4 : 0;
     }
 
@@ -1440,8 +1652,14 @@ public final class RlActorBench {
             final JsonObject t = cache.get(f).get(fl[1]);
             row.add("game_uid", t.get("game_uid"));
             row.add("digest_tape", t.get("digest"));
+            final String noRuntime = t.has("controllers") ? counterGeneratorRefusal(t.getAsJsonArray("controllers"),
+                    cfg.aiTimeoutSec) : null;
             if (!t.get("void").isJsonNull()) {
                 row.addProperty("error", "void");
+                row.addProperty("equal", false);
+            } else if (noRuntime != null) {
+                // review #3: a counted generator's tape replays only under the Forge AI settings it was played with
+                row.addProperty("error", noRuntime);
                 row.addProperty("equal", false);
             } else {
                 final JsonObject g = new JsonObject();
@@ -1479,11 +1697,23 @@ public final class RlActorBench {
                 }
                 final forge.bench.rl.RlReplayLabeller[] labs = new forge.bench.rl.RlReplayLabeller[1];
                 final int tobs = g.get("obs_schema").getAsInt();
-                final GameHook hook = cfg.labelSpec == null ? null : (game, seat, know) -> {
-                    labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelTurns, t, jarSha, game, know,
-                            feat.index(), tobs);
+                final forge.bench.rl.RlExileScan[] scans = new forge.bench.rl.RlExileScan[1];
+                final GameHook hook = cfg.labelSpec != null ? (game, seat, know) -> {
+                    labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelBandLo, cfg.labelTurns,
+                            cfg.labelSearch, t, jarSha, game, know, feat.index(), tobs);
+                    if (trajectoryRef != null) {
+                        labs[0].setReference(trajectoryRef.of(t.get("game_uid").getAsString()), trajectoryRef.turns,
+                                trajectoryRef.provenance());
+                    }
                     game.addPriorityDecisionListener(labs[0]);
-                };
+                } : cfg.exileScanOut != null ? (game, seat, know) -> {
+                    scans[0] = new forge.bench.rl.RlExileScan(cfg.exileScanTurns, t, game);
+                    if (trajectoryRef != null) {
+                        scans[0].setReference(trajectoryRef.of(t.get("game_uid").getAsString()), trajectoryRef.turns,
+                                trajectoryRef.provenance());
+                    }
+                    game.addPriorityDecisionListener(scans[0]);
+                } : null;
                 final Played p = play(cfg, tmode, g, feat, tapeEndpoint(t, RlWire.parseUid(
                         t.get("game_uid").getAsString())), null, jarSha, hook);
                 final forge.bench.rl.RlReplayLabeller lab = labs[0];
@@ -1531,6 +1761,19 @@ public final class RlActorBench {
                         row.addProperty("error", "label: the labeller was never attached");
                         row.addProperty("equal", false);
                     }
+                    if (cfg.exileScanOut != null) {
+                        if (scans[0] == null) {
+                            row.addProperty("error", "exile scan: never attached");
+                            row.addProperty("equal", false);
+                        } else {
+                            try {
+                                scans[0].finish(scanSink, eq, row);
+                            } catch (IOException e) {
+                                row.addProperty("error", "exile scan sink: " + e);
+                                row.addProperty("equal", false);
+                            }
+                        }
+                    }
                     if (lab != null) {
                         // bvw-plr-1023: the game's label rows are written only when its digest is the tape's
                         try {
@@ -1557,8 +1800,73 @@ public final class RlActorBench {
         return row;
     }
 
+    /**
+     * bvw-step1-build-1024 (review-align #2): null, or why this replay is refused before any game: a label search block
+     * on HonestForcedWin tapes (the step-0 generator, profile HonestForcedWin or HonestForcedWinCounted, or a tape with
+     * honest_generator seats) without {@code label.reference}, or with a reference window other than step 0's
+     * ({@link forge.bench.rl.TrajectoryRef#STEP0_WINDOW} turns).
+     */
+    static String referenceRefusal(final Cfg cfg, final List<JsonObject> tapes) {
+        if (cfg.labelSearch == null) {
+            return null;
+        }
+        int hfw = 0;
+        for (JsonObject t : tapes) {
+            hfw += honestForcedWinTape(t) ? 1 : 0;
+        }
+        if (hfw == 0) {
+            return null;
+        }
+        if (cfg.reference == null) {
+            return "refused: a label search on " + hfw + " HonestForcedWin (step-0) tape(s) needs label.reference (the "
+                    + "step-0 label index rows of its games; the trajectory check)";
+        }
+        if (cfg.referenceTurns != forge.bench.rl.TrajectoryRef.STEP0_WINDOW) {
+            return "refused: a label search on HonestForcedWin (step-0) tapes checks step 0's window: referenceTurns "
+                    + forge.bench.rl.TrajectoryRef.STEP0_WINDOW + ", not " + cfg.referenceTurns;
+        }
+        return null;
+    }
+
+    /** A tape of the step-0 generator: an HonestForcedWin(Counted) seat, or honest_generator seats on the tape. */
+    static boolean honestForcedWinTape(final JsonObject t) {
+        if (t.has("honest_generator") && t.get("honest_generator").isJsonArray()) {
+            for (JsonElement e : t.getAsJsonArray("honest_generator")) {
+                if (!e.isJsonNull()) {
+                    return true;
+                }
+            }
+        }
+        if (t.has("controllers") && t.get("controllers").isJsonArray()) {
+            for (JsonElement c : t.getAsJsonArray("controllers")) {
+                final String s = c.isJsonNull() ? "" : c.getAsString();
+                if (("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_PROFILE).equals(s)
+                        || ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE).equals(s)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * bvw-step1-build-1024 (review #3): a counter-budget generator seat (the HonestForcedWinCounted profile, or a
+     * forcedWin.spec override with budget=counter) refuses a run whose Forge AI clocks can bind. Null = fine.
+     */
+    static String counterGeneratorRefusal(final JsonArray controllers, final int aiTimeoutSec) {
+        boolean counter = String.valueOf(System.getProperty("forge.ai.forcedWin.spec")).contains("budget=counter");
+        for (JsonElement c : controllers) {
+            counter |= ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE).equals(c.getAsString());
+        }
+        return counter ? forge.ai.simulation.ForcedWinSolver.counterRuntimeRefusal(aiTimeoutSec) : null;
+    }
+
     /** bvw-plr-1023: the replay's label sink (one per JVM), or null. */
     static forge.bench.rl.RlReplayLabeller.Sink labelSink = null;
+    /** bvw-step1-build-1024: the exile scan's per-JVM files (exileScan replays only). */
+    static forge.bench.rl.RlExileScan.Sink scanSink = null;
+    /** bvw-step1-build-1024: the step-0 reference positions (null = no trajectory check). */
+    static forge.bench.rl.TrajectoryRef trajectoryRef = null;
 
     /** Config identity, excluding wall time and other diagnostic counters. */
     static JsonArray generatorSpecs(final JsonObject row) {
@@ -1607,6 +1915,11 @@ public final class RlActorBench {
                     System.err.println("[rlactor] local " + cfg.mode + " mode plays " + want + " seats only, not " + c);
                     return 2;
                 }
+            }
+            final String no = counterGeneratorRefusal(g.getAsJsonArray("controllers"), cfg.aiTimeoutSec);
+            if (no != null) {
+                System.err.println("[rlactor] " + no);
+                return 2;
             }
         }
         final Path tapesDir = Paths.get(cfg.tapesDir != null ? cfg.tapesDir : "tapes/" + cfg.actorId);

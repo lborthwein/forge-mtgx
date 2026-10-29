@@ -163,9 +163,53 @@ public final class ForcedWinSolver {
          * the seat's other responses stay its own.
          */
         public boolean hold = false;
+        /**
+         * bvw-step1-build-1024 (false = the default, and then nothing changes: every wall clock as before): host-independent
+         * budgets (spec key {@code budget=counter}). No wall clock is read: budgetMs, engineMs, planMs, evalReserveMs and
+         * wallGraceMs and the play-outs' walls do not bind. The decision's work is bounded by counters only: the width
+         * search's {@link #nodes}; the engine's {@link #engineNodes}, its per-move step cap and {@link #engineSteps} (engine
+         * move steps per engine search); {@link #top} lines and {@link #worlds} worlds per line; {@link #maxSteps} steps per
+         * play-out and {@link #evalSteps} (play-out steps per decision: past it no new line or world starts, as past the
+         * deadline). Refused with defense, likely or defendMs, which keep their wall clocks.
+         */
+        public boolean counter = false;
+        /** bvw-step1-build-1024, budget=counter: engine move steps per engine search (0 = no cap beyond nodes x per-move). */
+        public int engineSteps = 0;
+        /** bvw-step1-build-1024, budget=counter: play-out steps per decision's line evaluations (0 = no cap). */
+        public int evalSteps = 0;
+        /**
+         * bvw-step1-build-1024, budget=counter: the cards the game copies of one engine search may hold in all (0 = no
+         * cap): the stand-in for the engine deadline that also bounds its memory.
+         */
+        public int engineCards = 0;
+        /**
+         * bvw-step1-build-1024, budget=counter: the memory guard of the engine search (cards of the copies on its current
+         * DFS path; 0 = none).
+         */
+        public int enginePathCards = 0;
+        /**
+         * bvw-step1-build-1024 (false = the default, and then nothing changes): the live seat keeps an adopted line whose
+         * first step is our attack (it passes priority to combat, and {@link ForcedWinSolver#answerAttack} declares the
+         * alpha strike). Off, such a line is dropped at adoption and Forge AI plays the turn (lane bvw-label-audit-1024).
+         */
+        public boolean adoptAttack = false;
+
+        /** bvw-step1-build-1024: the keys added to the config after the step-0 freeze, with their defaults. */
+        public static final java.util.Map<String, Object> STEP1_DEFAULTS = java.util.Map.of("counter", false,
+                "engineSteps", 0, "evalSteps", 0, "engineCards", 0, "enginePathCards", 0, "adoptAttack", false);
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
+            final String budget = get.apply("budget");
+            if (budget != null && !budget.isEmpty() && !"ms".equals(budget) && !"counter".equals(budget)) {
+                throw new IllegalArgumentException("forced-win budget must be ms or counter, not " + budget);
+            }
+            c.counter = "counter".equals(budget);
+            c.engineSteps = intOr(get.apply("engineSteps"), c.engineSteps);
+            c.evalSteps = intOr(get.apply("evalSteps"), c.evalSteps);
+            c.engineCards = intOr(get.apply("engineCards"), c.engineCards);
+            c.enginePathCards = intOr(get.apply("enginePathCards"), c.enginePathCards);
+            c.adoptAttack = "true".equals(get.apply("adoptAttack"));
             c.frameMemory = "true".equals(get.apply("frameMemory"));
             c.likely = "true".equals(get.apply("likely"));
             c.paySearch = "true".equals(get.apply("paySearch"));
@@ -198,6 +242,13 @@ public final class ForcedWinSolver {
             c.defendMs = intOr(get.apply("defendMs"), (int) c.defendMs);
             c.sharedReader = "true".equals(get.apply("sharedReader"));
             c.hold = "true".equals(get.apply("hold"));
+            if (c.counter && (c.defense || c.likely || c.defendMs > 0)) {
+                throw new IllegalArgumentException("refused: budget=counter bounds the offense only; defense, likely and "
+                        + "defendMs keep wall clocks (set defense=false, likely=false, defendMs=0)");
+            }
+            if (c.engineSteps < 0 || c.evalSteps < 0 || c.engineCards < 0 || c.enginePathCards < 0) {
+                throw new IllegalArgumentException("forced-win engineSteps, evalSteps and engineCards must be >= 0");
+            }
             return c;
         }
 
@@ -287,6 +338,152 @@ public final class ForcedWinSolver {
     public long plannerNanos, engineNanos;
     public int copies;
 
+    /**
+     * bvw-step1-build-1024 (read-only: nothing reads it to decide): the solver's work, cumulative over its life, in the
+     * units the counter budgets bound, and the stops each budget caused. {@link #since} gives one call's share.
+     */
+    public static final class Meter {
+        /** Offense calls (decisions that read the position). */
+        public long offenses;
+        /** Width-search nodes visited; width searches cut at their wall time (planMs). */
+        public long plannerNodes, plannerTimeouts;
+        /** Engine searches; their nodes and move steps; searches stopped by the deadline, by a node or step cap. */
+        public long engineRuns, engineNodes, engineSteps, engineDeadlineStops, engineCapStops;
+        /** Cards in the engine's game copies; the engine's wall time (diagnostics: the ms-to-counter mapping). */
+        public long engineCards, engineNanos, enginePathPrunes;
+        /** Engine searches that stopped at the node cap with nodes spent by earlier searches of this solver (review #10). */
+        public long engineLifetimeStops;
+        /** Engine moves cut at the wall. */
+        public long engineWallCuts;
+        /** Lines evaluated; worlds run (the unopposed world 0 included); play-outs; their steps. */
+        public long lines, worlds, playouts, playoutSteps;
+        /** Line evaluations that stopped early at the deadline (ms) or at evalSteps (counter): worlds or lines not run. */
+        public long evalDeadlineStops, evalCapStops;
+        /** Play-outs cut at the wall (ms), at maxSteps, and at the call cap (counter). */
+        public long playoutWallCuts, playoutStepCaps, playoutCallCaps;
+
+        public Meter copy() {
+            final Meter m = new Meter();
+            m.add(this, 1);
+            return m;
+        }
+
+        void add(final Meter o, final int sign) {
+            offenses += sign * o.offenses;
+            plannerNodes += sign * o.plannerNodes;
+            plannerTimeouts += sign * o.plannerTimeouts;
+            engineRuns += sign * o.engineRuns;
+            engineNodes += sign * o.engineNodes;
+            engineSteps += sign * o.engineSteps;
+            engineCards += sign * o.engineCards;
+            engineNanos += sign * o.engineNanos;
+            enginePathPrunes += sign * o.enginePathPrunes;
+            engineLifetimeStops += sign * o.engineLifetimeStops;
+            engineDeadlineStops += sign * o.engineDeadlineStops;
+            engineCapStops += sign * o.engineCapStops;
+            engineWallCuts += sign * o.engineWallCuts;
+            lines += sign * o.lines;
+            worlds += sign * o.worlds;
+            playouts += sign * o.playouts;
+            playoutSteps += sign * o.playoutSteps;
+            evalDeadlineStops += sign * o.evalDeadlineStops;
+            evalCapStops += sign * o.evalCapStops;
+            playoutWallCuts += sign * o.playoutWallCuts;
+            playoutStepCaps += sign * o.playoutStepCaps;
+            playoutCallCaps += sign * o.playoutCallCaps;
+        }
+
+        /** This meter minus {@code before} (one call's work), or a copy when {@code before} is null. */
+        public Meter since(final Meter before) {
+            final Meter m = copy();
+            if (before != null) {
+                m.add(before, -1);
+            }
+            return m;
+        }
+
+        /** Adds {@code o} into this one (a check that ran several solvers). */
+        public void plus(final Meter o) {
+            add(o, 1);
+        }
+
+        /** Any stop a wall clock caused (the ms budgets bound this work). */
+        public boolean msBound() {
+            return plannerTimeouts + engineDeadlineStops + engineWallCuts + evalDeadlineStops + playoutWallCuts > 0;
+        }
+
+        public com.google.gson.JsonObject toJson() {
+            final com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+            o.addProperty("offenses", offenses);
+            o.addProperty("planner_nodes", plannerNodes);
+            o.addProperty("planner_timeouts", plannerTimeouts);
+            o.addProperty("engine_runs", engineRuns);
+            o.addProperty("engine_nodes", engineNodes);
+            o.addProperty("engine_steps", engineSteps);
+            o.addProperty("engine_cards", engineCards);
+            o.addProperty("engine_ms", engineNanos / 1_000_000);
+            o.addProperty("engine_path_prunes", enginePathPrunes);
+            o.addProperty("engine_lifetime_stops", engineLifetimeStops);
+            o.addProperty("engine_deadline_stops", engineDeadlineStops);
+            o.addProperty("engine_cap_stops", engineCapStops);
+            o.addProperty("engine_wall_cuts", engineWallCuts);
+            o.addProperty("lines", lines);
+            o.addProperty("worlds", worlds);
+            o.addProperty("playouts", playouts);
+            o.addProperty("playout_steps", playoutSteps);
+            o.addProperty("eval_deadline_stops", evalDeadlineStops);
+            o.addProperty("eval_cap_stops", evalCapStops);
+            o.addProperty("playout_wall_cuts", playoutWallCuts);
+            o.addProperty("playout_step_caps", playoutStepCaps);
+            o.addProperty("playout_call_caps", playoutCallCaps);
+            o.addProperty("ms_bound", msBound());
+            return o;
+        }
+    }
+
+    /** bvw-step1-build-1024: the cards in a game (every player's zones and the stack): a copy's size. */
+    public static int cardCount(Game g) {
+        return ForcedWinEngine.cardCount(g);
+    }
+
+    /** bvw-step1-build-1024 (review #3): the least Forge AI timeout a counter-budget run accepts, seconds. */
+    public static final int COUNTER_MIN_AI_TIMEOUT_SEC = 600;
+
+    /**
+     * bvw-step1-build-1024 (review #3): Forge AI keeps two wall clocks of its own that counter budgets do not replace: the
+     * AI timeout of its spell evaluation ({@code Game.AI_TIMEOUT}, copied into every game copy) and the parallel attack
+     * planner unless {@code -Dforge.bench.sequentialAi=true}. A counter-budget run refuses to start unless both are
+     * non-binding. Null when they are; else the refusal.
+     */
+    public static String counterRuntimeRefusal(int aiTimeoutSec) {
+        if (!Boolean.getBoolean("forge.bench.sequentialAi")) {
+            return "refused: a counter-budget run needs -Dforge.bench.sequentialAi=true (Forge AI's parallel attack planner "
+                    + "has a wall clock)";
+        }
+        if (aiTimeoutSec < COUNTER_MIN_AI_TIMEOUT_SEC) {
+            return "refused: a counter-budget run needs aiTimeoutSec >= " + COUNTER_MIN_AI_TIMEOUT_SEC + " (Forge AI's spell "
+                    + "evaluation has a wall clock), not " + aiTimeoutSec;
+        }
+        return null;
+    }
+
+    /** bvw-step1-build-1024: this solver's work so far (read-only diagnostics; {@link Meter}). */
+    public final Meter meter = new Meter();
+    /** bvw-step1-build-1024: per-decision receipts of the meter, -Dforge.ai.forcedWin.meter=true (diagnostics only). */
+    static final boolean METER_RECEIPTS = Boolean.getBoolean("forge.ai.forcedWin.meter");
+    /** bvw-step1-build-1024, budget=counter: the play-out steps when the current offense decision began. */
+    private long decisionSteps0;
+
+    /** bvw-step1-build-1024: budget=counter and the decision's evalSteps are spent (never true on the ms path). */
+    private boolean evalStepsSpent() {
+        return cfg.counter && cfg.evalSteps > 0 && meter.playoutSteps - decisionSteps0 >= cfg.evalSteps;
+    }
+
+    /** bvw-step1-build-1024: a deadline (System.nanoTime) on the ms path; none (Long.MAX_VALUE) with budget=counter. */
+    private long deadlineAt(final long msPathDeadline) {
+        return cfg.counter ? Long.MAX_VALUE : msPathDeadline;
+    }
+
     public ForcedWinSolver(Player me, Config cfg) {
         this(me, cfg, null);
     }
@@ -302,6 +499,11 @@ public final class ForcedWinSolver {
 
     public Config config() {
         return cfg;
+    }
+
+    /** bvw-step1-build-1024: the seat's game (the generator's recorded runtime). */
+    Game seatGame() {
+        return me.getGame();
     }
 
     public boolean lineActive() {
@@ -384,6 +586,13 @@ public final class ForcedWinSolver {
         final Follower.Next n = active.next(live, me);
         if (n.action != null) {
             return new Decision(true, n.action);
+        }
+        if (cfg.adoptAttack && n.waiting && active.attackPending) {
+            // bvw-step1-build-1024: the line's first step is our attack. Keep the line and pass to combat, where
+            // answerAttack declares its alpha strike (off: the line is dropped here and Forge AI plays the turn)
+            receipt("FORCED_WIN adopt-attack" + tag() + " turn=" + ph.getTurn() + " phase=" + ph.getPhase() + " line="
+                    + line.steps);
+            return Decision.PASS;
         }
         active = null;
         return Decision.NONE;
@@ -510,12 +719,30 @@ public final class ForcedWinSolver {
         final int copies0 = copies + engineStats.copies, probes0 = reader.probeStats.probes, eng0 = engineStats.nodes;
         lastOutcome = "?";
         lastPlannerNodes = 0;
+        final Meter m0 = METER_RECEIPTS ? meter.copy() : null;
         final Line l = offense0(live, key);
         receipt("FORCED_WIN cost" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " phase=" + live.getPhaseHandler().getPhase()
                 + " outcome=" + lastOutcome + " ms=" + (System.nanoTime() - t0) / 1_000_000 + " plannerNodes="
                 + lastPlannerNodes + " engineNodes=" + (engineStats.nodes - eng0) + " copies="
                 + (copies + engineStats.copies - copies0) + " probes=" + (reader.probeStats.probes - probes0));
+        if (m0 != null) {
+            // bvw-step1-build-1024: the decision's work in counter units (diagnostics only; budget calibration)
+            System.err.println("FORCED_WIN meter" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " phase="
+                    + live.getPhaseHandler().getPhase() + " outcome=" + lastOutcome + " budget="
+                    + (cfg.counter ? "counter" : "ms") + " ms=" + (System.nanoTime() - t0) / 1_000_000 + " "
+                    + meter.since(m0).toJson());
+        }
         return l;
+    }
+
+    /** bvw-step1-build-1024: the width search, metered (the same call as before; the meter only reads its result). */
+    private ForcedWinPlanner.Result plan(Position pos, ForcedWinPlanner.Limits lim) {
+        final ForcedWinPlanner.Result r = ForcedWinPlanner.plan(pos, lim);
+        meter.plannerNodes += r.visited;
+        if (r.timedOut) {
+            meter.plannerTimeouts++;
+        }
+        return r;
     }
 
     private String lastOutcome = "?";
@@ -525,7 +752,10 @@ public final class ForcedWinSolver {
         decisions++;
         final int index = decisionIndex++;
         final long t0 = System.nanoTime();
-        decisionWall = t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
+        // bvw-step1-build-1024: budget=counter reads no wall clock (0 = no wall)
+        decisionWall = cfg.counter ? 0L : t0 + (budgetMs() + cfg.wallGraceMs) * 1_000_000L;
+        decisionSteps0 = meter.playoutSteps;
+        meter.offenses++;
         final Position pos = readPosition(live, knownTop(live));
         if (pos == null) {
             noLineKey = key;
@@ -533,17 +763,18 @@ public final class ForcedWinSolver {
         }
         final ForcedWinPlanner.Limits lim = new ForcedWinPlanner.Limits();
         lim.nodes = cfg.nodes;
-        lim.ms = forge.ai.WallClock.budgetMs(cfg.planMs);
+        // bvw-step1-build-1024: budget=counter: no width-search wall time (ms < 0 = none); its nodes bound it
+        lim.ms = cfg.counter ? -1L : forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
         boolean payOnly = false;
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
         // before it reaches one); lines that pass the turn only when this turn has none
         lim.horizon = 1;
-        ForcedWinPlanner.Result res = cfg.forced ? ForcedWinPlanner.plan(pos, lim) : new ForcedWinPlanner.Result();
+        ForcedWinPlanner.Result res = cfg.forced ? plan(pos, lim) : new ForcedWinPlanner.Result();
         if (res.lines.isEmpty() && cfg.horizon >= 2 && cfg.forced) {
             final int first = res.nodes;
             lim.horizon = cfg.horizon;
-            res = ForcedWinPlanner.plan(pos, lim);
+            res = plan(pos, lim);
             res.nodes += first;
         }
         if (res.lines.isEmpty() && cfg.forced && cfg.paySearch) {
@@ -552,11 +783,11 @@ public final class ForcedWinSolver {
             final int before = res.nodes;
             lim.payPolicies = ForcedWinPlanner.PAY_POLICIES;
             lim.horizon = 1;
-            res = ForcedWinPlanner.plan(pos, lim);
+            res = plan(pos, lim);
             if (res.lines.isEmpty() && cfg.horizon >= 2) {
                 final int first = res.nodes;
                 lim.horizon = cfg.horizon;
-                res = ForcedWinPlanner.plan(pos, lim);
+                res = plan(pos, lim);
                 res.nodes += first;
             }
             res.nodes += before;
@@ -1303,15 +1534,34 @@ public final class ForcedWinSolver {
             el.ownKnownTop = kt == null ? 0 : kt.size();
         }
         el.wall = decisionWall;
+        // bvw-step1-build-1024: budget=counter: the engine's move steps per search are capped (0 = none), no deadline,
+        // and each seat's calls in a move are capped (the wall's stand-in)
+        el.totalSteps = cfg.counter ? cfg.engineSteps : 0;
+        el.totalCards = cfg.counter ? cfg.engineCards : 0;
+        el.pathCards = cfg.counter ? cfg.enginePathCards : 0;
+        el.callLimit = cfg.counter ? 2L * el.maxSteps : 0L;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
-        final long engineDeadline = Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs), budgetMs() - reserve)
-                * 1_000_000L, t0 + (budgetMs() - reserve) * 1_000_000L);
+        final long engineDeadline = deadlineAt(Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs),
+                budgetMs() - reserve) * 1_000_000L, t0 + (budgetMs() - reserve) * 1_000_000L));
         final List<Line> likelyCands = cfg.likely ? new ArrayList<>() : null;
         el.redraw = redraw;
+        final int en0 = engineStats.nodes, ec0 = engineStats.cut, ed0 = engineStats.deadlineStops, ek0 = engineStats.capStops;
+        final long es0 = engineStats.steps, ecd0 = engineStats.cards;
+        final int ep0 = engineStats.pathPrunes, el0 = engineStats.lifetimeStops;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
         engineNanos += System.nanoTime() - t1;
+        meter.engineRuns++;
+        meter.engineNodes += engineStats.nodes - en0;
+        meter.engineSteps += engineStats.steps - es0;
+        meter.engineCards += engineStats.cards - ecd0;
+        meter.enginePathPrunes += engineStats.pathPrunes - ep0;
+        meter.engineLifetimeStops += engineStats.lifetimeStops - el0;
+        meter.engineNanos += System.nanoTime() - t1;
+        meter.engineWallCuts += engineStats.cut - ec0;
+        meter.engineDeadlineStops += engineStats.deadlineStops - ed0;
+        meter.engineCapStops += engineStats.capStops - ek0;
         receipt("FORCED_WIN engine" + tag() + " turn=" + pos.turn + " found=" + (line != null) + " " + engineStats.summary()
                 + (line == null ? "" : " " + line) + (likelyCands == null ? "" : " likelyCands=" + likelyCands.size()));
         if (line == null || !cfg.forced) {
@@ -1323,7 +1573,7 @@ public final class ForcedWinSolver {
         engineFound++;
         evaluated++;
         final Eval e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999),
-                Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2));
+                deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
         if (evalSink != null) {
             evalSink.add(e);
@@ -1552,7 +1802,7 @@ public final class ForcedWinSolver {
 
     /** As above; the evaluation's budget counts from {@code from} (the decision's start with the payment search on). */
     Eval evaluateTop(Game live, List<Line> lines, int index, long from) {
-        final long deadline = from + budgetMs() * 1_000_000L;
+        final long deadline = deadlineAt(from + budgetMs() * 1_000_000L);
         final List<Line> picked = new ArrayList<>();
         final Set<String> shapes = new HashSet<>();
         for (Line l : lines) {
@@ -1566,7 +1816,12 @@ public final class ForcedWinSolver {
         }
         Eval best = null;
         for (int i = 0; i < picked.size(); i++) {
-            if (System.nanoTime() > deadline && best != null) {
+            if (best != null && System.nanoTime() > deadline) {
+                meter.evalDeadlineStops++;
+                break;
+            }
+            if (best != null && evalStepsSpent()) {
+                meter.evalCapStops++; // bvw-step1-build-1024: budget=counter, the decision's evalSteps are spent
                 break;
             }
             final Eval e = evaluate(live, picked.get(i), mix(cfg.seed, index * 1000L + i), deadline);
@@ -1596,7 +1851,10 @@ public final class ForcedWinSolver {
             return evaluateExact(live, line, seed, deadline);
         }
         final Eval e = new Eval(line);
-        final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
+        // bvw-step1-build-1024: budget=counter: no wall (0); maxSteps bounds each play-out
+        final long wall = cfg.counter ? 0L : Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
+        meter.lines++;
+        meter.worlds++;
         final Outcome u = playout(live, line, mix(seed, 0), 0, -1, wall);
         e.pUnopposed = u.won ? 1 : 0;
         e.endReason = u.endReason;
@@ -1616,9 +1874,15 @@ public final class ForcedWinSolver {
         final Map<String, Integer> fails = new HashMap<>();
         final Set<String> prot = new HashSet<>();
         for (int w = 1; w <= cfg.worlds; w++) {
-            if (System.nanoTime() > deadline && n > 0) {
+            if (n > 0 && System.nanoTime() > deadline) {
+                meter.evalDeadlineStops++;
                 break;
             }
+            if (n > 0 && evalStepsSpent()) {
+                meter.evalCapStops++; // bvw-step1-build-1024: budget=counter, the decision's evalSteps are spent
+                break;
+            }
+            meter.worlds++;
             final long ws = mix(seed, w);
             Outcome worst = playout(live, line, ws, w, -1, wall);
             if (worst.protectedBy != null) {
@@ -1654,7 +1918,10 @@ public final class ForcedWinSolver {
     /** search-bones-1015 (d): {@link Config#exact}'s evaluation (one world, the position as it stands). */
     Eval evaluateExact(Game live, Line line, long seed, long deadline) {
         final Eval e = new Eval(line);
-        final long wall = Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
+        // bvw-step1-build-1024: budget=counter: no wall (0)
+        final long wall = cfg.counter ? 0L : Math.max(decisionWall, deadline + cfg.wallGraceMs * 1_000_000L);
+        meter.lines++;
+        meter.worlds++;
         Outcome worst = playout(live, line, mix(seed, 0), -1, -1, wall);
         e.pUnopposed = worst.won ? 1 : 0;
         e.endReason = worst.endReason;
@@ -1668,9 +1935,17 @@ public final class ForcedWinSolver {
                 }
             }
             for (int j = 0; j < spells && worst.won; j++) {
-                if (System.nanoTime() > wall) {
+                if (wall != 0 && System.nanoTime() > wall) {
                     worst = new Outcome();
                     worst.why = "wall";
+                    break;
+                }
+                if (evalStepsSpent()) {
+                    // bvw-step1-build-1024 (review #13): budget=counter's stand-in for the wall here: the decision's
+                    // evalSteps are spent, so the remaining counter answers are not run and the line is not proven
+                    meter.evalCapStops++;
+                    worst = new Outcome();
+                    worst.why = "evalSteps";
                     break;
                 }
                 final Outcome o = playout(live, line, mix(seed, 0), -1, j, wall);
@@ -1734,13 +2009,15 @@ public final class ForcedWinSolver {
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             final Follower f = new Follower(line);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
-            lineAi.bounded(wall);
+            // bvw-step1-build-1024: budget=counter: each seat's calls in the play-out are capped (the wall's stand-in)
+            final long callLimit = cfg.counter ? 2L * cfg.maxSteps : 0L;
+            lineAi.bounded(wall).callLimited(callLimit);
             cm.dangerouslySetController(lineAi);
             AdversaryAi adv = null;
             for (Player o : g.getPlayers()) {
                 if (o != cm) {
                     adv = new AdversaryAi(g, o, o.getController().getLobbyPlayer(), cm, counterAt);
-                    adv.bounded(wall);
+                    adv.bounded(wall).callLimited(callLimit);
                     o.dangerouslySetController(adv);
                     out.oppHasCounter |= AdversaryAi.holdsCounter(o);
                 }
@@ -1750,10 +2027,15 @@ public final class ForcedWinSolver {
             final LookaheadSearch.TurnWatch watch = new LookaheadSearch.TurnWatch(ph.getTurn() + 1 + 2 * line.winTurn, null);
             g.subscribeToEvents(watch);
             int steps = 0;
+            meter.playouts++;
             while (!g.isGameOver() && !watch.reached && steps < cfg.maxSteps) {
                 ForcedWinEngine.checkWall(wall, "play-out step");
                 ph.mainLoopStep();
                 steps++;
+                meter.playoutSteps++;
+            }
+            if (steps >= cfg.maxSteps && !g.isGameOver() && !watch.reached) {
+                meter.playoutStepCaps++;
             }
             out.won = cm.hasWon() || cm.getOpponents().stream().anyMatch(Player::hasLost);
             out.protectedBy = lineAi.protectedBy;
@@ -1793,6 +2075,11 @@ public final class ForcedWinSolver {
             out.won = false;
             out.why = "wall";
             wallCuts++;
+            if (ex.getMessage() != null && ex.getMessage().startsWith("wall")) {
+                meter.playoutWallCuts++; // bvw-step1-build-1024: a wall-clock cut (not a refused attack)
+            } else if (ex.getMessage() != null && ex.getMessage().startsWith("calls")) {
+                meter.playoutCallCaps++; // bvw-step1-build-1024: budget=counter's call cap
+            }
             receipt("FORCED_WIN playout cut world=" + world + " " + ex.getMessage());
         } catch (RuntimeException | StackOverflowError ex) {
             out.won = false;

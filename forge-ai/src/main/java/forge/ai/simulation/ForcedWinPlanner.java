@@ -255,7 +255,10 @@ public final class ForcedWinPlanner {
         /** 1: this turn only; 2: this turn and our next turn. */
         int horizon = 2;
         int classes = 14;
-        /** POST-FREEZE 5: a wall-time budget (ms); late-game positions with large graveyards made keys slow. */
+        /**
+         * POST-FREEZE 5: a wall-time budget (ms); late-game positions with large graveyards made keys slow.
+         * bvw-step1-build-1024: a negative value is no wall time (budget=counter: the nodes alone bound the search).
+         */
         long ms = 1500;
         /**
          * solver-gaps-1015 (payment search, off by default): how many payment orders each cast is tried with. 1 = the
@@ -274,6 +277,9 @@ public final class ForcedWinPlanner {
         boolean exhausted;
         boolean sameTurn, nextTurn;
         long nanos;
+        /** bvw-step1-build-1024 (read-only): nodes actually visited, and whether the wall time cut the search. */
+        int visited;
+        boolean timedOut;
 
         String summary() {
             return "lines=" + lines.size() + " nodes=" + nodes + (exhausted ? "(budget)" : "") + " sameTurn=" + sameTurn
@@ -444,7 +450,7 @@ public final class ForcedWinPlanner {
     private long deadline = Long.MAX_VALUE;
 
     Result run() {
-        deadline = System.nanoTime() + lim.ms * 1_000_000L;
+        deadline = lim.ms < 0 ? Long.MAX_VALUE : System.nanoTime() + lim.ms * 1_000_000L;
         final S s = new S();
         s.sorcery = pos.sorcerySpeed;
         s.life = pos.life;
@@ -503,6 +509,7 @@ public final class ForcedWinPlanner {
         if (nodes >= lim.nodes || result.lines.size() >= lim.maxLines || (nodes & 63) == 0 && System.nanoTime() > deadline) {
             result.exhausted |= nodes >= lim.nodes || System.nanoTime() > deadline;
             if (System.nanoTime() > deadline) {
+                result.timedOut = true;
                 nodes = Math.max(nodes, lim.nodes);
             }
             return;
@@ -511,6 +518,7 @@ public final class ForcedWinPlanner {
             return;
         }
         nodes++;
+        result.visited++;
         if (!seen.add(s.key())) {
             return;
         }

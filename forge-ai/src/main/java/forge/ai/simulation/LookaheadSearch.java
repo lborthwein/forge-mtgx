@@ -1323,6 +1323,11 @@ public final class LookaheadSearch {
         /** Decision thread: one value per leaf payload, P(the seat wins) in [0, 1], in order; null = failed. */
         double[] leafValues(List<Object> payloads);
 
+        /** Decision thread: why the last {@link #leafValues} returned null (the static-fallback line names it), or null. */
+        default String leafError() {
+            return null;
+        }
+
         /** Play-out thread: the searching seat's controller for a policy play-out that starts with {@code first}. */
         PlayoutSeat playoutSeat(Object copyCtx, Game g, Player me, FirstAction first, long seed, LeafProbe probe);
     }
@@ -2177,6 +2182,43 @@ public final class LookaheadSearch {
         }
     }
 
+    /**
+     * bvw-step1-build-1024 (ruling 4; the step-1 labeller only, nothing in play calls it): the last given search's
+     * candidate {@code cand} (its index among the searched candidates) played out again in K FRESH worlds seeded by
+     * {@code salt} (never the decision's own world seeds), with the same play-outs and leaf values, our known top kept as
+     * {@code knownTop}. A departure's own K-world mean won a max over noisy means, so it is biased up; these worlds are
+     * not. Returns the per-world values, or null (a failed play-out, a budget stop, a leaf fallback).
+     */
+    public double[] reevaluate(Game live, Player me, int cand, long salt, int knownTop) {
+        final List<Cand> cs = lastCandidates;
+        if (cs == null || cand < 0 || cand >= cs.size()) {
+            return null;
+        }
+        final int k = Math.max(1, cfg.worlds);
+        final double[][] values = new double[1][k];
+        final Rollout[][] outs = new Rollout[1][k];
+        final boolean[] ok = {true};
+        final int prevTop = ownKnownTop;
+        ownKnownTop = Math.max(0, knownTop);
+        try {
+            final long fb = stats.leafFallbacks;
+            final int aborted = playAll(live, me, java.util.Collections.singletonList(cs.get(cand)), null, mix(cfg.seed, salt),
+                    new Carried[k], values, outs, ok, null);
+            if (aborted > 0 || !ok[0]) {
+                return null;
+            }
+            if (hookLeaf) {
+                valueLeaves(values, outs, ok, k);
+                if (stats.leafFallbacks != fb) {
+                    return null;
+                }
+            }
+            return values[0];
+        } finally {
+            ownKnownTop = prevTop;
+        }
+    }
+
     /** S-b: the next searched decision's world-0 seed (its recordings play in the same world 0 as its valuation). */
     public long nextWorld0Seed() {
         return mix(mix(cfg.seed, 0x5eedL + decisionIndex), 1000);
@@ -2891,7 +2933,8 @@ public final class LookaheadSearch {
     /**
      * S1 value leaf: replace one decision's static leaf values by the hooks' P(win) (terminal play-outs 1 / 0 / 0.5). One
      * call carries every non-terminal leaf, world-major then candidate-minor. On a failure the decision keeps its static
-     * values (all of them: a decision never mixes the two scales) and the fallback is counted.
+     * values (all of them: a decision never mixes the two scales) and the fallback is counted. Every fallback is said on
+     * stderr with its cause ("[lookahead] value leaf failed, static fallback: ...", bvw-p3-batch-1023).
      */
     private void valueLeaves(double[][] values, Rollout[][] outs, boolean[] ok, int k) {
         final int n = values.length;
@@ -2904,6 +2947,7 @@ public final class LookaheadSearch {
                     if (r.leafPayload == null) {
                         stats.leafFallbacks++;
                         stats.leafLastError = "a non-terminal play-out has no leaf payload";
+                        staticFallbackLine(-1);
                         return;
                     }
                     leaves.add(r.leafPayload);
@@ -2914,10 +2958,12 @@ public final class LookaheadSearch {
         double[] p = null;
         if (!leaves.isEmpty()) {
             final long t = System.nanoTime();
+            boolean threw = false;
             try {
                 p = hooks.leafValues(leaves);
             } catch (RuntimeException e) {
                 p = null;
+                threw = true;
                 stats.leafLastError = String.valueOf(e);
             }
             stats.leafNanos += System.nanoTime() - t;
@@ -2925,8 +2971,12 @@ public final class LookaheadSearch {
                 stats.leafFallbacks++;
                 if (p != null) {
                     stats.leafLastError = "leaf values: " + p.length + " for " + leaves.size() + " leaves";
+                } else if (!threw) {
+                    // bvw-p3-batch-1023: the hook's own reason (it used to be lost: "static fallback: null")
+                    final String why = hooks.leafError();
+                    stats.leafLastError = why != null ? why : "the value hook returned no values";
                 }
-                System.err.println("[lookahead] value leaf failed, static fallback: " + stats.leafLastError);
+                staticFallbackLine(leaves.size());
                 return;
             }
             stats.leafCalls++;
@@ -2943,6 +2993,15 @@ public final class LookaheadSearch {
         for (int i = 0; i < where.size(); i++) {
             values[where.get(i)[0]][where.get(i)[1]] = p[i];
         }
+    }
+
+    /**
+     * Every value-leaf static fallback, loud (bvw-p3-batch-1023): the cause, the leaves that keep static values (-1 =
+     * not collected) and the running count. The line's prefix is the one Stage A's leafq.py counts.
+     */
+    private void staticFallbackLine(int leaves) {
+        System.err.println("[lookahead] value leaf failed, static fallback: " + stats.leafLastError + " [STATIC leaf values"
+                + (leaves >= 0 ? " for " + leaves + " leaves" : "") + "; leafFallbacks " + stats.leafFallbacks + "]");
     }
 
     /**
@@ -5686,6 +5745,11 @@ public final class LookaheadSearch {
     }
 
     /** The copy resumes exactly where the live seat stands: it holds priority, it acted first. */
+    /** bvw-step1-build-1024: {@link #givePriority} for the step-1 labeller's root copy (forge.bench.rl.StepSearch). */
+    public static void givePriorityTo(PhaseHandler ph, Player p) {
+        givePriority(ph, p);
+    }
+
     static void givePriority(PhaseHandler ph, Player p) {
         initFields();
         try {

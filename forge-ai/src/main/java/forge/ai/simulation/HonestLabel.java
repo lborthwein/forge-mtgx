@@ -72,10 +72,26 @@ public final class HonestLabel {
         /** The position's wall budget for the loss worlds, ms (0 = none): worlds not started by then are not run. */
         public long lossWallMs = 0;
         public long seed = 1023L;
+        /**
+         * bvw-step1-build-1024 (false = the default, and then nothing changes, the spec's sha included): each row carries
+         * its check's solver work ({@link ForcedWinSolver.Meter}: counter units and the stops each budget caused).
+         */
+        public boolean meter = false;
+        /**
+         * bvw-step1-build-1024 (review #3; null = unset, the default, and then nothing changes, the sha included): the
+         * Forge AI settings a counter-budget spec runs under, part of its identity. A counter spec must set both
+         * ({@code sequentialAi} true, {@code aiTimeoutSec} >= 600) and the runner refuses a JVM or game that differs.
+         */
+        public Boolean sequentialAi = null;
+        public Integer aiTimeoutSec = null;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed"));
+                "seed", "meter", "sequentialAi", "aiTimeoutSec"));
+
+        /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
+        static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
+                "search", "reference", "referenceTurns"));
 
         /** The spec, or IllegalArgumentException ("refused: ...") when it is not honest or not well formed. */
         public static Spec parse(final JsonObject o) {
@@ -83,7 +99,7 @@ public final class HonestLabel {
                 throw new IllegalArgumentException("refused: no label spec");
             }
             for (String k : o.keySet()) {
-                if (!KEYS.contains(k) && !"turns".equals(k) && !"out".equals(k)) {
+                if (!KEYS.contains(k) && !HOST_KEYS.contains(k)) {
                     throw new IllegalArgumentException("label: unknown key " + k);
                 }
             }
@@ -99,6 +115,9 @@ public final class HonestLabel {
             if (o.has("beliefSingleton")) s.beliefSingleton = o.get("beliefSingleton").getAsBoolean();
             if (o.has("lossWallMs")) s.lossWallMs = o.get("lossWallMs").getAsLong();
             if (o.has("seed")) s.seed = o.get("seed").getAsLong();
+            if (o.has("meter")) s.meter = o.get("meter").getAsBoolean();
+            if (o.has("sequentialAi") && !o.get("sequentialAi").isJsonNull()) s.sequentialAi = o.get("sequentialAi").getAsBoolean();
+            if (o.has("aiTimeoutSec") && !o.get("aiTimeoutSec").isJsonNull()) s.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
             s.checkHonest();
             return s;
         }
@@ -122,6 +141,48 @@ public final class HonestLabel {
             if (worlds < 1 || worlds > 64 || beliefBasics < 1) {
                 throw new IllegalArgumentException("label: worlds in [1, 64], beliefBasics >= 1");
             }
+            // bvw-step1-build-1024: budget=counter in both checks or in neither; a counter spec reads no wall clock
+            final boolean wc = counter(solverCfg), lc = counter(lossCfg);
+            if (wc != lc) {
+                throw new IllegalArgumentException("refused: solverCfg and lossCfg must both be budget=counter or both not");
+            }
+            if (wc && lossWallMs > 0) {
+                throw new IllegalArgumentException("refused: a budget=counter label spec needs lossWallMs = 0 (no wall)");
+            }
+            if (wc && (!Boolean.TRUE.equals(sequentialAi) || aiTimeoutSec == null
+                    || aiTimeoutSec < ForcedWinSolver.COUNTER_MIN_AI_TIMEOUT_SEC)) {
+                throw new IllegalArgumentException("refused: a budget=counter label spec pins its Forge AI settings: "
+                        + "sequentialAi true and aiTimeoutSec >= " + ForcedWinSolver.COUNTER_MIN_AI_TIMEOUT_SEC);
+            }
+        }
+
+        /**
+         * bvw-step1-build-1024 (review #3): null when this JVM and a game with {@code gameAiTimeoutSec} run this spec as
+         * pinned; else the refusal (only a counter spec pins).
+         */
+        public String runtimeRefusal(final int gameAiTimeoutSec) {
+            if (!counterBudgets()) {
+                return null;
+            }
+            final String no = ForcedWinSolver.counterRuntimeRefusal(gameAiTimeoutSec);
+            if (no != null) {
+                return no;
+            }
+            if (aiTimeoutSec != gameAiTimeoutSec) {
+                return "refused: the label spec pins aiTimeoutSec " + aiTimeoutSec + ", the run has " + gameAiTimeoutSec;
+            }
+            return null;
+        }
+
+        /** bvw-step1-build-1024: this solver config object asks for counter budgets. */
+        static boolean counter(final JsonObject cfg) {
+            final JsonElement b = cfg == null ? null : cfg.get("budget");
+            return b != null && "counter".equals(b.getAsString());
+        }
+
+        /** bvw-step1-build-1024: both checks run on counter budgets (host-independent labels). */
+        public boolean counterBudgets() {
+            return counter(solverCfg);
         }
 
         /** The win check's solver config: S-b's budgets, the spec's keys, K worlds, act=false, no hand-written defence. */
@@ -192,6 +253,15 @@ public final class HonestLabel {
             o.addProperty("beliefSingleton", beliefSingleton);
             o.addProperty("lossWallMs", lossWallMs);
             o.addProperty("seed", seed);
+            if (meter) {
+                o.addProperty("meter", true); // bvw-step1-build-1024: only when on, so every other spec's sha is unchanged
+            }
+            if (sequentialAi != null) {
+                o.addProperty("sequentialAi", sequentialAi); // review #3: only when set (counter specs set both)
+            }
+            if (aiTimeoutSec != null) {
+                o.addProperty("aiTimeoutSec", aiTimeoutSec);
+            }
             return o;
         }
 
@@ -262,6 +332,8 @@ public final class HonestLabel {
         public int turnsToEnd = -1;
         public double ms;
         public String error;
+        /** bvw-step1-build-1024: the check's solver work (null unless the spec meters). */
+        public JsonObject meter;
 
         public JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -285,6 +357,7 @@ public final class HonestLabel {
             }
             o.addProperty("ms", Math.round(ms * 10) / 10.0);
             if (error != null) o.addProperty("error", error);
+            if (meter != null) o.add("meter", meter);
             return o;
         }
 
@@ -402,6 +475,9 @@ public final class HonestLabel {
             }
             final List<ForcedWinSolver.Proposal> props = s.propose(root);
             r.proposals = props.size();
+            if (spec.meter) {
+                r.meter = s.meter.toJson();
+            }
             ForcedWinSolver.Proposal best = null, proven = null;
             for (ForcedWinSolver.Proposal p : props) {
                 if (best == null || p.pBelief > best.pBelief + 1e-9) {
@@ -436,8 +512,11 @@ public final class HonestLabel {
             final Map<String, Integer> reasons = new TreeMap<>();
             final Map<String, Integer> kinds = new TreeMap<>();
             int steps = -1;
+            final ForcedWinSolver.Meter sum = spec.meter ? new ForcedWinSolver.Meter() : null;
+            boolean wallStop = false;
             for (int j = 0; j < spec.worlds; j++) {
                 if (System.nanoTime() > wall) {
+                    wallStop = true;
                     break;
                 }
                 final Object[] w = world(live, liveMe, liveOpp,
@@ -453,6 +532,9 @@ public final class HonestLabel {
                 }
                 final List<ForcedWinSolver.Proposal> props = s.propose(g);
                 ran++;
+                if (sum != null) {
+                    sum.plus(s.meter);
+                }
                 ForcedWinSolver.Proposal proven = null;
                 for (ForcedWinSolver.Proposal p : props) {
                     if (p.proven(1) && (proven == null || p.endTurn >= 0 && p.endTurn < proven.endTurn)) {
@@ -471,6 +553,10 @@ public final class HonestLabel {
             }
             r.worldsLoss = ran;
             r.lostWorlds = lost;
+            if (sum != null) {
+                r.meter = sum.toJson();
+                r.meter.addProperty("loss_wall_stop", wallStop); // lossWallMs stopped the worlds (ms specs only)
+            }
             r.pLoss = ran == 0 ? Double.NaN : (double) lost / ran;
             if (ran == spec.worlds && lost == ran && ran > 0) {
                 r.label = "loss";

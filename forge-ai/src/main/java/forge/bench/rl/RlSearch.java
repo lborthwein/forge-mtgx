@@ -686,6 +686,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (c.ack != null && c.ack.has("policy_sha") && !c.ack.get("policy_sha").isJsonNull()) {
                 servedPolicySha = c.ack.get("policy_sha").getAsString();
             }
+            if (c.ack != null) {
+                servedAck = c.ack.deepCopy(); // bvw-step1-build-1024: the service's identity (value backend) for label rows
+            }
             if (cfg.policySha != null) {
                 final String got = c.ack.has("policy_sha") ? c.ack.get("policy_sha").getAsString() : null;
                 if (!cfg.policySha.equals(got)) {
@@ -818,6 +821,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         priorityAsks++;
         if (cfg.cpuCapMs > 0 && gameCpuMs() > cfg.cpuCapMs) {
             voided = "cpu_cap";
+            tap("cpu_cap", null, null, 0, VOID);
             return VOID;
         }
         final PlanSearch sb = planSearches.isEmpty() ? null : planSearches.get(me.getId());
@@ -825,12 +829,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final boolean respond = sb != null && !g.getStack().isEmpty() && sb.respondPoint(g, menuObjs);
         if (!cfg.stack && !g.getStack().isEmpty() && !respond) {
             searchStackSkipped++;
+            tap("stack", null, null, 0, -1);
             return -1;
         }
         if (sb != null) {
             // search-bones-1015 (S-b): the live policy plan's next step, no search
             final int f = sb.follow(g, me, m, menuObjs);
             if (f >= 0) {
+                tap("follow", null, null, 0, f);
                 return f;
             }
         }
@@ -843,6 +849,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             drop();
             scoreFailures++;
             System.err.println("[rlsearch] SCORE failed, keeping the policy's choice: " + e);
+            tap("score_failed", null, null, 0, -1);
             return -1;
         }
         scoreCalls++;
@@ -850,6 +857,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         final int c = m.C();
         if (sc.status != RlWire.ST_OK || sc.probs.length != c) {
             scoreFailures++;
+            tap("score_status", null, null, 0, -1);
             return -1;
         }
         // Pool the candidates into entries: X variants of one menu entry, and menu entries that are the same action
@@ -882,6 +890,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         }
         final Integer defEntry = entryOf.get(actionKey(def0 == 0 ? null : menuObjs.get(def0 - 1)));
         if (defEntry == null || !by.containsKey(defEntry)) {
+            tap("no_default", null, null, 0, -1);
             return -1;
         }
         if (defEntry != def0) {
@@ -937,6 +946,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 }
                 planRow(g, frame, stage, null, order, -1, t0);
                 planDecided(g, stage, null, t0);
+                tap("proven_line", stage, null, order.size(), RlSeat.PrioritySearch.HOOK);
                 return RlSeat.PrioritySearch.HOOK;
             }
         }
@@ -988,6 +998,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (pa != -2) {
                 departures++;
                 planDecided(g, stage, r, t0);
+                tap("plan", stage, r, order.size(), pa);
                 return pa;
             }
         }
@@ -1158,7 +1169,72 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             row.addProperty("score_ms", Math.round((System.nanoTime() - t0) / 1e5 - r.ms * 10) / 10.0);
             rows.add(row);
         }
+        tap(r.givenIndex.length > 0 ? "searched" : String.valueOf(r.outcome), stage, r, order.size(), answer);
         return answer;
+    }
+
+    /**
+     * Lane bvw-step1-build-1024 (null = off, the default, and then nothing changes): told how each priority decision
+     * ended, for the step-1 labeller ({@link StepSearch}): why ({@code searched}, {@code plan}, {@code proven_line}, or
+     * why there was no search), the S-b stage (null without plans or off a plan point), the look-ahead's result (null
+     * when none ran), the given candidates' count and the answer.
+     */
+    public interface Tap {
+        void decided(String why, PlanSearch.Stage stage, LookaheadSearch.GivenResult r, int given, int answer);
+    }
+
+    public Tap tap;
+
+    private void tap(final String why, final PlanSearch.Stage stage, final LookaheadSearch.GivenResult r, final int given,
+            final int answer) {
+        final Tap t = tap;
+        if (t != null) {
+            t.decided(why, stage, r, given, answer);
+        }
+    }
+
+    /** bvw-step1-build-1024: this seat's S-b plan search (null without plans), for the step-1 labeller. */
+    PlanSearch planSearchOf(final Player p) {
+        return planSearches.get(p.getId());
+    }
+
+    /** bvw-step1-build-1024: the policy's greedy DECISION for a frame, on this thread's search-service connection. */
+    RlWire.Decision policyDecide(final byte[] payload) throws IOException {
+        try {
+            return client().decide(payload, false);
+        } catch (IOException | RuntimeException e) {
+            drop();
+            throw e;
+        }
+    }
+
+    /**
+     * bvw-step1-build-1024 (review #9): open this thread's connection (HELLO; the policySha pin is checked there) and
+     * return the service's HELLO_ACK; throws when there is no service or a pin fails.
+     */
+    JsonObject connectAck() throws IOException {
+        final RlSearchClient c = client();
+        return c.ack == null ? null : c.ack.deepCopy();
+    }
+
+    /**
+     * bvw-step1-build-1024 (ruling 4): the last search's candidate {@code cand} (its index among the searched candidates)
+     * played out again in K fresh worlds seeded by {@code salt}, valued by the same leaves: its per-world values, or null.
+     */
+    double[] reevaluate(final Game g, final Player me, final int cand, final long salt, final int knownTop) {
+        return ls.reevaluate(g, me, cand, salt, knownTop);
+    }
+
+    /** bvw-step1-build-1024: the served checkpoint (HELLO_ACK policy_sha) once a connection is open, or null. */
+    String servedPolicySha() {
+        return servedPolicySha;
+    }
+
+    private volatile JsonObject servedAck;
+
+    /** bvw-step1-build-1024: the service's HELLO_ACK once a connection is open (a copy), or null. */
+    JsonObject servedAck() {
+        return servedAck;
     }
 
     /** search-bones-1015: one JSON row per S-b plan point (decision log / rows, as the S-c rows). */
@@ -1807,6 +1883,17 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (voided != null) {
             o.addProperty("voided", voided);
         }
+        synchronized (this) {
+            if (bigLeafBatches > 0) {
+                // bvw-p3-batch-1023: only when a leaf batch needed more than one frame, so every other summary is unchanged
+                final JsonObject lb = new JsonObject();
+                lb.addProperty("batches", bigLeafBatches);
+                lb.addProperty("frames", bigLeafFrames);
+                lb.addProperty("messages", bigLeafMessages);
+                lb.addProperty("max_leaves", bigLeafMax);
+                o.add("leaf_big", lb);
+            }
+        }
         if (obsVersion != 1) {
             // search-v2-1009: only for an obs-v2 seat, so an S1 game's summary is unchanged
             o.addProperty("obs", obsVersion);
@@ -2001,11 +2088,27 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             ps.add((byte[]) p);
         }
         final float[] v;
+        leafError.remove();
         try {
-            v = client().values(ps);
+            final RlSearchClient c = client();
+            final long bb = c.bigBatches, bf = c.bigFrames, bm = c.bigMessages;
+            v = c.values(ps);
+            if (c.bigBatches != bb) {
+                // bvw-p3-batch-1023: a batch above one frame, scored in several frames / messages
+                synchronized (this) {
+                    bigLeafBatches++;
+                    bigLeafFrames += c.bigFrames - bf;
+                    bigLeafMessages += c.bigMessages - bm;
+                    bigLeafMax = Math.max(bigLeafMax, ps.size());
+                }
+            }
         } catch (IOException | RuntimeException e) {
             drop();
-            System.err.println("[rlsearch] LEAVES failed: " + e);
+            // bvw-p3-batch-1023: the cause also goes to the look-ahead, whose static-fallback line names it
+            final String why = "LEAVES failed: " + e + " (" + ps.size() + " leaves, "
+                    + RlSearchClient.leavesBytes(ps, 0, ps.size()) + " leaf bytes)";
+            leafError.set(why);
+            System.err.println("[rlsearch] " + why);
             return null;
         }
         final double[] out = new double[v.length];
@@ -2013,6 +2116,16 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             out[i] = (Math.max(-1.0, Math.min(1.0, v[i])) + 1.0) / 2.0;
         }
         return out;
+    }
+
+    /** Why this thread's last {@link #leafValues} returned null (bvw-p3-batch-1023), or null. */
+    private final ThreadLocal<String> leafError = new ThreadLocal<>();
+    /** Leaf batches above one frame (bvw-p3-batch-1023): batches, frames, messages, the largest batch's leaves. */
+    private long bigLeafBatches = 0, bigLeafFrames = 0, bigLeafMessages = 0, bigLeafMax = 0;
+
+    @Override
+    public String leafError() {
+        return leafError.get();
     }
 
     /** The policy-piloted seat of one play-out: a bridged controller whose asks the search service answers. */
