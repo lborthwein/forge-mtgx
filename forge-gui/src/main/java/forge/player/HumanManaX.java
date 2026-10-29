@@ -167,6 +167,51 @@ public final class HumanManaX {
         return last == max ? new Range(min, max, true, "Complete mana payment") : unknown(min, max, "Large X search");
     }
 
+    /** Upper bound on the X {@link #manaMax} tries. */
+    static final int MANA_MAX_CAP = 99;
+
+    /**
+     * The most X the player's mana could pay for {@code ability}'s mana cost, after its fixed mana part, or null when
+     * that is not computed here (owner report 2026-10-29T17-59-25: Fiend Artisan's {X}{G}, {T}, sacrifice another
+     * creature showed X up to 2147483647, its affordability "unknown" because of the non-mana cost parts).
+     *
+     * <p>Forge AI's own payability test, as forge-mtgx #134's {@code StateEncoder.payableX}: the largest X (at most
+     * {@code max} and {@link #MANA_MAX_CAP}) that {@code ComputerUtilMana.canPayManaCost} accepts, mana only: the
+     * non-mana parts (tap, sacrifice, life) are not priced. It runs on a private LKI copy of the ability (no new id or
+     * view) in test mode, which taps nothing, spends no floating mana, consumes no randomness and leaves the mana
+     * abilities' express choices cleared; for a human seat it reads no AI memory. It is not computed when floating mana,
+     * mana conversion or waterbend is involved (the test payment resets a pool's colour replacements and a waterbend
+     * cap). A hint for a client's X picker: it never bounds what Forge accepts.</p>
+     */
+    public static Integer manaMax(Player player, SpellAbility ability, int max) {
+        if (player == null || ability == null || ability.getPayCosts() == null || ability.getHostCard() == null)
+            return null;
+        final var part = ability.getPayCosts().getCostMana();
+        if (part == null || part.getMana().countX() == 0 || part.getMaxWaterbend() != null
+                || ability.getMaxWaterbend() != null || "NumTimes".equals(ability.getParam("Announce")))
+            return null;
+        if (!player.getManaPool().isEmpty() || player.getManaPool().isSnowForColor()) return null;
+        for (byte color : ManaAtom.MANATYPES)
+            if (player.getManaPool().getPossibleColorUses(color) != color) return null;
+        // the test payment applies these to the pool (StaticAbilityManaConvert, ManaConversion) and keeps them
+        if (ability.hasParam("ManaConversion") || ability.getMayPlayOption() != null
+                || (ability.getGrantorStatic() != null && ability.getGrantorStatic().hasParam("ManaConversion")))
+            return null;
+        for (Card card : player.getGame().getCardsIn(ZoneType.STATIC_ABILITIES_SOURCE_ZONES))
+            for (var st : card.getStaticAbilities())
+                if (st.checkMode(StaticAbilityMode.ManaConvert)) return null;
+        final int cap = Math.min(max, MANA_MAX_CAP);
+        try {
+            final SpellAbility copy = ability.copy(ability.getHostCard(), player, true);
+            copy.setXManaCostPaid(null);
+            int x = 0;
+            while (x < cap && forge.ai.ComputerUtilMana.canPayManaCost(copy, player, x + 1, false)) x++;
+            return x;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     static ManaCost priceAtX(SpellAbility ability, Player player, int x) {
         final SpellAbility copy = ability.copy(ability.getHostCard(), player, true);
         final ManaCostBeingPaid expanded = new ManaCostBeingPaid(ability.getPayCosts().getCostMana().getMana());

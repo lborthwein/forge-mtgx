@@ -315,6 +315,35 @@ final class InteractiveProtocol {
         }
     }
 
+    /**
+     * The config line's {@code seatNames}, or null when absent: the two names players read for the seats (seat order),
+     * in place of Forge's engine names, in every prompt and modal text ({@link InteractiveSeatNames}). Text only: the
+     * engine's player names, and so the game, are unchanged. Same rules as {@code names}: 1..40 letters, digits,
+     * spaces or ._'-.
+     */
+    static List<String> readSeatNames(final String line) throws ProtocolException {
+        final JsonObject json = parseObject(line, "invalid_config", "config");
+        if (!json.has("seatNames") || json.get("seatNames").isJsonNull()) {
+            return null;
+        }
+        if (!json.get("seatNames").isJsonArray() || json.getAsJsonArray("seatNames").size() != 2) {
+            throw new ProtocolException("invalid_config", "seatNames must contain exactly two display names");
+        }
+        final List<String> names = new ArrayList<>(2);
+        for (JsonElement value : json.getAsJsonArray("seatNames")) {
+            if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
+                throw new ProtocolException("invalid_config", "each seat name must be a string");
+            }
+            final String name = value.getAsString().trim();
+            if (name.isEmpty() || name.length() > 40 || !name.matches("[\\p{L}\\p{N} ._'-]+")) {
+                throw new ProtocolException("invalid_config",
+                        "each seat name must be 1..40 letters, digits, spaces or ._'-");
+            }
+            names.add(name);
+        }
+        return List.copyOf(names);
+    }
+
     /** The config line's {@code beliefPool}, or null when absent (the jar's live pool is used). */
     static BeliefPool readBeliefPool(final String line) throws ProtocolException {
         final JsonObject json = parseObject(line, "invalid_config", "config");

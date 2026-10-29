@@ -6,6 +6,9 @@ import java.util.List;
 import java.util.Map;
 
 import forge.game.event.GameEventRandomLog;
+import forge.game.event.GameEventVote;
+import forge.game.player.PlayerView;
+import forge.game.card.CardView;
 import forge.util.Lang;
 import org.apache.commons.lang3.StringUtils;
 
@@ -82,6 +85,17 @@ public class VoteEffect extends SpellAbilityEffect {
         ListMultimap<Object, Player> votes = ArrayListMultimap.create();
         Player voter = game.getControlVote();
 
+        // Informational only (a client shows the votes cast so far while the others decide): nothing reads it.
+        final List<PlayerView> order = Lists.newArrayList();
+        for (final Player p : tgtPlayers) {
+            if (p.isInGame()) {
+                order.add(p.getView());
+            }
+        }
+        final CardView sourceView = CardView.get(host);
+        game.fireEvent(new GameEventVote(GameEventVote.Stage.STARTED, sourceView, order, null, null, null, null,
+                null, secret));
+
         for (final Player p : tgtPlayers) {
             if (!p.isInGame()) {
                 continue;
@@ -105,6 +119,7 @@ public class VoteEffect extends SpellAbilityEffect {
 
                 if (result != null) {
                     votes.put(result, p);
+                    game.fireEvent(voteCast(sourceView, order, p, realVoter, result, secret));
                     if (!secret) {
                         game.getAction().notifyOfValue(sa, p, result + "\r\n" +
                                 Localizer.getInstance().getMessage("lblCurrentVote") + ":" + votes, p);
@@ -116,6 +131,9 @@ public class VoteEffect extends SpellAbilityEffect {
                 }
             }
         }
+
+        game.fireEvent(new GameEventVote(GameEventVote.Stage.ENDED, sourceView, order, null, null, null, null,
+                null, secret));
 
         final String voteResult = record.toString();
         if (secret) {
@@ -179,6 +197,28 @@ public class VoteEffect extends SpellAbilityEffect {
                 host.addRemembered(votes.keySet());
             }
         }
+    }
+
+    /** The {@link GameEventVote.Stage#CAST} event of {@code voter}'s vote for {@code result}. */
+    private static GameEventVote voteCast(final CardView source, final List<PlayerView> order, final Player voter,
+                                          final Player chooser, final Object result, final boolean secret) {
+        CardView card = null;
+        PlayerView player = null;
+        final String label;
+        if (result instanceof Card c) {
+            card = c.getView();
+            label = c.getName();
+        } else if (result instanceof Player p) {
+            player = p.getView();
+            label = p.getName();
+        } else if (result instanceof SpellAbility choice) {
+            final String description = choice.getDescription();
+            label = description == null || description.isBlank() ? String.valueOf(choice) : description;
+        } else {
+            label = String.valueOf(result);
+        }
+        return new GameEventVote(GameEventVote.Stage.CAST, source, order, voter.getView(),
+                chooser == voter ? null : chooser.getView(), card, player, label, secret);
     }
 
     private static List<Object> getMostVotes(final ListMultimap<Object, Player> votes) {

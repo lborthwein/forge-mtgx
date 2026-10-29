@@ -98,6 +98,7 @@ public final class InteractiveMain {
         try {
             config = InteractiveProtocol.readConfig(configLine);
             eventPool = InteractiveProtocol.readBeliefPool(configLine); // honest-belief-1020
+            seatNames = InteractiveProtocol.readSeatNames(configLine); // votes-seatnames-1029
             beliefSeen = InteractiveProtocol.readBeliefSeen(configLine); // deck-guess-1021
             puzzle = InteractivePuzzle.read(com.google.gson.JsonParser.parseString(configLine).getAsJsonObject());
             validateDeckFiles(config.decks());
@@ -213,6 +214,7 @@ public final class InteractiveMain {
             configureHumanPayment(humanController);
             gui = new InteractiveGuiGame(channel, config.humanSeat());
             gui.bind(game, human, humanController);
+            gui.setSeatNames(seatNames);
             if (continuation != null) {
                 gui.setContinuation(continuation);
             }
@@ -382,6 +384,7 @@ public final class InteractiveMain {
                 configureHumanPayment(humanController);
                 final InteractiveGuiGame gui = new InteractiveGuiGame(channel, seat, table);
                 gui.bind(game, human, humanController);
+                gui.setSeatNames(seatNames);
                 humanController.setGui(gui);
                 guis.add(gui);
                 controllers.add(humanController);
@@ -818,6 +821,8 @@ public final class InteractiveMain {
 
     /** honest-belief-1020: this session's event card pool (the config's beliefPool), or null: the jar's live pool. */
     static volatile InteractiveProtocol.BeliefPool eventPool;
+    /** The config line's {@code seatNames} (votes-seatnames-1029), or null: text only, never the engine's names. */
+    static volatile java.util.List<String> seatNames;
 
     /** Lane puzzle-host-1021: this one-seat game's puzzle position (the config's puzzle), or null: a deck game. */
     static volatile InteractivePuzzle.Spec puzzle;
