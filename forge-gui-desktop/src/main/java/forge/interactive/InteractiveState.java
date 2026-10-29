@@ -581,7 +581,7 @@ final class InteractiveState {
             return;
         }
         try {
-            final Card card = game.findById(cardObject.get("fid").getAsInt());
+            final Card card = findListedCard(game, cardObject.get("fid").getAsInt());
             final java.util.List<String> chosen = card == null ? null : card.getNamedCards();
             if (chosen == null || chosen.isEmpty()) {
                 return;
@@ -661,6 +661,42 @@ final class InteractiveState {
         return visibleCardForFid(object, field, game, viewer) != null;
     }
 
+    /**
+     * The card this view lists under {@code id}, in any registered seat's zones (lane own-cards-after-loss-1028, owner
+     * report 2026-10-28T23-24-50). {@link Game#findById} walks in-game players only, so once a seat has lost every card
+     * in its zones (the ones {@link #addEliminatedSeats} lists) went unresolved: its own hand was dropped and its own
+     * battlefield redacted to "Face-down card", in its own terminal view and in the opponent's. An eliminated seat's
+     * cards are looked up in that seat's zones too. Only the lookup changes: who may receive a card's identity is still
+     * {@link #mayReceiveIdentity}, Forge's own canBeShownTo / face-down rules, so the opponent's hand stays hidden.
+     */
+    static Card findListedCard(final Game game, final int id) {
+        final Card inGame = game.findById(id);
+        if (inGame != null) {
+            return inGame;
+        }
+        for (Player player : game.getRegisteredPlayers()) {
+            if (game.getPlayers().contains(player)) {
+                continue; // findById already walked this seat's zones
+            }
+            for (ZoneType zone : ELIMINATED_SEAT_ZONES) {
+                final forge.game.zone.PlayerZone cards = player.getZone(zone);
+                if (cards == null) {
+                    continue;
+                }
+                for (Card card : cards.getCards(false)) {
+                    if (card.getId() == id) {
+                        return card;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** The zones {@link Game#findById} walks per player, for {@link #findListedCard}. */
+    private static final List<ZoneType> ELIMINATED_SEAT_ZONES = List.of(ZoneType.Graveyard, ZoneType.Hand,
+            ZoneType.Library, ZoneType.Battlefield, ZoneType.Exile, ZoneType.Command);
+
     /** The card {@code object[field]} names, when the viewer may receive its identity; otherwise null. */
     private static Card visibleCardForFid(final JsonObject object, final String field,
                                           final Game game, final PlayerView viewer) {
@@ -668,7 +704,7 @@ final class InteractiveState {
             return null;
         }
         try {
-            final Card card = game.findById(object.get(field).getAsInt());
+            final Card card = findListedCard(game, object.get(field).getAsInt());
             return card != null && card.getZone() != null
                     && card.getView().getZone() == card.getZone().getZoneType()
                     && mayReceiveIdentity(card.getView(), viewer) ? card : null;
