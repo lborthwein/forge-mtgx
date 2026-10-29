@@ -12,10 +12,11 @@ import forge.game.player.PlayerView;
  * <p>Purely informational: nothing in the rules engine or the AI reads it. It is fired after the engine has recorded
  * the vote and creates no object, id or timestamp and consumes no randomness.</p>
  *
- * @param stage        {@link Stage#STARTED}, {@link Stage#CAST} or {@link Stage#ENDED}
+ * @param stage        {@link Stage#STARTED}, {@link Stage#VOTER} (a player's turn to vote begins), {@link Stage#CAST}
+ *                     or {@link Stage#ENDED}
  * @param source       the card whose ability holds the vote
  * @param order        the voting order (the players who vote, starting with the ability's controller); every stage
- * @param voter        CAST: the player whose vote this is ({@code null} otherwise)
+ * @param voter        VOTER, CAST: the player whose vote this is ({@code null} otherwise)
  * @param chooser      CAST: the player who chose this vote when another player controls the votes
  *                     ({@code Game.getControlVote}); {@code null} when the voter chose it, and for another stage
  * @param choiceCard   CAST: the card voted for, when the vote is for a card
@@ -23,12 +24,13 @@ import forge.game.player.PlayerView;
  * @param choiceLabel  CAST: the option voted for, when the vote is for a named option ("Grace", "Condemnation"); also
  *                     the readable name of a card or player choice
  * @param secret       the vote is secret (votes are revealed only at the end)
+ * @param voteAmount   VOTER: how many votes the voter casts (additional votes included); 0 otherwise
  */
 public record GameEventVote(Stage stage, CardView source, List<PlayerView> order, PlayerView voter,
                             PlayerView chooser, CardView choiceCard, PlayerView choicePlayer, String choiceLabel,
-                            boolean secret) implements GameEvent {
+                            boolean secret, int voteAmount) implements GameEvent {
 
-    public enum Stage { STARTED, CAST, ENDED }
+    public enum Stage { STARTED, VOTER, CAST, ENDED }
 
     public GameEventVote {
         order = order == null ? List.of() : List.copyOf(order);

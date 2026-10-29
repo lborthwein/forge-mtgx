@@ -301,6 +301,7 @@ final class InteractiveGameEvents {
      * <ul>
      * <li>{@code vote_started}: {@code source} (the card holding the vote, named as a log names a card) and
      * {@code sourceFid} when the viewer may see it, {@code order} (the voting seats, in order), {@code secret}.</li>
+     * <li>{@code vote_turn}: a player's turn to vote begins: {@code playerSeat}, {@code votes} (how many it casts).</li>
      * <li>{@code vote_cast}, the game-log line of each vote ("AI Player votes for Craterhoof Behemoth."):
      * {@code playerSeat} (whose vote it is), {@code chooserSeat} (vote control: the seat that chose it),
      * {@code secret}; and, unless the vote is secret and not the viewer's own, {@code choiceKind} (card / player /
@@ -314,10 +315,16 @@ final class InteractiveGameEvents {
                              final PlayerView viewer) {
         kind(result, switch (e.stage()) {
             case STARTED -> "vote_started";
+            case VOTER -> "vote_turn";
             case CAST -> "vote_cast";
             case ENDED -> "vote_ended";
         });
         result.addProperty("secret", e.secret());
+        if (e.stage() == GameEventVote.Stage.VOTER) {
+            seat(result, game, e.voter());
+            result.addProperty("votes", e.voteAmount());
+            return;
+        }
         if (e.stage() != GameEventVote.Stage.CAST) {
             if (e.source() != null) {
                 result.addProperty("source", label(e.source(), game, viewer));

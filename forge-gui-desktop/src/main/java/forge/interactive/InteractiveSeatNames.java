@@ -34,14 +34,22 @@ final class InteractiveSeatNames {
     static final String YOU = "You";
 
     private final List<String> configured;
+    /** The config's {@code names}: engine names a host chose for table seats, display names already. */
+    private final Set<String> hostNames;
 
     InteractiveSeatNames(final List<String> configured) {
+        this(configured, null);
+    }
+
+    InteractiveSeatNames(final List<String> configured, final List<String> hostNames) {
         this.configured = configured == null || configured.size() != 2 ? List.of() : List.copyOf(configured);
+        this.hostNames = hostNames == null ? Set.of() : Set.copyOf(hostNames);
     }
 
     /** The display name of {@code seat} as the player at {@code viewerSeat} reads it. */
     String displayName(final Game game, final int seat, final int viewerSeat) {
-        if (!configured.isEmpty() && seat >= 0 && seat < configured.size()) {
+        if (!configured.isEmpty() && seat >= 0 && seat < configured.size()
+                && !isOtherSeatsEngineName(game, seat, configured.get(seat))) {
             return configured.get(seat);
         }
         final Player player = playerAt(game, seat);
@@ -59,23 +67,110 @@ final class InteractiveSeatNames {
         if (text == null || text.isEmpty() || game == null) {
             return text;
         }
-        final List<Player> players = new ArrayList<>(game.getRegisteredPlayers());
-        // the longer name first: "Player 1" inside "Player 10" is never replaced on its own
-        players.sort(Comparator.comparingInt((Player p) -> p.getName() == null ? 0 : -p.getName().length()));
-        String result = text;
-        for (Player player : players) {
-            final String internal = player.getName();
-            if (internal == null || internal.isBlank()) {
-                continue;
-            }
-            final int seat = seatOf(game, player);
-            final String display = displayName(game, seat, viewerSeat);
-            if (display.equals(internal)) {
-                continue;
-            }
-            result = replaceName(result, internal, display);
+        final Compiled compiled = compiled(game, viewerSeat);
+        if (compiled == null) {
+            return text;
         }
-        return result;
+        final Matcher m = compiled.pattern.matcher(text);
+        final StringBuilder out = new StringBuilder(text.length() + 16);
+        int last = 0;
+        while (m.find()) {
+            out.append(text, last, m.start());
+            final String display = compiled.display.get(m.group(1));
+            final boolean possessive = m.group(2) != null;
+            last = m.end();
+            if (!YOU.equals(display)) {
+                out.append(display).append(possessive ? m.group(2) : "");
+                continue;
+            }
+            final boolean start = sentenceStart(out);
+            if (possessive) {
+                out.append(start ? "Your" : "your");
+                continue;
+            }
+            out.append(start ? "You" : "you");
+            // "Browser Player, you are going second." reads "You are going second."
+            final String rest = text.substring(last);
+            if (rest.startsWith(", you ") || rest.startsWith(", You ")) {
+                last += ", you".length();
+                continue;
+            }
+            final Matcher verb = NEXT_WORD.matcher(rest);
+            if (verb.find() && SECOND_PERSON.containsKey(verb.group(2))) {
+                out.append(verb.group(1)).append(SECOND_PERSON.get(verb.group(2)));
+                last += verb.end();
+            }
+        }
+        out.append(text, last, text.length());
+        return out.toString();
+    }
+
+    /** One alternation of every rewritable engine name (longest first), and each one's display name. */
+    private record Compiled(Pattern pattern, Map<String, String> display) {
+    }
+
+    /** review #138 S3-7: compiled once per game and viewer, not per string. */
+    private final Map<Long, Compiled> cache = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile Game cachedGame;
+
+    private Compiled compiled(final Game game, final int viewerSeat) {
+        if (cachedGame != game) {
+            cache.clear();
+            cachedGame = game;
+        }
+        final Compiled hit = cache.get((long) viewerSeat);
+        if (hit != null) {
+            return hit.pattern == null ? null : hit;
+        }
+        final List<Player> players = game.getRegisteredPlayers();
+        final Map<String, Integer> count = new java.util.HashMap<>();
+        for (Player p : players) {
+            if (p.getName() != null) {
+                count.merge(p.getName(), 1, Integer::sum);
+            }
+        }
+        final Map<String, String> display = new java.util.LinkedHashMap<>();
+        for (int seat = 0; seat < players.size(); seat++) {
+            final String internal = players.get(seat).getName();
+            // review #138 S2-1: never a host-chosen name (it is a display name, and may be a word of card text), never
+            // a name two seats share (whose would it be?)
+            if (internal == null || internal.isBlank() || hostNames.contains(internal) || count.get(internal) > 1) {
+                continue;
+            }
+            final String shown = displayName(game, seat, viewerSeat);
+            if (!shown.equals(internal)) {
+                display.put(internal, shown);
+            }
+        }
+        final Compiled result;
+        if (display.isEmpty()) {
+            result = new Compiled(null, Map.of());
+        } else {
+            final List<String> names = new ArrayList<>(display.keySet());
+            names.sort(Comparator.comparingInt(String::length).reversed());
+            final StringBuilder alternation = new StringBuilder();
+            for (String name : names) {
+                alternation.append(alternation.length() == 0 ? "" : "|").append(Pattern.quote(name));
+            }
+            result = new Compiled(Pattern.compile("(?<![\\p{L}\\p{N}])(" + alternation
+                    + ")('s|’s)?(?![\\p{L}\\p{N}])"), Map.copyOf(display));
+        }
+        cache.put((long) viewerSeat, result);
+        return result.pattern == null ? null : result;
+    }
+
+    /** A configured display name that is another seat's engine name would make the text ambiguous: not used. */
+    private static boolean isOtherSeatsEngineName(final Game game, final int seat, final String name) {
+        if (game == null) {
+            return false;
+        }
+        final List<Player> players = game.getRegisteredPlayers();
+        for (int i = 0; i < players.size(); i++) {
+            if (i != seat && name.equals(players.get(i).getName())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -83,12 +178,17 @@ final class InteractiveSeatNames {
      * depth of {@code node}) rendered by {@link #render}.
      */
     void renderTree(final JsonElement node, final Game game, final int viewerSeat) {
+        renderTree(node, game, viewerSeat, Set.of());
+    }
+
+    /** As above; {@code cardItems}: list-choice item ids whose option is a card (never rewritten either). */
+    void renderTree(final JsonElement node, final Game game, final int viewerSeat, final Set<String> cardItems) {
         if (node == null || game == null) {
             return;
         }
         if (node.isJsonArray()) {
             for (JsonElement element : node.getAsJsonArray()) {
-                renderTree(element, game, viewerSeat);
+                renderTree(element, game, viewerSeat, cardItems);
             }
             return;
         }
@@ -96,17 +196,21 @@ final class InteractiveSeatNames {
             return;
         }
         final JsonObject object = node.getAsJsonObject();
+        // review #138 S2-1: a card's control or item names the card (and quotes its text): never rewritten
+        final boolean card = object.has("cardId") || object.has("id") && object.get("id").isJsonPrimitive()
+                && (object.get("id").getAsString().startsWith("card:")
+                        || cardItems.contains(object.get("id").getAsString()));
         for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
             final JsonElement value = entry.getValue();
             if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()
-                    && TEXT_KEYS.contains(entry.getKey())) {
+                    && TEXT_KEYS.contains(entry.getKey()) && !card) {
                 final String before = value.getAsString();
                 final String after = render(before, game, viewerSeat);
                 if (!after.equals(before)) {
                     entry.setValue(new com.google.gson.JsonPrimitive(after));
                 }
             } else if (value.isJsonObject() || value.isJsonArray()) {
-                renderTree(value, game, viewerSeat);
+                renderTree(value, game, viewerSeat, cardItems);
             }
         }
     }
@@ -131,42 +235,6 @@ final class InteractiveSeatNames {
             Map.entry("can", "can"), Map.entry("cannot", "cannot"), Map.entry("would", "would"));
 
     private static final Pattern NEXT_WORD = Pattern.compile("^(\\s+)([a-z]+)\\b");
-
-    private static String replaceName(final String text, final String internal, final String display) {
-        final Pattern name = Pattern.compile("(?<![\\p{L}\\p{N}])" + Pattern.quote(internal)
-                + "('s|’s)?(?![\\p{L}\\p{N}])");
-        final Matcher m = name.matcher(text);
-        final StringBuilder out = new StringBuilder(text.length() + 16);
-        int last = 0;
-        while (m.find()) {
-            out.append(text, last, m.start());
-            final boolean possessive = m.group(1) != null;
-            last = m.end();
-            if (!YOU.equals(display)) {
-                out.append(display).append(possessive ? m.group(1) : "");
-                continue;
-            }
-            final boolean start = sentenceStart(out);
-            if (possessive) {
-                out.append(start ? "Your" : "your");
-                continue;
-            }
-            out.append(start ? "You" : "you");
-            // "Browser Player, you are going second." reads "You are going second."
-            final String rest = text.substring(last);
-            if (rest.startsWith(", you ") || rest.startsWith(", You ")) {
-                last += ", you".length();
-                continue;
-            }
-            final Matcher verb = NEXT_WORD.matcher(rest);
-            if (verb.find() && SECOND_PERSON.containsKey(verb.group(2))) {
-                out.append(verb.group(1)).append(SECOND_PERSON.get(verb.group(2)));
-                last += verb.end();
-            }
-        }
-        out.append(text, last, text.length());
-        return out.toString();
-    }
 
     /** True when the next word written to {@code out} begins a sentence (or the text, or a line). */
     private static boolean sentenceStart(final CharSequence out) {

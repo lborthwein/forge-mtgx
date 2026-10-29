@@ -37,6 +37,10 @@ final class InteractiveVotes {
         final List<Cast> casts = new CopyOnWriteArrayList<>();
         /** The last vote of another player, until its pop-up is shown. */
         volatile Cast unannounced;
+        /** The index in {@link #order} of the player now voting (VOTER), -1 before the first. */
+        volatile int asking = -1;
+        /** How many votes the player now voting casts. */
+        volatile int askingVotes;
 
         Open(final CardView source, final List<PlayerView> order, final boolean secret) {
             this.source = source;
@@ -51,6 +55,19 @@ final class InteractiveVotes {
     void onEvent(final GameEventVote e, final PlayerView self) {
         switch (e.stage()) {
             case STARTED -> open = new Open(e.source(), e.order(), e.secret());
+            case VOTER -> {
+                final Open current = open;
+                if (current != null && e.voter() != null) {
+                    int index = -1;
+                    for (int i = 0; i < current.order.size(); i++) {
+                        if (current.order.get(i).getId() == e.voter().getId()) {
+                            index = i;
+                        }
+                    }
+                    current.askingVotes = e.voteAmount();
+                    current.asking = index;
+                }
+            }
             case CAST -> {
                 Open current = open;
                 if (current == null) {
@@ -68,6 +85,11 @@ final class InteractiveVotes {
 
     boolean isOpen() {
         return open != null;
+    }
+
+    /** No vote open (a game over, or a new game bound). */
+    void clear() {
+        open = null;
     }
 
     /**
@@ -91,7 +113,7 @@ final class InteractiveVotes {
      * Nothing is added when no vote is open.
      */
     void addContext(final JsonObject context, final Game game, final PlayerView viewer, final JsonArray controls,
-                    final InteractiveSeatNames names, final int viewerSeat) {
+                    final Map<String, ?> choiceOptions, final InteractiveSeatNames names, final int viewerSeat) {
         final Open current = open;
         if (current == null || game == null) {
             return;
@@ -120,6 +142,7 @@ final class InteractiveVotes {
             context.addProperty("voteNextSeat", next);
         }
         final Map<Integer, List<String>> byCard = new LinkedHashMap<>();
+        final Map<Integer, List<String>> byPlayer = new LinkedHashMap<>();
         final Map<String, List<String>> byLabel = new LinkedHashMap<>();
         int i = 0;
         for (Cast cast : current.casts) {
@@ -149,6 +172,7 @@ final class InteractiveVotes {
                 context.addProperty(k + "ChoiceSeat", choiceSeat);
                 context.addProperty(k + "Choice", choiceSeat);
                 context.addProperty(k + "Label", names.displayName(game, choiceSeat, viewerSeat));
+                byPlayer.computeIfAbsent(cast.player().getId(), x -> new ArrayList<>()).add(String.valueOf(seat));
             } else {
                 context.addProperty(k + "ChoiceKind", "option");
                 context.addProperty(k + "Choice", cast.label());
@@ -176,7 +200,24 @@ final class InteractiveVotes {
                         }
                         final String id = string(item.getAsJsonObject(), "id");
                         List<String> seats = null;
-                        if (id != null && id.startsWith("card:")) {
+                        // review #138 S3-6: a list choice's item ("choice:0") is resolved through its option object
+                        final Object option = choiceOptions == null || id == null ? null : choiceOptions.get(id);
+                        if (option instanceof CardView card) {
+                            seats = byCard.get(card.getId());
+                        } else if (option instanceof PlayerView player) {
+                            seats = byPlayer.get(player.getId());
+                        } else if (option instanceof forge.game.spellability.SpellAbilityView ability) {
+                            seats = byLabel.get(ability.getDescription());
+                            if (seats == null) {
+                                seats = byLabel.get(string(item.getAsJsonObject(), "label"));
+                            }
+                        } else if (id != null && id.startsWith("player-id:")) {
+                            try {
+                                seats = byPlayer.get(Integer.parseInt(id.substring("player-id:".length())));
+                            } catch (NumberFormatException ignored) {
+                                seats = null;
+                            }
+                        } else if (id != null && id.startsWith("card:")) {
                             try {
                                 seats = byCard.get(Integer.parseInt(id.substring("card:".length())));
                             } catch (NumberFormatException ignored) {
@@ -244,15 +285,8 @@ final class InteractiveVotes {
             }
         }
         final List<String> still = new ArrayList<>();
-        final List<Integer> voted = new ArrayList<>();
-        for (Cast each : current.casts) {
-            voted.add(seatOf(game, each.voter()));
-        }
-        for (PlayerView player : current.order) {
-            final int seat = seatOf(game, player);
-            if (seat >= 0 && !voted.contains(seat)) {
-                still.add(names.displayName(game, seat, viewerSeat));
-            }
+        for (int seat : stillToVote(current, game)) {
+            still.add(names.displayName(game, seat, viewerSeat));
         }
         if (!still.isEmpty()) {
             text.append("\n\nStill to vote: ").append(String.join(", ", still));
@@ -264,18 +298,38 @@ final class InteractiveVotes {
     static final String CURRENT_VOTES_MARKER =
             forge.util.Localizer.getInstance().getMessage("lblCurrentVote") + ":";
 
-    private static int nextSeat(final Open current, final Game game) {
-        final List<Integer> voted = new ArrayList<>();
-        for (Cast each : current.casts) {
-            voted.add(seatOf(game, each.voter()));
-        }
-        for (PlayerView player : current.order) {
-            final int seat = seatOf(game, player);
-            if (seat >= 0 && !voted.contains(seat)) {
-                return seat;
+    /**
+     * The seats still to vote, in order (review #138 S3-5): the player now voting while it has votes left (additional
+     * votes count), then every later player in the order. A player skipped by the engine (out of the game, no option
+     * left) drops out once a later player's turn begins.
+     */
+    private static List<Integer> stillToVote(final Open current, final Game game) {
+        final List<Integer> still = new ArrayList<>();
+        final int asking = current.asking;
+        int castByAsking = 0;
+        if (asking >= 0) {
+            final PlayerView now = current.order.get(asking);
+            for (Cast each : current.casts) {
+                if (each.voter() != null && each.voter().getId() == now.getId()) {
+                    castByAsking++;
+                }
             }
         }
-        return -1;
+        for (int i = Math.max(asking, 0); i < current.order.size(); i++) {
+            if (i == asking && castByAsking >= current.askingVotes) {
+                continue;
+            }
+            final int seat = seatOf(game, current.order.get(i));
+            if (seat >= 0 && !still.contains(seat)) {
+                still.add(seat);
+            }
+        }
+        return still;
+    }
+
+    private static int nextSeat(final Open current, final Game game) {
+        final List<Integer> still = stillToVote(current, game);
+        return still.isEmpty() ? -1 : still.get(0);
     }
 
     private static boolean hiddenFrom(final Cast cast, final boolean secret, final Game game, final PlayerView viewer) {

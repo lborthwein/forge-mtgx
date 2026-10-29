@@ -244,12 +244,8 @@ public class InteractiveVoteAndSeatNamesTest extends AITest {
             judgment[0] = addCardToZone("Council's Judgment", foe, ZoneType.Hand);
             // a resolving spell is on the stack, where everyone sees it
             seat.getGame().getStackZone().add(judgment[0]);
-        }, null, self -> {
-            final SpellAbility sa = judgment[0].getFirstSpellAbility();
-            sa.setActivatingPlayer(self.foe);
-            AbilityUtils.resolve(sa);
-        })) {
-            h.game.subscribeToEvents(new Object() {
+            // review #138 S3-1: subscribed before the game thread starts, so no event is missed
+            seat.getGame().subscribeToEvents(new Object() {
                 @com.google.common.eventbus.Subscribe
                 public void on(final forge.game.event.GameEvent e) {
                     if (e instanceof GameEventVote v) {
@@ -257,6 +253,11 @@ public class InteractiveVoteAndSeatNamesTest extends AITest {
                     }
                 }
             });
+        }, null, self -> {
+            final SpellAbility sa = judgment[0].getFirstSpellAbility();
+            sa.setActivatingPlayer(self.foe);
+            AbilityUtils.resolve(sa);
+        })) {
             // 1. the AI's vote, announced in words, with the votes so far in context
             final JsonObject announce = h.request();
             assertEquals(announce.get("inputClass").getAsString(), "modal:message", announce.toString());
@@ -497,6 +498,34 @@ public class InteractiveVoteAndSeatNamesTest extends AITest {
         }
     }
 
+    /**
+     * AiTape.sync()'s fields (package-private there): the RNG seed, the card id counters, the timestamp and every global
+     * id counter (GlobalIds). A replay diverges when any of them moves. Reading {@code Random.seed} needs
+     * {@code --add-opens java.base/java.util=ALL-UNNAMED} (the surefire argLine in the root pom; MAVEN_OPTS for an
+     * in-process run).
+     */
+    private static String syncState(final Game game) throws Exception {
+        final StringBuilder sb = new StringBuilder();
+        if (MyRandom.getRandom() instanceof forge.ai.simulation.PlayoutKeys.TrackedRandom tracked) {
+            // what AiTape.sync() reads: the tracked state, including a pending nextGaussian
+            for (long v : tracked.snapshot()) {
+                sb.append(Long.toHexString(v)).append('g');
+            }
+        } else {
+            final java.lang.reflect.Field seed = java.util.Random.class.getDeclaredField("seed");
+            seed.setAccessible(true);
+            sb.append(Long.toHexString(((java.util.concurrent.atomic.AtomicLong) seed.get(MyRandom.getRandom())).get()));
+        }
+        for (int c : game.peekCardIdCounters()) {
+            sb.append('.').append(Integer.toHexString(c));
+        }
+        sb.append('.').append(Long.toHexString(game.getTimestamp()));
+        for (int v : forge.game.GlobalIds.capture()) {
+            sb.append('.').append(Integer.toHexString(v));
+        }
+        return sb.toString();
+    }
+
     /** The hint is read-only: no randomness drawn, nothing tapped, no floating mana, the ability's X untouched. */
     @Test
     public void manaMaxDrawsNoRandomnessAndChangesNothing() throws Exception {
@@ -518,15 +547,25 @@ public class InteractiveVoteAndSeatNamesTest extends AITest {
             }
         }
         assertNotNull(ability);
+        // the live seat is a PlayerControllerHuman (the payment test reads no AI memory for it)
+        p.dangerouslySetController(new PlayerControllerHuman(game, p, p.getLobbyPlayer()));
         ability.setActivatingPlayer(p);
-        final java.lang.reflect.Field seed = java.util.Random.class.getDeclaredField("seed");
-        seed.setAccessible(true);
-        final long before = ((java.util.concurrent.atomic.AtomicLong) seed.get(MyRandom.getRandom())).get();
+        // the live JVM's RNG is a tracked, seeded one (AiTape's): a draw would move its state
+        final java.util.Random was = MyRandom.getRandom();
+        MyRandom.setRandom(new forge.ai.simulation.PlayoutKeys.TrackedRandom(20261029L));
+        try {
+            manaMaxIsReadOnly(game, p, ability);
+        } finally {
+            MyRandom.setRandom(was);
+        }
+    }
+
+    private void manaMaxIsReadOnly(final Game game, final Player p, final SpellAbility ability) throws Exception {
+        final String before = syncState(game);
         final Integer xBefore = ability.getXManaCostPaid();
         final Integer max = HumanManaX.manaMax(p, ability, Integer.MAX_VALUE);
         assertEquals(max, Integer.valueOf(5), "4 Forests and Sol Ring: {G} and X = 5");
-        assertEquals(((java.util.concurrent.atomic.AtomicLong) seed.get(MyRandom.getRandom())).get(), before,
-                "no randomness drawn");
+        assertEquals(syncState(game), before, "no randomness drawn, no id, timestamp or ability id taken");
         assertEquals(ability.getXManaCostPaid(), xBefore);
         assertTrue(p.getManaPool().isEmpty());
         for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
@@ -606,5 +645,107 @@ public class InteractiveVoteAndSeatNamesTest extends AITest {
             assertEquals(mana.get("kind").getAsString(), "mana", mana.toString());
             assertFalse(mana.has("context") && mana.getAsJsonObject("context").has("optionalPayment"), mana.toString());
         }
+    }
+
+    /** Review #138 S1-1: a convoke spell's X (March of the Multitudes) puts no question to the player: one request. */
+    @Test(timeOut = 900000)
+    public void aConvokeXSpellAsksNothingButX() throws Exception {
+        final Card[] march = new Card[1];
+        try (Harness h = new Harness((seat, foe) -> {
+            addCard("Forest", seat);
+            addCard("Plains", seat);
+            addCard("Plains", seat);
+            addCard("Grizzly Bears", seat).setSickness(false);
+            march[0] = addCardToZone("March of the Multitudes", seat, ZoneType.Hand);
+        }, null, null)) {
+            final JsonObject priority = h.request();
+            h.answer(priority, "selectCard", "card:" + march[0].getId());
+            final JsonObject x = h.request();
+            assertEquals(x.get("inputClass").getAsString(), "modal:announceManaX", x.toString());
+            for (JsonElement c : x.getAsJsonArray("controls")) {
+                final JsonObject control = c.getAsJsonObject();
+                if ("mana-x".equals(control.get("controlId").getAsString())) {
+                    assertFalse(control.getAsJsonObject("value").has("manaMax"), "no hint with convoke: " + control);
+                }
+            }
+            // nothing else was asked before it, and nothing moved
+            long requests = h.seen.stream().filter(m -> "request".equals(m.get("type").getAsString())).count();
+            assertEquals(requests, 2L, "priority, then only the X request: " + h.seen);
+            for (Card c : h.seat.getCardsIn(ZoneType.Battlefield)) {
+                assertFalse(c.isTapped(), "nothing convoked: " + c);
+            }
+            // cancel the X: back to priority, no convoke question in between
+            h.answer(x, "cancel", "mana-x:cancel");
+            final JsonObject next = h.request();
+            assertEquals(next.get("kind").getAsString(), "priority", next.toString());
+        }
+    }
+
+    /** Review #138 S2-1: a host-chosen (table) engine name and a card's own label are never rewritten. */
+    @Test
+    public void hostNamesAndCardLabelsAreNeverRewritten() {
+        final Game game = initAndCreateGame();
+        final Player foe = game.getPlayers().get(0);  // "p2"
+        final Player seat = game.getPlayers().get(1); // "p1"
+        final InteractiveSeatNames table = new InteractiveSeatNames(null, List.of(foe.getName(), seat.getName()));
+        assertEquals(table.render(foe.getName() + " Guide gains haste.", game, 1), foe.getName() + " Guide gains haste.");
+        final InteractiveSeatNames names = new InteractiveSeatNames(List.of("Opp", "Me"));
+        final JsonObject controls = JsonParser.parseString("{\"controls\":[{\"controlId\":\"card:7\",\"cardId\":7,"
+                + "\"label\":\"select card: " + foe.getName() + " Guide (7)\"},{\"controlId\":\"choices\",\"items\":["
+                + "{\"id\":\"choice:0\",\"label\":\"" + foe.getName() + " Guide\"},{\"id\":\"choice:1\",\"label\":\""
+                + foe.getName() + "\"}]}]}").getAsJsonObject();
+        names.renderTree(controls, game, 1, java.util.Set.of("choice:0"));
+        final JsonArray list = controls.getAsJsonArray("controls");
+        assertEquals(list.get(0).getAsJsonObject().get("label").getAsString(), "select card: " + foe.getName() + " Guide (7)");
+        final JsonArray items = list.get(1).getAsJsonObject().getAsJsonArray("items");
+        assertEquals(items.get(0).getAsJsonObject().get("label").getAsString(), foe.getName() + " Guide");
+        assertEquals(items.get(1).getAsJsonObject().get("label").getAsString(), "Opp", "a player item is renamed");
+        // a configured name equal to another seat's engine name is not used (it would read as that seat)
+        final InteractiveSeatNames clash = new InteractiveSeatNames(List.of(seat.getName(), "Me"));
+        assertEquals(clash.displayName(game, 0, 1), InteractiveSeatNames.AI_PLAYER);
+        // one pass: names never chain into each other
+        final InteractiveSeatNames swap = new InteractiveSeatNames(List.of("Me", "Opp"));
+        assertEquals(swap.render(foe.getName() + " and " + seat.getName(), game, 1), "Me and Opp");
+    }
+
+    /** Review #138 S3-5 / S3-6: extra votes keep the voter next; list items carry the tally. */
+    @Test
+    public void extraVotesAndListItemTally() {
+        final Game game = initAndCreateGame();
+        final Player foe = game.getPlayers().get(0);
+        final Player seat = game.getPlayers().get(1);
+        final Card hoof = addCard("Craterhoof Behemoth", seat);
+        final Card ring = addCard("Sol Ring", seat);
+        final List<forge.game.player.PlayerView> order = List.of(foe.getView(), seat.getView());
+        final InteractiveVotes votes = new InteractiveVotes();
+        final InteractiveSeatNames names = new InteractiveSeatNames(null);
+        votes.onEvent(new GameEventVote(GameEventVote.Stage.STARTED, null, order, null, null, null, null, null, false, 0),
+                seat.getView());
+        votes.onEvent(new GameEventVote(GameEventVote.Stage.VOTER, null, order, foe.getView(), null, null, null, null,
+                false, 2), seat.getView());
+        votes.onEvent(new GameEventVote(GameEventVote.Stage.CAST, null, order, foe.getView(), null, hoof.getView(), null,
+                hoof.getName(), false, 0), seat.getView());
+        JsonObject context = new JsonObject();
+        votes.addContext(context, game, seat.getView(), new JsonArray(), null, names, 1);
+        assertEquals(context.get("voteNextSeat").getAsInt(), 0, "the foe has a second vote: " + context);
+        votes.onEvent(new GameEventVote(GameEventVote.Stage.CAST, null, order, foe.getView(), null, hoof.getView(), null,
+                hoof.getName(), false, 0), seat.getView());
+        final JsonArray controls = JsonParser.parseString("[{\"controlId\":\"choices\",\"items\":["
+                + "{\"id\":\"choice:0\",\"label\":\"Craterhoof Behemoth\"},{\"id\":\"choice:1\",\"label\":\"Sol Ring\"}]}]")
+                .getAsJsonArray();
+        final java.util.Map<String, Object> options = new java.util.LinkedHashMap<>();
+        options.put("choice:0", hoof.getView());
+        options.put("choice:1", ring.getView());
+        context = new JsonObject();
+        votes.addContext(context, game, seat.getView(), controls, options, names, 1);
+        assertEquals(context.get("voteNextSeat").getAsInt(), 1, context.toString());
+        assertEquals(context.get("voteCount").getAsInt(), 2);
+        final JsonObject tally = context.getAsJsonObject("voteTally");
+        assertEquals(tally.getAsJsonObject("choice:0").get("votes").getAsInt(), 2, tally.toString());
+        assertEquals(tally.getAsJsonObject("choice:0").get("seats").getAsString(), "0,0");
+        assertFalse(tally.has("choice:1"));
+        // a game over leaves no vote open
+        votes.clear();
+        assertFalse(votes.isOpen());
     }
 }

@@ -214,7 +214,7 @@ public final class InteractiveMain {
             configureHumanPayment(humanController);
             gui = new InteractiveGuiGame(channel, config.humanSeat());
             gui.bind(game, human, humanController);
-            gui.setSeatNames(seatNames);
+            gui.setSeatNames(seatNames, config.names());
             if (continuation != null) {
                 gui.setContinuation(continuation);
             }
@@ -384,7 +384,7 @@ public final class InteractiveMain {
                 configureHumanPayment(humanController);
                 final InteractiveGuiGame gui = new InteractiveGuiGame(channel, seat, table);
                 gui.bind(game, human, humanController);
-                gui.setSeatNames(seatNames);
+                gui.setSeatNames(seatNames, config.names());
                 humanController.setGui(gui);
                 guis.add(gui);
                 controllers.add(humanController);

@@ -94,7 +94,7 @@ public class VoteEffect extends SpellAbilityEffect {
         }
         final CardView sourceView = CardView.get(host);
         game.fireEvent(new GameEventVote(GameEventVote.Stage.STARTED, sourceView, order, null, null, null, null,
-                null, secret));
+                null, secret, 0));
 
         for (final Player p : tgtPlayers) {
             if (!p.isInGame()) {
@@ -114,6 +114,8 @@ public class VoteEffect extends SpellAbilityEffect {
             params.put("Voter", realVoter);
             voteAmount += p.getController().chooseNumber(sa, Localizer.getInstance().getMessage("lblHowManyAdditionalVotesDoYouWant"), 0, optionalVotes, params);
 
+            game.fireEvent(new GameEventVote(GameEventVote.Stage.VOTER, sourceView, order, p.getView(), null, null,
+                    null, null, secret, voteAmount));
             for (int i = 0; i < voteAmount; i++) {
                 Object result = realVoter.getController().vote(sa, host + " " + Localizer.getInstance().getMessage("lblVote") + ":", voteOpts, votes, p, sa.hasParam("UpTo"));
 
@@ -133,7 +135,7 @@ public class VoteEffect extends SpellAbilityEffect {
         }
 
         game.fireEvent(new GameEventVote(GameEventVote.Stage.ENDED, sourceView, order, null, null, null, null,
-                null, secret));
+                null, secret, 0));
 
         final String voteResult = record.toString();
         if (secret) {
@@ -218,7 +220,7 @@ public class VoteEffect extends SpellAbilityEffect {
             label = String.valueOf(result);
         }
         return new GameEventVote(GameEventVote.Stage.CAST, source, order, voter.getView(),
-                chooser == voter ? null : chooser.getView(), card, player, label, secret);
+                chooser == voter ? null : chooser.getView(), card, player, label, secret, 0);
     }
 
     private static List<Object> getMostVotes(final ListMultimap<Object, Player> votes) {

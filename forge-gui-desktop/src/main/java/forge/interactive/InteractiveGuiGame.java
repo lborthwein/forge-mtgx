@@ -147,6 +147,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
     private final ThreadLocal<CardView> textSubject = new ThreadLocal<>();
     /** Decision facts (`request.context`) for the request being built on this thread, or null. */
     private final ThreadLocal<JsonObject> requestContext = new ThreadLocal<>();
+    /** The objects behind a list choice's item ids ("choice:0" ...) for the request being built on this thread. */
+    private final ThreadLocal<Map<String, ?>> choiceOptions = new ThreadLocal<>();
     /** The vote in progress (owner report 2026-10-29T18-03-47); see {@link InteractiveVotes}. */
     private final InteractiveVotes votes = new InteractiveVotes();
     /** The names players read in place of Forge's engine names; see {@link InteractiveSeatNames}. */
@@ -216,6 +218,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         }
         this.game = Objects.requireNonNull(game);
         this.human = Objects.requireNonNull(human);
+        votes.clear();
         this.controller = Objects.requireNonNull(controller);
     }
 
@@ -225,7 +228,15 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
 
     /** The config line's {@code seatNames} (null or absent: the defaults of {@link InteractiveSeatNames}). */
     void setSeatNames(final List<String> names) {
-        seatNames = new InteractiveSeatNames(names);
+        setSeatNames(names, null);
+    }
+
+    /**
+     * As {@link #setSeatNames(List)}, with the config's {@code names} ({@code hostNames}): a table seat's engine name
+     * that the host chose is a display name already and is never rewritten (review #138 S2-1).
+     */
+    void setSeatNames(final List<String> names, final List<String> hostNames) {
+        seatNames = new InteractiveSeatNames(names, hostNames);
     }
 
     /** How many times this seat enumerated controls for a request (tests). */
@@ -1750,7 +1761,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (votes.isOpen() && game != null && human != null) {
             // owner report 2026-10-29T18-03-47: every request while a vote is open says who voted for what
             context = context == null ? new JsonObject() : context.deepCopy();
-            votes.addContext(context, game, human.getView(), controls, seatNames, humanSeat);
+            votes.addContext(context, game, human.getView(), controls, choiceOptions.get(), seatNames, humanSeat);
         }
         if (context != null) {
             body.add("context", context);
@@ -1758,8 +1769,17 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         // Forge's engine names ("Default Forge", "Browser Player") never reach a player: seat display names
         if (game != null) {
             final InteractiveSeatNames names = seatNames;
+            final Set<String> cardItems = new HashSet<>();
+            final Map<String, ?> options = choiceOptions.get();
+            if (options != null) {
+                options.forEach((id, option) -> {
+                    if (option instanceof CardView) {
+                        cardItems.add(id);
+                    }
+                });
+            }
             names.renderTree(prompt, game, humanSeat);
-            names.renderTree(controls, game, humanSeat);
+            names.renderTree(controls, game, humanSeat, cardItems);
             if (context != null) {
                 names.renderTree(context, game, humanSeat);
             }
@@ -2316,6 +2336,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         if (event instanceof GameEventVote vote && !isReadOnlyQueryEcho()) {
             votes.onEvent(vote, human == null ? null : human.getView());
         }
+        if (event instanceof GameEventGameOutcome) {
+            votes.clear(); // review #138 S3-4: a game that ends mid-vote leaves no vote open
+        }
         if (event instanceof GameEventGameOutcome && controller != null) {
             controller.macros().cancelCurrentMacro();
             controller.getInputQueue().onGameOver(true);
@@ -2827,7 +2850,8 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         metadata.addProperty("affordability", exact ? "exact" : "unknown");
         metadata.addProperty("detail", detail);
         if (manaMax != null && manaMax >= 0) {
-            metadata.addProperty("manaMax", Math.max(min, Math.min(max, manaMax)));
+            // as computed (at most max): review #138 S3-3, no clamp up to min
+            metadata.addProperty("manaMax", Math.min(max, manaMax));
         }
         number.add("value", metadata);
         final JsonArray controls = new JsonArray();
@@ -3214,6 +3238,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         final SpellAbility targeting = targetingChoice(message, options);
         final JsonObject answer;
         requestContext.set(targeting == null ? null : targetContext(targeting, itemTargets(byId)));
+        choiceOptions.set(byId);
         try {
             answer = ask("choice", inputClass, title, message, min, max,
                     min == 0, controls, action -> {
@@ -3222,6 +3247,7 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                     });
         } finally {
             requestContext.remove();
+            choiceOptions.remove();
         }
         if ("cancel".equals(string(answer, "type"))) {
             return Collections.emptyList();

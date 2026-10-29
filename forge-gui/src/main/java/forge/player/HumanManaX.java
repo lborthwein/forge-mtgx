@@ -190,6 +190,7 @@ public final class HumanManaX {
         if (part == null || part.getMana().countX() == 0 || part.getMaxWaterbend() != null
                 || ability.getMaxWaterbend() != null || "NumTimes".equals(ability.getParam("Announce")))
             return null;
+        if (asksWhilePricing(player, ability)) return null;
         if (!player.getManaPool().isEmpty() || player.getManaPool().isSnowForColor()) return null;
         for (byte color : ManaAtom.MANATYPES)
             if (player.getManaPool().getPossibleColorUses(color) != color) return null;
@@ -204,12 +205,43 @@ public final class HumanManaX {
         try {
             final SpellAbility copy = ability.copy(ability.getHostCard(), player, true);
             copy.setXManaCostPaid(null);
+            // review #138 S3-3: not even X = 0 is affordable: no hint
+            if (!forge.ai.ComputerUtilMana.canPayManaCost(copy, player, 0, false)) return null;
             int x = 0;
             while (x < cap && forge.ai.ComputerUtilMana.canPayManaCost(copy, player, x + 1, false)) x++;
             return x;
         } catch (RuntimeException e) {
             return null;
         }
+    }
+
+    /**
+     * Review #138 S1-1: the mechanics whose cost adjustment asks the payer's controller even in a test payment
+     * (CostAdjustment.adjust): convoke / improvise (choose creatures or artifacts), delve (choose cards, and it clears
+     * the real card's delved list), assist (choose a player; an AI assistant pays for real), TapCreaturesForMana,
+     * offering / emerge (choose a permanent), a face-down cast, the ability's own ReduceCost / RaiseCost, a ReduceCost
+     * static with UpTo (choose the reduction), and the order of several cost reductions under ChooseCostOrder. With
+     * any of them in play the hint is not computed: a hint must never put a question to the player.
+     */
+    static boolean asksWhilePricing(Player player, SpellAbility ability) {
+        final Card host = ability.getHostCard();
+        for (Keyword keyword : List.of(Keyword.CONVOKE, Keyword.IMPROVISE, Keyword.DELVE, Keyword.ASSIST))
+            if (host.hasKeyword(keyword)) return true;
+        if (ability.isOffering() || ability.isEmerge() || ability.isBestow() || ability.isCastFaceDown()
+                || ability.hasParam("ReduceCost") || ability.hasParam("RaiseCost")
+                || ability.hasParam("TapCreaturesForMana") || !ability.getPipsToReduce().isEmpty())
+            return true;
+        int reductions = 0;
+        for (Card card : player.getGame().getCardsInGame()) {
+            for (var st : card.getStaticAbilities()) {
+                if (!st.checkMode(StaticAbilityMode.ReduceCost) && !st.checkMode(StaticAbilityMode.RaiseCost)
+                        && !st.checkMode(StaticAbilityMode.SetCost)) continue;
+                if (st.hasParam("UpTo")) return true;
+                if (st.checkMode(StaticAbilityMode.ReduceCost)) reductions++;
+            }
+        }
+        return reductions > 1 && player.getController() != null
+                && player.getController().isFullControl(forge.game.player.PlayerController.FullControlFlag.ChooseCostOrder);
     }
 
     static ManaCost priceAtX(SpellAbility ability, Player player, int x) {
