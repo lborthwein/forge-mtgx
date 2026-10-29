@@ -389,7 +389,10 @@ public class LessonScriptTest extends AITest {
             final InteractivePuzzle.Spec spec = InteractivePuzzle.read(config(position, run == 0 ? null : "rest=bot"));
             final List<String> lines = InteractivePuzzle.lines(spec, 0);
             InteractivePuzzle.hook(InteractivePuzzle.position(spec, lines, 0), game).run();
-            InteractivePuzzle.seatScript(spec, game, 0);
+            if (run == 1) {
+                // J3: the game start seats a rest=bot lesson seat on every classic-AI lesson; run 0 is the plain seat
+                InteractivePuzzle.seatScript(spec, game, 0);
+            }
             game.getPhaseHandler().resetPriority();
             game.getPhaseHandler().onStackResolved();
             assertEquals(ai(game).getController() instanceof LessonScriptController, run == 1);

@@ -1246,6 +1246,26 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
         devModeSet(phase0, player0, true, 1);
     }
 
+    /**
+     * mtgx lane lessons-forge-jar-1027 (J3, a lesson position installed in a running game; nothing else calls it): the
+     * counters, extra turns and phases and the no-progress guard a fresh game starts without, before the position's
+     * {@code devModeSet}. The turn number, the phase and the priority are the position's (GameState sets them).
+     */
+    public final void devResetForPosition() {
+        extraTurns.clear();
+        extraPhases.clear();
+        nUpkeepsThisTurn = 0;
+        nUpkeepsThisGame = 0;
+        nCombatsThisTurn = 0;
+        nMainsThisTurn = 0;
+        nEndOfTurnsThisTurn = 0;
+        planarDiceSpecialActionThisTurn = 0;
+        skipDamageSteps = false;
+        bRepeatCleanup = false;
+        playerPreviousTurn = null;
+        noProgressGuard = null;
+    }
+
     public final void devModeSet(final PhaseType phase0, final Player player0, int cturn) {
         devModeSet(phase0, player0, true, cturn);
     }

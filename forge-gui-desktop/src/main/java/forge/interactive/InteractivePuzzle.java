@@ -473,15 +473,24 @@ final class InteractivePuzzle {
     /**
      * Seat the spec's script on the AI seat of {@code game} (after the game is created, before the AI tape is installed,
      * so a recording tape wraps the scripted seat). Every card the script names must be one Forge's database knows, and
-     * every phase one Forge's phase table knows; a refusal is {@code invalid_puzzle}. Null without a script.
+     * every phase one Forge's phase table knows; a refusal is {@code invalid_puzzle}. Null without a script, except a
+     * lesson position (goal 'none') on the classic AI seat, which gets a {@code rest=bot} lesson seat (J3).
      */
     static forge.ai.lesson.LessonScriptController seatScript(final Spec spec, final Game game, final int humanSeat)
             throws InteractiveProtocol.ProtocolException {
-        if (spec == null || spec.script() == null) {
+        if (spec == null || (spec.script() == null && spec.hasGoal())) {
             return null;
         }
-        final forge.ai.lesson.LessonScript script = checkedScript(spec.script());
         final Player ai = InteractiveMain.playerAtSeat(game, 1 - humanSeat);
+        if (spec.script() == null && (ai == null || ai.getController().getClass() != forge.ai.PlayerControllerAi.class)) {
+            // a lesson position with no script on a look-ahead or policy seat (strength hard): that seat, unchanged (and
+            // no installs, J3)
+            return null;
+        }
+        // J3: a lesson position with no script is a lesson seat too, rest=bot (the plain Forge AI, decision for
+        // decision), so a later install can give it a script
+        final forge.ai.lesson.LessonScript script = spec.script() == null ? forge.ai.lesson.LessonScript.parse("rest=bot")
+                : checkedScript(spec.script());
         if (ai == null || !(ai.getController() instanceof forge.ai.PlayerControllerAi)) {
             throw refuse("a lesson script needs the AI seat");
         }

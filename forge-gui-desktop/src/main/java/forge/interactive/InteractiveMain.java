@@ -199,7 +199,11 @@ public final class InteractiveMain {
             // lane forge-continue-1011: a rebuild remembers the live AI_TIMEOUT for its handover and runs at 600 s
             final InteractiveContinuation continuation = rebuild ? InteractiveContinuation.forGame(game) : null;
             // lane lessons-forge-jar-1027 (J2): a lesson's scripted AI seat, before the tape (which then wraps it)
-            InteractivePuzzle.seatScript(puzzle, game, config.humanSeat());
+            final forge.ai.lesson.LessonScriptController lessonSeat = InteractivePuzzle.seatScript(puzzle, game,
+                    config.humanSeat());
+            // J3: a lesson game takes lesson positions installed in it (null for every other game)
+            final InteractiveLessons lessons = InteractiveLessons.arm(puzzle, game, config.humanSeat(), lessonSeat,
+                    System.err);
             bindAiFixes(registered);
             bindLookahead(registered, game, config.seed(), "forced".equals(tapeMode));
             bindPolicy(registered, game, config.seed());
@@ -223,6 +227,9 @@ public final class InteractiveMain {
             gui.setSeatNames(seatNames, config.names());
             if (continuation != null) {
                 gui.setContinuation(continuation);
+            }
+            if (lessons != null) {
+                gui.setLessons(lessons);
             }
             if (review != null) {
                 gui.setRequestObserver(review::onRequest);
@@ -254,7 +261,11 @@ public final class InteractiveMain {
                     if (gameTape != null) {
                         gameTape.bindGameThread(Thread.currentThread());
                     }
-                    match.startGame(game, puzzleHook);
+                    if (lessons == null) {
+                        match.startGame(game, puzzleHook);
+                    } else {
+                        lessons.run(match, game, puzzleHook); // J3: the game, with lesson installs
+                    }
                     gameFinished.complete(null);
                 } catch (InteractiveGuiGame.GameConceded conceded) {
                     // Concede is a real Forge game action. Its outcome, not this control
