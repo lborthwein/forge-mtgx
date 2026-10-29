@@ -236,6 +236,24 @@ public class BvwDecisionLogTest {
         Assert.assertThrows(IllegalArgumentException.class, () -> RlActorBench.parse(o));
     }
 
+    /** bvw-tape-decisions-1028: a record pass's log whose LookaheadBench digest differs from the tape's is not accepted. */
+    @Test
+    public void aSidecarLogNeedsTheLookaheadDigestToo() {
+        final JsonObject r = new JsonObject();
+        r.add(DecisionLog.KEY, new JsonObject());
+        r.addProperty("equal", true);
+        r.addProperty("reference_required", true);
+        r.addProperty("trajectory_equal", true);
+        Assert.assertTrue(DecisionLog.accepted(r), "no digest_lb fields (older sidecars): as before");
+        r.addProperty("digest_lb_tape", "98c3bf10ec48ff6f");
+        r.addProperty("digest_lb_replay", "98c3bf10ec48ff6f");
+        Assert.assertTrue(DecisionLog.accepted(r));
+        r.addProperty("digest_lb_replay", "c8d61f5f32680097");
+        Assert.assertFalse(DecisionLog.accepted(r), "a different LookaheadBench digest is not step 0's game");
+        r.add("digest_lb_replay", com.google.gson.JsonNull.INSTANCE);
+        Assert.assertFalse(DecisionLog.accepted(r), "a tape digest_lb the replay did not reproduce");
+    }
+
     // ------------------------------------------------------------------------------------------------ forced replay
 
     @Test

@@ -384,6 +384,13 @@ final class DecisionLog {
         if (r.has("trajectory_equal") && !r.get("trajectory_equal").getAsBoolean()) {
             return false;
         }
+        // bvw-tape-decisions-1028: and LookaheadBench's finer digest of the game, when both are known (a slow-core record
+        // pass of 2988739350 matched the digest and step 0's trajectory but not digest_lb: not step 0's game, refused,
+        // as a forced replay of it is unequal by review #124 S2-2)
+        if (r.has("digest_lb_tape") && r.has("digest_lb_replay") && !r.get("digest_lb_tape").isJsonNull()
+                && !r.get("digest_lb_tape").equals(r.get("digest_lb_replay"))) {
+            return false;
+        }
         return !r.has("state_sha_mismatch") || r.get("state_sha_mismatch").getAsInt() == 0;
     }
 
@@ -416,6 +423,12 @@ final class DecisionLog {
             o.addProperty("line", line);
             o.add("digest_tape", t.get("digest"));
             o.add("digest_replay", row.get("digest_replay"));
+            if (t.has("digest_lb")) {
+                // bvw-tape-decisions-1028: LookaheadBench's digest too (accepted() needs both to agree)
+                o.add("digest_lb_tape", t.get("digest_lb"));
+                o.add("digest_lb_replay", row.has("digest_lb_replay") ? row.get("digest_lb_replay")
+                        : com.google.gson.JsonNull.INSTANCE);
+            }
             o.addProperty("equal", equal);
             // review #124 S2-3: an HonestForcedWin tape's re-run is host-dependent; its log counts only with the
             // trajectory check against step 0 (and step 2's state_sha where checked)
