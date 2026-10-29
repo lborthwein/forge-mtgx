@@ -65,6 +65,60 @@ final class DecisionLog {
         return new DecisionLog(Mode.RECORD, null);
     }
 
+    /**
+     * bvw-tape-decisions-1028 ({@code "decisionLogDiag": true}; off by default): a RECORD log whose top-level entries
+     * also carry {@code "d"}: the decision's wall ms and, when the seat's forced-win solver worked on it, that work
+     * ({@code "fw"}: engine ms and runs, engine and planner nodes, lines, worlds, play-outs, and whether a wall-clock
+     * budget cut it). Read by nobody in a replay: the answers and states are the log's either way.
+     */
+    static DecisionLog record(final boolean diag) {
+        final DecisionLog d = new DecisionLog(Mode.RECORD, null);
+        d.diag = diag;
+        return d;
+    }
+
+    private boolean diag;
+
+    private static AiTape.Diag diagOf(final Player p) {
+        return new AiTape.Diag() {
+            @Override
+            public Object begin() {
+                final forge.ai.simulation.ForcedWinSolver s = solver(p);
+                return new Object[] {System.nanoTime(), s == null ? null : s.meter.copy()};
+            }
+
+            @Override
+            public JsonObject end(final Object token) {
+                final Object[] a = (Object[]) token;
+                final JsonObject d = new JsonObject();
+                d.addProperty("ms", (System.nanoTime() - (Long) a[0]) / 1_000_000L);
+                final forge.ai.simulation.ForcedWinSolver s = solver(p);
+                if (s != null) {
+                    final forge.ai.simulation.ForcedWinSolver.Meter m = s.meter.since((forge.ai.simulation.ForcedWinSolver.Meter) a[1]);
+                    if (m.offenses + m.engineRuns + m.lines + m.plannerNodes > 0) {
+                        final JsonObject fw = new JsonObject();
+                        fw.addProperty("engine_ms", m.engineNanos / 1_000_000L);
+                        fw.addProperty("engine_runs", m.engineRuns);
+                        fw.addProperty("engine_nodes", m.engineNodes);
+                        fw.addProperty("planner_nodes", m.plannerNodes);
+                        fw.addProperty("lines", m.lines);
+                        fw.addProperty("worlds", m.worlds);
+                        fw.addProperty("playouts", m.playouts);
+                        fw.addProperty("ms_bound", m.msBound());
+                        d.add("fw", fw);
+                    }
+                }
+                return d;
+            }
+        };
+    }
+
+    /** The seat's forced-win solver once its policy made one (never makes one), or null. */
+    private static forge.ai.simulation.ForcedWinSolver solver(final Player p) {
+        final forge.ai.CubeComboControl c = forge.ai.CubeComboAi.control(p);
+        return c == null ? null : c.forcedWinIfRead();
+    }
+
     /** A forced replay of {@code log} (a tape line's {@link #KEY} object). */
     static DecisionLog forced(final JsonObject log) {
         if (log == null || !log.has("entries") || !log.has("format")
@@ -93,6 +147,9 @@ final class DecisionLog {
             }
             final AiTape t = mode == Mode.RECORD ? AiTape.record(game, p, rng, out)
                     : AiTape.forced(game, p, rng, out, entries);
+            if (mode == Mode.RECORD && diag) {
+                t.diag(diagOf(p)); // bvw-tape-decisions-1028: per-decision wall ms and solver work (diagnostics only)
+            }
             t.tagSeat();
             p.dangerouslySetController(AiTapeController.wrap(inner, t));
             t.install();

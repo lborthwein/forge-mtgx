@@ -136,6 +136,10 @@ public final class CubeComboControl {
         }
         return solver;
     }
+    /** bvw-tape-decisions-1028 (diagnostics): the solver once {@link #forcedWin()} has made it, else null; never makes one. */
+    public forge.ai.simulation.ForcedWinSolver forcedWinIfRead() {
+        return solverRead ? solver : null;
+    }
     public int getComboSelectionChanges() { return comboSelectionChanges; }
     public int getComboTutorPlanCasts() { return comboTutorPlanCasts; }
     /** Read-only per-game provenance and reach for the opt-in BVW generator. Never initializes a solver. */

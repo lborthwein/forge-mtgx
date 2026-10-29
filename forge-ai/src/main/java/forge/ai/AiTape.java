@@ -182,6 +182,8 @@ public final class AiTape {
         /** The start state differs from what the last entry left (so the entry carries it). */
         final boolean preNew;
         JsonArray sub;
+        /** bvw-tape-decisions-1028: the diagnostics hook's token for a top-level entry (null without a hook). */
+        Object diag;
 
         Rec(final boolean exec, final String pre, final boolean preNew) {
             this.exec = exec;
@@ -391,6 +393,25 @@ public final class AiTape {
         }
     }
 
+    /**
+     * bvw-tape-decisions-1028 (research, diagnostics only): told when each top-level RECORD entry begins and ends; what
+     * {@link #end(Object)} returns is the entry's {@code "d"} field, which no replay reads. Null (the default, and every
+     * live path): no field, and nothing changes.
+     */
+    public interface Diag {
+        Object begin();
+
+        JsonObject end(Object token);
+    }
+
+    private Diag diag;
+
+    /** Set the diagnostics hook (RECORD only; before {@link #install}). */
+    public AiTape diag(final Diag d) {
+        this.diag = d;
+        return this;
+    }
+
     public boolean isForced() {
         return mode == Mode.FORCED;
     }
@@ -550,6 +571,9 @@ public final class AiTape {
         final long t0 = System.nanoTime();
         final String pre = sync();
         final Rec r = new Rec(exec, pre, !pre.equals(lastPost));
+        if (diag != null && open.isEmpty()) {
+            r.diag = diag.begin();
+        }
         r.o.addProperty("k", k);
         if (m != null) {
             r.o.addProperty("m", m);
@@ -588,6 +612,12 @@ public final class AiTape {
         r.o.addProperty("post", post);
         lastPost = post;
         if (open.isEmpty()) {
+            if (r.diag != null) {
+                final JsonObject d = diag.end(r.diag);
+                if (d != null) {
+                    r.o.add("d", d);
+                }
+            }
             r.o.addProperty("n", entries++);
             r.o.addProperty("t", game.getPhaseHandler().getTurn());
             if (tagged) {

@@ -193,6 +193,49 @@ public class BvwDecisionLogTest {
         Assert.assertTrue(on.get(0).has("honest_generator"), "the HonestForcedWin seats' summary is on the tape");
     }
 
+    /**
+     * bvw-tape-decisions-1028: decisionLogDiag puts per-decision diagnostics ("d": wall ms; "fw": the forced-win solver's
+     * engine ms, worlds, ...) on the logged entries, and nothing else changes: the same game, the same entries apart
+     * from "d", and a forced replay of that log is complete and exact.
+     */
+    @Test
+    public void decisionDiagnosticsChangeNothingButTheirOwnField() throws Exception {
+        final RlActorBench.Cfg c = cfg("train");
+        c.decisionLog = "record";
+        c.decisionLogDiag = true;
+        final RlActorBench.Played p = RlActorBench.play(c, "train", games.get(0), new RlFeaturizer(index),
+                RlActorBench.nullRecorder(), null, "test");
+        Assert.assertNull(p.guardError, String.valueOf(p.guardError));
+        Assert.assertEquals(masked(p.tape), masked(off.get(0)), "the same game as without a log");
+        final JsonArray diagEntries = p.tape.getAsJsonObject(DecisionLog.KEY).getAsJsonArray("entries");
+        final JsonArray plainEntries = on.get(0).getAsJsonObject(DecisionLog.KEY).getAsJsonArray("entries");
+        Assert.assertEquals(diagEntries.size(), plainEntries.size());
+        int fw = 0;
+        long worlds = 0;
+        for (int i = 0; i < diagEntries.size(); i++) {
+            final JsonObject e = diagEntries.get(i).getAsJsonObject().deepCopy();
+            Assert.assertTrue(e.has("d") && e.getAsJsonObject("d").has("ms"), "every top-level entry has diagnostics: " + e);
+            final JsonObject d = e.remove("d").getAsJsonObject();
+            if (d.has("fw")) {
+                fw++;
+                worlds += d.getAsJsonObject("fw").get("worlds").getAsLong();
+            }
+            Assert.assertEquals(RlWire.canonicalString(e), RlWire.canonicalString(plainEntries.get(i)),
+                    "entry " + i + " is the plain log's but for its diagnostics");
+            Assert.assertFalse(plainEntries.get(i).getAsJsonObject().has("d"), "no diagnostics without the key");
+        }
+        Assert.assertTrue(fw > 0 && worlds > 0, "the HonestForcedWin seats' solver work is on some decisions: " + fw);
+        final RlActorBench.Played f = RlActorBench.play(cfg("train"), "train", games.get(0), new RlFeaturizer(index),
+                RlActorBench.nullRecorder(), null, "test", null, DecisionLog.forced(p.tape.getAsJsonObject(DecisionLog.KEY)));
+        Assert.assertEquals(f.end.get("digest").getAsString(), p.tape.get("digest").getAsString());
+        Assert.assertTrue(f.decisionLog.complete());
+        Assert.assertTrue(f.decisionLog.replayJson().get("exact").getAsBoolean(), f.decisionLog.replayJson().toString());
+        final JsonObject o = new JsonObject();
+        o.addProperty("mode", "train");
+        o.addProperty("decisionLogDiag", true);
+        Assert.assertThrows(IllegalArgumentException.class, () -> RlActorBench.parse(o));
+    }
+
     // ------------------------------------------------------------------------------------------------ forced replay
 
     @Test

@@ -207,6 +207,11 @@ public final class RlActorBench {
          * {@code "record"} (re-run the seats of a tape without a log and write their log to {@link #decisionLogOut}).
          */
         String decisionLog = null;
+        /**
+         * bvw-tape-decisions-1028 (false, the default: nothing changes): a RECORD log's top-level entries also carry
+         * per-decision diagnostics ({@code "d"}: wall ms; the forced-win solver's engine ms, worlds, nodes, ms_bound).
+         */
+        boolean decisionLogDiag = false;
         /** bvw-decision-log-1027: replay {@code "record"}: the directory of {@code decision-logs-<pid>.jsonl.gz}. */
         String decisionLogOut = null;
         /** bvw-decision-log-1027: replay: logs an earlier {@code "record"} replay wrote (used for digest-equal games). */
@@ -355,6 +360,12 @@ public final class RlActorBench {
             if (!ok.contains(c.decisionLog)) {
                 throw new IllegalArgumentException("decisionLog in " + c.mode + " mode is one of " + ok + ", not "
                         + c.decisionLog);
+            }
+        }
+        if (o.has("decisionLogDiag") && !o.get("decisionLogDiag").isJsonNull()) {
+            c.decisionLogDiag = o.get("decisionLogDiag").getAsBoolean();
+            if (c.decisionLogDiag && !"record".equals(c.decisionLog)) {
+                throw new IllegalArgumentException("decisionLogDiag is for decisionLog record");
             }
         }
         if (o.has("decisionLogOut") && !o.get("decisionLogOut").isJsonNull()) {
@@ -626,7 +637,7 @@ public final class RlActorBench {
             final RlSeat.Endpoint ep, final RlSeat.FrameListener listener, final String jarSha, final GameHook hook) {
         // bvw-decision-log-1027: a generation run's decisionLog "record" logs every game (a replay chooses per tape)
         return play(cfg, mode, g, feat, ep, listener, jarSha, hook,
-                "record".equals(cfg.decisionLog) && !"replay".equals(cfg.mode) ? DecisionLog.record() : null);
+                "record".equals(cfg.decisionLog) && !"replay".equals(cfg.mode) ? DecisionLog.record(cfg.decisionLogDiag) : null);
     }
 
     /** bvw-decision-log-1027: {@code dl} (null = none, as before) records or forces both Forge seats' decisions. */
@@ -2023,7 +2034,7 @@ public final class RlActorBench {
         if (side != null) {
             return DecisionLog.forced(side);
         }
-        return "record".equals(mode) ? DecisionLog.record() : null;
+        return "record".equals(mode) ? DecisionLog.record(cfg.decisionLogDiag) : null;
     }
 
     static String dlSource(final JsonObject t, final DecisionLog dl) {
