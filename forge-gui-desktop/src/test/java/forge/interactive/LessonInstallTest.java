@@ -378,6 +378,14 @@ public class LessonInstallTest extends AITest {
                     throw new AssertionError("the game failed", failure);
                 }
             }
+            for (var e : Thread.getAllStackTraces().entrySet()) {
+                if (e.getKey().getName().startsWith("Game")) {
+                    System.err.println("[wire-dump] " + e.getKey().getName() + " " + e.getKey().getState());
+                    for (StackTraceElement f : e.getValue()) {
+                        System.err.println("[wire-dump]   " + f);
+                    }
+                }
+            }
             throw new AssertionError("no " + type + " in 60 s");
         }
 
@@ -475,7 +483,15 @@ public class LessonInstallTest extends AITest {
             assertEquals(view.get("turn").getAsInt(), 4, after.toString());
             assertEquals(w.lessons.installs(), 1);
             // a request that is not priority (the player's blocks, after their scripted attack): refused
-            final JsonObject combat = after.get("kind").getAsString().equals("combat") ? after : w.request("combat");
+            // (`after` is open: the scripted pump on the stack; it is answered with a pass before the next request comes)
+            final JsonObject combat;
+            if (after.get("kind").getAsString().equals("combat")) {
+                combat = after;
+            } else {
+                w.send(after, after.get("kind").getAsString(), Wire.pass(after));
+                w.next("ack");
+                combat = w.request("combat");
+            }
             w.send(combat, InteractiveLessons.KIND, installAction(P2, null));
             final JsonObject refused = w.next("ack");
             assertFalse(refused.get("accepted").getAsBoolean());
