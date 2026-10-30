@@ -284,7 +284,6 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
     }
 
-    @Override
     /**
      * labeller-v2 §4 (harness only; absent = every position, the default): -Dforge.bench.labelOnly=FILE of
      * "game_uid:seat:dec_idx" lines, the only positions labelled. A position's label does not depend on the others
@@ -309,6 +308,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
     }
 
+    @Override
     public void beforeDecision(final Player p) {
         final Game g = game;
         final int ord = decisions++;
