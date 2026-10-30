@@ -622,15 +622,12 @@ public class ChooseACardTest extends SimulationTest {
         AssertJUnit.assertEquals(fp, LookaheadSearch.fingerprint(live));
         // with a known card the root world keeps it at its index (private world(), as HonestLabelWorldTest reads it)
         final HonestLabel.Seat s = seat.get();
-        final java.lang.reflect.Field kf = HonestLabel.Seat.class.getDeclaredField("knownOwn");
-        kf.setAccessible(true);
         final Card second = me.getCardsIn(ZoneType.Library).get(1);
-        kf.set(s, java.util.Set.of(second.getId()));
         final java.lang.reflect.Method world = HonestLabel.Seat.class.getDeclaredMethod("world", Game.class, Player.class,
-                Player.class, Random.class);
+                Player.class, Random.class, Set.class);
         world.setAccessible(true);
         for (int seed = 0; seed < 6; seed++) {
-            final Object[] w = (Object[]) world.invoke(s, live, me, opp, new Random(seed));
+            final Object[] w = (Object[]) world.invoke(s, live, me, opp, new Random(seed), java.util.Set.of(second.getId()));
             AssertJUnit.assertEquals(second.getId(), ((Player) w[1]).getCardsIn(ZoneType.Library).get(1).getId());
         }
     }
@@ -822,7 +819,7 @@ public class ChooseACardTest extends SimulationTest {
         cac.setRedraw((lv, lvMe, cg, cm, rng) -> {
             redraws[0]++;
             for (Player opp : cm.getOpponents()) {
-                for (Card h : new ArrayList<>(opp.getCardsIn(ZoneType.Hand))) cg.getAction().moveToLibrary(h, null);
+                for (Card h : new ArrayList<>(opp.getCardsIn(ZoneType.Hand))) cg.getAction().moveToBottomOfLibrary(h, null);
                 for (int i = 0; i < 1; i++) opp.drawCards(1); // a "sampled" hand: their library's top
             }
         });
