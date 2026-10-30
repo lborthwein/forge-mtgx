@@ -86,6 +86,8 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
         public int maxPriorityWait = 400;
         public String profile = "HonestForcedWin";
         public long seed = 1029L;
+        /** Label mode only: capture the post-option frame and zones, play no worlds (no value; frame recapture). */
+        public boolean framesOnly = false;
         public String out;
         public final JsonObject json;
 
@@ -104,6 +106,10 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
             if (o.has("maxPriorityWait")) maxPriorityWait = o.get("maxPriorityWait").getAsInt();
             if (o.has("profile")) profile = o.get("profile").getAsString();
             if (o.has("seed")) seed = o.get("seed").getAsLong();
+            if (o.has("framesOnly")) framesOnly = o.get("framesOnly").getAsBoolean();
+            if (framesOnly && !"label".equals(mode)) {
+                throw new IllegalArgumentException("bank.framesOnly is a label-mode option");
+            }
             out = o.get("out").getAsString();
             if ("label".equals(mode)) {
                 final String spec = System.getProperty("forge.ai.forcedWin.spec", "");
@@ -869,9 +875,13 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
         double wins = 0;
         int ok = 0;
         final List<Card> unknown = unknownLibrary(me);
-        final int w = Math.max(1, Math.min(job.has("worlds") ? job.get("worlds").getAsInt() : spec.worlds, unknown.size()));
+        final int w = spec.framesOnly ? 0
+                : Math.max(1, Math.min(job.has("worlds") ? job.get("worlds").getAsInt() : spec.worlds, unknown.size()));
         row.addProperty("unknown_library", unknown.size());
-        if (!row.has("error")) {
+        if (spec.framesOnly) {
+            row.addProperty("frames_only", true);
+        }
+        if (!row.has("error") && !spec.framesOnly) {
             final ForcedWinSolver.Redraw redraw = AssemblyWorlds.opponentBelief();
             for (int i = 0; i < w; i++) {
                 final JsonObject wr = world(i, w, me, unknown, redraw, stopTurn);
