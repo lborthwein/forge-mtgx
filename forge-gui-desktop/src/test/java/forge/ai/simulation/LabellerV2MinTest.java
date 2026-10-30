@@ -83,4 +83,55 @@ public class LabellerV2MinTest extends AITest {
         Assert.assertThrows(IllegalArgumentException.class, () -> ForcedWinSolver.Config.fromProps(k ->
                 "oppMin".equals(k) ? "true" : "defense".equals(k) ? "false" : null)); // counts-only
     }
+
+    static ForcedWinSolver.Config cfgEngine(final boolean oppMin) {
+        return ForcedWinSolver.Config.fromProps(k -> switch (k) {
+            case "budget" -> "counter";
+            case "defense" -> "false";
+            case "exact" -> "true";
+            case "act" -> "false";
+            case "horizon" -> "1";
+            case "nodes" -> "3000";
+            case "engineNodes" -> "200";
+            case "engineSteps" -> "4000";
+            case "oppMin" -> oppMin ? "true" : null;
+            default -> null;
+        });
+    }
+
+    /**
+     * Predeclared test 5 (the v1 gap): a line v1 proves (its adversary only counters SPELLS with counterspells) that v2
+     * does not: (i) their Rod of Ruin activation for our last life point, answered by our Stifle on the ability;
+     * (ii) their pumped attacker, answered by our Lightning Bolt on it. At least one of the two must be proven by v1
+     * for the test to mean anything; every case v1 proves, v2 must not.
+     */
+    @Test
+    public void v2RefutesLinesV1ProvesAgainstAbilitiesAndRemoval() {
+        final String[][] cases = {
+            {"Stifle", "Island", "1", "", "Rod of Ruin;Mountain;Mountain;Mountain"},
+            {"Lightning Bolt", "Mountain", "4", "Giant Growth", "Grizzly Bears;Forest;Forest"},
+        };
+        int v1Proofs = 0;
+        final StringBuilder sb = new StringBuilder();
+        for (String[] c : cases) {
+            final java.util.function.Supplier<Game> g = () -> ForcedWinSolverTest.game("Default", "Default",
+                    ForcedWinSolverTest.frame(c[0], c[1], Integer.parseInt(c[2]), c[3], c[4], 20, "ai"));
+            final boolean v1 = proven(g.get(), cfgEngine(false)) || proven(g.get(), cfg(false, 64));
+            final boolean v2 = proven(g.get(), cfgEngine(true)) || proven(g.get(), cfg(true, 64));
+            sb.append(c[0]).append(": v1=").append(v1).append(" v2=").append(v2).append("; ");
+            if (v1) {
+                v1Proofs++;
+                Assert.assertFalse(v2, "v2 must refute what only the counterspell adversary let through: " + sb);
+            }
+            // without our answer in hand both prove the line (the MIN is not a blanket refusal)
+            final java.util.function.Supplier<Game> open = () -> ForcedWinSolverTest.game("Default", "Default",
+                    ForcedWinSolverTest.frame("", c[1], Integer.parseInt(c[2]), c[3], c[4], 20, "ai"));
+            if (v1) {
+                Assert.assertTrue(proven(open.get(), cfgEngine(true)) || proven(open.get(), cfg(true, 64)),
+                        "v2 proves the same line with no answer in our hand: " + sb);
+            }
+        }
+        System.err.println("[labeller-v2] stricter cases: " + sb);
+        Assert.assertTrue(v1Proofs >= 1, "no case v1 proves, the test says nothing: " + sb);
+    }
 }
