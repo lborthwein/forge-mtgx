@@ -443,8 +443,14 @@ public final class RlActorBench {
             // r1-assembly-bank-1029
             c.bankSpec = new forge.bench.rl.RlAssemblyBank.Spec(o.getAsJsonObject("bank"));
             if (o.getAsJsonObject("bank").has("jobs")) {
-                for (String l : Files.readAllLines(Paths.get(o.getAsJsonObject("bank").get("jobs").getAsString()),
-                        StandardCharsets.UTF_8)) {
+                final List<String> jl;
+                try {
+                    jl = Files.readAllLines(Paths.get(o.getAsJsonObject("bank").get("jobs").getAsString()),
+                            StandardCharsets.UTF_8);
+                } catch (IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+                for (String l : jl) {
                     if (!l.isBlank()) {
                         c.bankJobs.add(JsonParser.parseString(l).getAsJsonObject());
                     }
