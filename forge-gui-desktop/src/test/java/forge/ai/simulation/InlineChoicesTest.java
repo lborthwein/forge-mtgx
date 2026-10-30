@@ -433,17 +433,20 @@ public class InlineChoicesTest extends SimulationTest {
 
     @Test
     public void triggerOrderLetsTheOracleWin() {
-        // Forge AI's order is a fixed function of the abilities' APIs, so it loses on one of the two libraries: with 0
-        // cards the Oracle must resolve first, with 3 cards Guardian Project's draw must (devotion 2 then sees 2 cards)
+        // Forge AI's order is a fixed function of the abilities' APIs (orderPlaySa: draws resolve first), so it loses on
+        // one of the two libraries: with 0 cards the Oracle must resolve first (Guardian Project's draw from the empty
+        // library loses at the next state-based check), with 3 the draw must (devotion 2 then sees 2 cards). Both games
+        // are played by the real game loop to the end of the turn. (A player who lost leaves getPlayers(): the seat is
+        // read from getRegisteredPlayers.)
         int lib = -1;
         final StringBuilder seen = new StringBuilder();
         for (int n : new int[] {0, 3}) {
             final Game g0 = oracleBoard(n);
             final PlayerControllerAi c0 = seat(g0, 0);
             c0.playChosenSpellAbility(spell(g0.getPlayers().get(0), "Thassa's Oracle"));
-            resolveAll(g0);
-            seen.append(n).append(':').append(g0.getPlayers().get(0).hasWon()).append(' ');
-            if (!g0.getPlayers().get(0).hasWon() && lib < 0) lib = n;
+            loopTurn(g0);
+            seen.append(n).append(':').append(g0.getRegisteredPlayers().get(0).hasWon()).append(' ');
+            if (!g0.getRegisteredPlayers().get(0).hasWon() && lib < 0) lib = n;
         }
         AssertJUnit.assertTrue("precondition: Forge AI's order loses on one library " + seen, lib >= 0);
 
@@ -451,9 +454,18 @@ public class InlineChoicesTest extends SimulationTest {
         final PlayerControllerAi c = seat(g, 0);
         final ChooseACard cac = hook(c, "ORDER_TRIGGERS", (x, p) -> 0.1);
         c.playChosenSpellAbility(spell(g.getPlayers().get(0), "Thassa's Oracle"));
-        resolveAll(g);
-        AssertJUnit.assertTrue(cac.log + " " + cac.counts + " lib " + lib, g.getPlayers().get(0).hasWon());
+        loopTurn(g);
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts + " lib " + lib + " " + seen, g.getRegisteredPlayers().get(0).hasWon());
         AssertJUnit.assertEquals("ORDER_TRIGGERS", kindOf(cac, 0));
+        AssertJUnit.assertEquals("departed", cac.log.get(0).getAsJsonObject().get("outcome").getAsString());
+    }
+
+    /** The real game loop until the game ends or the turn passes (at most 400 steps). */
+    static void loopTurn(final Game g) {
+        final int t = g.getPhaseHandler().getTurn();
+        for (int i = 0; i < 400 && !g.isGameOver() && g.getPhaseHandler().getTurn() == t; i++) {
+            g.getPhaseHandler().mainLoopStep();
+        }
     }
 
     // ------------------------------------------------------------------------------------------------ PAY_TO_PREVENT

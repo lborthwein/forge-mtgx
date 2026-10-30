@@ -2644,6 +2644,7 @@ public final class ChooseACard implements CacHook {
         } finally {
             if (why != null) {
                 count("drop:" + (why.startsWith("error") ? "error" : why.replaceAll("[0-9]+", "#")));
+                if (DEBUG) System.err.println("[cac-dbg] drop " + ask.kind + " " + ask.src + " " + why + (a.forge ? " (forge)" : ""));
             }
             p.ids = forge.util.IdScope.capture();
             p.cache = AiCache.captureScope();
