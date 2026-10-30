@@ -167,6 +167,7 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
     private final JsonObject tape;
     private final List<JsonObject> scanRows = new ArrayList<>();
     private final Map<String, String> lastPrio = new LinkedHashMap<>();
+    private final java.util.TreeMap<String, Integer> census = new java.util.TreeMap<>();
     private int parity = -1;
     // label state
     private boolean diverted = false;
@@ -220,6 +221,9 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
         r.addProperty("bank_mode", spec.mode);
         if ("scan".equals(spec.mode)) {
             r.addProperty("bank_rows", equal ? scanRows.size() : 0);
+            final JsonObject cj = new JsonObject();
+            census.forEach(cj::addProperty);
+            r.add("bank_census", cj);
             if (equal) {
                 sink.write(scanRows);
             }
@@ -327,6 +331,14 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
             pendingRecDetach = false;
             detachAll();
             return;
+        }
+        if ("scan".equals(spec.mode) && "chooseSpellAbilityToPlay".equals(method)) {
+            // the census's timing split (both seats): stack empty or not, own turn or not, play or pass
+            final PhaseHandler ph0 = game.getPhaseHandler();
+            final String key = (c.getPlayer() == seatP() ? "winner" : "loser") + "|stack" + (game.getStack().isEmpty() ? 0 : 1)
+                    + "|" + (ph0.getPlayerTurn() == c.getPlayer() ? "own" : "opp") + "|"
+                    + (value == null || ((List<?>) value).isEmpty() ? "pass" : "play");
+            census.merge(key, 1, Integer::sum);
         }
         if (!"scan".equals(spec.mode) || c.getPlayer() != seatP()) {
             return;
