@@ -35,7 +35,6 @@ import forge.game.PriorityDecisionListener;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
-import forge.game.card.CardCollectionView;
 import forge.game.card.CounterType;
 import forge.game.event.GameEventTurnBegan;
 import forge.game.phase.PhaseHandler;
