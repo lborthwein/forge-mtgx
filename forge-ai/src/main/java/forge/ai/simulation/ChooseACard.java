@@ -1122,8 +1122,7 @@ public final class ChooseACard implements CacHook {
 
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
-            if (leaf.armed) {
-                leaf.reached(getGame());
+            if (leaf.armed && leaf.reached(getGame())) {
                 return null;
             }
             return super.chooseSpellAbilityToPlay();
@@ -1157,20 +1156,27 @@ public final class ChooseACard implements CacHook {
 
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
-            if (leaf.armed) {
-                leaf.reached(getGame());
+            if (leaf.armed && leaf.reached(getGame())) {
                 return null;
             }
             return super.chooseSpellAbilityToPlay();
         }
     }
 
-    /** The leaf point: the first priority of any seat once armed. */
+    /**
+     * The leaf point: once armed, the first priority of any seat with an EMPTY stack (R1's bank frames are taken at the
+     * same point: the first empty-stack priority after the option). A priority with something on the stack is answered
+     * by Forge AI (the triggers the answer caused resolve first).
+     */
     static final class Leaf {
         volatile boolean armed = false, reached = false;
 
-        void reached(final Game g) {
-            reached = true;
+        /** True when this priority is the leaf (the seat then passes and the settle loop stops). */
+        boolean reached(final Game g) {
+            if (g.getStack().isEmpty() && !g.getStack().hasSimultaneousStackEntries()) {
+                reached = true;
+            }
+            return reached;
         }
     }
 
