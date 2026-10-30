@@ -374,6 +374,13 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
         if (!method.equals(next.has("m") ? next.get("m").getAsString() : "")) {
             return NONE;
         }
+        if (next.has("dest")) {
+            // a scripted answer for one destination only (a Doomsday pile's library order, not its exile order)
+            final Object dz = "orderMoveToZoneList".equals(method) ? args[1] : args[0];
+            if (!next.get("dest").getAsString().equals(String.valueOf(dz))) {
+                return NONE;
+            }
+        }
         script.poll();
         try {
             return answer(c, method, args, next);
