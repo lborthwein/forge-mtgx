@@ -208,11 +208,15 @@ public final class ForcedWinSolver {
          * counterspell at one of our spells" and v2 exactly the MIN over the scripted responses: a test then shows what
          * each covers structurally, not what Forge AI happens to play.
          */
-        public boolean testPassiveOpp = false;
+        public transient boolean testPassiveOpp = false;
 
         /** bvw-step1-build-1024: the keys added to the config after the step-0 freeze, with their defaults. */
         public static final java.util.Map<String, Object> STEP1_DEFAULTS = java.util.Map.of("counter", false,
                 "engineSteps", 0, "evalSteps", 0, "engineCards", 0, "enginePathCards", 0, "adoptAttack", false);
+
+        /** Labeller v2 (PREDECLARATION-labeller-v2): its keys, with their defaults (absent from a recorded config at these). */
+        public static final java.util.Map<String, Object> V2_DEFAULTS = java.util.Map.of("oppMin", false,
+                "oppResponses", 4, "oppDepth", 2, "oppNodes", 64);
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
