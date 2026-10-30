@@ -433,7 +433,7 @@ public final class ChooseACard implements CacHook {
         if (destination == ZoneType.Library && memory != null) {
             memory.noteLooked(cards);
         }
-        if (planLive() && plan.order != null) {
+        if (destination == ZoneType.Library && planLive() && plan.order != null) {
             final CardCollectionView o = toMoveOrder(plan.order, cards, destination);
             if (o != null) {
                 return o;
@@ -1008,6 +1008,7 @@ public final class ChooseACard implements CacHook {
         int pickIdx = 0;
         boolean orderUsed, shuffleUsed, arrangeUsed, cardsUsed;
         boolean miss = false;
+        String missWhy = "";
         final List<Integer> recPicks = new ArrayList<>();
         List<Integer> recOrder;
         Boolean recShuffle;
@@ -1034,6 +1035,7 @@ public final class ChooseACard implements CacHook {
                         if (x.getId() == id) return x;
                     }
                     miss = true;
+                    missWhy = "pick" + pickIdx;
                 } else if (record) {
                     if (pickIdx == 0 && firstPick != null) {
                         pickIdx++;
@@ -1058,11 +1060,12 @@ public final class ChooseACard implements CacHook {
         @Override
         public CardCollectionView orderMoveToZoneList(final CardCollectionView cards, final ZoneType destinationZone,
                 final SpellAbility source) {
-            if (!leaf.armed && a.order != null && !orderUsed && !record) {
+            if (!leaf.armed && a.order != null && !orderUsed && !record && destinationZone == ZoneType.Library) {
                 orderUsed = true;
                 final CardCollectionView o = toMoveOrder(a.order, cards, destinationZone);
                 if (o != null) return o;
                 miss = true;
+                missWhy = "order" + cards.size() + "/" + a.order.size();
             }
             final CardCollectionView o = super.orderMoveToZoneList(cards, destinationZone, source);
             if (!leaf.armed && record && recOrder == null && destinationZone == ZoneType.Library) {
@@ -1129,8 +1132,14 @@ public final class ChooseACard implements CacHook {
         /** Consumed every forced response it was given. */
         boolean complete() {
             if (miss) return false;
-            if (a.picks != null && pickIdx < a.picks.size()) return false;
-            if (a.order != null && !record && !orderUsed) return false;
+            if (a.picks != null && pickIdx < a.picks.size()) {
+                missWhy = "picks" + pickIdx + "/" + a.picks.size();
+                return false;
+            }
+            if (a.order != null && !record && !orderUsed) {
+                missWhy = "noOrder";
+                return false;
+            }
             if (a.shuffle != null && !shuffleUsed && !record) return false;
             if (a.top != null && !arrangeUsed && !record) return false;
             return a.cards == null || cardsUsed || record;
@@ -1267,7 +1276,7 @@ public final class ChooseACard implements CacHook {
             }
             if (!sc.complete()) {
                 d.misses++;
-                why = "planMiss";
+                why = "planMiss:" + sc.missWhy;
                 return null;
             }
             if (a.forge && ask.kind != Kind.LAND && ask.kind != Kind.MULLIGAN) {
@@ -1320,7 +1329,7 @@ public final class ChooseACard implements CacHook {
             return null;
         } finally {
             if (why != null) {
-                count("drop:" + (why.startsWith("error") ? "error" : why));
+                count("drop:" + (why.startsWith("error") ? "error" : why.replaceAll("[0-9]+", "#")));
             }
             p.ids = forge.util.IdScope.capture();
             p.cache = AiCache.captureScope();
