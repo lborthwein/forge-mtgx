@@ -2427,6 +2427,9 @@ public final class ChooseACard implements CacHook {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1);
+                if ("legendRule".equals(ask.method)) {
+                    copier.setDeferStateEffects(true); // the legend rule is resumed on the copy with the answer
+                }
                 if (ask.top != null || ask.copyStack) {
                     copier.setCopyStack(true);
                     copier.setSkipResolvingTrigger(true);
@@ -2471,6 +2474,8 @@ public final class ChooseACard implements CacHook {
                 sc.legendKeepId = a.cards.get(0);
                 g.getAction().checkStateEffects(true);
                 if (!sc.cardsUsed) {
+                    if (DEBUG) System.err.println("[cac-dbg] legendNotAsked bf=" + castKey(g, cm) + " ctrl="
+                            + cm.getController().getClass().getSimpleName() + " over=" + g.isGameOver());
                     why = "legendNotAsked";
                     return null;
                 }
@@ -2710,7 +2715,11 @@ public final class ChooseACard implements CacHook {
         } finally {
             sc.setCacHook(null);
         }
-        if (g.getStack().size() <= before) return "notCast";
+        if (g.getStack().size() <= before) {
+            if (DEBUG) System.err.println("[cac-dbg] notCast " + host + " zone=" + host.getZone() + " life=" + cm.getLife()
+                    + " bf=" + castKey(g, cm) + " phy=" + pi[0] + " used=" + used[0]);
+            return "notCast";
+        }
         int need = 0;
         if (a.costPicks != null) for (List<Integer> x : a.costPicks) if (x != null) need++;
         if (a.lifePips > 0) need += a.lifePips;
@@ -2722,6 +2731,7 @@ public final class ChooseACard implements CacHook {
 
     /** The live cast whose copies are being applied (its targets), set around a cast decision's applies. */
     private SpellAbility castAsk = null;
+    static final boolean DEBUG = Boolean.getBoolean("forge.cac.debug");
 
     /** Copy the live ability's targets (cards, players, stack entries; its sub-abilities too) onto {@code cs}. */
     private boolean copyTargets(final SpellAbility from, final SpellAbility cs, final Game g) {

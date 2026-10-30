@@ -80,6 +80,8 @@ public class InlineChoicesTest extends SimulationTest {
         while (!g.getStack().isEmpty() && guard++ < 12) {
             g.getStack().resolveStack();
             g.getAction().checkStateEffects(true);
+            g.getAction().checkGameOverCondition();
+            if (g.isGameOver()) return;
             g.getStack().addAllTriggeredAbilitiesToStack();
         }
     }
@@ -413,6 +415,10 @@ public class InlineChoicesTest extends SimulationTest {
      * terminal win (and loss), no stub needed.
      */
     private Game oracleBoard() {
+        return oracleBoard(0);
+    }
+
+    private Game oracleBoard(final int library) {
         final Game g = initAndCreateGame();
         final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
         g.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
@@ -420,24 +426,33 @@ public class InlineChoicesTest extends SimulationTest {
         addCard("Island", a);
         addCard("Island", a);
         addCardToZone("Thassa's Oracle", a, ZoneType.Hand);
+        for (int i = 0; i < library; i++) addCardToZone("Plains", a, ZoneType.Library);
         for (int i = 0; i < 10; i++) addCardToZone("Plains", b, ZoneType.Library);
         return g;
     }
 
     @Test
     public void triggerOrderLetsTheOracleWin() {
-        final Game g0 = oracleBoard();
-        final PlayerControllerAi c0 = seat(g0, 0);
-        c0.playChosenSpellAbility(spell(g0.getPlayers().get(0), "Thassa's Oracle"));
-        resolveAll(g0);
-        AssertJUnit.assertFalse("precondition: Forge AI's order does not win", g0.getPlayers().get(0).hasWon());
+        // Forge AI's order is a fixed function of the abilities' APIs, so it loses on one of the two libraries: with 0
+        // cards the Oracle must resolve first, with 3 cards Guardian Project's draw must (devotion 2 then sees 2 cards)
+        int lib = -1;
+        final StringBuilder seen = new StringBuilder();
+        for (int n : new int[] {0, 3}) {
+            final Game g0 = oracleBoard(n);
+            final PlayerControllerAi c0 = seat(g0, 0);
+            c0.playChosenSpellAbility(spell(g0.getPlayers().get(0), "Thassa's Oracle"));
+            resolveAll(g0);
+            seen.append(n).append(':').append(g0.getPlayers().get(0).hasWon()).append(' ');
+            if (!g0.getPlayers().get(0).hasWon() && lib < 0) lib = n;
+        }
+        AssertJUnit.assertTrue("precondition: Forge AI's order loses on one library " + seen, lib >= 0);
 
-        final Game g = oracleBoard();
+        final Game g = oracleBoard(lib);
         final PlayerControllerAi c = seat(g, 0);
         final ChooseACard cac = hook(c, "ORDER_TRIGGERS", (x, p) -> 0.1);
         c.playChosenSpellAbility(spell(g.getPlayers().get(0), "Thassa's Oracle"));
         resolveAll(g);
-        AssertJUnit.assertTrue(String.valueOf(cac.log) + cac.counts, g.getPlayers().get(0).hasWon());
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts + " lib " + lib, g.getPlayers().get(0).hasWon());
         AssertJUnit.assertEquals("ORDER_TRIGGERS", kindOf(cac, 0));
     }
 

@@ -83,7 +83,14 @@ public class GameCopier {
     }
 
     /** C1: also copy the original game's stack. Callers must first check {@link #stackUnsupported}. */
-    public void setCopyStack(boolean copyStack) {
+    private boolean deferStateEffects = false;
+
+    /** r3-inline-choices-1030: skip the copy's state-based check (the caller resumes it); default off = as before. */
+    public void setDeferStateEffects(boolean b) {
+        this.deferStateEffects = b;
+    }
+
+        public void setCopyStack(boolean copyStack) {
         this.copyStack = copyStack;
     }
 
@@ -436,7 +443,12 @@ public class GameCopier {
             newGame.getPhaseHandler().setCombat(new Combat(origPhaseHandler.getCombat(), gameObjectMap));
         }
 
-        newGame.getAction().checkStateEffects(true); //ensure state based effects and triggers are updated
+        if (deferStateEffects) {
+            // r3-inline-choices-1030: the caller runs the state-based actions itself (a legend-rule choice on the copy)
+            newGame.getAction().checkStaticAbilities(false);
+        } else {
+            newGame.getAction().checkStateEffects(true); //ensure state based effects and triggers are updated
+        }
         newGame.getTriggerHandler().resetActiveTriggers();
 
         if (GameSimulator.COPY_STACK)

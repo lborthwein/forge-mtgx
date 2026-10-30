@@ -736,7 +736,7 @@ public class ComputerUtilMana {
                     phyLifeToPay += 2;
                 }
 
-                if (sa.hasParam("AIPhyrexianPayment")) {
+                if (sa.hasParam("AIPhyrexianPayment") && !cacLife) { // r3: the hook's answer overrides the card's AI hint
                     if ("Never".equals(sa.getParam("AIPhyrexianPayment"))) {
                         break; // unwise to pay
                     } else if (sa.getParam("AIPhyrexianPayment").startsWith("OnFatalDamage.")) {
