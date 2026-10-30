@@ -2591,6 +2591,9 @@ public final class ChooseACard implements CacHook {
             if (ask.kind == Kind.MULLIGAN) {
                 leaf.reached = true; // no game loop yet: the leaf is the kept hand
             }
+            if (a.manaAlone) {
+                leaf.reached = true; // r3: mana floated alone is the leaf as it stands (the pool empties at the step's end)
+            }
             while (!g.isGameOver() && !leaf.reached && steps < cfg.settleSteps) {
                 ph.mainLoopStep();
                 steps++;

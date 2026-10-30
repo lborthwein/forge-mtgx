@@ -132,8 +132,8 @@ public class InlineChoicesTest extends SimulationTest {
         final Player a = g.getPlayers().get(0);
         final SpellAbility tt = spell(a, "Think Twice");
         playAll(c, cac.priority(c, Collections.singletonList(tt)));
-        AssertJUnit.assertTrue(String.valueOf(cac.log), untapped(a, "Mountain"));
-        AssertJUnit.assertTrue(String.valueOf(cac.log), find(a, ZoneType.Battlefield, "Tundra").isTapped());
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts, untapped(a, "Mountain"));
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts, find(a, ZoneType.Battlefield, "Tundra").isTapped());
         AssertJUnit.assertEquals(1, g.getStack().size());
         AssertJUnit.assertEquals("PAYMENT", kindOf(cac, 0));
         AssertJUnit.assertEquals("departed", cac.log.get(0).getAsJsonObject().get("outcome").getAsString());
@@ -173,7 +173,7 @@ public class InlineChoicesTest extends SimulationTest {
             AssertJUnit.assertEquals(mode, rng0, MyRandom.getRandom().nextLong());
             AssertJUnit.assertEquals(mode, id0, new Card(g.nextCardId(), g).getId());
             if (mode.equals("shadow")) {
-                AssertJUnit.assertTrue(String.valueOf(cac.log), cac.log.toString().contains("shadow-would-depart"));
+                AssertJUnit.assertTrue(cac.log + " " + cac.counts, cac.log.toString().contains("shadow-would-depart"));
             } else {
                 AssertJUnit.assertEquals(0, cac.log.size());
             }
@@ -235,7 +235,7 @@ public class InlineChoicesTest extends SimulationTest {
         final ChooseACard cac = hook(c, "COLOR", (x, p) -> p.getManaPool().getAmountOfColor(MagicColor.RED) > 0 ? 0.9 : 0.1);
         final Player a = g.getPlayers().get(0);
         playAll(c, cac.priority(c, Collections.singletonList(petal(a))));
-        AssertJUnit.assertEquals(String.valueOf(cac.log), 1, a.getManaPool().getAmountOfColor(MagicColor.RED));
+        AssertJUnit.assertEquals(cac.log + " " + cac.counts, 1, a.getManaPool().getAmountOfColor(MagicColor.RED));
         AssertJUnit.assertEquals("COLOR", kindOf(cac, 0));
     }
 
@@ -274,7 +274,7 @@ public class InlineChoicesTest extends SimulationTest {
         final ChooseACard cac = hook(c, "LIFE", (x, p) -> untapped(p, "Island") && inHand(p, "Brainstorm") ? 0.9 : 0.1);
         final Player a = g.getPlayers().get(0);
         playAll(c, cac.priority(c, Collections.singletonList(probe(g))));
-        AssertJUnit.assertTrue(String.valueOf(cac.log), untapped(a, "Island"));
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts, untapped(a, "Island"));
         AssertJUnit.assertEquals(18, a.getLife());
         AssertJUnit.assertEquals(1, g.getStack().size());
         AssertJUnit.assertEquals("LIFE", kindOf(cac, 0));
@@ -304,7 +304,8 @@ public class InlineChoicesTest extends SimulationTest {
     static SpellAbility fowAlt(final Game g) {
         final Player a = g.getPlayers().get(0);
         for (SpellAbility s : find(a, ZoneType.Hand, "Force of Will").getAllPossibleAbilities(a, true)) {
-            if (s.getPayCosts() != null && !s.getPayCosts().hasManaCost()) {
+            if (s.getPayCosts() != null && s.getPayCosts().getCostParts().stream()
+                    .anyMatch(p -> p instanceof forge.game.cost.CostExile)) {
                 s.setActivatingPlayer(a);
                 s.getTargets().add(g.getStack().peekAbility());
                 return s;
@@ -327,7 +328,7 @@ public class InlineChoicesTest extends SimulationTest {
         final ChooseACard cac = hook(c, "COST_CARDS", (x, p) -> inHand(p, pitched) ? 0.9 : 0.1);
         final Player a = g.getPlayers().get(0);
         playAll(c, cac.priority(c, Collections.singletonList(fowAlt(g))));
-        AssertJUnit.assertTrue(String.valueOf(cac.log), inHand(a, pitched));
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts, inHand(a, pitched));
         AssertJUnit.assertEquals("COST_CARDS", kindOf(cac, 0));
         AssertJUnit.assertEquals(2, g.getStack().size());
     }
@@ -367,7 +368,7 @@ public class InlineChoicesTest extends SimulationTest {
                 (x, p) -> ChooseACardTest.inZone(p, ZoneType.Battlefield, "Llanowar Elves") ? 0.9 : 0.1);
         resolveAll(g);
         final Player a = g.getPlayers().get(0);
-        AssertJUnit.assertTrue(String.valueOf(cac.log), ChooseACardTest.inZone(a, ZoneType.Battlefield, "Llanowar Elves"));
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts, ChooseACardTest.inZone(a, ZoneType.Battlefield, "Llanowar Elves"));
         AssertJUnit.assertFalse(ChooseACardTest.inZone(a, ZoneType.Battlefield, "Craw Wurm"));
         AssertJUnit.assertEquals("SACRIFICE", kindOf(cac, 0));
     }
@@ -400,15 +401,16 @@ public class InlineChoicesTest extends SimulationTest {
         final Player a = g.getPlayers().get(0);
         addCard("Isamaru, Hound of Konda", a).setSickness(false);
         g.getAction().checkStateEffects(true);
-        AssertJUnit.assertTrue(String.valueOf(cac.log), untapped(a, "Isamaru, Hound of Konda"));
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts, untapped(a, "Isamaru, Hound of Konda"));
         AssertJUnit.assertEquals("SACRIFICE", kindOf(cac, 0));
     }
 
     // ------------------------------------------------------------------------------------------------ ORDER_TRIGGERS
 
     /**
-     * Thassa's Oracle enters with Guardian Project out and three cards in the library (devotion 2): Guardian Project's
-     * draw must resolve FIRST (be put on the stack last) for the Oracle to win. A real terminal win, no stub needed.
+     * Thassa's Oracle enters with Guardian Project out and an EMPTY library: if Guardian Project's draw resolves first
+     * we lose to the empty-library draw at the next state-based check; the Oracle's trigger must resolve first. A real
+     * terminal win (and loss), no stub needed.
      */
     private Game oracleBoard() {
         final Game g = initAndCreateGame();
@@ -418,7 +420,6 @@ public class InlineChoicesTest extends SimulationTest {
         addCard("Island", a);
         addCard("Island", a);
         addCardToZone("Thassa's Oracle", a, ZoneType.Hand);
-        for (int i = 0; i < 3; i++) addCardToZone("Plains", a, ZoneType.Library);
         for (int i = 0; i < 10; i++) addCardToZone("Plains", b, ZoneType.Library);
         return g;
     }
@@ -477,7 +478,7 @@ public class InlineChoicesTest extends SimulationTest {
         final PlayerControllerAi c = (PlayerControllerAi) g.getPlayers().get(0).getController();
         final ChooseACard cac = hook(c, "PAY_TO_PREVENT", BOLT_READY);
         g.getStack().resolveStack();
-        AssertJUnit.assertTrue(String.valueOf(cac.log), untapped(g.getPlayers().get(0), "Mountain"));
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts, untapped(g.getPlayers().get(0), "Mountain"));
         AssertJUnit.assertEquals("PAY_TO_PREVENT", kindOf(cac, 0));
     }
 }
