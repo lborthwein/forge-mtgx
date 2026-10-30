@@ -508,4 +508,75 @@ public class InlineChoicesTest extends SimulationTest {
         AssertJUnit.assertTrue(cac.log + " " + cac.counts, untapped(g.getPlayers().get(0), "Mountain"));
         AssertJUnit.assertEquals("PAY_TO_PREVENT", kindOf(cac, 0));
     }
+
+    // ------------------------------------------------------------------------------------------------ TARGET (r3-target-choices-1030)
+
+    /** Brain Freeze with Thassa's Oracle in hand and 3 cards left: milling ourselves sets up the Oracle; Forge mills them. */
+    private Game freezeBoard() {
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
+        for (int i = 0; i < 4; i++) addCard("Island", a);
+        addCardToZone("Brain Freeze", a, ZoneType.Hand);
+        addCardToZone("Thassa's Oracle", a, ZoneType.Hand);
+        for (int i = 0; i < 3; i++) addCardToZone("Plains", a, ZoneType.Library);
+        for (int i = 0; i < 10; i++) addCardToZone("Plains", b, ZoneType.Library);
+        return g;
+    }
+
+    static SpellAbility freeze(final Game g) {
+        final SpellAbility sa = spell(g.getPlayers().get(0), "Brain Freeze");
+        sa.getTargets().add(g.getPlayers().get(1)); // Forge AI's own pick: the opponent
+        return sa;
+    }
+
+    @Test
+    public void brainFreezeOnOurselvesSetsUpTheOracle() {
+        final BiFunction<Game, Player, Double> v = (x, p) -> p.getCardsIn(ZoneType.Library).size() <= 2
+                && inHand(p, "Thassa's Oracle") ? 0.9 : 0.1;
+        final Game g = freezeBoard();
+        final PlayerControllerAi c = seat(g, 0);
+        final ChooseACard cac = hook(c, "TARGET", v);
+        playAll(c, cac.priority(c, Collections.singletonList(freeze(g))));
+        resolveAll(g);
+        final Player a = g.getRegisteredPlayers().get(0);
+        AssertJUnit.assertEquals(cac.log + " " + cac.counts, 0, a.getCardsIn(ZoneType.Library).size());
+        AssertJUnit.assertEquals("TARGET", kindOf(cac, 0));
+        AssertJUnit.assertEquals("departed", cac.log.get(0).getAsJsonObject().get("outcome").getAsString());
+    }
+
+    /** Eternal Witness with Time Warp and a Forest in the graveyard: the value wants the card Forge AI does not return. */
+    private Game witnessBoard() {
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
+        for (int i = 0; i < 3; i++) addCard("Forest", a);
+        addCardToZone("Eternal Witness", a, ZoneType.Hand);
+        addCardToZone("Time Warp", a, ZoneType.Graveyard);
+        addCardToZone("Forest", a, ZoneType.Graveyard);
+        for (int i = 0; i < 6; i++) addCardToZone("Plains", a, ZoneType.Library);
+        for (int i = 0; i < 10; i++) addCardToZone("Plains", b, ZoneType.Library);
+        return g;
+    }
+
+    @Test
+    public void witnessReturnsTheCardTheLineNeeds() {
+        final Game g0 = witnessBoard();
+        final PlayerControllerAi c0 = seat(g0, 0);
+        c0.playChosenSpellAbility(spell(g0.getPlayers().get(0), "Eternal Witness"));
+        resolveAll(g0);
+        final Player a0 = g0.getRegisteredPlayers().get(0);
+        final String forgeTook = inHand(a0, "Time Warp") ? "Time Warp" : "Forest";
+        final String want = forgeTook.equals("Time Warp") ? "Forest" : "Time Warp";
+        AssertJUnit.assertTrue("precondition: Forge AI returned one card", inHand(a0, forgeTook));
+
+        final Game g = witnessBoard();
+        final PlayerControllerAi c = seat(g, 0);
+        final ChooseACard cac = hook(c, "TARGET", (x, p) -> inHand(p, want) ? 0.9 : 0.1);
+        c.playChosenSpellAbility(spell(g.getPlayers().get(0), "Eternal Witness"));
+        resolveAll(g);
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts + " forge took " + forgeTook,
+                inHand(g.getRegisteredPlayers().get(0), want));
+        AssertJUnit.assertEquals("TARGET", kindOf(cac, 0));
+    }
 }
