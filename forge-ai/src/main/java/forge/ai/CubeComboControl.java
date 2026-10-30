@@ -116,7 +116,7 @@ public final class CubeComboControl {
             final boolean forced = "true".equals(AiProfileUtil.getAIProp(lobby, AiProps.FORCED_WIN_SOLVER));
             final boolean likelyOnly = "true".equals(AiProfileUtil.getAIProp(lobby, AiProps.LIKELY_WIN_LINES));
             if (forced || likelyOnly) {
-                final String spec = System.getProperty("forge.ai.forcedWin.spec",
+                final String spec = presetSpec != null ? presetSpec : System.getProperty("forge.ai.forcedWin.spec",
                         AiProfileUtil.getAIProp(lobby, AiProps.FORCED_WIN_SPEC));
                 final java.util.Map<String, String> kv = new java.util.HashMap<>();
                 for (String part : spec == null ? new String[0] : spec.split(",")) {
@@ -135,6 +135,18 @@ public final class CubeComboControl {
             }
         }
         return solver;
+    }
+    /**
+     * r3-labelsearch-1030 (E1; null = none, every seat unchanged): this seat's solver spec in place of its profile's
+     * FORCED_WIN_SPEC (the R3 roll-out seats' generator spec with the labeller-v2 keys). Read once, on the first decision.
+     */
+    private String presetSpec;
+
+    public void presetForcedWinSpec(final String spec) {
+        if (solverRead) {
+            throw new IllegalStateException("the forced-win solver was already made");
+        }
+        this.presetSpec = spec;
     }
     /** bvw-tape-decisions-1028 (diagnostics): the solver once {@link #forcedWin()} has made it, else null; never makes one. */
     public forge.ai.simulation.ForcedWinSolver forcedWinIfRead() {

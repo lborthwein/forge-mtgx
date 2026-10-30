@@ -57,6 +57,12 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      * variant, every variant's value, OPR on the seat's first band row with a target, a smoke run's per-world pairs).
      */
     public static final String SCHEMA_STEP3 = "mtgx-bvw-value/3";
+    /**
+     * r3-labelsearch-1030 (E1): rows of the R3 label search ({@link forge.ai.simulation.R3LabelSearch}): the /2 row
+     * fields plus {@code row_kind} (priority | choice), {@code choice_ord} (choice rows), {@code r3} (every candidate's
+     * world values, the pick, the target worlds with their draws and weights, the work) and its target.
+     */
+    public static final String SCHEMA_R3 = "mtgx-bvw-value/4";
     static final byte[] MAGIC = {'M', 'X', 'L', '1'};
 
     /** Shared by the replay threads of one JVM. */
@@ -227,16 +233,23 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     public RlReplayLabeller(final HonestLabel.Spec spec, final int bandLo, final int bandHi, final StepSearch.Spec searchSpec,
             final JsonObject tapeLine, final String jarSha, final Game game, final RlKnowledge knowledge,
             final CardIndex index, final int obs) {
+        this(spec, bandLo, bandHi, searchSpec, tapeLine, jarSha, game, knowledge, index, obs, false);
+    }
+
+    /** r3-labelsearch-1030: as above; {@code r3Band}: the band's teacher is the R3 search ({@link #setR3}), not a block. */
+    public RlReplayLabeller(final HonestLabel.Spec spec, final int bandLo, final int bandHi, final StepSearch.Spec searchSpec,
+            final JsonObject tapeLine, final String jarSha, final Game game, final RlKnowledge knowledge,
+            final CardIndex index, final int obs, final boolean r3Band) {
         spec.checkHonest();
         checkTrainTape(tapeLine);
         if (bandHi < 1 || bandLo < 0 || bandLo >= bandHi) {
             throw new IllegalArgumentException("label band [lo, hi): 0 <= lo < hi, hi >= 1, not [" + bandLo + ", " + bandHi
                     + ")");
         }
-        if (searchSpec != null && !spec.counterBudgets()) {
+        if ((searchSpec != null || r3Band) && !spec.counterBudgets()) {
             throw new IllegalArgumentException("refused: a step-1 search target needs the proof check on budget=counter too");
         }
-        if (bandLo > 0 && searchSpec == null) {
+        if (bandLo > 0 && searchSpec == null && !r3Band) {
             // review #14: a band is a step-k labeller; step-0 rows come only from the turns window
             throw new IllegalArgumentException("refused: a label band without a search block (step-0 rows use turns)");
         }
@@ -332,7 +345,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         windowDecisions++;
         final String phase = String.valueOf(g.getPhaseHandler().getPhase());
         // review-align #3: the position's public-state hash (step rows only; read before anything else reads the game)
-        final String stateSha = search == null ? null : TrajectoryRef.stateSha(g);
+        final String stateSha = search == null && r3 == null ? null : TrajectoryRef.stateSha(g);
         final long key = RlSearch.splitmix(uid ^ (0x6276774c4142454cL + 2L * ord + seat));
         final Object[] got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
             // the seat's own observation (its knowledge only), before anything else reads the game
@@ -386,19 +399,50 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             solved++;
         }
         gates.merge(r.gate, 1, Integer::sum);
+        if (r3 != null) {
+            // r3-labelsearch-1030: the row is written after the decision, when the generator's recorded move is known
+            r3Pending = new Object[] {p, seat, ord, turn, tbe, phase, g.getStack().size(), stateSha, payload,
+                    got[3], r, key};
+            return;
+        }
         row(seat, ord, turn, tbe, phase, g.getStack().size(), stateSha, payload, (Integer) got[3], r, sr);
     }
 
     @Override
     public void afterDecision(final Player p, final List<SpellAbility> chosen) {
+        if (r3 == null) {
+            return;
+        }
+        final Object[] pend = r3Pending;
+        r3Pending = null;
+        if (pend != null && pend[0] == p && fatal == null && FATAL.get() == null) {
+            r3PriorityRow(pend, chosen);
+        }
+        if (pend != null && game != null && !game.isGameOver()) {
+            // LAND and RETURN_COST choice rows: the recorded priority answer, ranked and searched by choose-a-card
+            final int seat = game.getRegisteredPlayers().indexOf(p);
+            final forge.ai.simulation.ChooseACard c = seat < 0 || seat > 1 ? null : r3Choice[seat];
+            if (c != null && chosen != null && chosen.size() == 1 && p.getController() instanceof forge.ai.AiTapeController) {
+                final forge.ai.PlayerControllerAi inner = ((forge.ai.AiTapeController) p.getController()).inner();
+                r3ChoiceAsk(p, -1, () -> c.priority(inner, chosen));
+            }
+        }
     }
 
     private void row(final int seat, final int ord, final int turn, final int tbe, final String phase, final int stack,
             final String stateSha, final byte[] payload, final int C, final HonestLabel.Result r,
             final StepSearch.Result sr) {
+        row(seat, ord, turn, tbe, phase, stack, stateSha, payload, C, r, sr, null, null, -1);
+    }
+
+    private void row(final int seat, final int ord, final int turn, final int tbe, final String phase, final int stack,
+            final String stateSha, final byte[] payload, final int C, final HonestLabel.Result r,
+            final StepSearch.Result sr, final String rowKind, final forge.ai.simulation.R3LabelSearch.Result r3r,
+            final int choiceOrd) {
         final JsonObject h = new JsonObject();
         h.addProperty("kind", "value");
-        h.addProperty("schema", search == null ? SCHEMA : variant != null ? SCHEMA_STEP3 : SCHEMA_STEP);
+        h.addProperty("schema", rowKind != null ? SCHEMA_R3 : search == null ? SCHEMA : variant != null ? SCHEMA_STEP3
+                : SCHEMA_STEP);
         h.addProperty("split", "TRAIN");
         h.addProperty("game_uid", Long.toUnsignedString(uid));
         h.addProperty("seed", tape.get("seed").getAsLong());
@@ -431,6 +475,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         if (search != null) {
             stepFields(h, tbe, r, sr);
         }
+        if (rowKind != null) {
+            r3Fields(h, r, rowKind, r3r, choiceOrd);
+        }
         h.add("controllers", tape.get("controllers"));
         final JsonArray dp = new JsonArray(), ds = new JsonArray();
         for (com.google.gson.JsonElement d : tape.getAsJsonArray("decks")) {
@@ -448,7 +495,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 "p_loss", "worlds_win", "worlds_loss", "lost_worlds", "proposals", "how", "end_reason", "line_how",
                 "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
                 "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof",
-                "state_sha", "s2t"}) {
+                "state_sha", "s2t", "row_kind", "choice_ord", "r3", "r3_sha", "r3_ranker"}) {
             if (h.has(k)) {
                 ir.add(k, h.get(k));
             }
@@ -539,6 +586,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      * games row says which. Returns the number of rows written.
      */
     public int finish(final Sink sink, final boolean digestEqual0, final JsonObject replayRow) throws IOException {
+        if (r3 != null && game != null) {
+            forge.ai.AiTapeController.PROBES.remove(game);
+        }
         // review #9: a game whose labelling hit a fatal search error writes no rows, whatever its digest; with a step-0
         // reference, nor does a game whose positions are not step 0's (the seat/dec_idx swap)
         final JsonObject traj = trajectory == null ? null
@@ -609,6 +659,22 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         gr.addProperty("turns_window", turnsWindow);
         gr.addProperty("spec_sha", specSha);
         gr.addProperty("jar_sha", jarSha);
+        if (r3 != null) {
+            gr.addProperty("schema", SCHEMA_R3);
+            gr.addProperty("band_lo", bandLo);
+            gr.addProperty("band_hi", turnsWindow);
+            gr.addProperty("r3_sha", r3Sha);
+            final JsonObject tj = new JsonObject();
+            for (Map.Entry<String, Integer> e : targets.entrySet()) tj.addProperty(e.getKey(), e.getValue());
+            gr.add("targets", tj);
+            final JsonObject wj = new JsonObject();
+            for (Map.Entry<String, Integer> e : r3Why.entrySet()) wj.addProperty(e.getKey(), e.getValue());
+            gr.add("r3_why", wj);
+            gr.addProperty("r3_ms", Math.round(r3Ms));
+            if (fatal != null) {
+                gr.addProperty("fatal", fatal);
+            }
+        }
         if (search != null) {
             // bvw-step1-build-1024: the band, the search block and the targets by source
             gr.addProperty("schema", variant != null ? SCHEMA_STEP3 : SCHEMA_STEP);
@@ -637,6 +703,312 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         replayRow.addProperty("label_rows_void", digestEqual ? 0 : records.size());
         replayRow.addProperty("label_solve_ms", Math.round(solveMs));
         return digestEqual ? records.size() : 0;
+    }
+
+    // ------------------------------------------------------------------------------------------------ R3 (E1)
+
+    /** r3-labelsearch-1030 (E1; null = off, every path above unchanged): the R3 label search of this game. */
+    private forge.ai.simulation.R3LabelSearch r3;
+    private String r3Sha, r3RankerName;
+    private Object[] r3Pending;
+    private final forge.ai.simulation.ChooseACard[] r3Choice = new forge.ai.simulation.ChooseACard[2];
+    private final forge.ai.simulation.OwnLibraryMemory[] r3Memory = new forge.ai.simulation.OwnLibraryMemory[2];
+    private final java.util.Set<String> r3Windows = new java.util.TreeSet<>();
+    private final Map<String, Integer> r3Why = new TreeMap<>();
+    private double r3Ms = 0;
+    /** The choice row being searched: {seat, choice ordinal, stateSha, payload, C, proof, key} (one at a time). */
+    private Object[] r3Ask;
+
+    /** The ranker of the R3 rows: the arm's tower through the search service, or the static evaluator (report only). */
+    public interface R3Ranker {
+        forge.ai.simulation.ChooseACard.Valuer valuer(Game game, RlKnowledge know);
+
+        String name();
+    }
+
+    /** REPORT ONLY: the static evaluator as the R3 ranker (cost runs before the tower is pinned; never a label). */
+    public static R3Ranker staticRanker() {
+        return new R3Ranker() {
+            @Override
+            public forge.ai.simulation.ChooseACard.Valuer valuer(final Game game, final RlKnowledge know) {
+                return forge.ai.simulation.R3LabelSearch.staticRanker();
+            }
+
+            @Override
+            public String name() {
+                return "static";
+            }
+        };
+    }
+
+    /**
+     * The arm's tower as the R3 ranker: the search service's value backend through the look-ahead's leaf protocol
+     * (LEAVES), pinned (a service serving another value backend, or none, stops the run: {@link StepSearch.PinError}).
+     */
+    public static R3Ranker serviceRanker(final JsonObject rlsearch, final String valueSha, final CardIndex index,
+            final int obs, final String jarSha, final long uid) {
+        final RlSearch.Config cfg = RlSearch.Config.parse(rlsearch.deepCopy());
+        if (valueSha == null) {
+            throw new IllegalArgumentException("refused: r3Ranker service pins its value backend (valueSha)");
+        }
+        return new R3Ranker() {
+            @Override
+            public forge.ai.simulation.ChooseACard.Valuer valuer(final Game game, final RlKnowledge know) {
+                final RlSearch s = new RlSearch(cfg, uid, uid, index, know, jarSha, "r3-" + Long.toUnsignedString(uid), obs);
+                final JsonObject ack;
+                try {
+                    ack = s.connectAck();
+                } catch (IOException | RuntimeException e) {
+                    throw new StepSearch.PinError("refused: the R3 ranker service is unusable: " + e);
+                }
+                final com.google.gson.JsonElement vb = ack == null ? null : ack.get("value_backend");
+                final String got = vb != null && vb.isJsonObject() && vb.getAsJsonObject().has("value_sha")
+                        ? vb.getAsJsonObject().get("value_sha").getAsString() : null;
+                if (!valueSha.equals(got)) {
+                    throw new StepSearch.PinError("refused: the R3 ranker service serves value backend " + got + ", not "
+                            + valueSha);
+                }
+                return forge.ai.simulation.ChooseACard.of(s);
+            }
+
+            @Override
+            public String name() {
+                return "service:" + valueSha;
+            }
+        };
+    }
+
+    /**
+     * r3-labelsearch-1030 (E1): turn on the R3 label search for this game (before its first decision). Rows are
+     * schema {@link #SCHEMA_R3}: priority rows (the first contested empty-stack priority per seat, turn and phase, and
+     * every priority with a costed draw) and choice rows (every choose-a-card-hooked ask, through the forced replay's
+     * probe). Refused with a step-1 search block (one teacher per row).
+     */
+    public void setR3(final forge.ai.simulation.R3LabelSearch.Spec r3spec, final R3Ranker ranker) {
+        if (search != null) {
+            throw new IllegalArgumentException("refused: r3 and a step-1 search block are two teachers");
+        }
+        if (game == null) {
+            return;
+        }
+        final forge.ai.simulation.HonestLabel.Seat proof = new forge.ai.simulation.HonestLabel.Seat(spec);
+        final forge.ai.simulation.ForcedWinSolver.Redraw redraw = forge.ai.simulation.R3LabelSearch.beliefRedraw(spec);
+        final forge.ai.simulation.ChooseACard.Valuer val = ranker.valuer(game, knowledge);
+        final List<Player> ps = game.getRegisteredPlayers();
+        for (int s = 0; s < 2 && s < ps.size(); s++) {
+            r3Memory[s] = new forge.ai.simulation.OwnLibraryMemory(ps.get(s));
+            r3Memory[s].watch(game);
+        }
+        final forge.ai.simulation.R3LabelSearch.Env env = new forge.ai.simulation.R3LabelSearch.Env() {
+            @Override
+            public forge.ai.simulation.ChooseACard.Valuer ranker() {
+                return val;
+            }
+
+            @Override
+            public forge.ai.simulation.HonestLabel.Seat proof() {
+                return proof;
+            }
+
+            @Override
+            public forge.ai.simulation.ForcedWinSolver.Redraw redraw() {
+                return redraw;
+            }
+
+            @Override
+            public java.util.Set<Integer> known(final Player p) {
+                final int s = game.getRegisteredPlayers().indexOf(p);
+                return s < 0 || s > 1 || r3Memory[s] == null ? new java.util.HashSet<>() : r3Memory[s].known(p);
+            }
+        };
+        this.r3 = new forge.ai.simulation.R3LabelSearch(r3spec, env);
+        this.r3Sha = r3spec.sha();
+        this.r3RankerName = ranker.name();
+        for (int s = 0; s < 2 && s < ps.size(); s++) {
+            final int seat = s;
+            r3Choice[s] = r3.choiceEngine(game, ps.get(s), r3.rowSearch(row -> (Long) r3Ask[6],
+                    (row, res) -> r3ChoiceRow(seat, res)));
+        }
+        forge.ai.AiTapeController.PROBES.put(game, new forge.ai.AiTapeController.Probe() {
+            @Override
+            public Object divert(final forge.ai.AiTapeController c, final String method, final Object[] args, final int ordinal) {
+                return NONE;
+            }
+
+            @Override
+            public void seen(final forge.ai.AiTapeController c, final String method, final Object[] args, final int ordinal,
+                    final Object value) {
+                r3Seen(c, method, args, ordinal, value);
+            }
+
+            @Override
+            public Object scripted(final forge.ai.AiTapeController c, final String method, final Object[] args) {
+                return NONE;
+            }
+        });
+    }
+
+    /** A forced choice of a taped seat: a choice row when choose-a-card hooks its kind (the record's answer stands). */
+    @SuppressWarnings("unchecked")
+    private void r3Seen(final forge.ai.AiTapeController c, final String m, final Object[] a, final int ordinal,
+            final Object value) {
+        final Player p = c.getPlayer();
+        final int seat = game.getRegisteredPlayers().indexOf(p);
+        if (seat < 0 || seat > 1 || r3Choice[seat] == null || fatal != null || FATAL.get() != null || game.isGameOver()) {
+            return;
+        }
+        final forge.ai.simulation.ChooseACard cac = r3Choice[seat];
+        final forge.ai.PlayerControllerAi in = c.inner();
+        final Runnable ask;
+        switch (m) {
+            case "chooseSingleCardForZoneChange":
+                ask = () -> cac.pick(in, (forge.game.zone.ZoneType) a[0], (List<forge.game.zone.ZoneType>) a[1],
+                        (SpellAbility) a[2], (forge.game.card.CardCollection) a[3], (Boolean) a[4], (Player) a[5],
+                        (forge.game.card.Card) value);
+                break;
+            case "orderMoveToZoneList":
+                ask = () -> cac.order(in, (forge.game.card.CardCollectionView) a[0], (forge.game.zone.ZoneType) a[1],
+                        (SpellAbility) a[2], (forge.game.card.CardCollectionView) value);
+                break;
+            case "arrangeForScry":
+                ask = () -> cac.scry(in, (forge.game.card.CardCollection) a[0],
+                        (org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection>) value);
+                break;
+            case "arrangeForSurveil":
+                ask = () -> cac.surveil(in, (forge.game.card.CardCollection) a[0],
+                        (org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection>) value);
+                break;
+            case "chooseCardsToDiscardFrom":
+                ask = () -> cac.discard(in, (Player) a[0], (SpellAbility) a[1], (forge.game.card.CardCollection) a[2],
+                        (Integer) a[3], (Integer) a[4], (forge.game.card.CardCollection) value);
+                break;
+            case "tuckCardsViaMulligan":
+                ask = () -> cac.tuck(in, (forge.game.card.CardCollectionView) a[0], (Integer) a[1],
+                        (forge.game.card.CardCollectionView) value);
+                break;
+            default:
+                return;
+        }
+        r3ChoiceAsk(p, ordinal, ask);
+    }
+
+    /** Run one choose-a-card ask (shadow, on copies only) with the row context set for its row search. */
+    private void r3ChoiceAsk(final Player p, final int ordinal, final Runnable ask) {
+        final Game g = game;
+        final int seat = g.getRegisteredPlayers().indexOf(p);
+        final int turn = g.getPhaseHandler().getTurn();
+        final int tbe = tapeTurns - turn;
+        if (tbe < bandLo || tbe >= turnsWindow) {
+            return;
+        }
+        final String ckey = uidStr + ":" + seat + ":" + decisions + ":c" + ordinal;
+        if (LABEL_ONLY != null && !LABEL_ONLY.contains(ckey) && !LABEL_ONLY.contains(uidStr + ":" + seat + ":c*")) {
+            return;
+        }
+        final long t0 = System.nanoTime();
+        try {
+            PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+                final String stateSha = TrajectoryRef.stateSha(g);
+                final RlFeaturizer.Obs o = feat.observe(g, p, 0, false, null);
+                final RlWire.Decide f = RlSearch.leafFrame(o, uid, seat, turn);
+                f.decIdx = decisions;
+                if (f.hasPriv()) {
+                    throw new IllegalStateException("bvw label: a value frame with the privileged block");
+                }
+                final long key = RlSearch.splitmix(uid ^ (0x52334348L + 2L * decisions + seat) ^ RlSearch.splitmix(ordinal + 7L));
+                if (seats[seat] == null) {
+                    seats[seat] = new HonestLabel.Seat(spec);
+                }
+                // a choice is mid-resolution: the proof check's own gate says so (stack), cheaply
+                final HonestLabel.Result r = seats[seat].label(g, p, key);
+                r3Ask = new Object[] {seat, ordinal, stateSha, RlWire.encodeDecide(f), f.C, r, key,
+                        String.valueOf(g.getPhaseHandler().getPhase()), g.getStack().size(), tbe, turn};
+                try {
+                    ask.run();
+                } finally {
+                    r3Ask = null;
+                }
+                return null;
+            }));
+        } finally {
+            r3Ms += (System.nanoTime() - t0) / 1e6;
+        }
+    }
+
+    /** A choice row's search finished (inside {@link #r3ChoiceAsk}): write its row. */
+    private void r3ChoiceRow(final int seat, final forge.ai.simulation.R3LabelSearch.Result res) {
+        final Object[] a = r3Ask;
+        if (a == null || (Integer) a[0] != seat) {
+            return;
+        }
+        windowDecisions++;
+        r3Why.merge("choice:" + res.why, 1, Integer::sum);
+        row(seat, decisions, (Integer) a[10], (Integer) a[9], (String) a[7], (Integer) a[8], (String) a[2],
+                (byte[]) a[3], (Integer) a[4], (HonestLabel.Result) a[5], null, "choice", res, (Integer) a[1]);
+    }
+
+    /** A priority row after its decision: searched (the rules above) or proof-only. */
+    private void r3PriorityRow(final Object[] pend, final List<SpellAbility> chosen) {
+        final Player p = (Player) pend[0];
+        final int seat = (Integer) pend[1];
+        final Game g = game;
+        final long key = (Long) pend[11];
+        final long t0 = System.nanoTime();
+        forge.ai.simulation.R3LabelSearch.Result res = null;
+        try {
+            res = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+                final List<forge.ai.simulation.R3LabelSearch.PCand> cands = r3.candidates(g, p, chosen);
+                final boolean draw = forge.ai.simulation.R3LabelSearch.hasDraw(cands);
+                final String win = seat + "|" + pend[3] + "|" + pend[5];
+                final boolean first = g.getStack().isEmpty() && forge.ai.simulation.R3LabelSearch.contested(cands)
+                        && !r3Windows.contains(win);
+                if (!draw && !first) {
+                    return null;
+                }
+                if (first) {
+                    r3Windows.add(win);
+                }
+                return r3.priorityRow(g, p, cands, key);
+            }));
+        } finally {
+            r3Ms += (System.nanoTime() - t0) / 1e6;
+        }
+        r3Why.merge("priority:" + (res == null ? "not_searched" : res.why), 1, Integer::sum);
+        row(seat, (Integer) pend[2], (Integer) pend[3], (Integer) pend[4], (String) pend[5], (Integer) pend[6],
+                (String) pend[7], (byte[]) pend[8], (Integer) pend[9], (HonestLabel.Result) pend[10], null, "priority", res,
+                -1);
+    }
+
+    /** An R3 row's band, proof, target and search block: a proof (DECIDED) first, else the R3 target, else none. */
+    private void r3Fields(final JsonObject h, final HonestLabel.Result r, final String rowKind,
+            final forge.ai.simulation.R3LabelSearch.Result res, final int choiceOrd) {
+        final JsonArray band = new JsonArray();
+        band.add(bandLo);
+        band.add(turnsWindow);
+        h.add("band", band);
+        h.addProperty("row_kind", rowKind);
+        if (choiceOrd >= 0) {
+            h.addProperty("choice_ord", choiceOrd);
+        }
+        final String proof = "win".equals(r.label) || "loss".equals(r.label) ? r.label : null;
+        h.add("proof", proof == null ? com.google.gson.JsonNull.INSTANCE : new com.google.gson.JsonPrimitive(proof));
+        final String source;
+        double target = Double.NaN;
+        if (proof != null) {
+            source = "proof";
+            target = "win".equals(proof) ? 1.0 : 0.0;
+        } else if (res != null && res.hasTarget()) {
+            source = "r3";
+            target = res.target;
+        } else {
+            source = "none";
+        }
+        targets.merge(source, 1, Integer::sum);
+        h.addProperty("target_source", source);
+        h.add("target", StepSearch.Result.num(target));
+        h.add("r3", res == null ? com.google.gson.JsonNull.INSTANCE : res.toJson());
+        h.addProperty("r3_sha", r3Sha);
+        h.addProperty("r3_ranker", r3RankerName);
     }
 
     public int windowDecisions() {
