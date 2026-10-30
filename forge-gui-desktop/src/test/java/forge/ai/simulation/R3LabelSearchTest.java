@@ -181,6 +181,8 @@ public class R3LabelSearchTest extends SimulationTest {
         // the proof spec (and its sha) does not see the r3 host keys
         final JsonObject l = new JsonObject();
         l.addProperty("redraw", "belief");
+        l.addProperty("sequentialAi", true);
+        l.addProperty("aiTimeoutSec", 600);
         final JsonObject sc = new JsonObject();
         sc.addProperty("hideOwnLibrary", "true");
         sc.addProperty("budget", "counter");
