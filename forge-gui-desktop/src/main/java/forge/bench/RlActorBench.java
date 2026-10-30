@@ -487,6 +487,19 @@ public final class RlActorBench {
     // ------------------------------------------------------------------------------------------------ deck guard
 
     /** §8 (Java side). Null when the deck may be loaded in this mode, else the refusal. */
+    /**
+     * labeller-v2 recall (off-Studio replay; harness only, absent = paths as written): -Dforge.bench.pathRemap=FROM=TO
+     * maps a tape's recorded deck path prefix FROM to TO (the deck file and its sha check are unchanged).
+     */
+    static String remap(final String path) {
+        final String m = System.getProperty("forge.bench.pathRemap");
+        if (m == null || m.indexOf('=') <= 0 || path == null) {
+            return path;
+        }
+        final String from = m.substring(0, m.indexOf('=')), to = m.substring(m.indexOf('=') + 1);
+        return path.startsWith(from) ? to + path.substring(from.length()) : path;
+    }
+
     static String deckGuard(final String mode, final String rlRoot, final String path, final String sha) {
         final boolean eval = "eval".equals(mode);
         try {
@@ -677,7 +690,7 @@ public final class RlActorBench {
         final JsonArray decksJ = g.getAsJsonArray("decks");
         final JsonArray shaJ = g.getAsJsonArray("deck_sha");
         final JsonArray ctlJ = g.getAsJsonArray("controllers");
-        final String[] decks = {decksJ.get(0).getAsString(), decksJ.get(1).getAsString()};
+        final String[] decks = {remap(decksJ.get(0).getAsString()), remap(decksJ.get(1).getAsString())};
         final String[] shas = {shaJ.get(0).getAsString(), shaJ.get(1).getAsString()};
         final String[] ctl = {ctlJ.get(0).getAsString(), ctlJ.get(1).getAsString()};
         final boolean trainSide = "train".equals(mode) || "record".equals(mode);
