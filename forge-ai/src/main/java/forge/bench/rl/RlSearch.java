@@ -190,6 +190,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          */
         public JsonObject plans = null;
         /**
+         * r2-choose-a-card-1029 (null = off, the default, and then nothing changes, the spec's JSON included): choose-a-card
+         * on the search seat's bridged controller ({@link forge.ai.simulation.ChooseACard.Config#fromJson}); its value is
+         * this search's leaf ({@code LEAVES}), its re-draw the search's belief.
+         */
+        public JsonObject cac = null;
+        /**
          * Lane block-search-1019 (0 = off, the default, and then nothing changes): 1 = the look-ahead also searches the seat's
          * declare-blockers asks ({@link #decideBlocks}): the policy's own declaration (the default), its next most sampled
          * ones, no blocks and Forge AI's declaration, played out as the priority candidates are. Policy play-outs only.
@@ -262,7 +268,8 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "opponent", "leafSym", "beliefPrior",
-                "beliefPriorSha256", "beliefPriorGain", "playoutLoopGuard", "playoutMaxDecisions", "replayMayPlayLoose"));
+                "beliefPriorSha256", "beliefPriorGain", "playoutLoopGuard", "playoutMaxDecisions", "replayMayPlayLoose",
+                "chooseACard"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -308,6 +315,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("copyFidelity")) c.copyFidelity = o.get("copyFidelity").getAsInt();
             if (o.has("forcedWin") && !o.get("forcedWin").isJsonNull()) c.forcedWin = o.getAsJsonObject("forcedWin");
             if (o.has("plans") && !o.get("plans").isJsonNull()) c.plans = o.getAsJsonObject("plans");
+            if (o.has("chooseACard") && !o.get("chooseACard").isJsonNull()) {
+                c.cac = o.getAsJsonObject("chooseACard");
+                forge.ai.simulation.ChooseACard.Config.fromJson(c.cac); // refuse a bad spec at parse time
+            }
             if (o.has("blocks")) c.blocks = o.get("blocks").getAsInt();
             if (o.has("blockSamples")) c.blockSamples = o.get("blockSamples").getAsInt();
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
@@ -476,6 +487,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (plans != null) {
                 o.add("plans", plans);
             }
+            if (cac != null) {
+                o.add("chooseACard", cac); // r2-choose-a-card-1029: only when on
+            }
             if (blocks > 0) {
                 // block-search-1019: only when on, so every other spec's JSON is unchanged
                 o.addProperty("blocks", blocks);
@@ -565,7 +579,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * keys is set, so every other spec's game is unchanged.
      */
     public void attach(final Game g, final boolean[] rlSeat, final RlSeat seat) {
-        if (cfg.forcedWin == null && cfg.plans == null) {
+        if (cfg.forcedWin == null && cfg.plans == null && cfg.cac == null) {
             return;
         }
         final List<Player> ps = g.getRegisteredPlayers();
@@ -590,8 +604,19 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 planSearches.put(p.getId(), ps1);
                 b.planHook = ps1;
             }
+            if (cfg.cac != null) {
+                // r2-choose-a-card-1029: the seat's assembly choices, valued by this search's leaf in one LEAVES batch
+                final forge.ai.simulation.ChooseACard c = new forge.ai.simulation.ChooseACard(
+                        forge.ai.simulation.ChooseACard.Config.fromJson(cfg.cac), forge.ai.simulation.ChooseACard.of(this), null);
+                c.setRedraw(ls.solverRedraw());
+                c.install(b);
+                chooseACards.put(p.getId(), c);
+            }
         }
     }
+
+    /** r2-choose-a-card-1029: the seats' choose-a-card engines (their logs), by player id; empty unless the key is set. */
+    public final Map<Integer, forge.ai.simulation.ChooseACard> chooseACards = new TreeMap<>();
 
     // ---- S-t (lane cm-choice-search-1009; untouched while cfg.choices == 0)
     /** One macro candidate's forced answers, and the counts of its schedule across its play-outs. */

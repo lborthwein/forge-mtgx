@@ -608,4 +608,69 @@ public class ChooseACardTest extends SimulationTest {
             AssertJUnit.assertEquals(second.getId(), ((Player) w[1]).getCardsIn(ZoneType.Library).get(1).getId());
         }
     }
+
+    // ------------------------------------------------------------------------------------------------ round 2: Gush, Dig
+
+    /** Gush by its alternative cost: return the two TAPPED Islands and keep the untapped one (a Force / counter mana). */
+    @Test
+    public void gushReturnsTheTappedIslands() {
+        final Game g = libraryBoard("Gush", "Island", "Forest", "Forest", "Forest", "Forest");
+        final Player a = g.getPlayers().get(0);
+        // the board's Island (untapped) plus two tapped Islands
+        addCard("Island", a).setTapped(true);
+        addCard("Island", a).setTapped(true);
+        final PlayerControllerAi c = seat(g);
+        final Stub stub = new Stub((x, p) -> {
+            for (Card k : p.getCardsIn(ZoneType.Battlefield)) {
+                if (k.getName().equals("Island") && !k.isTapped()) return 0.9;
+            }
+            return 0.2;
+        });
+        final JsonObject o = new JsonObject();
+        o.addProperty("mode", "on");
+        o.addProperty("topM", 0);
+        o.addProperty("kinds", "RETURN_COST");
+        final ChooseACard cac = new ChooseACard(ChooseACard.Config.fromJson(o), stub, null);
+        cac.install(c);
+        SpellAbility alt = null;
+        for (SpellAbility s : find(a, ZoneType.Hand, "Gush").getAllPossibleAbilities(a, true)) {
+            if (ChooseACard.returnPart(s) != null) alt = s;
+        }
+        AssertJUnit.assertNotNull("Gush's alternative cost", alt);
+        alt.setActivatingPlayer(a);
+        AssertJUnit.assertEquals(Collections.singletonList(alt), cac.priority(c, Collections.singletonList(alt)));
+        AssertJUnit.assertTrue(c.playChosenSpellAbility(alt));
+        int guard = 0;
+        while (!g.getStack().isEmpty() && guard++ < 5) g.getStack().resolveStack();
+        boolean untapped = false;
+        for (Card k : a.getCardsIn(ZoneType.Battlefield)) {
+            if (k.getName().equals("Island") && !k.isTapped()) untapped = true;
+        }
+        AssertJUnit.assertTrue(String.valueOf(cac.log), untapped);
+        AssertJUnit.assertEquals("RETURN_COST", cac.log.get(0).getAsJsonObject().get("kind").getAsString());
+        AssertJUnit.assertEquals(2, cac.log.get(0).getAsJsonObject().getAsJsonArray("cands").size());
+    }
+
+    /** A Dig pick (Impulse): the stub value wants the Island, Forge AI's own pick is something else. */
+    @Test
+    public void impulsePicksTheValuedCard() {
+        final java.util.function.Supplier<Game> board = () -> {
+            final Game g = libraryBoard("Impulse", "Island", "Lightning Bolt", "Forest", "Island", "Craw Wurm", "Swamp");
+            addCard("Island", g.getPlayers().get(0));
+            return g;
+        };
+        final Game g0 = board.get();
+        seat(g0);
+        castAndResolve(g0, "Impulse");
+        AssertJUnit.assertFalse("Forge AI's own pick must not be the Island: " + names(g0.getPlayers().get(0), ZoneType.Hand),
+                inZone(g0.getPlayers().get(0), ZoneType.Hand, "Island"));
+        final Game g = board.get();
+        final PlayerControllerAi c = seat(g);
+        final Stub stub = new Stub((x, p) -> inZone(p, ZoneType.Hand, "Island") ? 0.9 : 0.2);
+        final ChooseACard cac = new ChooseACard(cfg("on"), stub, null);
+        cac.install(c);
+        castAndResolve(g, "Impulse");
+        AssertJUnit.assertTrue(String.valueOf(cac.log), inZone(g.getPlayers().get(0), ZoneType.Hand, "Island"));
+        AssertJUnit.assertEquals("DIGPICK", cac.log.get(0).getAsJsonObject().get("kind").getAsString());
+    }
 }

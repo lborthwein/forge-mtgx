@@ -55,4 +55,15 @@ public interface CacHook {
     default List<SpellAbility> priority(PlayerControllerAi c, List<SpellAbility> def) {
         return def;
     }
+
+    /** A Dig-style pick among looked-at cards (chooseEntitiesForEffect of a Dig ability). */
+    default List<Card> dig(PlayerControllerAi c, List<Card> options, int min, int max, SpellAbility sa, List<Card> def) {
+        return def;
+    }
+
+    /** A return-to-hand cost's cards (Gush's Islands): AiCostDecision's choice {@code def}. */
+    default CardCollectionView returnCost(PlayerControllerAi c, SpellAbility sa, String type, int amount,
+            CardCollectionView def) {
+        return def;
+    }
 }

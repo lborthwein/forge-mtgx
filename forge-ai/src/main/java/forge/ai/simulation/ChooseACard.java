@@ -48,7 +48,7 @@ import forge.util.MyRandom;
 public final class ChooseACard implements CacHook {
 
     /** The choice kinds (DESIGN-r2 §1, §12.1). */
-    public enum Kind { SEARCH, MULTI, PILE, DIG, DISCARD, SCRY, SURVEIL, ORDER, MULLIGAN, LAND }
+    public enum Kind { SEARCH, MULTI, PILE, DIG, DIGPICK, DISCARD, SCRY, SURVEIL, ORDER, MULLIGAN, LAND, RETURN_COST }
 
     // ------------------------------------------------------------------------------------------------ config
 
@@ -228,6 +228,9 @@ public final class ChooseACard implements CacHook {
         List<Integer> cards;
         /** land play: the card id. */
         int land = -1;
+        /** a return-to-hand cost (Gush): the spell's card id, its ability index among the card's possible abilities, the cards. */
+        int castCard = -1, castIndex = -1;
+        List<Integer> returned;
         /** Forge AI's own answer (candidate 0). */
         boolean forge;
         String key;
@@ -660,6 +663,9 @@ public final class ChooseACard implements CacHook {
 
     @Override
     public List<SpellAbility> priority(final PlayerControllerAi c, final List<SpellAbility> def) {
+        if (mine(c) && def != null && def.size() == 1 && !def.get(0).isLandAbility() && returnPart(def.get(0)) != null) {
+            return returnCostDecision(def);
+        }
         if (!mine(c) || def == null || def.size() != 1 || !def.get(0).isLandAbility() || !cfg.kinds.contains(Kind.LAND)
                 || !live.getStack().isEmpty()) {
             return def;
@@ -701,6 +707,128 @@ public final class ChooseACard implements CacHook {
             return def;
         }
         return Collections.singletonList(sas.get(answers.indexOf(best)));
+    }
+
+    @Override
+    public List<Card> dig(final PlayerControllerAi c, final List<Card> options, final int min, final int max,
+            final SpellAbility sa, final List<Card> def) {
+        if (!mine(c) || !cfg.kinds.contains(Kind.DIGPICK) || options.isEmpty() || max < 1 || def == null
+                || live.getStack().isEmpty() || !live.getStack().isResolving()) {
+            return def;
+        }
+        for (Card x : options) {
+            if (x.getOwner() != me) return def;
+        }
+        final Ask ask = ask(Kind.DIGPICK, sa, "chooseEntitiesForEffect");
+        if (ask == null) return def;
+        final int k = Math.min(max, options.size());
+        final List<Answer> answers = new ArrayList<>();
+        final Answer f = new Answer();
+        f.forge = true;
+        f.cards = ids(def);
+        f.desc.add("forge:" + names(def));
+        answers.add(f);
+        final Set<String> seen = new HashSet<>();
+        seen.add(multisetKey(def));
+        final int[] total = {0};
+        combos(new ArrayList<>(options), k, cfg.cap, list -> {
+            total[0]++;
+            if (seen.add(multisetKey(list)) && answers.size() < cfg.cap) {
+                final Answer a = new Answer();
+                a.cards = ids(list);
+                a.desc.add("pick:" + names(list));
+                answers.add(a);
+            }
+        });
+        final Decision d = new Decision(ask, null);
+        d.nEnum = total[0];
+        final Answer best = decide(d, answers);
+        if (best == null || best.forge) return def;
+        final CardCollection out = byIds(best.cards, options);
+        return out == null ? def : new ArrayList<>(out);
+    }
+
+    /** The return-cost plan of the cast the seat is about to make (Gush), consumed by its cost decision. */
+    private Answer returnPlan = null;
+
+    @Override
+    public CardCollectionView returnCost(final PlayerControllerAi c, final SpellAbility sa, final String type,
+            final int amount, final CardCollectionView def) {
+        if (!mine(c) || returnPlan == null || sa == null || sa.getHostCard() == null
+                || sa.getHostCard().getId() != returnPlan.castCard) {
+            return def;
+        }
+        final Answer a = returnPlan;
+        returnPlan = null;
+        final CardCollection out = byIds(a.returned, me.getCardsIn(ZoneType.Battlefield));
+        if (out == null || out.size() != amount) {
+            count("liveMiss");
+            return def;
+        }
+        return out;
+    }
+
+    /** The cast's return-to-hand cost part (not "return this card"), or null. */
+    static forge.game.cost.CostReturn returnPart(final SpellAbility sa) {
+        if (sa == null || sa.getPayCosts() == null) return null;
+        for (forge.game.cost.CostPart p : sa.getPayCosts().getCostParts()) {
+            if (p instanceof forge.game.cost.CostReturn r && !r.payCostFromSource()) return r;
+        }
+        return null;
+    }
+
+    /** At priority: a cast whose cost returns permanents (Gush's Islands) - choose which, then cast with that plan. */
+    private List<SpellAbility> returnCostDecision(final List<SpellAbility> def) {
+        final SpellAbility sa = def.get(0);
+        final forge.game.cost.CostReturn part = returnPart(sa);
+        if (part == null || !cfg.kinds.contains(Kind.RETURN_COST) || !live.getStack().isEmpty()) return def;
+        final int amount = part.getAbilityAmount(sa);
+        final CardCollection valid = forge.game.card.CardLists.getValidCards(me.getCardsIn(ZoneType.Battlefield),
+                part.getType().split(";"), me, sa.getHostCard(), sa);
+        if (amount < 1 || valid.size() <= amount) return def;
+        final List<SpellAbility> all = new ArrayList<>(sa.getHostCard().getAllPossibleAbilities(me, true));
+        final int idx = indexOfSa(all, sa);
+        if (idx < 0) return def;
+        final Ask ask = new Ask();
+        ask.kind = Kind.RETURN_COST;
+        ask.method = "AiCostDecision.visit(CostReturn)";
+        ask.src = sa.getHostCard().getName();
+        final List<Answer> answers = new ArrayList<>();
+        final Set<String> seen = new HashSet<>();
+        final int[] total = {0};
+        combos(new ArrayList<>(valid), amount, cfg.cap, list -> {
+            total[0]++;
+            final List<String> k = new ArrayList<>();
+            for (Card x : list) k.add(x.getName() + (x.isTapped() ? "/T" : "/U"));
+            Collections.sort(k);
+            if (seen.add(k.toString()) && answers.size() < cfg.cap) {
+                final Answer a = new Answer();
+                a.castCard = sa.getHostCard().getId();
+                a.castIndex = idx;
+                a.returned = ids(list);
+                a.forge = answers.isEmpty(); // the first (lowest ids) stands for Forge's: its own choice is made at payment
+                a.key = "return:" + k;
+                a.desc.add((a.forge ? "first:" : "return:") + k);
+                answers.add(a);
+            }
+        });
+        final Decision d = new Decision(ask, null);
+        d.nEnum = total[0];
+        final Answer best = decide(d, answers);
+        if (best == null || best.forge) return def;
+        returnPlan = best;
+        return def;
+    }
+
+    static int indexOfSa(final List<SpellAbility> all, final SpellAbility sa) {
+        for (int i = 0; i < all.size(); i++) {
+            if (all.get(i) == sa) return i;
+        }
+        final String want = String.valueOf(sa.getPayCosts()) + "|" + sa.getDescription();
+        for (int i = 0; i < all.size(); i++) {
+            if ((String.valueOf(all.get(i).getPayCosts()) + "|" + all.get(i).getDescription()).equals(want)) return i;
+        }
+        return -1;
     }
 
     // ------------------------------------------------------------------------------------------------ deciding
@@ -1121,6 +1249,29 @@ public final class ChooseACard implements CacHook {
         }
 
         @Override
+        public <T extends forge.game.GameEntity> List<T> chooseEntitiesForEffect(
+                final forge.util.collect.FCollectionView<T> optionList, final int min, final int max,
+                final forge.game.player.DelayedReveal delayedReveal, final SpellAbility sa, final String title,
+                final Player targetedPlayer, final Map<String, Object> params) {
+            if (!leaf.armed && a.cards != null && !cardsUsed && sa != null && sa.getApi() == ApiType.Dig) {
+                cardsUsed = true;
+                final List<Card> opts = new ArrayList<>();
+                for (T t : optionList) {
+                    if (t instanceof Card) opts.add((Card) t);
+                }
+                final CardCollection c = byIds(a.cards, opts);
+                if (c != null) {
+                    @SuppressWarnings("unchecked")
+                    final List<T> out = (List<T>) new ArrayList<Card>(c);
+                    return out;
+                }
+                miss = true;
+                missWhy = "dig";
+            }
+            return super.chooseEntitiesForEffect(optionList, min, max, delayedReveal, sa, title, targetedPlayer, params);
+        }
+
+        @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             if (leaf.armed && leaf.reached(getGame())) {
                 return null;
@@ -1245,6 +1396,42 @@ public final class ChooseACard implements CacHook {
                     }
                     ls.setActivatingPlayer(cm);
                     sc.playChosenSpellAbility(ls);
+                    break;
+                }
+                case RETURN_COST: {
+                    final Card host = g.findById(a.castCard);
+                    final List<SpellAbility> all = host == null ? List.of()
+                            : new ArrayList<>(host.getAllPossibleAbilities(cm, true));
+                    if (a.castIndex < 0 || a.castIndex >= all.size()) {
+                        why = "cast";
+                        return null;
+                    }
+                    final SpellAbility cs = all.get(a.castIndex);
+                    cs.setActivatingPlayer(cm);
+                    final List<Integer> ret = a.returned;
+                    sc.setCacHook(new forge.ai.CacHook() {
+                        @Override
+                        public CardCollectionView returnCost(final PlayerControllerAi pc, final SpellAbility s2,
+                                final String type, final int amount, final CardCollectionView dd) {
+                            final CardCollection o = byIds(ret, cm.getCardsIn(ZoneType.Battlefield));
+                            if (o == null) {
+                                sc.miss = true;
+                                sc.missWhy = "return";
+                                return dd;
+                            }
+                            sc.cardsUsed = true;
+                            return o;
+                        }
+                    });
+                    if (!sc.playChosenSpellAbility(cs)) {
+                        why = "cast";
+                        return null;
+                    }
+                    sc.setCacHook(null);
+                    if (!sc.cardsUsed) {
+                        sc.miss = true;
+                        sc.missWhy = "returnNotAsked";
+                    }
                     break;
                 }
                 case MULLIGAN: {
