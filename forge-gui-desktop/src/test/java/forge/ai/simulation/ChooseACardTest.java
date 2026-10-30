@@ -546,4 +546,66 @@ public class ChooseACardTest extends SimulationTest {
         final DrawExpectation.Result r = ring(ringBoard(4, false, true), 0.3);
         AssertJUnit.assertTrue(r.log.toString(), r.ev[1] < r.ev[0]);
     }
+
+    /** N5b opt-in: HonestLabel's known-library overload with no known cards is the plain call; with some, they stay put. */
+    @Test
+    public void honestLabelKnownOwnOverloadDefaultsToThePlainPath() throws Exception {
+        final Game live = initAndCreateGame();
+        final Player me = live.getPlayers().get(0), opp = live.getPlayers().get(1);
+        live.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
+        for (String n : new String[] {"Island", "Mountain", "Forest", "Plains", "Swamp", "Shock", "Hill Giant", "Craw Wurm"}) {
+            addCardToZone(n, me, ZoneType.Library);
+        }
+        addCardToZone("Lightning Bolt", me, ZoneType.Hand);
+        addCard("Mountain", me);
+        for (int i = 0; i < 12; i++) addCardToZone("Raging Goblin", opp, ZoneType.Library);
+        opp.setLife(3, null);
+        final com.google.gson.JsonArray cards = new com.google.gson.JsonArray();
+        for (String name : new String[] {"Counterspell", "Giant Growth", "Hill Giant"}) {
+            final JsonObject card = new JsonObject();
+            card.addProperty("name", name);
+            card.add("tags", new com.google.gson.JsonArray());
+            cards.add(card);
+        }
+        final JsonObject cube = new JsonObject();
+        cube.addProperty("schema", "mtgx-belief-cube/1");
+        cube.add("cards", cards);
+        final java.nio.file.Path file = java.nio.file.Files.createTempFile("cac-cube-", ".json");
+        java.nio.file.Files.writeString(file, cube.toString());
+        final java.util.function.Supplier<HonestLabel.Seat> seat = () -> {
+            final HonestLabel.Spec spec = new HonestLabel.Spec();
+            spec.redraw = "belief";
+            spec.worlds = 2;
+            spec.solverCfg.addProperty("hideOwnLibrary", "true");
+            spec.lossCfg.addProperty("hideOwnLibrary", "true");
+            spec.beliefCube = file.toString();
+            spec.beliefCubeSha256 = null;
+            spec.beliefBasics = 2;
+            return new HonestLabel.Seat(spec);
+        };
+        final String fp = LookaheadSearch.fingerprint(live);
+        forge.util.IdScope.open();
+        final JsonObject plain = seat.get().label(live, me, 7L).toJson();
+        final JsonObject none = seat.get().label(live, me, 7L, null).toJson();
+        final JsonObject empty = seat.get().label(live, me, 7L, new HashSet<>()).toJson();
+        plain.remove("ms");
+        none.remove("ms");
+        empty.remove("ms");
+        AssertJUnit.assertEquals(plain.toString(), none.toString());
+        AssertJUnit.assertEquals(plain.toString(), empty.toString());
+        AssertJUnit.assertEquals(fp, LookaheadSearch.fingerprint(live));
+        // with a known card the root world keeps it at its index (private world(), as HonestLabelWorldTest reads it)
+        final HonestLabel.Seat s = seat.get();
+        final java.lang.reflect.Field kf = HonestLabel.Seat.class.getDeclaredField("knownOwn");
+        kf.setAccessible(true);
+        final Card second = me.getCardsIn(ZoneType.Library).get(1);
+        kf.set(s, java.util.Set.of(second.getId()));
+        final java.lang.reflect.Method world = HonestLabel.Seat.class.getDeclaredMethod("world", Game.class, Player.class,
+                Player.class, Random.class);
+        world.setAccessible(true);
+        for (int seed = 0; seed < 6; seed++) {
+            final Object[] w = (Object[]) world.invoke(s, live, me, opp, new Random(seed));
+            AssertJUnit.assertEquals(second.getId(), ((Player) w[1]).getCardsIn(ZoneType.Library).get(1).getId());
+        }
+    }
 }
