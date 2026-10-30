@@ -317,7 +317,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("plans") && !o.get("plans").isJsonNull()) c.plans = o.getAsJsonObject("plans");
             if (o.has("chooseACard") && !o.get("chooseACard").isJsonNull()) {
                 c.cac = o.getAsJsonObject("chooseACard");
-                forge.ai.simulation.ChooseACard.Config.fromJson(c.cac); // refuse a bad spec at parse time
+                // review #143 S3: every refusal at parse time (never at the first priority of a game)
+                final forge.ai.simulation.ChooseACard.Config cc = forge.ai.simulation.ChooseACard.Config.fromJson(c.cac);
+                if (cc.mode == forge.ai.simulation.ChooseACard.Config.Mode.ON && (cc.label == null || cc.topM < 1)) {
+                    throw new IllegalArgumentException("search.chooseACard: mode on needs a label spec (the solver check) "
+                            + "and topM >= 1");
+                }
             }
             if (o.has("blocks")) c.blocks = o.get("blocks").getAsInt();
             if (o.has("blockSamples")) c.blockSamples = o.get("blockSamples").getAsInt();
@@ -752,6 +757,12 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         if (!"off".equals(cfg.belief)) {
             // honest-belief-1020: the observation-only pool for every world (and, below, the solver's copies)
             lc.belief = cfg.belief;
+        if (cfg.cac != null && forge.ai.simulation.ChooseACard.Config.fromJson(cfg.cac).mode
+                != forge.ai.simulation.ChooseACard.Config.Mode.OFF && "off".equals(cfg.belief)) {
+            // review #143 S3: refused when the search is built (before the game), not at the first ask
+            throw new IllegalArgumentException("search.chooseACard needs a belief (the copies re-draw the opponent's "
+                    + "hidden cards)");
+        }
             lc.beliefCube = cfg.beliefCube;
             lc.beliefCubeSha256 = cfg.beliefCubeSha256;
             lc.beliefBasics = cfg.beliefBasics;

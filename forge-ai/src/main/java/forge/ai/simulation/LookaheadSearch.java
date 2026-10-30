@@ -1600,6 +1600,18 @@ public final class LookaheadSearch {
         } else {
             prior = null;
         }
+        if (cfg.cac != null) {
+            // review #143 S3: refuse a choose-a-card spec when the config is read, never at the first priority
+            final ChooseACard.Config cc = ChooseACard.Config.fromJson(cfg.cac);
+            if (cc.mode == ChooseACard.Config.Mode.ON && !cc.testUnsafe) {
+                throw new IllegalArgumentException("chooseACard: mode on needs an RL search seat (the value tower and the "
+                        + "solver check); a look-ahead (K8) seat runs it in shadow only");
+            }
+            if (cc.mode != ChooseACard.Config.Mode.OFF && !cfg.beliefOn()) {
+                throw new IllegalArgumentException("chooseACard: needs a belief (the copies re-draw the opponent's hidden "
+                        + "cards); set belief");
+            }
+        }
         if (cfg.tutorOn()) {
             if (cfg.tutorRank < 1) {
                 throw new IllegalStateException("tutorShadow needs tutorRank >= 1 (how many ranked names are played out)");

@@ -877,4 +877,63 @@ public class ChooseACardTest extends SimulationTest {
         AssertJUnit.assertEquals("SpellAbility ids the live game used", sa[0], sa[1]);
         AssertJUnit.assertEquals(ids[0], ids[1]);
     }
+
+    /**
+     * Review #143 S2 (baseline): the "Forge" candidate of a pile is what live Forge actually plays (recorded on an exact
+     * copy with the live random stream), not a re-answer under another stream and a shuffled library.
+     */
+    @Test
+    public void doomsdayBaselineIsLiveForgesPile() {
+        final java.util.function.Supplier<Game> board = () -> {
+            final Game g = libraryBoard("Doomsday", "Swamp", "Craw Wurm", "Gush", "Grizzly Bears", "Thassa's Oracle",
+                    "Island", "Force of Will", "Lotus Petal", "Brainstorm", "Hill Giant");
+            addCard("Swamp", g.getPlayers().get(0));
+            addCard("Swamp", g.getPlayers().get(0));
+            return g;
+        };
+        final Game g0 = board.get();
+        seat(g0);
+        castAndResolve(g0, "Doomsday");
+        final List<String> forgePile = names(g0.getPlayers().get(0), ZoneType.Library);
+        final Game g = board.get();
+        final PlayerControllerAi c = seat(g);
+        final JsonObject o = new JsonObject();
+        o.addProperty("mode", "shadow");
+        o.addProperty("topM", 0);
+        final ChooseACard cac = new ChooseACard(unsafe(o), new Stub((x, p) -> 0.3), null);
+        cac.install(c);
+        castAndResolve(g, "Doomsday");
+        AssertJUnit.assertEquals("shadow plays live Forge's pile", forgePile, names(g.getPlayers().get(0), ZoneType.Library));
+        final JsonObject e = cac.log.get(cac.log.size() - 1).getAsJsonObject();
+        final String base = e.getAsJsonArray("cands").get(0).getAsJsonObject().getAsJsonArray("answer").toString();
+        AssertJUnit.assertTrue(base + " vs " + forgePile, base.contains("baseline:" + forgePile));
+        AssertJUnit.assertEquals(String.valueOf(cac.counts), 0L, (long) cac.counts.getOrDefault("baselineMismatch", 0L));
+        AssertJUnit.assertEquals(0L, (long) cac.counts.getOrDefault("probeFailed", 0L));
+    }
+
+    /** Review #143 S3: a look-ahead config refuses choose-a-card ON, and shadow without a belief, when it is read. */
+    @Test
+    public void lookaheadConfigRefusesAtParseTime() {
+        final LookaheadSearch.Config on = new LookaheadSearch.Config();
+        final JsonObject j = new JsonObject();
+        j.addProperty("mode", "on");
+        on.cac = j;
+        AssertJUnit.assertTrue(expectIae(() -> new LookaheadSearch(on)));
+        final LookaheadSearch.Config sh = new LookaheadSearch.Config();
+        final JsonObject k = new JsonObject();
+        k.addProperty("mode", "shadow");
+        sh.cac = k;
+        AssertJUnit.assertTrue("shadow without a belief", expectIae(() -> new LookaheadSearch(sh)));
+        AssertJUnit.assertTrue(expectIae(() -> ChooseACard.Config.fromJson(com.google.gson.JsonParser
+                .parseString("{\"mode\":\"on\",\"kinds\":\"NOPE\"}").getAsJsonObject())));
+    }
+
+    static boolean expectIae(final Runnable r) {
+        try {
+            r.run();
+            return false;
+        } catch (IllegalArgumentException e) {
+            return true;
+        }
+    }
 }

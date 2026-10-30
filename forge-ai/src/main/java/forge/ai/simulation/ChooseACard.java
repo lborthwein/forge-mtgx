@@ -251,6 +251,13 @@ public final class ChooseACard implements CacHook {
         boolean forge;
         /** An optional search's "find nothing". */
         boolean none;
+        /**
+         * Review S2 (baseline): Forge's full answer was recorded on an EXACT copy with the live random stream (what live
+         * Forge itself plays), and is now a fixed answer like the others.
+         */
+        boolean probed;
+        /** The probe copy's controller (its recorded answers), set by a probe apply. */
+        Scripted probeSc;
         String key;
         List<String> desc = new ArrayList<>();
 
@@ -408,8 +415,14 @@ public final class ChooseACard implements CacHook {
             pinTop = ask.top;
             plan = null;
             planPick = 0;
+            shadowBase = null;
+            shadowPick = 1;
         }
     }
+
+    /** Shadow: the decision's recorded Forge baseline, to count live answers that differ from it (review S2). */
+    private Answer shadowBase = null;
+    private int shadowPick = 1;
 
     // ------------------------------------------------------------------------------------------------ hooks
 
@@ -422,6 +435,12 @@ public final class ChooseACard implements CacHook {
         }
         if (pinned()) {
             if (plan == null || plan.picks == null) {
+                if (shadowBase != null && shadowBase.picks != null && def != null) {
+                    if (shadowPick >= shadowBase.picks.size() || shadowBase.picks.get(shadowPick) != def.getId()) {
+                        count("baselineMismatch");
+                    }
+                    shadowPick++;
+                }
                 return def; // kept / shadow / single / error: the rest of this resolution is Forge AI's
             }
             if (plan.none) {
@@ -575,6 +594,10 @@ public final class ChooseACard implements CacHook {
         final Decision d = new Decision(ask, null);
         d.nEnum = answers.size() - 1;
         final Answer best = decide(d, answers);
+        if (best != null && best.forge && best.probed && cfg.mode == Config.Mode.ON) {
+            startPlan(best, ask); // review S2: kept = the recorded baseline (its shuffle bit too) is played
+            return def;
+        }
         if (best == null || best.forge) {
             return def;
         }
@@ -965,6 +988,9 @@ public final class ChooseACard implements CacHook {
         int applied, leaves, terminals, misses, failures, solverChecks;
         long steps;
 
+        /** The live random stream as it stands at the ask (a copy): the baseline probe replays Forge on it. */
+        final Random liveRng = cloneRandom(MyRandom.getRandom());
+
         Decision(final Ask ask, final List<Integer> forgeFirst) {
             this.ask = ask;
             this.forgeFirst = forgeFirst;
@@ -973,6 +999,13 @@ public final class ChooseACard implements CacHook {
 
     private Card decidePicks(final Decision d, final List<Answer> answers, final Card def, final CardCollection fetchList) {
         final Answer best = d.beam != null ? d.beam.run(answers) : decide(d, answers);
+        if (best != null && best.forge && best.probed && best.picks != null && !best.picks.isEmpty()
+                && cfg.mode == Config.Mode.ON) {
+            // review S2 (baseline): kept = the recorded Forge answer is played, so the valued state is the played one
+            startPlan(best, d.ask);
+            planPick = 1;
+            return def;
+        }
         if (best == null || best.forge || best.picks == null) {
             return def;
         }
@@ -1001,6 +1034,7 @@ public final class ChooseACard implements CacHook {
     /** Apply every answer, one batched value pass, solver on the top-m; the answer to play (null = Forge's). */
     Answer decide(final Decision d, final List<Answer> answers) {
         final long t0 = System.nanoTime();
+        final Answer[] sb = {null};
         final JsonObject e = d.entry;
         final PhaseHandler ph = live.getPhaseHandler();
         e.addProperty("i", d.index);
@@ -1025,6 +1059,9 @@ public final class ChooseACard implements CacHook {
                 return null;
             }
             out = choose(d, list, score);
+            if (cfg.mode == Config.Mode.SHADOW && list.get(0).probed) {
+                sb[0] = list.get(0);
+            }
             if (cfg.mode == Config.Mode.SHADOW && out != null && !out.forge) {
                 // shadow: logged, never played (the live answer stays Forge AI's)
                 e.addProperty("outcome", "shadow-would-depart");
@@ -1052,6 +1089,7 @@ public final class ChooseACard implements CacHook {
             e.add("work", w);
             e.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
             pin(d.ask); // review S1-1: every outcome pins this resolution (a departure then sets the plan)
+            shadowBase = sb[0];
             log.add(e);
             while (log.size() > LOG_KEEP) {
                 log.remove(0);
@@ -1280,7 +1318,7 @@ public final class ChooseACard implements CacHook {
                 final List<Integer> firstPick) {
             super(g, p, lp);
             this.a = a;
-            this.record = a.forge;
+            this.record = a.forge && !a.probed;
             this.leaf = leaf;
             this.firstPick = firstPick;
         }
@@ -1325,7 +1363,7 @@ public final class ChooseACard implements CacHook {
         @Override
         public CardCollectionView orderMoveToZoneList(final CardCollectionView cards, final ZoneType destinationZone,
                 final SpellAbility source) {
-            if (!leaf.armed && a.order != null && !orderUsed && !record && destinationZone == ZoneType.Library) {
+            if (!leaf.armed && a.order != null && !orderUsed && destinationZone == ZoneType.Library) {
                 orderUsed = true;
                 final CardCollectionView o = toMoveOrder(a.order, cards, destinationZone);
                 if (o != null) return o;
@@ -1470,6 +1508,37 @@ public final class ChooseACard implements CacHook {
 
     /** Copy the live game, apply {@code a}, settle to the leaf; null = the answer could not be applied. */
     private Prep apply(final Decision d, final Answer a, final long seed) {
+        if (a.forge && !a.probed && probeKind(d.ask.kind) && d.liveRng != null) {
+            probeForge(d, a, seed);
+        }
+        return apply(d, a, seed, false);
+    }
+
+    /**
+     * Review S2 (baseline): record live Forge's own full answer to this resolution on an EXACT copy (our library
+     * unshuffled, no re-draw: the position live Forge decides on) with a copy of the live random stream, then fix it
+     * as candidate 0's answer. Only answers are read from this copy; it is never valued.
+     */
+    private void probeForge(final Decision d, final Answer a, final long seed) {
+        final Answer rec = new Answer();
+        rec.forge = true;
+        final Prep pr = apply(d, rec, seed, true);
+        if (pr == null || rec.probeSc == null) {
+            count("probeFailed");
+            return;
+        }
+        final Scripted sc = rec.probeSc;
+        if (!sc.recPicks.isEmpty()) a.picks = new ArrayList<>(sc.recPicks);
+        if (sc.recOrder != null) a.order = new ArrayList<>(sc.recOrder);
+        else if (a.picks != null && (d.ask.kind == Kind.PILE || d.ask.kind == Kind.DIG)) a.order = new ArrayList<>(a.picks);
+        if (sc.recShuffle != null) a.shuffle = sc.recShuffle;
+        a.probed = true;
+        a.key = null;
+        a.desc.add("baseline:" + (a.picks != null ? namesById(live, a.order != null ? a.order : a.picks)
+                : namesById(live, a.order)) + (Boolean.TRUE.equals(a.shuffle) ? "+shuffle" : ""));
+    }
+
+    private Prep apply(final Decision d, final Answer a, final long seed, final boolean probe) {
         final Ask ask = d.ask;
         final Prep p = new Prep();
         final Random prev = MyRandom.getThreadRandom();
@@ -1498,17 +1567,20 @@ public final class ChooseACard implements CacHook {
                 }
                 // honesty (DESIGN-r2 §14 (2)): the copy's unknown library slots are shuffled (known positions and the
                 // cards this ask shows stay), one seed per decision so every answer sees the same arrangement
-                if (memory != null) {
+                if (memory != null && !probe) {
                     OwnLibraryMemory.shuffleUnknown(cm, memory.known(cm),
                             new Random(LookaheadSearch.mix(cfg.seed, 0x5EED0000L + d.index)));
                 }
-                if (redraw != null) {
+                if (redraw != null && !probe) {
                     redraw.apply(live, me, g, cm, new Random(LookaheadSearch.mix(cfg.seed, 0x0DD0000L + d.index)));
                 }
             }
-            MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 3)));
+            MyRandom.setThreadRandom(probe ? cloneRandom(d.liveRng) : new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 3)));
             final Leaf leaf = new Leaf();
             final Scripted sc = new Scripted(g, cm, cm.getController().getLobbyPlayer(), a, leaf, d.forgeFirst);
+            if (probe) {
+                a.probeSc = sc;
+            }
             cm.dangerouslySetController(sc);
             for (Player o : g.getPlayers()) {
                 if (o != cm) o.dangerouslySetController(new Watch(g, o, o.getController().getLobbyPlayer(), leaf));
@@ -1603,6 +1675,9 @@ public final class ChooseACard implements CacHook {
                         g.getStack().resolveStackFrom(sub);
                     }
                 }
+            }
+            if (probe) {
+                return sc.miss ? null : p; // the probe reads only the recorded answers
             }
             if (!sc.complete()) {
                 d.misses++;
@@ -2023,6 +2098,27 @@ public final class ChooseACard implements CacHook {
         a.order = new ArrayList<>(a.picks);
         a.desc.add("seq:" + names(seq));
         return a;
+    }
+
+    /** A copy of a random stream's state (null when it cannot be copied). Never advances {@code r}. */
+    static Random cloneRandom(final Random r) {
+        if (r == null) return null;
+        if (r instanceof PlayoutKeys.TrackedRandom t) return PlayoutKeys.TrackedRandom.ofSnapshot(t.snapshot());
+        try {
+            final java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            try (java.io.ObjectOutputStream o = new java.io.ObjectOutputStream(bo)) {
+                o.writeObject(r);
+            }
+            try (java.io.ObjectInputStream i = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(bo.toByteArray()))) {
+                return (Random) i.readObject();
+            }
+        } catch (java.io.IOException | ClassNotFoundException e) {
+            return null;
+        }
+    }
+
+    static boolean probeKind(final Kind k) {
+        return k == Kind.SEARCH || k == Kind.MULTI || k == Kind.PILE || k == Kind.DIG || k == Kind.ORDER;
     }
 
     static Answer pileAnswerOf(final Answer a) {
