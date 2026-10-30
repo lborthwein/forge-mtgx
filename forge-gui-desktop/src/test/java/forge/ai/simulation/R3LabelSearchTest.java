@@ -115,6 +115,12 @@ public class R3LabelSearchTest extends SimulationTest {
         return sa;
     }
 
+    static JsonObject withoutSchema(final JsonObject o) {
+        final JsonObject c = o.deepCopy();
+        c.remove("schema");
+        return c;
+    }
+
     static JsonObject noMs(final JsonObject o) {
         final JsonObject c = o.deepCopy();
         c.remove("ms");
@@ -203,7 +209,7 @@ public class R3LabelSearchTest extends SimulationTest {
         bad.getAsJsonObject("cac").addProperty("mode", "on");
         AssertJUnit.assertTrue(ChooseACardTest.expectIae(() -> R3LabelSearch.Spec.parse(bad)));
         AssertJUnit.assertEquals(R3LabelSearch.Spec.parse(new JsonObject()).sha(),
-                R3LabelSearch.Spec.parse(R3LabelSearch.Spec.parse(new JsonObject()).identity()).sha());
+                R3LabelSearch.Spec.parse(withoutSchema(R3LabelSearch.Spec.parse(new JsonObject()).identity())).sha());
         // the live game never moves: a searched row leaves the fingerprint and the random stream as they were
         final Game g = boltBoard(20, 20, false, false);
         final Player a = g.getPlayers().get(0);
