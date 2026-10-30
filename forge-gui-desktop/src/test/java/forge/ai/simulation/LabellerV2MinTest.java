@@ -101,7 +101,7 @@ public class LabellerV2MinTest extends AITest {
 
     /**
      * Predeclared test 5 (the v1 gap): a line v1 proves (its adversary only counters SPELLS with counterspells) that v2
-     * does not: (i) their Lightning Bolt for our last 3 life, answered by our instant life gain (Renewed Faith);
+     * does not: (i) their Lightning Bolt for our last 3 life, answered by our life gain (Renewed Faith; Fountain of Youth on our board);
      * (ii) their Rod of Ruin activation for our last life point, answered by our Stifle on the ability (reported). At least one of the two must be proven by v1
      * for the test to mean anything; every case v1 proves, v2 must not.
      */
@@ -110,6 +110,8 @@ public class LabellerV2MinTest extends AITest {
         final String[][] cases = {
             // their Bolt for our last 3 life; our instant life gain (no counterspell) answers it
             {"Renewed Faith", "Plains;Plains;Plains", "3", "Lightning Bolt", "Mountain"},
+            // an ACTIVATED life gain on our board (Forge AI rarely answers with one): 3 life + 1 survives the Bolt
+            {"", "Fountain of Youth;Plains;Plains", "3", "Lightning Bolt", "Mountain"},
             {"Stifle", "Island", "1", "", "Rod of Ruin;Mountain;Mountain;Mountain"},
         };
         int v1Proofs = 0;
@@ -125,8 +127,9 @@ public class LabellerV2MinTest extends AITest {
                 Assert.assertFalse(v2, "v2 must refute what only the counterspell adversary let through: " + sb);
             }
             // without our answer in hand both prove the line (the MIN is not a blanket refusal)
+            final String openBoard = c[1].replace("Fountain of Youth;", "");
             final java.util.function.Supplier<Game> open = () -> ForcedWinSolverTest.game("Default", "Default",
-                    ForcedWinSolverTest.frame("", c[1], Integer.parseInt(c[2]), c[3], c[4], 20, "ai"));
+                    ForcedWinSolverTest.frame("", openBoard, Integer.parseInt(c[2]), c[3], c[4], 20, "ai"));
             if (v1) {
                 Assert.assertTrue(proven(open.get(), cfgEngine(true)) || proven(open.get(), cfg(true, 64)),
                         "v2 proves the same line with no answer in our hand: " + sb);
