@@ -21,18 +21,18 @@ public class PlayerControllerLookahead extends PlayerControllerAi {
         this.lobby = lp;
     }
 
-    /** r2-choose-a-card-1029: install the search's choose-a-card engine on this live seat once (off: never). */
-    private boolean cacChecked = false;
-
+    /**
+     * r2-choose-a-card-1029: install the search's choose-a-card engine on this live seat (off: never). Checked at every
+     * mulligan and priority, so a controller swapped back after a Mindslaver-style turn gets it again (review S3).
+     */
     private void cacInstall() {
-        if (cacChecked) {
+        if (getCacHook() != null) {
             return;
         }
         final LookaheadSearch search = lobby.getSearch();
-        if (search == null || getGame() != lobby.getLiveGame()) {
+        if (search == null || getGame() != lobby.getLiveGame() || search.getConfig().cac == null) {
             return;
         }
-        cacChecked = true;
         final ChooseACard c = search.chooseACard();
         if (c != null) {
             c.install(this);

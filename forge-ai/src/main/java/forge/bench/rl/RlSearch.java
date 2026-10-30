@@ -609,6 +609,18 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 final forge.ai.simulation.ChooseACard c = new forge.ai.simulation.ChooseACard(
                         forge.ai.simulation.ChooseACard.Config.fromJson(cfg.cac), forge.ai.simulation.ChooseACard.of(this), null);
                 c.setRedraw(ls.solverRedraw());
+                final int seatIdx = s;
+                // review S2-2: every decision entry is a row of this game's decision log
+                c.setSink(e -> {
+                    final JsonObject row = new JsonObject();
+                    row.addProperty("kind", "chooseACard");
+                    row.addProperty("game_uid", uid);
+                    row.addProperty("seat", seatIdx);
+                    row.add("cac", e);
+                    synchronized (rows) {
+                        rows.add(row);
+                    }
+                });
                 c.install(b);
                 chooseACards.put(p.getId(), c);
             }

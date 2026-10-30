@@ -225,6 +225,15 @@ final class PileBeam {
         d.entry.addProperty("beam_evaluated", evaluated);
         d.entry.addProperty("beam_batches", batches);
         d.entry.addProperty("beam_pool", keys.size());
+        // review S2-4: the route roles order the pool; names past beamBranch are never tried as a prefix extension
+        // (they can still enter a pile through a template's completion): disclosed here
+        if (keys.size() > cac.config().beamBranch) {
+            final JsonArray pruned = new JsonArray();
+            for (int i = cac.config().beamBranch; i < keys.size(); i++) {
+                pruned.add(name(keys.get(i)));
+            }
+            d.entry.add("beam_branch_pruned", pruned);
+        }
         depth = n + 1;
         return cac.decide(d, fin);
     }

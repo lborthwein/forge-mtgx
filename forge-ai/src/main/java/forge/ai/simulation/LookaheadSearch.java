@@ -680,6 +680,9 @@ public final class LookaheadSearch {
         public final Map<String, Long> tutorWhy = new TreeMap<>();
         /** One entry per searched (or refused) choice: source, destination, names, Forge's pick, ranked, EVs, choice. */
         public final JsonArray tutorDecisions = new JsonArray();
+        /** r2-choose-a-card-1029: the seat's choose-a-card decisions (only when the option is on), and those past 512. */
+        public final JsonArray cacDecisions = new JsonArray();
+        public long cacDropped;
         /**
          * Belief (reported only when the option is on): searched decisions with a belief; skipped (nothing hidden, not
          * two players); service calls, failures (= uniform fallbacks), call time; worlds drawn from a belief (acting or
@@ -947,6 +950,10 @@ public final class LookaheadSearch {
                     o.addProperty("tutorLastError", tutorLastError);
                 }
                 o.add("tutorDecisions", tutorDecisions);
+            }
+            if (cacDecisions.size() > 0 || cacDropped > 0) {
+                o.add("cacDecisions", cacDecisions);
+                o.addProperty("cacDropped", cacDropped);
             }
             if (beliefOn) {
                 o.addProperty("beliefDecisions", beliefDecisions);
@@ -1684,6 +1691,18 @@ public final class LookaheadSearch {
         if (cacEngine == null) {
             final ChooseACard.Config c = ChooseACard.Config.fromJson(cfg.cac);
             cacEngine = new ChooseACard(c, hooks != null ? ChooseACard.of(hooks) : StaticValuer.INSTANCE, null);
+            // review S1-2: the copies' opponent hidden cards come from this seat's belief (null = no belief: install refuses)
+            cacEngine.setRedraw(solverRedraw());
+            // review S2-2: every decision entry goes to this game's stats (the bench row), bounded
+            cacEngine.setSink(e -> {
+                synchronized (stats) {
+                    if (stats.cacDecisions.size() < 512) {
+                        stats.cacDecisions.add(e);
+                    } else {
+                        stats.cacDropped++;
+                    }
+                }
+            });
         } else if (hooks != null) {
             cacEngine.setValuer(ChooseACard.of(hooks));
         }

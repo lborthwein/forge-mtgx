@@ -84,7 +84,15 @@ public class ChooseACardTest extends SimulationTest {
         final JsonObject o = new JsonObject();
         o.addProperty("mode", mode);
         o.addProperty("topM", 0);
-        return ChooseACard.Config.fromJson(o);
+        final ChooseACard.Config c = ChooseACard.Config.fromJson(o);
+        c.testUnsafe = true; // stub values, no solver check, no belief re-draw: tests only
+        return c;
+    }
+
+    static ChooseACard.Config unsafe(final JsonObject o) {
+        final ChooseACard.Config c = ChooseACard.Config.fromJson(o);
+        c.testUnsafe = true;
+        return c;
     }
 
     private static PlayerControllerAi seat(final Game game) {
@@ -174,8 +182,10 @@ public class ChooseACardTest extends SimulationTest {
         AssertJUnit.assertEquals(rng0, MyRandom.getRandom().nextLong());
         AssertJUnit.assertEquals(id0, new forge.game.card.Card(g2.nextCardId(), g2).getId());
         AssertJUnit.assertEquals(1, sh.log.size());
-        AssertJUnit.assertTrue(sh.log.toString(), sh.log.toString().contains("shadow-would-depart")
-                || hand0.contains("Lightning Bolt"));
+        AssertJUnit.assertFalse("Forge's own pick must not be the Bolt here: " + hand0, hand0.contains("Lightning Bolt"));
+        AssertJUnit.assertTrue(sh.log.toString(), sh.log.toString().contains("shadow-would-depart"));
+        AssertJUnit.assertEquals(Long.valueOf(1), sh.counts.get("shadowWouldDepart"));
+        AssertJUnit.assertEquals(Long.valueOf(0), sh.counts.getOrDefault("departed", 0L));
         AssertJUnit.assertEquals("one batched value pass per decision", 1, stub.calls);
 
         // a look-ahead config without the key: no "chooseACard" in its JSON
@@ -220,7 +230,7 @@ public class ChooseACardTest extends SimulationTest {
         o.addProperty("topM", 10);
         final Stub flat = new Stub((x, p) -> 0.5);
         final int[] checks = {0};
-        final ChooseACard cac = new ChooseACard(ChooseACard.Config.fromJson(o), flat, (copy, me, known, key) -> {
+        final ChooseACard cac = new ChooseACard(unsafe(o), flat, (copy, me, known, key) -> {
             checks[0]++;
             final ChooseACard.Verdict v = new ChooseACard.Verdict();
             v.win = inZone(me, ZoneType.Hand, "Lightning Bolt");
@@ -446,6 +456,7 @@ public class ChooseACardTest extends SimulationTest {
         cac.install(c);
         castAndResolve(g, "Doomsday");
         final List<String> lib = names(a, ZoneType.Library);
+        AssertJUnit.assertEquals("one decision for the whole pile (picks and order): " + cac.log, 1, cac.log.size());
         AssertJUnit.assertEquals(String.valueOf(cac.log) + cac.counts, 5, lib.size());
         AssertJUnit.assertEquals(String.valueOf(cac.log), "Gush", lib.get(0));
         AssertJUnit.assertEquals(lib + " " + cac.counts + " " + cac.log, "Thassa's Oracle", lib.get(1));
@@ -490,6 +501,10 @@ public class ChooseACardTest extends SimulationTest {
      * Activating draws two: the exact expectation over the next two cards weights the Bolt by exactly 2/10.
      */
     private Game ringBoard(final int myLife, final boolean redMana, final boolean oppAttacker) {
+        return ringBoard(myLife, redMana, oppAttacker, 1);
+    }
+
+    private Game ringBoard(final int myLife, final boolean redMana, final boolean oppAttacker, final int burden) {
         final Game g = initAndCreateGame();
         final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
         g.getPhaseHandler().devModeSet(PhaseType.MAIN2, a);
@@ -497,7 +512,7 @@ public class ChooseACardTest extends SimulationTest {
         for (int i = 0; i < 9; i++) addCardToZone("Forest", a, ZoneType.Library);
         for (int i = 0; i < 20; i++) addCardToZone("Plains", b, ZoneType.Library);
         final Card ring = addCard("The One Ring", a);
-        ring.addCounterInternal(CounterEnumType.BURDEN, 1, a, false, null, null);
+        ring.addCounterInternal(CounterEnumType.BURDEN, burden, a, false, null, null);
         if (redMana) addCard("Mountain", a);
         if (oppAttacker) addCard("Grizzly Bears", b).setSickness(false);
         a.setLife(myLife, null);
@@ -507,6 +522,11 @@ public class ChooseACardTest extends SimulationTest {
     }
 
     private static DrawExpectation.Result ring(final Game g, final double flat) {
+        return ring(g, flat, Collections.emptySet(), true);
+    }
+
+    private static DrawExpectation.Result ring(final Game g, final double flat, final Set<Integer> known,
+            final boolean checkTwoDraws) {
         final Player a = g.getPlayers().get(0);
         final Card ring = find(a, ZoneType.Battlefield, "The One Ring");
         int idx = -1, i = 0;
@@ -519,11 +539,17 @@ public class ChooseACardTest extends SimulationTest {
         acts.add(DrawExpectation.pass(ring.getId()));
         acts.add(DrawExpectation.activate(ring.getId(), idx, "ring"));
         final String fp = LookaheadSearch.fingerprint(g);
-        final DrawExpectation.Result r = new DrawExpectation(new DrawExpectation.Config()).evaluate(g, a, acts,
-                Collections.emptySet(), null, new Stub((x, p) -> flat));
+        final DrawExpectation.Config dc = new DrawExpectation.Config();
+        dc.testNoRedraw = true; // the opponent holds no hidden card that matters here; real calls must pass a re-draw
+        final DrawExpectation.Result r = new DrawExpectation(dc).evaluate(g, a, acts, known, null, new Stub((x, p) -> flat));
         AssertJUnit.assertEquals("the live game is never moved", fp, LookaheadSearch.fingerprint(g));
-        AssertJUnit.assertTrue(r.exact);
         AssertJUnit.assertEquals(1, r.valueCalls);
+        if (!checkTwoDraws) {
+            return r;
+        }
+        // review S2-6: the 2/10 below holds because the Ring (one burden counter, a second added) really draws two
+        AssertJUnit.assertEquals("the activation drew exactly two of our cards", 2, r.maxDraws);
+        AssertJUnit.assertTrue(r.exact);
         double boltWeight = 0;
         for (int s = 0; s < r.sequences.size(); s++) {
             if (r.sequences.get(s).contains("Lightning Bolt")) boltWeight += r.weights[s];
@@ -630,7 +656,7 @@ public class ChooseACardTest extends SimulationTest {
         o.addProperty("mode", "on");
         o.addProperty("topM", 0);
         o.addProperty("kinds", "RETURN_COST");
-        final ChooseACard cac = new ChooseACard(ChooseACard.Config.fromJson(o), stub, null);
+        final ChooseACard cac = new ChooseACard(unsafe(o), stub, null);
         cac.install(c);
         SpellAbility alt = null;
         for (SpellAbility s : find(a, ZoneType.Hand, "Gush").getAllPossibleAbilities(a, true)) {
@@ -672,5 +698,186 @@ public class ChooseACardTest extends SimulationTest {
         castAndResolve(g, "Impulse");
         AssertJUnit.assertTrue(String.valueOf(cac.log), inZone(g.getPlayers().get(0), ZoneType.Hand, "Island"));
         AssertJUnit.assertEquals("DIGPICK", cac.log.get(0).getAsJsonObject().get("kind").getAsString());
+    }
+
+    @Test
+    public void oneRingBeyondTheEnumeratedDepthIsNotExact() {
+        // burden 2 -> 3: the activation draws three, one past drawDepth 2: the result says so
+        final DrawExpectation.Result r = ring(ringBoard(20, true, false, 2), 0.3, Collections.emptySet(), false);
+        AssertJUnit.assertEquals(3, r.maxDraws);
+        AssertJUnit.assertFalse(r.log.toString(), r.exact);
+    }
+
+    @Test
+    public void oneRingKnownTopIsDrawnWithCertainty() {
+        // the Bolt is our KNOWN top card (a put-back): only the nine Forests are unknown, one sequence, weight 1
+        final Game g = ringBoard(20, true, false);
+        final Player a = g.getPlayers().get(0);
+        final Card bolt = a.getCardsIn(ZoneType.Library).get(0);
+        AssertJUnit.assertEquals("Lightning Bolt", bolt.getName());
+        final DrawExpectation.Result r = ring(g, 0.3, java.util.Set.of(bolt.getId()), false);
+        AssertJUnit.assertEquals(String.valueOf(r.sequences), 1, r.sequences.size());
+        AssertJUnit.assertEquals(1.0, r.weights[0], 1e-12);
+        AssertJUnit.assertEquals("the activation draws the known Bolt and wins", 1.0, r.ev[1], 1e-9);
+        AssertJUnit.assertEquals(0.3, r.ev[0], 1e-9);
+    }
+
+    @Test
+    public void drawExpectationRefusesWithoutABeliefRedraw() {
+        final Game g = ringBoard(20, true, false);
+        final Player a = g.getPlayers().get(0);
+        AssertJUnit.assertTrue(expectThrow(() -> new DrawExpectation(new DrawExpectation.Config()).evaluate(g, a,
+                List.of(DrawExpectation.pass()), Collections.emptySet(), null, new Stub((x, p) -> 0.5))));
+    }
+
+    static boolean expectThrow(final Runnable r) {
+        try {
+            r.run();
+            return false;
+        } catch (IllegalStateException e) {
+            return true;
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------ review #143
+
+    /**
+     * Review S1-1's repro: Brainstorm with Bolt / Bears / Island in hand, drawing Forest / Craw Wurm / Hill Giant;
+     * v = 0.9 for [Bears, Hill Giant] on top, 0.5 for [Bolt, Island], else 0.1. One decision for the whole put-back, and
+     * the live library ends in the state the decision valued (never a mix of a kept first pick and a later departure).
+     */
+    @Test
+    public void multiPickIsOneDecisionAndTheLiveStateIsTheChosenOne() {
+        final Game g = libraryBoard("Brainstorm", "Island", "Forest", "Craw Wurm", "Hill Giant", "Swamp", "Swamp");
+        final Player a = g.getPlayers().get(0);
+        addCardToZone("Lightning Bolt", a, ZoneType.Hand);
+        addCardToZone("Grizzly Bears", a, ZoneType.Hand);
+        addCardToZone("Island", a, ZoneType.Hand);
+        final PlayerControllerAi c = seat(g);
+        final Stub stub = new Stub((x, p) -> {
+            final List<String> lib = names(p, ZoneType.Library);
+            final List<String> two = lib.subList(0, 2);
+            if (two.equals(List.of("Grizzly Bears", "Hill Giant"))) return 0.9;
+            if (two.equals(List.of("Lightning Bolt", "Island"))) return 0.5;
+            return 0.1;
+        });
+        final ChooseACard cac = new ChooseACard(cfg("on"), stub, null);
+        cac.install(c);
+        castAndResolve(g, "Brainstorm");
+        AssertJUnit.assertEquals(String.valueOf(cac.log), 1, cac.log.size());
+        AssertJUnit.assertEquals(String.valueOf(cac.log), List.of("Grizzly Bears", "Hill Giant"),
+                names(a, ZoneType.Library).subList(0, 2));
+    }
+
+    /** Kept on decision 0: the rest of the resolution is Forge AI's own (no later decision). */
+    @Test
+    public void keptFirstDecisionPinsTheResolution() {
+        final Game g0 = libraryBoard("Brainstorm", "Island", "Forest", "Craw Wurm", "Hill Giant", "Swamp", "Swamp");
+        final Player a0 = g0.getPlayers().get(0);
+        addCardToZone("Lightning Bolt", a0, ZoneType.Hand);
+        addCardToZone("Grizzly Bears", a0, ZoneType.Hand);
+        seat(g0);
+        castAndResolve(g0, "Brainstorm");
+        final List<String> plain = names(a0, ZoneType.Library);
+        final Game g = libraryBoard("Brainstorm", "Island", "Forest", "Craw Wurm", "Hill Giant", "Swamp", "Swamp");
+        final Player a = g.getPlayers().get(0);
+        addCardToZone("Lightning Bolt", a, ZoneType.Hand);
+        addCardToZone("Grizzly Bears", a, ZoneType.Hand);
+        final PlayerControllerAi c = seat(g);
+        final ChooseACard cac = new ChooseACard(cfg("on"), new Stub((x, p) -> 0.5), null); // flat: keeps Forge's
+        cac.install(c);
+        castAndResolve(g, "Brainstorm");
+        AssertJUnit.assertEquals(1, cac.log.size());
+        AssertJUnit.assertEquals("kept", cac.log.get(0).getAsJsonObject().get("outcome").getAsString());
+        AssertJUnit.assertEquals(plain, names(a, ZoneType.Library));
+    }
+
+    /**
+     * Review S1-2: the copies never hold the opponent's real hidden cards. Without a belief re-draw a real install
+     * refuses; with one, every copy the value sees has the re-drawn hand, and the live opponent is untouched. ON also
+     * refuses without the tower and the solver check.
+     */
+    @Test
+    public void copiesNeverHoldTheOpponentsRealHand() {
+        final Game g = tutorBoard(3);
+        final Player b = g.getPlayers().get(1);
+        addCardToZone("Counterspell", b, ZoneType.Hand);
+        final PlayerControllerAi c = seat(g);
+        final JsonObject o = new JsonObject();
+        o.addProperty("mode", "shadow");
+        o.addProperty("topM", 0);
+        final ChooseACard refused = new ChooseACard(ChooseACard.Config.fromJson(o), new Stub((x, p) -> 0.5), null);
+        AssertJUnit.assertTrue(expectThrow(() -> refused.install(c)));
+        final JsonObject on = new JsonObject();
+        on.addProperty("mode", "on");
+        final ChooseACard onNoSolver = new ChooseACard(ChooseACard.Config.fromJson(on), StaticValuer.INSTANCE, null);
+        onNoSolver.setRedraw((lv, lvMe, cg, cm, rng) -> { });
+        AssertJUnit.assertTrue(expectThrow(() -> onNoSolver.install(c)));
+        final List<String> seen = new ArrayList<>();
+        final int[] redraws = {0};
+        final ChooseACard cac = new ChooseACard(ChooseACard.Config.fromJson(o), new Stub((x, p) -> {
+            for (Player opp : p.getOpponents()) seen.addAll(names(opp, ZoneType.Hand));
+            return 0.5;
+        }), null);
+        cac.setRedraw((lv, lvMe, cg, cm, rng) -> {
+            redraws[0]++;
+            for (Player opp : cm.getOpponents()) {
+                for (Card h : new ArrayList<>(opp.getCardsIn(ZoneType.Hand))) cg.getAction().moveToLibrary(h, null);
+                for (int i = 0; i < 1; i++) opp.drawCards(1); // a "sampled" hand: their library's top
+            }
+        });
+        cac.install(c);
+        castAndResolve(g, "Demonic Tutor");
+        AssertJUnit.assertTrue(redraws[0] >= 2);
+        AssertJUnit.assertFalse(String.valueOf(seen), seen.contains("Counterspell"));
+        AssertJUnit.assertTrue(inZone(b, ZoneType.Hand, "Counterspell"));
+    }
+
+    /** Shadow over every kind in one game: the live game equals the hook-less one (state, library order, id counters). */
+    @Test
+    public void shadowIsIdenticalAcrossAllKinds() {
+        final String[] script = {"Demonic Tutor", "Brainstorm", "Ponder", "Preordain", "Faithless Looting", "Impulse"};
+        final java.util.function.Supplier<Game> board = () -> {
+            final Game g = libraryBoard("Demonic Tutor", "Swamp", "Lightning Bolt", "Forest", "Craw Wurm", "Hill Giant",
+                    "Island", "Mountain", "Grizzly Bears", "Giant Growth", "Swamp", "Plains", "Forest", "Island", "Shock",
+                    "Counterspell", "Mountain", "Forest");
+            final Player a = g.getPlayers().get(0);
+            for (String n : script) if (!n.equals("Demonic Tutor")) addCardToZone(n, a, ZoneType.Hand);
+            addCardToZone("Griselbrand", a, ZoneType.Hand);
+            for (int i = 0; i < 6; i++) addCard("Island", a);
+            addCard("Swamp", a);
+            addCard("Mountain", a);
+            addCard("Mountain", a);
+            return g;
+        };
+        final String[] runs = new String[2];
+        final long[] rng = new long[2], sa = new long[2], ids = new long[2];
+        for (int run = 0; run < 2; run++) {
+            final Game g = board.get();
+            final PlayerControllerAi c = seat(g);
+            ChooseACard cac = null;
+            if (run == 1) {
+                final JsonObject o = new JsonObject();
+                o.addProperty("mode", "shadow");
+                o.addProperty("topM", 0);
+                cac = new ChooseACard(unsafe(o), new Stub((x, p) -> (double) (names(p, ZoneType.Library).hashCode()
+                        & 1023) / 1024.0), null);
+                cac.install(c);
+            }
+            final long sa0 = SpellAbility.peekMaxId();
+            for (String n : script) castAndResolve(g, n);
+            rng[run] = MyRandom.getRandom().nextLong();
+            sa[run] = SpellAbility.peekMaxId() - sa0;
+            ids[run] = g.nextCardId();
+            final Player a = g.getPlayers().get(0);
+            runs[run] = LookaheadSearch.fingerprint(g) + "\nlib=" + names(a, ZoneType.Library);
+            if (run == 1) {
+                AssertJUnit.assertTrue("every kind was decided: " + cac.counts, cac.log.size() >= 5);
+            }
+        }
+        AssertJUnit.assertEquals(runs[0], runs[1]);
+        AssertJUnit.assertEquals(rng[0], rng[1]);
+        AssertJUnit.assertEquals("SpellAbility ids the live game used", sa[0], sa[1]);
+        AssertJUnit.assertEquals(ids[0], ids[1]);
     }
 }

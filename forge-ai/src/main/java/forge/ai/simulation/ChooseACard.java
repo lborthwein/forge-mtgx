@@ -67,10 +67,21 @@ public final class ChooseACard implements CacHook {
         public int settleSteps = 200;
         /** Pile beam: prefixes kept per depth, pool names tried per prefix. */
         public int beamWidth = 6;
-        public int beamBranch = 10;
+        /** Pool names tried per prefix (the pool is ordered by route role, then mana value): names past it are logged. */
+        public int beamBranch = 40;
         /** A departure must beat Forge's answer's score by more than this. */
         public double margin = 0.0;
         public long seed = 1029L;
+        /**
+         * The honest win check's label spec ({@link HonestLabel.Spec#parse}: belief re-draw, hideOwnLibrary, counter
+         * budgets); built into the solver check at install. ON refuses to install without a solver check.
+         */
+        public JsonObject label = null;
+        /**
+         * Tests only (never a JSON key): allow a stub valuer, no solver check and no belief re-draw. Every real install
+         * refuses ON without the value tower and the solver check, and ON or SHADOW without the belief re-draw.
+         */
+        public boolean testUnsafe = false;
 
         public static Config fromJson(final JsonObject o) {
             final Config c = new Config();
@@ -94,6 +105,10 @@ public final class ChooseACard implements CacHook {
             if (o.has("beamBranch")) c.beamBranch = o.get("beamBranch").getAsInt();
             if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
             if (o.has("seed")) c.seed = o.get("seed").getAsLong();
+            if (o.has("label") && !o.get("label").isJsonNull()) {
+                c.label = o.getAsJsonObject("label");
+                HonestLabel.Spec.parse(c.label); // refuse a dishonest or malformed spec at parse time
+            }
             if (c.cap < 2 || c.shuffleWorlds < 1 || c.settleSteps < 1 || c.beamWidth < 1 || c.beamBranch < 1 || c.topM < 0) {
                 throw new IllegalArgumentException("chooseACard: cap >= 2, topM >= 0, shuffleWorlds/settleSteps/beam >= 1");
             }
@@ -101,7 +116,7 @@ public final class ChooseACard implements CacHook {
         }
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("mode", "kinds", "cap", "topM",
-                "shuffleWorlds", "settleSteps", "beamWidth", "beamBranch", "margin", "seed"));
+                "shuffleWorlds", "settleSteps", "beamWidth", "beamBranch", "margin", "seed", "label"));
 
         public JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -119,6 +134,7 @@ public final class ChooseACard implements CacHook {
             o.addProperty("beamBranch", beamBranch);
             o.addProperty("margin", margin);
             o.addProperty("seed", seed);
+            if (label != null) o.add("label", label);
             return o;
         }
     }
@@ -233,6 +249,8 @@ public final class ChooseACard implements CacHook {
         List<Integer> returned;
         /** Forge AI's own answer (candidate 0). */
         boolean forge;
+        /** An optional search's "find nothing". */
+        boolean none;
         String key;
         List<String> desc = new ArrayList<>();
 
@@ -274,12 +292,23 @@ public final class ChooseACard implements CacHook {
     private Player me;
     private OwnLibraryMemory memory;
     private int decisions = 0;
-    /** The plan the live seat follows for the rest of the resolution it departed in. */
+    /**
+     * The resolving stack entry a decision was made in (review S1-1): every later ask of that same resolution follows
+     * {@link #plan} (the departed answer) or, with no plan (kept, shadow, single, error), is Forge AI's own; it never
+     * opens a second decision.
+     */
+    private SpellAbility pinTop = null;
     private Answer plan = null;
-    private SpellAbility planTop = null;
     private int planPick = 0;
-    /** One entry per hooked decision (DESIGN-r2 §8). */
+    /** The last decisions (bounded: at most {@link #LOG_KEEP}); every entry also goes to the sink (the decision log). */
     public final JsonArray log = new JsonArray();
+    static final int LOG_KEEP = 256;
+    private java.util.function.Consumer<JsonObject> sink = null;
+
+    /** Where every decision entry goes as it is made (the game's decision log); null = memory only (bounded). */
+    public void setSink(final java.util.function.Consumer<JsonObject> s) {
+        this.sink = s;
+    }
     public final Map<String, Long> counts = new TreeMap<>();
     /** Tests: the last decision's candidate descriptions and scores, and its pick. */
     List<String> lastCands = null;
@@ -318,10 +347,30 @@ public final class ChooseACard implements CacHook {
         if (cfg.mode == Config.Mode.OFF) {
             return;
         }
+        if (checker == null && cfg.label != null) {
+            checker = honest(new HonestLabel.Seat(HonestLabel.Spec.parse(cfg.label)));
+        }
+        if (!cfg.testUnsafe) {
+            // review S1-2 / S2-1: never on the opponent's real hidden cards; ON only with the tower and the solver
+            if (redraw == null) {
+                throw new IllegalStateException("chooseACard refused: no belief re-draw (the copies would hold the "
+                        + "opponent's real hidden cards)");
+            }
+            if (cfg.mode == Config.Mode.ON && (valuer == null || valuer instanceof StaticValuer || checker == null
+                    || cfg.topM < 1)) {
+                throw new IllegalStateException("chooseACard refused: mode on needs the value tower (search hooks) and the "
+                        + "solver check (a label spec, topM >= 1); shadow reports without them");
+            }
+        }
+        if (ctrl.getCacHook() == this) {
+            return; // already installed (a re-install after a controller swap is a no-op on the same controller)
+        }
+        if (memory == null || live != ctrl.getGame() || me != ctrl.getPlayer()) {
+            this.memory = new OwnLibraryMemory(ctrl.getPlayer());
+            memory.watch(ctrl.getGame());
+        }
         this.live = ctrl.getGame();
         this.me = ctrl.getPlayer();
-        this.memory = new OwnLibraryMemory(me);
-        memory.watch(live);
         ctrl.setCacHook(this);
     }
 
@@ -337,18 +386,29 @@ public final class ChooseACard implements CacHook {
         counts.merge(k, 1L, Long::sum);
     }
 
-    /** The plan is still live: the same stack entry is resolving. */
-    private boolean planLive() {
-        if (plan == null) {
+    /** A decision was made in the stack entry resolving now (its later asks follow the pin: the plan, or Forge AI). */
+    private boolean pinned() {
+        if (pinTop == null) {
             return false;
         }
-        if (planTop == null || live.getStack().isEmpty() || !live.getStack().isResolving()
-                || live.getStack().peekAbility() != planTop) {
+        if (live.getStack().isEmpty() || !live.getStack().isResolving() || live.getStack().peekAbility() != pinTop) {
+            pinTop = null;
             plan = null;
-            planTop = null;
             return false;
         }
         return true;
+    }
+
+    private boolean planLive() {
+        return pinned() && plan != null;
+    }
+
+    private void pin(final Ask ask) {
+        if (ask != null && ask.top != null) {
+            pinTop = ask.top;
+            plan = null;
+            planPick = 0;
+        }
     }
 
     // ------------------------------------------------------------------------------------------------ hooks
@@ -360,7 +420,13 @@ public final class ChooseACard implements CacHook {
         if (!mine(c) || decider != me || fetchList == null || fetchList.isEmpty()) {
             return def;
         }
-        if (planLive() && plan.picks != null) {
+        if (pinned()) {
+            if (plan == null || plan.picks == null) {
+                return def; // kept / shadow / single / error: the rest of this resolution is Forge AI's
+            }
+            if (plan.none) {
+                return null; // the departed answer finds nothing
+            }
             if (planPick < plan.picks.size()) {
                 final int id = plan.picks.get(planPick++);
                 for (Card x : fetchList) {
@@ -418,12 +484,28 @@ public final class ChooseACard implements CacHook {
         final boolean exactOrdered = ordered && (kind == Kind.PILE || kind == Kind.DIG);
         final int[] total = {0};
         final Decision d = new Decision(ask, def == null ? null : Collections.singletonList(def.getId()));
-        if (kind == Kind.PILE && countSequences(pool, counts0, n, cfg.cap + 1) > cfg.cap - 1) {
-            d.beam = new PileBeam(this, d, fetchList, n);
-        } else {
-            enumerate(fetchList, n, exactOrdered, answers, total);
+        if (isOptional && def != null && kind == Kind.SEARCH) {
+            // "up to one" / a search that may fail to find: finding nothing is an answer too
+            final Answer none = new Answer();
+            none.picks = new ArrayList<>();
+            none.none = true;
+            none.key = "none";
+            none.desc.add("find nothing");
+            answers.add(none);
         }
-        d.nEnum = total[0];
+        if (kind == Kind.PILE) {
+            final long seqs = countSequences(pool, counts0, n, 10_000_000L);
+            d.entry.addProperty("n_sequences", seqs);
+            if (seqs > cfg.cap - 1) {
+                d.beam = new PileBeam(this, d, fetchList, n);
+                d.nEnum = (int) Math.min(Integer.MAX_VALUE, seqs);
+            }
+        }
+        if (d.beam == null) {
+            enumerate(fetchList, n, exactOrdered, answers, total);
+            d.nEnum = total[0];
+            logDropped(d, fetchList, answers);
+        }
         return decidePicks(d, answers, def, fetchList);
     }
 
@@ -436,7 +518,10 @@ public final class ChooseACard implements CacHook {
         if (destination == ZoneType.Library && memory != null) {
             memory.noteLooked(cards);
         }
-        if (destination == ZoneType.Library && planLive() && plan.order != null) {
+        if (pinned()) {
+            if (destination != ZoneType.Library || plan == null || plan.order == null) {
+                return def;
+            }
             final CardCollectionView o = toMoveOrder(plan.order, cards, destination);
             if (o != null) {
                 return o;
@@ -502,9 +587,7 @@ public final class ChooseACard implements CacHook {
     public boolean confirm(final PlayerControllerAi c, final SpellAbility sa, final PlayerActionConfirmMode mode,
             final String message, final boolean def) {
         if (mine(c) && planLive() && plan.shuffle != null && sa != null && sa.getApi() == ApiType.RearrangeTopOfLibrary) {
-            final boolean s = plan.shuffle;
-            plan = null;
-            return s;
+            return plan.shuffle;
         }
         return def;
     }
@@ -529,10 +612,19 @@ public final class ChooseACard implements CacHook {
         if (memory != null) {
             memory.noteLooked(topN); // kept positions (top or bottom); a surveilled card leaves the library
         }
+        if (pinned()) {
+            if (plan != null && plan.top != null) {
+                final CardCollection t = byIds(plan.top, topN), w = byIds(plan.away, topN);
+                if (t != null && w != null && t.size() + w.size() == topN.size()) {
+                    return ImmutablePair.of(t, w);
+                }
+                count("liveMiss");
+            }
+            return def;
+        }
         if (!cfg.kinds.contains(kind) || live.getStack().isEmpty() || !live.getStack().isResolving()) {
             return def;
         }
-        final SpellAbility sa = live.getStack().peekAbility();
         final Ask ask = askFromTop(kind, kind == Kind.SCRY ? "arrangeForScry" : "arrangeForSurveil");
         if (ask == null) {
             return def;
@@ -582,14 +674,26 @@ public final class ChooseACard implements CacHook {
             count("liveMiss");
             return def;
         }
+        startPlan(best, ask);
         return ImmutablePair.of(t, w);
     }
 
     @Override
     public CardCollection discard(final PlayerControllerAi c, final Player discarding, final SpellAbility sa,
             final CardCollection valid, final int min, final int max, final CardCollection def) {
-        if (!mine(c) || discarding != me || valid == null || valid.isEmpty() || !cfg.kinds.contains(Kind.DISCARD)
-                || def == null || min != max || min < 1 || live.getStack().isEmpty() || !live.getStack().isResolving()) {
+        if (!mine(c) || discarding != me || valid == null || valid.isEmpty() || def == null) {
+            return def;
+        }
+        if (pinned()) {
+            if (plan != null && plan.cards != null) {
+                final CardCollection out = byIds(plan.cards, valid);
+                if (out != null) return out;
+                count("liveMiss");
+            }
+            return def;
+        }
+        if (!cfg.kinds.contains(Kind.DISCARD) || min != max || min < 1 || live.getStack().isEmpty()
+                || !live.getStack().isResolving()) {
             return def;
         }
         final Ask ask = ask(Kind.DISCARD, sa, "chooseCardsToDiscardFrom");
@@ -616,11 +720,13 @@ public final class ChooseACard implements CacHook {
         });
         final Decision d = new Decision(ask, null);
         d.nEnum = total[0];
+        logDropped(d, valid, answers);
         final Answer best = decide(d, answers);
         if (best == null || best.forge) {
             return def;
         }
         final CardCollection out = byIds(best.cards, valid);
+        if (out != null) startPlan(best, ask);
         return out == null ? def : out;
     }
 
@@ -653,6 +759,7 @@ public final class ChooseACard implements CacHook {
         });
         final Decision d = new Decision(ask, null);
         d.nEnum = total[0];
+        logDropped(d, hand, answers);
         final Answer best = decide(d, answers);
         if (best == null || best.forge) {
             return def;
@@ -712,8 +819,18 @@ public final class ChooseACard implements CacHook {
     @Override
     public List<Card> dig(final PlayerControllerAi c, final List<Card> options, final int min, final int max,
             final SpellAbility sa, final List<Card> def) {
-        if (!mine(c) || !cfg.kinds.contains(Kind.DIGPICK) || options.isEmpty() || max < 1 || def == null
-                || live.getStack().isEmpty() || !live.getStack().isResolving()) {
+        if (!mine(c) || options.isEmpty() || def == null) {
+            return def;
+        }
+        if (pinned()) {
+            if (plan != null && plan.cards != null) {
+                final CardCollection out = byIds(plan.cards, options);
+                if (out != null) return new ArrayList<>(out);
+                count("liveMiss");
+            }
+            return def;
+        }
+        if (!cfg.kinds.contains(Kind.DIGPICK) || max < 1 || live.getStack().isEmpty() || !live.getStack().isResolving()) {
             return def;
         }
         for (Card x : options) {
@@ -742,9 +859,11 @@ public final class ChooseACard implements CacHook {
         });
         final Decision d = new Decision(ask, null);
         d.nEnum = total[0];
+        logDropped(d, options, answers);
         final Answer best = decide(d, answers);
         if (best == null || best.forge) return def;
         final CardCollection out = byIds(best.cards, options);
+        if (out != null) startPlan(best, ask);
         return out == null ? def : new ArrayList<>(out);
     }
 
@@ -814,6 +933,7 @@ public final class ChooseACard implements CacHook {
         });
         final Decision d = new Decision(ask, null);
         d.nEnum = total[0];
+        logDropped(d, valid, answers);
         final Answer best = decide(d, answers);
         if (best == null || best.forge) return def;
         returnPlan = best;
@@ -853,10 +973,13 @@ public final class ChooseACard implements CacHook {
 
     private Card decidePicks(final Decision d, final List<Answer> answers, final Card def, final CardCollection fetchList) {
         final Answer best = d.beam != null ? d.beam.run(answers) : decide(d, answers);
-        if (best == null || best.forge || best.picks == null || best.picks.isEmpty()) {
+        if (best == null || best.forge || best.picks == null) {
             return def;
         }
         startPlan(best, d.ask);
+        if (best.none) {
+            return null;
+        }
         planPick = 1;
         final int id = best.picks.get(0);
         for (Card x : fetchList) {
@@ -870,8 +993,8 @@ public final class ChooseACard implements CacHook {
     }
 
     private void startPlan(final Answer a, final Ask ask) {
+        pinTop = ask.top;
         plan = a;
-        planTop = ask.top;
         planPick = 0;
     }
 
@@ -905,6 +1028,7 @@ public final class ChooseACard implements CacHook {
             if (cfg.mode == Config.Mode.SHADOW && out != null && !out.forge) {
                 // shadow: logged, never played (the live answer stays Forge AI's)
                 e.addProperty("outcome", "shadow-would-depart");
+                counts.merge("departed", -1L, Long::sum);
                 count("shadowWouldDepart");
                 return null;
             }
@@ -927,7 +1051,14 @@ public final class ChooseACard implements CacHook {
             w.addProperty("solver_checks", d.solverChecks);
             e.add("work", w);
             e.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
+            pin(d.ask); // review S1-1: every outcome pins this resolution (a departure then sets the plan)
             log.add(e);
+            while (log.size() > LOG_KEEP) {
+                log.remove(0);
+            }
+            if (sink != null) {
+                sink.accept(e);
+            }
         }
     }
 
@@ -967,8 +1098,10 @@ public final class ChooseACard implements CacHook {
             applied.add(ap);
             final int w = Boolean.TRUE.equals(a.shuffle) ? cfg.shuffleWorlds : 1;
             for (int j = 0; j < w; j++) {
+                // review S2-3: keyed on the decision, the world j and the beam depth only, so every answer of a batch
+                // is played on the same streams (paired)
                 final Prep p = apply(d, a, LookaheadSearch.mix(LookaheadSearch.mix(cfg.seed, 0xCAC0000L + d.index),
-                        (long) i * 64 + j + (d.beam == null ? 0 : 1_000_000L * d.beam.depth)));
+                        j + (d.beam == null ? 0 : 1_000_000L * d.beam.depth)));
                 if (p == null) {
                     ap.ok = false;
                     break;
@@ -1157,6 +1290,10 @@ public final class ChooseACard implements CacHook {
                 final SpellAbility sa, final CardCollection fetchList, final forge.game.player.DelayedReveal delayedReveal,
                 final String selectPrompt, final boolean isOptional, final Player decider) {
             if (!leaf.armed && decider == getPlayer()) {
+                if (a.none && pickIdx == 0) {
+                    pickIdx++;
+                    return null;
+                }
                 if (a.picks != null && pickIdx < a.picks.size()) {
                     final int id = a.picks.get(pickIdx++);
                     for (Card x : fetchList) {
@@ -1282,7 +1419,7 @@ public final class ChooseACard implements CacHook {
         /** Consumed every forced response it was given. */
         boolean complete() {
             if (miss) return false;
-            if (a.picks != null && pickIdx < a.picks.size()) {
+            if (a.picks != null && !a.none && pickIdx < a.picks.size()) {
                 missWhy = "picks" + pickIdx + "/" + a.picks.size();
                 return false;
             }
@@ -1616,11 +1753,41 @@ public final class ChooseACard implements CacHook {
         return m;
     }
 
-    /** Pick answers of size n from the list: ordered sequences or sets, by (name, zone) multiset, ids lowest first. */
+    /**
+     * Review S2-4: the order answers are enumerated in, so a cap drops the least likely ones: route role first
+     * (finisher, draw, protection, mana, land, other: the route library's rank), then mana value (higher first), then id.
+     * A heuristic for WHICH answers are applied when over the cap; the value tower still decides among them.
+     */
+    static final java.util.Comparator<Card> PRIOR = (a, b) -> {
+        final int r = Integer.compare(PileBeam.ROLES.rankOf(a.getName()), PileBeam.ROLES.rankOf(b.getName()));
+        if (r != 0) return r;
+        final int m = Integer.compare(b.getCMC(), a.getCMC());
+        return m != 0 ? m : Integer.compare(a.getId(), b.getId());
+    };
+
+    /** Over the cap: the names no applied answer uses are logged (review S2-4). */
+    void logDropped(final Decision d, final Iterable<Card> all, final List<Answer> answers) {
+        if (d.nEnum + 1 <= cfg.cap) return;
+        final Set<Integer> used = new HashSet<>();
+        for (Answer a : answers) {
+            if (a.picks != null) used.addAll(a.picks);
+            if (a.cards != null) used.addAll(a.cards);
+            if (a.returned != null) used.addAll(a.returned);
+        }
+        final java.util.TreeSet<String> dropped = new java.util.TreeSet<>();
+        final Set<String> usedNames = new HashSet<>();
+        for (Card c : all) if (used.contains(c.getId())) usedNames.add(c.getName());
+        for (Card c : all) if (!usedNames.contains(c.getName())) dropped.add(c.getName());
+        final JsonArray j = new JsonArray();
+        dropped.forEach(j::add);
+        d.entry.add("dropped_names", j);
+    }
+
+    /** Pick answers of size n from the list: ordered sequences or sets, by (name, zone) multiset, in PRIOR order. */
     void enumerate(final CardCollection fetchList, final int n, final boolean ordered, final List<Answer> out,
             final int[] total) {
         final List<Card> sorted = new ArrayList<>(fetchList);
-        sorted.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+        sorted.sort(PRIOR);
         final Map<String, List<Card>> byKey = new LinkedHashMap<>();
         for (Card c : sorted) byKey.computeIfAbsent(rkey(c), k -> new ArrayList<>()).add(c);
         final List<String> keys = new ArrayList<>(byKey.keySet());
@@ -1700,7 +1867,7 @@ public final class ChooseACard implements CacHook {
 
     /** Every k-subset of the cards (in id order), until the consumer has seen cap*4 of them. */
     static void combos(final List<Card> cards, final int k, final int cap, final java.util.function.Consumer<List<Card>> f) {
-        cards.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+        cards.sort(PRIOR); // review S2-4: a cap drops the least likely subsets
         comboRec(cards, k, 0, new ArrayList<>(), f, new int[] {cap * 4});
     }
 

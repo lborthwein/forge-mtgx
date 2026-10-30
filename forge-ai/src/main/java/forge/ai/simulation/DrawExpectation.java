@@ -47,6 +47,8 @@ public final class DrawExpectation {
         public int samples = 128;
         public int turnSteps = 4000;
         public long seed = 1029L;
+        /** Tests only: allow no belief re-draw of the opponent (every real call must pass one: review S1-2). */
+        public boolean testNoRedraw = false;
     }
 
     /** One action candidate, played on a copy. */
@@ -122,8 +124,13 @@ public final class DrawExpectation {
         public double[] weights;
         /** values[action][sequence]. */
         public double[][] values;
+        /** The next drawDepth unknown cards were enumerated exactly AND no play-out drew more of our cards than that. */
         public boolean exact;
+        /** The most of our library cards any play-out drew before its leaf (review S2-6: beyond drawDepth = not exact). */
+        public int maxDraws;
         public int leaves, terminals, failures, valueCalls;
+        /** A failed value batch (then every ev is -inf), or null. */
+        public String error;
         public final JsonObject log = new JsonObject();
     }
 
@@ -140,6 +147,17 @@ public final class DrawExpectation {
      */
     public Result evaluate(final Game live, final Player liveMe, final List<Action> actions, final Set<Integer> known,
             final ForcedWinSolver.Redraw redraw, final ChooseACard.Valuer valuer) {
+        return evaluate(live, liveMe, actions, known, redraw, valuer, 0L);
+    }
+
+    /** As above; {@code key} (the decision's key) seeds the samples and the arrangements (review S3). */
+    public Result evaluate(final Game live, final Player liveMe, final List<Action> actions, final Set<Integer> known,
+            final ForcedWinSolver.Redraw redraw, final ChooseACard.Valuer valuer, final long key) {
+        if (redraw == null && !cfg.testNoRedraw) {
+            throw new IllegalStateException("draw expectation refused: no belief re-draw (the opponent's turn would be "
+                    + "played from their real hidden cards)");
+        }
+        final long seed0 = LookaheadSearch.mix(cfg.seed, key);
         final Result res = new Result();
         // the unknown slots and cards of our library (top first)
         final List<Card> lib = new ArrayList<>(liveMe.getCardsIn(ZoneType.Library));
@@ -166,7 +184,7 @@ public final class DrawExpectation {
             w.clear();
             for (int s = 0; s < cfg.samples; s++) {
                 final List<Card> sh = new ArrayList<>(sortedU);
-                Collections.shuffle(sh, new Random(LookaheadSearch.mix(cfg.seed, 0x5A3D0000L + s)));
+                Collections.shuffle(sh, new Random(LookaheadSearch.mix(seed0, 0x5A3D0000L + s)));
                 final List<String> q = new ArrayList<>();
                 for (int i = 0; i < d; i++) q.add(sh.get(i).getName());
                 seqs.add(q);
@@ -184,13 +202,20 @@ public final class DrawExpectation {
         final List<int[]> where = new ArrayList<>();
         final boolean[] ok = new boolean[A];
         java.util.Arrays.fill(ok, true);
+        // review S3: a failed (action, sequence) play-out drops that sequence for that action (weights renormalised),
+        // not the whole action; an action with no sequence left is dropped
+        final boolean[][] seqOk = new boolean[A][S];
         for (int a = 0; a < A; a++) {
-            for (int s = 0; s < S && ok[a]; s++) {
-                final Object[] out = play(live, liveMe, actions.get(a), seqs.get(s), sortedU, unknownSlots, s, redraw, valuer);
+            for (int s = 0; s < S; s++) {
+                final Object[] out = play(live, liveMe, actions.get(a), seqs.get(s), sortedU, unknownSlots, s, redraw, valuer,
+                        seed0);
                 if (out == null) {
-                    ok[a] = false;
                     res.failures++;
-                } else if (out[0] != null) {
+                    continue;
+                }
+                seqOk[a][s] = true;
+                res.maxDraws = Math.max(res.maxDraws, (Integer) out[2]);
+                if (out[0] != null) {
                     vals[a][s] = (Double) out[0];
                     res.terminals++;
                 } else {
@@ -203,7 +228,11 @@ public final class DrawExpectation {
             res.valueCalls++;
             final double[] v = valuer.values(payloads);
             if (v == null || v.length != payloads.size()) {
-                throw new IllegalStateException("draw expectation: value batch failed: " + valuer.error());
+                res.error = "value batch failed: " + valuer.error();
+                res.ev = new double[A];
+                java.util.Arrays.fill(res.ev, Double.NEGATIVE_INFINITY);
+                res.log.addProperty("error", res.error);
+                return res;
             }
             for (int k = 0; k < v.length; k++) vals[where.get(k)[0]][where.get(k)[1]] = v[k];
             res.leaves = payloads.size();
@@ -211,9 +240,17 @@ public final class DrawExpectation {
         res.values = vals;
         res.ev = new double[A];
         final JsonArray aj = new JsonArray();
+        res.exact = res.exact && res.maxDraws <= d;
         for (int a = 0; a < A; a++) {
-            double e = 0;
-            for (int s = 0; s < S; s++) e += res.weights[s] * vals[a][s];
+            double e = 0, wsum = 0;
+            for (int s = 0; s < S; s++) {
+                if (seqOk[a][s]) {
+                    e += res.weights[s] * vals[a][s];
+                    wsum += res.weights[s];
+                }
+            }
+            ok[a] = wsum > 0;
+            if (ok[a]) e /= wsum;
             res.ev[a] = ok[a] ? e : Double.NEGATIVE_INFINITY;
             final JsonObject o = new JsonObject();
             o.addProperty("action", actions.get(a).label());
@@ -223,6 +260,8 @@ public final class DrawExpectation {
         }
         res.log.add("actions", aj);
         res.log.addProperty("exact", res.exact);
+        res.log.addProperty("max_draws", res.maxDraws);
+        res.log.addProperty("failures", res.failures);
         res.log.addProperty("sequences", S);
         res.log.addProperty("draw_depth", d);
         res.log.addProperty("unknown", unknown.size());
@@ -288,11 +327,11 @@ public final class DrawExpectation {
     /** One (action, sequence) copy: {terminal value or null, leaf payload}; null = failed. */
     private Object[] play(final Game live, final Player liveMe, final Action action, final List<String> seq,
             final List<Card> unknownById, final List<Integer> unknownSlots, final int s,
-            final ForcedWinSolver.Redraw redraw, final ChooseACard.Valuer valuer) {
+            final ForcedWinSolver.Redraw redraw, final ChooseACard.Valuer valuer, final long seed0) {
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
         final Object prevCache = AiCache.captureScope();
-        final long seed = LookaheadSearch.mix(cfg.seed, 0xD2A0000L + s);
+        final long seed = LookaheadSearch.mix(seed0, 0xD2A0000L + s);
         MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 1)));
         AiCache.openScope();
         forge.util.IdScope.open();
@@ -321,6 +360,17 @@ public final class DrawExpectation {
                 if (o != me) o.dangerouslySetController(new LookaheadSearch.RolloutAi(g, o, o.getController().getLobbyPlayer()));
             }
             final Object ctx = valuer.onCopy(g, me);
+            final int[] draws = {0};
+            final int meId = me.getId();
+            g.subscribeToEvents(new Object() {
+                @com.google.common.eventbus.Subscribe
+                public void on(final forge.game.event.GameEventCardChangeZone e) {
+                    if (e.from() != null && e.from().zoneType() == ZoneType.Library && e.from().player() != null
+                            && e.from().player().getId() == meId && e.to() != null && e.to().zoneType() == ZoneType.Hand) {
+                        draws[0]++;
+                    }
+                }
+            });
             if (!action.apply(g, me)) return null;
             int steps = 0;
             while (!g.isGameOver() && !mine.reached && steps < cfg.turnSteps) {
@@ -332,10 +382,10 @@ public final class DrawExpectation {
                 for (Player o : me.getOpponents()) {
                     if (o.hasLost() && !me.hasLost()) t = 1.0;
                 }
-                return new Object[] {t, null};
+                return new Object[] {t, null, draws[0]};
             }
             if (!mine.reached) return null;
-            return new Object[] {null, valuer.capture(ctx, g, me)};
+            return new Object[] {null, valuer.capture(ctx, g, me), draws[0]};
         } catch (RuntimeException | StackOverflowError e) {
             System.err.println("[draw-expectation] play failed: " + e);
             return null;

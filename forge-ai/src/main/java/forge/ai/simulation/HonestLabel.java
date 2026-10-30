@@ -407,31 +407,22 @@ public final class HonestLabel {
          * The label of {@code liveMe}'s position in {@code live} (a priority the caller saw). {@code key} seeds the
          * position's worlds. Never throws; an error is an unresolved label with {@link Result#error}.
          */
-        /**
-         * r2-choose-a-card-1029 (N5b; null = none, the default path): our library card ids whose positions the seat
-         * knows (a put-back, a pile, a scry). Set only for the duration of {@link #label(Game, Player, long, Set)}.
-         */
-        private Set<Integer> knownOwn = null;
-
-        /**
-         * As {@link #label(Game, Player, long)}, keeping {@code knownOwn} (our library cards whose positions the seat
-         * knows) at their positions in every root world, and telling the win solver they are placed (its pile memory).
-         * Null or empty = exactly the plain call.
-         */
-        public Result label(final Game live, final Player liveMe, final long key, final Set<Integer> knownOwn) {
-            this.knownOwn = knownOwn == null || knownOwn.isEmpty() ? null : knownOwn;
-            try {
-                return label(live, liveMe, key);
-            } finally {
-                this.knownOwn = null;
-            }
+        public Result label(final Game live, final Player liveMe, final long key) {
+            return label(live, liveMe, key, null);
         }
 
-        public Result label(final Game live, final Player liveMe, final long key) {
+        /**
+         * r2-choose-a-card-1029 (N5b, opt-in): as {@link #label(Game, Player, long)}, keeping {@code knownOwn} (our
+         * library card ids whose positions the seat knows: a put-back, a pile, a scry) at their positions in every root
+         * world, and telling the win solver they are placed (its pile memory). Null or empty = exactly the plain call.
+         * The set is passed down as an argument (no field), so concurrent or nested calls do not share it.
+         */
+        public Result label(final Game live, final Player liveMe, final long key, final Set<Integer> knownOwn) {
+            final Set<Integer> known = knownOwn == null || knownOwn.isEmpty() ? null : knownOwn;
             final long t0 = System.nanoTime();
             final Result r = new Result();
             try {
-                label0(live, liveMe, key, r);
+                label0(live, liveMe, key, r, known);
             } catch (RuntimeException | StackOverflowError e) {
                 r.label = "unresolved";
                 r.gate = "error";
@@ -441,7 +432,7 @@ public final class HonestLabel {
             return r;
         }
 
-        private void label0(final Game live, final Player liveMe, final long key, final Result r) {
+        private void label0(final Game live, final Player liveMe, final long key, final Result r, final Set<Integer> known) {
             final PhaseHandler ph = live.getPhaseHandler();
             if (!live.getStack().isEmpty()) {
                 r.gate = "stack";
@@ -458,10 +449,10 @@ public final class HonestLabel {
             final boolean end = ph.is(PhaseType.END_OF_TURN);
             if (mine && main || !mine && end) {
                 r.check = "win";
-                win(live, liveMe, liveOpp, key, r);
+                win(live, liveMe, liveOpp, key, r, known);
             } else if (spec.loss && (!mine && main || mine && end)) {
                 r.check = "loss";
-                loss(live, liveMe, liveOpp, key, r);
+                loss(live, liveMe, liveOpp, key, r, known);
             } else {
                 r.gate = "phase:" + ph.getPhase();
             }
@@ -469,6 +460,12 @@ public final class HonestLabel {
 
         /** An honest world: a copy of the live game, their hidden cards from our belief, our library shuffled. */
         private Object[] world(final Game live, final Player liveMe, final Player liveOpp, final Random rng) {
+            return world(live, liveMe, liveOpp, rng, null);
+        }
+
+        /** As above, keeping {@code knownOwn} (null = none) at their library positions. */
+        private Object[] world(final Game live, final Player liveMe, final Player liveOpp, final Random rng,
+                final Set<Integer> knownOwn) {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1); // storm count, per-turn records (as the solver's own play-outs)
@@ -486,8 +483,9 @@ public final class HonestLabel {
             }
         }
 
-        private void win(final Game live, final Player liveMe, final Player liveOpp, final long key, final Result r) {
-            final Object[] w = world(live, liveMe, liveOpp, new Random(LookaheadSearch.mix(spec.seed, key)));
+        private void win(final Game live, final Player liveMe, final Player liveOpp, final long key, final Result r,
+                final Set<Integer> knownOwn) {
+            final Object[] w = world(live, liveMe, liveOpp, new Random(LookaheadSearch.mix(spec.seed, key)), knownOwn);
             final Game root = (Game) w[0];
             final Player me = (Player) w[1];
             final ForcedWinSolver s = new ForcedWinSolver(me, spec.winConfig());
@@ -538,7 +536,8 @@ public final class HonestLabel {
             }
         }
 
-        private void loss(final Game live, final Player liveMe, final Player liveOpp, final long key, final Result r) {
+        private void loss(final Game live, final Player liveMe, final Player liveOpp, final long key, final Result r,
+                final Set<Integer> knownOwn) {
             final long wall = spec.lossWallMs <= 0 ? Long.MAX_VALUE : System.nanoTime() + spec.lossWallMs * 1_000_000L;
             final ForcedWinSolver.Config cfg = spec.lossConfig();
             int ran = 0, lost = 0, maxTurns = -1;
@@ -553,7 +552,7 @@ public final class HonestLabel {
                     break;
                 }
                 final Object[] w = world(live, liveMe, liveOpp,
-                        new Random(LookaheadSearch.mix(spec.seed, key * 131L + 7919L * (j + 1))));
+                        new Random(LookaheadSearch.mix(spec.seed, key * 131L + 7919L * (j + 1))), knownOwn);
                 final Game g = (Game) w[0];
                 final Player opp = (Player) w[2];
                 // the opponent's solver in this world (their sampled hand is theirs to know); exact: the line is checked
