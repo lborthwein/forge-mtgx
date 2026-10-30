@@ -203,6 +203,12 @@ public final class ForcedWinSolver {
          */
         public boolean oppMin = false;
         public int oppResponses = 4, oppDepth = 2, oppNodes = 64;
+        /**
+         * Tests only (never a spec key): the adversary's own Forge AI answer is replaced by "pass", so v1 is exactly "one
+         * counterspell at one of our spells" and v2 exactly the MIN over the scripted responses: a test then shows what
+         * each covers structurally, not what Forge AI happens to play.
+         */
+        public boolean testPassiveOpp = false;
 
         /** bvw-step1-build-1024: the keys added to the config after the step-0 freeze, with their defaults. */
         public static final java.util.Map<String, Object> STEP1_DEFAULTS = java.util.Map.of("counter", false,
@@ -2094,6 +2100,7 @@ public final class ForcedWinSolver {
             for (Player o : g.getPlayers()) {
                 if (o != cm) {
                     adv = new AdversaryAi(g, o, o.getController().getLobbyPlayer(), cm, counterAt);
+                    adv.passive = cfg.testPassiveOpp;
                     if (script != null) {
                         adv.script = script; // labeller-v2 (d)
                         adv.sizes = out.responseSizes;
@@ -3020,6 +3027,18 @@ public final class ForcedWinSolver {
         int[] script;
         List<Integer> sizes;
         int maxResponses = 4;
+        /** Tests only: pass instead of Forge AI's own answer while one of our objects is on the stack. */
+        boolean passive;
+
+        private List<SpellAbility> fallback(final Game g) {
+            if (passive && !g.getStack().isEmpty()) {
+                final SpellAbility t = g.getStack().peekAbility();
+                if (t != null && t.getActivatingPlayer() == victim) {
+                    return null;
+                }
+            }
+            return super.chooseSpellAbilityToPlay();
+        }
         private final Set<Integer> seenPoints = new HashSet<>();
 
         @Override
@@ -3042,19 +3061,19 @@ public final class ForcedWinSolver {
                     }
                 }
             }
-            return super.chooseSpellAbilityToPlay();
+            return fallback(g);
         }
 
         /** labeller-v2 (d): at a response point (our spell or ability on top, first time), the scripted choice. */
         private List<SpellAbility> minChoice(final Game g) {
             if (g.getStack().isEmpty()) {
-                return super.chooseSpellAbilityToPlay();
+                return fallback(g);
             }
             final SpellAbilityStackInstance si = g.getStack().peek();
             final SpellAbility top = si.getSpellAbility();
             if (top == null || top.getActivatingPlayer() != victim || top.isManaAbility() || top.isTrigger()
                     || !(top.isSpell() || top.isActivatedAbility()) || !seenPoints.add(si.getId())) {
-                return super.chooseSpellAbilityToPlay();
+                return fallback(g);
             }
             final int point = seen++;
             final List<SpellAbility> rs = responses(top);
@@ -3063,7 +3082,7 @@ public final class ForcedWinSolver {
             }
             final int choice = point < script.length ? script[point] : 0;
             if (choice == 0) {
-                return super.chooseSpellAbilityToPlay();
+                return fallback(g);
             }
             if (choice == 1 || choice - 2 >= rs.size()) {
                 return null; // pass

@@ -84,6 +84,11 @@ public class LabellerV2MinTest extends AITest {
                 "oppMin".equals(k) ? "true" : "defense".equals(k) ? "false" : null)); // counts-only
     }
 
+    static ForcedWinSolver.Config passive(final ForcedWinSolver.Config c) {
+        c.testPassiveOpp = true;
+        return c;
+    }
+
     static ForcedWinSolver.Config cfgEngine(final boolean oppMin) {
         return ForcedWinSolver.Config.fromProps(k -> switch (k) {
             case "budget" -> "counter";
@@ -99,43 +104,42 @@ public class LabellerV2MinTest extends AITest {
         });
     }
 
+    static boolean provenAny(final java.util.function.Supplier<Game> g, final boolean oppMin) {
+        return proven(g.get(), passive(cfg(oppMin, 64))) || proven(g.get(), passive(cfgEngine(oppMin)));
+    }
+
     /**
-     * Predeclared test 5 (the v1 gap): a line v1 proves (its adversary only counters SPELLS with counterspells) that v2
-     * does not: (i) their Lightning Bolt for our last 3 life, answered by our life gain (Renewed Faith; Fountain of Youth on our board);
-     * (ii) their Rod of Ruin activation for our last life point, answered by our Stifle on the ability (reported). At least one of the two must be proven by v1
-     * for the test to mean anything; every case v1 proves, v2 must not.
+     * Predeclared test 5, on what v1's adversary STRUCTURALLY cannot cover (architect-o, 10-30), with the adversary's
+     * own Forge AI answer replaced by "pass" (testPassiveOpp) so no case depends on what Forge AI happens to play:
+     * (1) a SECOND counter: their Bolt is protected by their own Counterspell; we hold two Counterspells (v1 counters
+     * one spell per play-out, so their protection wins; v2's MIN counters the protection too);
+     * (2) a counter on an ABILITY: their Rod of Ruin activation for our last life point, our Stifle (v1's counterFor
+     * targets spells only). Every case v1 proves, v2 must refute, and with our answer removed v2 must prove it again.
      */
     @Test
-    public void v2RefutesLinesV1ProvesAgainstAbilitiesAndRemoval() {
+    public void v2RefutesWhatV1StructurallyMisses() {
         final String[][] cases = {
-            // their Bolt for our last 3 life; our instant life gain (no counterspell) answers it
-            {"Renewed Faith", "Plains;Plains;Plains", "3", "Lightning Bolt", "Mountain"},
-            // an ACTIVATED life gain on our board (Forge AI rarely answers with one): 3 life + 1 survives the Bolt
-            {"", "Fountain of Youth;Plains;Plains", "3", "Lightning Bolt", "Mountain"},
-            {"Stifle", "Island", "1", "", "Rod of Ruin;Mountain;Mountain;Mountain"},
+            {"Counterspell;Counterspell", "Island;Island;Island;Island", "3", "Lightning Bolt;Counterspell",
+                "Mountain;Island;Island", ""},
+            {"Stifle", "Island", "1", "", "Rod of Ruin;Mountain;Mountain;Mountain", ""},
         };
         int v1Proofs = 0;
         final StringBuilder sb = new StringBuilder();
         for (String[] c : cases) {
             final java.util.function.Supplier<Game> g = () -> ForcedWinSolverTest.game("Default", "Default",
                     ForcedWinSolverTest.frame(c[0], c[1], Integer.parseInt(c[2]), c[3], c[4], 20, "ai"));
-            final boolean v1 = proven(g.get(), cfgEngine(false)) || proven(g.get(), cfg(false, 64));
-            final boolean v2 = proven(g.get(), cfgEngine(true)) || proven(g.get(), cfg(true, 64));
-            sb.append(c[0]).append(": v1=").append(v1).append(" v2=").append(v2).append("; ");
+            final java.util.function.Supplier<Game> open = () -> ForcedWinSolverTest.game("Default", "Default",
+                    ForcedWinSolverTest.frame("", c[1], Integer.parseInt(c[2]), c[3], c[4], 20, "ai"));
+            final boolean v1 = provenAny(g, false), v2 = provenAny(g, true), v2open = provenAny(open, true);
+            sb.append(c[0]).append(": v1=").append(v1).append(" v2=").append(v2).append(" v2(no answer)=").append(v2open)
+                    .append("; ");
             if (v1) {
                 v1Proofs++;
-                Assert.assertFalse(v2, "v2 must refute what only the counterspell adversary let through: " + sb);
-            }
-            // without our answer in hand both prove the line (the MIN is not a blanket refusal)
-            final String openBoard = c[1].replace("Fountain of Youth;", "");
-            final java.util.function.Supplier<Game> open = () -> ForcedWinSolverTest.game("Default", "Default",
-                    ForcedWinSolverTest.frame("", openBoard, Integer.parseInt(c[2]), c[3], c[4], 20, "ai"));
-            if (v1) {
-                Assert.assertTrue(proven(open.get(), cfgEngine(true)) || proven(open.get(), cfg(true, 64)),
-                        "v2 proves the same line with no answer in our hand: " + sb);
+                Assert.assertFalse(v2, "v2 must refute what v1's one-counter adversary lets through: " + sb);
+                Assert.assertTrue(v2open, "with no answer in our hand v2 proves the same line: " + sb);
             }
         }
-        System.err.println("[labeller-v2] stricter cases: " + sb);
+        System.err.println("[labeller-v2] structural cases: " + sb);
         Assert.assertTrue(v1Proofs >= 1, "no case v1 proves, the test says nothing: " + sb);
     }
 }
