@@ -79,9 +79,32 @@ public final class ForcedWinProbe {
         int handBefore, gyBefore;
     }
 
+    /** labeller-v2 (c): set by a planScry reader around its learning (false = v1). */
+    static final ThreadLocal<Boolean> PLAN_SCRY = ThreadLocal.withInitial(() -> false);
+
     /** The sandbox's controller for our seat: passes, records choice asks, never shuffles a looked-at library. */
     static final class ProbeAi extends PlayerControllerAi {
         final List<String> trace;
+        /** labeller-v2 (c): record scry / surveil asks and keep the looked-at cards on top (false = Forge AI's answer). */
+        boolean planScry;
+
+        @Override
+        public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+            if (!planScry || topN == null) {
+                return super.arrangeForScry(topN);
+            }
+            trace.add("ASK scry " + topN.size());
+            return org.apache.commons.lang3.tuple.ImmutablePair.of(new CardCollection(topN), new CardCollection());
+        }
+
+        @Override
+        public org.apache.commons.lang3.tuple.ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+            if (!planScry || topN == null) {
+                return super.arrangeForSurveil(topN);
+            }
+            trace.add("ASK surveil " + topN.size());
+            return org.apache.commons.lang3.tuple.ImmutablePair.of(new CardCollection(topN), new CardCollection());
+        }
 
         ProbeAi(Game g, Player p, forge.LobbyPlayer lp, List<String> trace) {
             super(g, p, lp);
@@ -220,7 +243,9 @@ public final class ForcedWinProbe {
                 return o;
             }
             g.getPhaseHandler().devModeSet(PhaseType.MAIN1, me);
-            me.dangerouslySetController(new ProbeAi(g, me, me.getController().getLobbyPlayer(), o.trace));
+            final ProbeAi probeAi = new ProbeAi(g, me, me.getController().getLobbyPlayer(), o.trace);
+            probeAi.planScry = PLAN_SCRY.get();
+            me.dangerouslySetController(probeAi);
             for (Player p : g.getPlayers()) {
                 if (p != me) {
                     p.dangerouslySetController(new PassAi(g, p, p.getController().getLobbyPlayer()));
@@ -453,6 +478,19 @@ public final class ForcedWinProbe {
                 }
                 if (out.isEmpty() || out.get(out.size() - 1).kind != EffKind.SHUFFLE) {
                     out.add(new Eff(EffKind.SHUFFLE, 0, 0));
+                }
+                continue;
+            }
+            if (line.startsWith("ASK scry ") || line.startsWith("ASK surveil ")) {
+                // labeller-v2 (c) (only a planScry probe records these): the look comes in order with the moves
+                if (last != null) {
+                    out.add(new Eff(last, run, 0));
+                    last = null;
+                    run = 0;
+                }
+                final int n = Integer.parseInt(line.substring(line.lastIndexOf(' ') + 1));
+                if (n > 0) {
+                    out.add(new Eff(line.startsWith("ASK scry ") ? EffKind.SCRY : EffKind.SURVEIL, n, 0));
                 }
                 continue;
             }

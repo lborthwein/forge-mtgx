@@ -209,14 +209,38 @@ public final class ForcedWinSolver {
          * each covers structurally, not what Forge AI happens to play.
          */
         public transient boolean testPassiveOpp = false;
+        /**
+         * labeller-v2 items (a), (b), (c), (e) (PREDECLARATION-labeller-v2.md §1; all false = off, the default, and then
+         * nothing changes). (a) cacPicks: the engine's moves branch over every own-zone pick, scry, surveil, discard,
+         * library order and shuffle choice of our seat in the move's window (choose-a-card's distinct answers, at most
+         * cacCap per choice, ranked by the static value of the position after the move, cacVariants per choice with
+         * Forge AI's own answer included). (b) cacLine: a verification play-out answers each choice the line recorded as
+         * recorded (the fixed answers only for an unrecorded choice). (c) planScry / planDiscard: the width planner's
+         * SCRY n / SURVEIL n kinds (exact for n up to planScryMax) and DISCARD branching over hand classes. (e) payRecord:
+         * the planner branches over distinct untapped-remainder payments (payVariants) and the engine plays payment
+         * variants of a move as recorded sources (LineAi floats them; Forge AI pays only an unrecorded step).
+         */
+        public boolean cacPicks = false, cacLine = false, planScry = false, planDiscard = false, payRecord = false;
+        public int cacVariants = 6, cacCap = 48, payVariants = 3, planScryMax = 3;
 
         /** bvw-step1-build-1024: the keys added to the config after the step-0 freeze, with their defaults. */
         public static final java.util.Map<String, Object> STEP1_DEFAULTS = java.util.Map.of("counter", false,
                 "engineSteps", 0, "evalSteps", 0, "engineCards", 0, "enginePathCards", 0, "adoptAttack", false);
 
         /** Labeller v2 (PREDECLARATION-labeller-v2): its keys, with their defaults (absent from a recorded config at these). */
-        public static final java.util.Map<String, Object> V2_DEFAULTS = java.util.Map.of("oppMin", false,
-                "oppResponses", 4, "oppDepth", 2, "oppNodes", 64);
+        public static final java.util.Map<String, Object> V2_DEFAULTS = java.util.Map.ofEntries(
+                java.util.Map.entry("oppMin", false), java.util.Map.entry("oppResponses", 4),
+                java.util.Map.entry("oppDepth", 2), java.util.Map.entry("oppNodes", 64),
+                java.util.Map.entry("cacPicks", false), java.util.Map.entry("cacLine", false),
+                java.util.Map.entry("planScry", false), java.util.Map.entry("planDiscard", false),
+                java.util.Map.entry("payRecord", false), java.util.Map.entry("cacVariants", 6),
+                java.util.Map.entry("cacCap", 48), java.util.Map.entry("payVariants", 3),
+                java.util.Map.entry("planScryMax", 3));
+
+        /** Labeller v2: any of its items on (each needs budget=counter). */
+        public boolean v2() {
+            return oppMin || cacPicks || cacLine || planScry || planDiscard || payRecord;
+        }
 
         public static Config fromProps(java.util.function.Function<String, String> get) {
             final Config c = new Config();
@@ -230,12 +254,24 @@ public final class ForcedWinSolver {
             c.engineCards = intOr(get.apply("engineCards"), c.engineCards);
             c.enginePathCards = intOr(get.apply("enginePathCards"), c.enginePathCards);
             c.adoptAttack = "true".equals(get.apply("adoptAttack"));
-            c.oppMin = "true".equals(get.apply("oppMin"));
+            // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
+            final boolean v2all = "true".equals(get.apply("labellerV2"));
+            c.oppMin = v2all || "true".equals(get.apply("oppMin"));
             c.oppResponses = intOr(get.apply("oppResponses"), c.oppResponses);
             c.oppDepth = intOr(get.apply("oppDepth"), c.oppDepth);
             c.oppNodes = intOr(get.apply("oppNodes"), c.oppNodes);
-            if (c.oppMin && !c.counter) {
-                throw new IllegalArgumentException("oppMin needs budget=counter (labeller v2 is counts only)");
+            c.cacPicks = v2all || "true".equals(get.apply("cacPicks"));
+            c.cacLine = v2all || "true".equals(get.apply("cacLine"));
+            c.planScry = v2all || "true".equals(get.apply("planScry"));
+            c.planDiscard = v2all || "true".equals(get.apply("planDiscard"));
+            c.payRecord = v2all || "true".equals(get.apply("payRecord"));
+            c.cacVariants = intOr(get.apply("cacVariants"), c.cacVariants);
+            c.cacCap = intOr(get.apply("cacCap"), c.cacCap);
+            c.payVariants = intOr(get.apply("payVariants"), c.payVariants);
+            c.planScryMax = intOr(get.apply("planScryMax"), c.planScryMax);
+            if (c.v2() && !c.counter) {
+                throw new IllegalArgumentException((c.oppMin ? "oppMin" : "a labeller v2 key")
+                        + " needs budget=counter (labeller v2 is counts only)");
             }
             c.frameMemory = "true".equals(get.apply("frameMemory"));
             c.likely = "true".equals(get.apply("likely"));
@@ -301,7 +337,10 @@ public final class ForcedWinSolver {
                     + horizon + " budgetMs=" + budgetMs + " adversary=" + adversary + " defense=" + defense + " engine=" + engine + " engineNodes="
                 + engineNodes + " engineMs=" + engineMs + " forced=" + forced + " likely=" + likely + " likelyWorlds=" + likelyWorlds
                 + " likelyTop=" + likelyTop + " likelyCapTurns=" + likelyCapTurns + " paySearch=" + paySearch
-                + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes : "");
+                + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes : "")
+                + (cacPicks ? " cacPicks V=" + cacVariants + " cap=" + cacCap : "") + (cacLine ? " cacLine" : "")
+                + (planScry ? " planScry max=" + planScryMax : "") + (planDiscard ? " planDiscard" : "")
+                + (payRecord ? " payRecord V=" + payVariants : "");
         }
     }
 
@@ -391,6 +430,8 @@ public final class ForcedWinSolver {
         public long playoutWallCuts, playoutStepCaps, playoutCallCaps;
         /** labeller-v2 (d): MIN play-outs (response branches) and worlds cut at oppNodes; reported only when non-zero. */
         public long oppMinNodes, oppMinCuts;
+        /** labeller-v2 (a): engine moves applied to rank choice variants; reported only when non-zero. */
+        public long cacApplies;
 
         public Meter copy() {
             final Meter m = new Meter();
@@ -423,6 +464,7 @@ public final class ForcedWinSolver {
             playoutCallCaps += sign * o.playoutCallCaps;
             oppMinNodes += sign * o.oppMinNodes;
             oppMinCuts += sign * o.oppMinCuts;
+            cacApplies += sign * o.cacApplies;
         }
 
         /** This meter minus {@code before} (one call's work), or a copy when {@code before} is null. */
@@ -472,6 +514,9 @@ public final class ForcedWinSolver {
             if (oppMinNodes != 0 || oppMinCuts != 0) {
                 o.addProperty("opp_min_nodes", oppMinNodes);
                 o.addProperty("opp_min_cuts", oppMinCuts);
+            }
+            if (cacApplies != 0) {
+                o.addProperty("cac_applies", cacApplies);
             }
             return o;
         }
@@ -530,7 +575,12 @@ public final class ForcedWinSolver {
         this.cfg = cfg;
         this.reader = shared != null ? shared : new ForcedWinModel.Reader();
         this.reader.seed = cfg.seed;
-        this.oppReader = cfg.sharedReader ? sharedOppReader() : new ForcedWinModel.Reader();
+        // labeller-v2 (c): a planScry solver learns scry / surveil (own template keys); never the shared v1 reader
+        this.oppReader = cfg.sharedReader && !cfg.planScry ? sharedOppReader() : new ForcedWinModel.Reader();
+        if (cfg.planScry) {
+            this.reader.planScry = true;
+            this.oppReader.planScry = true;
+        }
     }
 
     public Config config() {
@@ -802,6 +852,12 @@ public final class ForcedWinSolver {
         // bvw-step1-build-1024: budget=counter: no width-search wall time (ms < 0 = none); its nodes bound it
         lim.ms = cfg.counter ? -1L : forge.ai.WallClock.budgetMs(cfg.planMs);
         lim.payPolicies = 1;
+        // labeller-v2 (c), (e) (off = v1)
+        lim.planScry = cfg.planScry;
+        lim.planDiscard = cfg.planDiscard;
+        lim.planScryMax = cfg.planScryMax;
+        lim.payRecord = cfg.payRecord;
+        lim.payVariants = cfg.payVariants;
         boolean payOnly = false;
         // POST-FREEZE 4: same-turn lines first (they are preferred, and a pass-the-turn search can fill the line cap
         // before it reaches one); lines that pass the turn only when this turn has none
@@ -1576,6 +1632,12 @@ public final class ForcedWinSolver {
         el.totalCards = cfg.counter ? cfg.engineCards : 0;
         el.pathCards = cfg.counter ? cfg.enginePathCards : 0;
         el.callLimit = cfg.counter ? 2L * el.maxSteps : 0L;
+        // labeller-v2 (a), (e): choice and payment variants of the engine's moves (off = v1)
+        el.cac = cfg.cacPicks;
+        el.cacVariants = cfg.cacVariants;
+        el.cacCap = cfg.cacCap;
+        el.pay = cfg.payRecord;
+        el.payVariants = cfg.payVariants;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
         final long engineDeadline = deadlineAt(Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs),
@@ -1584,7 +1646,7 @@ public final class ForcedWinSolver {
         el.redraw = redraw;
         final int en0 = engineStats.nodes, ec0 = engineStats.cut, ed0 = engineStats.deadlineStops, ek0 = engineStats.capStops;
         final long es0 = engineStats.steps, ecd0 = engineStats.cards;
-        final int ep0 = engineStats.pathPrunes, el0 = engineStats.lifetimeStops;
+        final int ep0 = engineStats.pathPrunes, el0 = engineStats.lifetimeStops, ca0 = engineStats.cacApplies;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
         engineNanos += System.nanoTime() - t1;
@@ -1593,6 +1655,7 @@ public final class ForcedWinSolver {
         meter.engineSteps += engineStats.steps - es0;
         meter.engineCards += engineStats.cards - ecd0;
         meter.enginePathPrunes += engineStats.pathPrunes - ep0;
+        meter.cacApplies += engineStats.cacApplies - ca0;
         meter.engineLifetimeStops += engineStats.lifetimeStops - el0;
         meter.engineNanos += System.nanoTime() - t1;
         meter.engineWallCuts += engineStats.cut - ec0;
@@ -1737,7 +1800,7 @@ public final class ForcedWinSolver {
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             if (line != null) {
-                final LineAi ai = new LineAi(g, cm, cm.getController().getLobbyPlayer(), new Follower(line));
+                final LineAi ai = new LineAi(g, cm, cm.getController().getLobbyPlayer(), Follower.of(line, cfg));
                 ai.continueAfter = true;
                 ai.bounded(deadline);
                 cm.dangerouslySetController(ai);
@@ -2094,7 +2157,7 @@ public final class ForcedWinSolver {
                 }
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
-            final Follower f = new Follower(line);
+            final Follower f = Follower.of(line, cfg);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
             // bvw-step1-build-1024: budget=counter: each seat's calls in the play-out are capped (the wall's stand-in)
             final long callLimit = cfg.counter ? 2L * cfg.maxSteps : 0L;
@@ -2492,9 +2555,24 @@ public final class ForcedWinSolver {
         ForcedWinEngine.TriggerTargets triggers = new ForcedWinEngine.TriggerTargets(null);
         /** The forced library pick of the step being resolved (ENGINE steps). */
         ForcedWinEngine.LibraryPicks picks = new ForcedWinEngine.LibraryPicks(null);
+        /**
+         * labeller-v2 (b) (false = v1): the step being resolved answers its recorded choice tokens; (e): a step's recorded
+         * payment sources float before its action.
+         */
+        boolean cacLine, payRecord;
+        ForcedWinChoices.Cursor choices = new ForcedWinChoices.Cursor(null);
+        int floatDone;
 
         Follower(Line line) {
             this.line = line;
+        }
+
+        /** labeller-v2: a play-out follower with the config's (b) and (e) switches. */
+        static Follower of(Line line, Config cfg) {
+            final Follower fo = new Follower(line);
+            fo.cacLine = cfg.cacLine;
+            fo.payRecord = cfg.payRecord;
+            return fo;
         }
 
         static final class Next {
@@ -2573,6 +2651,20 @@ public final class ForcedWinSolver {
                 n.waiting = true;
                 return n;
             }
+            if (payRecord && st.payFloats != null && floatDone < st.payFloats.size()) {
+                // labeller-v2 (e): the step's recorded sources float first (Forge AI then pays from the pool)
+                final SpellAbility fa = locate(g, me, st.payFloats.get(floatDone));
+                if (fa == null) {
+                    broken = true;
+                    why = "payFloat:" + st.payFloats.get(floatDone) + " of " + st;
+                    n.broken = true;
+                    n.why = why;
+                    return n;
+                }
+                floatDone++;
+                n.action = fa;
+                return n;
+            }
             final SpellAbility sa = locate(g, me, st);
             if (sa == null) {
                 broken = true;
@@ -2597,6 +2689,10 @@ public final class ForcedWinSolver {
             executed.put(st.hostId, st);
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);
+            floatDone = 0;
+            if (cacLine) {
+                choices = new ForcedWinChoices.Cursor(st.cacPlayed != null ? st.cacPlayed : st.cac);
+            }
             n.action = sa;
             return n;
         }
@@ -2874,6 +2970,18 @@ public final class ForcedWinSolver {
         public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
                 CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional,
                 Player decider) {
+            if (f.cacLine && ForcedWinEngine.MoveAi.ownPick(getPlayer(), origin, sa, fetchList, decider)) {
+                // labeller-v2 (b): the line's recorded pick
+                final String t = f.choices.next(ForcedWinChoices.PICK);
+                if (t != null) {
+                    final Card[] r = ForcedWinChoices.applyPick(t, fetchList);
+                    if (r != null && (r[0] != null || isOptional)) {
+                        f.choices.hits++;
+                        return r[0];
+                    }
+                    f.choices.misses++;
+                }
+            }
             final Card c = decider == getPlayer() ? f.pick(sa, fetchList) : null;
             return c != null ? c : super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
                     selectPrompt, isOptional, decider);
@@ -2882,6 +2990,18 @@ public final class ForcedWinSolver {
         @Override
         public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone,
                 SpellAbility source) {
+            if (f.cacLine && destinationZone == ZoneType.Library && cards != null && cards.size() >= 2
+                    && cards.stream().allMatch(c -> c.getOwner() == getPlayer())) {
+                final String t = f.choices.next(ForcedWinChoices.ORDER);
+                if (t != null) {
+                    final CardCollectionView r = ForcedWinChoices.applyOrder(t, cards);
+                    if (r != null) {
+                        f.choices.hits++;
+                        return r;
+                    }
+                    f.choices.misses++;
+                }
+            }
             final CardCollectionView o = f.order(cards, destinationZone, source);
             return o != null ? o : super.orderMoveToZoneList(cards, destinationZone, source);
         }
@@ -2890,6 +3010,13 @@ public final class ForcedWinSolver {
         public boolean confirmAction(SpellAbility sa, PlayerActionConfirmMode mode, String message, List<String> options,
                 Card cardToShow, Map<String, Object> params) {
             if (message != null && message.toLowerCase().contains("shuffle")) {
+                if (f.cacLine) {
+                    final String t = f.choices.next(ForcedWinChoices.SHUF);
+                    if (t != null) {
+                        f.choices.hits++;
+                        return ForcedWinChoices.applyShuf(t);
+                    }
+                }
                 return false;
             }
             return super.confirmAction(sa, mode, message, options, cardToShow, params);
@@ -2897,7 +3024,26 @@ public final class ForcedWinSolver {
 
         @Override
         public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
-            return ImmutablePair.of(new CardCollection(topN), new CardCollection());
+            final ImmutablePair<CardCollection, CardCollection> r = recordedArr(ForcedWinChoices.SCRY, topN);
+            return r != null ? r : ImmutablePair.of(new CardCollection(topN), new CardCollection());
+        }
+
+        /** labeller-v2 (b): the line's recorded scry / surveil answer, or null (then all on top, as v1). */
+        private ImmutablePair<CardCollection, CardCollection> recordedArr(String kind, CardCollection topN) {
+            if (!f.cacLine || topN == null || topN.isEmpty()) {
+                return null;
+            }
+            final String t = f.choices.next(kind);
+            if (t == null) {
+                return null;
+            }
+            final ImmutablePair<CardCollection, CardCollection> r = ForcedWinChoices.applyArr(t, topN);
+            if (r == null) {
+                f.choices.misses++;
+                return null;
+            }
+            f.choices.hits++;
+            return r;
         }
 
         @Override
@@ -2932,12 +3078,24 @@ public final class ForcedWinSolver {
 
         @Override
         public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
-            return ImmutablePair.of(new CardCollection(topN), new CardCollection());
+            final ImmutablePair<CardCollection, CardCollection> r = recordedArr(ForcedWinChoices.SURV, topN);
+            return r != null ? r : ImmutablePair.of(new CardCollection(topN), new CardCollection());
         }
 
         @Override
         public CardCollection chooseCardsToDiscardFrom(Player p, SpellAbility sa, CardCollection validCards, int min,
                 int max, CardCollectionView visibleToChooser) {
+            if (f.cacLine && p == getPlayer() && min == max && min >= 1 && validCards != null && validCards.size() > min) {
+                final String t = f.choices.next(ForcedWinChoices.DISC);
+                if (t != null) {
+                    final CardCollection r = ForcedWinChoices.applyDisc(t, validCards, min, max);
+                    if (r != null) {
+                        f.choices.hits++;
+                        return r;
+                    }
+                    f.choices.misses++;
+                }
+            }
             final CardCollection ordinary = super.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser);
             return avoid(ordinary, validCards, f.reserved());
         }

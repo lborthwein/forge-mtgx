@@ -63,6 +63,15 @@ public final class ForcedWinPlanner {
         /** ENGINE steps: the forced pick (by name) of the first search of our library this step makes (null = AI's). */
         String pickName;
         /**
+         * labeller-v2 (a)/(c) (null = none, v1): the forced choice tokens of this step's window ({@link ForcedWinChoices}):
+         * the engine's variant identity, or the planner's scry / surveil / discard answers.
+         */
+        List<String> cac;
+        /** labeller-v2 (a): every choice token the engine's move played (forced and Forge AI's), for the line; null = none. */
+        List<String> cacPlayed;
+        /** labeller-v2 (e) (null = Forge AI pays): the sources this step floats first, as FLOAT steps (a payment variant). */
+        List<Step> payFloats;
+        /**
          * Diagnostics (solver-gaps-1015): the width model's expected hand and library top (6 entries) before this step,
          * as planner card indices (filled when the line is recorded into ids; -1 = an unseen card). Shared on copy.
          */
@@ -119,6 +128,9 @@ public final class ForcedWinPlanner {
             s.expHand = expHand;
             s.expLib = expLib;
             s.anyColors.addAll(anyColors);
+            s.cac = cac == null ? null : new ArrayList<>(cac);
+            s.cacPlayed = cacPlayed == null ? null : new ArrayList<>(cacPlayed);
+            s.payFloats = payFloats == null ? null : new ArrayList<>(payFloats);
             if (body != null) {
                 s.body = new ArrayList<>(body);
                 s.times = times;
@@ -180,7 +192,8 @@ public final class ForcedWinPlanner {
                 return "REPEAT" + times + body;
             }
             return kind + "|" + hostId + "|" + desc + "|" + costKey + "|" + targetRefs + "|" + triggerRef + "|" + pickName
-                    + "|" + floatColor + "|" + targetVariant;
+                    + "|" + floatColor + "|" + targetVariant + (cac == null ? "" : "|cac" + cac)
+                    + (payFloats == null ? "" : "|pay" + payFloats);
         }
 
         boolean isSpell() {
@@ -204,7 +217,9 @@ public final class ForcedWinPlanner {
                     + (targetVariant != null ? "@" + targetVariant : "")
                     + (pile.isEmpty() ? "" : " pile" + pile) + (picks.isEmpty() ? "" : " pick" + picks)
                     + (putBack.isEmpty() ? "" : " putBack" + putBack) + (phyrexianLife ? " phyLife" : "")
-                    + (anyColors.isEmpty() ? "" : " as" + anyColors);
+                    + (anyColors.isEmpty() ? "" : " as" + anyColors)
+                    + (cacPlayed != null ? " cac" + cacPlayed : cac != null ? " cac" + cac : "")
+                    + (payFloats == null ? "" : " pay" + payFloats);
         }
     }
 
@@ -266,6 +281,14 @@ public final class ForcedWinPlanner {
          * sources first, keep each colour, Phyrexian pips with life.
          */
         int payPolicies = 1;
+        /**
+         * labeller-v2 (false = v1): (c) SCRY / SURVEIL n branch over each kept / away split and order of the top
+         * min(n, planScryMax) entries (deduped by the known library prefix, and for surveil the graveyard added), and a
+         * DISCARD branches over hand classes; (e) each cast branches over its distinct untapped-remainder payments
+         * (payVariants, by the payment orders).
+         */
+        boolean planScry, planDiscard, payRecord;
+        int planScryMax = 3, payVariants = 3;
     }
 
     /** solver-gaps-1015: the payment orders of the bounded payment search (see {@link #sourceScore}). */
@@ -652,6 +675,10 @@ public final class ForcedWinPlanner {
         final Step step = new Step(ab.kind, a, ab, -1);
         step.expHandIdx = s0.hand.stream().mapToInt(Integer::intValue).toArray();
         step.expLibIdx = s0.lib.subList(0, Math.min(6, s0.lib.size())).stream().mapToInt(Integer::intValue).toArray();
+        if (!free && lim.payRecord && lim.payPolicies <= 1) {
+            payVariants(s, ab, self, step, host, handIdx, a, out);
+            return out;
+        }
         if (free || lim.payPolicies <= 1) {
             if (!free && !pay(s, ab, self, step)) {
                 return out;
@@ -675,6 +702,41 @@ public final class ForcedWinPlanner {
             afterPay(v, st, vSelf, host, handIdx, a, ab, false, out);
         }
         return out;
+    }
+
+    /**
+     * labeller-v2 (e): the cast paid in each payment order (greedy first), one branch per distinct untapped remainder
+     * (the sorted names and colours of the untapped sources left, the pool, life and Phyrexian life), up to payVariants.
+     * Each branch's line floats exactly the sources it paid with (FLOAT steps), as the greedy line does.
+     */
+    private void payVariants(S s, Abil ab, Perm self, Step step, int host, int handIdx, ACard a, List<S> out) {
+        final int selfIdx = self == null ? -1 : s.bf.indexOf(self);
+        final Set<String> paid = new HashSet<>();
+        for (int pol = 0; pol < PAY_POLICIES && paid.size() < lim.payVariants; pol++) {
+            final S v = s.copy();
+            final Step st = step.copy();
+            final Perm vSelf = selfIdx < 0 ? null : v.bf.get(selfIdx);
+            payPolicy = pol;
+            final boolean ok = pay(v, ab, vSelf, st);
+            payPolicy = 0;
+            if (!ok || !paid.add(remainder(v) + st.phyrexianLife)) {
+                continue;
+            }
+            afterPay(v, st, vSelf, host, handIdx, a, ab, false, out);
+        }
+    }
+
+    /** labeller-v2 (e): the untapped sources left (name and colours, sorted), the pool and life. */
+    private String remainder(S s) {
+        final List<String> left = new ArrayList<>();
+        for (Perm p : s.bf) {
+            final ACard c = cards.get(p.card);
+            if (!p.tapped && c.sourceColors != 0) {
+                left.add(c.name + "/" + c.sourceColors);
+            }
+        }
+        java.util.Collections.sort(left);
+        return left + Arrays.toString(s.pool) + s.life;
     }
 
     /** The rest of {@link #apply} once the cost is paid: the step is played and its effects resolve into {@code out}. */
@@ -1002,12 +1064,33 @@ public final class ForcedWinPlanner {
                 return;
             }
             case DISCARD: {
+                if (lim.planDiscard && e.n != ForcedWinModel.ALL && s.hand.size() > e.n) {
+                    // labeller-v2 (c): each distinct class of hand cards (least useful first), recorded for the line
+                    for (List<Integer> ch : discardChoices(s, e.n)) {
+                        final S n = s.copy();
+                        final List<String> names = new ArrayList<>();
+                        for (int c : ch) {
+                            n.hand.remove(Integer.valueOf(c));
+                            n.gyPool.add(c);
+                            names.add(cards.get(c).name);
+                        }
+                        java.util.Collections.sort(names);
+                        token(n, ForcedWinChoices.DISC + ":" + String.join(";", names));
+                        resolve(n, effs, ei + 1, 0, ab, out);
+                    }
+                    return;
+                }
                 for (int i = 0; i < e.n && !s.hand.isEmpty(); i++) {
                     final int d = leastUseful(s.hand);
                     s.hand.remove(Integer.valueOf(d));
                     s.gyPool.add(d);
                 }
                 resolve(s, effs, ei + 1, 0, ab, out);
+                return;
+            }
+            case SCRY:
+            case SURVEIL: {
+                scry(s, e, effs, ei, ab, out);
                 return;
             }
             case HAND_TO_LIBRARY: {
@@ -1066,6 +1149,148 @@ public final class ForcedWinPlanner {
             default:
                 resolve(s, effs, ei + 1, 0, ab, out);
         }
+    }
+
+    /**
+     * labeller-v2 (c): scry / surveil n: every kept / away split of the top min(n, planScryMax) library entries and every
+     * order of the kept ones (a lazy pile slot is never sent away), deduped by the resulting library entries up to the
+     * first unknown one (surveil: and the known cards it puts into the graveyard); the line records each answer.
+     */
+    private void scry(S s, Eff e, List<Eff> effs, int ei, Abil ab, List<S> out) {
+        final int m = Math.min(Math.min(e.n, lim.planScryMax), s.lib.size());
+        if (!lim.planScry || m == 0) {
+            resolve(s, effs, ei + 1, 0, ab, out);
+            return;
+        }
+        final boolean surveil = e.kind == EffKind.SURVEIL;
+        final List<Integer> top = new ArrayList<>(s.lib.subList(0, m));
+        final Set<String> keys = new HashSet<>();
+        for (int mask = 0; mask < (1 << m); mask++) {
+            final List<Integer> keep = new ArrayList<>(), away = new ArrayList<>();
+            boolean ok = true;
+            for (int i = 0; i < m; i++) {
+                final int x = top.get(i);
+                if ((mask & (1 << i)) != 0) {
+                    if (x <= LAZY && x != UNKNOWN) {
+                        ok = false;
+                        break;
+                    }
+                    away.add(x);
+                } else {
+                    keep.add(x);
+                }
+            }
+            if (!ok) {
+                continue;
+            }
+            final List<List<Integer>> perms = new ArrayList<>();
+            permute(keep, 0, perms);
+            for (List<Integer> perm : perms) {
+                final List<Integer> lib = new ArrayList<>(perm);
+                lib.addAll(s.lib.subList(m, s.lib.size()));
+                if (!surveil) {
+                    lib.addAll(away);
+                }
+                final StringBuilder key = new StringBuilder();
+                for (int x : lib) {
+                    if (x == UNKNOWN) {
+                        break;
+                    }
+                    key.append(x).append(',');
+                }
+                if (surveil) {
+                    final List<Integer> known = new ArrayList<>();
+                    for (int x : away) {
+                        if (x >= 0) {
+                            known.add(x);
+                        }
+                    }
+                    known.sort(Integer::compare);
+                    key.append('|').append(known);
+                }
+                if (!keys.add(key.toString())) {
+                    continue;
+                }
+                final S n = s.copy();
+                n.lib = lib;
+                if (surveil) {
+                    for (int x : away) {
+                        if (x >= 0) {
+                            n.gyPool.add(x);
+                        } else {
+                            n.gyExtra++;
+                        }
+                    }
+                }
+                token(n, (surveil ? ForcedWinChoices.SURV : ForcedWinChoices.SCRY) + ":" + tokNames(perm) + "|"
+                        + tokNames(away));
+                resolve(n, effs, ei + 1, 0, ab, out);
+            }
+        }
+    }
+
+    private static void permute(List<Integer> xs, int k, List<List<Integer>> out) {
+        if (k >= xs.size()) {
+            if (!out.contains(xs)) {
+                out.add(new ArrayList<>(xs));
+            }
+            return;
+        }
+        for (int i = k; i < xs.size(); i++) {
+            java.util.Collections.swap(xs, k, i);
+            permute(xs, k + 1, out);
+            java.util.Collections.swap(xs, k, i);
+        }
+    }
+
+    /** Token names of library entries: a known card's name, else "?". */
+    private String tokNames(List<Integer> xs) {
+        final StringBuilder sb = new StringBuilder();
+        for (int x : xs) {
+            sb.append(sb.length() == 0 ? "" : ";").append(x >= 0 ? cards.get(x).name : "?");
+        }
+        return sb.toString();
+    }
+
+    /** Record a choice token on the step being resolved. */
+    private static void token(S n, String tok) {
+        if (n.steps.isEmpty()) {
+            return;
+        }
+        final Step st = n.steps.get(n.steps.size() - 1);
+        if (st.cac == null) {
+            st.cac = new ArrayList<>();
+        }
+        st.cac.add(tok);
+    }
+
+    /** labeller-v2 (c): the discard choices of {@code n} cards: distinct classes, least useful first (as put-back's). */
+    private List<List<Integer>> discardChoices(S s, int n) {
+        final List<Integer> hand = new ArrayList<>(s.hand);
+        hand.sort(Comparator.comparingInt((Integer h) -> -cards.get(h).order()).thenComparingInt(h -> cards.get(h).id));
+        final List<Integer> distinct = new ArrayList<>();
+        final Map<String, Integer> perName = new HashMap<>();
+        for (int h : hand) {
+            final int k = perName.merge(cards.get(h).name, 1, Integer::sum);
+            if (k <= n) {
+                distinct.add(h);
+            }
+        }
+        final List<List<Integer>> raw = new ArrayList<>();
+        combos(distinct, n, 0, new ArrayList<>(), raw, lim.classes * 4);
+        final List<List<Integer>> out = new ArrayList<>();
+        final Set<String> seenNames = new HashSet<>();
+        for (List<Integer> c : raw) {
+            final List<String> names = new ArrayList<>();
+            for (int x : c) {
+                names.add(cards.get(x).name);
+            }
+            java.util.Collections.sort(names);
+            if (seenNames.add(names.toString()) && out.size() < lim.classes) {
+                out.add(c);
+            }
+        }
+        return out;
     }
 
     private void assign(S s, int lazy, int card) {
