@@ -719,6 +719,12 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     /** The choice row being searched: {seat, choice ordinal, stateSha, payload, C, proof, key} (one at a time). */
     private Object[] r3Ask;
 
+    /**
+     * Cost harness only (absent = the predeclared rules): -Dforge.bench.r3SearchAll=true searches every labelled contested
+     * empty-stack priority row (with -Dforge.bench.labelOnly, exactly the listed positions).
+     */
+    static final boolean R3_SEARCH_ALL = Boolean.getBoolean("forge.bench.r3SearchAll");
+
     /** The ranker of the R3 rows: the arm's tower through the search service, or the static evaluator (report only). */
     public interface R3Ranker {
         forge.ai.simulation.ChooseACard.Valuer valuer(Game game, RlKnowledge know);
@@ -961,7 +967,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 final boolean draw = forge.ai.simulation.R3LabelSearch.hasDraw(cands);
                 final String win = seat + "|" + pend[3] + "|" + pend[5];
                 final boolean first = g.getStack().isEmpty() && forge.ai.simulation.R3LabelSearch.contested(cands)
-                        && !r3Windows.contains(win);
+                        && (!r3Windows.contains(win) || R3_SEARCH_ALL);
                 if (!draw && !first) {
                     return null;
                 }
