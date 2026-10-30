@@ -1738,18 +1738,19 @@ public class AiController {
         });
         // CpuAccount.charged: the eval thread's CPU is charged to the asking thread's accounts (an RL search seat's game,
         // lane s1-search-1007); with none set it is the FutureTask itself, as before
-        Thread t = new Thread(CpuAccount.charged(future), "Game AI Eval");
-        t.setDaemon(true);
-        t.start();
+        // lane thread-pool-1030: a reused "Game AI Eval" thread with a new thread's state (AiEvalThreads), not a new
+        // thread per call
+        final AiEvalThreads.Handle t = AiEvalThreads.start(CpuAccount.charged(future));
         try {
             return future.get(game.getAITimeout(), TimeUnit.SECONDS);
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
+            t.abandon(); // its worker is not reused: a late interrupt or stop below reaches only this task's thread
             e.printStackTrace();
             if (e instanceof TimeoutException) {
                 // log where the eval thread currently is - each timeout doubles as a
                 // profiler sample for diagnosing remaining AI slowdowns from user logs
                 StringBuilder sb = new StringBuilder("AI eval thread at timeout:");
-                StackTraceElement[] evalStack = t.getStackTrace();
+                StackTraceElement[] evalStack = t.thread().getStackTrace();
                 for (int i = 0; i < Math.min(30, evalStack.length); i++) {
                     sb.append("\n\tat ").append(evalStack[i]);
                 }
