@@ -93,6 +93,74 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     private final PlayerControllerAi inner;
     private final AiTape tape;
 
+    /**
+     * r1-assembly-bank-1029 (research only; empty = every existing path unchanged): a probe of a FORCED replay game. It is
+     * shown each forced choice of a taped seat ({@link #seen}) and may divert one ({@link #divert}): the probe's answer is
+     * returned in place of the record's and the game's tapes are detached, so from then on both seats decide live.
+     */
+    public interface Probe {
+        /** Not handled: the record's answer (or, after a divert, the inner controller's live answer). */
+        Object NONE = new Object();
+
+        /** Before the record's answer is taken; {@code ordinal}: this seat's forced choices so far. Return NONE or the answer. */
+        Object divert(AiTapeController c, String method, Object[] args, int ordinal);
+
+        /** After a forced choice was answered from the record ({@code value} the decoded answer). */
+        void seen(AiTapeController c, String method, Object[] args, int ordinal, Object value);
+
+        /** After a divert: a choice the probe may script (return NONE to let the inner controller answer live). */
+        Object scripted(AiTapeController c, String method, Object[] args);
+    }
+
+    public static final java.util.Map<Game, Probe> PROBES = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** This seat's forced choices so far (r1-assembly-bank-1029; counted only while a probe watches the game). */
+    private int forcedOrdinal = 0;
+
+    public AiTape tape() {
+        return tape;
+    }
+
+    private static final ThreadLocal<Object[]> ARGS = new ThreadLocal<>();
+
+    /** A choice with its arguments visible to a bank probe (r1-assembly-bank-1029; no probe: exactly {@link #choice}). */
+    @SuppressWarnings("unchecked")
+    private <T> T probed(final Object[] args, final String m, final Runnable witness, final Supplier<T> live,
+            final Function<T, JsonElement> enc, final Function<JsonElement, T> dec) {
+        final Probe pr = PROBES.isEmpty() ? null : PROBES.get(g());
+        if (pr == null) {
+            return choice(m, witness, live, enc, dec);
+        }
+        // N8 (lane n8-tower-1030): a probe's answer replaces the decision, not the look. The seat still saw the cards
+        // it arranges (scry, surveil, an ordered move), so its observers (RlKnowledge: the u_lib_known tokens and their
+        // lib_pos) get the witness first, exactly as a recorded or live answer does; without it the post-option frames of
+        // every scripted order / scry option were identical (no known-position tokens) and every value function tied.
+        if (tape.isDetached()) {
+            final Object s = pr.scripted(this, m, args);
+            if (s != Probe.NONE) {
+                if (witness != null) {
+                    witness.run();
+                }
+                return (T) s;
+            }
+            return live.get();
+        }
+        if (!tape.controllerHere() || tape.recordsNow("m", m)) {
+            return choice(m, witness, live, enc, dec);
+        }
+        final int ord = forcedOrdinal++;
+        final Object d = pr.divert(this, m, args, ord);
+        if (d != Probe.NONE) {
+            if (witness != null) {
+                witness.run();
+            }
+            return (T) d;
+        }
+        final T v = choice(m, witness, live, enc, dec);
+        pr.seen(this, m, args, ord, v);
+        return v;
+    }
+
     public AiTapeController(final PlayerControllerAi inner, final AiTape tape) {
         super(inner.getGame(), inner.getPlayer(), inner.getLobbyPlayer());
         this.inner = inner;
@@ -235,9 +303,12 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
             // the record forced a state the execution could not take: that decision's divergence, never a raw failure
             throw tape.diverge(m + " could not run as recorded: " + x.getClass().getSimpleName());
         } finally {
-            if (!ok) {
+            if (!ok && !tape.isDetached()) {
                 tape.abandon(e);
             }
+        }
+        if (tape.isDetached()) {
+            return v; // r1-assembly-bank-1029: a bank probe diverted inside this execution; the record no longer applies
         }
         tape.leave(e);
         final JsonElement got;
@@ -377,7 +448,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        return choice("chooseSpellAbilityToPlay", inner::chooseSpellAbilityToPlay, sas -> {
+        return probed(new Object[0], "chooseSpellAbilityToPlay", null, inner::chooseSpellAbilityToPlay, sas -> {
             if (sas == null) {
                 return JsonNull.INSTANCE;
             }
@@ -642,7 +713,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     @Override
     public CardCollectionView chooseCardsForEffect(final CardCollectionView sourceList, final SpellAbility sa, final String title,
             final int min, final int max, final boolean isOptional, final Map<String, Object> params) {
-        return choice("chooseCardsForEffect", () -> inner.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params),
+        return probed(new Object[] {sourceList, sa, title, min, max, isOptional}, "chooseCardsForEffect", null, () -> inner.chooseCardsForEffect(sourceList, sa, title, min, max, isOptional, params),
                 this::cards, e -> amongCards(sourceList, e));
     }
 
@@ -704,19 +775,19 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
 
     @Override
     public CardCollectionView orderMoveToZoneList(final CardCollectionView cards, final ZoneType destinationZone, final SpellAbility source) {
-        return choice("orderMoveToZoneList", () -> inner.witnessLook(cards == null ? null : listOf(cards), destinationZone),
+        return probed(new Object[] {cards, destinationZone, source}, "orderMoveToZoneList", () -> inner.witnessLook(cards == null ? null : listOf(cards), destinationZone),
                 () -> inner.orderMoveToZoneList(cards, destinationZone, source), this::cards, e -> amongCards(cards, e));
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(final CardCollection topN) {
-        return choice("arrangeForScry", () -> inner.witnessLook(topN == null ? null : listOf(topN), ZoneType.Library),
+        return probed(new Object[] {topN}, "arrangeForScry", () -> inner.witnessLook(topN == null ? null : listOf(topN), ZoneType.Library),
                 () -> inner.arrangeForScry(topN), this::pile2, e -> unpile2(topN, e));
     }
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(final CardCollection topN) {
-        return choice("arrangeForSurveil", () -> inner.witnessLook(topN == null ? null : listOf(topN), ZoneType.Library),
+        return probed(new Object[] {topN}, "arrangeForSurveil", () -> inner.witnessLook(topN == null ? null : listOf(topN), ZoneType.Library),
                 () -> inner.arrangeForSurveil(topN), this::pile2, e -> unpile2(topN, e));
     }
 
@@ -747,7 +818,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     @Override
     public CardCollection chooseCardsToDiscardFrom(final Player p, final SpellAbility sa, final CardCollection validCards, final int min,
             final int max, final CardCollectionView visibleToChooser) {
-        return choice("chooseCardsToDiscardFrom", () -> inner.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser),
+        return probed(new Object[] {p, sa, validCards, min, max}, "chooseCardsToDiscardFrom", null, () -> inner.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser),
                 this::cards, e -> amongCards(validCards, e));
     }
 
@@ -760,7 +831,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
 
     @Override
     public CardCollectionView chooseCardsToDiscardToMaximumHandSize(final int numDiscard) {
-        return choice("chooseCardsToDiscardToMaximumHandSize", () -> inner.chooseCardsToDiscardToMaximumHandSize(numDiscard),
+        return probed(new Object[] {numDiscard}, "chooseCardsToDiscardToMaximumHandSize", null, () -> inner.chooseCardsToDiscardToMaximumHandSize(numDiscard),
                 this::cards, e -> amongCards(getPlayer().getCardsIn(ZoneType.Hand), e));
     }
 
@@ -834,12 +905,12 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
 
     @Override
     public CardCollectionView tuckCardsViaMulligan(final CardCollectionView hand, final int cardsToReturn) {
-        return choice("tuckCardsViaMulligan", () -> inner.tuckCardsViaMulligan(hand, cardsToReturn), this::cards, e -> amongCards(hand, e));
+        return probed(new Object[] {hand, cardsToReturn}, "tuckCardsViaMulligan", null, () -> inner.tuckCardsViaMulligan(hand, cardsToReturn), this::cards, e -> amongCards(hand, e));
     }
 
     @Override
     public boolean mulliganKeepHand(final Player firstPlayer, final int cardsToReturn) {
-        return choice("mulliganKeepHand", () -> inner.mulliganKeepHand(firstPlayer, cardsToReturn), AiTapeController::bool,
+        return probed(new Object[] {firstPlayer, cardsToReturn}, "mulliganKeepHand", null, () -> inner.mulliganKeepHand(firstPlayer, cardsToReturn), AiTapeController::bool,
                 AiTapeController::bool);
     }
 
@@ -854,7 +925,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     public Card chooseSingleCardForZoneChange(final ZoneType destination, final List<ZoneType> origin, final SpellAbility sa,
             final CardCollection fetchList, final DelayedReveal delayedReveal, final String selectPrompt, final boolean isOptional,
             final Player decider) {
-        return choice("chooseSingleCardForZoneChange", revealOf(delayedReveal),
+        return probed(new Object[] {destination, origin, sa, fetchList, isOptional, decider}, "chooseSingleCardForZoneChange", revealOf(delayedReveal),
                 () -> inner.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal, selectPrompt, isOptional, decider),
                 this::one, e -> amongOne(listOf(fetchList), e));
     }
@@ -863,7 +934,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     public List<Card> chooseCardsForZoneChange(final ZoneType destination, final List<ZoneType> origin, final SpellAbility sa,
             final CardCollection fetchList, final int min, final int max, final DelayedReveal delayedReveal, final String selectPrompt,
             final Player decider) {
-        return choice("chooseCardsForZoneChange",
+        return probed(new Object[] {destination, origin, sa, fetchList, min, max, decider}, "chooseCardsForZoneChange", null,
                 () -> inner.chooseCardsForZoneChange(destination, origin, sa, fetchList, min, max, delayedReveal, selectPrompt, decider),
                 this::cards, e -> among(listOf(fetchList), e));
     }
@@ -873,7 +944,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
     @Override
     public boolean confirmAction(final SpellAbility sa, final PlayerActionConfirmMode mode, final String message, final List<String> options,
             final Card cardToShow, final Map<String, Object> params) {
-        return choice("confirmAction", () -> inner.confirmAction(sa, mode, message, options, cardToShow, params), AiTapeController::bool,
+        return probed(new Object[] {sa, mode, message, options, cardToShow}, "confirmAction", null, () -> inner.confirmAction(sa, mode, message, options, cardToShow, params), AiTapeController::bool,
                 AiTapeController::bool);
     }
 

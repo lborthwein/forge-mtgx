@@ -431,7 +431,25 @@ public final class AiTape {
      * this seat's controller on the game thread throws the divergence again, so a game whose engine swallowed the first
      * throw stops at its next decision instead of letting the AI decide in the record's place.
      */
+    /**
+     * r1-assembly-bank-1029 (research; never set on any live or replay path unless a bank probe diverts): from here on this
+     * tape decides nothing; every call of its controller is the inner controller's, and the engine seams are off.
+     */
+    private volatile boolean detached;
+
+    public void detach() {
+        detached = true;
+        uninstall();
+    }
+
+    public boolean isDetached() {
+        return detached;
+    }
+
     void refuseAfterDivergence() {
+        if (detached) {
+            return;
+        }
         if (divergence != null && mode == Mode.FORCED && !resume && Thread.currentThread() == gameThread) {
             throw new Divergence("the AI's recorded decision " + currentTop + " does not fit this game");
         }
@@ -439,7 +457,7 @@ public final class AiTape {
 
     /** A controller call here is a decision: on the game thread, and no choice frame open (the AI's own deliberation). */
     boolean controllerHere() {
-        if (Thread.currentThread() != gameThread || divergence != null) {
+        if (detached || Thread.currentThread() != gameThread || divergence != null) {
             return false;
         }
         if (!(mode == Mode.RECORD ? open.isEmpty() || open.peek().exec : cursors.isEmpty() || cursors.peek().exec)) {

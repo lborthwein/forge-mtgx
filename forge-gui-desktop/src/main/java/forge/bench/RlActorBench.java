@@ -172,6 +172,9 @@ public final class RlActorBench {
          * plus {@code turns} (T, default 3) and {@code out} (the label directory). A spec that is not honest is refused.
          */
         forge.ai.simulation.HonestLabel.Spec labelSpec = null;
+        /** r1-assembly-bank-1029: the bank block (scan or label), or null; label jobs by index (replay line [f, l, job]). */
+        forge.bench.rl.RlAssemblyBank.Spec bankSpec = null;
+        final List<JsonObject> bankJobs = new ArrayList<>();
         int labelTurns = 3;
         String labelOut = null;
         /**
@@ -436,13 +439,32 @@ public final class RlActorBench {
                 && !("record".equals(c.decisionLog) && "replay".equals(c.mode))) {
             throw new IllegalArgumentException("decisionLogTier / decisionLogAttempt are for decisionLog record in replay mode");
         }
+        if (o.has("bank") && !o.get("bank").isJsonNull()) {
+            // r1-assembly-bank-1029
+            c.bankSpec = new forge.bench.rl.RlAssemblyBank.Spec(o.getAsJsonObject("bank"));
+            if (o.getAsJsonObject("bank").has("jobs")) {
+                final List<String> jl;
+                try {
+                    jl = Files.readAllLines(Paths.get(o.getAsJsonObject("bank").get("jobs").getAsString()),
+                            StandardCharsets.UTF_8);
+                } catch (IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+                for (String l : jl) {
+                    if (!l.isBlank()) {
+                        c.bankJobs.add(JsonParser.parseString(l).getAsJsonObject());
+                    }
+                }
+            }
+        }
         if (o.has("replay") && o.get("replay").isJsonObject()) {
             final JsonObject r = o.getAsJsonObject("replay");
             if (r.has("tapes")) for (JsonElement e : r.getAsJsonArray("tapes")) c.replayTapes.add(e.getAsString());
             if (r.has("lines")) {
                 for (JsonElement e : r.getAsJsonArray("lines")) {
                     final JsonArray a = e.getAsJsonArray();
-                    c.replayLines.add(new int[] {a.get(0).getAsInt(), a.get(1).getAsInt()});
+                    c.replayLines.add(a.size() > 2 ? new int[] {a.get(0).getAsInt(), a.get(1).getAsInt(), a.get(2).getAsInt()}
+                            : new int[] {a.get(0).getAsInt(), a.get(1).getAsInt()});
                 }
             }
             if (r.has("out")) c.replayOut = r.get("out").getAsString();
@@ -1614,6 +1636,11 @@ public final class RlActorBench {
                         + cfg.labelSearch.valueSha));
             }
         }
+        if (cfg.bankSpec != null) {
+            bankSink = new forge.bench.rl.RlAssemblyBank.Sink(Paths.get(cfg.bankSpec.out), cfg.bankSpec.mode);
+            System.err.println("[r1-bank] " + cfg.bankSpec.mode + " spec " + cfg.bankSpec.sha().substring(0, 12) + " jobs "
+                    + cfg.bankJobs.size() + " -> " + bankSink.file());
+        }
         if (cfg.exileScanOut != null) {
             // bvw-step1-build-1024 (OPEN-6 ruling): the read-only face-down-exile scan
             scanSink = new forge.bench.rl.RlExileScan.Sink(Paths.get(cfg.exileScanOut));
@@ -1837,6 +1864,8 @@ public final class RlActorBench {
         return unequal > 0 ? 4 : 0;
     }
 
+    static forge.bench.rl.RlAssemblyBank.Sink bankSink;
+
     static JsonObject replayOne(final Cfg cfg, final Map<String, List<JsonObject>> cache, final int[] fl,
             final RlFeaturizer feat, final String jarSha) {
         final String f = cfg.replayTapes.get(fl[0]);
@@ -1900,9 +1929,18 @@ public final class RlActorBench {
                     forge.bench.rl.RlReplayLabeller.checkTrainTape(t);
                 }
                 final forge.bench.rl.RlReplayLabeller[] labs = new forge.bench.rl.RlReplayLabeller[1];
+                final forge.bench.rl.RlAssemblyBank[] banks = new forge.bench.rl.RlAssemblyBank[1];
+                final JsonObject bankJob = fl.length > 2 ? cfg.bankJobs.get(fl[2]) : null;
+                if (bankJob != null) {
+                    row.add("bank_job", bankJob.get("job_id"));
+                }
                 final int tobs = g.get("obs_schema").getAsInt();
                 final forge.bench.rl.RlExileScan[] scans = new forge.bench.rl.RlExileScan[1];
-                final GameHook hook0 = cfg.labelSpec != null ? (game, seat, know) -> {
+                final GameHook hook0 = cfg.bankSpec != null ? (game, seat, know) -> {
+                    banks[0] = new forge.bench.rl.RlAssemblyBank(cfg.bankSpec, bankSink, bankJob, t, game, know,
+                            feat.index(), tobs);
+                    banks[0].attach();
+                } : cfg.labelSpec != null ? (game, seat, know) -> {
                     labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelBandLo, cfg.labelTurns,
                             cfg.labelSearch, t, jarSha, game, know, feat.index(), tobs);
                     if (trajectoryRef != null) {
@@ -2005,6 +2043,12 @@ public final class RlActorBench {
                         eq &= se;
                     }
                     row.addProperty("equal", eq);
+                    if (banks[0] != null) {
+                        final JsonObject br = banks[0].finish(eq);
+                        for (String k : br.keySet()) {
+                            row.add(k, br.get(k));
+                        }
+                    }
                     if (cfg.labelSpec != null && lab == null) {
                         row.addProperty("error", "label: the labeller was never attached");
                         row.addProperty("equal", false);
