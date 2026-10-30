@@ -523,6 +523,15 @@ public final class ChooseACard implements CacHook {
             return memory == null ? new HashSet<>() : memory.known(me);
         }
 
+        /**
+         * E1 (owner ruling 10-30): the card ids answer {@code i} gives up from our hand: a discard's or a mulligan
+         * bottom's cards (empty for other kinds, and for Forge's own answer when it was probed, not recorded).
+         */
+        public List<Integer> spent(final int i) {
+            final Answer a = list.get(i);
+            return a.cards == null ? Collections.<Integer>emptyList() : a.cards;
+        }
+
         /** The ids answer {@code i} places at known library positions. */
         public Set<Integer> placed(final int i) {
             return list.get(i).placed();

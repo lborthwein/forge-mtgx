@@ -88,6 +88,12 @@ public final class R3LabelSearch {
     public static final class Spec {
         public int maxCands = 10;
         public int policyTop = 4;
+        /**
+         * Owner ruling 10-30: when the recorded move or any candidate spends a route piece of the seat's deck, the "hold
+         * the piece" alternatives are candidates (a hold pass, the policy's best non-spending action) and a choice row
+         * plays its best answer that keeps every piece.
+         */
+        public boolean holdPieces = true;
         public int selectWorlds = 8;
         public int targetWorlds = 16;
         public boolean stratify = true;
@@ -131,7 +137,7 @@ public final class R3LabelSearch {
             return o;
         }
 
-        static final Set<String> KEYS = new TreeSet<>(Arrays.asList("maxCands", "policyTop", "selectWorlds",
+        static final Set<String> KEYS = new TreeSet<>(Arrays.asList("maxCands", "policyTop", "holdPieces", "selectWorlds",
                 "targetWorlds", "stratify", "topAnswers", "cac", "inline", "leaf", "maxTurns", "maxSteps", "horizon",
                 "proofLeaf", "profile", "solverSpec", "drawDepth", "seqCap", "samples", "oppMin", "oppMinIn",
                 "oppResponses", "oppDepth", "oppNodes", "maxUnresolvedShare", "seed"));
@@ -149,6 +155,7 @@ public final class R3LabelSearch {
             }
             if (o.has("maxCands")) s.maxCands = o.get("maxCands").getAsInt();
             if (o.has("policyTop")) s.policyTop = o.get("policyTop").getAsInt();
+            if (o.has("holdPieces")) s.holdPieces = o.get("holdPieces").getAsBoolean();
             if (o.has("selectWorlds")) s.selectWorlds = o.get("selectWorlds").getAsInt();
             if (o.has("targetWorlds")) s.targetWorlds = o.get("targetWorlds").getAsInt();
             if (o.has("stratify")) s.stratify = o.get("stratify").getAsBoolean();
@@ -206,6 +213,7 @@ public final class R3LabelSearch {
             o.addProperty("schema", "mtgx-bvw-r3-labelsearch/1");
             o.addProperty("maxCands", maxCands);
             o.addProperty("policyTop", policyTop);
+            o.addProperty("holdPieces", holdPieces);
             o.addProperty("selectWorlds", selectWorlds);
             o.addProperty("targetWorlds", targetWorlds);
             o.addProperty("stratify", stratify);
@@ -286,6 +294,15 @@ public final class R3LabelSearch {
         default List<SpellAbility> policyTop(final Game copy, final Player me, final int k) {
             return Collections.emptyList();
         }
+
+        /**
+         * The route pieces of {@code me}'s deck (card names), read on {@code g} (the live game or a copy): by default the
+         * cube-combo policy's protected pieces and gate pieces that the seat's own cards include
+         * ({@link forge.ai.CubeComboAi#routePieceNames}).
+         */
+        default Set<String> routePieces(final Game g, final Player me) {
+            return forge.ai.CubeComboAi.routePieceNames(me);
+        }
     }
 
     /** E2's seam: told every line seat as it is installed (both seats, every line), with the line's root turn. */
@@ -353,7 +370,7 @@ public final class R3LabelSearch {
     /** Work counters of one row (counts only). */
     static final class Work {
         long lines, steps, copies, proofs, proofWins, proofLosses, inlineAsks, inlineDeparted, oppNodes, oppCuts,
-                leafValues;
+                leafValues, holdPasses;
 
         JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -368,6 +385,7 @@ public final class R3LabelSearch {
             o.addProperty("opp_min_nodes", oppNodes);
             o.addProperty("opp_min_cuts", oppCuts);
             o.addProperty("leaf_values", leafValues);
+            if (holdPasses > 0) o.addProperty("hold_passes", holdPasses);
             return o;
         }
     }
@@ -420,6 +438,8 @@ public final class R3LabelSearch {
         final List<WorldOut> worlds = new ArrayList<>();
         double mean = Double.NaN;
         int resolved, capped, failed;
+        /** Owner ruling 10-30: the route pieces this candidate may spend (priority rows) or spends (choice rows). */
+        Set<String> spends = Collections.emptySet();
 
         CandOut(final String desc, final String src) {
             this.desc = desc;
@@ -476,6 +496,11 @@ public final class R3LabelSearch {
                 x.addProperty("desc", c.desc);
                 x.addProperty("src", c.src);
                 if (c.key != null) x.addProperty("key", c.key);
+                if (!c.spends.isEmpty()) {
+                    final JsonArray sp = new JsonArray();
+                    for (String n : c.spends) sp.add(n);
+                    x.add("spends", sp);
+                }
                 if (!Double.isNaN(c.rank)) x.add("rank", num(c.rank));
                 x.add("mean", num(c.mean));
                 x.addProperty("resolved", c.resolved);
@@ -737,7 +762,29 @@ public final class R3LabelSearch {
                     && g.getStack().peekAbility().getActivatingPlayer() == me) {
                 return null;
             }
+            if (first != null && first.hold != null && !first.hold.isEmpty() && p == me && ph.getTurn() == rootTurn) {
+                // owner ruling 10-30, the hold constraint: our own play in the root turn never spends a held piece
+                final List<SpellAbility> mine = own.get();
+                if (mine != null && spendsHeld(mine, p)) {
+                    work.holdPasses++;
+                    return null;
+                }
+                return mine;
+            }
             return own.get();
+        }
+
+        private boolean spendsHeld(final List<SpellAbility> mine, final Player p) {
+            final Set<String> names = new TreeSet<>();
+            for (Integer id : first.hold) {
+                final Card c = g.findById(id);
+                if (c != null && c.getController() == p && !c.isInZone(ZoneType.Battlefield)) names.add(c.getName());
+            }
+            if (names.isEmpty()) return false;
+            for (SpellAbility sa : mine) {
+                if (sa != null && !spends(sa, p, names).isEmpty()) return true;
+            }
+            return false;
         }
     }
 
@@ -1084,9 +1131,18 @@ public final class R3LabelSearch {
         final boolean land;
         final String label, src;
         final boolean draws;
+        /** Owner ruling 10-30: the hold constraint (the root turn's own play never spends these piece card ids). */
+        final Set<Integer> hold;
+        /** The route pieces (names) this action may spend: cast, pitched, discarded or sacrificed. */
+        Set<String> spends = Collections.emptySet();
 
         PCand(final boolean pass, final int hostId, final String desc, final boolean land, final String label,
                 final String src, final boolean draws) {
+            this(pass, hostId, desc, land, label, src, draws, null);
+        }
+
+        PCand(final boolean pass, final int hostId, final String desc, final boolean land, final String label,
+                final String src, final boolean draws, final Set<Integer> hold) {
             this.pass = pass;
             this.hostId = hostId;
             this.desc = desc;
@@ -1094,14 +1150,28 @@ public final class R3LabelSearch {
             this.label = label;
             this.src = src;
             this.draws = draws;
+            this.hold = hold;
         }
 
         String key() {
-            return pass ? "pass" : hostId + "|" + land + "|" + desc;
+            final String k = pass ? "pass" : hostId + "|" + land + "|" + desc;
+            return hold == null ? k : "hold:" + k;
         }
 
         static PCand pass(final String src) {
             return new PCand(true, -1, "", false, "pass", src, false);
+        }
+
+        /** Hold the pieces: pass now, and our own play in the rest of the root turn never spends {@code ids}. */
+        static PCand holdPass(final Set<Integer> ids) {
+            return new PCand(true, -1, "", false, "hold: pass", "hold", false, ids);
+        }
+
+        /** Hold the pieces: {@code sa} (spends none) now, then the same constraint as {@link #holdPass}. */
+        static PCand holdOf(final SpellAbility sa, final Set<Integer> ids) {
+            final Card h = sa.getHostCard();
+            return new PCand(false, h == null ? -1 : h.getId(), sa.getDescription(), sa.isLandAbility(),
+                    "hold: " + (h == null ? "?" : h.getName()) + ": " + sa.getDescription(), "hold", drawsCards(sa), ids);
         }
 
         static PCand of(final SpellAbility sa, final String src) {
@@ -1126,6 +1196,64 @@ public final class R3LabelSearch {
         }
     }
 
+    /**
+     * Owner ruling 10-30: the route pieces (names in {@code pieces}) that {@code sa} may spend: its host cast from a hand,
+     * graveyard or exile; a cost that discards, exiles, sacrifices, returns or puts into the library a piece the cost
+     * accepts (Force of Will's pitch, a sacrifice outlet, the host sacrificing itself); a discard by us in its chain (a
+     * looter). "May": Forge pays the cost and picks the discard later, so any piece it could take counts.
+     */
+    static Set<String> spends(final SpellAbility sa, final Player me, final Set<String> pieces) {
+        final Set<String> out = new TreeSet<>();
+        if (pieces == null || pieces.isEmpty() || sa == null) return out;
+        final Card host = sa.getHostCard();
+        if (host != null && pieces.contains(host.getName()) && !sa.isLandAbility()
+                && (host.isInZone(ZoneType.Hand) || host.isInZone(ZoneType.Graveyard) || host.isInZone(ZoneType.Exile)
+                        || host.isInZone(ZoneType.Library)) && (sa.isSpell() || !host.isInZone(ZoneType.Battlefield))) {
+            out.add(host.getName());
+        }
+        try {
+            if (sa.getPayCosts() != null) {
+                for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
+                    final List<ZoneType> from;
+                    if (part instanceof forge.game.cost.CostDiscard) from = Collections.singletonList(ZoneType.Hand);
+                    else if (part instanceof forge.game.cost.CostExile ce) from = ce.getFrom();
+                    else if (part instanceof forge.game.cost.CostSacrifice || part instanceof forge.game.cost.CostReturn)
+                        from = Collections.singletonList(ZoneType.Battlefield);
+                    else if (part instanceof forge.game.cost.CostPutCardToLib) from = Collections.singletonList(ZoneType.Hand);
+                    else continue;
+                    if (part.payCostFromSource()) {
+                        if (host != null && pieces.contains(host.getName())) out.add(host.getName());
+                        continue;
+                    }
+                    final CardCollection valid = forge.game.card.CardLists.getValidCards(me.getCardsIn(from),
+                            part.getType().split(";"), me, host, sa);
+                    for (Card c : valid) {
+                        if (c != host && pieces.contains(c.getName())) out.add(c.getName());
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            // a cost Forge cannot test here: the host test stands
+        }
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.getApi() == ApiType.Discard && (!s.hasParam("Defined") || "You".equals(s.getParam("Defined")))) {
+                for (Card c : me.getCardsIn(ZoneType.Hand)) {
+                    if (c != host && pieces.contains(c.getName())) out.add(c.getName());
+                }
+            }
+        }
+        return out;
+    }
+
+    /** The ids of {@code me}'s cards (any zone but the battlefield) whose names are among {@code names}. */
+    static Set<Integer> pieceIds(final Player me, final Set<String> names) {
+        final Set<Integer> ids = new TreeSet<>();
+        for (Card c : me.getAllCards()) {
+            if (!c.isInZone(ZoneType.Battlefield) && names.contains(c.getName())) ids.add(c.getId());
+        }
+        return ids;
+    }
+
     /** A costed-draw action: its ability chain draws cards (The One Ring, Necro, Night's Whisper, ...). */
     static boolean drawsCards(final SpellAbility sa) {
         for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
@@ -1141,10 +1269,13 @@ public final class R3LabelSearch {
      */
     public List<PCand> candidates(final Game live, final Player liveMe, final List<SpellAbility> recorded) {
         final Map<String, PCand> out = new LinkedHashMap<>();
-        final PCand rec = recorded == null || recorded.isEmpty() || recorded.get(0) == null ? PCand.pass("recorded")
-                : PCand.of(recorded.get(0), "recorded");
+        final boolean recPass = recorded == null || recorded.isEmpty() || recorded.get(0) == null;
+        final PCand rec = recPass ? PCand.pass("recorded") : PCand.of(recorded.get(0), "recorded");
+        final Set<String> pieces = spec.holdPieces ? env.routePieces(live, liveMe) : Collections.<String>emptySet();
+        if (!recPass) rec.spends = spends(recorded.get(0), liveMe, pieces);
         out.put(rec.key(), rec);
-        out.putIfAbsent("pass", PCand.pass("pass"));
+        // owner ruling 10-30: the hold alternatives go right after the recorded move, so no cap can drop them
+        final List<PCand> holds = new ArrayList<>();
         isolated(LookaheadSearch.mix(spec.seed, 0x43414E44L), () -> {
             final Game g;
             final Player me;
@@ -1158,7 +1289,7 @@ public final class R3LabelSearch {
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
             }
-            final List<PCand> draws = new ArrayList<>(), lands = new ArrayList<>();
+            final List<PCand> draws = new ArrayList<>(), lands = new ArrayList<>(), policy = new ArrayList<>();
             final Set<String> landNames = new TreeSet<>();
             List<SpellAbility> all = ComputerUtilAbility.getSpellAbilities(ComputerUtilAbility.getAvailableCards(g, me), me);
             all = ComputerUtilAbility.getOriginalAndAltCostAbilities(all, me);
@@ -1173,24 +1304,48 @@ public final class R3LabelSearch {
                         continue;
                     }
                     if (drawsCards(sa) && sa.canPlay() && ComputerUtilCost.canPayCost(sa, me, false)) {
-                        draws.add(PCand.of(sa, "draw"));
+                        final PCand c = PCand.of(sa, "draw");
+                        c.spends = spends(sa, me, pieces);
+                        draws.add(c);
                     }
                 } catch (RuntimeException e) {
                     // an ability Forge cannot test here is not a candidate
                 }
             }
-            for (PCand c : draws) out.putIfAbsent(c.key(), c);
-            for (PCand c : lands) out.putIfAbsent(c.key(), c);
-            if (spec.policyTop > 0) {
-                for (SpellAbility sa : env.policyTop(g, me, spec.policyTop)) {
-                    if (sa != null) {
-                        final PCand c = PCand.of(sa, "policy");
-                        out.putIfAbsent(c.key(), c);
+            final List<SpellAbility> top = spec.policyTop > 0 ? env.policyTop(g, me, spec.policyTop)
+                    : Collections.<SpellAbility>emptyList();
+            for (SpellAbility sa : top) {
+                if (sa != null) {
+                    final PCand c = PCand.of(sa, "policy");
+                    c.spends = spends(sa, me, pieces);
+                    policy.add(c);
+                }
+            }
+            boolean spending = !rec.spends.isEmpty();
+            for (PCand c : draws) spending |= !c.spends.isEmpty();
+            for (PCand c : policy) spending |= !c.spends.isEmpty();
+            if (spending) {
+                // hold every piece any candidate could spend: a hold pass, and the policy's best non-spending action
+                final Set<String> spent = new TreeSet<>(rec.spends);
+                for (PCand c : draws) spent.addAll(c.spends);
+                for (PCand c : policy) spent.addAll(c.spends);
+                final Set<Integer> ids = pieceIds(me, spent);
+                holds.add(PCand.holdPass(ids));
+                for (SpellAbility sa : top) {
+                    if (sa != null && spends(sa, me, pieces).isEmpty()) {
+                        holds.add(PCand.holdOf(sa, ids));
+                        break;
                     }
                 }
             }
+            for (PCand c : holds) out.putIfAbsent(c.key(), c);
+            out.putIfAbsent("pass", PCand.pass("pass"));
+            for (PCand c : draws) out.putIfAbsent(c.key(), c);
+            for (PCand c : lands) out.putIfAbsent(c.key(), c);
+            for (PCand c : policy) out.putIfAbsent(c.key(), c);
             return null;
         });
+        out.putIfAbsent("pass", PCand.pass("pass"));
         final List<PCand> list = new ArrayList<>(out.values());
         return list.size() > spec.maxCands ? new ArrayList<>(list.subList(0, spec.maxCands)) : list;
     }
@@ -1229,6 +1384,7 @@ public final class R3LabelSearch {
             for (PCand c : cands) {
                 final CandOut co = new CandOut(c.label, c.src);
                 co.key = c.key();
+                co.spends = c.spends;
                 res.cands.add(co);
             }
             for (int w = 0; w < spec.selectWorlds; w++) {
@@ -1391,6 +1547,32 @@ public final class R3LabelSearch {
             final List<Integer> played = new ArrayList<>();
             played.add(0);
             for (int i = 0; i < idx.size() && played.size() < spec.topAnswers + 1; i++) played.add(idx.get(i));
+            // owner ruling 10-30: when a played answer gives up a route piece, the best-ranked answer that keeps the
+            // most pieces (all, when one exists) is played too, whatever the top-m cut
+            final Set<String> pieces = spec.holdPieces ? env.routePieces(live, liveMe) : Collections.<String>emptySet();
+            final List<Set<String>> spentNames = new ArrayList<>();
+            for (int i = 0; i < row.size(); i++) {
+                final Set<String> n = new TreeSet<>();
+                for (Integer id : row.spent(i)) {
+                    final Card c = live.findById(id);
+                    if (c != null && pieces.contains(c.getName())) n.add(c.getName());
+                }
+                spentNames.add(n);
+            }
+            boolean spending = false;
+            for (int i : played) spending |= !spentNames.get(i).isEmpty();
+            if (spending) {
+                int keep = -1;
+                for (int i : idx) {
+                    if (keep < 0 || spentNames.get(i).size() < spentNames.get(keep).size()) keep = i;
+                }
+                if (keep >= 0) {
+                    boolean better = true;
+                    for (int i : played) better &= spentNames.get(i).size() > spentNames.get(keep).size();
+                    if (better && !played.contains(keep)) played.add(keep);
+                    res.extra.addProperty("hold_answer", keep);
+                }
+            }
             res.extra.addProperty("n_enum", row.nEnum());
             res.extra.addProperty("capped", row.capped());
             res.extra.addProperty("n_ranked", row.size());
@@ -1410,6 +1592,7 @@ public final class R3LabelSearch {
                 final CandOut co = new CandOut(row.desc(i), i == 0 ? "forge" : "answer");
                 co.key = row.key(i);
                 co.rank = row.score(i);
+                co.spends = spentNames.get(i);
                 res.cands.add(co);
             }
             for (int w = 0; w < spec.selectWorlds; w++) {

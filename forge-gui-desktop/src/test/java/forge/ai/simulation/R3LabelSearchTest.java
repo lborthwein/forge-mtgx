@@ -553,6 +553,68 @@ public class R3LabelSearchTest extends SimulationTest {
         return sb.toString();
     }
 
+    // ------------------------------------------------------------------------------------------------ hold the piece
+
+    /**
+     * Owner ruling 10-30: Kiki-Jiki is reachable next turn (in our library, Demonic Tutor in hand), Pestermite is in our
+     * hand and the opponent is attacking. The recorded move flashes Pestermite in (it spends a route piece), so the hold
+     * alternative is a candidate, right after it; under a stub value that rewards the assembled Kiki line (Pestermite
+     * kept, Kiki-Jiki reachable) flashing in scores lower than holding, and the search picks the hold. holdPieces off:
+     * no hold candidate.
+     */
+    @Test
+    public void holdingAKikiPieceBeatsFlashBlockingWithIt() {
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        addCardToZone("Kiki-Jiki, Mirror Breaker", a, ZoneType.Library);
+        for (int i = 0; i < 19; i++) addCardToZone("Mountain", a, ZoneType.Library);
+        for (int i = 0; i < 20; i++) addCardToZone("Plains", b, ZoneType.Library);
+        addCardToZone("Pestermite", a, ZoneType.Hand);
+        addCardToZone("Demonic Tutor", a, ZoneType.Hand);
+        for (int i = 0; i < 3; i++) addCard("Island", a);
+        addCard("Swamp", a);
+        for (int i = 0; i < 3; i++) addCard("Mountain", a);
+        final Card bears = addCard("Grizzly Bears", b);
+        bears.setSickness(false);
+        g.getPhaseHandler().devModeSet(PhaseType.COMBAT_DECLARE_ATTACKERS, b);
+        final forge.game.combat.Combat combat = new forge.game.combat.Combat(b);
+        combat.addAttacker(bears, a);
+        bears.setTapped(true);
+        g.getPhaseHandler().setCombat(combat);
+        g.getAction().checkStateEffects(true);
+        final ChooseACardTest.Stub kiki = new ChooseACardTest.Stub((x, p) ->
+                ChooseACardTest.inZone(p, ZoneType.Hand, "Pestermite")
+                        && (ChooseACardTest.inZone(p, ZoneType.Library, "Kiki-Jiki, Mirror Breaker")
+                                || ChooseACardTest.inZone(p, ZoneType.Hand, "Kiki-Jiki, Mirror Breaker")) ? 0.9 : 0.3);
+        final JsonObject o = base();
+        o.addProperty("leaf", "value");
+        o.addProperty("horizon", 1);
+        final R3LabelSearch r3 = new R3LabelSearch(spec(o), env(kiki, null));
+        final SpellAbility flash = firstSpell(a, "Pestermite");
+        final List<R3LabelSearch.PCand> cands = r3.candidates(g, a, Collections.singletonList(flash));
+        AssertJUnit.assertTrue(String.valueOf(cands.get(0).spends), cands.get(0).spends.contains("Pestermite"));
+        AssertJUnit.assertEquals("recorded", cands.get(0).src);
+        AssertJUnit.assertEquals("the hold right after the recorded move", "hold", cands.get(1).src);
+        AssertJUnit.assertTrue(cands.get(1).pass);
+        final R3LabelSearch.Result res = r3.priorityRow(g, a, cands, 1030L);
+        final JsonObject j = res.toJson();
+        System.err.println("[r3-test] hold row " + j);
+        AssertJUnit.assertEquals("the hold is picked: " + j, 1, res.pick);
+        final JsonArray ca = j.getAsJsonArray("cands");
+        final double cast = ca.get(0).getAsJsonObject().get("mean").getAsDouble();
+        final double hold = ca.get(1).getAsJsonObject().get("mean").getAsDouble();
+        AssertJUnit.assertTrue("flash-blocking scores lower than holding: " + j, cast < hold);
+        AssertJUnit.assertEquals(0.9, hold, 1e-9);
+        AssertJUnit.assertEquals(0.9, res.target, 1e-9);
+        // holdPieces off: the menu has no hold
+        final JsonObject off = base();
+        off.addProperty("holdPieces", false);
+        for (R3LabelSearch.PCand c : new R3LabelSearch(spec(off), env(kiki, null)).candidates(g, a,
+                Collections.singletonList(flash))) {
+            AssertJUnit.assertFalse(c.label, "hold".equals(c.src));
+        }
+    }
+
     static Map<Integer, Set<Integer>> knownOf(final Player p, final Card... cs) {
         final Map<Integer, Set<Integer>> m = new HashMap<>();
         final Set<Integer> s = new HashSet<>();

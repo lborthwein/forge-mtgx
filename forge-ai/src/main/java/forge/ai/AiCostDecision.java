@@ -305,7 +305,7 @@ public class AiCostDecision extends CostDecisionMakerBase {
      * Oracle of {@code doom-16702353-s0} is named by no existing predicate.
      * Follow-up: derive this union from each plan's own zone definitions in
      * {@code CubeComboAi.protectedPieceNames}. */
-    private static final Set<String> CUBE_GATE_PIECES = Set.of(
+    static final Set<String> CUBE_GATE_PIECES = Set.of(
             "Doomsday", "Thassa's Oracle",
             "Yawgmoth's Will", "Tendrils of Agony",
             "Underworld Breach", "Brain Freeze",
