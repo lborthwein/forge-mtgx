@@ -275,6 +275,14 @@ public final class LookaheadSearch {
         /** Tutor ranking: the checkpoint the service must serve (GET /v1/health checkpointSha256), checked once per JVM. */
         public String tutorCheckpointSha256 = null;
 
+        /**
+         * r2-choose-a-card-1029 (research; null = off, the default, and then nothing is built and the config JSON is
+         * unchanged): the choose-a-card spec ({@link ChooseACard.Config#fromJson}). The look-ahead seat's controller
+         * installs a {@link ChooseACard} on itself in the live game; its value is the search's value leaf
+         * ({@link SearchHooks}) when the search has one, else Forge's static evaluator (report only).
+         */
+        public JsonObject cac = null;
+
         /** Tutor ranking is on (a ranker call and play-outs at qualifying searches, acting or shadow). */
         public boolean tutorOn() {
             return tutorRank > 0 || tutorShadow;
@@ -472,6 +480,9 @@ public final class LookaheadSearch {
                 o.addProperty("priorUrl", priorUrl);
                 o.addProperty("priorTimeoutMs", priorTimeoutMs);
                 o.addProperty("priorCheckpointSha256", priorCheckpointSha256);
+            }
+            if (cac != null) {
+                o.add("chooseACard", cac);
             }
             if (tutorOn()) {
                 o.addProperty("tutorRank", tutorRank);
@@ -1661,6 +1672,22 @@ public final class LookaheadSearch {
      */
     public static String checkPriorService(Config c) {
         return PriorClient.checkHealth(c.priorUrl, c.priorCheckpointSha256, c.priorTimeoutMs);
+    }
+
+    /** r2-choose-a-card-1029: the seat's choose-a-card engine (null unless {@link Config#cac}); built on first use. */
+    private ChooseACard cacEngine = null;
+
+    public synchronized ChooseACard chooseACard() {
+        if (cfg.cac == null) {
+            return null;
+        }
+        if (cacEngine == null) {
+            final ChooseACard.Config c = ChooseACard.Config.fromJson(cfg.cac);
+            cacEngine = new ChooseACard(c, hooks != null ? ChooseACard.of(hooks) : StaticValuer.INSTANCE, null);
+        } else if (hooks != null) {
+            cacEngine.setValuer(ChooseACard.of(hooks));
+        }
+        return cacEngine;
     }
 
     public Config getConfig() {

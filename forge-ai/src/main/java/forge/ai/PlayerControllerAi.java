@@ -86,6 +86,21 @@ public class PlayerControllerAi extends PlayerController {
 
     private KnowledgeHook knowledgeHook = null;
 
+    /**
+     * r2-choose-a-card-1029 (research; null = off, the default, and then every answer below is Forge AI's own, byte for
+     * byte): the choose-a-card hook ({@link CacHook}). Forge AI answers first, exactly as without it; the hook sees that
+     * answer and may replace it. Set only on a live seat's controller; a game copy's controllers never have one.
+     */
+    private CacHook cacHook = null;
+
+    public void setCacHook(final CacHook hook) {
+        this.cacHook = hook;
+    }
+
+    public CacHook getCacHook() {
+        return cacHook;
+    }
+
     public void setKnowledgeHook(final KnowledgeHook hook) {
         this.knowledgeHook = hook;
     }
@@ -421,6 +436,11 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean confirmAction(SpellAbility sa, PlayerActionConfirmMode mode, String message, List<String> options, Card cardToShow, Map<String, Object> params) {
+        final boolean def = confirmActionAi(sa, mode, message, options, cardToShow, params);
+        return cacHook == null ? def : cacHook.confirm(this, sa, mode, message, def);
+    }
+
+    private boolean confirmActionAi(SpellAbility sa, PlayerActionConfirmMode mode, String message, List<String> options, Card cardToShow, Map<String, Object> params) {
         return getAi().confirmAction(sa, mode, message, params);
     }
 
@@ -575,6 +595,11 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+        final ImmutablePair<CardCollection, CardCollection> def = arrangeForScryAi(topN);
+        return cacHook == null ? def : cacHook.scry(this, topN, def);
+    }
+
+    private ImmutablePair<CardCollection, CardCollection> arrangeForScryAi(CardCollection topN) {
         if (knowledgeHook != null && topN != null) {
             knowledgeHook.onLook(Lists.newArrayList(topN), ZoneType.Library);
         }
@@ -599,6 +624,11 @@ public class PlayerControllerAi extends PlayerController {
      */
     @Override
     public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+        final ImmutablePair<CardCollection, CardCollection> def = arrangeForSurveilAi(topN);
+        return cacHook == null ? def : cacHook.surveil(this, topN, def);
+    }
+
+    private ImmutablePair<CardCollection, CardCollection> arrangeForSurveilAi(CardCollection topN) {
         if (knowledgeHook != null && topN != null) {
             knowledgeHook.onLook(Lists.newArrayList(topN), ZoneType.Library);
         }
@@ -633,6 +663,11 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
+        final CardCollectionView def = orderMoveToZoneListAi(cards, destinationZone, source);
+        return cacHook == null ? def : cacHook.order(this, cards, destinationZone, source, def);
+    }
+
+    private CardCollectionView orderMoveToZoneListAi(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
         if (knowledgeHook != null && cards != null) {
             knowledgeHook.onLook(Lists.newArrayList(cards), destinationZone);
         }
@@ -738,6 +773,11 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollection chooseCardsToDiscardFrom(Player p, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
+        final CardCollection def = chooseCardsToDiscardFromAi(p, sa, validCards, min, max, visibleToChooser);
+        return cacHook == null ? def : cacHook.discard(this, p, sa, validCards, min, max, def);
+    }
+
+    private CardCollection chooseCardsToDiscardFromAi(Player p, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
         if (p == player) {
             return brains.getCardsToDiscard(min, max, validCards, sa);
         }
@@ -849,6 +889,11 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn) {
+        final CardCollectionView def = tuckCardsViaMulliganAi(hand, cardsToReturn);
+        return cacHook == null ? def : cacHook.tuck(this, hand, cardsToReturn, def);
+    }
+
+    private CardCollectionView tuckCardsViaMulliganAi(CardCollectionView hand, int cardsToReturn) {
         // TODO This is better than it was before, but still suboptimal (but fast).
         // Maybe score a bunch of hands based on projected hand size and return the "duds"
         int numLandsDesired = (player.getStartingHandSize() - cardsToReturn) / 2;
@@ -903,6 +948,11 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        final List<SpellAbility> def = chooseSpellAbilityToPlayAi();
+        return cacHook == null ? def : cacHook.priority(this, def);
+    }
+
+    private List<SpellAbility> chooseSpellAbilityToPlayAi() {
         FairNaming.observe(player);
         return brains.chooseSpellAbilityToPlay();
     }
@@ -1674,6 +1724,13 @@ public class PlayerControllerAi extends PlayerController {
     public Card chooseSingleCardForZoneChange(ZoneType destination,
             List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, DelayedReveal delayedReveal,
             String selectPrompt, boolean isOptional, Player decider) {
+        final Card def = chooseSingleCardForZoneChangeAi(destination, origin, sa, fetchList, delayedReveal, selectPrompt,
+                isOptional, decider);
+        return cacHook == null ? def : cacHook.pick(this, destination, origin, sa, fetchList, isOptional, decider, def);
+    }
+
+    private Card chooseSingleCardForZoneChangeAi(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
+            CardCollection fetchList, DelayedReveal delayedReveal, String selectPrompt, boolean isOptional, Player decider) {
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }

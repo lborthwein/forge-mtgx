@@ -407,6 +407,26 @@ public final class HonestLabel {
          * The label of {@code liveMe}'s position in {@code live} (a priority the caller saw). {@code key} seeds the
          * position's worlds. Never throws; an error is an unresolved label with {@link Result#error}.
          */
+        /**
+         * r2-choose-a-card-1029 (N5b; null = none, the default path): our library card ids whose positions the seat
+         * knows (a put-back, a pile, a scry). Set only for the duration of {@link #label(Game, Player, long, Set)}.
+         */
+        private Set<Integer> knownOwn = null;
+
+        /**
+         * As {@link #label(Game, Player, long)}, keeping {@code knownOwn} (our library cards whose positions the seat
+         * knows) at their positions in every root world, and telling the win solver they are placed (its pile memory).
+         * Null or empty = exactly the plain call.
+         */
+        public Result label(final Game live, final Player liveMe, final long key, final Set<Integer> knownOwn) {
+            this.knownOwn = knownOwn == null || knownOwn.isEmpty() ? null : knownOwn;
+            try {
+                return label(live, liveMe, key);
+            } finally {
+                this.knownOwn = null;
+            }
+        }
+
         public Result label(final Game live, final Player liveMe, final long key) {
             final long t0 = System.nanoTime();
             final Result r = new Result();
@@ -457,7 +477,11 @@ public final class HonestLabel {
                 final Player opp = (Player) copier.find(liveOpp);
                 // their hand + library re-drawn from the pool (visibility read in the LIVE game), our library below its
                 // visible top shuffled
+                final List<Integer> before = knownOwn == null ? null : OwnLibraryMemory.order(me);
                 belief.resampleBelief(live, liveMe, g, me, rng, null);
+                if (knownOwn != null) {
+                    OwnLibraryMemory.keepKnown(me, before, knownOwn);
+                }
                 return new Object[] {g, me, opp};
             }
         }
@@ -467,6 +491,15 @@ public final class HonestLabel {
             final Game root = (Game) w[0];
             final Player me = (Player) w[1];
             final ForcedWinSolver s = new ForcedWinSolver(me, spec.winConfig());
+            if (knownOwn != null) {
+                final List<forge.game.card.Card> placed = new ArrayList<>();
+                for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Library)) {
+                    if (knownOwn.contains(c.getId())) {
+                        placed.add(c);
+                    }
+                }
+                s.notePlaced(placed);
+            }
             // every world the solver copies from the root (verification worlds, the engine's root) re-draws their hidden
             // cards again from OUR pool, with visibility from the live game
             s.redraw = (lv, lvMe, g, cm, rng) -> redrawBase.apply(live, liveMe, g, cm, rng);

@@ -671,6 +671,42 @@ public class MagicStack /* extends MyObservable */ implements Iterable<SpellAbil
         }
     }
 
+    /**
+     * Research (choose-a-card, r2-choose-a-card-1029; nothing in play calls it): resolve the top entry as
+     * {@link #resolveStack} does, but starting at {@code from}, a sub-ability in the top entry's chain, instead of at its
+     * root. Used on a game COPY taken while the live game was in the middle of resolving that entry (the effects before
+     * {@code from} already happened in the copy), so a choice asked by {@code from} can be answered again. No fizzle
+     * check (the entry did not fizzle in the live game).
+     */
+    public final void resolveStackFrom(final SpellAbility from) {
+        freezeStack(null);
+        setResolving(true);
+        final SpellAbility sa = peekAbility();
+        game.getPhaseHandler().resetPriority();
+        final Card source = sa.getHostCard();
+        curResolvingCard = source;
+        game.copyLastState();
+        if (sa.getControlledByPlayer() != null) {
+            sa.getActivatingPlayer().addController(sa.getControlledByPlayer().getLeft(), sa.getControlledByPlayer().getRight());
+        }
+        AbilityUtils.resolve(from);
+        final java.util.Map<AbilityKey, Object> runParams = AbilityKey.mapFromCard(source);
+        runParams.put(AbilityKey.SpellAbility, sa);
+        game.getTriggerHandler().runTrigger(TriggerType.AbilityResolves, runParams, false);
+        if (sa.getControlledByPlayer() != null) {
+            sa.getActivatingPlayer().removeController(sa.getControlledByPlayer().getLeft());
+            sa.setControlledByPlayer(-1, null);
+            sa.setManaCostBeingPaid(null);
+        }
+        game.fireEvent(new forge.game.event.GameEventSpellResolved(sa, false));
+        game.getAction().checkStaticAbilities();
+        finishResolving(sa, false);
+        game.copyLastState();
+        if (isEmpty() && !hasSimultaneousStackEntries()) {
+            game.clearChangeZoneLKIInfo();
+        }
+    }
+
     private void finishResolving(final SpellAbility sa, final boolean fizzle) {
         // SpellAbility is removed from the stack here
         // temporarily removed removing SA after resolution
