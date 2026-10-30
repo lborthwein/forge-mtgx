@@ -720,7 +720,12 @@ public class ComputerUtilMana {
                 continue;
             }
 
-            if (saPayment == null) {
+            // r3-inline-choices-1030: the seat's choose-a-card hook may pay this Phyrexian pip with life instead of the
+            // mana source found (no hook, or the hook keeps Forge's answer: unchanged)
+            final boolean cacLife = saPayment != null && !test && toPay.isPhyrexian()
+                    && ai.getController() instanceof PlayerControllerAi pcc && pcc.getCacHook() != null
+                    && ai.canPayLife(2, false, sa) && ai.getLife() > 2 && pcc.getCacHook().phyrexianLife(pcc, sa, false);
+            if (saPayment == null || cacLife) {
                 boolean lifeInsteadOfBlack = toPay.isBlack() && ai.hasKeyword("PayLifeInsteadOf:B");
                 if ((!toPay.isPhyrexian() && !lifeInsteadOfBlack) || !ai.canPayLife(phyLifeToPay, false, sa)
                         || (ai.getLife() <= phyLifeToPay && !ai.cantLoseForZeroOrLessLife())) {

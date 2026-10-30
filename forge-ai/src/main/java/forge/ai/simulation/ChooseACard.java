@@ -48,7 +48,18 @@ import forge.util.MyRandom;
 public final class ChooseACard implements CacHook {
 
     /** The choice kinds (DESIGN-r2 §1, §12.1). */
-    public enum Kind { SEARCH, MULTI, PILE, DIG, DIGPICK, DISCARD, SCRY, SURVEIL, ORDER, MULLIGAN, LAND, RETURN_COST }
+    public enum Kind {
+        SEARCH, MULTI, PILE, DIG, DIGPICK, DISCARD, SCRY, SURVEIL, ORDER, MULLIGAN, LAND, RETURN_COST,
+        // r3-inline-choices-1030 (FLAG-R3-5): opt-in by name in "kinds"; never on by default (LEGACY below)
+        PAYMENT, COLOR, COST_CARDS, LIFE, SACRIFICE, ORDER_TRIGGERS, PAY_TO_PREVENT
+    }
+
+    /** The kinds a config without "kinds" turns on: #143's, so an old config means what it meant. */
+    public static final Set<Kind> LEGACY = java.util.Collections.unmodifiableSet(java.util.EnumSet.range(Kind.SEARCH,
+            Kind.RETURN_COST));
+    /** r3-inline-choices-1030: the kinds decided at the priority of a cast (on a copy of the position before it). */
+    static final Set<Kind> CAST_KINDS = java.util.EnumSet.of(Kind.PAYMENT, Kind.COLOR, Kind.COST_CARDS, Kind.LIFE,
+            Kind.SACRIFICE);
 
     // ------------------------------------------------------------------------------------------------ config
 
@@ -56,7 +67,7 @@ public final class ChooseACard implements CacHook {
         public enum Mode { OFF, SHADOW, ON }
 
         public Mode mode = Mode.OFF;
-        public Set<Kind> kinds = new java.util.TreeSet<>(Arrays.asList(Kind.values()));
+        public Set<Kind> kinds = new java.util.TreeSet<>(LEGACY);
         /** Answers applied per decision (Forge's answer included). */
         public int cap = 48;
         /** Answers the solver checks (by v, best first); 0 = no solver. */
@@ -72,6 +83,10 @@ public final class ChooseACard implements CacHook {
         /** A departure must beat Forge's answer's score by more than this. */
         public double margin = 0.0;
         public long seed = 1029L;
+        /** r3-inline-choices-1030: payment-remainder variants enumerated per cast (Forge's payment not counted). */
+        public int payCap = 6;
+        /** r3-inline-choices-1030: trigger orders enumerated per ask (Forge's order included; permutations capped). */
+        public int orderCap = 24;
         /**
          * The honest win check's label spec ({@link HonestLabel.Spec#parse}: belief re-draw, hideOwnLibrary, counter
          * budgets); built into the solver check at install. ON refuses to install without a solver check.
@@ -105,6 +120,11 @@ public final class ChooseACard implements CacHook {
             if (o.has("beamBranch")) c.beamBranch = o.get("beamBranch").getAsInt();
             if (o.has("margin")) c.margin = o.get("margin").getAsDouble();
             if (o.has("seed")) c.seed = o.get("seed").getAsLong();
+            if (o.has("payCap")) c.payCap = o.get("payCap").getAsInt();
+            if (o.has("orderCap")) c.orderCap = o.get("orderCap").getAsInt();
+            if (c.payCap < 0 || c.orderCap < 2) {
+                throw new IllegalArgumentException("chooseACard: payCap >= 0, orderCap >= 2");
+            }
             if (o.has("label") && !o.get("label").isJsonNull()) {
                 c.label = o.getAsJsonObject("label");
                 HonestLabel.Spec.parse(c.label); // refuse a dishonest or malformed spec at parse time
@@ -116,7 +136,7 @@ public final class ChooseACard implements CacHook {
         }
 
         static final Set<String> KEYS = new java.util.TreeSet<>(Arrays.asList("mode", "kinds", "cap", "topM",
-                "shuffleWorlds", "settleSteps", "beamWidth", "beamBranch", "margin", "seed", "label"));
+                "shuffleWorlds", "settleSteps", "beamWidth", "beamBranch", "margin", "seed", "label", "payCap", "orderCap"));
 
         public JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -134,6 +154,11 @@ public final class ChooseACard implements CacHook {
             o.addProperty("beamBranch", beamBranch);
             o.addProperty("margin", margin);
             o.addProperty("seed", seed);
+            // r3-inline-choices-1030: the new keys are written only when a new kind is on (old configs print as before)
+            if (!java.util.Collections.disjoint(kinds, java.util.EnumSet.complementOf(java.util.EnumSet.copyOf(LEGACY)))) {
+                o.addProperty("payCap", payCap);
+                o.addProperty("orderCap", orderCap);
+            }
             if (label != null) o.add("label", label);
             return o;
         }
@@ -275,6 +300,35 @@ public final class ChooseACard implements CacHook {
         }
 
         boolean kindAwayIsLibrary = false;
+
+        // r3-inline-choices-1030 (FLAG-R3-5)
+        /** PAYMENT / COLOR: mana floated before the cast, {source id, colour index (0-4 WUBRG, 5 C)}, in order. */
+        List<int[]> floats;
+        /** COST_CARDS / SACRIFICE (cost): the cards of each cost ask of the cast, in ask order (null = Forge's). */
+        List<List<Integer>> costPicks;
+        /** LIFE: Phyrexian pips paid with 2 life, the first n of the cast's (-1 = Forge's). */
+        int lifePips = -1;
+        /** ORDER_TRIGGERS: indexes into the asked list, first = bottom of the stack (Forge's convention). */
+        List<Integer> trigOrder;
+        /** PAY_TO_PREVENT: pay or not. */
+        Boolean pay;
+        /** COLOR (resolution): the colour mask. */
+        byte colour = 0;
+        /** COLOR at priority: the mana ability is played alone (castIndex is its index among the host's mana abilities). */
+        boolean manaAlone;
+        /** The kind this answer varies (the log's "sub"). */
+        Kind sub;
+        /** A cast probe's recorded asks (record mode only). */
+        CastRecord rec;
+    }
+
+    /** r3-inline-choices-1030: what a cast asked on its copy (Forge's own answers). */
+    static final class CastRecord {
+        final List<String> parts = new ArrayList<>();
+        final List<List<Integer>> valid = new ArrayList<>();
+        final List<Integer> amounts = new ArrayList<>();
+        final List<List<Integer>> defs = new ArrayList<>();
+        int phyrexian = 0;
     }
 
     /** The ask that opened a decision. */
@@ -288,6 +342,12 @@ public final class ChooseACard implements CacHook {
         boolean trigger;
         String src = "-";
         String method;
+        /** r3-inline-choices-1030: copy the (copyable) stack with no resolving entry (a cast in response, a legend). */
+        boolean copyStack;
+        /** r3-inline-choices-1030: the live abilities a trigger order is asked for. */
+        List<SpellAbility> trigs;
+        /** r3-inline-choices-1030: the decision is a cast at priority (the CAST_KINDS). */
+        boolean cast;
     }
 
     // ------------------------------------------------------------------------------------------------ state
@@ -797,8 +857,17 @@ public final class ChooseACard implements CacHook {
 
     @Override
     public List<SpellAbility> priority(final PlayerControllerAi c, final List<SpellAbility> def) {
+        if (mine(c)) {
+            castPlan = null; // r3-inline-choices-1030: a cast plan lives from its priority to the next one
+            castCostIdx = 0;
+            castPhyIdx = 0;
+        }
         if (mine(c) && def != null && def.size() == 1 && !def.get(0).isLandAbility() && returnPart(def.get(0)) != null) {
             return returnCostDecision(def);
+        }
+        if (mine(c) && def != null && def.size() == 1 && !def.get(0).isLandAbility()
+                && !java.util.Collections.disjoint(cfg.kinds, CAST_KINDS)) {
+            return castDecision(def);
         }
         if (!mine(c) || def == null || def.size() != 1 || !def.get(0).isLandAbility() || !cfg.kinds.contains(Kind.LAND)
                 || !live.getStack().isEmpty()) {
@@ -976,6 +1045,713 @@ public final class ChooseACard implements CacHook {
             if ((String.valueOf(all.get(i).getPayCosts()) + "|" + all.get(i).getDescription()).equals(want)) return i;
         }
         return -1;
+    }
+
+    // ------------------------------------------------------------------------------------------------ r3 in-line kinds
+
+    /** r3-inline-choices-1030: the cast plan of the seat's next cast (cost cards, life), consumed by its payment. */
+    private Answer castPlan = null;
+    private int castCostIdx = 0, castPhyIdx = 0;
+
+    /** A ask's result key part: name, zone, tapped (two untapped Islands are one answer). */
+    static String stateKey(final Card c) {
+        return c.getName() + "@" + (c.getZone() == null ? "?" : c.getZone().getZoneType()) + (c.isTapped() ? "/T" : "");
+    }
+
+    static String stateKeys(final Iterable<Card> cs) {
+        final List<String> k = new ArrayList<>();
+        for (Card c : cs) k.add(stateKey(c));
+        Collections.sort(k);
+        return k.toString();
+    }
+
+    /**
+     * At priority, a cast or activation Forge AI chose (PAYMENT, COLOR, COST_CARDS, SACRIFICE, LIFE): Forge's cast is
+     * candidate 0; the others vary ONE thing each: which sources pay (distinct untapped remainders, labeller v2 (e)'s
+     * enumeration widened to every one-tap source), the colour of an any-colour source's mana, the cards of one cost
+     * part (pitch, discard, sacrifice, tap, delve, convoke), or how many Phyrexian pips are paid with life. Each is
+     * cast on a copy and settled to the first empty-stack priority; answers whose resulting state repeats are dropped.
+     */
+    private List<SpellAbility> castDecision(final List<SpellAbility> def) {
+        final SpellAbility sa = def.get(0);
+        final Card host = sa.getHostCard();
+        if (host == null || sa.isCopied()) return def;
+        if (sa.isManaAbility()) {
+            return cfg.kinds.contains(Kind.COLOR) ? colourAtPriority(def) : def;
+        }
+        if (sa.getPayCosts() == null) return def;
+        if (sa.getApi() == ApiType.Charm || sa.getPayCosts().hasXInAnyCostPart() || sa.getSplicedCards() != null && !sa.getSplicedCards().isEmpty()) {
+            count("unsupported:castModesX");
+            return def;
+        }
+        final List<SpellAbility> all = new ArrayList<>(host.getAllPossibleAbilities(me, true));
+        final int idx = indexOfSa(all, sa);
+        if (idx < 0) return def;
+        final Ask ask = new Ask();
+        ask.kind = Kind.PAYMENT;
+        ask.cast = true;
+        ask.sa = sa; // its targets are copied onto each copy's ability
+        ask.method = "cast";
+        ask.src = host.getName();
+        if (!live.getStack().isEmpty()) {
+            if (live.getStack().isResolving()) return def;
+            final String why = GameCopier.stackUnsupported(live, false);
+            if (why != null) {
+                count("unsupported:" + why);
+                return def;
+            }
+            ask.copyStack = true;
+        }
+        final Decision d = new Decision(ask, null);
+        castAsk = sa;
+        try {
+            return castDecision(def, sa, host, idx, ask, d);
+        } finally {
+            castAsk = null;
+        }
+    }
+
+    private List<SpellAbility> castDecision(final List<SpellAbility> def, final SpellAbility sa, final Card host,
+            final int idx, final Ask ask, final Decision d) {
+        final List<Answer> answers = new ArrayList<>();
+        final Answer f = new Answer();
+        f.forge = true;
+        f.castCard = host.getId();
+        f.castIndex = idx;
+        f.desc.add("forge:" + host.getName());
+        answers.add(f);
+        int n = 0;
+        // cost cards and Phyrexian life: Forge's cast recorded on a copy first (the asks and their valid cards)
+        if (needsRecord(sa)) {
+            final Answer r = new Answer();
+            r.castCard = host.getId();
+            r.castIndex = idx;
+            r.rec = new CastRecord();
+            r.forge = true;
+            if (apply(d, r, LookaheadSearch.mix(cfg.seed, 0xCA570000L + d.index)) != null || !r.rec.parts.isEmpty()
+                    || r.rec.phyrexian > 0) {
+                n += costAnswers(r.rec, f, answers);
+            }
+            d.applied--; // the record copy is not a candidate
+        }
+        if (cfg.kinds.contains(Kind.PAYMENT) || cfg.kinds.contains(Kind.COLOR)) {
+            n += payAnswers(sa, f, answers);
+        }
+        d.nEnum = n;
+        if (answers.size() < 2) {
+            return def;
+        }
+        ask.kind = answers.get(1).sub;
+        final Answer best = decide(d, answers);
+        if (best == null || best.forge) return def;
+        castPlan = best;
+        castCostIdx = 0;
+        castPhyIdx = 0;
+        if (best.floats == null) return def;
+        final List<SpellAbility> out = new ArrayList<>();
+        for (int[] fl : best.floats) {
+            final SpellAbility m = floatSa(live, me, fl[0], fl[1]);
+            if (m == null) {
+                count("liveMiss");
+                castPlan = null;
+                return def;
+            }
+            out.add(m);
+        }
+        out.add(sa);
+        return out;
+    }
+
+    /** A cast whose payment asks something to record: a card-choosing cost part, delve, convoke, a Phyrexian pip. */
+    static boolean needsRecord(final SpellAbility sa) {
+        for (forge.game.cost.CostPart p : sa.getPayCosts().getCostParts()) {
+            if ((p instanceof forge.game.cost.CostExile || p instanceof forge.game.cost.CostDiscard
+                    || p instanceof forge.game.cost.CostSacrifice || p instanceof forge.game.cost.CostTapType)
+                    && !p.payCostFromSource()) return true;
+        }
+        final Card h = sa.getHostCard();
+        if (h.hasKeyword(forge.game.keyword.Keyword.DELVE) || h.hasKeyword(forge.game.keyword.Keyword.CONVOKE)
+                || h.hasKeyword(forge.game.keyword.Keyword.IMPROVISE)) return true;
+        final forge.card.mana.ManaCost mc = sa.getPayCosts().getTotalMana();
+        if (mc != null) {
+            for (forge.card.mana.ManaCostShard sh : mc) {
+                if (sh.isPhyrexian()) return true;
+            }
+        }
+        return false;
+    }
+
+    /** The cost-card and life answers from a recorded cast (one ask varied per answer). */
+    private int costAnswers(final CastRecord rec, final Answer f, final List<Answer> answers) {
+        int total = 0;
+        for (int k = 0; k < rec.parts.size() && k < 4; k++) {
+            final String part = rec.parts.get(k);
+            final Kind sub = part.equals("CostSacrifice") ? Kind.SACRIFICE : Kind.COST_CARDS;
+            if (!cfg.kinds.contains(sub)) continue;
+            final List<Card> valid = new ArrayList<>();
+            for (int id : rec.valid.get(k)) {
+                final Card c = live.findById(id);
+                if (c != null) valid.add(c);
+            }
+            valid.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+            final Set<String> seen = new HashSet<>();
+            seen.add(stateKeys(byIdsLoose(rec.defs.get(k))));
+            final int amount = rec.amounts.get(k);
+            final boolean anySize = part.equals("Delve");
+            final int lo = anySize ? 0 : amount, hi = Math.min(amount, valid.size());
+            for (int size = hi; size >= lo; size--) {
+                final int kk = k, sz = size;
+                final int[] t = {0};
+                combos(valid, size, cfg.cap, list -> {
+                    t[0]++;
+                    if (!seen.add(stateKeys(list)) || answers.size() >= cfg.cap) return;
+                    final Answer a = new Answer();
+                    a.castCard = f.castCard;
+                    a.castIndex = f.castIndex;
+                    a.costPicks = new ArrayList<>();
+                    for (int j = 0; j < rec.parts.size(); j++) a.costPicks.add(j == kk ? ids(list) : null);
+                    a.sub = sub;
+                    a.desc.add((sub == Kind.SACRIFICE ? "sac:" : "cost:") + part + (anySize ? "#" + sz : "") + ":"
+                            + names(list));
+                    answers.add(a);
+                });
+                total += t[0];
+            }
+        }
+        if (rec.phyrexian > 0 && cfg.kinds.contains(Kind.LIFE) && me.canPayLife(2, false, null)) {
+            for (int k = 1; k <= rec.phyrexian && answers.size() < cfg.cap; k++) {
+                if (me.getLife() <= 2 * k) break;
+                final Answer a = new Answer();
+                a.castCard = f.castCard;
+                a.castIndex = f.castIndex;
+                a.lifePips = k;
+                a.sub = Kind.LIFE;
+                a.desc.add("life:" + (2 * k));
+                answers.add(a);
+                total++;
+            }
+        }
+        return total;
+    }
+
+    private List<Card> byIdsLoose(final List<Integer> ids) {
+        final List<Card> out = new ArrayList<>();
+        for (int id : ids) {
+            final Card c = live.findById(id);
+            if (c != null) out.add(c);
+        }
+        return out;
+    }
+
+    /** One untapped mana source of ours: one-tap (or tap and sacrifice itself) abilities, its colours and amount. */
+    static final class Src {
+        Card c;
+        int mask, amount;
+        boolean any;
+    }
+
+    static List<Src> sources(final Player me, final Card except) {
+        final List<Src> out = new ArrayList<>();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (c == except || c.isTapped()) continue;
+            final Src s = new Src();
+            s.c = c;
+            for (SpellAbility ma : c.getManaAbilities()) {
+                if (ma.getPayCosts() == null || !ma.getPayCosts().hasTapCost()) continue;
+                boolean simple = true;
+                for (forge.game.cost.CostPart p : ma.getPayCosts().getCostParts()) {
+                    if (!(p instanceof forge.game.cost.CostTap)
+                            && !(p instanceof forge.game.cost.CostSacrifice && p.payCostFromSource())) simple = false;
+                }
+                if (!simple || ma.getRestrictions() != null && !ma.getRestrictions().canPlay(c, ma)) continue;
+                final SpellAbility m = ma.copy(me);
+                m.setActivatingPlayer(me);
+                if (!m.canPlay()) continue;
+                for (int col = 0; col < 6; col++) {
+                    if (m.canProduce(ForcedWinModel.SHORT[col])) s.mask |= 1 << col;
+                }
+                s.amount = Math.max(s.amount, Math.max(1, m.amountOfManaGenerated(false)));
+                s.any |= m.getManaPart() != null && (m.getManaPart().isAnyMana() || m.getManaPart().isComboMana());
+            }
+            if (s.mask != 0) out.add(s);
+        }
+        out.sort((x, y) -> Integer.compare(x.c.getId(), y.c.getId()));
+        return out;
+    }
+
+    /**
+     * PAYMENT / COLOR answers: minimal source sets that pay the cost (coloured pips first), each with a colour per
+     * source, deduped by the untapped remainder plus the colours left floating; X, hybrid, Phyrexian and snow costs
+     * stay Forge's (stated gap).
+     */
+    private int payAnswers(final SpellAbility sa, final Answer f, final List<Answer> answers) {
+        final forge.card.mana.ManaCost mc = sa.getPayCosts().getTotalMana();
+        if (mc == null || mc.countX() > 0 || mc.isNoCost() || cfg.payCap == 0) return 0;
+        final Card host = sa.getHostCard();
+        if (host.hasKeyword(forge.game.keyword.Keyword.DELVE) || host.hasKeyword(forge.game.keyword.Keyword.CONVOKE)
+                || host.hasKeyword(forge.game.keyword.Keyword.IMPROVISE)) return 0;
+        final List<Integer> need = new ArrayList<>();
+        for (forge.card.mana.ManaCostShard sh : mc) {
+            if (sh == forge.card.mana.ManaCostShard.COLORLESS) {
+                need.add(ForcedWinModel.C);
+            } else if (sh.isMonoColor() && !sh.isOr2Generic() && !sh.isPhyrexian() && !sh.isSnow()
+                    && Integer.bitCount(sh.getColorMask() & 0x1f) == 1) {
+                need.add(Integer.numberOfTrailingZeros(sh.getColorMask()));
+            } else if (!sh.isGeneric() || sh.isSnow() || sh.isOr2Generic()) {
+                return 0;
+            }
+        }
+        final int total = need.size() + mc.getGenericCost();
+        if (total == 0) return 0;
+        final List<Src> src = sources(me, host);
+        final Set<String> seen = new HashSet<>();
+        final int[] n = {0};
+        final int before = answers.size();
+        for (int size = 1; size <= Math.min(total, src.size()); size++) {
+            final List<Card> cards = new ArrayList<>();
+            for (Src s : src) cards.add(s.c);
+            combos(cards, size, 4096, set -> {
+                if (answers.size() - before >= cfg.payCap || answers.size() >= cfg.cap) return;
+                final List<Src> ss = new ArrayList<>();
+                int amt = 0, minAmt = Integer.MAX_VALUE;
+                for (Card c : set) {
+                    for (Src s : src) if (s.c == c) ss.add(s);
+                }
+                for (Src s : ss) {
+                    amt += s.amount;
+                    minAmt = Math.min(minAmt, s.amount);
+                }
+                if (amt < total || amt - minAmt >= total) return; // pays, and no source is spare
+                for (int[] colour : colourings(ss, need, cfg.kinds.contains(Kind.COLOR))) {
+                    if (answers.size() - before >= cfg.payCap || answers.size() >= cfg.cap) return;
+                    n[0]++;
+                    final List<String> left = new ArrayList<>();
+                    for (Src s : src) if (!set.contains(s.c)) left.add(s.c.getName());
+                    Collections.sort(left);
+                    final List<String> excess = excessColours(ss, colour, need, total);
+                    final String key = left + "|" + excess;
+                    if (!seen.add(key)) continue;
+                    final Answer a = new Answer();
+                    a.castCard = f.castCard;
+                    a.castIndex = f.castIndex;
+                    a.floats = new ArrayList<>();
+                    final List<String> dsc = new ArrayList<>();
+                    for (int i = 0; i < ss.size(); i++) {
+                        a.floats.add(new int[] {ss.get(i).c.getId(), colour[i]});
+                        dsc.add(ss.get(i).c.getName() + "=" + ForcedWinModel.SHORT[colour[i]]);
+                    }
+                    a.sub = excess.isEmpty() || !cfg.kinds.contains(Kind.COLOR) ? Kind.PAYMENT : Kind.COLOR;
+                    if (a.sub == Kind.PAYMENT && !cfg.kinds.contains(Kind.PAYMENT)) continue;
+                    a.desc.add("pay:" + dsc + " keep:" + left + (excess.isEmpty() ? "" : " float:" + excess));
+                    answers.add(a);
+                }
+            });
+        }
+        return n[0];
+    }
+
+    /** Colour per source covering every coloured pip (each source makes one colour); all distinct when {@code all}. */
+    static List<int[]> colourings(final List<Src> ss, final List<Integer> need, final boolean all) {
+        final List<int[]> out = new ArrayList<>();
+        colourRec(ss, need, 0, new int[ss.size()], out, all ? 16 : 1);
+        return out;
+    }
+
+    private static void colourRec(final List<Src> ss, final List<Integer> need, final int i, final int[] cur,
+            final List<int[]> out, final int cap) {
+        if (out.size() >= cap) return;
+        if (i == ss.size()) {
+            // coverage: each pip by a source of its colour, a source covers at most its amount
+            final int[] cnt = new int[6];
+            for (int j = 0; j < ss.size(); j++) cnt[cur[j]] += ss.get(j).amount;
+            final int[] want = new int[6];
+            for (int col : need) want[col]++;
+            for (int col = 0; col < 6; col++) if (want[col] > cnt[col]) return;
+            out.add(cur.clone());
+            return;
+        }
+        final Src s = ss.get(i);
+        // a one-colour or single-mana non-any source: its first useful colour only (no colour choice to make)
+        final boolean choice = s.any && s.amount > 1 || Integer.bitCount(s.mask) > 1;
+        boolean any = false;
+        for (int col = 0; col < 6; col++) {
+            if ((s.mask & (1 << col)) == 0) continue;
+            if (!choice && any) break;
+            cur[i] = col;
+            any = true;
+            colourRec(ss, need, i + 1, cur, out, cap);
+            if (out.size() >= cap) return;
+        }
+    }
+
+    /** The colours left floating after the pips are paid (multi-mana sources' excess). */
+    static List<String> excessColours(final List<Src> ss, final int[] colour, final List<Integer> need, final int total) {
+        final int[] cnt = new int[6];
+        int amt = 0;
+        for (int j = 0; j < ss.size(); j++) {
+            cnt[colour[j]] += ss.get(j).amount;
+            amt += ss.get(j).amount;
+        }
+        for (int col : need) cnt[col]--;
+        int generic = total - need.size();
+        final List<String> out = new ArrayList<>();
+        for (int col = 5; col >= 0; col--) {
+            while (cnt[col] > 0 && generic > 0) {
+                cnt[col]--;
+                generic--;
+            }
+        }
+        for (int col = 0; col < 6; col++) for (int k = 0; k < cnt[col]; k++) out.add(ForcedWinModel.SHORT[col]);
+        return amt > total ? out : new ArrayList<>();
+    }
+
+    /** A mana ability of {@code id} producing {@code col}, prepared to float it (labeller v2 / solver FLOAT steps). */
+    static SpellAbility floatSa(final Game g, final Player me, final int id, final int col) {
+        final Card host = g.findById(id);
+        if (host == null) return null;
+        for (SpellAbility m : host.getManaAbilities()) {
+            final SpellAbility a = m.copy(me);
+            a.setActivatingPlayer(me);
+            if (a.getManaPart() == null || !a.canProduce(ForcedWinModel.SHORT[col])) continue;
+            if (col < 5 && (a.getManaPart().isAnyMana() || a.getManaPart().isComboMana())) {
+                a.setManaExpressChoice(forge.card.ColorSet.fromMask(ForcedWinModel.FORGE_COLOR[col]));
+            }
+            if (!a.canPlay() || !forge.ai.ComputerUtilCost.canPayCost(a, me, false)) continue;
+            return a;
+        }
+        return null;
+    }
+
+    /** COLOR at priority: an any-colour mana ability played alone (Lion's Eye Diamond, Lotus): one answer per colour. */
+    private List<SpellAbility> colourAtPriority(final List<SpellAbility> def) {
+        final SpellAbility ma = def.get(0);
+        if (ma.getManaPart() == null || !(ma.getManaPart().isAnyMana() || ma.getManaPart().isComboMana())
+                || !live.getStack().isEmpty() && GameCopier.stackUnsupported(live, false) != null
+                || live.getStack().isResolving()) return def;
+        final Ask ask = new Ask();
+        ask.kind = Kind.COLOR;
+        ask.cast = true;
+        ask.method = "manaAbility";
+        ask.src = ma.getHostCard().getName();
+        ask.copyStack = !live.getStack().isEmpty();
+        final List<Answer> answers = new ArrayList<>();
+        final Answer f = new Answer();
+        f.forge = true;
+        f.castCard = ma.getHostCard().getId();
+        f.manaAlone = true;
+        f.castIndex = ma.getHostCard().getManaAbilities().indexOf(ma.getRootAbility());
+        f.desc.add("forge:" + ask.src);
+        answers.add(f);
+        for (int col = 0; col < 5; col++) {
+            if (!ma.canProduce(ForcedWinModel.SHORT[col])) continue;
+            final Answer a = new Answer();
+            a.castCard = f.castCard;
+            a.manaAlone = true;
+            a.floats = List.<int[]>of(new int[] {f.castCard, col});
+            a.sub = Kind.COLOR;
+            a.desc.add("colour:" + ForcedWinModel.SHORT[col]);
+            answers.add(a);
+        }
+        final Decision d = new Decision(ask, null);
+        d.nEnum = answers.size() - 1;
+        final Answer best = decide(d, answers);
+        if (best == null || best.forge) return def;
+        final SpellAbility m = floatSa(live, me, best.floats.get(0)[0], best.floats.get(0)[1]);
+        return m == null ? def : Collections.singletonList(m);
+    }
+
+    @Override
+    public CardCollectionView costCards(final PlayerControllerAi c, final SpellAbility sa, final String part,
+            final CardCollectionView valid, final int amount, final CardCollectionView def) {
+        if (!mine(c) || castPlan == null || castPlan.costPicks == null
+                || sa != null && (sa.getHostCard() == null || sa.getHostCard().getId() != castPlan.castCard)) {
+            return def;
+        }
+        final int k = castCostIdx++;
+        if (k >= castPlan.costPicks.size() || castPlan.costPicks.get(k) == null) return def;
+        final CardCollection out = byIds(castPlan.costPicks.get(k), valid);
+        if (out == null) {
+            count("liveMiss");
+            return def;
+        }
+        return out;
+    }
+
+    @Override
+    public boolean phyrexianLife(final PlayerControllerAi c, final SpellAbility sa, final boolean def) {
+        if (!mine(c) || castPlan == null || castPlan.lifePips < 0 || sa == null || sa.getHostCard() == null
+                || sa.getHostCard().getId() != castPlan.castCard) {
+            return def;
+        }
+        return castPhyIdx++ < castPlan.lifePips;
+    }
+
+    /** SACRIFICE (resolution): an edict's or a "sacrifice a permanent" effect's choice. */
+    @Override
+    public CardCollectionView sacrifice(final PlayerControllerAi c, final SpellAbility sa, final int min, final int max,
+            final CardCollectionView valid, final CardCollectionView def) {
+        if (!mine(c) || def == null || valid == null) return def;
+        if (pinned()) {
+            if (plan != null && plan.cards != null && plan.sub == Kind.SACRIFICE) {
+                final CardCollection out = byIds(plan.cards, valid);
+                if (out != null) return out;
+                count("liveMiss");
+            }
+            return def;
+        }
+        if (!cfg.kinds.contains(Kind.SACRIFICE) || def.isEmpty() || valid.size() <= def.size()) return def;
+        final Ask ask = ask(Kind.SACRIFICE, sa, "choosePermanentsToSacrifice");
+        if (ask == null) return def;
+        final List<Answer> answers = new ArrayList<>();
+        final Answer f = new Answer();
+        f.forge = true;
+        f.cards = ids(def);
+        f.sub = Kind.SACRIFICE;
+        f.desc.add("forge:" + names(def));
+        answers.add(f);
+        final Set<String> seen = new HashSet<>();
+        seen.add(stateKeys(def));
+        final List<Card> opts = new ArrayList<>(valid);
+        opts.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+        final int[] total = {0};
+        combos(opts, def.size(), cfg.cap, list -> {
+            total[0]++;
+            if (seen.add(stateKeys(list)) && answers.size() < cfg.cap) {
+                final Answer a = new Answer();
+                a.cards = ids(list);
+                a.sub = Kind.SACRIFICE;
+                a.key = "sac:" + stateKeys(list);
+                a.desc.add("sac:" + names(list));
+                answers.add(a);
+            }
+        });
+        f.key = "sac:" + stateKeys(def);
+        final Decision d = new Decision(ask, null);
+        d.nEnum = total[0];
+        final Answer best = decide(d, answers);
+        if (best == null || best.forge) return def;
+        final CardCollection out = byIds(best.cards, valid);
+        if (out != null) startPlan(best, ask);
+        return out == null ? def : out;
+    }
+
+    /** SACRIFICE (the legend rule, in state-based actions): which copy to keep. */
+    @Override
+    public Card legendKeep(final PlayerControllerAi c, final List<Card> options, final Card def) {
+        if (!mine(c) || !cfg.kinds.contains(Kind.SACRIFICE) || options.size() < 2 || live.getStack().isResolving()) {
+            return def;
+        }
+        if (!live.getStack().isEmpty() && GameCopier.stackUnsupported(live, false) != null) {
+            count("unsupported:legendStack");
+            return def;
+        }
+        final Ask ask = new Ask();
+        ask.kind = Kind.SACRIFICE;
+        ask.method = "legendRule";
+        ask.src = def.getName();
+        ask.copyStack = !live.getStack().isEmpty();
+        final List<Answer> answers = new ArrayList<>();
+        final Answer f = new Answer();
+        f.forge = true;
+        f.cards = List.of(def.getId());
+        f.sub = Kind.SACRIFICE;
+        f.key = "keep:" + legendKey(def);
+        f.desc.add("forge:keep " + legendKey(def));
+        answers.add(f);
+        final Set<String> seen = new HashSet<>();
+        seen.add(legendKey(def));
+        final List<Card> opts = new ArrayList<>(options);
+        opts.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+        for (Card x : opts) {
+            if (!seen.add(legendKey(x))) continue;
+            final Answer a = new Answer();
+            a.cards = List.of(x.getId());
+            a.sub = Kind.SACRIFICE;
+            a.key = "keep:" + legendKey(x);
+            a.desc.add("keep:" + legendKey(x));
+            answers.add(a);
+        }
+        final Decision d = new Decision(ask, null);
+        d.nEnum = opts.size();
+        final Answer best = decide(d, answers);
+        if (best == null || best.forge) return def;
+        final Card k = live.findById(best.cards.get(0));
+        return k == null || !options.contains(k) ? def : k;
+    }
+
+    static String legendKey(final Card c) {
+        return c.getName() + (c.isTapped() ? "/T" : "") + (c.isSick() ? "/sick" : "") + (c.hasCounters() ? "/" + c.getCounters() : "")
+                + (c.isEnchanted() || c.isEquipped() ? "/attached" : "");
+    }
+
+    /** ORDER_TRIGGERS: our 2+ simultaneous triggers' order, permutations deduped by the host/trigger sequence. */
+    @Override
+    public List<SpellAbility> orderTriggers(final PlayerControllerAi c, final List<SpellAbility> sas,
+            final List<SpellAbility> def) {
+        if (!mine(c) || !cfg.kinds.contains(Kind.ORDER_TRIGGERS) || sas.size() < 2) return def;
+        for (SpellAbility s : sas) {
+            if (!(s instanceof forge.game.trigger.WrappedAbility) || s.isCopied()
+                    || s.getTrigger() != null && s.getTrigger().getMode() == forge.game.trigger.TriggerType.AbilityTriggered) {
+                count("unsupported:orderNonTrigger");
+                return def;
+            }
+        }
+        if (live.getStack().hasSimultaneousStackEntries() || live.getStack().isResolving()) {
+            count("unsupported:orderPending");
+            return def;
+        }
+        final String why = live.getStack().isEmpty() ? null : GameCopier.stackUnsupported(live, false);
+        if (why != null) {
+            count("unsupported:" + why);
+            return def;
+        }
+        final Ask ask = new Ask();
+        ask.kind = Kind.ORDER_TRIGGERS;
+        ask.method = "orderSimultaneousSa";
+        ask.copyStack = !live.getStack().isEmpty();
+        ask.trigs = new ArrayList<>(sas);
+        final List<String> tk = new ArrayList<>();
+        for (SpellAbility s : sas) tk.add(trigKey(s));
+        ask.src = String.join("+", tk);
+        final List<Answer> answers = new ArrayList<>();
+        final Answer f = new Answer();
+        f.forge = true;
+        f.trigOrder = new ArrayList<>();
+        for (SpellAbility s : def) f.trigOrder.add(sas.indexOf(s));
+        f.sub = Kind.ORDER_TRIGGERS;
+        f.key = "trig:" + seqKey(tk, f.trigOrder);
+        f.desc.add("forge:" + seqKey(tk, f.trigOrder));
+        answers.add(f);
+        final Set<String> seen = new HashSet<>();
+        seen.add(seqKey(tk, f.trigOrder));
+        final List<Integer> idx = new ArrayList<>();
+        for (int i = 0; i < sas.size(); i++) idx.add(i);
+        final List<List<Integer>> perms = new ArrayList<>();
+        permIdx(new ArrayList<>(), idx, perms, 5040);
+        int total = 0;
+        for (List<Integer> pm : perms) {
+            total++;
+            if (answers.size() >= Math.min(cfg.cap, cfg.orderCap)) break;
+            if (!seen.add(seqKey(tk, pm))) continue;
+            final Answer a = new Answer();
+            a.trigOrder = pm;
+            a.sub = Kind.ORDER_TRIGGERS;
+            a.key = "trig:" + seqKey(tk, pm);
+            a.desc.add("order:" + seqKey(tk, pm));
+            answers.add(a);
+        }
+        final Decision d = new Decision(ask, null);
+        d.nEnum = total;
+        final Answer best = decide(d, answers);
+        if (best == null || best.forge) return def;
+        final List<SpellAbility> out = new ArrayList<>();
+        for (int i : best.trigOrder) out.add(sas.get(i));
+        return out;
+    }
+
+    static String trigKey(final SpellAbility s) {
+        final forge.game.trigger.Trigger t = s.getTrigger();
+        return (s.getHostCard() == null ? "?" : s.getHostCard().getName()) + "#"
+                + (t == null ? "" : t.getMode() + ":" + t.getParam("Execute"));
+    }
+
+    static String seqKey(final List<String> tk, final List<Integer> order) {
+        final List<String> o = new ArrayList<>();
+        for (int i : order) o.add(tk.get(i));
+        return o.toString();
+    }
+
+    private static void permIdx(final List<Integer> cur, final List<Integer> rest, final List<List<Integer>> out,
+            final int cap) {
+        if (out.size() >= cap) return;
+        if (rest.isEmpty()) {
+            out.add(new ArrayList<>(cur));
+            return;
+        }
+        for (int i = 0; i < rest.size(); i++) {
+            final List<Integer> r = new ArrayList<>(rest);
+            cur.add(r.remove(i));
+            permIdx(cur, r, out, cap);
+            cur.remove(cur.size() - 1);
+        }
+    }
+
+    /** PAY_TO_PREVENT: pay a Daze / Mana Leak / tax, or not. */
+    @Override
+    public boolean payToPrevent(final PlayerControllerAi c, final forge.game.cost.Cost cost, final SpellAbility sa,
+            final boolean canPay, final boolean def) {
+        if (!mine(c) || !cfg.kinds.contains(Kind.PAY_TO_PREVENT) || !canPay || pinned()) return def;
+        final Ask ask = ask(Kind.PAY_TO_PREVENT, sa, "payCostToPreventEffect");
+        if (ask == null) return def;
+        final List<Answer> answers = new ArrayList<>();
+        for (boolean b : new boolean[] {def, !def}) {
+            final Answer a = new Answer();
+            a.forge = answers.isEmpty();
+            a.pay = b;
+            a.sub = Kind.PAY_TO_PREVENT;
+            a.desc.add((a.forge ? "forge:" : "") + (b ? "pay:" + cost.toSimpleString() : "decline"));
+            answers.add(a);
+        }
+        final Decision d = new Decision(ask, null);
+        d.nEnum = 1;
+        final Answer best = decide(d, answers);
+        return best == null ? def : best.pay;
+    }
+
+    /** COLOR (resolution): a resolving ritual's or Manamorphose's any-colour mana. */
+    @Override
+    public byte chooseColor(final PlayerControllerAi c, final SpellAbility sa, final forge.card.ColorSet colors,
+            final byte def) {
+        if (!mine(c) || sa == null || !cfg.kinds.contains(Kind.COLOR) || pinned() || live.getStack().isEmpty()
+                || !live.getStack().isResolving()) return def;
+        final Ask ask = ask(Kind.COLOR, sa, "chooseColor");
+        if (ask == null) return def;
+        final List<Answer> answers = new ArrayList<>();
+        final Answer f = new Answer();
+        f.forge = true;
+        f.colour = def;
+        f.sub = Kind.COLOR;
+        f.desc.add("forge:" + forge.card.MagicColor.toShortString(def));
+        answers.add(f);
+        for (byte b : forge.card.MagicColor.WUBRG) {
+            if ((colors.getColor() & b) == 0 || b == def) continue;
+            final Answer a = new Answer();
+            a.colour = b;
+            a.sub = Kind.COLOR;
+            a.desc.add("colour:" + forge.card.MagicColor.toShortString(b));
+            answers.add(a);
+        }
+        final Decision d = new Decision(ask, null);
+        d.nEnum = answers.size() - 1;
+        final Answer best = decide(d, answers);
+        return best == null ? def : best.colour;
+    }
+
+    /** The resulting-state key of a cast answer (dedupes payments, colours and cost cards that end the same). */
+    static String castKey(final Game g, final Player me) {
+        final StringBuilder b = new StringBuilder("cast:");
+        final List<String> bf = new ArrayList<>();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) bf.add(stateKey(c));
+        Collections.sort(bf);
+        b.append(bf).append("|hand:").append(sortedNamesOf(me.getCardsIn(ZoneType.Hand)))
+                .append("|gy:").append(sortedNamesOf(me.getCardsIn(ZoneType.Graveyard)))
+                .append("|exile:").append(sortedNamesOf(me.getCardsIn(ZoneType.Exile)))
+                .append("|pool:").append(poolKey(me))
+                .append("|life:").append(me.getLife());
+        return b.toString();
+    }
+
+    static String poolKey(final Player me) {
+        final StringBuilder b = new StringBuilder();
+        for (byte c : forge.card.MagicColor.WUBRGC) b.append(me.getManaPool().getAmountOfColor(c)).append(',');
+        return b.toString();
+    }
+
+    static String sortedNamesOf(final Iterable<Card> cs) {
+        final List<String> n = new ArrayList<>();
+        for (Card c : cs) n.add(c.getName());
+        Collections.sort(n);
+        return n.toString();
     }
 
     // ------------------------------------------------------------------------------------------------ deciding
@@ -1463,9 +2239,90 @@ public final class ChooseACard implements CacHook {
             return super.chooseSpellAbilityToPlay();
         }
 
+        // r3-inline-choices-1030
+        List<Integer> trigPlan;
+        boolean trigUsed, payUsed, colourUsed;
+        int legendKeepId = -1;
+
+        @Override
+        public List<SpellAbility> orderSimultaneousSa(final List<SpellAbility> sas) {
+            if (!leaf.armed && trigPlan != null && !trigUsed && sas != null && sas.size() == trigPlan.size()) {
+                trigUsed = true;
+                final List<SpellAbility> out = new ArrayList<>();
+                for (int i : trigPlan) out.add(sas.get(i));
+                return out;
+            }
+            return super.orderSimultaneousSa(sas);
+        }
+
+        @Override
+        public CardCollectionView choosePermanentsToSacrifice(final SpellAbility sa, final int min, final int max,
+                final CardCollectionView validTargets, final String message) {
+            if (!leaf.armed && a.cards != null && a.sub == Kind.SACRIFICE && !cardsUsed) {
+                cardsUsed = true;
+                final CardCollection c = byIds(a.cards, validTargets);
+                if (c != null) return c;
+                miss = true;
+                missWhy = "sac";
+            }
+            return super.choosePermanentsToSacrifice(sa, min, max, validTargets, message);
+        }
+
+        @Override
+        public <T extends forge.game.GameEntity> T chooseSingleEntityForEffect(
+                final forge.util.collect.FCollectionView<T> optionList, final forge.game.player.DelayedReveal delayedReveal,
+                final SpellAbility sa, final String title, final boolean isOptional, final Player targetedPlayer,
+                final Map<String, Object> params) {
+            if (!leaf.armed && legendKeepId >= 0 && !cardsUsed && sa != null && sa.getApi() == ApiType.InternalLegendaryRule) {
+                for (T t : optionList) {
+                    if (t instanceof Card && ((Card) t).getId() == legendKeepId) {
+                        cardsUsed = true;
+                        return t;
+                    }
+                }
+                miss = true;
+                missWhy = "legend";
+            }
+            return super.chooseSingleEntityForEffect(optionList, delayedReveal, sa, title, isOptional, targetedPlayer, params);
+        }
+
+        @Override
+        public boolean payCostToPreventEffect(final forge.game.cost.Cost cost, final SpellAbility sa,
+                final boolean alreadyPaid, final forge.util.collect.FCollectionView<Player> allPayers) {
+            if (!leaf.armed && a.pay != null && !payUsed) {
+                payUsed = true;
+                if (!a.pay) return false;
+                if (!forge.ai.ComputerUtilCost.canPayCost(cost, sa, getPlayer(), true)) {
+                    miss = true;
+                    missWhy = "pay";
+                    return false;
+                }
+                return new forge.game.cost.CostPayment(cost, sa).payComputerCosts(
+                        forge.ai.AiCostDecision.forPayment(getPlayer(), sa, true));
+            }
+            return super.payCostToPreventEffect(cost, sa, alreadyPaid, allPayers);
+        }
+
+        @Override
+        public byte chooseColor(final String message, final SpellAbility sa, final forge.card.ColorSet colors) {
+            if (!leaf.armed && a.colour != 0 && !colourUsed && (colors.getColor() & a.colour) != 0) {
+                colourUsed = true;
+                return a.colour;
+            }
+            return super.chooseColor(message, sa, colors);
+        }
+
         /** Consumed every forced response it was given. */
         boolean complete() {
             if (miss) return false;
+            if (a.pay != null && !payUsed) {
+                missWhy = "noPay";
+                return false;
+            }
+            if (a.colour != 0 && !colourUsed) {
+                missWhy = "noColour";
+                return false;
+            }
             if (a.picks != null && !a.none && pickIdx < a.picks.size()) {
                 missWhy = "picks" + pickIdx + "/" + a.picks.size();
                 return false;
@@ -1570,7 +2427,7 @@ public final class ChooseACard implements CacHook {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1);
-                if (ask.top != null) {
+                if (ask.top != null || ask.copyStack) {
                     copier.setCopyStack(true);
                     copier.setSkipResolvingTrigger(true);
                 }
@@ -1602,7 +2459,22 @@ public final class ChooseACard implements CacHook {
             }
             final Object ctx = valuer == null ? null : valuer.onCopy(g, cm);
             // resume the decision
-            switch (ask.kind) {
+            if (ask.cast) {
+                why = applyCast(g, cm, sc, a); // r3-inline-choices-1030
+                if (why != null) return null;
+                if (a.rec != null) return p; // a record of the asks only: never valued
+            } else if (ask.kind == Kind.ORDER_TRIGGERS) {
+                sc.trigPlan = a.trigOrder;
+                why = applyOrder(g, cm, sc, a, ask);
+                if (why != null) return null;
+            } else if ("legendRule".equals(ask.method)) {
+                sc.legendKeepId = a.cards.get(0);
+                g.getAction().checkStateEffects(true);
+                if (!sc.cardsUsed) {
+                    why = "legendNotAsked";
+                    return null;
+                }
+            } else switch (ask.kind) {
                 case LAND: {
                     final Card land = g.findById(a.land);
                     SpellAbility ls = null;
@@ -1758,6 +2630,180 @@ public final class ChooseACard implements CacHook {
             AiCache.installScope(prevCache);
             MyRandom.setThreadRandom(prev);
         }
+    }
+
+    /** r3-inline-choices-1030: cast (or activate) the answer's ability on the copy with its payment; null = applied. */
+    private String applyCast(final Game g, final Player cm, final Scripted sc, final Answer a) {
+        final Card host = g.findById(a.castCard);
+        if (host == null) return "cast";
+        if (a.manaAlone) {
+            final SpellAbility m;
+            if (a.floats != null) {
+                m = floatSa(g, cm, a.floats.get(0)[0], a.floats.get(0)[1]);
+            } else {
+                final List<SpellAbility> mas = new ArrayList<>(host.getManaAbilities());
+                if (a.castIndex < 0 || a.castIndex >= mas.size()) return "mana";
+                m = mas.get(a.castIndex).copy(cm);
+                m.setActivatingPlayer(cm);
+            }
+            if (m == null) return "float";
+            sc.playChosenSpellAbility(m);
+            a.key = castKey(g, cm);
+            return null;
+        }
+        final List<SpellAbility> all = new ArrayList<>(host.getAllPossibleAbilities(cm, true));
+        if (a.castIndex < 0 || a.castIndex >= all.size()) return "cast";
+        final SpellAbility cs = all.get(a.castIndex);
+        cs.setActivatingPlayer(cm);
+        if (castAsk != null && !copyTargets(castAsk, cs, g)) return "targets";
+        final int before = g.getStack().size();
+        if (a.floats != null) {
+            for (int[] fl : a.floats) {
+                final SpellAbility m = floatSa(g, cm, fl[0], fl[1]);
+                if (m == null) return "float";
+                sc.playChosenSpellAbility(m);
+            }
+        }
+        final int[] ci = {0}, pi = {0}, used = {0};
+        sc.setCacHook(new forge.ai.CacHook() {
+            @Override
+            public CardCollectionView costCards(final PlayerControllerAi pc, final SpellAbility s2, final String part,
+                    final CardCollectionView valid, final int amount, final CardCollectionView dd) {
+                if (pc != sc) return dd;
+                final int k = ci[0]++;
+                if (a.rec != null) {
+                    a.rec.parts.add(part);
+                    a.rec.valid.add(ids(valid));
+                    a.rec.amounts.add(amount);
+                    a.rec.defs.add(ids(dd));
+                    return dd;
+                }
+                if (a.costPicks == null || k >= a.costPicks.size() || a.costPicks.get(k) == null) return dd;
+                final CardCollection o = byIds(a.costPicks.get(k), valid);
+                if (o == null) {
+                    sc.miss = true;
+                    sc.missWhy = "cost";
+                    return dd;
+                }
+                used[0]++;
+                return o;
+            }
+
+            @Override
+            public boolean phyrexianLife(final PlayerControllerAi pc, final SpellAbility s2, final boolean dd) {
+                if (pc != sc) return dd;
+                final int k = pi[0]++;
+                if (a.rec != null) {
+                    a.rec.phyrexian++;
+                    return dd;
+                }
+                if (a.lifePips < 0) return dd;
+                if (k < a.lifePips) used[0]++;
+                return k < a.lifePips;
+            }
+        });
+        try {
+            sc.playChosenSpellAbility(cs);
+        } finally {
+            sc.setCacHook(null);
+        }
+        if (g.getStack().size() <= before) return "notCast";
+        int need = 0;
+        if (a.costPicks != null) for (List<Integer> x : a.costPicks) if (x != null) need++;
+        if (a.lifePips > 0) need += a.lifePips;
+        if (a.rec == null && used[0] < need) return "costNotAsked";
+        if (sc.miss) return "planMiss:" + sc.missWhy;
+        a.key = castKey(g, cm);
+        return null;
+    }
+
+    /** The live cast whose copies are being applied (its targets), set around a cast decision's applies. */
+    private SpellAbility castAsk = null;
+
+    /** Copy the live ability's targets (cards, players, stack entries; its sub-abilities too) onto {@code cs}. */
+    private boolean copyTargets(final SpellAbility from, final SpellAbility cs, final Game g) {
+        SpellAbility x = from, y = cs;
+        while (x != null) {
+            if (y == null) return false;
+            if (x.usesTargeting()) {
+                y.resetTargets();
+                for (forge.game.GameObject o : x.getTargets()) {
+                    final Object m;
+                    if (o instanceof SpellAbility ts) {
+                        m = mapStack(ts, g);
+                    } else {
+                        m = mapObj(o, g);
+                    }
+                    if (m == null || m == NO_MAP || !(m instanceof forge.game.GameObject)) return false;
+                    y.getTargets().add((forge.game.GameObject) m);
+                }
+            }
+            x = x.getSubAbility();
+            y = y.getSubAbility();
+        }
+        return true;
+    }
+
+    /** A live stack entry's ability in the copy (same depth from the top), or null. */
+    private SpellAbility mapStack(final SpellAbility ts, final Game g) {
+        final List<SpellAbility> l = new ArrayList<>(), c = new ArrayList<>();
+        for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) l.add(si.getSpellAbility());
+        for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) c.add(si.getSpellAbility());
+        final int i = l.indexOf(ts);
+        return i < 0 || l.size() != c.size() ? null : c.get(i);
+    }
+
+    /** r3-inline-choices-1030: rebuild our pending triggers on the copy and put them on its stack in the answer's order. */
+    private String applyOrder(final Game g, final Player cm, final Scripted sc, final Answer a, final Ask ask) {
+        for (SpellAbility ls : ask.trigs) {
+            final forge.game.trigger.WrappedAbility w = (forge.game.trigger.WrappedAbility) ls;
+            final SpellAbility inner = LookaheadSearch.rebuildTrigger(g, cm, w);
+            final Map<forge.game.ability.AbilityKey, Object> m = mapTrig(w.getTriggeringObjects(), g);
+            if (m == null) return "trigObj";
+            inner.setTriggeringObjects(m);
+            final forge.game.trigger.WrappedAbility cw = new forge.game.trigger.WrappedAbility(inner.getTrigger(), inner, cm);
+            cw.setOptionalTrigger(w.isOptionalTrigger());
+            g.getStack().addSimultaneousStackEntry(cw);
+        }
+        g.getStack().addAllTriggeredAbilitiesToStack();
+        return sc.trigUsed ? null : "orderNotAsked";
+    }
+
+    private static final Object NO_MAP = new Object();
+
+    /** A trigger's objects mapped into the copy by id (null = an object that cannot be mapped). */
+    private Map<forge.game.ability.AbilityKey, Object> mapTrig(final Map<forge.game.ability.AbilityKey, Object> m,
+            final Game g) {
+        final Map<forge.game.ability.AbilityKey, Object> out = new java.util.EnumMap<>(forge.game.ability.AbilityKey.class);
+        if (m == null) return out;
+        for (Map.Entry<forge.game.ability.AbilityKey, Object> e : m.entrySet()) {
+            final Object v = mapObj(e.getValue(), g);
+            if (v == NO_MAP) return null;
+            if (v != null) out.put(e.getKey(), v);
+        }
+        return out;
+    }
+
+    private Object mapObj(final Object v, final Game g) {
+        if (v == null || v instanceof Number || v instanceof String || v instanceof Boolean || v instanceof Enum) return v;
+        if (v instanceof Card c) {
+            final Card x = g.findById(c.getId());
+            return x == null ? NO_MAP : x;
+        }
+        if (v instanceof Player p) {
+            final int i = live.getRegisteredPlayers().indexOf(p);
+            return i < 0 ? NO_MAP : g.getRegisteredPlayers().get(i);
+        }
+        if (v instanceof CardCollectionView cc) {
+            final CardCollection out = new CardCollection();
+            for (Card c : cc) {
+                final Card x = g.findById(c.getId());
+                if (x == null) return NO_MAP;
+                out.add(x);
+            }
+            return out;
+        }
+        return NO_MAP;
     }
 
     // ------------------------------------------------------------------------------------------------ asks
@@ -2031,6 +3077,15 @@ public final class ChooseACard implements CacHook {
         if (a.land >= 0) {
             final Card c = live.findById(a.land);
             return "land:" + (c == null ? a.land : c.getName());
+        }
+        if (a.trigOrder != null) {
+            return "trig:" + a.trigOrder;
+        }
+        if (a.pay != null) {
+            return "pay:" + a.pay;
+        }
+        if (a.colour != 0) {
+            return "colour:" + a.colour;
         }
         return "?";
     }

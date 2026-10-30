@@ -73,4 +73,49 @@ public interface CacHook {
             CardCollectionView def) {
         return def;
     }
+
+    // ---------------------------------------------------------------- r3-inline-choices-1030 (FLAG-R3-5)
+
+    /**
+     * A cost part's cards as Forge AI decided them (exile: Force of Will's pitched card; discard; sacrifice: Thopter
+     * Foundry's artifact; tap-type; delve's exiled cards; convoke's tappers), during payment. {@code part} names the
+     * part's class ("CostExile", "CostDiscard", "CostSacrifice", "CostTapType", "Delve", "Convoke"); {@code valid} is
+     * every card the part could take.
+     */
+    default CardCollectionView costCards(PlayerControllerAi c, SpellAbility sa, String part, CardCollectionView valid,
+            int amount, CardCollectionView def) {
+        return def;
+    }
+
+    /** One Phyrexian pip Forge AI is about to pay with mana ({@code def} false): true pays 2 life instead. */
+    default boolean phyrexianLife(PlayerControllerAi c, SpellAbility sa, boolean def) {
+        return def;
+    }
+
+    /** choosePermanentsToSacrifice during a resolution (edicts, "sacrifice a creature"). */
+    default CardCollectionView sacrifice(PlayerControllerAi c, SpellAbility sa, int min, int max,
+            CardCollectionView valid, CardCollectionView def) {
+        return def;
+    }
+
+    /** The legend rule's "choose one to keep" ({@code def}: Forge AI's). */
+    default Card legendKeep(PlayerControllerAi c, List<Card> options, Card def) {
+        return def;
+    }
+
+    /** The order our simultaneous triggers go on the stack (first = bottom, Forge's convention). */
+    default List<SpellAbility> orderTriggers(PlayerControllerAi c, List<SpellAbility> sas, List<SpellAbility> def) {
+        return def;
+    }
+
+    /** Pay a cost to prevent an effect (Daze, Mana Leak, taxes)? {@code canPay}: payable now. */
+    default boolean payToPrevent(PlayerControllerAi c, forge.game.cost.Cost cost, SpellAbility sa, boolean canPay,
+            boolean def) {
+        return def;
+    }
+
+    /** A colour for mana of any colour chosen while an ability resolves (a ritual's, Manamorphose's). */
+    default byte chooseColor(PlayerControllerAi c, SpellAbility sa, forge.card.ColorSet colors, byte def) {
+        return def;
+    }
 }

@@ -155,6 +155,9 @@ public class CostPayment extends ManaConversionMatrix {
                 PaymentDecision pd = tap == null ? part.accept(decisionMaker)
                         : tap.cost(decisionMaker.getPlayer(), part, partIndex, ability, () -> part.accept(decisionMaker));
                 partIndex++;
+                if (pd != null) {
+                    pd = decisionMaker.review(part, pd); // r3-inline-choices-1030: identity unless an AI hook is set
+                }
 
                 // Right before we start paying as decided, we need to transfer the CostPayments matrix over?
                 if (pd != null) {
@@ -199,8 +202,10 @@ public class CostPayment extends ManaConversionMatrix {
 
         int partIndex = 0;
         for (final CostPart part : parts) {
-            final PaymentDecision decision = tap == null ? part.accept(decisionMaker)
+            final PaymentDecision decided = tap == null ? part.accept(decisionMaker)
                     : tap.cost(decisionMaker.getPlayer(), part, partIndex, ability, () -> part.accept(decisionMaker));
+            // r3-inline-choices-1030: identity unless an AI seat's choose-a-card hook is set
+            final PaymentDecision decision = decided == null ? null : decisionMaker.review(part, decided);
             partIndex++;
             if (null == decision) return false;
 
