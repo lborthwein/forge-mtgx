@@ -101,15 +101,16 @@ public class LabellerV2MinTest extends AITest {
 
     /**
      * Predeclared test 5 (the v1 gap): a line v1 proves (its adversary only counters SPELLS with counterspells) that v2
-     * does not: (i) their Rod of Ruin activation for our last life point, answered by our Stifle on the ability;
-     * (ii) their pumped attacker, answered by our Lightning Bolt on it. At least one of the two must be proven by v1
+     * does not: (i) their Lightning Bolt for our last 3 life, answered by our instant life gain (Renewed Faith);
+     * (ii) their Rod of Ruin activation for our last life point, answered by our Stifle on the ability (reported). At least one of the two must be proven by v1
      * for the test to mean anything; every case v1 proves, v2 must not.
      */
     @Test
     public void v2RefutesLinesV1ProvesAgainstAbilitiesAndRemoval() {
         final String[][] cases = {
+            // their Bolt for our last 3 life; our instant life gain (no counterspell) answers it
+            {"Renewed Faith", "Plains;Plains;Plains", "3", "Lightning Bolt", "Mountain"},
             {"Stifle", "Island", "1", "", "Rod of Ruin;Mountain;Mountain;Mountain"},
-            {"Lightning Bolt", "Mountain", "4", "Giant Growth", "Grizzly Bears;Forest;Forest"},
         };
         int v1Proofs = 0;
         final StringBuilder sb = new StringBuilder();
