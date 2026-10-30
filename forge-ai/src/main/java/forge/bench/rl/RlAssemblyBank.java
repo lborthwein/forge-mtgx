@@ -862,7 +862,7 @@ public final class RlAssemblyBank implements AiTapeController.Probe, PriorityDec
         double wins = 0;
         int ok = 0;
         final List<Card> unknown = unknownLibrary(me);
-        final int w = Math.max(1, Math.min(spec.worlds, unknown.size()));
+        final int w = Math.max(1, Math.min(job.has("worlds") ? job.get("worlds").getAsInt() : spec.worlds, unknown.size()));
         row.addProperty("unknown_library", unknown.size());
         if (!row.has("error")) {
             final ForcedWinSolver.Redraw redraw = AssemblyWorlds.opponentBelief();
