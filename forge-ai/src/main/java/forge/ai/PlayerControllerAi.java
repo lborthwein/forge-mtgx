@@ -696,6 +696,9 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
+        if (cacHook != null && !cacSuppressed) {
+            cacHook.beforeAsk(this);
+        }
         final CardCollectionView def = orderMoveToZoneListAi(cards, destinationZone, source);
         return cacHook == null || cacSuppressed ? def : cacHook.order(this, cards, destinationZone, source, def);
     }
@@ -1757,6 +1760,9 @@ public class PlayerControllerAi extends PlayerController {
     public Card chooseSingleCardForZoneChange(ZoneType destination,
             List<ZoneType> origin, SpellAbility sa, CardCollection fetchList, DelayedReveal delayedReveal,
             String selectPrompt, boolean isOptional, Player decider) {
+        if (cacHook != null && !cacSuppressed) {
+            cacHook.beforeAsk(this);
+        }
         final Card def = chooseSingleCardForZoneChangeAi(destination, origin, sa, fetchList, delayedReveal, selectPrompt,
                 isOptional, decider);
         return cacHook == null || cacSuppressed ? def : cacHook.pick(this, destination, origin, sa, fetchList, isOptional, decider, def);

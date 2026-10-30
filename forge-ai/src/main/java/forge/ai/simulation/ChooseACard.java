@@ -430,6 +430,8 @@ public final class ChooseACard implements CacHook {
     public Card pick(final PlayerControllerAi c, final ZoneType destination, final List<ZoneType> origin,
             final SpellAbility sa, final CardCollection fetchList, final boolean isOptional, final Player decider,
             final Card def) {
+        curPre = preAskRng;
+        preAskRng = null;
         if (!mine(c) || decider != me || fetchList == null || fetchList.isEmpty()) {
             return def;
         }
@@ -531,6 +533,8 @@ public final class ChooseACard implements CacHook {
     @Override
     public CardCollectionView order(final PlayerControllerAi c, final CardCollectionView cards, final ZoneType destination,
             final SpellAbility sa, final CardCollectionView def) {
+        curPre = preAskRng;
+        preAskRng = null;
         if (!mine(c) || cards == null) {
             return def;
         }
@@ -988,8 +992,13 @@ public final class ChooseACard implements CacHook {
         int applied, leaves, terminals, misses, failures, solverChecks;
         long steps;
 
-        /** The live random stream as it stands at the ask (a copy): the baseline probe replays Forge on it. */
-        final Random liveRng = cloneRandom(MyRandom.getRandom());
+        /**
+         * The live random stream as it stood just BEFORE Forge computed its own answer to this ask (a copy, from
+         * {@link #beforeAsk}; else as it stands now): the baseline probe replays Forge from it, its first pick included
+         * (Forge's pick shuffles the effect's own list in place, so forcing that pick would change the later ones).
+         */
+        final Random liveRng = takePreRng();
+        final boolean preRng = lastPreRngTaken;
 
         Decision(final Ask ask, final List<Integer> forgeFirst) {
             this.ask = ask;
@@ -1528,6 +1537,11 @@ public final class ChooseACard implements CacHook {
             return;
         }
         final Scripted sc = rec.probeSc;
+        if (d.forgeFirst != null && !d.forgeFirst.isEmpty()
+                && (sc.recPicks.isEmpty() || !sc.recPicks.get(0).equals(d.forgeFirst.get(0)))) {
+            count("probeMismatch"); // the replay did not reproduce live Forge's first pick: keep the old record path
+            return;
+        }
         if (!sc.recPicks.isEmpty()) a.picks = new ArrayList<>(sc.recPicks);
         if (sc.recOrder != null) a.order = new ArrayList<>(sc.recOrder);
         else if (a.picks != null && (d.ask.kind == Kind.PILE || d.ask.kind == Kind.DIG)) a.order = new ArrayList<>(a.picks);
@@ -1577,7 +1591,8 @@ public final class ChooseACard implements CacHook {
             }
             MyRandom.setThreadRandom(probe ? cloneRandom(d.liveRng) : new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, 3)));
             final Leaf leaf = new Leaf();
-            final Scripted sc = new Scripted(g, cm, cm.getController().getLobbyPlayer(), a, leaf, d.forgeFirst);
+            final Scripted sc = new Scripted(g, cm, cm.getController().getLobbyPlayer(), a, leaf,
+                    probe && d.preRng ? null : d.forgeFirst); // a pre-ask stream replays Forge's first pick too
             if (probe) {
                 a.probeSc = sc;
             }
@@ -2098,6 +2113,24 @@ public final class ChooseACard implements CacHook {
         a.order = new ArrayList<>(a.picks);
         a.desc.add("seq:" + names(seq));
         return a;
+    }
+
+    private Random preAskRng = null;
+    private boolean lastPreRngTaken = false;
+
+    @Override
+    public void beforeAsk(final PlayerControllerAi c) {
+        preAskRng = mine(c) && !pinned() ? cloneRandom(MyRandom.getRandom()) : null;
+    }
+
+    /** The snapshot taken for THIS ask (moved out of preAskRng at the hook's entry, so a stale one is never used). */
+    private Random curPre = null;
+
+    private Random takePreRng() {
+        final Random r = curPre;
+        curPre = null;
+        lastPreRngTaken = r != null;
+        return r != null ? r : cloneRandom(MyRandom.getRandom());
     }
 
     /** A copy of a random stream's state (null when it cannot be copied). Never advances {@code r}. */

@@ -18,6 +18,13 @@ import forge.game.zone.ZoneType;
  * play. The defaults return {@code def}: a hook that overrides nothing changes nothing.
  */
 public interface CacHook {
+    /**
+     * Called just before Forge AI computes its own answer to a library-search pick or an order (only when a hook is
+     * set): the hook may snapshot the random stream that answer will consume (review #143 S2: the baseline replay).
+     */
+    default void beforeAsk(PlayerControllerAi c) {
+    }
+
     default Card pick(PlayerControllerAi c, ZoneType destination, List<ZoneType> origin, SpellAbility sa,
             CardCollection fetchList, boolean isOptional, Player decider, Card def) {
         return def;
