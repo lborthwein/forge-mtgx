@@ -774,6 +774,12 @@ public final class ChooseACard implements CacHook {
                 return null;
             }
             out = choose(d, list, score);
+            if (cfg.mode == Config.Mode.SHADOW && out != null && !out.forge) {
+                // shadow: logged, never played (the live answer stays Forge AI's)
+                e.addProperty("outcome", "shadow-would-depart");
+                count("shadowWouldDepart");
+                return null;
+            }
             return out;
         } catch (RuntimeException | StackOverflowError ex) {
             count("error");
@@ -794,11 +800,6 @@ public final class ChooseACard implements CacHook {
             e.add("work", w);
             e.addProperty("ms", Math.round((System.nanoTime() - t0) / 1e4) / 100.0);
             log.add(e);
-            if (cfg.mode == Config.Mode.SHADOW && out != null && !out.forge) {
-                e.addProperty("outcome", "shadow-would-depart");
-                count("shadowWouldDepart");
-                out = null;
-            }
         }
     }
 
@@ -1240,6 +1241,7 @@ public final class ChooseACard implements CacHook {
                         }
                         g.getAction().moveToBottomOfLibrary(c, null);
                     }
+                    sc.cardsUsed = true;
                     break;
                 }
                 default: {

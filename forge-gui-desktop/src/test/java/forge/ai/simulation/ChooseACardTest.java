@@ -238,8 +238,8 @@ public class ChooseACardTest extends SimulationTest {
 
     /**
      * GOAL-PROMPT's worked example: Doomsday and Gush in hand, one blue source short of the kill. The stub v rewards an
-     * available kill (Doomsday + Gush in hand and two Islands: on the battlefield, or one in hand with the land drop
-     * unused). Forge AI's own Demonic Tutor pick is something else; choose-a-card takes the Island.
+     * available kill next turn (Doomsday + Gush in hand and two Islands: on the battlefield or one in hand for next
+     * turn's land drop; this turn's land drop is spent). Forge AI's own Demonic Tutor pick is something else; choose-a-card takes the Island.
      */
     @Test
     public void doomsdayGushOneBlueShortTutorsTheBlueSource() {
@@ -247,7 +247,7 @@ public class ChooseACardTest extends SimulationTest {
             if (!inZone(p, ZoneType.Hand, "Doomsday") || !inZone(p, ZoneType.Hand, "Gush")) return 0.1;
             int islands = 0;
             for (Card x : p.getCardsIn(ZoneType.Battlefield)) if (x.getType().hasSubtype("Island")) islands++;
-            if (p.getLandsPlayedThisTurn() == 0 && inZone(p, ZoneType.Hand, "Island")) islands++;
+            if (inZone(p, ZoneType.Hand, "Island")) islands++; // next turn's land drop
             return islands >= 2 ? 0.8 : 0.4;
         };
         final java.util.function.Supplier<Game> board = () -> {
@@ -259,9 +259,9 @@ public class ChooseACardTest extends SimulationTest {
                 addCardToZone(n, a, ZoneType.Library);
             }
             for (int i = 0; i < 20; i++) addCardToZone("Mountain", b, ZoneType.Library);
-            addCard("Swamp", a);
-            addCard("Swamp", a);
+            for (int i = 0; i < 4; i++) addCard("Swamp", a);
             addCard("Island", a);
+            a.addLandPlayedThisTurn(); // the land drop is spent: the blue source tutored now is next turn's
             addCardToZone("Demonic Tutor", a, ZoneType.Hand);
             addCardToZone("Doomsday", a, ZoneType.Hand);
             addCardToZone("Gush", a, ZoneType.Hand);
@@ -365,7 +365,8 @@ public class ChooseACardTest extends SimulationTest {
         final Game g = libraryBoard("Preordain", "Island", "Forest", "Lightning Bolt", "Swamp", "Swamp", "Swamp");
         final Player a = g.getPlayers().get(0);
         final PlayerControllerAi c = seat(g);
-        final Stub stub = new Stub((x, p) -> inZone(p, ZoneType.Hand, "Lightning Bolt") ? 0.9 : 0.2);
+        final Stub stub = new Stub((x, p) -> (inZone(p, ZoneType.Hand, "Lightning Bolt") ? 0.9 : 0.2)
+                + (names(p, ZoneType.Library).get(0).equals("Forest") ? 0.0 : 0.05));
         final ChooseACard cac = new ChooseACard(cfg("on"), stub, null);
         cac.install(c);
         castAndResolve(g, "Preordain");
@@ -445,9 +446,9 @@ public class ChooseACardTest extends SimulationTest {
         cac.install(c);
         castAndResolve(g, "Doomsday");
         final List<String> lib = names(a, ZoneType.Library);
-        AssertJUnit.assertEquals(String.valueOf(cac.log), 5, lib.size());
+        AssertJUnit.assertEquals(String.valueOf(cac.log) + cac.counts, 5, lib.size());
         AssertJUnit.assertEquals(String.valueOf(cac.log), "Gush", lib.get(0));
-        AssertJUnit.assertEquals("Thassa's Oracle", lib.get(1));
+        AssertJUnit.assertEquals(lib + " " + cac.counts + " " + cac.log, "Thassa's Oracle", lib.get(1));
         AssertJUnit.assertTrue(lib.contains("Force of Will"));
         final JsonObject e = cac.log.get(cac.log.size() - 1).getAsJsonObject();
         AssertJUnit.assertEquals("PILE", e.get("kind").getAsString());

@@ -57,8 +57,8 @@ public final class DrawExpectation {
         boolean apply(Game copy, Player me);
 
         /**
-         * The card whose abilities this seat does not use again for the rest of the current turn in the play-out (the
-         * decision is "use it this turn or not": both arms leave it alone afterwards); -1 = none.
+         * The card whose abilities this seat does not use again in the play-out, up to the leaf (the decision is "use it
+         * now or not": both arms leave it alone afterwards, so "pass" is not "use it at their end step"); -1 = none.
          */
         default int decidedSource() {
             return -1;
@@ -274,10 +274,10 @@ public final class DrawExpectation {
                 return null;
             }
             final List<SpellAbility> chosen = super.chooseSpellAbilityToPlay();
-            if (decided >= 0 && g.getPhaseHandler().getTurn() == startTurn && chosen != null) {
+            if (decided >= 0 && chosen != null) {
                 for (SpellAbility sa : chosen) {
                     if (sa.getHostCard() != null && sa.getHostCard().getId() == decided) {
-                        return null; // the decided source is not used again this turn
+                        return null; // the decided source is not used again before the leaf
                     }
                 }
             }
