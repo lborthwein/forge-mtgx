@@ -890,6 +890,9 @@ public final class ForcedWinSolver {
         }
         plannerNanos += System.nanoTime() - t0;
         lastPlannerNodes = res.nodes;
+        if (!res.lines.isEmpty()) {
+            diag("planner:" + res.lines.size());
+        }
         if (res.lines.isEmpty()) {
             lastOutcome = "gate";
             final Line engine = engineFallback(live, pos, index, t0);
@@ -1594,8 +1597,49 @@ public final class ForcedWinSolver {
      * The engine search, once per turn in main phase 1, only when something the width model cannot express is on our
      * side (an ability that targets a card or has a cost outside the model) or our board threatens lethal.
      */
+    /**
+     * labeller-v2 recall diagnostic (APPENDIX-recall §5; off unless -Dforge.ai.forcedWin.gateDiag=true): what the offense
+     * did at each call (planner lines, or why the engine fallback did or did not run), and the cards in play as the
+     * width model learned them. Read-only: no decision reads it.
+     */
+    public static final boolean GATE_DIAG = Boolean.getBoolean("forge.ai.forcedWin.gateDiag");
+    final StringBuilder gateDiag = GATE_DIAG ? new StringBuilder() : null;
+
+    void diag(String s) {
+        if (gateDiag != null) {
+            gateDiag.append(gateDiag.length() == 0 ? "" : " ").append(s);
+        }
+    }
+
+    public String gateDiag() {
+        return gateDiag == null ? null : gateDiag.toString();
+    }
+
+    /** The cards in hand and on the battlefield as the width model sees them: name, then !U (unmodeled) and effect kinds. */
+    static String modelled(Position pos) {
+        final StringBuilder sb = new StringBuilder();
+        for (List<ACard> zone : List.of(pos.hand, pos.battlefield)) {
+            sb.append(zone == pos.hand ? "H[" : " B[");
+            for (ACard a : zone) {
+                final java.util.Set<String> k = new java.util.TreeSet<>();
+                for (ForcedWinModel.Abil ab : zone == pos.hand ? a.fromHand : a.onBattlefield) {
+                    for (ForcedWinModel.Eff e : ab.effects) {
+                        k.add(e.kind.name());
+                    }
+                }
+                sb.append(a.name).append(a.unmodeled ? "!U" : "").append(k).append(';');
+            }
+            sb.append(']');
+        }
+        return sb.toString();
+    }
+
     private Line engineFallback(Game live, Position pos, int index, long t0) {
+        if (gateDiag != null) {
+            diag("plannerNone " + modelled(pos));
+        }
         if (!cfg.engine || engineTurn == pos.turn || !live.getPhaseHandler().is(PhaseType.MAIN1)) {
+            diag(!cfg.engine ? "fb:engineOff" : engineTurn == pos.turn ? "fb:turnSeen" : "fb:notMain1");
             return null;
         }
         boolean unmodeled = false;
@@ -1610,11 +1654,14 @@ public final class ForcedWinSolver {
             power += Math.max(0, c.getNetCombatDamage());
         }
         if (!unmodeled && power < pos.oppLife) {
+            diag("fb:allModelled");
             return null;
         }
         if (!cfg.forced && !cfg.likely) {
+            diag("fb:noForced");
             return null;
         }
+        diag("fb:ran" + (unmodeled ? "(unmodeled)" : "(power)"));
         engineTurn = pos.turn;
         engineRuns++;
         lastOutcome = "gate+engine";
@@ -1650,6 +1697,7 @@ public final class ForcedWinSolver {
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
         engineNanos += System.nanoTime() - t1;
+        diag("engineFound=" + (line != null));
         meter.engineRuns++;
         meter.engineNodes += engineStats.nodes - en0;
         meter.engineSteps += engineStats.steps - es0;

@@ -18,6 +18,7 @@ import java.util.zip.GZIPOutputStream;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
+import forge.ai.simulation.ForcedWinSolver;
 import forge.ai.simulation.HonestLabel;
 import forge.bench.PlayerControllerBridge;
 import forge.game.Game;
@@ -352,7 +353,12 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             if (probe != null) {
                 probe.accept(g);
             }
-            return new Object[] {payload, seats[seat].label(g, p, key), fms, f.C};
+            HonestLabel.LAST_WIN_DIAG.remove();
+            final Object lab = seats[seat].label(g, p, key);
+            if (ForcedWinSolver.GATE_DIAG) {
+                System.err.println("[lv2-gatediag] " + uidStr + ":" + seat + ":" + ord + " " + HonestLabel.LAST_WIN_DIAG.get());
+            }
+            return new Object[] {payload, lab, fms, f.C};
         }));
         // bvw-step1-build-1024: the search value, in its own isolation (a copy of the live game; never moves it)
         StepSearch.Result sr = null;

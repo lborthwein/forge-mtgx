@@ -388,6 +388,9 @@ public final class HonestLabel {
      * One seat's labeller in one game: the seat's own belief (its pool leaves out what IT can see; a {@link
      * LookaheadSearch} per seat and game, as live). Build it on the game thread, under the caller's isolation.
      */
+    /** labeller-v2 recall diagnostic: the last win check's offense record on this thread (null unless gateDiag). */
+    public static final ThreadLocal<String> LAST_WIN_DIAG = new ThreadLocal<>();
+
     public static final class Seat {
         private final Spec spec;
         private final LookaheadSearch belief;
@@ -505,6 +508,7 @@ public final class HonestLabel {
                 throw new IllegalStateException("refused: dishonest win solver");
             }
             final List<ForcedWinSolver.Proposal> props = s.propose(root);
+            LAST_WIN_DIAG.set(s.gateDiag()); // labeller-v2 recall diagnostic (null unless gateDiag)
             r.proposals = props.size();
             if (spec.meter) {
                 r.meter = s.meter.toJson();
