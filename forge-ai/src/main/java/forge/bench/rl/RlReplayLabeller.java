@@ -160,6 +160,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     private String fatal;
     private final JsonObject tape;
     private final long uid;
+    /** The tape's game uid as written in label rows (labeller-v2 §4 position filter key). */
+    private final String uidStr;
     private final int tapeTurns;
     private final String specSha;
     private final String jarSha;
@@ -260,6 +262,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         this.oprK = searchSpec == null ? 0 : searchSpec.oprK;
         this.tape = tapeLine;
         this.uid = RlWire.parseUid(tapeLine.get("game_uid").getAsString());
+        this.uidStr = tapeLine.get("game_uid").getAsString();
         this.tapeTurns = tapeLine.get("turns").getAsInt();
         this.specSha = spec.sha();
         this.jarSha = jarSha;
@@ -281,6 +284,32 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
     }
 
+    /**
+     * labeller-v2 §4 (harness only; absent = every position, the default): -Dforge.bench.labelOnly=FILE of
+     * "game_uid:seat:dec_idx" lines, the only positions labelled. A position's label does not depend on the others
+     * (a fresh solver per label call, a per-position seed from (uid, ordinal, seat)), so a subset labels as in a full run
+     * (review S3: with sharedReader off, the label spec's default; a shared affordance reader would carry learned
+     * templates from earlier positions).
+     */
+    static final java.util.Set<String> LABEL_ONLY = loadLabelOnly(System.getProperty("forge.bench.labelOnly"));
+
+    static java.util.Set<String> loadLabelOnly(final String file) {
+        if (file == null || file.isEmpty()) {
+            return null;
+        }
+        try {
+            final java.util.Set<String> s = new java.util.HashSet<>();
+            for (String l : java.nio.file.Files.readAllLines(java.nio.file.Paths.get(file))) {
+                if (!l.trim().isEmpty()) {
+                    s.add(l.trim());
+                }
+            }
+            return s;
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("forge.bench.labelOnly: " + e);
+        }
+    }
+
     @Override
     public void beforeDecision(final Player p) {
         final Game g = game;
@@ -296,6 +325,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         if (tbe < bandLo || tbe >= turnsWindow || seat < 0 || seat > 1) {
             return;
+        }
+        if (LABEL_ONLY != null && !LABEL_ONLY.contains(uidStr + ":" + seat + ":" + ord)) {
+            return; // labeller-v2 §4 sample: only the listed positions (each position's label is independent)
         }
         windowDecisions++;
         final String phase = String.valueOf(g.getPhaseHandler().getPhase());

@@ -43,6 +43,8 @@ final class ForcedWinEngine {
 
     static final class Stats {
         int nodes, copies, moves;
+        /** labeller-v2 (a): moves applied to rank choice variants (part of {@link #moves}). */
+        int cacApplies;
         /** solver-gaps-1015: moves cut at the wall (a step still running at the search's deadline, or a refused attack). */
         int cut;
         /** solver-gaps-1015: our attack declarations the rules refused (handed to Forge AI). */
@@ -213,6 +215,16 @@ final class ForcedWinEngine {
         int depth = 64;
         int branching = 8;
         int targetVariants = 3;
+        /**
+         * labeller-v2 (a) (false = v1): every choice of our seat in a move's window (own-zone picks, scry, surveil,
+         * discard, library order, shuffle) branches: up to cacVariants answers per choice (Forge AI's included), the
+         * others ranked by the static value of the position after the move, from at most cacCap enumerated answers.
+         */
+        boolean cac;
+        int cacVariants = 6, cacCap = 48;
+        /** labeller-v2 (e) (false = v1): payment variants of a move: distinct untapped remainders, up to payVariants. */
+        boolean pay;
+        int payVariants = 3;
         int maxSteps = 1500;
         /** Also search lines that pass the turn once (win by our next turn). */
         boolean passTurn = true;
@@ -748,6 +760,8 @@ final class ForcedWinEngine {
         }
         int tried = 0;
         final Set<Step> variants = new HashSet<>();
+        // labeller-v2 (a)/(e): variants applied while ranking, kept for their turn in the loop (by identity)
+        final java.util.Map<Step, Applied> pre = new java.util.IdentityHashMap<>();
         for (int mi = 0; mi < moves.size(); mi++) {
             final Step mv = moves.get(mi);
             // solver-gaps-1015: the branching cap counts distinct moves only; the forced-answer variants of a move (its
@@ -762,14 +776,34 @@ final class ForcedWinEngine {
             if (!variants.contains(mv)) {
                 tried++;
             }
-            st.moves++;
-            final Applied a = apply(node, mv);
+            final Applied a;
+            if (pre.containsKey(mv)) {
+                a = pre.remove(mv);
+            } else {
+                st.moves++;
+                a = apply(node, mv);
+            }
             if (TRACE) {
                 ForcedWinSolver.receipt("FW_ENGINE   move " + mv + " -> " + (a == null ? "error " + lastError
                         : a.won ? "WON" : a.child == null ? "no-rest(" + a.why + ")" : "rest"));
             }
             if (a == null) {
                 continue;
+            }
+            if (a.rec != null) {
+                if (a.rec.miss && !a.won) {
+                    continue; // a forced answer that did not apply: the same play as another variant
+                }
+                mv.cacPlayed = new ArrayList<>(a.rec.played);
+            }
+            if (!a.won && (a.rec != null || lim.pay)) {
+                int at = mi + 1;
+                if (a.rec != null) {
+                    at = expandCac(node, mv, a.rec, moves, at, variants, pre);
+                }
+                if (lim.pay && mv.payFloats == null && (mv.cac == null || mv.cac.isEmpty())) {
+                    expandPay(node, mv, a, moves, at, variants, pre);
+                }
             }
             if (mv.pickName == null && !a.pickCandidates.isEmpty()) {
                 // the move searched our library: try it again with each of a few forced picks next (biggest first)
@@ -1165,6 +1199,218 @@ final class ForcedWinEngine {
      * permanents with an activated ability first: re-enabling an engine; then our other permanents; then the
      * opponent's), and when a forced target is given it is put on the stack with that target instead of Forge AI's.
      */
+    /**
+     * labeller-v2 (a): the variants of {@code mv} at each of its free choice points j (prefix = the answers it played
+     * before j, then one other answer at j): each is applied now and ranked by the static value of the position after
+     * the move (a win first, a failed move last; ties in enumeration order); the best cacVariants - 1 (Forge AI's own
+     * answer is {@code mv} itself) go into {@code moves} at {@code at}, their results kept in {@code pre}. Returns the
+     * next insertion index.
+     */
+    private int expandCac(Node node, Step mv, ForcedWinChoices.Recorder rec, List<Step> moves, int at, Set<Step> variants,
+            java.util.Map<Step, Applied> pre) {
+        for (int pi = 0; pi < rec.freeAt.size(); pi++) {
+            final int j = rec.freeAt.get(pi);
+            final List<String> cands = rec.candidates.get(pi);
+            if (cands.size() < 2) {
+                continue;
+            }
+            final List<Object[]> ranked = new ArrayList<>();
+            for (int ci = 1; ci < cands.size(); ci++) {
+                if (out()) {
+                    break;
+                }
+                final Step v = mv.copy();
+                v.cac = new ArrayList<>(rec.played.subList(0, j));
+                v.cac.add(cands.get(ci));
+                v.cacPlayed = null;
+                st.moves++;
+                st.cacApplies++;
+                final Applied av = apply(node, v);
+                if (av == null || av.rec != null && av.rec.miss && !av.won) {
+                    continue;
+                }
+                long score;
+                if (av.won) {
+                    score = Long.MAX_VALUE;
+                } else if (av.child == null) {
+                    score = Long.MIN_VALUE;
+                } else {
+                    try {
+                        score = evaluator.getStaticScore(av.child.g, av.child.me).value;
+                    } catch (RuntimeException ex) {
+                        score = Long.MIN_VALUE;
+                    }
+                }
+                ranked.add(new Object[] {score, ci, v, av});
+            }
+            ranked.sort((x, y) -> {
+                final int c = Long.compare((Long) y[0], (Long) x[0]);
+                return c != 0 ? c : Integer.compare((Integer) x[1], (Integer) y[1]);
+            });
+            for (int k = 0; k < ranked.size(); k++) {
+                final Step v = (Step) ranked.get(k)[2];
+                final Applied av = (Applied) ranked.get(k)[3];
+                if (k >= lim.cacVariants - 1) {
+                    av.child = null; // dropped by rank: released
+                    continue;
+                }
+                moves.add(at++, v);
+                variants.add(v);
+                pre.put(v, av);
+            }
+        }
+        return at;
+    }
+
+    /**
+     * labeller-v2 (e): payment variants of {@code mv}: each distinct untapped remainder of our untapped one-tap land
+     * sources after paying its mana cost (by the sorted names left untapped), other than Forge AI's own payment's, up
+     * to payVariants - 1; a variant floats its sources first (FLOAT steps) and Forge AI pays from the pool. Costs with
+     * X, hybrid, Phyrexian or snow pips are left to Forge AI (stated gap).
+     */
+    private void expandPay(Node node, Step mv, Applied a, List<Step> moves, int at, Set<Step> variants,
+            java.util.Map<Step, Applied> pre) {
+        if (mv.pass || mv.kind == AbilKind.ATTACK || mv.kind == AbilKind.FLOAT || mv.kind == AbilKind.LAND
+                || mv.kind == AbilKind.REPEAT) {
+            return;
+        }
+        final List<Step> plans;
+        final Object prevIds = forge.util.IdScope.capture();
+        try {
+            forge.util.IdScope.install(cloneScope(node.ids));
+            plans = paymentPlans(node.g, node.me, mv, a);
+        } catch (RuntimeException ex) {
+            return;
+        } finally {
+            forge.util.IdScope.install(prevIds); // review S3: restored
+        }
+        for (Step v : plans) {
+            moves.add(at++, v);
+            variants.add(v);
+        }
+    }
+
+    /** The payment variants of {@code mv} at {@code g} (see {@link #expandPay}). */
+    private List<Step> paymentPlans(Game g, Player me, Step mv, Applied a) {
+        final List<Step> out = new ArrayList<>();
+        final SpellAbility sa = ForcedWinSolver.Follower.locate(g, me, mv);
+        if (sa == null || sa.getPayCosts() == null || !sa.getPayCosts().hasManaCost()) {
+            return out;
+        }
+        final forge.card.mana.ManaCost mc = sa.getPayCosts().getTotalMana();
+        if (mc == null || mc.countX() > 0) {
+            return out;
+        }
+        final List<Integer> need = new ArrayList<>(); // colour index per coloured pip (5 = {C})
+        for (forge.card.mana.ManaCostShard sh : mc) {
+            if (sh == forge.card.mana.ManaCostShard.COLORLESS) {
+                need.add(ForcedWinModel.C);
+            } else if (sh.isMonoColor() && !sh.isOr2Generic() && !sh.isPhyrexian() && !sh.isSnow()
+                    && Integer.bitCount(sh.getColorMask() & 0x1f) == 1) {
+                need.add(Integer.numberOfTrailingZeros(sh.getColorMask()));
+            } else if (!sh.isGeneric() || sh.isSnow() || sh.isOr2Generic()) {
+                return out;
+            }
+        }
+        final int total = need.size() + mc.getGenericCost();
+        final Card host = g.findById(mv.hostId);
+        final List<Card> src = new ArrayList<>();
+        final java.util.Map<Integer, Integer> masks = new java.util.HashMap<>();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (c == host || !c.isLand() || c.isTapped()) {
+                continue;
+            }
+            int mask = 0;
+            for (SpellAbility ma : c.getManaAbilities()) {
+                if (ma.getPayCosts() == null || !ma.getPayCosts().hasTapCost() || ma.getPayCosts().getCostParts().size() != 1) {
+                    continue;
+                }
+                for (int col = 0; col < 6; col++) {
+                    if (ma.canProduce(ForcedWinModel.SHORT[col])) {
+                        mask |= 1 << col;
+                    }
+                }
+            }
+            if (mask != 0) {
+                src.add(c);
+                masks.put(c.getId(), mask);
+            }
+        }
+        if (total == 0 || src.size() <= total) {
+            return out; // no choice of sources (or other mana pays: Forge AI's)
+        }
+        src.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
+        // Forge AI's own remainder: which of these sources its payment left untapped
+        final java.util.Set<String> seen = new java.util.HashSet<>();
+        if (a.child != null) {
+            final List<Card> left = new ArrayList<>();
+            for (Card c : src) {
+                final Card cc = a.child.g.findById(c.getId());
+                if (cc != null && cc.isInPlay() && !cc.isTapped()) {
+                    left.add(c);
+                }
+            }
+            seen.add(ForcedWinChoices.remainderKey(left));
+        }
+        final List<List<Card>> sets = new ArrayList<>();
+        ChooseACard.combos(src, total, 512, sets::add);
+        for (List<Card> set : sets) {
+            if (out.size() >= lim.payVariants - 1) {
+                break;
+            }
+            final int[] colour = assign(set, need, masks);
+            if (colour == null) {
+                continue;
+            }
+            final List<Card> left = new ArrayList<>(src);
+            left.removeAll(set);
+            if (!seen.add(ForcedWinChoices.remainderKey(left))) {
+                continue;
+            }
+            final Step v = mv.copy();
+            v.payFloats = new ArrayList<>();
+            for (int i = 0; i < set.size(); i++) {
+                v.payFloats.add(Step.floatMana(set.get(i).getId(), set.get(i).getName(), "", colour[i]));
+            }
+            out.add(v);
+        }
+        return out;
+    }
+
+    /** A colour per source paying {@code need} (coloured pips) with the rest generic, or null (backtracking). */
+    static int[] assign(List<Card> set, List<Integer> need, java.util.Map<Integer, Integer> masks) {
+        final int[] colour = new int[set.size()];
+        java.util.Arrays.fill(colour, -1);
+        if (!assignRec(set, need, masks, 0, colour)) {
+            return null;
+        }
+        for (int i = 0; i < colour.length; i++) {
+            if (colour[i] < 0) {
+                final int m = masks.get(set.get(i).getId());
+                colour[i] = (m & (1 << ForcedWinModel.C)) != 0 ? ForcedWinModel.C : Integer.numberOfTrailingZeros(m);
+            }
+        }
+        return colour;
+    }
+
+    private static boolean assignRec(List<Card> set, List<Integer> need, java.util.Map<Integer, Integer> masks, int k,
+            int[] colour) {
+        if (k >= need.size()) {
+            return true;
+        }
+        final int col = need.get(k);
+        for (int i = 0; i < set.size(); i++) {
+            if (colour[i] < 0 && (masks.get(set.get(i).getId()) & (1 << col)) != 0) {
+                colour[i] = col;
+                if (assignRec(set, need, masks, k + 1, colour)) {
+                    return true;
+                }
+                colour[i] = -1;
+            }
+        }
+        return false;
+    }
+
     static final class TriggerTargets {
         final String forced;
         boolean seen;
@@ -1295,6 +1541,8 @@ final class ForcedWinEngine {
         String why = "";
         List<String> triggerCandidates = List.of();
         List<String> pickCandidates = List.of();
+        /** labeller-v2 (a): the move's choice points (null = v1). */
+        ForcedWinChoices.Recorder rec;
     }
 
     static final boolean TRACE = Boolean.getBoolean("forge.ai.forcedWin.engineTrace");
@@ -1314,6 +1562,9 @@ final class ForcedWinEngine {
             final int copyCards = cardCount(g);
             st.cards += copyCards;
             final MoveAi ai = new MoveAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn);
+            if (lim.cac) {
+                ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap); // labeller-v2 (a)
+            }
             // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the wall
             // (bvw-step1-build-1024: none with budget=counter: no wall and no deadline, so per-move maxSteps bounds it)
             final long wall = lim.wall != 0 ? lim.wall : deadline == Long.MAX_VALUE ? 0L : deadline;
@@ -1339,6 +1590,7 @@ final class ForcedWinEngine {
             final Applied a = new Applied();
             a.triggerCandidates = ai.triggers.candidates;
             a.pickCandidates = ai.picks.candidates;
+            a.rec = ai.rec;
             a.won = me.hasWon() || me.getOpponents().stream().anyMatch(Player::hasLost);
             if (a.won || !ai.rest || g.isGameOver()) {
                 a.why = ai.failed ? "failed" : g.isGameOver() ? "over" : ph.getTurn() > lastTurn ? "turn" : "steps" + steps;
@@ -1390,13 +1642,162 @@ final class ForcedWinEngine {
             this.picks = new LibraryPicks(move.pickName);
         }
 
+        /** labeller-v2 (a): the move's choice points (null = v1: only the first own-zone pick, by {@link #picks}). */
+        ForcedWinChoices.Recorder rec;
+        /** labeller-v2 (e): the payment floats played so far (the move's recorded sources, before its action). */
+        int floated;
+
+        /** An own-zone pick of ours (LibraryPicks' scope, every pick of the move, not only the first). */
+        static boolean ownPick(Player me, List<ZoneType> origin, SpellAbility sa,
+                forge.game.card.CardCollectionView fetchList, Player decider) {
+            return decider == me && origin != null && (origin.contains(ZoneType.Library) || origin.contains(ZoneType.Hand)
+                    || origin.contains(ZoneType.Graveyard)) && sa != null && sa.getActivatingPlayer() == me
+                    && fetchList != null && !fetchList.isEmpty() && fetchList.stream().allMatch(c -> c.getOwner() == me);
+        }
+
         @Override
         public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
                 forge.game.card.CardCollection fetchList, forge.game.player.DelayedReveal delayedReveal, String selectPrompt,
                 boolean isOptional, Player decider) {
+            if (rec != null) {
+                if (!ownPick(getPlayer(), origin, sa, fetchList, decider)) {
+                    return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
+                            selectPrompt, isOptional, decider);
+                }
+                final String t = rec.at(ForcedWinChoices.PICK);
+                if (t != null) {
+                    final Card[] r = ForcedWinChoices.applyPick(t, fetchList);
+                    if (r != null && (r[0] != null || isOptional)) {
+                        rec.played(t);
+                        return r[0];
+                    }
+                    rec.miss = true;
+                }
+                final Card def = super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
+                        selectPrompt, isOptional, decider);
+                if (rec.forcedPoint()) {
+                    rec.played(ForcedWinChoices.pickTok(def));
+                } else {
+                    rec.free(ForcedWinChoices.picks(fetchList, isOptional, def, rec.cap), ForcedWinChoices.pickTok(def));
+                }
+                return def;
+            }
             final Card c = picks.pick(getPlayer(), origin, sa, fetchList, decider);
             return c != null ? c : super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
                     selectPrompt, isOptional, decider);
+        }
+
+        @Override
+        public org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection>
+                arrangeForScry(forge.game.card.CardCollection topN) {
+            return rec == null || topN == null || topN.isEmpty() ? super.arrangeForScry(topN)
+                    : arrange(ForcedWinChoices.SCRY, topN);
+        }
+
+        @Override
+        public org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection>
+                arrangeForSurveil(forge.game.card.CardCollection topN) {
+            return rec == null || topN == null || topN.isEmpty() ? super.arrangeForSurveil(topN)
+                    : arrange(ForcedWinChoices.SURV, topN);
+        }
+
+        private org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection>
+                arrange(String kind, forge.game.card.CardCollection topN) {
+            final String t = rec.at(kind);
+            if (t != null) {
+                final org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection> r
+                        = ForcedWinChoices.applyArr(t, topN);
+                if (r != null) {
+                    rec.played(t);
+                    return r;
+                }
+                rec.miss = true;
+            }
+            final org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection> def
+                    = kind.equals(ForcedWinChoices.SCRY) ? super.arrangeForScry(topN) : super.arrangeForSurveil(topN);
+            final String dt = ForcedWinChoices.arrTok(kind, def.getLeft(), def.getRight());
+            if (rec.forcedPoint()) {
+                rec.played(dt);
+            } else {
+                rec.free(ForcedWinChoices.arrangements(kind, topN, def, rec.cap), dt);
+            }
+            return def;
+        }
+
+        @Override
+        public forge.game.card.CardCollection chooseCardsToDiscardFrom(Player p, SpellAbility sa,
+                forge.game.card.CardCollection validCards, int min, int max,
+                forge.game.card.CardCollectionView visibleToChooser) {
+            if (rec == null || p != getPlayer() || min != max || min < 1 || validCards == null || validCards.size() <= min) {
+                return super.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser);
+            }
+            final String t = rec.at(ForcedWinChoices.DISC);
+            if (t != null) {
+                final forge.game.card.CardCollection r = ForcedWinChoices.applyDisc(t, validCards, min, max);
+                if (r != null) {
+                    rec.played(t);
+                    return r;
+                }
+                rec.miss = true;
+            }
+            final forge.game.card.CardCollection def = super.chooseCardsToDiscardFrom(p, sa, validCards, min, max,
+                    visibleToChooser);
+            if (def == null) {
+                return null;
+            }
+            final String dt = ForcedWinChoices.discTok(def);
+            if (rec.forcedPoint()) {
+                rec.played(dt);
+            } else {
+                rec.free(ForcedWinChoices.discards(validCards, min, def, rec.cap), dt);
+            }
+            return def;
+        }
+
+        @Override
+        public forge.game.card.CardCollectionView orderMoveToZoneList(forge.game.card.CardCollectionView cards,
+                ZoneType destinationZone, SpellAbility source) {
+            if (rec == null || destinationZone != ZoneType.Library || cards == null || cards.size() < 2
+                    || !cards.stream().allMatch(c -> c.getOwner() == getPlayer())) {
+                return super.orderMoveToZoneList(cards, destinationZone, source);
+            }
+            final String t = rec.at(ForcedWinChoices.ORDER);
+            if (t != null) {
+                final forge.game.card.CardCollectionView r = ForcedWinChoices.applyOrder(t, cards);
+                if (r != null) {
+                    rec.played(t);
+                    return r;
+                }
+                rec.miss = true;
+            }
+            final forge.game.card.CardCollectionView def = super.orderMoveToZoneList(cards, destinationZone, source);
+            final String dt = ForcedWinChoices.orderTok(def);
+            if (rec.forcedPoint()) {
+                rec.played(dt);
+            } else {
+                rec.free(ForcedWinChoices.orders(cards, def, rec.cap), dt);
+            }
+            return def;
+        }
+
+        @Override
+        public boolean confirmAction(SpellAbility sa, forge.game.player.PlayerActionConfirmMode mode, String message,
+                List<String> options, Card cardToShow, java.util.Map<String, Object> params) {
+            if (rec == null || message == null || !message.toLowerCase().contains("shuffle")) {
+                return super.confirmAction(sa, mode, message, options, cardToShow, params);
+            }
+            final String t = rec.at(ForcedWinChoices.SHUF);
+            if (t != null) {
+                rec.played(t);
+                return ForcedWinChoices.applyShuf(t);
+            }
+            final boolean def = super.confirmAction(sa, mode, message, options, cardToShow, params);
+            if (rec.forcedPoint()) {
+                rec.played(ForcedWinChoices.shufTok(def));
+            } else {
+                rec.free(ForcedWinChoices.shuffles(def), ForcedWinChoices.shufTok(def));
+            }
+            return def;
         }
 
         @Override
@@ -1421,6 +1822,16 @@ final class ForcedWinEngine {
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             final Game g = getGame();
+            if (!acted && move.payFloats != null && floated < move.payFloats.size()) {
+                // labeller-v2 (e): the move's recorded sources float first; Forge AI then pays from the pool
+                final SpellAbility fa = ForcedWinSolver.Follower.locate(g, getPlayer(), move.payFloats.get(floated++));
+                if (fa == null) {
+                    failed = true;
+                    acted = true;
+                    return null;
+                }
+                return capped(List.of(fa));
+            }
             if (!acted) {
                 acted = true;
                 if (move.pass) {
