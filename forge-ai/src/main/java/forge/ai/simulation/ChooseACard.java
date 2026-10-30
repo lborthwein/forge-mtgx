@@ -1072,7 +1072,20 @@ public final class ChooseACard implements CacHook {
      * part (pitch, discard, sacrifice, tap, delve, convoke), or how many Phyrexian pips are paid with life. Each is
      * cast on a copy and settled to the first empty-stack priority; answers whose resulting state repeats are dropped.
      */
+    /**
+     * r3-inline-choices-1030: a live seat recorded by an AI tape plays the new kinds in shadow only. The tape records
+     * the priority list, trigger orders, cost cards and pay-to-prevent as played, but not a Phyrexian pip paid with
+     * life over an available source, and its encoding of a floated mana ability is not tested: so ON does not depart
+     * there (counted). Label-search lines and copies are never taped.
+     */
+    private boolean tapedOn() {
+        if (cfg.mode != Config.Mode.ON || forge.ai.AiTape.covering(me) == null) return false;
+        count("unsupported:tapedSeat");
+        return true;
+    }
+
     private List<SpellAbility> castDecision(final List<SpellAbility> def) {
+        if (tapedOn()) return def;
         final SpellAbility sa = def.get(0);
         final Card host = sa.getHostCard();
         if (host == null || sa.isCopied()) return def;
@@ -1499,7 +1512,7 @@ public final class ChooseACard implements CacHook {
             }
             return def;
         }
-        if (!cfg.kinds.contains(Kind.SACRIFICE) || def.isEmpty() || valid.size() <= def.size()) return def;
+        if (!cfg.kinds.contains(Kind.SACRIFICE) || def.isEmpty() || valid.size() <= def.size() || tapedOn()) return def;
         final Ask ask = ask(Kind.SACRIFICE, sa, "choosePermanentsToSacrifice");
         if (ask == null) return def;
         final List<Answer> answers = new ArrayList<>();
@@ -1538,7 +1551,7 @@ public final class ChooseACard implements CacHook {
     /** SACRIFICE (the legend rule, in state-based actions): which copy to keep. */
     @Override
     public Card legendKeep(final PlayerControllerAi c, final List<Card> options, final Card def) {
-        if (!mine(c) || !cfg.kinds.contains(Kind.SACRIFICE) || options.size() < 2 || live.getStack().isResolving()) {
+        if (!mine(c) || !cfg.kinds.contains(Kind.SACRIFICE) || options.size() < 2 || live.getStack().isResolving() || tapedOn()) {
             return def;
         }
         if (!live.getStack().isEmpty() && GameCopier.stackUnsupported(live, false) != null) {
@@ -1588,7 +1601,8 @@ public final class ChooseACard implements CacHook {
     @Override
     public List<SpellAbility> orderTriggers(final PlayerControllerAi c, final List<SpellAbility> sas,
             final List<SpellAbility> def) {
-        if (!mine(c) || !cfg.kinds.contains(Kind.ORDER_TRIGGERS) || sas.size() < 2) return def;
+        if (DEBUG) System.err.println("[cac-dbg] orderTriggers mine=" + mine(c) + " n=" + sas.size());
+        if (!mine(c) || !cfg.kinds.contains(Kind.ORDER_TRIGGERS) || sas.size() < 2 || tapedOn()) return def;
         for (SpellAbility s : sas) {
             if (!(s instanceof forge.game.trigger.WrappedAbility) || s.isCopied()
                     || s.getTrigger() != null && s.getTrigger().getMode() == forge.game.trigger.TriggerType.AbilityTriggered) {
@@ -1680,7 +1694,7 @@ public final class ChooseACard implements CacHook {
     @Override
     public boolean payToPrevent(final PlayerControllerAi c, final forge.game.cost.Cost cost, final SpellAbility sa,
             final boolean canPay, final boolean def) {
-        if (!mine(c) || !cfg.kinds.contains(Kind.PAY_TO_PREVENT) || !canPay || pinned()) return def;
+        if (!mine(c) || !cfg.kinds.contains(Kind.PAY_TO_PREVENT) || !canPay || pinned() || tapedOn()) return def;
         final Ask ask = ask(Kind.PAY_TO_PREVENT, sa, "payCostToPreventEffect");
         if (ask == null) return def;
         final List<Answer> answers = new ArrayList<>();
@@ -1702,7 +1716,7 @@ public final class ChooseACard implements CacHook {
     @Override
     public byte chooseColor(final PlayerControllerAi c, final SpellAbility sa, final forge.card.ColorSet colors,
             final byte def) {
-        if (!mine(c) || sa == null || !cfg.kinds.contains(Kind.COLOR) || pinned() || live.getStack().isEmpty()
+        if (!mine(c) || sa == null || !cfg.kinds.contains(Kind.COLOR) || pinned() || tapedOn() || live.getStack().isEmpty()
                 || !live.getStack().isResolving()) return def;
         final Ask ask = ask(Kind.COLOR, sa, "chooseColor");
         if (ask == null) return def;

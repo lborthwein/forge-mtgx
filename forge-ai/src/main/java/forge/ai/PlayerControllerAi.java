@@ -1492,12 +1492,18 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        // r3-inline-choices-1030: Forge's orderPlaySa REMOVES entries from the list it is given (filterList), so the
+        // hook gets a copy taken before Forge orders (Forge itself still gets the original list, as before)
+        final List<SpellAbility> asked = cacHook == null || cacSuppressed || activePlayerSAs == null ? activePlayerSAs
+                : new ArrayList<>(activePlayerSAs);
         // lane replay-record-1021: the AI tape records the order (a forced replay plays the record's)
         final AiTape tape = AiTape.covering(player);
         if (tape != null && activePlayerSAs != null && activePlayerSAs.size() > 1) { // one ability: no order to choose
-            return cacOrder(activePlayerSAs, tape.order(activePlayerSAs, () -> getAi().orderPlaySa(activePlayerSAs)));
+            // the tape records the order actually played (the hook's, when it departs); a forced replay returns the
+            // record without asking either
+            return tape.order(activePlayerSAs, () -> cacOrder(asked, getAi().orderPlaySa(activePlayerSAs)));
         }
-        return cacOrder(activePlayerSAs, getAi().orderPlaySa(activePlayerSAs));
+        return cacOrder(asked, getAi().orderPlaySa(activePlayerSAs));
     }
 
     /** r3-inline-choices-1030: 2+ simultaneous abilities' order goes to the choose-a-card hook (no hook: {@code def}). */
