@@ -1275,11 +1275,14 @@ final class ForcedWinEngine {
             return;
         }
         final List<Step> plans;
+        final Object prevIds = forge.util.IdScope.capture();
         try {
             forge.util.IdScope.install(cloneScope(node.ids));
             plans = paymentPlans(node.g, node.me, mv, a);
         } catch (RuntimeException ex) {
             return;
+        } finally {
+            forge.util.IdScope.install(prevIds); // review S3: restored
         }
         for (Step v : plans) {
             moves.add(at++, v);

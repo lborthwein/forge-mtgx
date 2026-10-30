@@ -62,11 +62,10 @@ public class LabellerV2MinTest extends AITest {
 
     @Test
     public void twoCountersRefuteTheLineUnderMinOnly() {
-        final boolean v1 = proven(board("Counterspell;Counterspell", "Island;Island;Island;Island"), cfg(false, 64));
-        final boolean v2 = proven(board("Counterspell;Counterspell", "Island;Island;Island;Island"), cfg(true, 64));
+        final boolean v1 = proven(board("Counterspell;Counterspell", "Island;Island;Island;Island"), passive(cfg(false, 64)));
+        final boolean v2 = proven(board("Counterspell;Counterspell", "Island;Island;Island;Island"), passive(cfg(true, 64)));
+        Assert.assertTrue(v1, "v1 counters one spell per play-out: their protection wins");
         Assert.assertFalse(v2, "a second counter on their protection stops the Bolt");
-        // v1 (one counter at one spell) is reported, not asserted: the point is that v2 is no weaker
-        System.err.println("[labeller-v2] two counters: v1 proven=" + v1 + " v2 proven=" + v2);
     }
 
     @Test
@@ -82,6 +81,62 @@ public class LabellerV2MinTest extends AITest {
         Assert.assertFalse(c.toString().contains("oppMin"));
         Assert.assertThrows(IllegalArgumentException.class, () -> ForcedWinSolver.Config.fromProps(k ->
                 "oppMin".equals(k) ? "true" : "defense".equals(k) ? "false" : null)); // counts-only
+    }
+
+    static ForcedWinSolver.Config engineMin(final boolean oppMin, final int depth) {
+        final ForcedWinSolver.Config c = cfgEngine(oppMin);
+        c.oppDepth = depth;
+        return passive(c);
+    }
+
+    static Game frame(String defHand, String defBf, int defLife, String ourHand, String ourBf) {
+        return ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(defHand, defBf, defLife, ourHand, ourBf,
+                20, "ai"));
+    }
+
+    /**
+     * Review S1-1 repro: their Bolt answers our Giant Growth'd Bears attack. Four "Disenchant -> Mox" entries sort ahead
+     * of "Bolt -> Bears" in the response set; a set larger than oppResponses must be a cap hit, never a truncation.
+     */
+    @Test
+    public void aTruncatedResponseSetIsNotWon() {
+        Assert.assertFalse(proven(frame("Lightning Bolt", "Mountain", 4, "Giant Growth", "Grizzly Bears;Forest;Forest"),
+                engineMin(true, 2)), "Bolt on the Bears refutes the attack");
+        Assert.assertFalse(proven(frame("Lightning Bolt;Disenchant", "Mountain;Plains;Plains", 4, "Giant Growth",
+                "Grizzly Bears;Forest;Forest;Mox Emerald;Mox Jet;Mox Pearl;Mox Ruby"), engineMin(true, 2)),
+                "five responses > oppResponses 4: the world is cut, not won");
+    }
+
+    /** Review S1-2 repro: a counter war three deep; any depth cap below it must be a cap hit, not a win. */
+    @Test
+    public void pointsPastTheDepthCapAreNotWon() {
+        for (int d : new int[] {2, 3, 4}) {
+            Assert.assertFalse(proven(board3("Counterspell;Counterspell;Counterspell",
+                    "Island;Island;Island;Island;Island;Island"), passive(withDepth(cfg(true, 64), d))),
+                    "their third Counterspell wins the war; D=" + d);
+        }
+    }
+
+    static Game board3(String defHand, String defLands) {
+        return ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(defHand, defLands, 3,
+                "Lightning Bolt;Counterspell;Counterspell", "Mountain;Island;Island;Island;Island", 20, "ai"));
+    }
+
+    static ForcedWinSolver.Config withDepth(final ForcedWinSolver.Config c, final int d) {
+        c.oppDepth = d;
+        return c;
+    }
+
+    /** Predeclared §3 test 5 (Swords on the attacker), at the declare-attackers point. */
+    @Test
+    public void swordsOnTheAttackerRefutesV2Only() {
+        final boolean v1 = proven(frame("Swords to Plowshares", "Plains", 3, "", "Hill Giant;Mountain"), engineMin(false, 2));
+        final boolean v2 = proven(frame("Swords to Plowshares", "Plains", 3, "", "Hill Giant;Mountain"), engineMin(true, 2));
+        final boolean open = proven(frame("", "Plains", 3, "", "Hill Giant;Mountain"), engineMin(true, 2));
+        Assert.assertTrue(open, "no answer: the attack is proven");
+        Assert.assertFalse(v2, "v2's MIN tries Swords on the attacker");
+        // v1 is reported: its engine searches against Forge AI, which itself plays the Swords here
+        System.err.println("[labeller-v2] swords: v1 proven=" + v1 + " v2 proven=" + v2 + " open=" + open);
     }
 
     static ForcedWinSolver.Config passive(final ForcedWinSolver.Config c) {

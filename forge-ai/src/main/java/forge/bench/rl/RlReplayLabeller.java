@@ -287,7 +287,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     /**
      * labeller-v2 §4 (harness only; absent = every position, the default): -Dforge.bench.labelOnly=FILE of
      * "game_uid:seat:dec_idx" lines, the only positions labelled. A position's label does not depend on the others
-     * (a fresh solver per label call, a per-position seed from (uid, ordinal, seat)), so a subset labels as in a full run.
+     * (a fresh solver per label call, a per-position seed from (uid, ordinal, seat)), so a subset labels as in a full run
+     * (review S3: with sharedReader off, the label spec's default; a shared affordance reader would carry learned
+     * templates from earlier positions).
      */
     static final java.util.Set<String> LABEL_ONLY = loadLabelOnly(System.getProperty("forge.bench.labelOnly"));
 

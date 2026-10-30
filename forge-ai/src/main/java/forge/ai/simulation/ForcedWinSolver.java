@@ -2098,10 +2098,7 @@ public final class ForcedWinSolver {
         while (!queue.isEmpty()) {
             final int[] script = queue.poll();
             if (nodes >= cfg.oppNodes) {
-                meter.oppMinCuts++;
-                final Outcome cut = new Outcome();
-                cut.why = "oppNodes";
-                return cut;
+                return minCut("oppNodes");
             }
             nodes++;
             meter.oppMinNodes++;
@@ -2114,9 +2111,33 @@ public final class ForcedWinSolver {
                 return o;
             }
             final int point = script.length;
-            if (point < cfg.oppDepth && o.responseSizes.size() > point) {
-                final int choices = 1 + Math.min(cfg.oppResponses, o.responseSizes.get(point));
-                for (int c = 1; c <= choices; c++) {
+            final List<Integer> sz = o.responseSizes;
+            if (point >= cfg.oppDepth) {
+                // review S1-2: a later point with responses is not explored (Forge AI answered it): a cap hit, not won
+                for (int i = point; i < sz.size(); i++) {
+                    if (sz.get(i) > 0) {
+                        return minCut("oppDepth");
+                    }
+                }
+                continue;
+            }
+            if (sz.size() > point) {
+                final int n = sz.get(point);
+                if (n > cfg.oppResponses) {
+                    return minCut("oppResponses"); // review S1-1: a truncated set is a cap hit, never a win
+                }
+                boolean later = false;
+                for (int i = point + 1; i < sz.size(); i++) {
+                    later |= sz.get(i) > 0;
+                }
+                if (later) {
+                    // review S2-1: under Forge AI's own answer at this point, its later points are MIN'd too
+                    final int[] f0 = java.util.Arrays.copyOf(script, point + 1);
+                    f0[point] = 0;
+                    queue.add(f0);
+                }
+                // an empty set at this point: nothing castable, so pass is Forge AI's answer (no branch)
+                for (int c = 1; n > 0 && c <= 1 + n; c++) {
                     final int[] child = java.util.Arrays.copyOf(script, point + 1);
                     child[point] = c;
                     queue.add(child);
@@ -2124,6 +2145,13 @@ public final class ForcedWinSolver {
             }
         }
         return first;
+    }
+
+    private Outcome minCut(String why) {
+        meter.oppMinCuts++;
+        final Outcome cut = new Outcome();
+        cut.why = why;
+        return cut;
     }
 
     Outcome playout(Game live, Line line, long seed, int world, int counterAt, long wall, int[] script) {
@@ -2171,7 +2199,6 @@ public final class ForcedWinSolver {
                     if (script != null) {
                         adv.script = script; // labeller-v2 (d)
                         adv.sizes = out.responseSizes;
-                        adv.maxResponses = cfg.oppResponses;
                     }
                     adv.bounded(wall).callLimited(callLimit);
                     o.dangerouslySetController(adv);
@@ -3188,20 +3215,33 @@ public final class ForcedWinSolver {
         /** labeller-v2 (d): the scripted choices per response point (null = the one-counter adversary), and the sizes met. */
         int[] script;
         List<Integer> sizes;
-        int maxResponses = 4;
         /** Tests only: pass instead of Forge AI's own answer while one of our objects is on the stack. */
         boolean passive;
 
         private List<SpellAbility> fallback(final Game g) {
-            if (passive && !g.getStack().isEmpty()) {
-                final SpellAbility t = g.getStack().peekAbility();
-                if (t != null && t.getActivatingPlayer() == victim) {
-                    return null;
-                }
+            if (passive && pointKey(g) != null) {
+                return null;
             }
             return super.chooseSpellAbilityToPlay();
         }
-        private final Set<Integer> seenPoints = new HashSet<>();
+        private final Set<String> seenPoints = new HashSet<>();
+
+        /**
+         * labeller-v2 (d): the response point at this priority, or null: one of our spells, activated abilities or
+         * triggers on top of the stack (review S2-1: triggers too, Stifle on an ETB, storm or Doomsday trigger), or our
+         * declare-attackers step with attackers declared (Swords on the attacker, a flash blocker).
+         */
+        private String pointKey(final Game g) {
+            if (g.getStack().isEmpty()) {
+                final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
+                final forge.game.combat.Combat cb = g.getCombat();
+                return ph.is(PhaseType.COMBAT_DECLARE_ATTACKERS) && ph.isPlayerTurn(victim) && cb != null
+                        && !cb.getAttackers().isEmpty() ? "atk:" + ph.getTurn() : null;
+            }
+            final SpellAbilityStackInstance si = g.getStack().peek();
+            final SpellAbility top = si.getSpellAbility();
+            return top == null || top.getActivatingPlayer() != victim || top.isManaAbility() ? null : "s:" + si.getId();
+        }
 
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
@@ -3226,17 +3266,17 @@ public final class ForcedWinSolver {
             return fallback(g);
         }
 
-        /** labeller-v2 (d): at a response point (our spell or ability on top, first time), the scripted choice. */
+        /**
+         * labeller-v2 (d): at a response point (first time), the scripted choice: 0 = Forge AI's own answer, 1 = pass,
+         * k >= 2 = the (k-2)-th response. The FULL response set's size is recorded (review S1-1: the MIN cuts a set
+         * larger than oppResponses, it never truncates it).
+         */
         private List<SpellAbility> minChoice(final Game g) {
-            if (g.getStack().isEmpty()) {
+            final String pk = pointKey(g);
+            if (pk == null || !seenPoints.add(pk)) {
                 return fallback(g);
             }
-            final SpellAbilityStackInstance si = g.getStack().peek();
-            final SpellAbility top = si.getSpellAbility();
-            if (top == null || top.getActivatingPlayer() != victim || top.isManaAbility() || top.isTrigger()
-                    || !(top.isSpell() || top.isActivatedAbility()) || !seenPoints.add(si.getId())) {
-                return fallback(g);
-            }
+            final SpellAbility top = g.getStack().isEmpty() ? null : g.getStack().peek().getSpellAbility();
             final int point = seen++;
             final List<SpellAbility> rs = responses(top);
             if (sizes != null) {
@@ -3250,39 +3290,55 @@ public final class ForcedWinSolver {
                 return null; // pass
             }
             final SpellAbility r = rs.get(choice - 2);
-            countered = top.getHostCard().getName() + " answered by " + r.getHostCard().getName();
+            countered = (top == null ? "attack" : top.getHostCard().getName()) + " answered by " + r.getHostCard().getName();
             return capped(List.of(r));
         }
 
         /**
-         * labeller-v2 (d): the response set to {@code top}, in a fixed order: counters (incl. Stifle effects) first, then
-         * removal, discard, flash creatures, other; one per (name, target class); at most maxResponses; each castable now
-         * and payable.
+         * labeller-v2 (d): the whole response set at a point, in a fixed order (counters incl. Stifle effects, removal,
+         * discard, flash creatures, other), one per (category, name, target class), each castable or activatable now
+         * and payable. Sources (review S2-1): their hand, every permanent (tapped too: sacrifice and pay-life abilities),
+         * graveyard and exile (flashback, escape). Targets: our top stack object, our permanents by name, us, and their
+         * own permanents by name and themselves (lifegain, protection, regeneration).
          */
         List<SpellAbility> responses(final SpellAbility top) {
             final Player p = getPlayer();
             final java.util.TreeMap<String, SpellAbility> byKey = new java.util.TreeMap<>();
-            final List<Card> sources = new ArrayList<>(p.getCardsIn(ZoneType.Hand));
-            for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
-                if (!c.isTapped()) sources.add(c);
+            final List<Card> sources = new ArrayList<>();
+            for (ZoneType z : List.of(ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile)) {
+                sources.addAll(p.getCardsIn(z));
             }
-            sources.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+            sources.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
             for (Card c : sources) {
                 for (SpellAbility sa0 : c.getAllPossibleAbilities(p, true)) {
                     if (sa0.isManaAbility() || sa0.isLandAbility()) continue;
-                    if (sa0.isSpell() && !c.isInZone(ZoneType.Hand)) continue;
+                    if (sa0.isSpell() && c.isInZone(ZoneType.Battlefield)) continue;
                     final List<Object> targets = new ArrayList<>();
+                    final List<String> keys = new ArrayList<>();
                     if (sa0.usesTargeting()) {
-                        if (sa0.canTargetSpellAbility(top)) targets.add(top);
-                        final Set<String> names = new HashSet<>();
-                        for (Card v : victim.getCardsIn(ZoneType.Battlefield)) {
-                            if (names.add(v.getName()) && sa0.canTarget(v)) targets.add(v);
+                        if (top != null && sa0.canTargetSpellAbility(top)) {
+                            targets.add(top);
+                            keys.add("stack");
                         }
-                        if (sa0.canTarget(victim)) targets.add(victim);
+                        for (Player who : List.of(victim, p)) {
+                            final Set<String> names = new HashSet<>();
+                            for (Card v : who.getCardsIn(ZoneType.Battlefield)) {
+                                if (names.add(v.getName()) && sa0.canTarget(v)) {
+                                    targets.add(v);
+                                    keys.add((who == p ? "own:" : "card:") + v.getName());
+                                }
+                            }
+                            if (sa0.canTarget(who)) {
+                                targets.add(who);
+                                keys.add(who == p ? "self" : "player");
+                            }
+                        }
                     } else {
                         targets.add(null);
+                        keys.add("-");
                     }
-                    for (Object t : targets) {
+                    for (int ti = 0; ti < targets.size(); ti++) {
+                        final Object t = targets.get(ti);
                         final SpellAbility cs = sa0.copy(p);
                         cs.setActivatingPlayer(p);
                         if (t != null) {
@@ -3292,15 +3348,11 @@ public final class ForcedWinSolver {
                             if (!cs.isTargetNumberValid()) continue;
                         }
                         if (!cs.canPlay() || !ComputerUtilCost.canPayCost(cs, p, false)) continue;
-                        final String tk = t == null ? "-" : t instanceof SpellAbility ? "stack"
-                                : t instanceof Card tc ? "card:" + tc.getName() : "player";
-                        final int cat = category(cs);
-                        byKey.putIfAbsent(cat + "|" + c.getName() + "|" + tk, cs);
+                        byKey.putIfAbsent(category(cs) + "|" + c.getName() + "|" + keys.get(ti), cs);
                     }
                 }
             }
-            final List<SpellAbility> out = new ArrayList<>(byKey.values());
-            return out.size() > maxResponses ? new ArrayList<>(out.subList(0, maxResponses)) : out;
+            return new ArrayList<>(byKey.values());
         }
 
         static int category(final SpellAbility sa) {
