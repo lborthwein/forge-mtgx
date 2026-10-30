@@ -122,6 +122,14 @@ public class AiProfileUtil {
     public static final String HONEST_FORCED_WIN_COUNTED_SPEC = "hideOwnLibrary=true,defense=false,worlds=8,cycles=true,"
             + "threshold=1.0,budget=counter,engineSteps=6000,evalSteps=1750,engineCards=60000,enginePathCards=20000,"
             + "adoptAttack=true";
+    /**
+     * solver-cap12-1030 (CAP-2, PREDECLARATION-solver-cap12): the counted generator with engineNodesPerSearch (each
+     * engine search gets its own engineNodes; HonestForcedWinCounted compares the solver's lifetime node count, so its
+     * same-turn engine pass gets no nodes after the seat's first searches and it misses kills a label proves). A NEW
+     * generator version: never mixed with HonestForcedWinCounted tapes. HonestForcedWinCounted is unchanged.
+     */
+    public static final String HONEST_FORCED_WIN_COUNTED2_PROFILE = "HonestForcedWinCounted2";
+    public static final String HONEST_FORCED_WIN_COUNTED2_SPEC = HONEST_FORCED_WIN_COUNTED_SPEC + ",engineNodesPerSearch=true";
     /** mtgx (lane solver-gaps-1015, Part B): Forge AI with likely-win lines alone (no forced-win search or defense). */
     public static final String LIKELY_WIN_PROFILE = "LikelyWin";
 
@@ -170,6 +178,15 @@ public class AiProfileUtil {
             counted.put(AiProps.FORCED_WIN_HONEST, "true");
             counted.put(AiProps.FORCED_WIN_SPEC, HONEST_FORCED_WIN_COUNTED_SPEC);
             loadedProfiles.put(HONEST_FORCED_WIN_COUNTED_PROFILE, counted);
+        }
+        if (base != null && !loadedProfiles.containsKey(HONEST_FORCED_WIN_COUNTED2_PROFILE)) {
+            final Map<AiProps, String> counted2 = new HashMap<>(base);
+            counted2.put(AiProps.CUBE_COMBO_PLANS, "true");
+            counted2.put(AiProps.CUBE_COMBO_LINEAGE, "false");
+            counted2.put(AiProps.FORCED_WIN_SOLVER, "true");
+            counted2.put(AiProps.FORCED_WIN_HONEST, "true");
+            counted2.put(AiProps.FORCED_WIN_SPEC, HONEST_FORCED_WIN_COUNTED2_SPEC);
+            loadedProfiles.put(HONEST_FORCED_WIN_COUNTED2_PROFILE, counted2);
         }
     }
 

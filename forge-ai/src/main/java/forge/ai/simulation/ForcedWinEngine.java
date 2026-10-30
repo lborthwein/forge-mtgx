@@ -212,6 +212,8 @@ final class ForcedWinEngine {
 
     static final class Limits {
         int nodes = 250;
+        /** solver-cap12-1030 (CAP-2; false = off): {@link #nodes} per search, counted from the search's start. */
+        boolean perSearchNodes;
         int depth = 64;
         int branching = 8;
         int targetVariants = 3;
@@ -630,6 +632,9 @@ final class ForcedWinEngine {
             final int nodeCap = lim.nodes;
             lim.nodes = twoTurns ? nodeCap / 2 : nodeCap;
             e.passCap = lim.nodes;
+            if (lim.perSearchNodes) {
+                lim.nodes += st.nodes; // solver-cap12-1030: this pass's share from here, not from the solver's birth
+            }
             e.passStart = st.nodes;
             List<Step> win = e.dfs(root, 0);
             if (win == null && twoTurns && System.nanoTime() < deadline) {

@@ -2140,7 +2140,8 @@ public final class RlActorBench {
             for (JsonElement c : t.getAsJsonArray("controllers")) {
                 final String s = c.isJsonNull() ? "" : c.getAsString();
                 if (("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_PROFILE).equals(s)
-                        || ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE).equals(s)) {
+                        || ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE).equals(s)
+                        || ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED2_PROFILE).equals(s)) {
                     return true;
                 }
             }
@@ -2155,7 +2156,8 @@ public final class RlActorBench {
     static String counterGeneratorRefusal(final JsonArray controllers, final int aiTimeoutSec) {
         boolean counter = String.valueOf(System.getProperty("forge.ai.forcedWin.spec")).contains("budget=counter");
         for (JsonElement c : controllers) {
-            counter |= ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE).equals(c.getAsString());
+            counter |= ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED_PROFILE).equals(c.getAsString())
+                    || ("forge:" + forge.ai.AiProfileUtil.HONEST_FORCED_WIN_COUNTED2_PROFILE).equals(c.getAsString());
         }
         return counter ? forge.ai.simulation.ForcedWinSolver.counterRuntimeRefusal(aiTimeoutSec) : null;
     }
