@@ -275,6 +275,14 @@ public final class LookaheadSearch {
         /** Tutor ranking: the checkpoint the service must serve (GET /v1/health checkpointSha256), checked once per JVM. */
         public String tutorCheckpointSha256 = null;
 
+        /**
+         * r2-choose-a-card-1029 (research; null = off, the default, and then nothing is built and the config JSON is
+         * unchanged): the choose-a-card spec ({@link ChooseACard.Config#fromJson}). The look-ahead seat's controller
+         * installs a {@link ChooseACard} on itself in the live game; its value is the search's value leaf
+         * ({@link SearchHooks}) when the search has one, else Forge's static evaluator (report only).
+         */
+        public JsonObject cac = null;
+
         /** Tutor ranking is on (a ranker call and play-outs at qualifying searches, acting or shadow). */
         public boolean tutorOn() {
             return tutorRank > 0 || tutorShadow;
@@ -473,6 +481,9 @@ public final class LookaheadSearch {
                 o.addProperty("priorTimeoutMs", priorTimeoutMs);
                 o.addProperty("priorCheckpointSha256", priorCheckpointSha256);
             }
+            if (cac != null) {
+                o.add("chooseACard", cac);
+            }
             if (tutorOn()) {
                 o.addProperty("tutorRank", tutorRank);
                 o.addProperty("tutorShadow", tutorShadow);
@@ -669,6 +680,9 @@ public final class LookaheadSearch {
         public final Map<String, Long> tutorWhy = new TreeMap<>();
         /** One entry per searched (or refused) choice: source, destination, names, Forge's pick, ranked, EVs, choice. */
         public final JsonArray tutorDecisions = new JsonArray();
+        /** r2-choose-a-card-1029: the seat's choose-a-card decisions (only when the option is on), and those past 512. */
+        public final JsonArray cacDecisions = new JsonArray();
+        public long cacDropped;
         /**
          * Belief (reported only when the option is on): searched decisions with a belief; skipped (nothing hidden, not
          * two players); service calls, failures (= uniform fallbacks), call time; worlds drawn from a belief (acting or
@@ -936,6 +950,10 @@ public final class LookaheadSearch {
                     o.addProperty("tutorLastError", tutorLastError);
                 }
                 o.add("tutorDecisions", tutorDecisions);
+            }
+            if (cacDecisions.size() > 0 || cacDropped > 0) {
+                o.add("cacDecisions", cacDecisions);
+                o.addProperty("cacDropped", cacDropped);
             }
             if (beliefOn) {
                 o.addProperty("beliefDecisions", beliefDecisions);
@@ -1582,6 +1600,18 @@ public final class LookaheadSearch {
         } else {
             prior = null;
         }
+        if (cfg.cac != null) {
+            // review #143 S3: refuse a choose-a-card spec when the config is read, never at the first priority
+            final ChooseACard.Config cc = ChooseACard.Config.fromJson(cfg.cac);
+            if (cc.mode == ChooseACard.Config.Mode.ON && !cc.testUnsafe) {
+                throw new IllegalArgumentException("chooseACard: mode on needs an RL search seat (the value tower and the "
+                        + "solver check); a look-ahead (K8) seat runs it in shadow only");
+            }
+            if (cc.mode != ChooseACard.Config.Mode.OFF && !cfg.beliefOn()) {
+                throw new IllegalArgumentException("chooseACard: needs a belief (the copies re-draw the opponent's hidden "
+                        + "cards); set belief");
+            }
+        }
         if (cfg.tutorOn()) {
             if (cfg.tutorRank < 1) {
                 throw new IllegalStateException("tutorShadow needs tutorRank >= 1 (how many ranked names are played out)");
@@ -1661,6 +1691,34 @@ public final class LookaheadSearch {
      */
     public static String checkPriorService(Config c) {
         return PriorClient.checkHealth(c.priorUrl, c.priorCheckpointSha256, c.priorTimeoutMs);
+    }
+
+    /** r2-choose-a-card-1029: the seat's choose-a-card engine (null unless {@link Config#cac}); built on first use. */
+    private ChooseACard cacEngine = null;
+
+    public synchronized ChooseACard chooseACard() {
+        if (cfg.cac == null) {
+            return null;
+        }
+        if (cacEngine == null) {
+            final ChooseACard.Config c = ChooseACard.Config.fromJson(cfg.cac);
+            cacEngine = new ChooseACard(c, hooks != null ? ChooseACard.of(hooks) : StaticValuer.INSTANCE, null);
+            // review S1-2: the copies' opponent hidden cards come from this seat's belief (null = no belief: install refuses)
+            cacEngine.setRedraw(solverRedraw());
+            // review S2-2: every decision entry goes to this game's stats (the bench row), bounded
+            cacEngine.setSink(e -> {
+                synchronized (stats) {
+                    if (stats.cacDecisions.size() < 512) {
+                        stats.cacDecisions.add(e);
+                    } else {
+                        stats.cacDropped++;
+                    }
+                }
+            });
+        } else if (hooks != null) {
+            cacEngine.setValuer(ChooseACard.of(hooks));
+        }
+        return cacEngine;
     }
 
     public Config getConfig() {

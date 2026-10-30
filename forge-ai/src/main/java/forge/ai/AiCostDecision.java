@@ -684,6 +684,10 @@ public class AiCostDecision extends CostDecisionMakerBase {
         int c = cost.getAbilityAmount(ability);
 
         CardCollectionView res = ComputerUtil.chooseReturnType(player, cost.getType(), source, ability.getTargetCard(), c, ability);
+        // r2-choose-a-card-1029: the seat's choose-a-card hook may replace the cards (no hook: Forge AI's, unchanged)
+        if (player.getController() instanceof PlayerControllerAi pc && pc.getCacHook() != null) {
+            res = pc.getCacHook().returnCost(pc, ability, cost.getType(), c, res);
+        }
         return res.isEmpty() ? null : PaymentDecision.card(res);
     }
 

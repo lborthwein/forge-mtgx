@@ -1,0 +1,27 @@
+{
+  "schema": "mtgx-cac-route-roles/1",
+  "note": "r2-choose-a-card-1029: Doomsday route roles for the pile beam (route-guided proposals; the tower scores every pile). Top-first templates. Roles only order the beam's proposals and branches; they never decide.",
+  "rank": ["finisher", "draw", "protection", "mana", "land", "other"],
+  "roles": {
+    "Thassa's Oracle": "finisher", "Laboratory Maniac": "finisher", "Jace, Wielder of Mysteries": "finisher",
+    "Tainted Pact": "finisher", "Demonic Consultation": "finisher",
+    "Gush": "draw", "Brainstorm": "draw", "Ponder": "draw", "Preordain": "draw", "Street Wraith": "draw",
+    "Edge of Autumn": "draw", "Gitaxian Probe": "draw", "Mishra's Bauble": "draw", "Urza's Bauble": "draw",
+    "Night's Whisper": "draw", "Sign in Blood": "draw", "Ancestral Recall": "draw", "Frantic Search": "draw",
+    "Force of Will": "protection", "Pact of Negation": "protection", "Daze": "protection", "Flusterstorm": "protection",
+    "Mental Misstep": "protection", "Spell Pierce": "protection", "Duress": "protection", "Cabal Therapy": "protection",
+    "Lotus Petal": "mana", "Dark Ritual": "mana", "Cabal Ritual": "mana", "Black Lotus": "mana", "Mox Sapphire": "mana",
+    "Mox Jet": "mana", "Simian Spirit Guide": "mana", "Lion's Eye Diamond": "mana",
+    "Island": "land", "Swamp": "land", "Underground Sea": "land", "Watery Grave": "land", "Polluted Delta": "land",
+    "Scalding Tarn": "land", "Misty Rainforest": "land", "Flooded Strand": "land", "Volcanic Island": "land",
+    "Tropical Island": "land"
+  },
+  "templates": [
+    ["draw", "finisher", "other", "other", "other"],
+    ["land", "draw", "finisher", "other", "other"],
+    ["protection", "draw", "finisher", "other", "other"],
+    ["draw", "draw", "finisher", "other", "other"],
+    ["mana", "draw", "finisher", "other", "other"],
+    ["finisher", "other", "other", "other", "other"]
+  ]
+}

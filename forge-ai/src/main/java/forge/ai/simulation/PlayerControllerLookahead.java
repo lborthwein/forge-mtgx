@@ -21,8 +21,33 @@ public class PlayerControllerLookahead extends PlayerControllerAi {
         this.lobby = lp;
     }
 
+    /**
+     * r2-choose-a-card-1029: install the search's choose-a-card engine on this live seat (off: never). Checked at every
+     * mulligan and priority, so a controller swapped back after a Mindslaver-style turn gets it again (review S3).
+     */
+    private void cacInstall() {
+        if (getCacHook() != null) {
+            return;
+        }
+        final LookaheadSearch search = lobby.getSearch();
+        if (search == null || getGame() != lobby.getLiveGame() || search.getConfig().cac == null) {
+            return;
+        }
+        final ChooseACard c = search.chooseACard();
+        if (c != null) {
+            c.install(this);
+        }
+    }
+
+    @Override
+    public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn) {
+        cacInstall();
+        return super.mulliganKeepHand(firstPlayer, cardsToReturn);
+    }
+
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        cacInstall();
         final long t0 = System.nanoTime();
         final List<SpellAbility> def = super.chooseSpellAbilityToPlay();
         final LookaheadSearch search = lobby.getSearch();
