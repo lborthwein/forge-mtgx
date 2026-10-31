@@ -358,6 +358,18 @@ public final class LookaheadSearch {
             return "codraft".equals(belief);
         }
 
+        /**
+         * belief-n11-1030 (N11), belief "deck": the learned opponent-deck model every world (and the plans' and
+         * choose-a-card's solver worlds) draws the opponent's hidden hand and library from, given the cards they showed
+         * in this game ({@link #redrawOpponentsDeck}). Not a JSON key (RlSearch's spec pins the export by its sha256).
+         */
+        public DeckBeliefModel beliefDeckModel = null;
+
+        /** belief-n11-1030: the belief is the learned deck model. */
+        public boolean deck() {
+            return "deck".equals(belief);
+        }
+
         /** A belief is computed at searched decisions (acting or shadow). */
         public boolean beliefOn() {
             return !"off".equals(belief) || beliefShadow;
@@ -509,6 +521,9 @@ public final class LookaheadSearch {
                 }
                 if (codraft()) {
                     o.addProperty("beliefPriorGain", beliefPriorGain); // bvw-step2-fork-1027: only with codraft
+                }
+                if (deck() && beliefDeckModel != null) {
+                    o.addProperty("beliefDeckSha256", beliefDeckModel.sha256); // belief-n11-1030: only with deck
                 }
             }
             // bvw-step2-fork-1027 (S2T): only when on, so every other config's JSON is unchanged
@@ -1643,8 +1658,12 @@ public final class LookaheadSearch {
         }
         if (cfg.beliefOn()) {
             if (!"off".equals(cfg.belief) && !"human".equals(cfg.belief) && !"uniform".equals(cfg.belief)
-                    && !cfg.codraft()) {
-                throw new IllegalStateException("belief must be off, human, uniform or codraft: " + cfg.belief);
+                    && !cfg.codraft() && !cfg.deck()) {
+                throw new IllegalStateException("belief must be off, human, uniform, codraft or deck: " + cfg.belief);
+            }
+            if (cfg.deck() && cfg.beliefDeckModel == null) {
+                // belief-n11-1030: the learned deck belief needs its model
+                throw new IllegalStateException("belief=deck needs its model (beliefDeckModel)");
             }
             if (cfg.codraft() && (cfg.beliefPriorTable == null || !(cfg.beliefPriorGain >= 0))) {
                 // bvw-step2-fork-1027: the co-draft prior needs its table (and a gain >= 0)
@@ -7864,7 +7883,11 @@ public final class LookaheadSearch {
      * belief off or in shadow mode, {@link #resample} as before.
      */
     void redraw(Game live, Player liveMe, Game g, Player me, Random rng) {
-        if (beliefCube != null && !cfg.beliefShadow && cfg.codraft()) {
+        if (beliefCube != null && !cfg.beliefShadow && cfg.deck()) {
+            // belief-n11-1030: the learned deck model over the cards they showed in this game, then our own library
+            redrawOpponentsDeck(live, liveMe, g, me, rng, cfg.beliefDeckModel);
+            shuffleOwnLibrary(liveMe, me, rng);
+        } else if (beliefCube != null && !cfg.beliefShadow && cfg.codraft()) {
             // bvw-step2-fork-1027 (S2T): the co-draft deck prior over the cards they showed in this game (honest: public
             // co-draft data and public cards), then our own library below its known top
             redrawOpponentsPrior(live, liveMe, g, me, rng, cfg.beliefPriorTable, cfg.beliefPriorGain, false, null, 0);
@@ -7881,7 +7904,8 @@ public final class LookaheadSearch {
      * ({@link #opponentRedrawPrior}, this game's shown cards only) with belief "codraft", else {@link #opponentRedraw}.
      */
     public ForcedWinSolver.Redraw solverRedraw() {
-        final ForcedWinSolver.Redraw base = cfg.codraft() ? opponentRedrawPrior(cfg.beliefPriorTable, cfg.beliefPriorGain)
+        final ForcedWinSolver.Redraw base = cfg.deck() ? opponentRedrawDeck(cfg.beliefDeckModel)
+                : cfg.codraft() ? opponentRedrawPrior(cfg.beliefPriorTable, cfg.beliefPriorGain)
                 : opponentRedraw();
         if (base == null || !beliefWorldDecks()) {
             return base;
@@ -8206,6 +8230,101 @@ public final class LookaheadSearch {
             synchronized (stats) {
                 stats.beliefWorlds++;
                 stats.beliefCards += hs.size() + libSlots.size();
+                stats.beliefCreateNanos += System.nanoTime() - c0;
+            }
+        }
+        if (changed) refreshBeliefStatics(g);
+    }
+
+    /**
+     * belief-n11-1030 (N11): the solver's re-draw with the learned deck model ({@link #redrawOpponentsDeck}). Null when
+     * no belief is on or no model is given.
+     */
+    public ForcedWinSolver.Redraw opponentRedrawDeck(final DeckBeliefModel model) {
+        if (beliefCube == null || cfg.beliefShadow || model == null) {
+            return null;
+        }
+        return (live, liveMe, g, me, rng) -> redrawOpponentsDeck(live, liveMe, g, me, rng, model);
+    }
+
+    /**
+     * belief-n11-1030 (N11): each opponent's hidden hand and library (together: the rest of their deck) drawn from the
+     * learned deck model given the card instances they have shown in this game (battlefield, graveyard, exile, command,
+     * their spells on the stack, hand cards we can see), never from their real cards. Kept hand cards and the known top
+     * of their library stay. Hidden counts are matched exactly; the drawn cards are shuffled and dealt hand first.
+     */
+    private void redrawOpponentsDeck(Game live, Player liveMe, Game g, Player me, Random rng, DeckBeliefModel model) {
+        boolean changed = false;
+        final PlayerView myView = liveMe.getView();
+        for (Player opp : me.getOpponents()) {
+            final Player liveOpp = (Player) live.getPlayer(opp.getId());
+            if (liveOpp == null) {
+                throw new IllegalStateException("belief: no live player for opponent " + opp.getId());
+            }
+            final List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
+            final List<Card> keep = new ArrayList<>();
+            for (Card c : hand) {
+                Card lc = live.findById(c.getId());
+                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                    keep.add(c);
+                }
+            }
+            final List<Card> libKnownTop = new ArrayList<>();
+            for (Card lc : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library))) {
+                if (lc.getView().canBeShownTo(myView)) {
+                    Card cc = g.findById(lc.getId());
+                    if (cc != null) {
+                        libKnownTop.add(cc);
+                        continue;
+                    }
+                }
+                break;
+            }
+            final int need = hand.size() - keep.size();
+            final int libNeed = opp.getCardsIn(ZoneType.Library).size() - libKnownTop.size();
+            if (need == 0 && libNeed == 0) {
+                continue;
+            }
+            // the card instances they have shown (a name per card, so basics repeat), by card id order
+            final List<Card> shownCards = new ArrayList<>();
+            for (Card c : live.getCardsInGame()) {
+                if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
+                        && c.getView().canBeShownTo(myView)) {
+                    shownCards.add(c);
+                }
+            }
+            for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
+                final Card sc = si.getSourceCard();
+                if (si.getActivatingPlayer() == liveOpp && sc != null && sc.getPaperCard() != null && !sc.isFaceDown()
+                        && !sc.isToken() && sc.getView().canBeShownTo(myView) && !shownCards.contains(sc)) {
+                    shownCards.add(sc);
+                }
+            }
+            shownCards.sort(java.util.Comparator.comparingInt(Card::getId));
+            final List<String> shown = new ArrayList<>();
+            for (Card c : shownCards) {
+                shown.add(c.getPaperCard().getName());
+            }
+            final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
+            final long c0 = System.nanoTime();
+            final List<String> drawn = new ArrayList<>(model.sample(shown, pool, need + libNeed, rng));
+            Collections.shuffle(drawn, rng);
+            final List<Card> newHand = new ArrayList<>(keep);
+            final List<Card> newLib = new ArrayList<>(libKnownTop);
+            for (int k = 0; k < drawn.size(); k++) {
+                final Card nc = beliefCard(drawn.get(k), opp, g);
+                if (k < need) {
+                    newHand.add(nc);
+                } else {
+                    newLib.add(nc);
+                }
+            }
+            opp.getZone(ZoneType.Hand).setCards(newHand);
+            opp.getZone(ZoneType.Library).setCards(newLib);
+            changed = true;
+            synchronized (stats) {
+                stats.beliefWorlds++;
+                stats.beliefCards += drawn.size();
                 stats.beliefCreateNanos += System.nanoTime() - c0;
             }
         }
