@@ -867,7 +867,7 @@ public final class ChooseACard implements CacHook {
         }
         if (mine(c) && def != null && def.size() == 1 && !def.get(0).isLandAbility()
                 && !java.util.Collections.disjoint(cfg.kinds, CAST_KINDS)) {
-            return castDecision(def);
+            return scopedCast(def);
         }
         if (!mine(c) || def == null || def.size() != 1 || !def.get(0).isLandAbility() || !cfg.kinds.contains(Kind.LAND)
                 || !live.getStack().isEmpty()) {
@@ -1160,9 +1160,36 @@ public final class ChooseACard implements CacHook {
         castPlan = best;
         castCostIdx = 0;
         castPhyIdx = 0;
-        if (best.floats == null) return def;
+        liveFloats = best.floats; // built by scopedCast in the live id scope (a departure's floats are real plays)
+        return def;
+    }
+
+    /** A departed cast's floats, to build on the live game after the decision's own id scope is closed. */
+    private List<int[]> liveFloats = null;
+    private boolean liveFloatAlone = false;
+
+    /**
+     * Review #147 S1-1: a cast decision's live-side enumeration (alternative costs, the source scan, Forge's targets,
+     * every copy it makes) runs in a scratch id scope, so SHADOW (and a kept ON decision) never moves the live game's
+     * SpellAbility or card id counters. Only a departure's floated mana abilities, which are real plays, are built in
+     * the live scope, after the scratch scope is closed.
+     */
+    private List<SpellAbility> scopedCast(final List<SpellAbility> def) {
+        liveFloats = null;
+        liveFloatAlone = false;
+        final Object prevIds = forge.util.IdScope.capture();
+        forge.util.IdScope.open();
+        final List<SpellAbility> r;
+        try {
+            r = castDecision(def);
+        } finally {
+            forge.util.IdScope.install(prevIds);
+        }
+        if (liveFloats == null) return r;
+        final List<int[]> fls = liveFloats;
+        liveFloats = null;
         final List<SpellAbility> out = new ArrayList<>();
-        for (int[] fl : best.floats) {
+        for (int[] fl : fls) {
             final SpellAbility m = floatSa(live, me, fl[0], fl[1]);
             if (m == null) {
                 count("liveMiss");
@@ -1171,7 +1198,7 @@ public final class ChooseACard implements CacHook {
             }
             out.add(m);
         }
-        out.add(sa);
+        if (!liveFloatAlone) out.add(def.get(0));
         return out;
     }
 
@@ -1469,8 +1496,9 @@ public final class ChooseACard implements CacHook {
         d.nEnum = answers.size() - 1;
         final Answer best = decide(d, answers);
         if (best == null || best.forge) return def;
-        final SpellAbility m = floatSa(live, me, best.floats.get(0)[0], best.floats.get(0)[1]);
-        return m == null ? def : Collections.singletonList(m);
+        liveFloats = best.floats; // built by scopedCast in the live id scope
+        liveFloatAlone = true;
+        return def;
     }
 
     @Override
@@ -2830,6 +2858,11 @@ public final class ChooseACard implements CacHook {
         if (v instanceof Player p) {
             final int i = live.getRegisteredPlayers().indexOf(p);
             return i < 0 ? NO_MAP : g.getRegisteredPlayers().get(i);
+        }
+        if (v instanceof SpellAbility sa) {
+            // storm / prowess: the cast spell, on the stack in both games (same depth)
+            final SpellAbility m = mapStack(sa, g);
+            return m == null ? NO_MAP : m;
         }
         if (v instanceof CardCollectionView cc) {
             final CardCollection out = new CardCollection();

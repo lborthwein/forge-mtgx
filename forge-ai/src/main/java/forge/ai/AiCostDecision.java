@@ -117,7 +117,8 @@ public class AiCostDecision extends CostDecisionMakerBase {
      */
     @Override
     public PaymentDecision review(final CostPart part, final PaymentDecision decision) {
-        if (!(player.getController() instanceof PlayerControllerAi pc) || pc.getCacHook() == null || decision == null
+        final PlayerControllerAi pc = PlayerControllerAi.cacOf(player); // the wrapped controller on a taped seat
+        if (pc == null || pc.getCacHook() == null || decision == null
                 || decision.cards == null || decision.cards.isEmpty() || !(part instanceof CostPartWithList pl)) {
             return decision;
         }

@@ -508,4 +508,83 @@ public class InlineChoicesTest extends SimulationTest {
         AssertJUnit.assertTrue(cac.log + " " + cac.counts, untapped(g.getPlayers().get(0), "Mountain"));
         AssertJUnit.assertEquals("PAY_TO_PREVENT", kindOf(cac, 0));
     }
+
+    // ------------------------------------------------------------------------------------------------ review #147 S1-1
+
+    interface Play {
+        void run(Game g, PlayerControllerAi c, ChooseACard cac);
+    }
+
+    /** One SpellAbility id from the counter in force (scoped or global): a probe of where the counter stands. */
+    static int saId(final Game g) {
+        return new SpellAbility.EmptySa(forge.game.ability.ApiType.InternalLegendaryRule, new Card(-1, g),
+                g.getPlayers().get(0)).getId();
+    }
+
+    static final String ALL = "PAYMENT,COLOR,COST_CARDS,LIFE,SACRIFICE,ORDER_TRIGGERS,PAY_TO_PREVENT";
+
+    /** Play {@code play} with no hook and with a SHADOW hook of every new kind: nothing live may differ. */
+    void identity(final String name, final java.util.function.Supplier<Game> board, final Play play) {
+        final String[] fp = new String[2];
+        final long[] rng = new long[2];
+        final int[] sa = new int[2], card = new int[2];
+        for (int arm = 0; arm < 2; arm++) {
+            final Game g = board.get();
+            final Player a = g.getPlayers().get(0);
+            final PlayerControllerAi c = a.getController() instanceof PlayerControllerAi pc ? pc : seat(g, 0);
+            ChooseACard cac = null;
+            if (arm == 1) {
+                final JsonObject o = new JsonObject();
+                o.addProperty("mode", "shadow");
+                o.addProperty("topM", 0);
+                o.addProperty("kinds", ALL);
+                final ChooseACard.Config cfg = ChooseACard.Config.fromJson(o);
+                cfg.testUnsafe = true;
+                cac = new ChooseACard(cfg, new ChooseACardTest.Stub((x, p) -> 0.5 + 0.01 * p.getCardsIn(ZoneType.Hand).size()), null);
+                cac.install(c);
+            }
+            MyRandom.setRandom(new java.util.Random(7));
+            final int s0 = saId(g), c0 = g.nextCardId();
+            play.run(g, c, cac);
+            fp[arm] = LookaheadSearch.fingerprint(g);
+            rng[arm] = MyRandom.getRandom().nextLong();
+            sa[arm] = saId(g) - s0;
+            card[arm] = g.nextCardId() - c0;
+        }
+        AssertJUnit.assertEquals(name + " fingerprint", fp[0], fp[1]);
+        AssertJUnit.assertEquals(name + " random stream", rng[0], rng[1]);
+        AssertJUnit.assertEquals(name + " SpellAbility ids", sa[0], sa[1]);
+        AssertJUnit.assertEquals(name + " card ids", card[0], card[1]);
+    }
+
+    static List<SpellAbility> hooked(final PlayerControllerAi c, final ChooseACard cac, final SpellAbility sa) {
+        return cac == null ? Collections.singletonList(sa) : cac.priority(c, Collections.singletonList(sa));
+    }
+
+    @Test
+    public void shadowMovesNoIdsOnAnyKind() {
+        identity("payment", this::paymentBoard, (g, c, cac) -> {
+            playAll(c, hooked(c, cac, spell(g.getPlayers().get(0), "Think Twice")));
+            resolveAll(g);
+        });
+        identity("pitch", this::fowBoard, (g, c, cac) -> {
+            playAll(c, hooked(c, cac, fowAlt(g)));
+            resolveAll(g);
+        });
+        identity("life", this::probeBoard, (g, c, cac) -> {
+            playAll(c, hooked(c, cac, probe(g)));
+            resolveAll(g);
+        });
+        identity("colour", this::petalBoard, (g, c, cac) -> playAll(c, hooked(c, cac, petal(g.getPlayers().get(0)))));
+        identity("edict", this::edictBoard, (g, c, cac) -> resolveAll(g));
+        identity("legend", this::legendBoard, (g, c, cac) -> {
+            addCard("Isamaru, Hound of Konda", g.getPlayers().get(0)).setSickness(false);
+            g.getAction().checkStateEffects(true);
+        });
+        identity("order", () -> oracleBoard(0), (g, c, cac) -> {
+            c.playChosenSpellAbility(spell(g.getPlayers().get(0), "Thassa's Oracle"));
+            loopTurn(g);
+        });
+        identity("payToPrevent", this::spikeBoard, (g, c, cac) -> g.getStack().resolveStack());
+    }
 }
