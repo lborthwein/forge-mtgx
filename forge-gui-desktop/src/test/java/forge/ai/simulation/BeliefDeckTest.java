@@ -66,6 +66,17 @@ public class BeliefDeckTest extends SimulationTest {
         return DeckBeliefModel.loadPinned(p.toString(), sha(p));
     }
 
+    /** A frame game registers no deck: give {@code p} a fixed one (as LookaheadSearch.worldDecks does, by reflection). */
+    static void registerDeck(final Player p) throws Exception {
+        final forge.deck.Deck d = new forge.deck.Deck("fixture");
+        final forge.deck.CardPool main = d.getOrCreate(forge.deck.DeckSection.Main);
+        main.add(forge.model.FModel.getMagicDb().getCommonCards().getCard("Esper Sentinel"));
+        main.add(forge.model.FModel.getMagicDb().getCommonCards().getCard("Plains"), 2);
+        final java.lang.reflect.Field f = forge.game.player.RegisteredPlayer.class.getDeclaredField("currentDeck");
+        f.setAccessible(true);
+        f.set(p.getRegisteredPlayer(), d);
+    }
+
     /** The deck key of {@code p}'s registered main deck (the gate's key). */
     static String keyOf(final Player p) {
         final java.util.Map<String, Integer> main = new java.util.HashMap<>();
@@ -203,6 +214,7 @@ public class BeliefDeckTest extends SimulationTest {
         final Game g0 = ForcedWinSolverTest.game("Default", "Default", BvwS2tHonestyTest.frame(BvwS2tHonestyTest.OUR_HAND,
                 BvwS2tHonestyTest.OUR_LIB, BvwS2tHonestyTest.OUR_BF, BvwS2tHonestyTest.THEIR_HAND_A,
                 BvwS2tHonestyTest.THEIR_LIB_A, bf0));
+        registerDeck(g0.getPlayers().get(1));
         final String oppKey = keyOf(g0.getPlayers().get(1));
         // the per-deck gate, refusing: an export not held out from this opponent's deck
         final LookaheadSearch refused = deckSearch(model(Files.createTempDirectory("deckbelief"), "\"k0\""));
@@ -221,6 +233,9 @@ public class BeliefDeckTest extends SimulationTest {
         final String b = BvwS2tHonestyTest.frame(BvwS2tHonestyTest.OUR_HAND, BvwS2tHonestyTest.OUR_LIB,
                 BvwS2tHonestyTest.OUR_BF, BvwS2tHonestyTest.THEIR_HAND_B, BvwS2tHonestyTest.THEIR_LIB_B, bf);
         final Game ga = ForcedWinSolverTest.game("Default", "Default", a), gb = ForcedWinSolverTest.game("Default", "Default", b);
+        registerDeck(ga.getPlayers().get(1));
+        registerDeck(gb.getPlayers().get(1));
+        Assert.assertEquals(keyOf(ga.getPlayers().get(1)), oppKey);
         int hitsDeck = 0, hitsUni = 0, hitsSolver = 0;
         final int n = 40;
         for (int i = 0; i < n; i++) {
