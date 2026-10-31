@@ -116,6 +116,7 @@ public class GameCopier {
     private final Map<Trigger, Trigger> trigMap = new java.util.IdentityHashMap<>();
     private final Map<Object, Object> cmdMap = new java.util.IdentityHashMap<>();
     private final Map<Object, Object> saMap = new java.util.IdentityHashMap<>();
+    private final Map<Card, Card> staleMap = new java.util.IdentityHashMap<>();
 
     /**
      * gamecopier-fidelity-1030: the solver's verification and search copies carry pending delayed triggers and commands
@@ -951,6 +952,7 @@ public class GameCopier {
         trigMap.clear();
         cmdMap.clear();
         saMap.clear();
+        staleMap.clear();
         // delayed triggers first: commands that register one later ("next turn") map to the same copy
         final forge.game.trigger.TriggerHandler from = origGame.getTriggerHandler(), to = newGame.getTriggerHandler();
         for (Trigger t : new ArrayList<>(from.getDelayedTriggersView())) {
@@ -1146,28 +1148,33 @@ public class GameCopier {
      * the original; a card of an id the copy does not hold is a stand-in in no zone.
      */
     private Card mapCardPending(Card c, Game newGame) {
+        final Card memo = staleMap.get(c);
+        if (memo != null) {
+            return memo;
+        }
+        // cards are equal by id: cardMap finds the copy's card of this id, and its key is the original's zone object
         final Card m = cardMap.get(c);
         if (m != null) {
-            return m;
+            final Card key = cardMap.inverse().get(m);
+            if (key == c || !c.isLKI() && key != null && c.getGameTimestamp() == key.getGameTimestamp()
+                    && c.getCurrentStateName() == key.getCurrentStateName()) {
+                return m;
+            }
+            // a last-known or stale object (the card has moved since): a last-known copy of the copy's card, with the
+            // object's game timestamp
+            final Card lki = CardCopyService.getLKICopy(m);
+            final forge.card.CardStateName st = c.getCurrentStateName();
+            if (st != null && st != lki.getCurrentStateName() && lki.hasState(st)) {
+                lki.setState(st, false);
+            }
+            lki.setGameTimestamp(c.getGameTimestamp());
+            staleMap.put(c, lki);
+            return lki;
         }
-        final Card cur = newGame.findById(c.getId());
-        if (cur == null) {
-            final Card st = standIn(newGame, c);
-            st.setGameTimestamp(c.getGameTimestamp());
-            cardMap.put(c, st);
-            return st;
-        }
-        if (!c.isLKI() && c.getGameTimestamp() == cur.getGameTimestamp() && c.getCurrentStateName() == cur.getCurrentStateName()) {
-            return cur;
-        }
-        final Card lki = CardCopyService.getLKICopy(cur);
-        final forge.card.CardStateName st = c.getCurrentStateName();
-        if (st != null && st != lki.getCurrentStateName() && lki.hasState(st)) {
-            lki.setState(st, false);
-        }
-        lki.setGameTimestamp(c.getGameTimestamp());
-        cardMap.put(c, lki);
-        return lki;
+        final Card st = standIn(newGame, c);
+        st.setGameTimestamp(c.getGameTimestamp());
+        staleMap.put(c, st);
+        return st;
     }
 
     private static final Class<?>[] PASS = {String.class, Number.class, Boolean.class, Character.class, Enum.class,
