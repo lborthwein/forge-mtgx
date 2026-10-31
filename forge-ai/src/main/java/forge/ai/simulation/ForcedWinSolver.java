@@ -1746,12 +1746,13 @@ public final class ForcedWinSolver {
 
     /**
      * R3-1: the position's engine structure, as bits: G a graveyard card of ours with a playable non-mana ability, M an
-     * untapped nonland permanent of ours with a mana ability that does not sacrifice it, L the first pass saw a loop, U a
-     * card the width model or the probe could not model. "" = none. No card names.
+     * untapped nonland permanent of ours with a mana ability that does not sacrifice it, L the first pass saw a loop.
+     * "" = none. No card names. (D10: U, a card the width model or the probe could not model, no longer triggers: it was
+     * on 123 of 124 escalations of the ladder-frequency sample and flipped no label row.)
      */
     private String ladderStructure(Game live, Position pos, boolean loopSeen) {
         final StringBuilder sb = new StringBuilder();
-        boolean g = false, m = false, u = false;
+        boolean g = false, m = false;
         for (Card c : me.getCardsIn(ZoneType.Graveyard)) {
             try {
                 for (SpellAbility sa0 : c.getAllPossibleAbilities(me, true)) {
@@ -1784,12 +1785,6 @@ public final class ForcedWinSolver {
                 }
             }
         }
-        for (ACard a : pos.hand) {
-            u |= a.unmodeled || anyUnplayable(a);
-        }
-        for (ACard a : pos.battlefield) {
-            u |= a.unmodeled || anyUnplayable(a);
-        }
         if (g) {
             sb.append('G');
         }
@@ -1798,9 +1793,6 @@ public final class ForcedWinSolver {
         }
         if (loopSeen) {
             sb.append('L');
-        }
-        if (u) {
-            sb.append('U');
         }
         return sb.toString();
     }
