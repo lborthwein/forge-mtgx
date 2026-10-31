@@ -371,6 +371,17 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + e.getMessage());
                 System.err.println("[bvw-label] FATAL " + e.getMessage());
                 return;
+            } catch (IllegalStateException e) {
+                if (forge.ai.simulation.DeckBeliefModel.refusal() == null) {
+                    throw e;
+                }
+            }
+            if (forge.ai.simulation.DeckBeliefModel.refusal() != null) {
+                // review #155 (follow-up): a deck-belief refusal is fatal for the run (exit 2; the summary names it)
+                fatal = "deck_belief_refused: " + forge.ai.simulation.DeckBeliefModel.refusal();
+                FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + fatal);
+                System.err.println("[bvw-label] FATAL " + fatal);
+                return;
             }
             searchMs += sr.ms;
             searchWhy.merge(sr.why, 1, Integer::sum);
