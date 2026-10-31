@@ -3587,6 +3587,15 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
         leavePlayCommandList.add(c);
     }
 
+    /**
+     * mtgx (gamecopier-fidelity-1030): this card's pending command lists for a game copier, in a fixed order: leaves play,
+     * untap, change controller, unattach, face up, face down, phase out (live lists).
+     */
+    public final List<List<GameCommand>> getCommandListsForCopy() {
+        return Arrays.asList(leavePlayCommandList, untapCommandList, changeControllerCommandList, unattachCommandList,
+                faceupCommandList, facedownCommandList, phaseOutCommandList);
+    }
+
     public void addStaticCommandList(Object[] objects) {
         staticCommandList.add(objects);
     }
