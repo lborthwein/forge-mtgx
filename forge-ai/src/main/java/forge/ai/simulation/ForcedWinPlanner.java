@@ -122,6 +122,7 @@ public final class ForcedWinPlanner {
             s.targetRefs.addAll(targetRefs);
             s.engineSpell = engineSpell;
             s.byName = byName;
+            s.xValue = xValue;
             s.triggerRef = triggerRef;
             s.pickName = pickName;
             s.expHandIdx = expHandIdx;
@@ -172,6 +173,11 @@ public final class ForcedWinPlanner {
          */
         boolean byName;
         /**
+         * solver-cap12-1030 R3-4 (a), engineX only (-1 = off: Forge AI's X): the X this engine step pays (the follower sets
+         * it on the ability before paying).
+         */
+        int xValue = -1;
+        /**
          * REPEAT steps (search-bones-1015, the engine search's cycles with progress): the loop body, played {@link #times}
          * times in order; null for every other step.
          */
@@ -199,7 +205,7 @@ public final class ForcedWinPlanner {
             }
             return kind + "|" + hostId + "|" + desc + "|" + costKey + "|" + targetRefs + "|" + triggerRef + "|" + pickName
                     + "|" + floatColor + "|" + targetVariant + (cac == null ? "" : "|cac" + cac)
-                    + (payFloats == null ? "" : "|pay" + payFloats);
+                    + (payFloats == null ? "" : "|pay" + payFloats) + (xValue >= 0 ? "|X" + xValue : "");
         }
 
         boolean isSpell() {
@@ -225,7 +231,7 @@ public final class ForcedWinPlanner {
                     + (putBack.isEmpty() ? "" : " putBack" + putBack) + (phyrexianLife ? " phyLife" : "")
                     + (anyColors.isEmpty() ? "" : " as" + anyColors)
                     + (cacPlayed != null ? " cac" + cacPlayed : cac != null ? " cac" + cac : "")
-                    + (payFloats == null ? "" : " pay" + payFloats);
+                    + (payFloats == null ? "" : " pay" + payFloats) + (xValue >= 0 ? " X=" + xValue : "");
         }
     }
 
@@ -237,6 +243,11 @@ public final class ForcedWinPlanner {
          * window an engine line was found in (the opponent's end step, say) and its turn; the follower also acts there.
          */
         forge.game.phase.PhaseType window;
+        /**
+         * solver-cap12-1030 R3-5, engineStack only (false = off): the line starts with the opponent's item on the stack
+         * (a response): the follower acts while the top of the stack is not ours.
+         */
+        boolean stackStart;
         int windowTurn = -1;
         final List<String> pileNames;
         /** 0: wins this turn; 1: wins by our next turn (after one pass). */

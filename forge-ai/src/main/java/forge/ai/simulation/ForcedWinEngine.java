@@ -75,12 +75,15 @@ final class ForcedWinEngine {
         long cards;
         /** bvw-step1-build-1024 (read-only): branches not entered because the path's copies would exceed pathCards. */
         int pathPrunes;
+        /** solver-cap12 round 3 (R3-3): nodes whose moves were value-ordered, and value passes that failed. */
+        int ordered, orderFails;
 
         String summary() {
             return "engineNodes=" + nodes + " engineCopies=" + copies + " moves=" + moves + " engineMs=" + nanos / 1_000_000
                     + (cut > 0 ? " engineCut=" + cut : "") + (refusedAttacks > 0 ? " refusedAttacks=" + refusedAttacks : "")
                     + (loops > 0 || pruned > 0 ? " pruned=" + pruned + " loops=" + loops + " loopReps=" + loopReps
-                            + " loopWins=" + loopWins : "");
+                            + " loopWins=" + loopWins : "")
+                    + (ordered > 0 || orderFails > 0 ? " ordered=" + ordered + " orderFails=" + orderFails : "");
         }
     }
 
@@ -260,6 +263,22 @@ final class ForcedWinEngine {
         boolean anyWindow;
         int loopWindow = 8;
         int loopCap = 128;
+        /**
+         * solver-cap12-1030 R3-3 (null = off, byte-identical): the engine's move order. At each node up to {@link #orderCap}
+         * distinct moves (and their variants) are applied first, a win returns at once, and the rest are searched in the
+         * order of one batched value pass of this valuer (Forge's order on ties or a failed pass); the branching cap then
+         * applies in that order.
+         */
+        ChooseACard.Valuer order;
+        int orderCap = 24;
+        /** R3-4 (a) (false = off): X branches inside engine moves (up to {@link #xVariants} values, see xValues). */
+        boolean xChoice;
+        int xVariants = 8;
+        /**
+         * R3-5 (false = off): the root may be our priority with the opponent's items on the stack (a response): a move
+         * also rests at our next priority in the root's turn and phase when the top of the stack is not ours.
+         */
+        boolean stack;
         /**
          * search-bones-1015: our library's known top in the root copy (pile memory); the rest is shuffled there. -1 (the
          * default) keeps the real order.
@@ -478,7 +497,7 @@ final class ForcedWinEngine {
         final long[] c = new long[PROGRESS + 2];
         java.util.Arrays.fill(c, Long.MAX_VALUE);
         int payLife = 0, oppPower = 0, oppLife = 0;
-        long mana = 0;
+        long mana = 0, sink = 0;
         boolean x = false;
         for (Player o : me.getOpponents()) {
             oppLife += Math.max(0, o.getLife());
@@ -510,6 +529,10 @@ final class ForcedWinEngine {
                         final forge.card.mana.ManaCost mc = sa.getPayCosts().getTotalMana();
                         mana += mc.getCMC();
                         x |= mc.countX() > 0;
+                        if (!sa.getPayCosts().hasTapCost() && sa.getPayCosts().getCostParts().stream().noneMatch(
+                                p -> p instanceof forge.game.cost.CostSacrifice)) {
+                            sink = Math.max(sink, mc.getCMC()); // R3-5: a repeatable mana sink (no tap, no sacrifice)
+                        }
                     }
                 }
             }
@@ -527,7 +550,9 @@ final class ForcedWinEngine {
         }
         c[4] = tokens + oppLife + oppCreatures + 1L;
         c[LIFE] = 1L + Math.max(20, Math.max(payLife, 2L * oppPower));
-        c[MANA] = mana + (x ? 2L * oppLife : 0L);
+        // a repeatable mana sink (an activated ability that neither taps nor sacrifices) turns mana into its effect again
+        // and again: enough mana for it once per point of their life (and one more) earns value (solver-cap12 round 3)
+        c[MANA] = mana + (x ? 2L * oppLife : 0L) + sink * (oppLife + 1L);
         c[HAND] = me.getCardsIn(ZoneType.Hand).size() + me.getCardsIn(ZoneType.Library).size();
         return c;
     }
@@ -914,6 +939,7 @@ final class ForcedWinEngine {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1); // storm count, per-turn records
+                copyStackIf(copier, live, lim.stack); // R3-5
                 root.g = copier.makeCopy();
                 root.me = (Player) copier.find(liveMe);
                 st.copies++;
@@ -1017,6 +1043,16 @@ final class ForcedWinEngine {
     private static final ZoneType[] COUNTED_ZONES = {ZoneType.Hand, ZoneType.Library, ZoneType.Graveyard,
             ZoneType.Battlefield, ZoneType.Exile, ZoneType.Command};
 
+    /**
+     * R3-5 (engineStack only; {@code on} false = nothing changes): copy the source game's stack too when it holds items
+     * GameCopier can copy faithfully (a response's root, worlds and nodes).
+     */
+    static void copyStackIf(GameCopier copier, Game src, boolean on) {
+        if (on && !src.getStack().isEmpty() && GameCopier.stackUnsupported(src) == null) {
+            copier.setCopyStack(true);
+        }
+    }
+
     static Object cloneScope(Object captured) {
         if (!(captured instanceof AtomicInteger[] a)) {
             return captured;
@@ -1067,6 +1103,9 @@ final class ForcedWinEngine {
     }
 
     private List<Step> dfs0(Node node, int depth) {
+        if (lim.order != null) {
+            return dfs0Ordered(node, depth); // R3-3
+        }
         if (out() || depth >= lim.depth) {
             return null;
         }
@@ -1087,13 +1126,15 @@ final class ForcedWinEngine {
             // solver-gaps-1015: the branching cap counts distinct moves only; the forced-answer variants of a move (its
             // picks, its trigger targets) have their own cap and no longer crowd the other moves out (Natural Order's
             // variants used every branch, so casting Llanowar Elves first was never tried)
-            if (out() || !variants.contains(mv) && tried >= lim.branching) {
+            // R3-4 (a): an X variant (xValue >= 0, engineX only) is a variant of its move, like a forced pick
+            final boolean variant = variants.contains(mv) || mv.xValue >= 0;
+            if (out() || !variant && tried >= lim.branching) {
                 if (out()) {
                     break;
                 }
                 continue;
             }
-            if (!variants.contains(mv)) {
+            if (!variant) {
                 tried++;
             }
             final Applied a;
@@ -1174,99 +1215,297 @@ final class ForcedWinEngine {
             if (a.child == null) {
                 continue;
             }
-            a.child.path.addAll(node.path);
-            a.child.path.add(mv);
-            a.child.passed = node.passed || mv.pass;
-            a.child.loopsDone = node.loopsDone; // R2-3 (loopMacro only reads it)
-            if (lim.cycles) {
-                // search-bones-1015 (c): the progress table instead of the exact-key set, and loops fast-forwarded
-                a.child.parent = node;
-                a.child.pv = progress(a.child.g, a.child.me);
-                if (lim.loopMacro) {
-                    // R2-3: a loop by state recurrence (any body up to loopWindow), N chosen by the search
-                    a.child.mk = macroKey(a.child.g, a.child.me);
-                    final long[] ceil = ceilings(node.g, node.me);
-                    List<Step> mb = macroBody(a.child, ceil);
-                    if (mb != null && done(node, mb)) {
-                        mb = null; // review #152-6: this path already fast-forwarded the same loop (N = 1 continues)
-                    }
-                    if (mb != null) {
-                        a.child.loopsDone = new HashSet<>(node.loopsDone == null ? Set.of() : node.loopsDone);
-                        a.child.loopsDone.add(bodyKey(mb));
-                        final Object fw = macroForward(a.child, mb, ceil);
-                        if (fw instanceof List<?> l && !l.isEmpty() && l.get(0) instanceof Step) {
-                            @SuppressWarnings("unchecked")
-                            final List<Step> win = (List<Step>) fw;
-                            return win;
-                        }
-                        @SuppressWarnings("unchecked")
-                        final List<Node> cps = (List<Node>) fw;
-                        long cpsCards = 0;
-                        for (Node cp : cps) {
-                            cp.loopsDone = a.child.loopsDone;
-                            cpsCards += cp.cards;
-                        }
-                        for (Node cp : cps) {
-                            if (out()) {
-                                break;
-                            }
-                            if (seenDominated(cp)) {
-                                st.pruned++;
-                                continue;
-                            }
-                            // review #152-3: the DFS child and the other checkpoints stay alive while this one is searched
-                            final long held = (cp.g != a.child.g ? a.child.cards : 0) + cpsCards - cp.cards;
-                            pathCards += held;
-                            final List<Step> r;
-                            try {
-                                r = dfs(cp, depth + 1);
-                            } finally {
-                                pathCards -= held;
-                            }
-                            if (r != null) {
-                                return r;
-                            }
-                        }
-                        // N = 1 (the child itself) is searched below like any child
-                    }
+            final List<Step> r = descend(node, mv, a, depth);
+            if (r != null) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * R3-3 (engineOrder): as {@link #dfs0}, but the node's candidates (up to orderCap distinct moves and their variants)
+     * are applied first; a win returns at once; the children are then searched in the order of one batched value pass
+     * (Forge's move order on ties or a failed pass) and the branching cap counts distinct moves in that order. Children
+     * past the cap are released before the descent; the kept ones count in the path-card guard while pending.
+     */
+    private List<Step> dfs0Ordered(Node node, int depth) {
+        if (out() || depth >= lim.depth) {
+            return null;
+        }
+        st.nodes++;
+        forge.util.IdScope.install(cloneScope(node.ids));
+        LookaheadSearch.givePriority(node.g.getPhaseHandler(), node.me);
+        final List<Step> moves = moves(node);
+        if (TRACE) {
+            ForcedWinSolver.receipt("FW_ENGINE node(ordered) depth=" + depth + " path=" + node.path + " moves=" + moves);
+        }
+        final Set<Step> variants = new HashSet<>();
+        final java.util.Map<Step, Applied> pre = new java.util.IdentityHashMap<>();
+        final java.util.Map<Step, Step> baseOf = new java.util.IdentityHashMap<>();
+        final List<Step> kidMoves = new ArrayList<>();
+        final List<Applied> kids = new ArrayList<>();
+        int distinct = 0;
+        for (int mi = 0; mi < moves.size(); mi++) {
+            if (out()) {
+                break;
+            }
+            final Step mv = moves.get(mi);
+            final boolean variant = variants.contains(mv) || mv.xValue >= 0;
+            if (!variant && distinct >= lim.orderCap) {
+                continue;
+            }
+            if (!variant) {
+                distinct++;
+                baseOf.put(mv, mv);
+            } else if (!baseOf.containsKey(mv)) {
+                baseOf.put(mv, mv); // an X variant: its own entry (it does not count as a distinct move below either)
+            }
+            final Applied a;
+            if (pre.containsKey(mv)) {
+                a = pre.remove(mv);
+            } else {
+                st.moves++;
+                a = apply(node, mv);
+            }
+            if (a == null) {
+                continue;
+            }
+            if (a.rec != null) {
+                if (a.rec.miss && !a.won) {
+                    continue;
                 }
-                final List<Step> body = loopBody(a.child);
-                if (body != null) {
-                    final Forward fw = fastForward(a.child, body);
-                    if (fw.win != null) {
-                        return fw.win;
+                mv.cacPlayed = new ArrayList<>(a.rec.played);
+            }
+            final int before = moves.size();
+            if (!a.won && (a.rec != null || lim.pay)) {
+                int at = mi + 1;
+                if (a.rec != null) {
+                    at = expandCac(node, mv, a.rec, moves, at, variants, pre);
+                }
+                if (lim.pay && mv.payFloats == null && (mv.cac == null || mv.cac.isEmpty())) {
+                    expandPay(node, mv, a, moves, at, variants, pre);
+                }
+            }
+            if (mv.pickName == null && !a.pickCandidates.isEmpty()) {
+                int k = 0;
+                for (String name : a.pickCandidates) {
+                    if (k++ >= lim.targetVariants) {
+                        break;
                     }
-                    if (!seenDominated(fw.node)) {
-                        // review #11: while the REPEAT node is searched, its parent link keeps the DFS child's copy too
-                        final long held = fw.node.g != a.child.g ? a.child.cards : 0;
+                    final Step v = mv.copy();
+                    v.pickName = name;
+                    moves.add(mi + k, v);
+                    variants.add(v);
+                }
+            }
+            if (mv.triggerRef == null && !a.triggerCandidates.isEmpty()) {
+                int k = 0;
+                for (String ref : a.triggerCandidates) {
+                    if (k++ >= lim.targetVariants) {
+                        break;
+                    }
+                    final Step v = mv.copy();
+                    v.triggerRef = ref;
+                    moves.add(mi + k, v);
+                    variants.add(v);
+                }
+            }
+            for (int vi = mi + 1; vi < moves.size() && vi <= mi + (moves.size() - before); vi++) {
+                final Step vs = moves.get(vi);
+                if (variants.contains(vs) && !baseOf.containsKey(vs)) {
+                    baseOf.put(vs, baseOf.get(mv)); // this move's new variants share its branch
+                }
+            }
+            if (a.won) {
+                final List<Step> path = new ArrayList<>(node.path);
+                path.add(mv);
+                return path;
+            }
+            if (collect != null && a.child != null && !node.passed && !mv.pass && a.child.turn == startTurn) {
+                try {
+                    final int score = evaluator.getStaticScore(a.child.g, a.child.me).value;
+                    final List<Step> path = new ArrayList<>(node.path);
+                    path.add(mv);
+                    collect.add(new Cand(path, score, a.key));
+                    if (collect.size() > 4 * keep) {
+                        collect.sort((x, y) -> Integer.compare(y.score, x.score));
+                        collect.subList(keep, collect.size()).clear();
+                    }
+                } catch (RuntimeException ex) {
+                    // no value
+                }
+            }
+            if (a.child != null) {
+                kidMoves.add(mv);
+                kids.add(a);
+            }
+        }
+        for (Applied left : pre.values()) {
+            left.child = null; // ranked variants never reached (the node was cut): released
+        }
+        // one batched value pass over the children (Forge's order kept on ties and on a failed pass)
+        final Integer[] idx = new Integer[kids.size()];
+        for (int i = 0; i < idx.length; i++) {
+            idx[i] = i;
+        }
+        double[] v = null;
+        if (kids.size() > 1) {
+            final Object prevIds = forge.util.IdScope.capture();
+            try {
+                final List<Object> payloads = new ArrayList<>();
+                for (Applied k : kids) {
+                    forge.util.IdScope.install(cloneScope(k.child.ids));
+                    payloads.add(lim.order.capture(lim.order.onCopy(k.child.g, k.child.me), k.child.g, k.child.me));
+                }
+                v = lim.order.values(payloads);
+            } catch (RuntimeException ex) {
+                v = null;
+            } finally {
+                forge.util.IdScope.install(prevIds);
+            }
+            if (v == null || v.length != kids.size()) {
+                st.orderFails++;
+                v = null;
+            } else {
+                st.ordered++;
+                final double[] vv = v;
+                java.util.Arrays.sort(idx, (x, y) -> Double.compare(vv[y], vv[x])); // stable: ties keep Forge's order
+            }
+        }
+        if (TRACE) {
+            final StringBuilder sb = new StringBuilder();
+            for (Integer i : idx) {
+                sb.append(kidMoves.get(i)).append('=').append(v == null ? "?" : String.format("%.3f", v[i])).append(' ');
+            }
+            ForcedWinSolver.receipt("FW_ENGINE   order " + sb);
+        }
+        // the branching cap over distinct moves, in value order; the children past it are released now
+        final List<Integer> keepIdx = new ArrayList<>();
+        final Set<Step> bases = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        long pending = 0;
+        for (Integer i : idx) {
+            final Step base = baseOf.getOrDefault(kidMoves.get(i), kidMoves.get(i));
+            if (!bases.contains(base) && bases.size() >= lim.branching) {
+                kids.get(i).child = null;
+                continue;
+            }
+            bases.add(base);
+            keepIdx.add(i);
+            pending += kids.get(i).child.cards;
+        }
+        for (Integer i : keepIdx) {
+            final Applied a = kids.get(i);
+            if (out()) {
+                a.child = null;
+                continue;
+            }
+            pending -= a.child.cards;
+            pathCards += pending; // the siblings still waiting stay alive while this child is searched
+            final List<Step> r;
+            try {
+                r = descend(node, kidMoves.get(i), a, depth);
+            } finally {
+                pathCards -= pending;
+            }
+            a.child = null;
+            if (r != null) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    /** A move's child (not a win): its path, the progress table and loops (cycles, loopMacro), then the DFS below it. */
+    private List<Step> descend(Node node, Step mv, Applied a, int depth) {
+        a.child.path.addAll(node.path);
+        a.child.path.add(mv);
+        a.child.passed = node.passed || mv.pass;
+        a.child.loopsDone = node.loopsDone; // R2-3 (loopMacro only reads it)
+        if (lim.cycles) {
+            // search-bones-1015 (c): the progress table instead of the exact-key set, and loops fast-forwarded
+            a.child.parent = node;
+            a.child.pv = progress(a.child.g, a.child.me);
+            if (lim.loopMacro) {
+                // R2-3: a loop by state recurrence (any body up to loopWindow), N chosen by the search
+                a.child.mk = macroKey(a.child.g, a.child.me);
+                final long[] ceil = ceilings(node.g, node.me);
+                List<Step> mb = macroBody(a.child, ceil);
+                if (mb != null && done(node, mb)) {
+                    mb = null; // review #152-6: this path already fast-forwarded the same loop (N = 1 continues)
+                }
+                if (mb != null) {
+                    a.child.loopsDone = new HashSet<>(node.loopsDone == null ? Set.of() : node.loopsDone);
+                    a.child.loopsDone.add(bodyKey(mb));
+                    final Object fw = macroForward(a.child, mb, ceil);
+                    if (fw instanceof List<?> l && !l.isEmpty() && l.get(0) instanceof Step) {
+                        @SuppressWarnings("unchecked")
+                        final List<Step> win = (List<Step>) fw;
+                        return win;
+                    }
+                    @SuppressWarnings("unchecked")
+                    final List<Node> cps = (List<Node>) fw;
+                    long cpsCards = 0;
+                    for (Node cp : cps) {
+                        cp.loopsDone = a.child.loopsDone;
+                        cpsCards += cp.cards;
+                    }
+                    for (Node cp : cps) {
+                        if (out()) {
+                            break;
+                        }
+                        if (seenDominated(cp)) {
+                            st.pruned++;
+                            continue;
+                        }
+                        // review #152-3: the DFS child and the other checkpoints stay alive while this one is searched
+                        final long held = (cp.g != a.child.g ? a.child.cards : 0) + cpsCards - cp.cards;
                         pathCards += held;
                         final List<Step> r;
                         try {
-                            r = dfs(fw.node, depth + 1);
+                            r = dfs(cp, depth + 1);
                         } finally {
                             pathCards -= held;
                         }
                         if (r != null) {
                             return r;
                         }
-                    } else {
-                        st.pruned++;
                     }
-                    continue;
+                    // N = 1 (the child itself) is searched below like any child
                 }
-                if (seenDominated(a.child)) {
+            }
+            final List<Step> body = loopBody(a.child);
+            if (body != null) {
+                final Forward fw = fastForward(a.child, body);
+                if (fw.win != null) {
+                    return fw.win;
+                }
+                if (!seenDominated(fw.node)) {
+                    // review #11: while the REPEAT node is searched, its parent link keeps the DFS child's copy too
+                    final long held = fw.node.g != a.child.g ? a.child.cards : 0;
+                    pathCards += held;
+                    final List<Step> r;
+                    try {
+                        r = dfs(fw.node, depth + 1);
+                    } finally {
+                        pathCards -= held;
+                    }
+                    if (r != null) {
+                        return r;
+                    }
+                } else {
                     st.pruned++;
-                    continue;
                 }
-            } else if (!seen.add(a.key)) {
-                continue;
+                return null;
             }
-            final List<Step> r = dfs(a.child, depth + 1);
-            if (r != null) {
-                return r;
+            if (seenDominated(a.child)) {
+                st.pruned++;
+                return null;
             }
+        } else if (!seen.add(a.key)) {
+            return null;
         }
-        return null;
+        return dfs(a.child, depth + 1);
     }
 
     /** Our legal moves at a node, best first: the previous move's ability, permanents' abilities, spells, lands, attack. */
@@ -1411,7 +1650,9 @@ final class ForcedWinEngine {
         } else if (!node.passed && lim.passTurn) {
             out.add(Step.PASS);
         }
-        if (g.getPhaseHandler().is(PhaseType.MAIN1) && canAttack(me)) {
+        // R3-5: a root outside our turn (a response at their main phase) never attacks there (off: the root is ours)
+        if (g.getPhaseHandler().is(PhaseType.MAIN1) && canAttack(me)
+                && (!(lim.stack || lim.anyWindow) || g.getPhaseHandler().isPlayerTurn(me))) {
             final Step atk = Step.engine(AbilKind.ATTACK, -1, "attack", "attack", "", false);
             if (lethalOnBoard(me)) {
                 out.add(0, atk);
@@ -1495,8 +1736,59 @@ final class ForcedWinEngine {
         return power >= opp.getLife();
     }
 
-    /** One step per target variant of a legal ability (Forge AI's targets, then a few of our own permanents). */
+    /** One step per target variant of a legal ability; with {@link Limits#xChoice} also its X variants (R3-4 a). */
     private List<Step> variants(Game g, Player me, Card c, SpellAbility sa0, String desc, String costKey) {
+        final List<Step> out = variants0(g, me, c, sa0, desc, costKey);
+        if (!lim.xChoice || out.isEmpty()) {
+            return out;
+        }
+        final int max;
+        try {
+            final forge.game.cost.Cost pc = sa0.getPayCosts();
+            if (pc == null || !pc.hasManaCost() || pc.getTotalMana().countX() == 0) {
+                return out;
+            }
+            final SpellAbility sa = sa0.copy(me);
+            sa.setActivatingPlayer(me);
+            max = forge.ai.ComputerUtilMana.determineLeftoverMana(sa, me, false);
+        } catch (RuntimeException e) {
+            return out;
+        }
+        final List<Step> all = new ArrayList<>(out);
+        for (Step base : out) {
+            for (int x : xValues(max, lim.xVariants)) {
+                final Step v = base.copy();
+                v.xValue = x;
+                all.add(v);
+            }
+        }
+        return all;
+    }
+
+    /**
+     * R3-4 (a): the X values searched for an X cost our mana pays up to {@code max}: every value when there are at most
+     * {@code k}, else max, max-1, 3max/4, max/2, max/4, 2, 1, 0 (largest first, deduped).
+     */
+    static List<Integer> xValues(int max, int k) {
+        final List<Integer> xs = new ArrayList<>();
+        if (max < 0) {
+            return xs;
+        }
+        if (max + 1 <= k) {
+            for (int x = max; x >= 0; x--) {
+                xs.add(x);
+            }
+            return xs;
+        }
+        for (int x : new int[] {max, max - 1, 3 * max / 4, max / 2, max / 4, 2, 1, 0}) {
+            if (x >= 0 && x <= max && !xs.contains(x)) {
+                xs.add(x);
+            }
+        }
+        return xs;
+    }
+
+    private List<Step> variants0(Game g, Player me, Card c, SpellAbility sa0, String desc, String costKey) {
         final List<Step> out = new ArrayList<>();
         final SpellAbility sa = sa0.copy(me);
         sa.setActivatingPlayer(me);
@@ -1528,12 +1820,20 @@ final class ForcedWinEngine {
         if (slot != null && firstTargeting(sa) == slot) {
             int n = 0;
             final List<GameObject> cands = new ArrayList<>();
-            for (Card p : me.getCardsIn(ZoneType.Battlefield)) {
-                cands.add(p);
+            if (lim.order != null) {
+                // R3-3: with value-ordered moves every legal single target is a candidate (players, then every
+                // permanent), up to orderCap; the value pass orders them, not a fixed few of our own permanents
+                cands.addAll(g.getPlayers());
+                cands.addAll(g.getCardsIn(ZoneType.Battlefield));
+            } else {
+                for (Card p : me.getCardsIn(ZoneType.Battlefield)) {
+                    cands.add(p);
+                }
+                cands.addAll(g.getPlayers());
             }
-            cands.addAll(g.getPlayers());
+            final int cap = lim.order != null ? lim.orderCap : lim.targetVariants;
             for (GameObject o : cands) {
-                if (n >= lim.targetVariants) {
+                if (n >= cap) {
                     break;
                 }
                 if (!slot.canTarget(o)) {
@@ -1963,6 +2263,7 @@ final class ForcedWinEngine {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
                 copier.setCopyFidelity(1); // storm count, per-turn records
+            copyStackIf(copier, node.g, lim.stack); // R3-5
             final Game g = copier.makeCopy();
             final Player me = (Player) copier.find(node.me);
             st.copies++;
@@ -1972,6 +2273,10 @@ final class ForcedWinEngine {
             if (lim.anyWindow && !(g.getPhaseHandler().isPlayerTurn(me) && (g.getPhaseHandler().is(PhaseType.MAIN1)
                     || g.getPhaseHandler().is(PhaseType.MAIN2)))) {
                 ai.restPhase = g.getPhaseHandler().getPhase(); // R2-4 (c): rest again in the root's window
+            }
+            if (lim.stack && !g.getStack().isEmpty()) {
+                ai.restPhase = g.getPhaseHandler().getPhase(); // R3-5: a response: rest in the root's turn and phase
+                ai.restOnTheirs = true;
             }
             if (lim.cac) {
                 ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap); // labeller-v2 (a)
@@ -2011,6 +2316,14 @@ final class ForcedWinEngine {
             child.g = g;
             child.cards = copyCards;
             child.me = me;
+            if (ai.snapshot != null) {
+                // R3-5: rested at our priority with the opponent's item on the stack: the node is the copy taken there
+                // (our pass that followed would resolve it), a fresh copy as the root is
+                child.g = ai.snapshot;
+                child.me = ai.snapshotMe;
+                st.copies++;
+                st.cards += cardCount(child.g);
+            }
             child.turn = ph.getTurn();
             child.ids = cloneScope(forge.util.IdScope.capture());
             a.child = child;
@@ -2046,6 +2359,11 @@ final class ForcedWinEngine {
         final int fromTurn;
         /** R2-4 (c): the root's phase when it is not our main phase (null = rest only at our main phase). */
         PhaseType restPhase;
+        /** R3-5: also rest at our priority in the root's window when the top of the stack is not ours (a response). */
+        boolean restOnTheirs;
+        /** R3-5: the copy taken at that rest (null = none). */
+        Game snapshot;
+        Player snapshotMe;
 
         MoveAi(Game g, Player p, forge.LobbyPlayer lp, Step move, int fromTurn) {
             super(g, p, lp);
@@ -2262,6 +2580,10 @@ final class ForcedWinEngine {
                 return capped(List.of(sa));
             }
             final PhaseHandler ph = g.getPhaseHandler();
+            if (TRACE && restOnTheirs) {
+                ForcedWinSolver.receipt("FW_ENGINE     moveai t" + ph.getTurn() + " " + ph.getPhase() + " stack=" + g.getStack().size()
+                        + (g.getStack().isEmpty() ? "" : " top=" + g.getStack().peek().getActivatingPlayer()));
+            }
             if (g.getStack().isEmpty() && ph.isPlayerTurn(getPlayer())
                     && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))
                     && (!move.pass || ph.getTurn() > fromTurn && ph.is(PhaseType.MAIN1))) {
@@ -2269,6 +2591,16 @@ final class ForcedWinEngine {
             } else if (restPhase != null && !move.pass && g.getStack().isEmpty() && ph.getTurn() == fromTurn
                     && ph.is(restPhase)) {
                 rest = true; // R2-4 (c): our priority again in the root's window, the stack empty
+            } else if (restOnTheirs && !move.pass && !g.getStack().isEmpty() && ph.getTurn() == fromTurn && ph.is(restPhase)
+                    && g.getStack().peek().getActivatingPlayer() != getPlayer()) {
+                // R3-5: our priority again in the root's window, the opponent's item on top: the node is a copy taken
+                // here, before this pass lets their item resolve
+                final GameCopier rc = new GameCopier(g, true);
+                rc.setCopyFidelity(1);
+                copyStackIf(rc, g, true);
+                snapshot = rc.makeCopy();
+                snapshotMe = (Player) rc.find(getPlayer());
+                rest = true;
             }
             return null;
         }

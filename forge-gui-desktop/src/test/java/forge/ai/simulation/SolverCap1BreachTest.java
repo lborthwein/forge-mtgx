@@ -63,6 +63,9 @@ p1sideboard=
         lim.cycles = true;
         lim.passTurn = true;
         lim.loopMacro = Boolean.getBoolean("sc1.loopMacro");
+        // round 3 (R3-3, R3-4 a): -Dsc1.order=static orders the engine's moves by Forge's static value; -Dsc1.x=true
+        lim.order = "static".equals(System.getProperty("sc1.order")) ? StaticValuer.INSTANCE : null;
+        lim.xChoice = Boolean.getBoolean("sc1.x");
         return lim;
     }
 
