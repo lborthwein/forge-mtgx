@@ -1167,6 +1167,11 @@ public final class ChooseACard implements CacHook {
         castPlan = best;
         castCostIdx = 0;
         castPhyIdx = 0;
+        if (best.tgtChain >= 0 && !retarget(sa, best.tgtChain, best.tgt, live)) {
+            count("liveMiss");
+            castPlan = null;
+            return def;
+        }
         if (best.floats == null) return def;
         final List<SpellAbility> out = new ArrayList<>();
         for (int[] fl : best.floats) {
@@ -2760,7 +2765,12 @@ public final class ChooseACard implements CacHook {
         if (a.lifePips > 0) need += a.lifePips;
         if (a.rec == null && used[0] < need) return "costNotAsked";
         if (sc.miss) return "planMiss:" + sc.missWhy;
-        a.key = castKey(g, cm);
+        // the cast's targets are part of its result (they are not on the board yet): Brain Freeze on us vs on them
+        final List<String> tk = new ArrayList<>();
+        for (SpellAbility x = cs; x != null; x = x.getSubAbility()) {
+            if (x.usesTargeting()) for (forge.game.GameObject o : x.getTargets()) tk.add(targetKey(o));
+        }
+        a.key = castKey(g, cm) + (tk.isEmpty() ? "" : "|tgt:" + tk);
         return null;
     }
 
@@ -2808,7 +2818,7 @@ public final class ChooseACard implements CacHook {
             final Set<String> seen = new HashSet<>();
             seen.add(targetKey(cur));
             int total = 0;
-            final List<forge.game.GameEntity> cands = new ArrayList<>(x.getTargetRestrictions().getAllCandidates(x, true));
+            final List<forge.game.GameEntity> cands = new ArrayList<>(x.getTargetRestrictions().getAllCandidates(x, false));
             cands.sort((p, q) -> Integer.compare(code(p), code(q)));
             for (forge.game.GameEntity e : cands) {
                 if (!(e instanceof Card) && !(e instanceof Player) || !x.canTarget(e)) continue;
@@ -2872,7 +2882,7 @@ public final class ChooseACard implements CacHook {
         final Set<String> seen = new HashSet<>();
         seen.add(targetKey(cur));
         int total = 0;
-        final List<forge.game.GameEntity> cands = new ArrayList<>(x.getTargetRestrictions().getAllCandidates(x, true));
+        final List<forge.game.GameEntity> cands = new ArrayList<>(x.getTargetRestrictions().getAllCandidates(x, false));
         cands.sort((p, q) -> Integer.compare(code(p), code(q)));
         for (forge.game.GameEntity e : cands) {
             if (!(e instanceof Card) && !(e instanceof Player) || !x.canTarget(e)) continue;
