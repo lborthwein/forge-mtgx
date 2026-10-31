@@ -521,7 +521,7 @@ public class InlineChoicesTest extends SimulationTest {
                 g.getPlayers().get(0)).getId();
     }
 
-    static final String ALL = "PAYMENT,COLOR,COST_CARDS,LIFE,SACRIFICE,ORDER_TRIGGERS,PAY_TO_PREVENT";
+    static final String ALL = "PAYMENT,COLOR,COST_CARDS,LIFE,SACRIFICE,ORDER_TRIGGERS,PAY_TO_PREVENT,TARGET";
 
     /** Play {@code play} with no hook and with a SHADOW hook of every new kind: nothing live may differ. */
     void identity(final String name, final java.util.function.Supplier<Game> board, final Play play) {
@@ -586,5 +586,115 @@ public class InlineChoicesTest extends SimulationTest {
             loopTurn(g);
         });
         identity("payToPrevent", this::spikeBoard, (g, c, cac) -> g.getStack().resolveStack());
+        identity("target", this::freezeBoard, (g, c, cac) -> {
+            playAll(c, hooked(c, cac, freeze(g)));
+            resolveAll(g);
+        });
+        identity("triggerTarget", this::witnessBoard, (g, c, cac) -> {
+            c.playChosenSpellAbility(spell(g.getPlayers().get(0), "Eternal Witness"));
+            resolveAll(g);
+        });
+    }
+
+    // ------------------------------------------------------------------------------------------------ TARGET (r3-target-choices-1030)
+
+    /**
+     * Brain Freeze at storm 1 (Ornithopter cast first) with Thassa's Oracle in hand and 6 cards left: milling ourselves
+     * moves toward the Oracle (the value falls with our library). The storm copy settles on the copy (the storm-trigger
+     * fix) and chooses its own new target as Forge AI does. Forge AI's own target (canPlaySa, as when it chooses the
+     * play) is the opponent.
+     */
+    private Game freezeBoard() {
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
+        for (int i = 0; i < 4; i++) addCard("Island", a);
+        addCardToZone("Ornithopter", a, ZoneType.Hand);
+        addCardToZone("Brain Freeze", a, ZoneType.Hand);
+        addCardToZone("Thassa's Oracle", a, ZoneType.Hand);
+        for (int i = 0; i < 6; i++) addCardToZone("Plains", a, ZoneType.Library);
+        for (int i = 0; i < 20; i++) addCardToZone("Plains", b, ZoneType.Library);
+        final PlayerControllerAi c = seat(g, 0);
+        c.playChosenSpellAbility(spell(a, "Ornithopter"));
+        resolveAll(g);
+        AssertJUnit.assertEquals(1, a.getSpellsCastThisTurn());
+        return g;
+    }
+
+    /**
+     * Brain Freeze with Forge AI's own targets: its play decision (canPlaySa) when it would cast it, else its targeting
+     * for the spell as a must-target ability (SpellAbilityAi.doTrigger mandatory), the choice Forge makes when a
+     * line casts it.
+     */
+    static SpellAbility freeze(final Game g) {
+        final Player a = g.getPlayers().get(0);
+        final SpellAbility sa = spell(a, "Brain Freeze");
+        ((PlayerControllerAi) a.getController()).getAi().canPlaySa(sa);
+        if (sa.getTargets().isEmpty()) {
+            forge.ai.SpellApiToAi.Converter.get(sa).doTrigger(a, sa, true);
+        }
+        return sa;
+    }
+
+    static int ownLibrary(final Game g) {
+        return g.getRegisteredPlayers().get(0).getCardsIn(ZoneType.Library).size();
+    }
+
+    @Test
+    public void brainFreezeOnOurselvesSetsUpTheOracle() {
+        final Game g0 = freezeBoard();
+        final PlayerControllerAi c0 = (PlayerControllerAi) g0.getPlayers().get(0).getController();
+        final SpellAbility f0 = freeze(g0);
+        AssertJUnit.assertEquals("precondition: Forge AI targets one player", 1, f0.getTargets().size());
+        c0.playChosenSpellAbility(f0);
+        resolveAll(g0);
+        AssertJUnit.assertEquals("precondition: Forge AI mills the opponent (storm 1: two Brain Freezes)", 6, ownLibrary(g0));
+
+        final Game g = freezeBoard();
+        final PlayerControllerAi c = (PlayerControllerAi) g.getPlayers().get(0).getController();
+        final ChooseACard cac = hook(c, "TARGET", (x, p) -> inHand(p, "Thassa's Oracle")
+                ? 0.9 - 0.1 * p.getCardsIn(ZoneType.Library).size() : 0.0);
+        playAll(c, cac.priority(c, Collections.singletonList(freeze(g))));
+        resolveAll(g);
+        // the spell itself mills us (3); its storm copy's new target stays Forge AI's choice (stated gap in #151),
+        // which here is the opponent
+        AssertJUnit.assertEquals(cac.log + " " + cac.counts, 3, ownLibrary(g));
+        AssertJUnit.assertEquals("TARGET", kindOf(cac, 0));
+        AssertJUnit.assertEquals("departed", cac.log.get(0).getAsJsonObject().get("outcome").getAsString());
+    }
+
+    /** Eternal Witness with Time Warp and a Forest in the graveyard: the value wants the card Forge AI does not return. */
+    private Game witnessBoard() {
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
+        for (int i = 0; i < 3; i++) addCard("Forest", a);
+        addCardToZone("Eternal Witness", a, ZoneType.Hand);
+        addCardToZone("Time Warp", a, ZoneType.Graveyard);
+        addCardToZone("Forest", a, ZoneType.Graveyard);
+        for (int i = 0; i < 6; i++) addCardToZone("Plains", a, ZoneType.Library);
+        for (int i = 0; i < 10; i++) addCardToZone("Plains", b, ZoneType.Library);
+        return g;
+    }
+
+    @Test
+    public void witnessReturnsTheCardTheLineNeeds() {
+        final Game g0 = witnessBoard();
+        final PlayerControllerAi c0 = seat(g0, 0);
+        c0.playChosenSpellAbility(spell(g0.getPlayers().get(0), "Eternal Witness"));
+        resolveAll(g0);
+        final Player a0 = g0.getRegisteredPlayers().get(0);
+        final String forgeTook = inHand(a0, "Time Warp") ? "Time Warp" : "Forest";
+        final String want = forgeTook.equals("Time Warp") ? "Forest" : "Time Warp";
+        AssertJUnit.assertTrue("precondition: Forge AI returned one card", inHand(a0, forgeTook));
+
+        final Game g = witnessBoard();
+        final PlayerControllerAi c = seat(g, 0);
+        final ChooseACard cac = hook(c, "TARGET", (x, p) -> inHand(p, want) ? 0.9 : 0.1);
+        c.playChosenSpellAbility(spell(g.getPlayers().get(0), "Eternal Witness"));
+        resolveAll(g);
+        AssertJUnit.assertTrue(cac.log + " " + cac.counts + " forge took " + forgeTook,
+                inHand(g.getRegisteredPlayers().get(0), want));
+        AssertJUnit.assertEquals("TARGET", kindOf(cac, 0));
     }
 }

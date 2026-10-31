@@ -1527,9 +1527,15 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        final boolean lone = activePlayerSAs != null && activePlayerSAs.size() == 1;
         for (final SpellAbility sa : orderSimultaneousSa(activePlayerSAs)) {
             if (sa.isTrigger() && !sa.isCopied()) {
                 if (prepareSingleSa(sa.getHostCard(), sa, true)) {
+                    // r3-target-choices-1030: a lone trigger's targets, as Forge AI set them, go to the choose-a-card
+                    // hook, which may replace them in place (no hook: unchanged)
+                    if (lone && cacHook != null && !cacSuppressed && sa.usesTargeting()) {
+                        cacHook.triggerTargets(this, sa);
+                    }
                     ComputerUtil.playStack(sa, player, getGame());
                 }
             } else {

@@ -118,4 +118,8 @@ public interface CacHook {
     default byte chooseColor(PlayerControllerAi c, SpellAbility sa, forge.card.ColorSet colors, byte def) {
         return def;
     }
+
+    /** r3-target-choices-1030: a lone trigger about to go on the stack with Forge AI's targets; may retarget in place. */
+    default void triggerTargets(PlayerControllerAi c, SpellAbility sa) {
+    }
 }

@@ -51,7 +51,9 @@ public final class ChooseACard implements CacHook {
     public enum Kind {
         SEARCH, MULTI, PILE, DIG, DIGPICK, DISCARD, SCRY, SURVEIL, ORDER, MULLIGAN, LAND, RETURN_COST,
         // r3-inline-choices-1030 (FLAG-R3-5): opt-in by name in "kinds"; never on by default (LEGACY below)
-        PAYMENT, COLOR, COST_CARDS, LIFE, SACRIFICE, ORDER_TRIGGERS, PAY_TO_PREVENT
+        PAYMENT, COLOR, COST_CARDS, LIFE, SACRIFICE, ORDER_TRIGGERS, PAY_TO_PREVENT,
+        // r3-target-choices-1030
+        TARGET
     }
 
     /** The kinds a config without "kinds" turns on: #143's, so an old config means what it meant. */
@@ -59,7 +61,7 @@ public final class ChooseACard implements CacHook {
             Kind.RETURN_COST));
     /** r3-inline-choices-1030: the kinds decided at the priority of a cast (on a copy of the position before it). */
     static final Set<Kind> CAST_KINDS = java.util.EnumSet.of(Kind.PAYMENT, Kind.COLOR, Kind.COST_CARDS, Kind.LIFE,
-            Kind.SACRIFICE);
+            Kind.SACRIFICE, Kind.TARGET);
 
     // ------------------------------------------------------------------------------------------------ config
 
@@ -318,6 +320,8 @@ public final class ChooseACard implements CacHook {
         boolean manaAlone;
         /** The kind this answer varies (the log's "sub"). */
         Kind sub;
+        /** TARGET: the chain index of the targeting ability and its one target (card id, or -(player index + 1)). */
+        int tgtChain = -1, tgt = Integer.MIN_VALUE;
         /** A cast probe's recorded asks (record mode only). */
         CastRecord rec;
     }
@@ -1147,6 +1151,9 @@ public final class ChooseACard implements CacHook {
             }
             d.applied--; // the record copy is not a candidate
         }
+        if (cfg.kinds.contains(Kind.TARGET)) {
+            n += targetAnswers(sa, f, answers);
+        }
         if (cfg.kinds.contains(Kind.PAYMENT) || cfg.kinds.contains(Kind.COLOR)) {
             n += payAnswers(sa, f, answers);
         }
@@ -1160,6 +1167,11 @@ public final class ChooseACard implements CacHook {
         castPlan = best;
         castCostIdx = 0;
         castPhyIdx = 0;
+        if (best.tgtChain >= 0 && !retarget(sa, best.tgtChain, best.tgt, live)) {
+            count("liveMiss");
+            castPlan = null;
+            return def;
+        }
         liveFloats = best.floats; // built by scopedCast in the live id scope (a departure's floats are real plays)
         return def;
     }
@@ -2508,6 +2520,9 @@ public final class ChooseACard implements CacHook {
                 why = applyCast(g, cm, sc, a); // r3-inline-choices-1030
                 if (why != null) return null;
                 if (a.rec != null) return p; // a record of the asks only: never valued
+            } else if (ask.kind == Kind.TARGET) {
+                why = applyTriggerTarget(g, cm, a, ask);
+                if (why != null) return null;
             } else if (ask.kind == Kind.ORDER_TRIGGERS) {
                 sc.trigPlan = a.trigOrder;
                 why = applyOrder(g, cm, sc, a, ask);
@@ -2711,6 +2726,7 @@ public final class ChooseACard implements CacHook {
         final SpellAbility cs = all.get(a.castIndex);
         cs.setActivatingPlayer(cm);
         if (castAsk != null && !copyTargets(castAsk, cs, g)) return "targets";
+        if (a.tgtChain >= 0 && !retarget(cs, a.tgtChain, a.tgt, g)) return "retarget";
         final int before = g.getStack().size();
         if (a.floats != null) {
             for (int[] fl : a.floats) {
@@ -2777,13 +2793,143 @@ public final class ChooseACard implements CacHook {
         if (a.lifePips > 0) need += a.lifePips;
         if (a.rec == null && used[0] < need) return "costNotAsked";
         if (sc.miss) return "planMiss:" + sc.missWhy;
-        a.key = castKey(g, cm);
+        // the cast's targets are part of its result (they are not on the board yet): Brain Freeze on us vs on them
+        final List<String> tk = new ArrayList<>();
+        for (SpellAbility x = cs; x != null; x = x.getSubAbility()) {
+            if (x.usesTargeting()) for (forge.game.GameObject o : x.getTargets()) tk.add(targetKey(o));
+        }
+        a.key = castKey(g, cm) + (tk.isEmpty() ? "" : "|tgt:" + tk);
         return null;
     }
 
     /** The live cast whose copies are being applied (its targets), set around a cast decision's applies. */
     private SpellAbility castAsk = null;
     static final boolean DEBUG = Boolean.getBoolean("forge.cac.debug");
+
+    /** The entity a TARGET answer encodes, in {@code g}. */
+    private forge.game.GameObject entity(final int code, final Game g) {
+        if (code < 0) {
+            final int i = -code - 1;
+            return i < g.getRegisteredPlayers().size() ? g.getRegisteredPlayers().get(i) : null;
+        }
+        return g.findById(code);
+    }
+
+    private int code(final forge.game.GameObject o) {
+        if (o instanceof Player p) return -(live.getRegisteredPlayers().indexOf(p) + 1);
+        return o instanceof Card c ? c.getId() : Integer.MIN_VALUE;
+    }
+
+    /** Set the chain link's one target to the encoded entity (legal on {@code g}). */
+    private boolean retarget(final SpellAbility root, final int chain, final int code, final Game g) {
+        SpellAbility x = root;
+        for (int i = 0; i < chain && x != null; i++) x = x.getSubAbility();
+        final forge.game.GameObject o = entity(code, g);
+        if (x == null || o == null || !x.canTarget(o)) return false;
+        x.resetTargets();
+        x.getTargets().add(o);
+        return true;
+    }
+
+    /**
+     * TARGET answers: the first chain link that targets exactly one entity (as Forge AI chose it), every other legal
+     * candidate, deduped by the target's state (two untapped Islands are one answer; players by seat), capped.
+     */
+    private int targetAnswers(final SpellAbility sa, final Answer f, final List<Answer> answers) {
+        int chain = 0;
+        for (SpellAbility x = sa; x != null; x = x.getSubAbility(), chain++) {
+            if (!x.usesTargeting()) continue;
+            if (x.getTargets().size() != 1 || x.getTargetRestrictions() == null) return 0;
+            final forge.game.GameObject cur = x.getTargets().getFirstTargetedCard() != null ? x.getTargets().getFirstTargetedCard()
+                    : x.getTargets().getFirstTargetedPlayer();
+            if (cur == null) return 0;
+            final Set<String> seen = new HashSet<>();
+            seen.add(targetKey(cur));
+            int total = 0;
+            final List<forge.game.GameEntity> cands = new ArrayList<>(x.getTargetRestrictions().getAllCandidates(x, false));
+            cands.sort((p, q) -> Integer.compare(code(p), code(q)));
+            for (forge.game.GameEntity e : cands) {
+                if (!(e instanceof Card) && !(e instanceof Player) || !x.canTarget(e)) continue;
+                total++;
+                if (!seen.add(targetKey(e)) || answers.size() >= cfg.cap) continue;
+                final Answer a = new Answer();
+                a.castCard = f.castCard;
+                a.castIndex = f.castIndex;
+                a.tgtChain = chain;
+                a.tgt = code(e);
+                a.sub = Kind.TARGET;
+                a.desc.add("target:" + targetKey(e));
+                answers.add(a);
+            }
+            return total;
+        }
+        return 0;
+    }
+
+    static String targetKey(final Object o) {
+        if (o instanceof Player p) return "player:" + p.getName();
+        if (o instanceof Card c) return stateKey(c) + (c.getController() == null ? "" : "/" + c.getController().getName());
+        return String.valueOf(o);
+    }
+
+    /** TARGET (a lone trigger): Forge AI's targets are candidate 0; each other legal target is applied on a copy. */
+    @Override
+    public void triggerTargets(final PlayerControllerAi c, final SpellAbility sa) {
+        if (!mine(c) || !cfg.kinds.contains(Kind.TARGET) || !(sa instanceof forge.game.trigger.WrappedAbility w)
+                || tapedOn()) return;
+        if (live.getStack().hasSimultaneousStackEntries() || live.getStack().isResolving()) {
+            count("unsupported:targetPending");
+            return;
+        }
+        if (!live.getStack().isEmpty() && GameCopier.stackUnsupported(live, false) != null) {
+            count("unsupported:targetStack");
+            return;
+        }
+        final Ask ask = new Ask();
+        ask.kind = Kind.TARGET;
+        ask.method = "triggerTargets";
+        ask.copyStack = !live.getStack().isEmpty();
+        ask.trigs = List.of(sa);
+        ask.src = trigKey(sa);
+        final List<Answer> answers = new ArrayList<>();
+        final Answer f = new Answer();
+        f.forge = true;
+        f.sub = Kind.TARGET;
+        int chain = 0;
+        SpellAbility x = sa;
+        for (; x != null && !x.usesTargeting(); x = x.getSubAbility()) chain++;
+        if (x == null || x.getTargets().size() != 1) return;
+        final Object cur = x.getTargets().getFirstTargetedCard() != null ? x.getTargets().getFirstTargetedCard()
+                : x.getTargets().getFirstTargetedPlayer();
+        if (!(cur instanceof Card) && !(cur instanceof Player)) return;
+        f.tgtChain = chain;
+        f.tgt = code((forge.game.GameObject) cur);
+        f.key = "target:" + targetKey(cur);
+        f.desc.add("forge:" + targetKey(cur));
+        answers.add(f);
+        final Set<String> seen = new HashSet<>();
+        seen.add(targetKey(cur));
+        int total = 0;
+        final List<forge.game.GameEntity> cands = new ArrayList<>(x.getTargetRestrictions().getAllCandidates(x, false));
+        cands.sort((p, q) -> Integer.compare(code(p), code(q)));
+        for (forge.game.GameEntity e : cands) {
+            if (!(e instanceof Card) && !(e instanceof Player) || !x.canTarget(e)) continue;
+            total++;
+            if (!seen.add(targetKey(e)) || answers.size() >= cfg.cap) continue;
+            final Answer a = new Answer();
+            a.tgtChain = chain;
+            a.tgt = code(e);
+            a.sub = Kind.TARGET;
+            a.key = "target:" + targetKey(e);
+            a.desc.add("target:" + targetKey(e));
+            answers.add(a);
+        }
+        final Decision d = new Decision(ask, null);
+        d.nEnum = total;
+        final Answer best = decide(d, answers);
+        if (best == null || best.forge) return;
+        if (!retarget(sa, best.tgtChain, best.tgt, live)) count("liveMiss");
+    }
 
     /** Copy the live ability's targets (cards, players, stack entries; its sub-abilities too) onto {@code cs}. */
     private boolean copyTargets(final SpellAbility from, final SpellAbility cs, final Game g) {
@@ -2832,6 +2978,20 @@ public final class ChooseACard implements CacHook {
         }
         g.getStack().addAllTriggeredAbilitiesToStack();
         return sc.trigUsed ? null : "orderNotAsked";
+    }
+
+    /** r3-target-choices-1030: the lone trigger rebuilt on the copy with the answer's target, put on the stack. */
+    private String applyTriggerTarget(final Game g, final Player cm, final Answer a, final Ask ask) {
+        final forge.game.trigger.WrappedAbility w = (forge.game.trigger.WrappedAbility) ask.trigs.get(0);
+        final SpellAbility inner = LookaheadSearch.rebuildTrigger(g, cm, w);
+        final Map<forge.game.ability.AbilityKey, Object> m = mapTrig(w.getTriggeringObjects(), g);
+        if (m == null) return "trigObj";
+        inner.setTriggeringObjects(m);
+        final forge.game.trigger.WrappedAbility cw = new forge.game.trigger.WrappedAbility(inner.getTrigger(), inner, cm);
+        cw.setOptionalTrigger(w.isOptionalTrigger());
+        if (!retarget(cw, a.tgtChain, a.tgt, g)) return "retarget";
+        g.getStack().add(cw);
+        return g.getStack().isEmpty() ? "notOnStack" : null;
     }
 
     private static final Object NO_MAP = new Object();
