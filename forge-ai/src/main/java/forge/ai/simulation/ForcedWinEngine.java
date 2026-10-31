@@ -279,6 +279,8 @@ final class ForcedWinEngine {
          * also rests at our next priority in the root's turn and phase when the top of the stack is not ours.
          */
         boolean stack;
+        /** R3-4 (b) (false = off): an engine move's cost cards branch (COST kind, through MoveAi's own CacHook). */
+        boolean costChoice;
         /**
          * search-bones-1015: our library's known top in the root copy (pile memory); the rest is shuffled there. -1 (the
          * default) keeps the real order.
@@ -2281,6 +2283,14 @@ final class ForcedWinEngine {
             if (lim.cac) {
                 ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap); // labeller-v2 (a)
             }
+            if (lim.costChoice) {
+                // R3-4 (b): the cost cards of the move's abilities branch too (E2's CacHook.costCards point)
+                if (ai.rec == null) {
+                    ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap);
+                    ai.rec.costOnly = true;
+                }
+                ai.setCacHook(ai.costHook());
+            }
             // solver-gaps-1015: every step of the move, combat declarations included, is bounded by the wall
             // (bvw-step1-build-1024: none with budget=counter: no wall and no deadline, so per-move maxSteps bounds it)
             final long wall = lim.wall != 0 ? lim.wall : deadline == Long.MAX_VALUE ? 0L : deadline;
@@ -2378,6 +2388,44 @@ final class ForcedWinEngine {
         /** labeller-v2 (e): the payment floats played so far (the move's recorded sources, before its action). */
         int floated;
 
+        /** labeller-v2 (a)'s kinds record (a recorder that is not COST-only, R3-4 b). */
+        private boolean recAll() {
+            return rec != null && !rec.costOnly;
+        }
+
+        /**
+         * R3-4 (b): the move's cost cards as a COST choice point: a forced token's cards, else Forge AI's, recorded with
+         * every other distinct multiset of names as candidates.
+         */
+        forge.ai.CacHook costHook() {
+            return new forge.ai.CacHook() {
+                @Override
+                public forge.game.card.CardCollectionView costCards(forge.ai.PlayerControllerAi c, SpellAbility sa,
+                        String part, forge.game.card.CardCollectionView valid, int amount,
+                        forge.game.card.CardCollectionView def) {
+                    if (rec == null || c != MoveAi.this || valid == null || valid.size() <= amount || amount < 1) {
+                        return def;
+                    }
+                    final String t = rec.at(ForcedWinChoices.COST);
+                    if (t != null) {
+                        final forge.game.card.CardCollection r = ForcedWinChoices.applyCost(t, valid, amount);
+                        if (r != null) {
+                            rec.played(t);
+                            return r;
+                        }
+                        rec.miss = true;
+                    }
+                    final String dt = ForcedWinChoices.costTok(def);
+                    if (rec.forcedPoint()) {
+                        rec.played(dt);
+                    } else {
+                        rec.free(ForcedWinChoices.costs(valid, amount, def, rec.cap), dt);
+                    }
+                    return def;
+                }
+            };
+        }
+
         /** An own-zone pick of ours (LibraryPicks' scope, every pick of the move, not only the first). */
         static boolean ownPick(Player me, List<ZoneType> origin, SpellAbility sa,
                 forge.game.card.CardCollectionView fetchList, Player decider) {
@@ -2390,7 +2438,7 @@ final class ForcedWinEngine {
         public Card chooseSingleCardForZoneChange(ZoneType destination, List<ZoneType> origin, SpellAbility sa,
                 forge.game.card.CardCollection fetchList, forge.game.player.DelayedReveal delayedReveal, String selectPrompt,
                 boolean isOptional, Player decider) {
-            if (rec != null) {
+            if (recAll()) {
                 if (!ownPick(getPlayer(), origin, sa, fetchList, decider)) {
                     return super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
                             selectPrompt, isOptional, decider);
@@ -2421,14 +2469,14 @@ final class ForcedWinEngine {
         @Override
         public org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection>
                 arrangeForScry(forge.game.card.CardCollection topN) {
-            return rec == null || topN == null || topN.isEmpty() ? super.arrangeForScry(topN)
+            return !recAll() || topN == null || topN.isEmpty() ? super.arrangeForScry(topN)
                     : arrange(ForcedWinChoices.SCRY, topN);
         }
 
         @Override
         public org.apache.commons.lang3.tuple.ImmutablePair<forge.game.card.CardCollection, forge.game.card.CardCollection>
                 arrangeForSurveil(forge.game.card.CardCollection topN) {
-            return rec == null || topN == null || topN.isEmpty() ? super.arrangeForSurveil(topN)
+            return !recAll() || topN == null || topN.isEmpty() ? super.arrangeForSurveil(topN)
                     : arrange(ForcedWinChoices.SURV, topN);
         }
 
@@ -2459,7 +2507,7 @@ final class ForcedWinEngine {
         public forge.game.card.CardCollection chooseCardsToDiscardFrom(Player p, SpellAbility sa,
                 forge.game.card.CardCollection validCards, int min, int max,
                 forge.game.card.CardCollectionView visibleToChooser) {
-            if (rec == null || p != getPlayer() || min != max || min < 1 || validCards == null || validCards.size() <= min) {
+            if (!recAll() || p != getPlayer() || min != max || min < 1 || validCards == null || validCards.size() <= min) {
                 return super.chooseCardsToDiscardFrom(p, sa, validCards, min, max, visibleToChooser);
             }
             final String t = rec.at(ForcedWinChoices.DISC);
@@ -2488,7 +2536,7 @@ final class ForcedWinEngine {
         @Override
         public forge.game.card.CardCollectionView orderMoveToZoneList(forge.game.card.CardCollectionView cards,
                 ZoneType destinationZone, SpellAbility source) {
-            if (rec == null || destinationZone != ZoneType.Library || cards == null || cards.size() < 2
+            if (!recAll() || destinationZone != ZoneType.Library || cards == null || cards.size() < 2
                     || !cards.stream().allMatch(c -> c.getOwner() == getPlayer())) {
                 return super.orderMoveToZoneList(cards, destinationZone, source);
             }
@@ -2514,7 +2562,7 @@ final class ForcedWinEngine {
         @Override
         public boolean confirmAction(SpellAbility sa, forge.game.player.PlayerActionConfirmMode mode, String message,
                 List<String> options, Card cardToShow, java.util.Map<String, Object> params) {
-            if (rec == null || message == null || !message.toLowerCase().contains("shuffle")) {
+            if (!recAll() || message == null || !message.toLowerCase().contains("shuffle")) {
                 return super.confirmAction(sa, mode, message, options, cardToShow, params);
             }
             final String t = rec.at(ForcedWinChoices.SHUF);

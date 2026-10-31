@@ -1893,6 +1893,7 @@ public final class ForcedWinSolver {
         el.xChoice = cfg.engineX;
         el.xVariants = cfg.xVariants;
         el.stack = stackWindow;
+        el.costChoice = cfg.engineCostChoice;
         final long t1 = System.nanoTime();
         final long reserve = cfg.likely ? Math.max(cfg.evalReserveMs, cfg.likelyReserveMs) : cfg.evalReserveMs;
         final long engineDeadline = deadlineAt(Math.max(t1 + Math.min(forge.ai.WallClock.budgetMs(cfg.engineMs),
@@ -2912,6 +2913,7 @@ public final class ForcedWinSolver {
             fo.cacLine = cfg.cacLine;
             fo.payRecord = cfg.payRecord;
             fo.uncapped = cfg.loopMacro;
+            fo.costLine = cfg.engineCostChoice;
             return fo;
         }
 
@@ -2921,6 +2923,8 @@ public final class ForcedWinSolver {
          * Off, a loop line breaks at the 13th two-step iteration (fastbond-zuran-crucible-aetherflux, Basalt + Kinnan).
          */
         boolean uncapped;
+        /** R3-4 (b), engineCostChoice (false = off): the line's recorded COST answers are replayed (LineAi's CacHook). */
+        boolean costLine;
 
         static final class Next {
             SpellAbility action;
@@ -3039,7 +3043,7 @@ public final class ForcedWinSolver {
             triggers = new ForcedWinEngine.TriggerTargets(st.triggerRef);
             picks = new ForcedWinEngine.LibraryPicks(st.pickName);
             floatDone = 0;
-            if (cacLine) {
+            if (cacLine || costLine) {
                 choices = new ForcedWinChoices.Cursor(st.cacPlayed != null ? st.cacPlayed : st.cac);
             }
             n.action = sa;
@@ -3308,6 +3312,29 @@ public final class ForcedWinSolver {
         LineAi(Game g, Player p, forge.LobbyPlayer lp, Follower f) {
             super(g, p, lp);
             this.f = f;
+            if (f.costLine) {
+                // R3-4 (b): the line's recorded cost cards (a COST token of the step), else Forge AI's
+                setCacHook(new forge.ai.CacHook() {
+                    @Override
+                    public CardCollectionView costCards(forge.ai.PlayerControllerAi c, SpellAbility sa, String part,
+                            CardCollectionView valid, int amount, CardCollectionView def) {
+                        if (c != LineAi.this || valid == null) {
+                            return def;
+                        }
+                        final String t = f.choices.next(ForcedWinChoices.COST);
+                        if (t == null) {
+                            return def;
+                        }
+                        final CardCollection r = ForcedWinChoices.applyCost(t, valid, amount);
+                        if (r == null) {
+                            f.choices.misses++;
+                            return def;
+                        }
+                        f.choices.hits++;
+                        return r;
+                    }
+                });
+            }
         }
 
         @Override
