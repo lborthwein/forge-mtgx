@@ -304,6 +304,20 @@ final class ForcedWinEngine {
         /** R2-3 (loopMacro): this node's {@link #macroKey}, and on a loop checkpoint node the body whose moves it drops. */
         String mk;
         List<Step> afterLoop;
+        /** review #152-6: the loop bodies (bodyKey) already fast-forwarded on this node's path. */
+        Set<String> loopsDone;
+    }
+
+    static String bodyKey(List<Step> body) {
+        final StringBuilder sb = new StringBuilder();
+        for (Step b : body) {
+            sb.append(b.loopKey()).append(';');
+        }
+        return sb.toString();
+    }
+
+    private static boolean done(Node n, List<Step> body) {
+        return n.loopsDone != null && n.loopsDone.contains(bodyKey(body));
     }
 
     // ------------------------------------------------------------------ (c) cycles with progress (search-bones-1015)
@@ -714,13 +728,18 @@ final class ForcedWinEngine {
     /**
      * R2-3: play {@code body} again and again from {@code from} (which ends one repetition) until we win, a body step
      * cannot be played, a repetition gains nothing below the ceilings (the stop rule), {@link Limits#loopCap} or the
-     * budget. Returns a win, or the checkpoint nodes (1, 2, 4, ... repetitions and the last; the largest first), each
+     * budget. Returns a win, or the checkpoint nodes (2, 4, 8, ... repetitions and the last; the largest first), each
      * with path prefix + REPEAT(body, n) and the body to drop from its moves (the outlet search).
      */
-    private Object macroForward(Node from, List<Step> body, long[] ceil) {
+    private Object macroForward(Node from, List<Step> body0, long[] ceil) {
         st.loops++;
-        for (Step b : body) {
-            b.byName = true; // the copies a loop moves around are fungible (Follower.locate)
+        // review #152-4: the body's own copies (the path's steps are shared with sibling subtrees), located by name (the
+        // cards a loop moves around are fungible; Follower.locate)
+        final List<Step> body = new ArrayList<>();
+        for (Step b : body0) {
+            final Step c = b.copy();
+            c.byName = true;
+            body.add(c);
         }
         final int len = body.size();
         final List<Step> prefix = new ArrayList<>(from.path.subList(0, from.path.size() - len));
@@ -756,7 +775,7 @@ final class ForcedWinEngine {
                     break;
                 }
                 final long live = pathCards + from.cards + (cur != from ? cur.cards : 0) + (next != cur ? next.cards : 0)
-                        + a.child.cards + marksCards(marks);
+                        + a.child.cards + marksCards(marks) - (marks.contains(cur) ? cur.cards : 0);
                 if (lim.pathCards > 0 && live > lim.pathCards) {
                     st.pathPrunes++;
                     st.loopCardStops++;
@@ -776,10 +795,8 @@ final class ForcedWinEngine {
             if (Integer.bitCount(reps) == 1) {
                 marks.add(cur);
                 markReps.add(reps);
-                if (marks.size() > 3) {
-                    marks.remove(0); // keep the three largest powers of two (memory: each holds a game copy)
-                    markReps.remove(0);
-                }
+                // review #152-5: every power of two is kept (N = 2, 4, ... stay searchable; their copies count in
+                // the path-card guard above and while the checkpoints are searched)
             }
             if (lethalPastBlockers(cur)) {
                 break;
@@ -1160,6 +1177,7 @@ final class ForcedWinEngine {
             a.child.path.addAll(node.path);
             a.child.path.add(mv);
             a.child.passed = node.passed || mv.pass;
+            a.child.loopsDone = node.loopsDone; // R2-3 (loopMacro only reads it)
             if (lim.cycles) {
                 // search-bones-1015 (c): the progress table instead of the exact-key set, and loops fast-forwarded
                 a.child.parent = node;
@@ -1168,8 +1186,13 @@ final class ForcedWinEngine {
                     // R2-3: a loop by state recurrence (any body up to loopWindow), N chosen by the search
                     a.child.mk = macroKey(a.child.g, a.child.me);
                     final long[] ceil = ceilings(node.g, node.me);
-                    final List<Step> mb = macroBody(a.child, ceil);
+                    List<Step> mb = macroBody(a.child, ceil);
+                    if (mb != null && done(node, mb)) {
+                        mb = null; // review #152-6: this path already fast-forwarded the same loop (N = 1 continues)
+                    }
                     if (mb != null) {
+                        a.child.loopsDone = new HashSet<>(node.loopsDone == null ? Set.of() : node.loopsDone);
+                        a.child.loopsDone.add(bodyKey(mb));
                         final Object fw = macroForward(a.child, mb, ceil);
                         if (fw instanceof List<?> l && !l.isEmpty() && l.get(0) instanceof Step) {
                             @SuppressWarnings("unchecked")
@@ -1178,6 +1201,11 @@ final class ForcedWinEngine {
                         }
                         @SuppressWarnings("unchecked")
                         final List<Node> cps = (List<Node>) fw;
+                        long cpsCards = 0;
+                        for (Node cp : cps) {
+                            cp.loopsDone = a.child.loopsDone;
+                            cpsCards += cp.cards;
+                        }
                         for (Node cp : cps) {
                             if (out()) {
                                 break;
@@ -1186,7 +1214,8 @@ final class ForcedWinEngine {
                                 st.pruned++;
                                 continue;
                             }
-                            final long held = cp.g != a.child.g ? a.child.cards : 0;
+                            // review #152-3: the DFS child and the other checkpoints stay alive while this one is searched
+                            final long held = (cp.g != a.child.g ? a.child.cards : 0) + cpsCards - cp.cards;
                             pathCards += held;
                             final List<Step> r;
                             try {

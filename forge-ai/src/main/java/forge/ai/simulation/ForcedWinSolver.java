@@ -967,8 +967,9 @@ public final class ForcedWinSolver {
         if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0
                 || cfg.honestProbes && best.worldsRun < cfg.worlds) {
             lastOutcome = "declined";
-            if (cfg.engineAfterPlanFail) {
-                // R2-4 (b): every planner line failed verification: the engine searches the position itself
+            if (cfg.engineAfterPlanFail && evalSink == null) {
+                // R2-4 (b): every planner line failed verification: the engine searches the position itself (a
+                // label's proposals ran it above already; review #152-2)
                 final Line engine = engineFallback(live, pos, index, t0, true);
                 if (engine != null) {
                     if (!"likely-take".equals(lastOutcome)) {
@@ -1749,9 +1750,19 @@ public final class ForcedWinSolver {
         final int ep0 = engineStats.pathPrunes, el0 = engineStats.lifetimeStops, ca0 = engineStats.cacApplies;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
-        if (line != null && otherWindow) {
-            line.window = eph.getPhase(); // R2-4 (c): the follower acts in the window the line was found in
-            line.windowTurn = eph.getTurn();
+        if (otherWindow) {
+            // R2-4 (c): the follower acts in the window the lines were found in (the forced line and, review #152-1,
+            // every likely candidate the engine collected there)
+            if (line != null) {
+                line.window = eph.getPhase();
+                line.windowTurn = eph.getTurn();
+            }
+            if (likelyCands != null) {
+                for (Line c : likelyCands) {
+                    c.window = eph.getPhase();
+                    c.windowTurn = eph.getTurn();
+                }
+            }
         }
         engineNanos += System.nanoTime() - t1;
         meter.engineRuns++;
