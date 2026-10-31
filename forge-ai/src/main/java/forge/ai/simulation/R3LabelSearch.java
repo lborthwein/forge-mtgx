@@ -38,7 +38,6 @@ import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.player.PlayerActionConfirmMode;
 import forge.game.spellability.SpellAbility;
-import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.zone.ZoneType;
 import forge.util.MyRandom;
 
@@ -397,8 +396,8 @@ public final class R3LabelSearch {
         String end = "failed:none";
         int turns, steps;
         final List<Integer> sizes = new ArrayList<>();
-        /** Response points met past the scripted depth (root turn). */
-        int pointsMet;
+        /** The shared MIN's response points this line met (root turn). */
+        List<OppMin.Point> points;
 
         boolean resolved() {
             return !Double.isNaN(v);
@@ -417,12 +416,15 @@ public final class R3LabelSearch {
         String minWhy;
         String draw;
         double weight = Double.NaN;
+        int memoHits, budget;
 
         JsonObject toJson() {
             final JsonObject o = new JsonObject();
             o.add("v", num(v));
             o.addProperty("end", end);
             if (branches > 1) o.addProperty("branches", branches);
+            if (memoHits > 0) o.addProperty("memo", memoHits);
+            if (budget > 0) o.addProperty("budget", budget);
             if (minWhy != null) o.addProperty("min", minWhy);
             if (draw != null) o.addProperty("draw", draw);
             if (!Double.isNaN(weight)) o.add("w", num(weight));
@@ -440,6 +442,8 @@ public final class R3LabelSearch {
         int resolved, capped, failed;
         /** Owner ruling 10-30: the route pieces this candidate may spend (priority rows) or spends (choice rows). */
         Set<String> spends = Collections.emptySet();
+        /** oppMinIn both: the selection worlds run before its upper bound fell to the best mean (-1: not cut). */
+        int cutAt = -1;
 
         CandOut(final String desc, final String src) {
             this.desc = desc;
@@ -505,6 +509,7 @@ public final class R3LabelSearch {
                 x.add("mean", num(c.mean));
                 x.addProperty("resolved", c.resolved);
                 x.addProperty("capped", c.capped);
+                if (c.cutAt >= 0) x.addProperty("cut_at", c.cutAt);
                 x.addProperty("failed", c.failed);
                 final JsonArray wa = new JsonArray();
                 for (WorldOut w : c.worlds) wa.add(w.toJson());
@@ -667,9 +672,8 @@ public final class R3LabelSearch {
         final String rootPhase;
         final int rootStack;
         /** oppMin: the script per response point (null = no MIN) and the passive test opponent. */
-        int[] script;
-        int point = 0;
-        final Set<Integer> seenPoints = new HashSet<>();
+        /** The shared MIN's driver of this branch (null = no MIN). */
+        OppMin.Driver driver;
         int lastProofTurn;
         boolean stop;
 
@@ -736,27 +740,9 @@ public final class R3LabelSearch {
                 stop = true;
                 return null;
             }
-            if (script != null && p != me && ph.getTurn() == rootTurn && !g.getStack().isEmpty()) {
-                final SpellAbilityStackInstance si = g.getStack().peek();
-                final SpellAbility top = si.getSpellAbility();
-                if (top != null && top.getActivatingPlayer() == me && !top.isManaAbility() && !top.isTrigger()
-                        && (top.isSpell() || top.isActivatedAbility()) && seenPoints.add(si.getId())) {
-                    final int pt = point++;
-                    if (pt >= spec.oppDepth) {
-                        out.pointsMet++;
-                        return own.get(); // past the depth cap: the generator's own play (counted: the world is capped)
-                    }
-                    final List<SpellAbility> rs = responses(g, p, me, top);
-                    out.sizes.add(rs.size());
-                    final int choice = pt < script.length ? script[pt] : 0;
-                    if (choice == 0) {
-                        return spec.testPassiveOpp ? null : own.get();
-                    }
-                    if (choice == 1 || choice - 2 >= Math.min(rs.size(), spec.oppResponses)) {
-                        return null;
-                    }
-                    return new ArrayList<>(Collections.singletonList(rs.get(choice - 2)));
-                }
+            if (driver != null && p != me) {
+                // the shared MIN (OppMin): the opponent's scripted response at our root-turn points
+                return driver.choose(g, () -> spec.testPassiveOpp && OppMin.pointKey(g, me) != null ? null : own.get());
             }
             if (spec.testPassiveOpp && p != me && !g.getStack().isEmpty() && g.getStack().peekAbility() != null
                     && g.getStack().peekAbility().getActivatingPlayer() == me) {
@@ -790,10 +776,7 @@ public final class R3LabelSearch {
 
     /** The opponent's response set to our {@code top} (labeller v2 (d)'s, uncapped here: the caller caps and counts). */
     static List<SpellAbility> responses(final Game g, final Player opp, final Player me, final SpellAbility top) {
-        final ForcedWinSolver.AdversaryAi a = new ForcedWinSolver.AdversaryAi(g, opp, opp.getController().getLobbyPlayer(),
-                me, -1);
-        a.maxResponses = Integer.MAX_VALUE;
-        return a.responses(top);
+        return OppMin.responses(g, opp, me, top);
     }
 
     /** A line seat on Forge AI alone (a profile without the cube combo plans). */
@@ -909,12 +892,15 @@ public final class R3LabelSearch {
      * Play one line on {@code g} (a world copy, inside its own scopes) to its leaf. {@code first}: a priority
      * candidate's first action (null: a choice row's copy, already past its answer); {@code script}: the oppMin script.
      */
-    LineOut line(final Game g, final Player me, final int rootTurn, final PCand first, final int[] script,
+    LineOut line(final Game g, final Player me, final int rootTurn, final PCand first, final OppMin.Script script,
             final World world, final Work work, final long seed) {
         final LineOut out = new LineOut();
         final LineState st = new LineState(g, me, rootTurn, out, work, seed);
         st.first = first;
-        st.script = script;
+        if (script != null && !me.getOpponents().isEmpty()) {
+            st.driver = new OppMin.Driver(script, me.getOpponents().get(0), me, rootTurn);
+            out.points = st.driver.points;
+        }
         work.lines++;
         try {
             if (world != null) {
@@ -1050,7 +1036,7 @@ public final class R3LabelSearch {
      * One world of a candidate: the MIN over its oppMin branches when {@code min} (each branch the same world, the same
      * seeds), else the plain line. {@code play} runs one branch (its script) and returns its line.
      */
-    WorldOut world(final boolean min, final Work work, final java.util.function.Function<int[], LineOut> play) {
+    WorldOut world(final boolean min, final Work work, final java.util.function.Function<OppMin.Script, LineOut> play) {
         final WorldOut wo = new WorldOut();
         if (!min) {
             final LineOut l = play.apply(null);
@@ -1058,66 +1044,19 @@ public final class R3LabelSearch {
             wo.end = l.end;
             return wo;
         }
-        // labeller v2 (d)'s breadth-first script tree: 0 = the generator's own play, 1 = pass, k >= 2 = response k-2
-        final java.util.ArrayDeque<int[]> queue = new java.util.ArrayDeque<>();
-        queue.add(new int[0]);
-        double lo = Double.POSITIVE_INFINITY;
-        String loEnd = null, loWhy = null, cap = null;
-        int nodes = 0;
-        while (!queue.isEmpty()) {
-            final int[] script = queue.poll();
-            if (nodes >= spec.oppNodes) {
-                work.oppCuts++;
-                cap = "nodes";
-                break;
-            }
-            nodes++;
+        // architect-o ruling 10-30: the shared budgeted MIN, one implementation with the solver's proof check
+        final OppMin.Out m = OppMin.min(new OppMin.Cfg(spec.oppNodes, spec.oppResponses, spec.oppDepth), script -> {
             work.oppNodes++;
             final LineOut l = play.apply(script);
-            if (!l.resolved()) {
-                // an unresolved branch (capped or failed): the world's min is not known
-                cap = cap == null ? "branch:" + l.end : cap;
-                continue;
-            }
-            if (l.v < lo) {
-                lo = l.v;
-                loEnd = l.end;
-                loWhy = Arrays.toString(script);
-            }
-            if (lo == 0.0) {
-                break; // the floor: no branch can go lower (a cap no longer matters)
-            }
-            if (l.pointsMet > 0) {
-                cap = cap == null ? "depth" : cap;
-            }
-            final int point = script.length;
-            if (point < spec.oppDepth && l.sizes.size() > point) {
-                final int size = l.sizes.get(point);
-                if (size > spec.oppResponses) {
-                    cap = cap == null ? "truncated" : cap;
-                }
-                final int choices = 1 + Math.min(spec.oppResponses, size);
-                for (int c = 1; c <= choices; c++) {
-                    final int[] child = Arrays.copyOf(script, point + 1);
-                    child[point] = c;
-                    queue.add(child);
-                }
-            }
-        }
-        wo.branches = nodes;
-        if (lo == 0.0) {
-            wo.v = 0.0;
-            wo.end = loEnd;
-            wo.minWhy = loWhy;
-        } else if (cap != null || lo == Double.POSITIVE_INFINITY) {
-            wo.v = Double.NaN; // caps count as not won: the world is unresolved
-            wo.end = "min-cap:" + (cap == null ? "none" : cap);
-            wo.minWhy = loWhy;
-        } else {
-            wo.v = lo;
-            wo.end = loEnd;
-            wo.minWhy = loWhy;
-        }
+            return new OppMin.Leaf(l.v, l.end, l.points);
+        });
+        if (m.cap != null && !(m.v == 0.0)) work.oppCuts++;
+        wo.branches = m.nodes;
+        wo.v = m.v;
+        wo.end = m.end == null ? "failed:none" : m.end;
+        wo.minWhy = m.why;
+        wo.memoHits = m.memoHits;
+        wo.budget = m.budget;
         return wo;
     }
 
@@ -1387,15 +1326,12 @@ public final class R3LabelSearch {
                 co.spends = c.spends;
                 res.cands.add(co);
             }
-            for (int w = 0; w < spec.selectWorlds; w++) {
+            selection(res.cands, minSel, (i, w) -> {
                 final long ws = LookaheadSearch.mix(seed0, 0x53454C0000L + w); // common across candidates
-                for (int i = 0; i < cands.size(); i++) {
-                    final PCand c = cands.get(i);
-                    res.cands.get(i).worlds.add(world(minSel, res.work,
-                            script -> priorityLine(live, liveMe, c, new World(false, ws, -1, 0, null, null, knownMe,
-                                    knownOpp), ws, script, res.work)));
-                }
-            }
+                final PCand c = cands.get(i);
+                return world(minSel, res.work, script -> priorityLine(live, liveMe, c, new World(false, ws, -1, 0, null,
+                        null, knownMe, knownOpp), ws, script, res.work));
+            });
             for (CandOut co : res.cands) co.close();
             res.pick = argmax(res.cands);
             res.departed = res.pick > 0;
@@ -1453,7 +1389,7 @@ public final class R3LabelSearch {
 
     /** One priority line: an isolated copy of the live priority, its world, the candidate first, played to the leaf. */
     private LineOut priorityLine(final Game live, final Player liveMe, final PCand c, final World wm, final long ws,
-            final int[] script, final Work work) {
+            final OppMin.Script script, final Work work) {
         return isolated(LookaheadSearch.mix(ws, 1), () -> {
             final Game g;
             final Player me;
@@ -1479,11 +1415,53 @@ public final class R3LabelSearch {
     }
 
     /** Argmax of the resolved means; ties to the lower index; a departure must be strictly better (margin 0). */
+    /**
+     * The selection worlds of every candidate, {@code w(i, world)}. With {@code cut} (oppMinIn both, ruling 10-30) the
+     * candidates run one at a time and a candidate stops once its mean's upper bound (its remaining worlds at 1) is no
+     * better than the best finished mean: it cannot be the argmax (ties go to the lower index). Without, as before.
+     */
+    void selection(final List<CandOut> cands, final boolean cut,
+            final java.util.function.BiFunction<Integer, Integer, WorldOut> w) {
+        final int W = spec.selectWorlds;
+        if (!cut) {
+            for (int k = 0; k < W; k++) {
+                for (int i = 0; i < cands.size(); i++) cands.get(i).worlds.add(w.apply(i, k));
+            }
+            return;
+        }
+        double best = Double.NaN;
+        for (int i = 0; i < cands.size(); i++) {
+            final CandOut co = cands.get(i);
+            double sum = 0;
+            int res = 0;
+            for (int k = 0; k < W; k++) {
+                final WorldOut wo = w.apply(i, k);
+                co.worlds.add(wo);
+                if (!Double.isNaN(wo.v)) {
+                    sum += wo.v;
+                    res++;
+                }
+                final int left = W - k - 1;
+                if (left > 0 && !Double.isNaN(best)) {
+                    final double ub = Math.max(res == 0 ? Double.NEGATIVE_INFINITY : sum / res, (sum + left) / (res + left));
+                    if (ub <= best) {
+                        co.cutAt = k + 1;
+                        break;
+                    }
+                }
+            }
+            if (co.cutAt < 0 && res > 0) {
+                final double m = sum / res;
+                if (Double.isNaN(best) || m > best) best = m;
+            }
+        }
+    }
+
     static int argmax(final List<CandOut> cands) {
         int best = -1;
         for (int i = 0; i < cands.size(); i++) {
             final double m = cands.get(i).mean;
-            if (Double.isNaN(m)) continue;
+            if (Double.isNaN(m) || cands.get(i).cutAt >= 0) continue;
             if (best < 0 || m > cands.get(best).mean) best = i;
         }
         return best;
@@ -1595,14 +1573,12 @@ public final class R3LabelSearch {
                 co.spends = spentNames.get(i);
                 res.cands.add(co);
             }
-            for (int w = 0; w < spec.selectWorlds; w++) {
+            selection(res.cands, minSel, (j, w) -> {
                 final long ws = LookaheadSearch.mix(seed0, 0x53454C0000L + w);
-                for (int j = 0; j < played.size(); j++) {
-                    final int i = played.get(j);
-                    res.cands.get(j).worlds.add(world(minSel, res.work, script -> choiceLine(row, i, new World(false, ws,
-                            -1, 0, null, null, knownMe, knownOpp), ws, rootTurn, script, res.work)));
-                }
-            }
+                final int i = played.get(j);
+                return world(minSel, res.work, script -> choiceLine(row, i, new World(false, ws, -1, 0, null, null,
+                        knownMe, knownOpp), ws, rootTurn, script, res.work));
+            });
             for (CandOut co : res.cands) co.close();
             final int pj = argmax(res.cands);
             res.pick = pj;
@@ -1638,7 +1614,7 @@ public final class R3LabelSearch {
     }
 
     private LineOut choiceLine(final ChooseACard.Row row, final int i, final World wm, final long ws, final int rootTurn,
-            final int[] script, final Work work) {
+            final OppMin.Script script, final Work work) {
         work.copies++;
         final LineOut l = row.play(i, wm, ws, (g, me) -> line(g, me, rootTurn, null, script, wm, work, ws));
         if (l == null) {

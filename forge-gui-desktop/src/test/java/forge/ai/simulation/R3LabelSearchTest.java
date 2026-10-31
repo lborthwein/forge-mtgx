@@ -443,7 +443,7 @@ public class R3LabelSearchTest extends SimulationTest {
         AssertJUnit.assertEquals("their Counterspell, then the bears: " + j, 0.0, min.target, 1e-9);
         AssertJUnit.assertTrue(j.toString(), min.work.oppNodes >= 3);
         AssertJUnit.assertTrue(j.toString(), j.getAsJsonArray("target_worlds").get(0).getAsJsonObject().get("min")
-                .getAsString().contains("2"));
+                .getAsString().contains("0:0"));
         // caps count as not won: a truncated response set leaves a world whose min is above 0 unresolved
         final JsonObject trunc = on.deepCopy();
         trunc.addProperty("oppResponses", 0);
@@ -551,6 +551,29 @@ public class R3LabelSearchTest extends SimulationTest {
         cac.install(c);
         castAndResolve(d, "Demonic Tutor");
         return sb.toString();
+    }
+
+    /** Ruling 10-30: under oppMinIn both a candidate whose upper bound cannot beat the best mean stops early. */
+    @Test
+    public void bothCutsCandidatesByTheirUpperBound() {
+        final Game g = boltBoard(3, 20, false, false);
+        final Player a = g.getPlayers().get(0);
+        final JsonObject o = base();
+        o.addProperty("selectWorlds", 3);
+        o.addProperty("targetWorlds", 2);
+        o.addProperty("oppMin", true);
+        o.addProperty("oppMinIn", "both");
+        final R3LabelSearch r3 = new R3LabelSearch(spec(o), env(flat(0.5), null));
+        final List<R3LabelSearch.PCand> cands = r3.candidates(g, a,
+                Collections.singletonList(firstSpell(a, "Lightning Bolt")));
+        final R3LabelSearch.Result res = r3.priorityRow(g, a, cands, 41L);
+        final JsonObject j = res.toJson();
+        System.err.println("[r3-test] both-cut row " + j);
+        AssertJUnit.assertEquals(j.toString(), 0, res.pick);
+        AssertJUnit.assertEquals(1.0, res.target, 1e-9);
+        final JsonArray ca = j.getAsJsonArray("cands");
+        AssertJUnit.assertTrue(j.toString(), ca.size() >= 2 && ca.get(1).getAsJsonObject().has("cut_at"));
+        AssertJUnit.assertEquals(1, ca.get(1).getAsJsonObject().get("cut_at").getAsInt());
     }
 
     // ------------------------------------------------------------------------------------------------ hold the piece
