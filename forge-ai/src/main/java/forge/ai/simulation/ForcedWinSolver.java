@@ -414,7 +414,7 @@ public final class ForcedWinSolver {
                     + horizon + " budgetMs=" + budgetMs + " adversary=" + adversary + " defense=" + defense + " engine=" + engine + " engineNodes="
                 + engineNodes + " engineMs=" + engineMs + " forced=" + forced + " likely=" + likely + " likelyWorlds=" + likelyWorlds
                 + " likelyTop=" + likelyTop + " likelyCapTurns=" + likelyCapTurns + " paySearch=" + paySearch
-                + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes : "")
+                + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes + " V=" + OppMin.VERSION : "")
                 + (cacPicks ? " cacPicks V=" + cacVariants + " cap=" + cacCap : "") + (cacLine ? " cacLine" : "")
                 + (planScry ? " planScry max=" + planScryMax : "") + (planDiscard ? " planDiscard" : "")
                 + (payRecord ? " payRecord V=" + payVariants : "") + (engineNodesPerSearch ? " engineNodesPerSearch" : "")
@@ -2389,6 +2389,8 @@ public final class ForcedWinSolver {
         int endTurn = -1;
         /** labeller-v2 (d): the opponent's response-set size at each response point this play-out met. */
         final List<Integer> responseSizes = new ArrayList<>();
+        /** The shared MIN's record of each response point this play-out met (OppMin). */
+        List<OppMin.Point> points;
     }
 
     /**
@@ -2408,60 +2410,34 @@ public final class ForcedWinSolver {
      * world is won only if every explored branch wins; a tree larger than oppNodes play-outs is not won (cut).
      */
     Outcome minWorld(Game live, Line line, long ws, int world, long wall) {
-        final java.util.ArrayDeque<int[]> queue = new java.util.ArrayDeque<>();
-        queue.add(new int[0]);
-        Outcome first = null;
-        int nodes = 0;
-        while (!queue.isEmpty()) {
-            final int[] script = queue.poll();
-            if (nodes >= cfg.oppNodes) {
-                return minCut("oppNodes");
-            }
-            nodes++;
+        // architect-o ruling 10-30: the shared budgeted MIN (OppMin), one implementation with the R3 label search
+        final OppMin.Cfg oc = new OppMin.Cfg(cfg.oppNodes, cfg.oppResponses, cfg.oppDepth);
+        final Outcome[] firstLost = new Outcome[1];
+        final Outcome[] firstOut = new Outcome[1];
+        final OppMin.Out m = OppMin.min(oc, script -> {
             meter.oppMinNodes++;
             final Outcome o = playout(live, line, ws, world, -1, wall, script);
-            if (first == null) {
-                first = o;
+            if (firstOut[0] == null) firstOut[0] = o;
+            if (!o.won && firstLost[0] == null) {
+                o.why = "min" + script + ":" + o.why;
+                firstLost[0] = o;
             }
-            if (!o.won) {
-                o.why = "min" + java.util.Arrays.toString(script) + ":" + o.why;
-                return o;
+            if (OppMin.DEBUG) {
+                final StringBuilder sb = new StringBuilder();
+                if (o.points != null) for (OppMin.Point pt : o.points) sb.append(pt.size).append(' ');
+                System.err.println("[oppmin] world " + world + " " + script + " won=" + o.won + " why=" + o.why
+                        + " points=" + sb);
             }
-            final int point = script.length;
-            final List<Integer> sz = o.responseSizes;
-            if (point >= cfg.oppDepth) {
-                // review S1-2: a later point with responses is not explored (Forge AI answered it): a cap hit, not won
-                for (int i = point; i < sz.size(); i++) {
-                    if (sz.get(i) > 0) {
-                        return minCut("oppDepth");
-                    }
-                }
-                continue;
-            }
-            if (sz.size() > point) {
-                final int n = sz.get(point);
-                if (n > cfg.oppResponses) {
-                    return minCut("oppResponses"); // review S1-1: a truncated set is a cap hit, never a win
-                }
-                boolean later = false;
-                for (int i = point + 1; i < sz.size(); i++) {
-                    later |= sz.get(i) > 0;
-                }
-                if (later) {
-                    // review S2-1: under Forge AI's own answer at this point, its later points are MIN'd too
-                    final int[] f0 = java.util.Arrays.copyOf(script, point + 1);
-                    f0[point] = 0;
-                    queue.add(f0);
-                }
-                // an empty set at this point: nothing castable, so pass is Forge AI's answer (no branch)
-                for (int c = 1; n > 0 && c <= 1 + n; c++) {
-                    final int[] child = java.util.Arrays.copyOf(script, point + 1);
-                    child[point] = c;
-                    queue.add(child);
-                }
-            }
+            return new OppMin.Leaf(o.won ? 1.0 : 0.0, o.why, o.points);
+        });
+        if (m.v == 0.0) {
+            return firstLost[0];
         }
-        return first;
+        if (Double.isNaN(m.v)) {
+            return minCut(m.cap == null ? "oppMin" : m.cap.startsWith("nodes") ? "oppNodes"
+                    : m.cap.startsWith("truncated") ? "oppResponses" : m.cap.startsWith("budget") ? "oppDepth" : m.cap);
+        }
+        return firstOut[0];
     }
 
     private Outcome minCut(String why) {
@@ -2471,7 +2447,7 @@ public final class ForcedWinSolver {
         return cut;
     }
 
-    Outcome playout(Game live, Line line, long seed, int world, int counterAt, long wall, int[] script) {
+    Outcome playout(Game live, Line line, long seed, int world, int counterAt, long wall, OppMin.Script script) {
         final Outcome out = new Outcome();
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
@@ -2515,8 +2491,8 @@ public final class ForcedWinSolver {
                     adv = new AdversaryAi(g, o, o.getController().getLobbyPlayer(), cm, counterAt);
                     adv.passive = cfg.testPassiveOpp;
                     if (script != null) {
-                        adv.script = script; // labeller-v2 (d)
-                        adv.sizes = out.responseSizes;
+                        adv.driver = new OppMin.Driver(script, o, cm, -1); // labeller-v2 (d), the shared MIN
+                        out.points = adv.driver.points;
                     }
                     adv.bounded(wall).callLimited(callLimit);
                     o.dangerouslySetController(adv);
@@ -3602,6 +3578,13 @@ public final class ForcedWinSolver {
             this.counterAt = counterAt;
         }
 
+        @Override
+        public List<forge.game.spellability.AbilitySub> chooseModeForAbility(SpellAbility sa,
+                List<forge.game.spellability.AbilitySub> possible, int min, int num, boolean allowRepeat) {
+            final List<forge.game.spellability.AbilitySub> f = OppMin.forcedModes(sa, possible);
+            return f != null ? f : super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+        }
+
         static boolean holdsCounter(Player p) {
             for (Card c : p.getCardsIn(ZoneType.Hand)) {
                 for (SpellAbility sa : c.getSpellAbilities()) {
@@ -3613,9 +3596,8 @@ public final class ForcedWinSolver {
             return false;
         }
 
-        /** labeller-v2 (d): the scripted choices per response point (null = the one-counter adversary), and the sizes met. */
-        int[] script;
-        List<Integer> sizes;
+        /** labeller-v2 (d): the shared MIN's driver for this branch (null = the one-counter adversary). */
+        OppMin.Driver driver;
         /** Tests only: pass instead of Forge AI's own answer while one of our objects is on the stack. */
         boolean passive;
 
@@ -3625,7 +3607,6 @@ public final class ForcedWinSolver {
             }
             return super.chooseSpellAbilityToPlay();
         }
-        private final Set<String> seenPoints = new HashSet<>();
 
         /**
          * labeller-v2 (d): the response point at this priority, or null: one of our spells, activated abilities or
@@ -3633,22 +3614,16 @@ public final class ForcedWinSolver {
          * declare-attackers step with attackers declared (Swords on the attacker, a flash blocker).
          */
         private String pointKey(final Game g) {
-            if (g.getStack().isEmpty()) {
-                final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
-                final forge.game.combat.Combat cb = g.getCombat();
-                return ph.is(PhaseType.COMBAT_DECLARE_ATTACKERS) && ph.isPlayerTurn(victim) && cb != null
-                        && !cb.getAttackers().isEmpty() ? "atk:" + ph.getTurn() : null;
-            }
-            final SpellAbilityStackInstance si = g.getStack().peek();
-            final SpellAbility top = si.getSpellAbility();
-            return top == null || top.getActivatingPlayer() != victim || top.isManaAbility() ? null : "s:" + si.getId();
+            return OppMin.pointKey(g, victim);
         }
 
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             final Game g = getGame();
-            if (script != null) {
-                return minChoice(g);
+            if (driver != null) {
+                final List<SpellAbility> r = driver.choose(g, () -> fallback(g));
+                if (driver.answered != null) countered = driver.answered;
+                return r == null ? null : capped(r);
             }
             if (!g.getStack().isEmpty()) {
                 final SpellAbilityStackInstance si = g.getStack().peek();
@@ -3668,34 +3643,6 @@ public final class ForcedWinSolver {
         }
 
         /**
-         * labeller-v2 (d): at a response point (first time), the scripted choice: 0 = Forge AI's own answer, 1 = pass,
-         * k >= 2 = the (k-2)-th response. The FULL response set's size is recorded (review S1-1: the MIN cuts a set
-         * larger than oppResponses, it never truncates it).
-         */
-        private List<SpellAbility> minChoice(final Game g) {
-            final String pk = pointKey(g);
-            if (pk == null || !seenPoints.add(pk)) {
-                return fallback(g);
-            }
-            final SpellAbility top = g.getStack().isEmpty() ? null : g.getStack().peek().getSpellAbility();
-            final int point = seen++;
-            final List<SpellAbility> rs = responses(top);
-            if (sizes != null) {
-                sizes.add(rs.size());
-            }
-            final int choice = point < script.length ? script[point] : 0;
-            if (choice == 0) {
-                return fallback(g);
-            }
-            if (choice == 1 || choice - 2 >= rs.size()) {
-                return null; // pass
-            }
-            final SpellAbility r = rs.get(choice - 2);
-            countered = (top == null ? "attack" : top.getHostCard().getName()) + " answered by " + r.getHostCard().getName();
-            return capped(List.of(r));
-        }
-
-        /**
          * labeller-v2 (d): the whole response set at a point, in a fixed order (counters incl. Stifle effects, removal,
          * discard, flash creatures, other), one per (category, name, target class), each castable or activatable now
          * and payable. Sources (review S2-1): their hand, every permanent (tapped too: sacrifice and pay-life abilities),
@@ -3703,57 +3650,7 @@ public final class ForcedWinSolver {
          * own permanents by name and themselves (lifegain, protection, regeneration).
          */
         List<SpellAbility> responses(final SpellAbility top) {
-            final Player p = getPlayer();
-            final java.util.TreeMap<String, SpellAbility> byKey = new java.util.TreeMap<>();
-            final List<Card> sources = new ArrayList<>();
-            for (ZoneType z : List.of(ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile)) {
-                sources.addAll(p.getCardsIn(z));
-            }
-            sources.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
-            for (Card c : sources) {
-                for (SpellAbility sa0 : c.getAllPossibleAbilities(p, true)) {
-                    if (sa0.isManaAbility() || sa0.isLandAbility()) continue;
-                    if (sa0.isSpell() && c.isInZone(ZoneType.Battlefield)) continue;
-                    final List<Object> targets = new ArrayList<>();
-                    final List<String> keys = new ArrayList<>();
-                    if (sa0.usesTargeting()) {
-                        if (top != null && sa0.canTargetSpellAbility(top)) {
-                            targets.add(top);
-                            keys.add("stack");
-                        }
-                        for (Player who : List.of(victim, p)) {
-                            final Set<String> names = new HashSet<>();
-                            for (Card v : who.getCardsIn(ZoneType.Battlefield)) {
-                                if (names.add(v.getName()) && sa0.canTarget(v)) {
-                                    targets.add(v);
-                                    keys.add((who == p ? "own:" : "card:") + v.getName());
-                                }
-                            }
-                            if (sa0.canTarget(who)) {
-                                targets.add(who);
-                                keys.add(who == p ? "self" : "player");
-                            }
-                        }
-                    } else {
-                        targets.add(null);
-                        keys.add("-");
-                    }
-                    for (int ti = 0; ti < targets.size(); ti++) {
-                        final Object t = targets.get(ti);
-                        final SpellAbility cs = sa0.copy(p);
-                        cs.setActivatingPlayer(p);
-                        if (t != null) {
-                            cs.resetTargets();
-                            if (t instanceof SpellAbility ts) cs.getTargets().add(ts);
-                            else cs.getTargets().add((forge.game.GameObject) t);
-                            if (!cs.isTargetNumberValid()) continue;
-                        }
-                        if (!cs.canPlay() || !ComputerUtilCost.canPayCost(cs, p, false)) continue;
-                        byKey.putIfAbsent(category(cs) + "|" + c.getName() + "|" + keys.get(ti), cs);
-                    }
-                }
-            }
-            return new ArrayList<>(byKey.values());
+            return OppMin.responses(getGame(), getPlayer(), victim, top);
         }
 
         static int category(final SpellAbility sa) {

@@ -117,6 +117,81 @@ public class LabellerV2MinTest extends AITest {
         }
     }
 
+    /**
+     * Review S2 repro (the oppResponses cap counted answer x target pairs): their Bolt at our face, we are at 3, our
+     * hand Lightning Bolt + Shock + Giant Growth with Mountain x2, Forest and Grizzly Bears. None of it answers the Bolt
+     * (burn at their face at 20, a pump outside combat): the shared MIN's set is empty, so the line is PROVEN (#144
+     * counted seven answer x target pairs > 4 and cut it).
+     */
+    @Test
+    public void irrelevantAnswersCollapseAndTheLineIsProven() {
+        final java.util.function.Supplier<Game> g = () -> frame("Lightning Bolt;Shock;Giant Growth",
+                "Mountain;Mountain;Forest;Grizzly Bears", 3, "Lightning Bolt", "Mountain");
+        Assert.assertTrue(proven(g.get(), passive(cfg(true, 64))), "no real answer: proven");
+        Assert.assertTrue(proven(g.get(), passive(cfgEngine(true))), "no real answer: proven (engine)");
+    }
+
+    /**
+     * Review #148 S1 repros: answers the first OppMin allow-list dropped (false PROVEN) must refute the line, and the
+     * controls must hold. Stack points use the passive spec, attack points the engine spec (both oppMin on).
+     */
+    @Test
+    public void realAnswersTheAllowListMissedRefuteTheLine() {
+        final String[][] stack = {
+            {"Cryptic Command", "Island;Island;Island;Island", "a modal counter (choose two)"},
+            {"Izzet Charm", "Island;Mountain", "a modal soft counter (choose one): its mode is forced"},
+            {"Mystic Confluence", "Island;Island;Island;Island;Island", "a modal counter (choose three, repeats)"},
+            {"Counterspell", "Island;Island", "control"},
+        };
+        for (String[] c : stack) {
+            Assert.assertFalse(proven(frame(c[0], c[1], 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                    c[0] + " vs Bolt: " + c[2]);
+        }
+        Assert.assertTrue(proven(frame("", "Island;Island;Island;Island", 3, "Lightning Bolt", "Mountain"),
+                passive(cfg(true, 64))), "open control: no answer, proven");
+        final String[][] attack = {
+            {"Turn to Frog", "Island;Island", "the attacker becomes a 1/1"},
+
+            {"Diabolic Edict", "Swamp;Swamp", "an edict at the attacker's controller"},
+        };
+        for (String[] c : attack) {
+            Assert.assertFalse(proven(frame(c[0], c[1], 3, "", "Hill Giant;Mountain"), engineMin(true, 2)),
+                    (c[0].isEmpty() ? c[1] : c[0]) + " vs a Hill Giant attack: " + c[2]);
+        }
+        // Mutavault animates and trades with the Bears (with a Hill Giant the block only delays: the Giant attacks again
+        // next turn into an empty board, so that line is a true two-turn win and is proven)
+        Assert.assertFalse(proven(frame("", "Mutavault;Mountain", 2, "", "Grizzly Bears;Mountain"), engineMin(true, 2)),
+                "Mutavault animates and blocks the Bears");
+    }
+
+    /**
+     * Review #148 S1 (round 2): a modal answer tries every target class of its modes. Kolaghan's Command against our
+     * lethal Bears attack at 2 life, a summoning-sick Llanowar Elves listed first: its 2 damage on the Bears refutes it
+     * (with one target per mode it hit the Elves and the attack was proven).
+     */
+    @Test
+    public void aModalAnswerTriesEveryTarget() {
+        Assert.assertFalse(proven(frame("Kolaghan's Command", "Swamp;Mountain;Mountain", 2, "",
+                "Llanowar Elves|SummonSick;Grizzly Bears;Forest"), engineMin(true, 2)), "Kolaghan's Command on the Bears");
+        Assert.assertTrue(proven(frame("", "Swamp;Mountain;Mountain", 2, "", "Llanowar Elves|SummonSick;Grizzly Bears;Forest"),
+                engineMin(true, 2)), "open control: the Bears attack is proven");
+    }
+
+    /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
+    @Test
+    public void graveyardTargetsAreResponses() {
+        final Game g = frame("", "Scavenging Ooze;Forest", 3, "Lightning Bolt", "Mountain");
+        final Player def = g.getPlayers().get(0), ai = g.getPlayers().get(1);
+        addCardToZone("Griselbrand", ai, forge.game.zone.ZoneType.Graveyard);
+        boolean gy = false;
+        for (forge.game.spellability.SpellAbility sa : OppMin.responses(g, def, ai, null)) {
+            for (forge.game.GameObject o : sa.getTargets()) {
+                gy |= o instanceof forge.game.card.Card c && c.getName().equals("Griselbrand");
+            }
+        }
+        Assert.assertTrue(gy, "Ooze exiles the reanimation target");
+    }
+
     static Game board3(String defHand, String defLands) {
         return ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(defHand, defLands, 3,
                 "Lightning Bolt;Counterspell;Counterspell", "Mountain;Island;Island;Island;Island", 20, "ai"));
