@@ -220,6 +220,12 @@ public class RlLiveSeatTest {
 
     /** One game, Forge AI Default (seat 0) vs the policy seat (seat 1), on a "Game" thread as the interactive server's. */
     static Game play(final RlLiveSeat live, final long seed) throws Exception {
+        return play(live, seed, null);
+    }
+
+    /** As {@link #play(RlLiveSeat, long)}; {@code k8Tweak} (or null) edits the K8 spec's config first (live-ai-quality-1030). */
+    static Game play(final RlLiveSeat live, final long seed,
+            final java.util.function.Consumer<LookaheadSearch.Config> k8Tweak) throws Exception {
         final LobbyPlayerAi forge = new LobbyPlayerAi("Seat0", null);
         forge.setAiProfile("Default");
         final LobbyPlayerPolicy pol = live.lobby("Default Forge", 1, "Default");
@@ -247,6 +253,9 @@ public class RlLiveSeatTest {
                 k8.departZ = 1.645;
                 k8.decisionLog = true;
                 k8.seed = seed * 31 + 1;
+                if (k8Tweak != null) {
+                    k8Tweak.accept(k8);
+                }
                 live.bind(game, 1, seed, k8, AiFixes.Mode.ON);
                 out.set(game);
                 match.startGame(game, null);

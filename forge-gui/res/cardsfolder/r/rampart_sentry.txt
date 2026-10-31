@@ -1,0 +1,5 @@
+Name:Rampart Sentry
+ManaCost:1 W
+Types:Creature Soldier
+PT:2/2
+Oracle:

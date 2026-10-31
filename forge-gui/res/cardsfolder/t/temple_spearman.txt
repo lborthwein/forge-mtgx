@@ -1,0 +1,5 @@
+Name:Temple Spearman
+ManaCost:2 W
+Types:Creature Soldier
+PT:3/2
+Oracle:

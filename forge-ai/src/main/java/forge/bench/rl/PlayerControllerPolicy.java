@@ -31,15 +31,39 @@ public class PlayerControllerPolicy extends PlayerControllerBridge {
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         final long t0 = System.nanoTime();
         final List<SpellAbility> chosen = super.chooseSpellAbilityToPlay();
-        if (!live.degraded() || getGame() != live.liveGame()) {
+        if (getGame() != live.liveGame()) {
             return chosen;
+        }
+        if (!live.degraded()) {
+            // lane live-ai-quality-1030 (owner 2026-10-31, "extend to policy AI"): the policy's answer through the dud-cast
+            // guard; null (dudCast off in the live K8 spec, the default) = the answer as chosen
+            return guardPolicy(chosen);
         }
         final LookaheadSearch k8 = live.k8();
         if (k8 == null) {
-            return chosen;
+            return guardPolicy(chosen);
         }
         // degraded (possibly during this very ask): `chosen` is Forge AI's own answer
         k8.noteForgeNanos(System.nanoTime() - t0);
-        return k8.decide(this, chosen);
+        final List<SpellAbility> answer = k8.decide(this, chosen);
+        // the degraded K8 search goes through the guard as the pure K8 seat's does (PlayerControllerLookahead)
+        return k8.getConfig().dudCast == forge.ai.AiFixes.Mode.OFF ? answer
+                : forge.ai.simulation.DudCast.guard(k8, this, answer);
+    }
+
+    /**
+     * The guard over the healthy seat's answer (lane live-ai-quality-1030). On a veto the seat's decision line says so
+     * ({@code "vetoed"}, {@code "playedBy"}) and its answerer marks the decision overridden (review of #159, S2-a); the
+     * host's AI tape wraps this controller, so it records the answer returned here, the one played.
+     */
+    List<SpellAbility> guardPolicy(final List<SpellAbility> chosen) {
+        final LookaheadSearch guard = live.dudGuard();
+        if (guard == null) {
+            return chosen;
+        }
+        final List<SpellAbility> played = forge.ai.simulation.DudCast.guard(guard, this, chosen);
+        final boolean vetoed = played != chosen;
+        live.guarded(getPlayer(), vetoed, !vetoed ? "policy" : played == null || played.isEmpty() ? "pass" : "forge", played);
+        return played;
     }
 }

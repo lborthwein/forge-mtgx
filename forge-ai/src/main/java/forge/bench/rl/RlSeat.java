@@ -1027,6 +1027,31 @@ public final class RlSeat implements BenchSession.LocalAnswerer {
         }
     }
 
+    /** Answers the dud-cast guard overrode (lane live-ai-quality-1030): their dec_idx are also in {@code overridden}. */
+    public int guardOverridden = 0;
+
+    /**
+     * Lane live-ai-quality-1030 (review of #159, S2-a): the dud-cast guard vetoed this seat's answer to {@code method} and
+     * Forge AI (or a pass) decided instead. Its dec_idx joins {@code overridden} (GAME_END and the tape), as a refused
+     * answer's does, so no record shows the vetoed answer as the action taken.
+     */
+    @Override
+    public void onOverride(final Game g, final Player player, final String method, final String playedBy, final Object played) {
+        if (g != game || method == null) {
+            return;
+        }
+        final Integer d = lastAnswered.remove(method);
+        final Integer d2 = lastAnswered2.remove(method);
+        if (d2 != null) {
+            overridden.add(d2);
+        }
+        if (d != null && d >= 0) {
+            overridden.add(d);
+            okAnswers.merge(method, -1, Integer::sum);
+            guardOverridden++;
+        }
+    }
+
     // ------------------------------------------------------------------------------------------------ record mode
 
     @Override
