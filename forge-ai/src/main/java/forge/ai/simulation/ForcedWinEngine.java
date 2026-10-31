@@ -2755,6 +2755,7 @@ final class ForcedWinEngine {
                 }
                 final GameCopier rc = new GameCopier(g, true);
                 rc.setCopyFidelity(1);
+                rc.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copyStackIf(rc, g, true);
                 snapshot = rc.makeCopy();
                 snapshotMe = (Player) rc.find(getPlayer());
