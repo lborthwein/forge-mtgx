@@ -60,8 +60,8 @@ import java.util.concurrent.atomic.AtomicReference;
  *   life lost and gained, cards drawn, damage, left-the-battlefield), then the position's own lands played; every
  *   zone of both players is the position's (no card object survives);</li>
  *   <li>each player's life and counters: life back to the starting life, every player counter (poison, energy, rad,
- *   experience, ...) removed, then the position's {@code humanlife=}/{@code ailife=} and {@code humancounters=}/
- *   {@code aicounters=} (GameState sets them only when named);</li>
+ *   experience, ...) removed, then the position's {@code humanlife=}/{@code ailife=} (unnamed: the starting life) and
+ *   {@code humancounters=}/{@code aicounters=} (unnamed: none);</li>
  *   <li>the AI seat: its card memory cleared; its script replaced by the position's (a fresh place in it; none:
  *   {@code rest=bot}, the plain Forge AI); the browser seat's auto-pass cancelled;</li>
  *   <li>the journal and AI tape: the install is an input (above), and the AI tape is untouched: its next entry records
@@ -231,6 +231,22 @@ final class InteractiveLessons implements PriorityDecisionListener {
         }
     }
 
+    /**
+     * The position's lines, plus {@code p0life=}/{@code p1life=} at that player's starting life for a player whose
+     * life they do not name (review #140 S2-2). {@link InteractivePuzzle#lines} has already made every player key
+     * game-relative ({@code p<i>} = game player i).
+     */
+    List<String> withStartingLife(final List<String> lines) {
+        final List<String> out = new java.util.ArrayList<>(lines);
+        for (int i = 0; i < game.getPlayers().size(); i++) {
+            final String key = "p" + i + "life=";
+            if (out.stream().noneMatch(l -> l.startsWith(key))) {
+                out.add(key + game.getPlayers().get(i).getStartingLife());
+            }
+        }
+        return out;
+    }
+
     /** The install itself, on the game thread (see the class comment for what it resets). */
     void install(final Install install) {
         final Thread self = Thread.currentThread();
@@ -273,8 +289,9 @@ final class InteractiveLessons implements PriorityDecisionListener {
                 }
                 p.clearCounters();
             }
-            // the position, installed as a puzzle's is (no goal: a lesson position)
-            InteractivePuzzle.position(install.spec(), install.lines(), humanSeat).applyToGame(game);
+            // the position, installed as a puzzle's is (no goal: a lesson position); a player whose life it does not
+            // name starts at the starting life (GameState would set an unnamed life to -1, its "no life" marker)
+            InteractivePuzzle.position(install.spec(), withStartingLife(install.lines()), humanSeat).applyToGame(game);
             InteractivePuzzle.beginCombat(game);
             for (Player p : game.getPlayers()) {
                 p.setLifeStartedThisTurnWith(p.getLife());
