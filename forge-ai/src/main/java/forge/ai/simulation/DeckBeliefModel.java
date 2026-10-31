@@ -40,6 +40,8 @@ public final class DeckBeliefModel {
     public final String sha256;
     final int d;
     final Map<String, Integer> index = new HashMap<>();
+    /** review #1530 S1 ruling: the deck keys this export is held out (and lineage-held-out) from. */
+    final Set<String> heldKeys = new HashSet<>();
     final float[][] a;
     final float[][] u;
     final float[] b;
@@ -58,6 +60,10 @@ public final class DeckBeliefModel {
             throw new IllegalArgumentException("deck belief: only kind=bag is implemented, not " + o.get("kind"));
         }
         checkProvenance(o);
+        final JsonArray held = o.getAsJsonObject("source").getAsJsonArray("held_deck_keys");
+        for (int i = 0; i < held.size(); i++) {
+            heldKeys.add(held.get(i).getAsString());
+        }
         this.sha256 = sha256;
         this.d = o.get("d").getAsInt();
         final JsonArray vocab = o.getAsJsonArray("vocab");
@@ -97,6 +103,8 @@ public final class DeckBeliefModel {
         }
     }
 
+    static final String LIVE_HUMAN = "live/human";
+
     /**
      * Review #150 S1: an export must declare it was trained without the decks its seats face, nor their drafted parents.
      * Required in {@code source}: {@code mix} null (a bank mix is a hidden label), {@code near_jaccard} in (0, 0.5] and
@@ -108,8 +116,12 @@ public final class DeckBeliefModel {
         if (src == null) {
             throw new IllegalArgumentException("deck belief: the export has no source provenance");
         }
-        if (src.has("mix") && !src.get("mix").isJsonNull()) {
-            throw new IllegalArgumentException("deck belief: an export trained with a bank mix is refused");
+        // review #150 S2 (re-check): the mix must be declared null at the top level AND in the trainer's own args
+        final JsonObject train = src.has("train") && src.get("train").isJsonObject() ? src.getAsJsonObject("train") : null;
+        if (!src.has("mix") || !src.get("mix").isJsonNull() || train == null || !train.has("mix")
+                || !train.get("mix").isJsonNull()) {
+            throw new IllegalArgumentException("deck belief: the export must declare mix null (source.mix and "
+                    + "source.train.mix); a bank mix is a hidden label");
         }
         final double j = src.has("near_jaccard") && !src.get("near_jaccard").isJsonNull()
                 ? src.get("near_jaccard").getAsDouble() : 0;
@@ -123,9 +135,102 @@ public final class DeckBeliefModel {
         if (src.has("excluded_banks") && src.get("excluded_banks").isJsonArray()) {
             src.getAsJsonArray("excluded_banks").forEach(x -> excl.add(x.getAsString()));
         }
+        if (!src.has("held_deck_keys") || !src.get("held_deck_keys").isJsonArray()
+                || src.getAsJsonArray("held_deck_keys").size() == 0) {
+            throw new IllegalArgumentException("deck belief: the export lists no held-out deck keys (held_deck_keys)");
+        }
+        if (!near.contains(LIVE_HUMAN) || !excl.contains(LIVE_HUMAN)) {
+            // review #150 S3 (re-check): the live human decks are excluded and lineage-held-out too
+            throw new IllegalArgumentException("deck belief: the export must exclude and lineage-hold-out " + LIVE_HUMAN);
+        }
         if (near.isEmpty() || !excl.containsAll(near)) {
             throw new IllegalArgumentException("deck belief: the export's faced banks are not both excluded and "
                     + "lineage-held-out: near " + near + ", excluded " + excl);
+        }
+    }
+
+    /**
+     * The deck key of a main-section multiset: sha256 of the lines "name TAB count" in name order, newline-joined (mtgx
+     * deckbelief data.deck_key).
+     */
+    public static String deckKey(Map<String, Integer> main) {
+        final StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, Integer> e : new java.util.TreeMap<>(main).entrySet()) {
+            if (sb.length() > 0) {
+                sb.append('\n');
+            }
+            sb.append(e.getKey()).append('\t').append(e.getValue());
+        }
+        try {
+            return hex(MessageDigest.getInstance("SHA-256").digest(sb.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException x) {
+            throw new IllegalStateException(x);
+        }
+    }
+
+    /**
+     * review #155 S1: the first refusal in this JVM, sticky. Redraw callers swallow exceptions (a failed world, a skipped
+     * threat world), so a refusal must not depend on its exception surfacing: RlActorBench voids every game that ends
+     * after it, StepSearch refuses its result, harnesses exit 2, and {@link #sample} refuses to draw.
+     */
+    private static volatile String refusal = null;
+
+    /** The first deck-belief refusal in this JVM, or null. */
+    public static String refusal() {
+        return refusal;
+    }
+
+    /** Throw if a deck-belief refusal happened in this JVM. */
+    public static void throwIfRefused() {
+        final String r = refusal;
+        if (r != null) {
+            throw new IllegalStateException(r);
+        }
+    }
+
+    /** Tests only. */
+    static void resetRefusalForTests() {
+        refusal = null;
+    }
+
+    /** review #155 S3: the registered players that passed the gate (weak: a finished game's players go away). */
+    private final Set<forge.game.player.RegisteredPlayer> gateOk = java.util.Collections.synchronizedSet(
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
+
+    /**
+     * review #1530 S1 ruling (the per-deck gate, on every load path: RlSearch, StepSearch, RlActorBench, harnesses): an
+     * opponent's deck must be one this export was held out from, or the game is refused, and the refusal is sticky
+     * ({@link #refusal}). Reads the registered decklist for this check only, never for a draw.
+     */
+    public void requireHeld(forge.game.player.RegisteredPlayer rp) {
+        if (rp != null && gateOk.contains(rp)) {
+            return;
+        }
+        try {
+            requireHeld(rp == null ? null : rp.getDeck());
+        } catch (IllegalStateException e) {
+            synchronized (DeckBeliefModel.class) {
+                if (refusal == null) {
+                    refusal = e.getMessage();
+                }
+            }
+            throw e;
+        }
+        gateOk.add(rp);
+    }
+
+    void requireHeld(forge.deck.Deck deck) {
+        if (deck == null || !deck.has(forge.deck.DeckSection.Main)) {
+            throw new IllegalStateException("deck belief: refused: the opponent has no registered main deck to check");
+        }
+        final Map<String, Integer> main = new HashMap<>();
+        for (Map.Entry<forge.item.PaperCard, Integer> e : deck.get(forge.deck.DeckSection.Main)) {
+            main.merge(e.getKey().getName(), e.getValue(), Integer::sum);
+        }
+        final String k = deckKey(main);
+        if (!heldKeys.contains(k)) {
+            throw new IllegalStateException("deck belief: refused: the opponent's deck " + k.substring(0, 12)
+                    + " is not one this export (" + sha256.substring(0, 12) + ") was held out from");
         }
     }
 
@@ -241,7 +346,8 @@ public final class DeckBeliefModel {
      * Basics are not capped (the other beliefs cap them at beliefBasics). A non-basic is never drawn twice, whatever
      * beliefSingleton says: the model is trained on near-singleton cube decks (review #150 S2-2, documented).
      */
-    public List<String> sample(Collection<String> shown, List<String> pool, int total, Random rng) {
+    List<String> sample(Collection<String> shown, List<String> pool, int total, Random rng) {
+        throwIfRefused(); // review #155 S3: never draw after a refusal
         final float[] sum = new float[d];
         int n = 0;
         final Set<String> used = new HashSet<>();

@@ -775,6 +775,8 @@ public final class StepSearch {
             }
             res.ms = (System.nanoTime() - t0) / 1e6;
         }
+        // review #155 S1: a deck-belief refusal anywhere in this value (swallowed by a world) refuses the value
+        forge.ai.simulation.DeckBeliefModel.throwIfRefused();
         return res;
     }
 

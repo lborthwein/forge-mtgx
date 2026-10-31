@@ -1926,6 +1926,12 @@ public final class LookaheadSearch {
         labelTargets = labelSink != null ? new JsonArray[n] : null;
         final Carried[] carried = cfg.reuse ? carry(live, me, cands, turn, k) : new Carried[k];
         final Rollout[] freshDef = cfg.reuseVerify ? new Rollout[k] : null;
+        if (beliefCube != null && !cfg.beliefShadow && cfg.deck() && cfg.beliefDeckModel != null) {
+            // review #155 S1: gate every opponent at the decision, outside the per-world try blocks
+            for (Player o : me.getOpponents()) {
+                cfg.beliefDeckModel.requireHeld(o.getRegisteredPlayer());
+            }
+        }
         final BeliefSampler.Dist bd = beliefCube == null ? null
                 : belief(live, me, beliefRoot == null ? null : beliefRoot[0], index, turn, onStack);
         lastBelief = bd;
@@ -8310,6 +8316,8 @@ public final class LookaheadSearch {
             for (Card c : shownCards) {
                 shown.add(c.getPaperCard().getName());
             }
+            // review #1530 S1 ruling: the per-deck gate (cached in the model; sticky on refusal)
+            model.requireHeld(liveOpp.getRegisteredPlayer());
             final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
             final long c0 = System.nanoTime();
             final List<String> drawn = new ArrayList<>(model.sample(shown, pool, need + libNeed, rng));
