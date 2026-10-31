@@ -216,7 +216,7 @@ public final class R3LabelSearch {
             }
             if (s.maxCands < 2 || s.selectWorlds < 1 || s.targetWorlds < 1 || s.topAnswers < 1 || s.maxTurns < 1
                     || s.maxSteps < 1 || s.horizon < 0 || s.drawDepth < 1 || s.seqCap < 1 || s.samples < 1
-                    || s.oppResponses < 0 || s.oppDepth < 1 || s.oppNodes < 1 || s.policyTop < 0 || s.exploreAnswers < 0
+                    || s.oppResponses < 0 || s.oppResponses > OppMin.CHARM_CAP || s.oppDepth < 1 || s.oppNodes < 1 || s.policyTop < 0 || s.exploreAnswers < 0
                     || s.rowMaxLines < 0 || s.rowMaxProofs < 0 || s.rowMaxSteps < 0
                     || !(s.maxUnresolvedShare >= 0 && s.maxUnresolvedShare <= 1)) {
                 throw new IllegalArgumentException("r3: counts out of range");
@@ -394,6 +394,8 @@ public final class R3LabelSearch {
     static final class Work {
         long lines, steps, copies, proofs, proofWins, proofLosses, inlineAsks, inlineDeparted, oppNodes, oppCuts,
                 leafValues, holdPasses;
+        /** Review #148: every MIN cap event of the row by reason (the recall cost of failing closed). */
+        final Map<String, Integer> capReasons = new TreeMap<>();
 
         /** The first per-row cap this row has reached, or null. */
         String over(final Spec spec) {
@@ -417,6 +419,11 @@ public final class R3LabelSearch {
             o.addProperty("opp_min_cuts", oppCuts);
             o.addProperty("leaf_values", leafValues);
             if (holdPasses > 0) o.addProperty("hold_passes", holdPasses);
+            if (!capReasons.isEmpty()) {
+                final JsonObject c = new JsonObject();
+                for (Map.Entry<String, Integer> e : capReasons.entrySet()) c.addProperty(e.getKey(), e.getValue());
+                o.add("cap_reasons", c);
+            }
             return o;
         }
     }
@@ -449,6 +456,8 @@ public final class R3LabelSearch {
         String draw;
         double weight = Double.NaN;
         int memoHits, budget;
+        /** Review #148: the MIN's cap events by reason. */
+        final Map<String, Integer> caps = new TreeMap<>();
 
         JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -457,6 +466,11 @@ public final class R3LabelSearch {
             if (branches > 1) o.addProperty("branches", branches);
             if (memoHits > 0) o.addProperty("memo", memoHits);
             if (budget > 0) o.addProperty("budget", budget);
+            if (!caps.isEmpty()) {
+                final JsonObject c = new JsonObject();
+                for (Map.Entry<String, Integer> e : caps.entrySet()) c.addProperty(e.getKey(), e.getValue());
+                o.add("caps", c);
+            }
             if (minWhy != null) o.addProperty("min", minWhy);
             if (draw != null) o.addProperty("draw", draw);
             if (!Double.isNaN(weight)) o.add("w", num(weight));
@@ -1110,6 +1124,8 @@ public final class R3LabelSearch {
         wo.minWhy = m.why;
         wo.memoHits = m.memoHits;
         wo.budget = m.budget;
+        wo.caps.putAll(m.caps);
+        for (Map.Entry<String, Integer> e : m.caps.entrySet()) work.capReasons.merge(e.getKey(), e.getValue(), Integer::sum);
         return wo;
     }
 

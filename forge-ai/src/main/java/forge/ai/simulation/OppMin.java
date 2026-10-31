@@ -65,6 +65,11 @@ public final class OppMin {
         public boolean memo = true;
 
         public Cfg(final int nodes, final int perPoint, final int depth) {
+            if (perPoint > CHARM_CAP) {
+                // review #148 (fail closed): a per-point cap at or above the modal enumeration cap would let a cut
+                // modal set pass as complete
+                throw new IllegalArgumentException("oppResponses " + perPoint + " > " + CHARM_CAP);
+            }
             this.nodes = nodes;
             this.perPoint = perPoint;
             this.depth = depth;
@@ -135,12 +140,19 @@ public final class OppMin {
         final String state;
         final int impact;
         final int budgetHint;
+        /** Review #148 (fail closed): why the set is not complete (an answer OppMin cannot enumerate), or null. */
+        public final String gap;
 
         Point(final int size, final String state, final int impact, final int budgetHint) {
+            this(size, state, impact, budgetHint, null);
+        }
+
+        Point(final int size, final String state, final int impact, final int budgetHint, final String gap) {
             this.size = size;
             this.state = state;
             this.impact = impact;
             this.budgetHint = budgetHint;
+            this.gap = gap;
         }
     }
 
@@ -167,6 +179,13 @@ public final class OppMin {
         public String why;
         public int nodes, memoHits, maxResponses, budget;
         public Leaf firstLeaf;
+        /** Every cap event of the tree by reason (review #148: the recall cost of failing closed). */
+        public final java.util.TreeMap<String, Integer> caps = new java.util.TreeMap<>();
+
+        void cap(final String why) {
+            if (cap == null) cap = why;
+            caps.merge(why, 1, Integer::sum);
+        }
     }
 
     // ------------------------------------------------------------------------------------------------ the tree
@@ -182,14 +201,14 @@ public final class OppMin {
         while (!stack.isEmpty()) {
             final Script s = stack.pop();
             if (out.nodes >= cfg.nodes) {
-                out.cap = out.cap == null ? "nodes" : out.cap;
+                out.cap("nodes");
                 break;
             }
             out.nodes++;
             final Leaf l = play.apply(s);
             if (out.firstLeaf == null) out.firstLeaf = l;
             if (Double.isNaN(l.v)) {
-                out.cap = out.cap == null ? "branch:" + l.end : out.cap;
+                out.cap("branch:" + l.end);
                 continue;
             }
             if (l.v < lo) {
@@ -218,14 +237,18 @@ public final class OppMin {
             final List<Integer> kidImpact = new ArrayList<>();
             for (int j = s.last() + 1; j < pts.size(); j++) {
                 final Point p = pts.get(j);
+                if (p.gap != null) {
+                    // fail closed: an answer this point's set could not enumerate completely makes it a cap hit
+                    out.cap("gap:" + p.gap);
+                }
                 if (p.size == 0) continue;
                 out.maxResponses = Math.max(out.maxResponses, p.size);
                 if (p.size > cfg.perPoint) {
-                    out.cap = out.cap == null ? "truncated" : out.cap;
+                    out.cap("truncated");
                     continue;
                 }
                 if (left <= 0) {
-                    out.cap = out.cap == null ? "budget" : out.cap;
+                    out.cap("budget");
                     continue;
                 }
                 if (cfg.memo && !memo.add(p.state + "|" + left)) {
@@ -304,18 +327,20 @@ public final class OppMin {
                         + " stack " + g.getStack().size());
             }
             final String state = stateKey(g);
-            final List<SpellAbility> rs = responses(g, opp, victim, top);
+            final Answers as = answers(g, opp, victim, top);
+            final List<SpellAbility> rs = as.list;
             // review S1 (safety net, the base's behaviour): Forge AI's own answer at this point is a candidate too
             final List<SpellAbility> mine = own.get();
             if (script.forge) {
-                points.add(new Point(rs.size(), state, impact(top), budgetHint(opp, rs)));
+                points.add(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()));
                 return mine;
             }
             final SpellAbility fa = mine == null || mine.isEmpty() ? null : mine.get(0);
             if (fa != null && fa.getActivatingPlayer() == opp && !fa.isManaAbility() && !sameAsAny(fa, rs)) {
                 rs.add(fa);
             }
-            points.add(new Point(rs.size(), state, impact(top), budgetHint(opp, rs)));
+            points.add(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()));
+            if (DEBUG && as.gap() != null) System.err.println("[oppmin] point " + idx + " gap " + as.gap());
             final int r = script.respAt(idx);
             if (r < 0 || r >= rs.size()) return null;
             final SpellAbility sa = rs.get(r);
@@ -472,6 +497,27 @@ public final class OppMin {
      * (tapped too), graveyard and exile. Targets: our top stack object, our and their permanents by name, us, themselves.
      */
     public static List<SpellAbility> responses(final Game g, final Player opp, final Player victim, final SpellAbility top) {
+        return answers(g, opp, victim, top).list;
+    }
+
+    /** A point's response set and why it is not complete (review #148, fail closed: each reason is a cap hit). */
+    public static final class Answers {
+        public final List<SpellAbility> list;
+        public final java.util.TreeSet<String> gaps;
+
+        Answers(final List<SpellAbility> list, final java.util.TreeSet<String> gaps) {
+            this.list = list;
+            this.gaps = gaps;
+        }
+
+        String gap() {
+            return gaps.isEmpty() ? null : String.join("+", gaps);
+        }
+    }
+
+    /** {@link #responses} with the reasons the set is not complete (answers OppMin cannot enumerate fully). */
+    public static Answers answers(final Game g, final Player opp, final Player victim, final SpellAbility top) {
+        final java.util.TreeSet<String> gaps = new java.util.TreeSet<>();
         final TreeMap<String, SpellAbility> byKey = new TreeMap<>();
         final List<Card> sources = new ArrayList<>();
         for (ZoneType z : List.of(ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile)) {
@@ -486,7 +532,7 @@ public final class OppMin {
                 // review S3: alternative costs are separate answers (Force of Will hard-cast vs pitched)
                 final String cost = sa0.getPayCosts() == null ? "-" : sa0.getPayCosts().toSimpleString();
                 if (sa0.getApi() == ApiType.Charm) {
-                    charmResponses(byKey, c, sa0, cost, top, victim, opp, attack);
+                    charmResponses(byKey, gaps, c, sa0, cost, top, victim, opp, attack);
                     continue;
                 }
                 final List<Object> targets = new ArrayList<>();
@@ -514,11 +560,48 @@ public final class OppMin {
                     } catch (RuntimeException e) {
                         continue;
                     }
+                    final String gap = gapOf(cs);
+                    if (gap != null) gaps.add(gap);
                     byKey.putIfAbsent(cat + "|" + c.getName() + "|" + sa0.getApi() + "|" + cost + "|" + keys.get(ti), cs);
                 }
             }
         }
-        return new ArrayList<>(byKey.values());
+        return new Answers(new ArrayList<>(byKey.values()), gaps);
+    }
+
+    /**
+     * Review #148 (fail closed): why OppMin cannot enumerate this castable answer's options completely, or null. Unknown
+     * effect (no API), a choice made at resolution (GenericChoice), an X cost, more than one target or divided damage, a
+     * target zone the enumeration does not cover (hand, library, exile, command), a target in a sub-ability.
+     */
+    static String gapOf(final SpellAbility sa) {
+        for (SpellAbility x = sa; x != null; x = x.getSubAbility()) {
+            final ApiType api = x.getApi();
+            if (api == null) return "unknown-api";
+            if (api == ApiType.GenericChoice) return "resolution-choice";
+            if (x.usesTargeting()) {
+                if (x != sa && !(x instanceof forge.game.spellability.AbilitySub as && as.getParent() != null
+                        && as.getParent().getApi() == ApiType.Charm)) {
+                    return "sub-target";
+                }
+                if (x.isDividedAsYouChoose() || x.getMaxTargets() > 1) return "multi-target";
+                final forge.game.spellability.TargetRestrictions tr = x.getTargetRestrictions();
+                if (tr != null && tr.getZone() != null) {
+                    for (ZoneType z : tr.getZone()) {
+                        if (z != ZoneType.Battlefield && z != ZoneType.Graveyard && z != ZoneType.Stack) return "target-zone";
+                    }
+                }
+            }
+        }
+        try {
+            if (sa.getPayCosts() != null && sa.getPayCosts().getTotalMana() != null
+                    && sa.getPayCosts().getTotalMana().countX() > 0) {
+                return "x-cost";
+            }
+        } catch (RuntimeException e) {
+            return "cost-unreadable";
+        }
+        return null;
     }
 
     /**
@@ -535,6 +618,16 @@ public final class OppMin {
         if (top != null && sa.canTargetSpellAbility(top)) {
             targets.add(top);
             keys.add("stack");
+        }
+        // review #148 (fail closed): our other objects on the stack too (a counter on the spell below the top)
+        final Set<String> seenStack = new HashSet<>();
+        for (SpellAbilityStackInstance si : victim.getGame().getStack()) {
+            final SpellAbility x = si.getSpellAbility();
+            if (x == null || x == top || x.getActivatingPlayer() != victim || x.getHostCard() == null) continue;
+            if (seenStack.add(x.getHostCard().getName() + "|" + x.getDescription()) && sa.canTargetSpellAbility(x)) {
+                targets.add(x);
+                keys.add("stack:" + x.getHostCard().getName());
+            }
         }
         for (Player who : List.of(victim, opp)) {
             for (ZoneType z : List.of(ZoneType.Battlefield, ZoneType.Graveyard)) {
@@ -562,33 +655,69 @@ public final class OppMin {
      * card allows them; at most 24 combinations), each with its modes forced ({@link #forcedModes}). A combination is a
      * response when any of its modes is (incidental modes alone are not).
      */
-    static void charmResponses(final TreeMap<String, SpellAbility> byKey, final Card c, final SpellAbility sa0,
-            final String cost, final SpellAbility top, final Player victim, final Player opp, final boolean attack) {
+    static void charmResponses(final TreeMap<String, SpellAbility> byKey, final java.util.TreeSet<String> gaps,
+            final Card c, final SpellAbility sa0, final String cost, final SpellAbility top, final Player victim,
+            final Player opp, final boolean attack) {
         final List<forge.game.spellability.AbilitySub> modes;
-        final int num;
-        final boolean repeat;
+        final int num, min;
         try {
             sa0.setActivatingPlayer(opp);
             modes = forge.game.ability.effects.CharmEffect.makePossibleOptions(sa0);
             num = Math.max(1, AbilityUtils.calculateAmount(c, sa0.getParamOrDefault("CharmNum", "1"), sa0));
-            repeat = sa0.hasParam("CanRepeatModes");
+            min = sa0.hasParam("MinCharmNum") ? AbilityUtils.calculateAmount(c, sa0.getParam("MinCharmNum"), sa0) : num;
         } catch (RuntimeException e) {
+            gaps.add("charm-unreadable");
             return;
         }
         if (modes.isEmpty()) return;
-        final int k = repeat ? num : Math.min(num, modes.size());
+        // the extra cost of each mode past the first (Escalate); another per-mode cost keyword is not modelled
+        int extra = 0;
+        for (forge.game.keyword.KeywordInterface kw : c.getKeywords()) {
+            final String k = kw.getOriginal();
+            if (k.startsWith("Escalate")) {
+                try {
+                    extra = new forge.card.mana.ManaCost(new forge.card.mana.ManaCostParser(k.substring(k.indexOf(':') + 1)))
+                            .getCMC();
+                } catch (RuntimeException e) {
+                    gaps.add("charm-cost");
+                    return;
+                }
+            } else if (k.startsWith("Spree") || k.startsWith("Tiered")) {
+                gaps.add("charm-cost");
+            }
+        }
+        int mana;
+        int base;
+        try {
+            mana = ComputerUtilMana.getAvailableManaEstimate(opp, false);
+            base = sa0.getPayCosts() == null || sa0.getPayCosts().getTotalMana() == null ? 0
+                    : sa0.getPayCosts().getTotalMana().getCMC();
+        } catch (RuntimeException e) {
+            mana = Integer.MAX_VALUE;
+            base = 0;
+        }
+        final boolean repeat = sa0.hasParam("CanRepeatModes");
+        final int hi = repeat ? num : Math.min(num, modes.size());
         final List<int[]> combos = new ArrayList<>();
-        combo(modes.size(), k, repeat, 0, new int[k], 0, combos, 24);
+        for (int k = Math.max(1, min); k <= hi; k++) {
+            combo(modes.size(), k, repeat, 0, new int[k], 0, combos, CHARM_CAP + 1);
+        }
+        if (combos.size() > CHARM_CAP) gaps.add("charm-overflow");
         int added = 0;
+        boolean real = false;
         for (int[] cmb : combos) {
-            // review #148 S1 (round 2): every mode's distinct target classes (collapsed by name as for other answers),
-            // and every product of them; past CHARM_CAP answers the point's set is over the per-point cap (a cap hit)
+            if (added > CHARM_CAP) break;
+            if (extra > 0 && base + (cmb.length - 1) * extra > mana) continue; // not payable with its escalate cost
+            // every mode's distinct target classes (collapsed by name), every product of them
             final List<List<Object>> optT = new ArrayList<>();
             final List<List<Integer>> optC = new ArrayList<>();
+            final List<String> modeGaps = new ArrayList<>();
             boolean ok = true;
             for (int m : cmb) {
                 final forge.game.spellability.AbilitySub sub = modes.get(m);
                 sub.setActivatingPlayer(opp);
+                final String mg = gapOf(sub);
+                if (mg != null) modeGaps.add(mg);
                 final List<Object> ts = new ArrayList<>();
                 targetsOf(sub, top, victim, opp, ts, new ArrayList<>());
                 final List<Object> oT = new ArrayList<>();
@@ -598,7 +727,7 @@ public final class OppMin {
                     try {
                         x = category(sub, t, top, victim, opp, attack);
                     } catch (RuntimeException e) {
-                        x = -1; // a mode Forge cannot test here: not a reason to answer
+                        x = -1;
                     }
                     if (x >= 0 || !sub.usesTargeting()) {
                         oT.add(t);
@@ -606,12 +735,12 @@ public final class OppMin {
                     }
                 }
                 if (oT.isEmpty()) {
-                    // a targeted mode with no real target: its first legal one (a bonus mode), else not castable
-                    if (ts.isEmpty()) {
-                        ok = false;
+                    if (ts.isEmpty() && sub.usesTargeting() && sub.getMinTargets() > 0) {
+                        ok = false; // a mode that needs a target it cannot have
                         break;
                     }
-                    oT.add(ts.get(0));
+                    // a mode with no real target: its first legal one, or none (TargetMin 0): a bonus mode
+                    oT.add(ts.isEmpty() ? null : ts.get(0));
                     oC.add(-1);
                 }
                 optT.add(oT);
@@ -639,16 +768,22 @@ public final class OppMin {
                     } catch (RuntimeException e) {
                         play = false;
                     }
-                    if (play && byKey.putIfAbsent(cat + "|" + c.getName() + "|Charm|" + cost + "|modes:" + key, cs) == null) {
-                        added++;
+                    if (play) {
+                        real = true;
+                        gaps.addAll(modeGaps);
+                        if (byKey.putIfAbsent(cat + "|" + c.getName() + "|Charm|" + cost + "|modes:" + key, cs) == null) {
+                            added++;
+                        }
                     }
                 }
                 int q = cmb.length - 1;
                 while (q >= 0 && ++pick[q] >= optT.get(q).size()) pick[q--] = 0;
                 if (q < 0) break;
             }
-            if (added > CHARM_CAP) break;
         }
+        if (added > CHARM_CAP) gaps.add("charm-overflow");
+        // repeated modes share one sub (a forced "A,B" would play as "B,B"): fail closed on a real repeatable answer
+        if (repeat && real) gaps.add("charm-repeat");
     }
 
     /** At most this many answers per modal card (one more than the default per-point cap would already be a cap hit). */

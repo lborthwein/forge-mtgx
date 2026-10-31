@@ -177,6 +177,33 @@ public class LabellerV2MinTest extends AITest {
                 engineMin(true, 2)), "open control: the Bears attack is proven");
     }
 
+    /**
+     * Review #148 S1 (round 3) and the fail-closed ruling: an answer OppMin cannot enumerate completely is a cap hit,
+     * never "no response". Blessed Alliance ("choose one or more", escalate) at a stack point; Mystic Confluence's
+     * repeatable modes (two bounces on two different attackers); Fire split between two attackers. None is proven, and
+     * the gaps name their reasons; Healing Salve (choose one) refutes the Bolt as before.
+     */
+    @Test
+    public void answersOppMinCannotEnumerateFailClosed() {
+        Assert.assertFalse(proven(frame("Blessed Alliance", "Plains;Plains", 3, "Lightning Bolt", "Mountain"),
+                passive(cfg(true, 64))), "Blessed Alliance: gain 4 life answers the Bolt");
+        Assert.assertFalse(proven(frame("Healing Salve", "Plains", 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                "Healing Salve: prevent 3 answers the Bolt");
+        final java.util.function.Supplier<Game> conf = () -> frame("Mystic Confluence", "Island;Island;Island;Island;Island",
+                4, "", "Grizzly Bears;Grizzly Bears;Forest");
+        Assert.assertFalse(proven(conf.get(), engineMin(true, 2)), "Confluence bounces both attackers");
+        final Game cg = conf.get();
+        Assert.assertTrue(OppMin.answers(cg, cg.getPlayers().get(0), cg.getPlayers().get(1), null).gaps
+                .contains("charm-repeat"), "a repeatable modal answer is a gap");
+        final java.util.function.Supplier<Game> fire = () -> frame("Fire // Ice", "Mountain;Mountain", 2, "",
+                "Savannah Lions;Savannah Lions;Plains");
+        Assert.assertFalse(proven(fire.get(), engineMin(true, 2)), "Fire split between the two attackers");
+        final Game fg = fire.get();
+        Assert.assertTrue(OppMin.answers(fg, fg.getPlayers().get(0), fg.getPlayers().get(1), null).gaps
+                .contains("multi-target"), "divided damage is a gap: " + OppMin.answers(fg, fg.getPlayers().get(0),
+                fg.getPlayers().get(1), null).gaps);
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {

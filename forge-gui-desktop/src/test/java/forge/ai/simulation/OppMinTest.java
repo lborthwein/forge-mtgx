@@ -86,6 +86,32 @@ public class OppMinTest {
         }
     }
 
+    /** Review #148 (fail closed): a point whose set has an answer OppMin cannot enumerate is a cap hit, logged by reason. */
+    @Test
+    public void anUnenumerableAnswerIsACapHit() {
+        final OppMin.Out o = OppMin.min(cfg(), s -> {
+            final List<OppMin.Point> pts = new ArrayList<>();
+            pts.add(new OppMin.Point(0, "p0", 1, 0, null));
+            pts.add(new OppMin.Point(0, "p1", 1, 0, "unknown-api")); // a castable answer with no modelled effect
+            return new OppMin.Leaf(1.0, "terminal", pts);
+        });
+        AssertJUnit.assertTrue(Double.isNaN(o.v));
+        AssertJUnit.assertEquals("gap:unknown-api", o.cap);
+        AssertJUnit.assertEquals(Integer.valueOf(1), o.caps.get("gap:unknown-api"));
+        // a refutation still wins over the gap: the min is 0
+        final OppMin.Out z = OppMin.min(cfg(), s -> new OppMin.Leaf(s.forge ? 1.0 : 0.0, "terminal",
+                java.util.Collections.singletonList(new OppMin.Point(0, "p", 1, 0, "unknown-api"))));
+        AssertJUnit.assertEquals(0.0, z.v, 1e-12);
+        // the per-point cap is bounded by the modal enumeration cap
+        boolean refused = false;
+        try {
+            new OppMin.Cfg(64, OppMin.CHARM_CAP + 1, 2);
+        } catch (IllegalArgumentException e) {
+            refused = true;
+        }
+        AssertJUnit.assertTrue(refused);
+    }
+
     @Test
     public void theNodeCapAndTheMemo() {
         final OppMin.Cfg c = new OppMin.Cfg(5, 4, 2);

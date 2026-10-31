@@ -335,6 +335,10 @@ public final class ForcedWinSolver {
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
             c.oppResponses = intOr(get.apply("oppResponses"), c.oppResponses);
+            if (c.oppResponses > OppMin.CHARM_CAP) {
+                throw new IllegalArgumentException("oppResponses " + c.oppResponses + " > " + OppMin.CHARM_CAP
+                        + " (review #148: a cut modal set must stay a cap hit)");
+            }
             c.oppDepth = intOr(get.apply("oppDepth"), c.oppDepth);
             c.oppNodes = intOr(get.apply("oppNodes"), c.oppNodes);
             c.cacPicks = v2all || "true".equals(get.apply("cacPicks"));
@@ -516,6 +520,13 @@ public final class ForcedWinSolver {
         public long playoutWallCuts, playoutStepCaps, playoutCallCaps;
         /** labeller-v2 (d): MIN play-outs (response branches) and worlds cut at oppNodes; reported only when non-zero. */
         public long oppMinNodes, oppMinCuts;
+        /** Review #148: the shared MIN's cap events by reason (process-local diagnostics; never in a label or sha). */
+        public final java.util.Map<String, Long> oppMinCapReasons = new java.util.TreeMap<>();
+
+        void noteMinCaps(final java.util.Map<String, Integer> caps) {
+            for (java.util.Map.Entry<String, Integer> e : caps.entrySet()) oppMinCapReasons.merge(e.getKey(), (long) e.getValue(), Long::sum);
+            if (OppMin.DEBUG) System.err.println("[oppmin] cut " + caps);
+        }
         /** labeller-v2 (a): engine moves applied to rank choice variants; reported only when non-zero. */
         public long cacApplies;
         /** solver-cap12 round 3 (R3-1): ladder escalations, the lines they found, their nodes and steps; only when non-zero. */
@@ -2445,6 +2456,7 @@ public final class ForcedWinSolver {
             return firstLost[0];
         }
         if (Double.isNaN(m.v)) {
+            meter.noteMinCaps(m.caps);
             return minCut(m.cap == null ? "oppMin" : m.cap.startsWith("nodes") ? "oppNodes"
                     : m.cap.startsWith("truncated") ? "oppResponses" : m.cap.startsWith("budget") ? "oppDepth" : m.cap);
         }
