@@ -193,6 +193,13 @@ public final class DudCast {
                 lastWhy = "not in copy: " + (p.error != null ? String.valueOf(p.error) : p.missWhy);
                 return Verdict.UNKNOWN;
             }
+            final String lost = historyLost(live, p.g);
+            if (lost != null) {
+                // the copy does not carry this turn's history (revolt: Fatal Push on a 3-drop): the copy's verdict could
+                // be wrong, so never call it a dud (live report 2026-10-31T02-13-20)
+                lastWhy = "turn history not in the copy: " + lost;
+                return Verdict.UNKNOWN;
+            }
             final Boolean changed = resolveInCopy(p, liveSa.isSpell());
             if (changed == null) {
                 return Verdict.UNKNOWN;
@@ -202,6 +209,40 @@ public final class DudCast {
             }
         }
         return Verdict.DUD;
+    }
+
+    /**
+     * The first per-turn history fact a condition may read that differs between the live game and its copy (null when they
+     * agree): revolt, spells cast, life gained and lost, cards drawn, lands played, for every player.
+     */
+    static String historyLost(Game live, Game copy) {
+        for (Player lp : live.getPlayers()) {
+            Player cp = null;
+            for (Player x : copy.getPlayers()) {
+                if (x.getId() == lp.getId()) {
+                    cp = x;
+                }
+            }
+            if (cp == null) {
+                return "player " + lp.getId();
+            }
+            if (lp.hasRevolt() != cp.hasRevolt()) {
+                return "revolt";
+            }
+            if (lp.getSpellsCastThisTurn() != cp.getSpellsCastThisTurn()) {
+                return "spells cast this turn";
+            }
+            if (lp.getLifeGainedThisTurn() != cp.getLifeGainedThisTurn() || lp.getLifeLostThisTurn() != cp.getLifeLostThisTurn()) {
+                return "life gained/lost this turn";
+            }
+            if (lp.getNumDrawnThisTurn() != cp.getNumDrawnThisTurn()) {
+                return "cards drawn this turn";
+            }
+            if (lp.getLandsPlayedThisTurn() != cp.getLandsPlayedThisTurn()) {
+                return "lands played this turn";
+            }
+        }
+        return null;
     }
 
     /** In the prepared copy's own scopes: cast, key, resolve the item, key. Null = could not tell. */

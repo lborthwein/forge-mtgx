@@ -452,4 +452,65 @@ public class LookaheadDudCastTest extends SimulationTest {
         AssertJUnit.assertEquals(0, s.getStats().dudVetoed);
         s.shutdown();
     }
+
+    /**
+     * Live report 2026-10-31T02-13-20 (session 67b8040a, turn 9, its draw step): Forge AI's own answer was Fatal Push on
+     * Spellseeker (mana value 3) with no revolt this turn; the target is legal and the mana value is checked on
+     * resolution, so it does nothing. The detector calls it a dud; with revolt it is an effect.
+     */
+    @Test
+    public void fatalPushWithoutRevolt() {
+        Game g = board();
+        Player me = g.getPlayers().get(1);
+        Player opp = g.getPlayers().get(0);
+        Card seeker = addCard("Spellseeker", opp);
+        g.getAction().checkStateEffects(true);
+        Card pushCard = addCardToZone("Fatal Push", me, ZoneType.Hand);
+        SpellAbility push = spellOf(pushCard);
+        push.getTargets().add(seeker);
+        AssertJUnit.assertEquals("mana value 3, no revolt", DudCast.Verdict.DUD, check(g, push));
+        Card bears = addCard("Grizzly Bears", opp);
+        g.getAction().checkStateEffects(true);
+        SpellAbility push2 = spellOf(pushCard);
+        push2.resetTargets();
+        push2.getTargets().add(bears);
+        AssertJUnit.assertEquals("mana value 2", DudCast.Verdict.EFFECT, check(g, push2));
+        // revolt: a permanent we controlled left the battlefield this turn
+        Card swamp = null;
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            if (c.getName().equals("Swamp") && !c.isTapped()) {
+                swamp = c;
+            }
+        }
+        g.getAction().moveToGraveyard(swamp, null);
+        AssertJUnit.assertTrue("revolt", me.hasRevolt());
+        g.getAction().checkStateEffects(true);
+        SpellAbility push3 = spellOf(pushCard);
+        push3.resetTargets();
+        push3.getTargets().add(seeker);
+        // the game copy does not carry revolt, so the check cannot tell: never a dud
+        AssertJUnit.assertEquals("mana value 3 with revolt", DudCast.Verdict.UNKNOWN, check(g, push3));
+    }
+
+    /** The live answer handed to the seat's guard: ON vetoes Fatal Push on Spellseeker and asks Forge AI again. */
+    @Test
+    public void fatalPushAtTheSeat() {
+        PlayerControllerLookahead c = seatAt(AiFixes.Mode.ON, PhaseType.DRAW, true, new String[] {"Swamp", "Swamp"},
+                new String[] {"Fatal Push"}, new String[] {});
+        Card seeker = addCard("Spellseeker", c.getGame().getPlayers().get(1));
+        c.getGame().getAction().checkStateEffects(true);
+        Card pushCard = c.getPlayer().getCardsIn(ZoneType.Hand).get(0);
+        SpellAbility push = spellOf(pushCard);
+        push.setActivatingPlayer(c.getPlayer());
+        push.getTargets().add(seeker);
+        List<SpellAbility> live = new ArrayList<>();
+        live.add(push);
+        List<SpellAbility> a = DudCast.guard(searchOf(c), c, live);
+        System.err.println("[dud-test] fatal push at the seat: " + label(a) + " " + searchOf(c).getStats().toJson().get("dudCast"));
+        AssertJUnit.assertEquals(1, searchOf(c).getStats().dudVetoed);
+        AssertJUnit.assertEquals(1L, (long) searchOf(c).getStats().dudCards.get("Fatal Push"));
+        AssertJUnit.assertFalse("not Fatal Push on Spellseeker: " + label(a), a != null && !a.isEmpty()
+                && a.get(0).getHostCard() == pushCard && a.get(0).getTargets().contains(seeker));
+        searchOf(c).shutdown();
+    }
 }
