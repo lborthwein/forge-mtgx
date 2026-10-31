@@ -164,6 +164,19 @@ public class LabellerV2MinTest extends AITest {
                 "Mutavault animates and blocks the Bears");
     }
 
+    /**
+     * Review #148 S1 (round 2): a modal answer tries every target class of its modes. Kolaghan's Command against our
+     * lethal Bears attack at 2 life, a summoning-sick Llanowar Elves listed first: its 2 damage on the Bears refutes it
+     * (with one target per mode it hit the Elves and the attack was proven).
+     */
+    @Test
+    public void aModalAnswerTriesEveryTarget() {
+        Assert.assertFalse(proven(frame("Kolaghan's Command", "Swamp;Mountain;Mountain", 2, "",
+                "Llanowar Elves|SummonSick;Grizzly Bears;Forest"), engineMin(true, 2)), "Kolaghan's Command on the Bears");
+        Assert.assertTrue(proven(frame("", "Swamp;Mountain;Mountain", 2, "", "Llanowar Elves|SummonSick;Grizzly Bears;Forest"),
+                engineMin(true, 2)), "open control: the Bears attack is proven");
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {
