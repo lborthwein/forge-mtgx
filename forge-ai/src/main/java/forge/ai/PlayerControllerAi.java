@@ -106,6 +106,16 @@ public class PlayerControllerAi extends PlayerController {
         return cacHook;
     }
 
+    /**
+     * Review #147 S2: the controller holding a player's choose-a-card hook. A taped seat's controller is the
+     * {@link AiTapeController} wrapper, and the hook is installed on the controller it wraps.
+     */
+    public static PlayerControllerAi cacOf(final Player p) {
+        final forge.game.player.PlayerController c = p == null ? null : p.getController();
+        if (c instanceof AiTapeController t) return t.inner();
+        return c instanceof PlayerControllerAi pc ? pc : null;
+    }
+
     public void setKnowledgeHook(final KnowledgeHook hook) {
         this.knowledgeHook = hook;
     }

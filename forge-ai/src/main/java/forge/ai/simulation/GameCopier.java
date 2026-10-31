@@ -82,15 +82,16 @@ public class GameCopier {
         }
     }
 
-    /** C1: also copy the original game's stack. Callers must first check {@link #stackUnsupported}. */
+    /** r3-inline-choices-1030: skip the copy's state-based check (the caller resumes it); default off = as before. */
     private boolean deferStateEffects = false;
 
-    /** r3-inline-choices-1030: skip the copy's state-based check (the caller resumes it); default off = as before. */
+    /** r3-inline-choices-1030: see {@link #deferStateEffects} (a legend-rule choice resumed on the copy). */
     public void setDeferStateEffects(boolean b) {
         this.deferStateEffects = b;
     }
 
-        public void setCopyStack(boolean copyStack) {
+    /** C1: also copy the original game's stack. Callers must first check {@link #stackUnsupported}. */
+    public void setCopyStack(boolean copyStack) {
         this.copyStack = copyStack;
     }
 
