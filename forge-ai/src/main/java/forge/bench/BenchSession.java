@@ -95,6 +95,15 @@ public final class BenchSession {
         }
 
         /**
+         * Lane live-ai-quality-1030 (review of #159, S2-a): the answer this answerer gave to {@code method} was not played:
+         * the dud-cast guard vetoed it, and {@code playedBy} ("forge" or "pass") decided instead ({@code played}, or null
+         * for a pass). A training or session record must not show the vetoed answer as the action taken. Default: nothing.
+         */
+        default void onOverride(forge.game.Game game, forge.game.player.Player player, String method, String playedBy,
+                Object played) {
+        }
+
+        /**
          * True when this answerer only observes (delegates every ask; RL record mode): the bridge then builds its
          * priority menu on a scratch random stream and puts the IdScope counters back, so Forge plays the game it
          * would have played alone. Default false (an answerer whose answers are played).

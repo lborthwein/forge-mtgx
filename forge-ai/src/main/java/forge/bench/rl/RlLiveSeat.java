@@ -494,6 +494,7 @@ public final class RlLiveSeat {
             }
         };
         final RlSeat rs = new RlSeat(feat, ep, sc, uid, ctl, false);
+        this.seatAnswerer = rs;
         session.setLiveGame(g);
         rs.setGame(g);
         final RlKnowledge know = new RlKnowledge(g);
@@ -547,6 +548,102 @@ public final class RlLiveSeat {
 
     public Game liveGame() {
         return game;
+    }
+
+    /**
+     * lane live-ai-quality-1030 (review of #159, S2-a): with the guard on, the priority decision line waits for the guard so
+     * it can say whether its answer was played ({@code "vetoed"}, {@code "playedBy"}); off, it is written at once as before.
+     */
+    private com.google.gson.JsonObject heldLine;
+    /** Answers the guard vetoed (the end line's {@code dudCast.overrides}). */
+    private int guardOverrides;
+    /** The seat's answerer (the session's local answerer), told of each veto. */
+    private RlSeat seatAnswerer;
+
+    private void decisionLine(final com.google.gson.JsonObject d) {
+        flushDecisionLine();
+        if (k8Config != null && k8Config.dudCast != AiFixes.Mode.OFF) {
+            heldLine = d;
+        } else {
+            System.err.println("[lookahead-decision] " + d);
+        }
+    }
+
+    private void flushDecisionLine() {
+        if (heldLine != null) {
+            System.err.println("[lookahead-decision] " + heldLine);
+            heldLine = null;
+        }
+    }
+
+    /**
+     * After the guard ran on the policy's priority answer: the held decision line gets {@code vetoed} and {@code playedBy}
+     * ("policy", "forge" or "pass") and is written; on a veto the seat's answerer is told ({@link
+     * forge.bench.BenchSession.LocalAnswerer#onOverride}) so no record shows the vetoed answer as the action taken.
+     */
+    synchronized void guarded(final forge.game.player.Player p, final boolean vetoed, final String playedBy, final Object played) {
+        if (heldLine != null) {
+            heldLine.addProperty("vetoed", vetoed);
+            heldLine.addProperty("playedBy", playedBy);
+        }
+        flushDecisionLine();
+        if (vetoed) {
+            guardOverrides++;
+            final RlSeat a = seatAnswerer;
+            if (a != null) {
+                try {
+                    a.onOverride(game, p, "chooseSpellAbilityToPlay", playedBy, played);
+                } catch (RuntimeException e) {
+                    System.err.println("[policy-seat] override note failed: " + e);
+                }
+            }
+        }
+    }
+
+    /** lane live-ai-quality-1030: the dud-cast guard's look-ahead (the live K8 spec's config; null while dudCast is off). */
+    private volatile LookaheadSearch dudGuard;
+
+    /**
+     * The look-ahead the dud-cast guard runs its copies with: the degraded seat's K8 once there is one, else the seat's own
+     * (made on first use from the live K8 spec, honest belief as the K8 seat's). Null when the server has no look-ahead
+     * spec or its dudCast is off (the default): the seat's answers are then unchanged.
+     */
+    synchronized LookaheadSearch dudGuard() {
+        if (k8Config == null || k8Config.dudCast == AiFixes.Mode.OFF || dudGuardFailed) {
+            return null;
+        }
+        if (degraded && k8 != null) {
+            return k8;
+        }
+        if (dudGuard == null) {
+            try {
+                // the live K8 spec's config: honest already (InteractiveMain.parseLookahead ends in honest(): belief uniform over
+                // the event or jar pool, reuse off), as the degraded K8 fallback's
+                dudGuard = new LookaheadSearch(k8Config);
+            } catch (RuntimeException e) {
+                // the seat's own guard only: the shared K8 config is untouched (a degraded K8 keeps its own guard)
+                dudGuardFailed = true;
+                System.err.println("[policy-seat] dud-cast guard could not start, off for this seat's own answers: " + e);
+                return null;
+            }
+        }
+        return dudGuard;
+    }
+
+    /** The seat's own guard could not start: never retried this game. */
+    private boolean dudGuardFailed;
+
+
+    /** The guard's stats block ({"dudCast": ...} of the look-aheads it ran in), or null when it never ran. */
+    private JsonObject dudStats() {
+        final JsonObject o = new JsonObject();
+        for (LookaheadSearch s : new LookaheadSearch[] {dudGuard, k8}) {
+            final JsonObject st = s == null ? null : s.getStats().toJson();
+            if (st != null && st.has("dudCast")) {
+                o.add(s == dudGuard ? "seat" : "k8", st.get("dudCast"));
+            }
+        }
+        return o.size() == 0 ? null : o;
     }
 
     /** The K8 look-ahead of a degraded seat (null before a degrade, or when the server has no look-ahead spec). */
@@ -625,7 +722,7 @@ public final class RlLiveSeat {
             d.addProperty("proposeMs", Math.round(search.lastProposeMs * 10) / 10.0);
         }
         replayFlags(d);
-        System.err.println("[lookahead-decision] " + d);
+        decisionLine(d);
     }
 
     /**
@@ -664,7 +761,7 @@ public final class RlLiveSeat {
             d.addProperty("rebuild", true);
         }
         replayFlags(d);
-        System.err.println("[lookahead-decision] " + d);
+        decisionLine(d);
     }
 
     /**
@@ -758,6 +855,12 @@ public final class RlLiveSeat {
             if (search != null) {
                 o.add("search", search.summary());
             }
+            flushDecisionLine();
+            final JsonObject dud = dudStats(); // lane live-ai-quality-1030: only when the guard ran (dudCast on)
+            if (dud != null) {
+                dud.addProperty("overrides", guardOverrides);
+                o.add("dudCast", dud);
+            }
             if (k8 != null) {
                 o.add("k8", k8.getStats().toJson());
             }
@@ -773,6 +876,9 @@ public final class RlLiveSeat {
                     k8.finishGame(game);
                 }
                 k8.shutdown();
+            }
+            if (dudGuard != null) {
+                dudGuard.shutdown();
             }
             seatClient.close();
         }
