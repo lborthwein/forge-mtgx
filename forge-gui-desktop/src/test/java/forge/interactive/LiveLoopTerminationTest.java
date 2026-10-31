@@ -40,15 +40,24 @@ public class LiveLoopTerminationTest extends AITest {
             + "aiFixes0928=on,deadEtb=on,zeroX=on,crewNoop=on";
 
     private static String lib(String... names) {
+        return libN(30, names);
+    }
+
+    private static String libN(int n, String... names) {
         List<String> l = new ArrayList<>();
-        for (int i = 0; i < 30; i++) {
+        for (int i = 0; i < n; i++) {
             l.add(names[i % names.length]);
         }
         return String.join(";", l);
     }
 
     private static String position(String aiBattlefield, String aiHand, String aiGraveyard, String aiLibrary) {
-        return String.join("\n", "turn=5", "activeplayer=ai", "activephase=MAIN1", "humanlife=20", "ailife=20",
+        return position("ai", "MAIN1", aiBattlefield, aiHand, aiGraveyard, aiLibrary);
+    }
+
+    private static String position(String active, String phase, String aiBattlefield, String aiHand, String aiGraveyard,
+            String aiLibrary) {
+        return String.join("\n", "turn=5", "activeplayer=" + active, "activephase=" + phase, "humanlife=20", "ailife=20",
                 "humanhand=Island;Island", "humanlibrary=" + lib("Island", "Grizzly Bears"), "humangraveyard=", "humanexile=",
                 "humanbattlefield=Island;Island;Island",
                 "aihand=" + aiHand, "ailibrary=" + aiLibrary, "aigraveyard=" + aiGraveyard, "aiexile=",
@@ -62,6 +71,16 @@ public class LiveLoopTerminationTest extends AITest {
     static final String MANA = position("Kinnan, Bonder Prodigy;Basalt Monolith;Forest;Island;Forest", "", "",
             lib("Forest", "Grizzly Bears"));
 
+    /** Mid-loop: Mox Amber in hand (a free noncreature spell: Kitten resets Teferi), six cards left in the library. */
+    static final String DRAW_MID = position("Displacer Kitten;Teferi, Time Raveler|Counters:LOYALTY=4;"
+            + "Island;Island;Island;Island", "Mox Amber", "", libN(6, "Island", "Grizzly Bears"));
+    /** Mid-loop: the opponent's end step, Basalt Monolith tapped (its untap's AILogic is AtOppEOT), Kinnan in play. */
+    static final String MANA_MID = position("human", "END_OF_TURN", "Kinnan, Bonder Prodigy;Basalt Monolith|Tapped;"
+            + "Forest;Island;Forest;Island", "", "", lib("Forest", "Grizzly Bears"));
+    /** The loop's own steps in the game log, per scenario (what "started the loop" means). */
+    static final String[] LOOP_STEPS = {"cast Mox Amber", "triggered Displacer Kitten targeting [Teferi", "activated Teferi",
+        "activated Zuran Orb", "activated Basalt Monolith"};
+
     /** One scripted run's outcome. */
     static final class Run {
         int steps;
@@ -72,12 +91,15 @@ public class LiveLoopTerminationTest extends AITest {
         int seatLife;
         long decisions;
         final List<Integer> actionsPerTurn = new ArrayList<>();
+        final java.util.Map<String, Integer> loopSteps = new java.util.TreeMap<>();
+        int logged;
         String stats;
 
         @Override
         public String toString() {
             return "steps " + steps + " capped " + capped + " seatLost " + seatLost + " (" + reason + ") library " + seatLibrary
-                    + " life " + seatLife + " decisions " + decisions + " seat actions per turn " + actionsPerTurn + " stats " + stats;
+                    + " life " + seatLife + " decisions " + decisions + " seat actions per turn " + actionsPerTurn
+                    + " loop steps " + loopSteps + " stats " + stats;
         }
     }
 
@@ -139,6 +161,14 @@ public class LiveLoopTerminationTest extends AITest {
             if (m == null) {
                 continue;
             }
+            if (m.startsWith(seat.getName() + " ") && r.logged++ < 80) {
+                System.err.println("[loop-log] " + name + " | " + m);
+            }
+            for (String step : LOOP_STEPS) {
+                if (m.startsWith(seat.getName() + " " + step)) {
+                    r.loopSteps.merge(step, 1, Integer::sum);
+                }
+            }
             if (m.startsWith("Turn ")) {
                 r.actionsPerTurn.add(turnActions);
                 turnActions = 0;
@@ -153,22 +183,41 @@ public class LiveLoopTerminationTest extends AITest {
         return r;
     }
 
-    private void check(String name, String position) {
+    private Run check(String name, String position) {
         final String spec = System.getProperty("loop.spec", LIVE_SPEC);
         final Run r = run(name, position, spec);
         AssertJUnit.assertFalse(name + ": the run must end within the step cap: " + r, r.capped);
         AssertJUnit.assertFalse(name + ": the seat must not lose (deck itself): " + r, r.seatLost);
         AssertJUnit.assertTrue(name + ": library left: " + r, r.seatLibrary > 0);
+        return r;
+    }
+
+    private static int steps(Run r, String step) {
+        return r.loopSteps.getOrDefault(step, 0);
     }
 
     @Test(timeOut = 3_600_000)
     public void infiniteLife() {
-        check("life (Fastbond + Zuran Orb + Crucible)", LIFE);
+        // the loop runs: lands replayed from the graveyard and sacrificed to the Orb, then the seat stops
+        final Run r = check("life (Fastbond + Zuran Orb + Crucible)", LIFE);
+        AssertJUnit.assertTrue("the seat starts the life loop: " + r, steps(r, "activated Zuran Orb") >= 3);
     }
 
     @Test(timeOut = 3_600_000)
     public void infiniteDraw() {
         check("draw (Displacer Kitten + Teferi + Mox Amber)", DRAW);
+    }
+
+    @Test(timeOut = 3_600_000)
+    public void infiniteDrawMidLoop() {
+        // the loop's first step (the free Mox Amber, the Kitten trigger) is taken; the seat then does not reset Teferi
+        final Run r = check("draw mid-loop (Mox Amber in hand, 6 cards left)", DRAW_MID);
+        AssertJUnit.assertTrue("the seat takes the loop's first step: " + r, steps(r, "cast Mox Amber") >= 1);
+    }
+
+    @Test(timeOut = 3_600_000)
+    public void infiniteManaMidLoop() {
+        check("mana mid-loop (opponent's end step, Monolith tapped)", MANA_MID);
     }
 
     @Test(timeOut = 3_600_000)

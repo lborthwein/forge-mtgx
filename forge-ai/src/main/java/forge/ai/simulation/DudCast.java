@@ -40,19 +40,22 @@ import forge.util.MyRandom;
  * non-permanent spell or a non-mana activated ability, the guard plays it in {@link LookaheadSearch.Config#dudWorlds} game
  * copies, each with the hidden information re-drawn from the seat's belief ({@link LookaheadSearch#prepare}: the opponents'
  * hand and library from the belief pool, our own library order shuffled; never the real hidden cards). In each copy it casts
- * or activates the answer with its live choices (Forge AI pays the costs), takes the {@link #effectKey}, resolves only that
- * stack item with no responses, applies state-based actions and takes the key again. The key covers every player's life,
- * poison, counters and keywords, every card of every zone (library order included) with its controller, tapped state, P/T,
- * damage, counters, type line, keywords and attachments, the combat, the monarch, pending until-end-of-turn commands and
- * delayed triggers. It leaves out mana pools and, for a spell, the spell's own card: the card and mana spent. When the key is
- * unchanged in every copy, the answer is a dud.
+ * or activates the answer with its live choices (Forge AI pays the costs) and puts the pending triggers on the stack: a cast
+ * trigger (prowess, magecraft, Displacer Kitten) means the play does something. Otherwise it takes the {@link #effectKey},
+ * resolves only that stack item with no responses, applies state-based actions and pending triggers (a new trigger is an
+ * effect) and takes the key again. The key covers every player's life, poison, counters and keywords, every card of every
+ * zone (library order included) with its controller, tapped state, P/T, damage, counters, type line, keywords, goad and
+ * attachments, the combat, the monarch, every phase's pending commands (until end of turn, until your next turn, ...) and
+ * delayed triggers. It leaves out mana pools and, for a spell, the spell's own card: the card and mana spent. When the key
+ * is unchanged in every copy, the answer is a dud.
  *
  * <p><b>The guard.</b> ON: a dud is vetoed for this priority and Forge AI is asked again without it (as the policy pilot
  * re-asks, {@link forge.ai.AiController#setPolicyVeto}); its new answer is checked the same way, up to {@link #MAX_VETOES}
- * vetoes, then the seat passes. SHADOW: counts and logs, plays the answer. Anything the check cannot establish (the answer
- * not found or not payable in a copy, a copy or resolution error, a stack the copier does not support) keeps the answer.
- * Abilities whose point is information or mana the key cannot see are never checked: scry, surveil, look at / reveal / dig,
- * rearrange, clash, mana, extra turns and phases.
+ * vetoes, then the seat passes. SHADOW: counts and logs, plays the answer. Anything the check cannot establish (a non-empty
+ * stack, where a stack-only effect such as Stifle is outside the key; the answer not found or not payable in a copy; a copy
+ * or resolution error) keeps the answer. Never checked: permanent spells (Auras too), planeswalker abilities and any ability
+ * whose cost adds counters (the gain is the cost), and abilities whose point is information or mana the key cannot see:
+ * scry, surveil, look at / reveal / dig, a reveal-and-choose discard (Duress), rearrange, clash, mana, extra turns and phases.
  */
 public final class DudCast {
 
@@ -79,15 +82,25 @@ public final class DudCast {
             return false;
         }
         if (sa.isSpell()) {
-            // a permanent spell always puts its permanent onto the battlefield (dead ETBs are deadEtb's)
-            if (sa.getApi() == ApiType.PermanentCreature || sa.getApi() == ApiType.PermanentNoncreature) {
+            // a permanent spell (an Aura too: Animate Dead is ApiType Attach) puts its permanent onto the battlefield;
+            // dead ETBs are deadEtb's (review of #153, S1-a)
+            if (sa.getHostCard().isPermanent() || sa.getApi() == ApiType.PermanentCreature
+                    || sa.getApi() == ApiType.PermanentNoncreature || sa.getApi() == ApiType.Attach) {
                 return false;
             }
         } else if (!sa.isActivatedAbility()) {
             return false;
+        } else if (sa.isPwAbility() || (sa.getPayCosts() != null
+                && sa.getPayCosts().hasSpecificCostType(forge.game.cost.CostPutCounter.class))) {
+            // a cost that adds counters (a loyalty +N) is itself a gain, paid before the key is taken (review S1-b)
+            return false;
         }
         for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
             if (s.getApi() == null || EXEMPT.contains(s.getApi())) {
+                return false;
+            }
+            // Duress / Thoughtseize: seeing the hand has value with no legal pick (review S2)
+            if (s.getApi() == ApiType.Discard && s.hasParam("Mode") && s.getParam("Mode").startsWith("Reveal")) {
                 return false;
             }
         }
@@ -157,6 +170,11 @@ public final class DudCast {
         if (!checkable(liveSa)) {
             return Verdict.SKIPPED;
         }
+        if (!live.getStack().isEmpty()) {
+            // a stack-only effect (Stifle, a redirect, a counter) is outside the key: never call it a dud (review S2)
+            lastWhy = "the stack is not empty";
+            return Verdict.UNKNOWN;
+        }
         final LookaheadSearch.Config cfg = search.getConfig();
         final int worlds = Math.max(1, cfg.dudWorlds);
         final LookaheadSearch.Cand c = new LookaheadSearch.Cand(liveSa, true);
@@ -205,6 +223,11 @@ public final class DudCast {
                 lastWhy = "cast: ok=" + ok + " stack " + stackBefore + "->" + g.getStack().size();
                 return null;
             }
+            // cast triggers (prowess, magecraft, Displacer Kitten): casting it already does something (review S1-a, S2)
+            g.getStack().addAllTriggeredAbilitiesToStack();
+            if (g.getStack().size() > stackBefore + 1) {
+                return Boolean.TRUE;
+            }
             final SpellAbility top = g.getStack().peekAbility();
             if (top == null || top.getHostCard() == null || top.getHostCard().getId() != host.getId()) {
                 lastWhy = "top of stack is " + top;
@@ -214,6 +237,7 @@ public final class DudCast {
             final String before = effectKey(g, exclude);
             g.getStack().resolveStack();
             g.getAction().checkStateEffects(false, new HashSet<>());
+            g.getStack().addAllTriggeredAbilitiesToStack();
             if (g.getStack().size() > stackBefore) {
                 return Boolean.TRUE; // the resolution put something on the stack (a trigger, a copy): it did something
             }
@@ -234,7 +258,8 @@ public final class DudCast {
         final Player monarch = g.getMonarch();
         sb.append("mon=").append(monarch == null ? -1 : monarch.getId());
         final int[] until = GameCopier.untilCounts(g);
-        sb.append(" until=").append(until[0]).append(" delayed=").append(delayedTriggers(g)).append('\n');
+        sb.append(" until=").append(until[0]).append(" delayed=").append(delayedTriggers(g)).append(" phases=")
+                .append(phaseCommands(g)).append('\n');
         final Combat combat = g.getPhaseHandler().getCombat();
         if (combat != null) {
             sb.append("combat");
@@ -296,6 +321,14 @@ public final class DudCast {
             if (c.isSick()) {
                 sb.append(" sick");
             }
+            if (!c.getGoaded().isEmpty()) {
+                final List<Integer> gs = new ArrayList<>();
+                for (Player p : c.getGoaded()) {
+                    gs.add(p.getId());
+                }
+                Collections.sort(gs);
+                sb.append(" goad").append(gs);
+            }
         }
         counters(sb, c);
         if (c.getExiledWith() != null) {
@@ -330,6 +363,28 @@ public final class DudCast {
         if (!cn.isEmpty()) {
             sb.append(" n").append(cn);
         }
+    }
+
+    /** The pending commands of every phase (until EOT, until your next turn, ...): per phase and list, their counts. */
+    private static String phaseCommands(Game g) {
+        final StringBuilder sb = new StringBuilder();
+        final forge.game.phase.Phase[] phases = {g.getUntap(), g.getUpkeep(), g.getBeginOfCombat(), g.getEndOfCombat(),
+            g.getEndOfTurn(), g.getCleanup()};
+        for (forge.game.phase.Phase ph : phases) {
+            for (String f : new String[] {"at", "until", "untilMap", "untilEndMap", "registerMap"}) {
+                try {
+                    final java.lang.reflect.Field fl = forge.game.phase.Phase.class.getDeclaredField(f);
+                    fl.setAccessible(true);
+                    final Object v = fl.get(ph);
+                    sb.append(v instanceof java.util.Collection<?> c ? c.size()
+                            : v instanceof com.google.common.collect.Multimap<?, ?> m ? m.size() : -1).append(',');
+                } catch (ReflectiveOperationException | RuntimeException e) {
+                    sb.append("?,");
+                }
+            }
+            sb.append('|');
+        }
+        return sb.toString();
     }
 
     private static int delayedTriggers(Game g) {
