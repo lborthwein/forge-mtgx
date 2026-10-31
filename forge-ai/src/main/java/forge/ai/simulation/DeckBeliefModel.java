@@ -103,13 +103,19 @@ public final class DeckBeliefModel {
      * a non-empty {@code near_banks} (the lineage holdout against the banks the seats face), and {@code excluded_banks}
      * containing every one of those banks. Anything else is refused.
      */
+    static final String LIVE_HUMAN = "live/human";
+
     static void checkProvenance(JsonObject o) {
         final JsonObject src = o.has("source") && o.get("source").isJsonObject() ? o.getAsJsonObject("source") : null;
         if (src == null) {
             throw new IllegalArgumentException("deck belief: the export has no source provenance");
         }
-        if (src.has("mix") && !src.get("mix").isJsonNull()) {
-            throw new IllegalArgumentException("deck belief: an export trained with a bank mix is refused");
+        // review #150 S2 (re-check): the mix must be declared null at the top level AND in the trainer's own args
+        final JsonObject train = src.has("train") && src.get("train").isJsonObject() ? src.getAsJsonObject("train") : null;
+        if (!src.has("mix") || !src.get("mix").isJsonNull() || train == null || !train.has("mix")
+                || !train.get("mix").isJsonNull()) {
+            throw new IllegalArgumentException("deck belief: the export must declare mix null (source.mix and "
+                    + "source.train.mix); a bank mix is a hidden label");
         }
         final double j = src.has("near_jaccard") && !src.get("near_jaccard").isJsonNull()
                 ? src.get("near_jaccard").getAsDouble() : 0;
@@ -122,6 +128,10 @@ public final class DeckBeliefModel {
         }
         if (src.has("excluded_banks") && src.get("excluded_banks").isJsonArray()) {
             src.getAsJsonArray("excluded_banks").forEach(x -> excl.add(x.getAsString()));
+        }
+        if (!near.contains(LIVE_HUMAN) || !excl.contains(LIVE_HUMAN)) {
+            // review #150 S3 (re-check): the live human decks are excluded and lineage-held-out too
+            throw new IllegalArgumentException("deck belief: the export must exclude and lineage-hold-out " + LIVE_HUMAN);
         }
         if (near.isEmpty() || !excl.containsAll(near)) {
             throw new IllegalArgumentException("deck belief: the export's faced banks are not both excluded and "

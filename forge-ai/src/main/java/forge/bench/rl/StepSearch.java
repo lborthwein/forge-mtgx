@@ -135,7 +135,7 @@ public final class StepSearch {
         public static final int SMOKE_TRUE_K = 8;
 
         static final java.util.Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("rlsearch", "valueSha",
-                "control", "maxCopyCards", "target", "opr", "smoke"));
+                "control", "maxCopyCards", "target", "opr", "smoke", "deckBeliefFaced"));
 
         /**
          * The spec, or IllegalArgumentException ("refused: ...") unless honest, host-independent and tied to the proof
@@ -168,6 +168,14 @@ public final class StepSearch {
             if ("codraft".equals(c.belief)) {
                 // bvw-step2-fork-1027 (S2T): the co-draft table's pin is checked at the start (refused: exit 2)
                 PlanSearch.loadSynPinned(c.beliefPrior, c.beliefPriorSha256);
+            }
+            // belief-n11b (review #150 S2): the banks the seats face, a runner key outside the identity; the host's spec
+            // check (mtgx bvw.check_deck_belief) runs the lineage check against them before it pins the export
+            final boolean faced = o.has("deckBeliefFaced") && o.get("deckBeliefFaced").isJsonArray()
+                    && o.getAsJsonArray("deckBeliefFaced").size() > 0;
+            if ("deck".equals(c.belief) != faced) {
+                throw new IllegalArgumentException("refused: label.search.deckBeliefFaced (a non-empty bank list) goes "
+                        + "with rlsearch.belief=deck, and only with it");
             }
             if ("deck".equals(c.belief)) {
                 // belief-n11-1030 (N11): the learned deck model's pin is checked at the start (refused: exit 2)

@@ -40,8 +40,8 @@ public class BeliefDeckTest extends SimulationTest {
         return export(PROVENANCE);
     }
 
-    static final String PROVENANCE = "\"source\":{\"mix\":null,\"near_jaccard\":0.5,\"near_banks\":[\"train/cur-1009\"],"
-            + "\"excluded_banks\":[\"train/cur-1009\",\"live/human\"]},";
+    static final String PROVENANCE = "\"source\":{\"mix\":null,\"train\":{\"mix\":null},\"near_jaccard\":0.5,"
+            + "\"near_banks\":[\"train/cur-1009\",\"live/human\"],\"excluded_banks\":[\"train/cur-1009\",\"live/human\"]},";
 
     static String export(final String provenance) {
         return "{\"schema\":\"mtgx-deckbelief-export/1\",\"kind\":\"bag\",\"d\":1," + provenance
@@ -112,7 +112,11 @@ public class BeliefDeckTest extends SimulationTest {
                 "\"source\":{\"mix\":\"0.5=train/cur-\",\"near_jaccard\":0.5,\"near_banks\":[\"a\"],\"excluded_banks\":[\"a\"]},",
                 "\"source\":{\"mix\":null,\"near_jaccard\":0,\"near_banks\":[\"a\"],\"excluded_banks\":[\"a\"]},",
                 "\"source\":{\"mix\":null,\"near_jaccard\":0.5,\"near_banks\":[],\"excluded_banks\":[\"a\"]},",
-                "\"source\":{\"mix\":null,\"near_jaccard\":0.5,\"near_banks\":[\"a\"],\"excluded_banks\":[\"b\"]},"};
+                "\"source\":{\"mix\":null,\"near_jaccard\":0.5,\"near_banks\":[\"a\"],\"excluded_banks\":[\"b\"]},",
+                // review #150 re-check: a mix hidden in the trainer's args, a missing mix key, live humans not held out
+                PROVENANCE.replace("\"train\":{\"mix\":null}", "\"train\":{\"mix\":\"0.5=train/cur-\"}"),
+                PROVENANCE.replace("\"mix\":null,\"train\":{\"mix\":null},", "\"train\":{\"mix\":null},"),
+                PROVENANCE.replace(",\"live/human\"],\"excluded", "],\"excluded")};
         for (int i = 0; i < bad.length; i++) {
             final Path p = dir.resolve("bad" + i + ".json");
             Files.write(p, export(bad[i]).getBytes(StandardCharsets.UTF_8));
