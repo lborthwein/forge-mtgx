@@ -224,6 +224,19 @@ public class RlLiveSeatDudCastTest {
             System.err.println("[dud-test] policy normal end: " + end);
             Assert.assertFalse(live.degraded());
             Assert.assertTrue(end.contains("\"dudCast\":{\"seat\":"), "the normal path ran the guard: " + end);
+            // review of #159, S2-a: what the session, journal and tape show after a veto
+            final long vetoedLines = err.lines().filter(l -> l.startsWith("[lookahead-decision] ")
+                    && l.contains("\"vetoed\":true")).count();
+            final long keptLines = err.lines().filter(l -> l.startsWith("[lookahead-decision] ")
+                    && l.contains("\"vetoed\":false,\"playedBy\":\"policy\"")).count();
+            final long vetoLines = err.lines().filter(l -> l.startsWith("[dud-cast] veto ")).count();
+            System.err.println("[dud-test] policy lines: vetoed " + vetoedLines + " kept " + keptLines + " veto " + vetoLines);
+            Assert.assertTrue(vetoedLines > 0, "a vetoed decision says so on its decision line (vetoed, playedBy)");
+            Assert.assertTrue(err.lines().filter(l -> l.contains("\"vetoed\":true")).allMatch(
+                    l -> l.contains("\"playedBy\":\"forge\"") || l.contains("\"playedBy\":\"pass\"")), "playedBy on a veto");
+            Assert.assertTrue(keptLines > 0, "an answer the guard kept says playedBy policy");
+            // the seat's answerer marked each veto overridden (its GAME_END and tape list): the end line's count
+            Assert.assertTrue(end.contains("\"overrides\":" + vetoedLines), "overrides == vetoed lines: " + end);
         }
         try (FakeSearchService svc = new FakeSearchService(RlLiveSeatTest.SHA)) {
             svc.failAfterDecides = 150;

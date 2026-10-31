@@ -440,7 +440,9 @@ public final class DudCast {
             final Game g = p.g;
             final Player me = p.me;
             // the policy seat's copy holds its bridge controller (which would ask the closed session): Forge AI casts and pays
-            // in the copy, as it does for the K8 seat (whose copies' controller is plain Forge AI already)
+            // in the copy, as it does for the K8 seat (whose copies' controller is plain Forge AI already, so this never
+            // runs there). The replacement is a fresh PlayerControllerAi: no aiFixes0928 and no AI profile of the seat;
+            // it only casts and pays one answer in a throwaway copy, so the guard's verdict, not a play, depends on it.
             if (!(me.getController() instanceof PlayerControllerAi) || me.getController() instanceof forge.bench.PlayerControllerBridge) {
                 me.dangerouslySetController(new PlayerControllerAi(g, me, me.getLobbyPlayer()));
             }

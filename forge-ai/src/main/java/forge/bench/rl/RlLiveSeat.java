@@ -494,6 +494,7 @@ public final class RlLiveSeat {
             }
         };
         final RlSeat rs = new RlSeat(feat, ep, sc, uid, ctl, false);
+        this.seatAnswerer = rs;
         session.setLiveGame(g);
         rs.setGame(g);
         final RlKnowledge know = new RlKnowledge(g);
@@ -549,6 +550,56 @@ public final class RlLiveSeat {
         return game;
     }
 
+    /**
+     * lane live-ai-quality-1030 (review of #159, S2-a): with the guard on, the priority decision line waits for the guard so
+     * it can say whether its answer was played ({@code "vetoed"}, {@code "playedBy"}); off, it is written at once as before.
+     */
+    private com.google.gson.JsonObject heldLine;
+    /** Answers the guard vetoed (the end line's {@code dudCast.overrides}). */
+    private int guardOverrides;
+    /** The seat's answerer (the session's local answerer), told of each veto. */
+    private RlSeat seatAnswerer;
+
+    private void decisionLine(final com.google.gson.JsonObject d) {
+        flushDecisionLine();
+        if (k8Config != null && k8Config.dudCast != AiFixes.Mode.OFF) {
+            heldLine = d;
+        } else {
+            System.err.println("[lookahead-decision] " + d);
+        }
+    }
+
+    private void flushDecisionLine() {
+        if (heldLine != null) {
+            System.err.println("[lookahead-decision] " + heldLine);
+            heldLine = null;
+        }
+    }
+
+    /**
+     * After the guard ran on the policy's priority answer: the held decision line gets {@code vetoed} and {@code playedBy}
+     * ("policy", "forge" or "pass") and is written; on a veto the seat's answerer is told ({@link
+     * forge.bench.BenchSession.LocalAnswerer#onOverride}) so no record shows the vetoed answer as the action taken.
+     */
+    synchronized void guarded(final forge.game.player.Player p, final boolean vetoed, final String playedBy, final Object played) {
+        if (heldLine != null) {
+            heldLine.addProperty("vetoed", vetoed);
+            heldLine.addProperty("playedBy", playedBy);
+        }
+        flushDecisionLine();
+        if (vetoed) {
+            guardOverrides++;
+            final RlSeat a = seatAnswerer;
+            if (a != null) {
+                try {
+                    a.onOverride(game, p, "chooseSpellAbilityToPlay", playedBy, played);
+                } catch (RuntimeException e) {
+                    System.err.println("[policy-seat] override note failed: " + e);
+                }
+            }
+        }
+    }
+
     /** lane live-ai-quality-1030: the dud-cast guard's look-ahead (the live K8 spec's config; null while dudCast is off). */
     private volatile LookaheadSearch dudGuard;
 
@@ -558,7 +609,7 @@ public final class RlLiveSeat {
      * spec or its dudCast is off (the default): the seat's answers are then unchanged.
      */
     synchronized LookaheadSearch dudGuard() {
-        if (k8Config == null || k8Config.dudCast == AiFixes.Mode.OFF) {
+        if (k8Config == null || k8Config.dudCast == AiFixes.Mode.OFF || dudGuardFailed) {
             return null;
         }
         if (degraded && k8 != null) {
@@ -566,14 +617,49 @@ public final class RlLiveSeat {
         }
         if (dudGuard == null) {
             try {
-                dudGuard = new LookaheadSearch(k8Config);
+                dudGuard = new LookaheadSearch(guardConfig(k8Config));
             } catch (RuntimeException e) {
-                k8Config.dudCast = AiFixes.Mode.OFF; // never retried: the seat plays as without the guard
-                System.err.println("[policy-seat] dud-cast guard could not start, off for this game: " + e);
+                // the seat's own guard only: the shared K8 config is untouched (a degraded K8 keeps its own guard)
+                dudGuardFailed = true;
+                System.err.println("[policy-seat] dud-cast guard could not start, off for this seat's own answers: " + e);
                 return null;
             }
         }
         return dudGuard;
+    }
+
+    /** The seat's own guard could not start: never retried this game. */
+    private boolean dudGuardFailed;
+
+    /**
+     * The guard look-ahead's config (review of #159, S2-b): a copy of the K8 spec's; its copies' hidden cards come from the
+     * honest belief. The live spec is honest already (InteractiveMain.parseLookahead: belief=uniform from the event or
+     * jar pool, reuse off); a spec with belief off (tests, benches) would re-draw the opponent's real hidden cards, so
+     * the guard's copy takes the jar's live pool instead. The K8 config itself (the degraded fallback's) is unchanged.
+     */
+    static LookaheadSearch.Config guardConfig(final LookaheadSearch.Config k8) {
+        final LookaheadSearch.Config c = new LookaheadSearch.Config();
+        for (java.lang.reflect.Field f : LookaheadSearch.Config.class.getFields()) {
+            if (java.lang.reflect.Modifier.isStatic(f.getModifiers()) || java.lang.reflect.Modifier.isFinal(f.getModifiers())) {
+                continue;
+            }
+            try {
+                f.set(c, f.get(k8));
+            } catch (IllegalAccessException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+        if ("off".equals(c.belief) && !c.beliefShadow) {
+            c.belief = "uniform";
+            c.beliefPool = null;
+            c.beliefCube = forge.ai.simulation.BeliefSampler.LIVE_CUBE;
+            c.beliefCubeSha256 = forge.ai.simulation.BeliefSampler.LIVE_CUBE_SHA256;
+            c.beliefSingleton = forge.ai.simulation.BeliefSampler.LIVE_CUBE_SINGLETON;
+            c.reuse = false;
+            c.reuseVerify = false;
+            c.reuseShadowFresh = false;
+        }
+        return c;
     }
 
     /** The guard's stats block ({"dudCast": ...} of the look-aheads it ran in), or null when it never ran. */
@@ -664,7 +750,7 @@ public final class RlLiveSeat {
             d.addProperty("proposeMs", Math.round(search.lastProposeMs * 10) / 10.0);
         }
         replayFlags(d);
-        System.err.println("[lookahead-decision] " + d);
+        decisionLine(d);
     }
 
     /**
@@ -703,7 +789,7 @@ public final class RlLiveSeat {
             d.addProperty("rebuild", true);
         }
         replayFlags(d);
-        System.err.println("[lookahead-decision] " + d);
+        decisionLine(d);
     }
 
     /**
@@ -797,8 +883,10 @@ public final class RlLiveSeat {
             if (search != null) {
                 o.add("search", search.summary());
             }
+            flushDecisionLine();
             final JsonObject dud = dudStats(); // lane live-ai-quality-1030: only when the guard ran (dudCast on)
             if (dud != null) {
+                dud.addProperty("overrides", guardOverrides);
                 o.add("dudCast", dud);
             }
             if (k8 != null) {
