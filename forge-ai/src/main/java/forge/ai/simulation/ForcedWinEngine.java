@@ -1271,6 +1271,7 @@ final class ForcedWinEngine {
         final java.util.Map<Step, Step> baseOf = new java.util.IdentityHashMap<>();
         final List<Step> kidMoves = new ArrayList<>();
         final List<Applied> kids = new ArrayList<>();
+        long heldApplied = 0;
         int distinct = 0;
         for (int mi = 0; mi < moves.size(); mi++) {
             if (out()) {
@@ -1285,7 +1286,16 @@ final class ForcedWinEngine {
                 distinct++;
                 baseOf.put(mv, mv);
             } else if (!baseOf.containsKey(mv)) {
-                baseOf.put(mv, mv); // an X variant: its own entry (it does not count as a distinct move below either)
+                // review #154-4: an X variant shares its X-less move's branch (as in dfs0, it does not count apart)
+                Step base = mv;
+                for (Step o : moves) {
+                    if (o.xValue < 0 && o.hostId == mv.hostId && o.desc.equals(mv.desc) && o.costKey.equals(mv.costKey)
+                            && o.targetRefs.equals(mv.targetRefs)) {
+                        base = baseOf.getOrDefault(o, o);
+                        break;
+                    }
+                }
+                baseOf.put(mv, base);
             }
             final Applied a;
             if (pre.containsKey(mv)) {
@@ -1346,6 +1356,7 @@ final class ForcedWinEngine {
             if (a.won) {
                 final List<Step> path = new ArrayList<>(node.path);
                 path.add(mv);
+                pathCards -= heldApplied;
                 return path;
             }
             if (collect != null && a.child != null && !node.passed && !mv.pass && a.child.turn == startTurn) {
@@ -1365,8 +1376,11 @@ final class ForcedWinEngine {
             if (a.child != null) {
                 kidMoves.add(mv);
                 kids.add(a);
+                pathCards += a.child.cards; // review #154-9: applied children count in the guard while held
+                heldApplied += a.child.cards;
             }
         }
+        pathCards -= heldApplied;
         for (Applied left : pre.values()) {
             left.child = null; // ranked variants never reached (the node was cut): released
         }
@@ -1684,7 +1698,7 @@ final class ForcedWinEngine {
         }
         // R3-5: a root outside our turn (a response at their main phase) never attacks there (off: the root is ours)
         if (g.getPhaseHandler().is(PhaseType.MAIN1) && canAttack(me)
-                && (!(lim.stack || lim.anyWindow) || g.getPhaseHandler().isPlayerTurn(me))) {
+                && (!lim.stack || g.getPhaseHandler().isPlayerTurn(me))) {
             final Step atk = Step.engine(AbilKind.ATTACK, -1, "attack", "attack", "", false);
             if (lethalOnBoard(me)) {
                 out.add(0, atk);
@@ -2362,13 +2376,14 @@ final class ForcedWinEngine {
                 // (our pass that followed would resolve it), a fresh copy as the root is
                 child.g = ai.snapshot;
                 child.me = ai.snapshotMe;
+                child.cards = cardCount(child.g); // review #154-6: the snapshot's own size and key
                 st.copies++;
-                st.cards += cardCount(child.g);
+                st.cards += child.cards;
             }
             child.turn = ph.getTurn();
             child.ids = cloneScope(forge.util.IdScope.capture());
             a.child = child;
-            a.key = PlayoutKeys.stateKey(g);
+            a.key = PlayoutKeys.stateKey(child.g);
             return a;
         } catch (OutOfBudget ex) {
             // the move did not finish by the wall (or the rules refused its attack twice): dropped
@@ -2623,10 +2638,10 @@ final class ForcedWinEngine {
             if (triggers.confirms(wrapper)) {
                 return true;
             }
-            if (rec != null && lim.costChoice) {
+            if (rec != null && lim.costChoice && wrapper != null && wrapper.getHostCard() != null) {
                 // R3-4 (b), engineCostChoice: our optional trigger ("you may") is a choice point: Forge AI's answer and
                 // the other one
-                final String host = wrapper == null || wrapper.getHostCard() == null ? "?" : wrapper.getHostCard().getName();
+                final String host = wrapper.getHostCard().getName();
                 final String t = rec.at(ForcedWinChoices.TRIG);
                 if (t != null && t.startsWith(ForcedWinChoices.TRIG + ":" + host + "=")) {
                     rec.played(t);
@@ -2700,7 +2715,12 @@ final class ForcedWinEngine {
             } else if (restOnTheirs && !move.pass && !g.getStack().isEmpty() && ph.getTurn() == fromTurn && ph.is(restPhase)
                     && g.getStack().peek().getActivatingPlayer() != getPlayer()) {
                 // R3-5: our priority again in the root's window, the opponent's item on top: the node is a copy taken
-                // here, before this pass lets their item resolve
+                // here, before this pass lets their item resolve (review #154-2: a stack GameCopier cannot copy
+                // faithfully drops the move instead of resting on a copy that lost their item)
+                if (GameCopier.stackUnsupported(g) != null) {
+                    failed = true;
+                    return null;
+                }
                 final GameCopier rc = new GameCopier(g, true);
                 rc.setCopyFidelity(1);
                 copyStackIf(rc, g, true);

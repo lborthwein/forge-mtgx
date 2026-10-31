@@ -957,7 +957,7 @@ public final class ForcedWinSolver {
             noLineKey = key;
             return null;
         }
-        if (cfg.engineStack && !live.getStack().isEmpty()) {
+        if (cfg.engineStack && !live.getStack().isEmpty() && GameCopier.stackUnsupported(live) == null) {
             // R3-5: a response (the opponent's item on the stack): the width model plans from an empty stack, so the
             // engine searches the position itself (its gate skipped, as after a failed plan)
             lastOutcome = "stack";
@@ -1125,7 +1125,7 @@ public final class ForcedWinSolver {
         final boolean ourMain = ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
         final boolean theirEnd = !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
         final boolean response = cfg.engineStack && !live.getStack().isEmpty()
-                && live.getStack().peek().getActivatingPlayer() != me; // R3-5
+                && live.getStack().peek().getActivatingPlayer() != me && GameCopier.stackUnsupported(live) == null; // R3-5
         if (!response && (!live.getStack().isEmpty() || !ourMain && !theirEnd) || lineActive()) {
             return out;
         }
@@ -1819,7 +1819,7 @@ public final class ForcedWinSolver {
         final boolean main1 = eph.is(PhaseType.MAIN1) && eph.isPlayerTurn(me);
         // R3-5 (engineStack): our priority with the opponent's item on top is a window too (any phase)
         final boolean stackWindow = cfg.engineStack && !live.getStack().isEmpty()
-                && live.getStack().peek().getActivatingPlayer() != me;
+                && live.getStack().peek().getActivatingPlayer() != me && GameCopier.stackUnsupported(live) == null;
         final boolean otherWindow = stackWindow || cfg.engineAnyWindow && (eph.isPlayerTurn(me) ? eph.is(PhaseType.MAIN2)
                 : eph.is(PhaseType.END_OF_TURN));
         if (!cfg.engine || !main1 && !otherWindow && !eph.is(PhaseType.MAIN1)) {
@@ -1889,6 +1889,9 @@ public final class ForcedWinSolver {
         // solver-cap12 round 3 (all off by default)
         el.order = "static".equals(cfg.engineOrder) ? StaticValuer.INSTANCE
                 : "service".equals(cfg.engineOrder) ? engineValuer : null;
+        if ("service".equals(cfg.engineOrder) && engineValuer == null) {
+            receipt("FORCED_WIN engine-order service: no valuer attached, Forge's order"); // review #154-7
+        }
         el.orderCap = cfg.orderCap;
         el.xChoice = cfg.engineX;
         el.xVariants = cfg.xVariants;
@@ -2983,6 +2986,9 @@ public final class ForcedWinSolver {
                     return n;
                 }
                 cursor++;
+                if (costLine) {
+                    choices = new ForcedWinChoices.Cursor(null); // review #154-5: a PASS spends no step's tokens
+                }
             }
             if (cursor >= line.steps.size()) {
                 done = true;
@@ -3318,8 +3324,8 @@ public final class ForcedWinSolver {
                     @Override
                     public CardCollectionView costCards(forge.ai.PlayerControllerAi c, SpellAbility sa, String part,
                             CardCollectionView valid, int amount, CardCollectionView def) {
-                        if (c != LineAi.this || valid == null) {
-                            return def;
+                        if (c != LineAi.this || valid == null || valid.size() <= amount || amount < 1) {
+                            return def; // review #154-1: the engine records no point here either
                         }
                         final String t = f.choices.next(ForcedWinChoices.COST);
                         if (t == null) {

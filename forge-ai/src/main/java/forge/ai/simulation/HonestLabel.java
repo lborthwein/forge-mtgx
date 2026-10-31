@@ -437,7 +437,8 @@ public final class HonestLabel {
             if (!live.getStack().isEmpty()) {
                 // solver-cap12 round 3 (R3-5, engineStack only): our priority with the opponent's item on top is a win
                 // check (a response line); otherwise, as before, no check
-                if (spec.winConfig().engineStack && live.getStack().peek().getActivatingPlayer() != liveMe) {
+                if (spec.winConfig().engineStack && live.getStack().peek().getActivatingPlayer() != liveMe
+                        && GameCopier.stackUnsupported(live) == null) {
                     final List<Player> os = new ArrayList<>(liveMe.getOpponents());
                     if (os.size() == 1) {
                         r.check = "win";
