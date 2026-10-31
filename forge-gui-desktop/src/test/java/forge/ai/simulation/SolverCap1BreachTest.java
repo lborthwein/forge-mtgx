@@ -1,10 +1,8 @@
 package forge.ai.simulation;
 
-import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 
 import forge.bench.PlayerControllerBridge;
 import forge.game.Game;
