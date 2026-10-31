@@ -25,6 +25,12 @@ final class ForcedWinChoices {
     static final String PICK = "pick", SCRY = "scry", SURV = "surv", DISC = "disc", ORDER = "order", SHUF = "shuf";
     /** solver-cap12 round 3 (R3-4 b, engineCostChoice): a cost part's cards (sacrifice, exile, discard, tap-type). */
     static final String COST = "cost";
+    /** R3-4 (b), engineCostChoice: our optional trigger's "you may" (trig:y / trig:n, by the trigger's host name). */
+    static final String TRIG = "trig";
+
+    static String trigTok(final String host, final boolean yes) {
+        return TRIG + ":" + host + "=" + (yes ? "y" : "n");
+    }
 
     private ForcedWinChoices() {
     }

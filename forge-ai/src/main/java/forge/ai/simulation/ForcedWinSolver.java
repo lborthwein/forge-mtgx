@@ -3467,7 +3467,21 @@ public final class ForcedWinSolver {
 
         @Override
         public boolean confirmTrigger(forge.game.trigger.WrappedAbility wrapper) {
-            return f.triggers.confirms(wrapper) || super.confirmTrigger(wrapper);
+            if (f.triggers.confirms(wrapper)) {
+                return true;
+            }
+            if (f.costLine && wrapper != null && wrapper.getHostCard() != null) {
+                // R3-4 (b): the line's recorded answer to our optional trigger
+                final String t = f.choices.next(ForcedWinChoices.TRIG);
+                if (t != null && t.startsWith(ForcedWinChoices.TRIG + ":" + wrapper.getHostCard().getName() + "=")) {
+                    f.choices.hits++;
+                    return t.endsWith("=y");
+                }
+                if (t != null) {
+                    f.choices.misses++;
+                }
+            }
+            return super.confirmTrigger(wrapper);
         }
 
         /** The line's alpha strike (if the rules refuse it, the guard hands the declaration to Forge AI). */

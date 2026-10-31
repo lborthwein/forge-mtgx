@@ -599,6 +599,20 @@ final class ForcedWinEngine {
         return false;
     }
 
+    /**
+     * A copy of a played step for replaying it (a loop's repetition, the repeat-first move): with costChoice (R3-4 b) it
+     * forces the choice tokens the step played, so each repetition pays its cost with the same cards (by name); off, a
+     * plain copy.
+     */
+    private Step replayCopy(Step b) {
+        final Step c = b.copy();
+        if (lim.costChoice && b.cacPlayed != null && !b.cacPlayed.isEmpty()) {
+            c.cac = new ArrayList<>(b.cacPlayed);
+            c.cacPlayed = null;
+        }
+        return c;
+    }
+
     /** The k-th ancestor of a node (0 = itself), or null. */
     private static Node ancestor(Node n, int k) {
         Node a = n;
@@ -646,8 +660,18 @@ final class ForcedWinEngine {
      * a body step cannot be played or the game would end otherwise, a repetition makes no progress, the cap, or the
      * budget. The path becomes prefix + REPEAT(body, repetitions) (+ the steps of a winning partial repetition).
      */
-    private Forward fastForward(Node from, List<Step> body) {
+    private Forward fastForward(Node from, List<Step> body0) {
         st.loops++;
+        // R3-4 (b), costChoice only: each repetition replays the cost cards the body's steps played (off: the steps as is)
+        final List<Step> body;
+        if (lim.costChoice) {
+            body = new ArrayList<>();
+            for (Step b : body0) {
+                body.add(replayCopy(b));
+            }
+        } else {
+            body = body0;
+        }
         final int len = body.size();
         final List<Step> prefix = new ArrayList<>(from.path.subList(0, from.path.size() - 2 * len));
         int reps = 2;
@@ -764,7 +788,7 @@ final class ForcedWinEngine {
         // cards a loop moves around are fungible; Follower.locate)
         final List<Step> body = new ArrayList<>();
         for (Step b : body0) {
-            final Step c = b.copy();
+            final Step c = replayCopy(b);
             c.byName = true;
             body.add(c);
         }
@@ -1562,6 +1586,12 @@ final class ForcedWinEngine {
                         same.triggerRef = last.triggerRef;
                         same.pickName = last.pickName;
                         rep.add(same);
+                    } else if (repeat && lim.costChoice && last.cacPlayed != null && !last.cacPlayed.isEmpty()
+                            && s.targetRefs.equals(last.targetRefs)) {
+                        // R3-4 (b): a loop: the same ability paying its cost with the same cards first
+                        final Step same = s.copy();
+                        same.cac = new ArrayList<>(last.cacPlayed);
+                        rep.add(same);
                     }
                     (repeat ? rep : c.isInPlay() ? act : spells).add(s);
                 }
@@ -2283,6 +2313,7 @@ final class ForcedWinEngine {
             if (lim.cac) {
                 ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap); // labeller-v2 (a)
             }
+            ai.lim = lim;
             if (lim.costChoice) {
                 // R3-4 (b): the cost cards of the move's abilities branch too (E2's CacHook.costCards point)
                 if (ai.rec == null) {
@@ -2374,6 +2405,9 @@ final class ForcedWinEngine {
         /** R3-5: the copy taken at that rest (null = none). */
         Game snapshot;
         Player snapshotMe;
+
+        /** R3-4 (b): the search's limits (engineCostChoice's trigger kind reads them). */
+        Limits lim = new Limits();
 
         MoveAi(Game g, Player p, forge.LobbyPlayer lp, Step move, int fromTurn) {
             super(g, p, lp);
@@ -2586,7 +2620,31 @@ final class ForcedWinEngine {
 
         @Override
         public boolean confirmTrigger(forge.game.trigger.WrappedAbility wrapper) {
-            return triggers.confirms(wrapper) || super.confirmTrigger(wrapper);
+            if (triggers.confirms(wrapper)) {
+                return true;
+            }
+            if (rec != null && lim.costChoice) {
+                // R3-4 (b), engineCostChoice: our optional trigger ("you may") is a choice point: Forge AI's answer and
+                // the other one
+                final String host = wrapper == null || wrapper.getHostCard() == null ? "?" : wrapper.getHostCard().getName();
+                final String t = rec.at(ForcedWinChoices.TRIG);
+                if (t != null && t.startsWith(ForcedWinChoices.TRIG + ":" + host + "=")) {
+                    rec.played(t);
+                    return t.endsWith("=y");
+                }
+                if (t != null) {
+                    rec.miss = true;
+                }
+                final boolean def = super.confirmTrigger(wrapper);
+                final String dt = ForcedWinChoices.trigTok(host, def);
+                if (rec.forcedPoint()) {
+                    rec.played(dt);
+                } else {
+                    rec.free(List.of(dt, ForcedWinChoices.trigTok(host, !def)), dt);
+                }
+                return def;
+            }
+            return super.confirmTrigger(wrapper);
         }
 
         /** Tap or untap: the rules' default (untap our own, tap theirs) instead of Forge AI's "always tap". */

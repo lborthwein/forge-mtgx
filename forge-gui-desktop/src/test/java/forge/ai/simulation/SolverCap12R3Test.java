@@ -122,6 +122,7 @@ public class SolverCap12R3Test extends forge.ai.AITest {
                 final ForcedWinEngine.Limits lim = limits(nodes, order, true);
                 lim.stack = !g.getStack().isEmpty(); // R3-5: a response puzzle
                 lim.anyWindow = true;
+                lim.costChoice = Boolean.getBoolean("sc3.cost"); // R3-4 (b)
                 final ForcedWinPlanner.Line l = engine(g, me, lim, st);
                 System.out.println("SC3 N2P " + name + " order=" + (order ? "static" : "forge") + " found=" + (l != null)
                         + " nodes=" + st.nodes + " moves=" + st.moves + " copies=" + st.copies + " ms="
