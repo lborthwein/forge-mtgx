@@ -1926,6 +1926,12 @@ public final class LookaheadSearch {
         labelTargets = labelSink != null ? new JsonArray[n] : null;
         final Carried[] carried = cfg.reuse ? carry(live, me, cands, turn, k) : new Carried[k];
         final Rollout[] freshDef = cfg.reuseVerify ? new Rollout[k] : null;
+        if (beliefCube != null && !cfg.beliefShadow && cfg.deck() && cfg.beliefDeckModel != null) {
+            // review #155 S1: gate every opponent at the decision, outside the per-world try blocks
+            for (Player o : me.getOpponents()) {
+                cfg.beliefDeckModel.requireHeld(o.getRegisteredPlayer());
+            }
+        }
         final BeliefSampler.Dist bd = beliefCube == null ? null
                 : belief(live, me, beliefRoot == null ? null : beliefRoot[0], index, turn, onStack);
         lastBelief = bd;
@@ -8257,9 +8263,6 @@ public final class LookaheadSearch {
      * their spells on the stack, hand cards we can see), never from their real cards. Kept hand cards and the known top
      * of their library stay. Hidden counts are matched exactly; the drawn cards are shuffled and dealt hand first.
      */
-    /** review #1530 S1: (model, registered player) pairs that passed the per-deck gate. */
-    private final java.util.Set<Object> deckGateOk = java.util.concurrent.ConcurrentHashMap.newKeySet();
-
     private void redrawOpponentsDeck(Game live, Player liveMe, Game g, Player me, Random rng, DeckBeliefModel model) {
         boolean changed = false;
         final PlayerView myView = liveMe.getView();
@@ -8313,13 +8316,8 @@ public final class LookaheadSearch {
             for (Card c : shownCards) {
                 shown.add(c.getPaperCard().getName());
             }
-            // review #1530 S1 ruling: the per-deck gate, once per opponent and model
-            final forge.game.player.RegisteredPlayer rp = liveOpp.getRegisteredPlayer();
-            final Object gateKey = java.util.Arrays.asList(model, rp);
-            if (!deckGateOk.contains(gateKey)) {
-                model.requireHeld(rp == null ? null : rp.getDeck());
-                deckGateOk.add(gateKey);
-            }
+            // review #1530 S1 ruling: the per-deck gate (cached in the model; sticky on refusal)
+            model.requireHeld(liveOpp.getRegisteredPlayer());
             final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
             final long c0 = System.nanoTime();
             final List<String> drawn = new ArrayList<>(model.sample(shown, pool, need + libNeed, rng));

@@ -169,13 +169,59 @@ public final class DeckBeliefModel {
     }
 
     /**
-     * review #1530 S1 ruling (the per-deck gate, on every load path: RlSearch, StepSearch, RlActorBench, harnesses): an
-     * opponent's deck must be one this export was held out from, or the game is refused. Reads the registered decklist
-     * for this check only, never for a draw.
+     * review #155 S1: the first refusal in this JVM, sticky. Redraw callers swallow exceptions (a failed world, a skipped
+     * threat world), so a refusal must not depend on its exception surfacing: RlActorBench voids every game that ends
+     * after it, StepSearch refuses its result, harnesses exit 2, and {@link #sample} refuses to draw.
      */
-    public void requireHeld(forge.deck.Deck deck) {
+    private static volatile String refusal = null;
+
+    /** The first deck-belief refusal in this JVM, or null. */
+    public static String refusal() {
+        return refusal;
+    }
+
+    /** Throw if a deck-belief refusal happened in this JVM. */
+    public static void throwIfRefused() {
+        final String r = refusal;
+        if (r != null) {
+            throw new IllegalStateException(r);
+        }
+    }
+
+    /** Tests only. */
+    static void resetRefusalForTests() {
+        refusal = null;
+    }
+
+    /** review #155 S3: the registered players that passed the gate (weak: a finished game's players go away). */
+    private final Set<forge.game.player.RegisteredPlayer> gateOk = java.util.Collections.synchronizedSet(
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
+
+    /**
+     * review #1530 S1 ruling (the per-deck gate, on every load path: RlSearch, StepSearch, RlActorBench, harnesses): an
+     * opponent's deck must be one this export was held out from, or the game is refused, and the refusal is sticky
+     * ({@link #refusal}). Reads the registered decklist for this check only, never for a draw.
+     */
+    public void requireHeld(forge.game.player.RegisteredPlayer rp) {
+        if (rp != null && gateOk.contains(rp)) {
+            return;
+        }
+        try {
+            requireHeld(rp == null ? null : rp.getDeck());
+        } catch (IllegalStateException e) {
+            synchronized (DeckBeliefModel.class) {
+                if (refusal == null) {
+                    refusal = e.getMessage();
+                }
+            }
+            throw e;
+        }
+        gateOk.add(rp);
+    }
+
+    void requireHeld(forge.deck.Deck deck) {
         if (deck == null || !deck.has(forge.deck.DeckSection.Main)) {
-            throw new IllegalStateException("deck belief: the opponent has no registered main deck to check");
+            throw new IllegalStateException("deck belief: refused: the opponent has no registered main deck to check");
         }
         final Map<String, Integer> main = new HashMap<>();
         for (Map.Entry<forge.item.PaperCard, Integer> e : deck.get(forge.deck.DeckSection.Main)) {
@@ -300,7 +346,8 @@ public final class DeckBeliefModel {
      * Basics are not capped (the other beliefs cap them at beliefBasics). A non-basic is never drawn twice, whatever
      * beliefSingleton says: the model is trained on near-singleton cube decks (review #150 S2-2, documented).
      */
-    public List<String> sample(Collection<String> shown, List<String> pool, int total, Random rng) {
+    List<String> sample(Collection<String> shown, List<String> pool, int total, Random rng) {
+        throwIfRefused(); // review #155 S3: never draw after a refusal
         final float[] sum = new float[d];
         int n = 0;
         final Set<String> used = new HashSet<>();

@@ -1057,6 +1057,10 @@ public final class RlActorBench {
         forgeDecided.keySet().removeAll(NOT_DECISIONS);
         forgeDecided.putAll(seat.forgeDecidedExtra);
 
+        if (voidReason == null && forge.ai.simulation.DeckBeliefModel.refusal() != null) {
+            // review #155 S1: a deck-belief refusal (sticky) voids every game that ends after it
+            voidReason = "deck_belief_refused";
+        }
         final JsonObject end = new JsonObject();
         end.addProperty("game_uid", Long.toUnsignedString(uid));
         end.add("result", RlWire.intArray(result));

@@ -35,6 +35,11 @@ import forge.game.zone.ZoneType;
  */
 public class BeliefDeckTest extends SimulationTest {
 
+    @org.testng.annotations.BeforeMethod
+    public void resetRefusal() {
+        DeckBeliefModel.resetRefusalForTests();
+    }
+
     static String export() {
         // vocab: Esper Sentinel (a = 1), Thraben Inspector (u = 10), Mox Pearl; h = relu(mean a) (d = 1, one hidden unit)
         return export(provenance("\"k0\""));
@@ -196,6 +201,39 @@ public class BeliefDeckTest extends SimulationTest {
         }
     }
 
+    @Test(timeOut = 1800000)
+    public void aRefusalSwallowedInsideThreatStillSurfaces() throws Exception {
+        initAndCreateGame();
+        final Game g = ForcedWinSolverTest.game("Default", "Default", BvwS2tHonestyTest.frame(BvwS2tHonestyTest.OUR_HAND,
+                BvwS2tHonestyTest.OUR_LIB, BvwS2tHonestyTest.OUR_BF, BvwS2tHonestyTest.THEIR_HAND_A,
+                BvwS2tHonestyTest.THEIR_LIB_A, "Plains;Plains;Esper Sentinel"));
+        registerDeck(g.getPlayers().get(1));
+        final LookaheadSearch unlisted = deckSearch(model(Files.createTempDirectory("deckbelief"), "\"k0\""));
+        final java.util.Map<String, String> props = new java.util.HashMap<>();
+        props.put("budgetMs", "500");
+        props.put("engine", "false");
+        props.put("act", "false");
+        props.put("defense", "true");
+        final ForcedWinSolver s = new ForcedWinSolver(g.getPlayers().get(0), ForcedWinSolver.Config.fromProps(props::get));
+        s.redraw = unlisted.solverRedraw();
+        final ForcedWinSolver.Threat t = s.threat(g, g.getPlayers().get(1), null, Collections.emptyList(), false, 4);
+        // threat() swallows each world's error (it reports P=0 over 0 worlds); the refusal must surface regardless
+        Assert.assertEquals(t.worlds, 0, "no world may run against an unlisted deck: " + t);
+        Assert.assertNotNull(DeckBeliefModel.refusal(), "a refusal swallowed inside threat() was lost");
+        try {
+            DeckBeliefModel.throwIfRefused();
+            Assert.fail("throwIfRefused did not throw");
+        } catch (IllegalStateException e) {
+            Assert.assertTrue(e.getMessage().contains("is not one this export"), e.getMessage());
+        }
+        try {
+            unlisted.getConfig().beliefDeckModel.sample(Collections.emptyList(), Arrays.asList("Plains"), 1, new Random(1));
+            Assert.fail("sample drew after a refusal");
+        } catch (IllegalStateException e) {
+            Assert.assertTrue(e.getMessage().contains("is not one this export"), e.getMessage());
+        }
+    }
+
     static LookaheadSearch deckSearch(final DeckBeliefModel m) {
         final LookaheadSearch.Config c = new LookaheadSearch.Config();
         c.worlds = 1;
@@ -225,6 +263,8 @@ public class BeliefDeckTest extends SimulationTest {
         } catch (IllegalStateException e) {
             Assert.assertTrue(e.getMessage().contains("is not one this export"), e.getMessage());
         }
+        Assert.assertNotNull(DeckBeliefModel.refusal(), "the refusal is sticky");
+        DeckBeliefModel.resetRefusalForTests();
         final DeckBeliefModel m = model(Files.createTempDirectory("deckbelief"), "\"" + oppKey + "\"");
         final LookaheadSearch deck = deckSearch(m), uni = BvwS2tTargetTest.belief("uniform", null);
         final String bf = "Plains;Plains;Esper Sentinel";
