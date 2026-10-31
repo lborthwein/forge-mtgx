@@ -1866,9 +1866,9 @@ final class ForcedWinEngine {
         if (slot != null && firstTargeting(sa) == slot) {
             int n = 0;
             final List<GameObject> cands = new ArrayList<>();
-            if (lim.order != null) {
-                // R3-3: with value-ordered moves every legal single target is a candidate (players, then every
-                // permanent), up to orderCap; the value pass orders them, not a fixed few of our own permanents
+            if (lim.order != null || lim.xChoice) {
+                // R3-3 (and D8: engineX): every legal single target is a candidate (players, then every permanent), up
+                // to orderCap, not a fixed few of our own permanents (which left the opponent out when we had three)
                 cands.addAll(g.getPlayers());
                 cands.addAll(g.getCardsIn(ZoneType.Battlefield));
             } else {
@@ -1877,7 +1877,7 @@ final class ForcedWinEngine {
                 }
                 cands.addAll(g.getPlayers());
             }
-            final int cap = lim.order != null ? lim.orderCap : lim.targetVariants;
+            final int cap = lim.order != null || lim.xChoice ? lim.orderCap : lim.targetVariants;
             for (GameObject o : cands) {
                 if (n >= cap) {
                     break;
