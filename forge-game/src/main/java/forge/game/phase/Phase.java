@@ -52,6 +52,35 @@ public class Phase implements java.io.Serializable {
     private final Multimap<Player, GameCommand> untilEndMap = MultimapBuilder.hashKeys().arrayListValues().build();
     private final Multimap<Player, GameCommand> registerMap = MultimapBuilder.hashKeys().arrayListValues().build();
 
+    /**
+     * mtgx (gamecopier-fidelity-1030): the pending commands of this phase for a game copier, in a fixed order: at, until,
+     * then the per-player until, until-end and registered-until-end maps (live collections: read them, do not change them).
+     */
+    public final List<GameCommand> getAtCommands() {
+        return at;
+    }
+
+    public final List<GameCommand> getUntilCommands() {
+        return until;
+    }
+
+    public final Multimap<Player, GameCommand> getUntilMapCommands() {
+        return untilMap;
+    }
+
+    public final Multimap<Player, GameCommand> getUntilEndMapCommands() {
+        return untilEndMap;
+    }
+
+    public final Multimap<Player, GameCommand> getRegisterMapCommands() {
+        return registerMap;
+    }
+
+    /** mtgx (gamecopier-fidelity-1030): any command pending in this phase. */
+    public final boolean hasPendingCommands() {
+        return !at.isEmpty() || !until.isEmpty() || !untilMap.isEmpty() || !untilEndMap.isEmpty() || !registerMap.isEmpty();
+    }
+
     public void clearCommands() {
         at.clear();
         until.clear();

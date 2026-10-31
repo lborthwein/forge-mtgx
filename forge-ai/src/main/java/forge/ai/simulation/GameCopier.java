@@ -101,6 +101,56 @@ public class GameCopier {
     }
 
     /**
+     * gamecopier-fidelity-1030: also carry everything the original game has pending that a later turn or event will
+     * act on (see {@link #copyPendingState}): every delayed trigger (with its host, remembered objects, spawning and
+     * overriding abilities mapped into the copy), every phase's pending commands (at / until / until-your-next /
+     * until-end-of / registered: the until-end-of-turn pump, the effect card exiled at cleanup, Threaten's control
+     * return), the state-based-action commands and every card's own command lists (leaves play, untap, change of
+     * control, ...). Off by default, which is the copier's original behaviour. A pending object it cannot carry
+     * faithfully is left out and named in {@link #getPendingGaps}; {@link #unsupportedPending} names them up front.
+     * When the original has nothing pending this is a no-op (no ids, timestamps or randomness are consumed).
+     */
+    private boolean copyPending = false;
+    private final List<String> pendingGaps = new ArrayList<>();
+    private int pendingCopied = 0;
+    private final Map<Trigger, Trigger> trigMap = new java.util.IdentityHashMap<>();
+    private final Map<Object, Object> cmdMap = new java.util.IdentityHashMap<>();
+    private final Map<Object, Object> saMap = new java.util.IdentityHashMap<>();
+    private final Map<Card, Card> staleMap = new java.util.IdentityHashMap<>();
+
+    /**
+     * gamecopier-fidelity-1030: the solver's verification and search copies carry pending delayed triggers and commands
+     * (default on; -Dforge.ai.copyPending=false restores the copies of the jars before this lane, byte for byte).
+     */
+    public static final boolean SOLVER_COPY_PENDING = !"false".equalsIgnoreCase(System.getProperty("forge.ai.copyPending"));
+
+    /** gamecopier-fidelity-1030: see {@link #copyPending}. */
+    public void setCopyPending(boolean on) {
+        this.copyPending = on;
+    }
+
+    /**
+     * gamecopier-fidelity-1030 (review #156 S2): with {@link #copyPending}, a copy that leaves anything pending out
+     * throws instead of returning an unfaithful game (a search node or verification world then fails, so no line is
+     * proven through it). Off by default.
+     */
+    private boolean pendingStrict = false;
+
+    public void setPendingStrict(boolean on) {
+        this.pendingStrict = on;
+    }
+
+    /** gamecopier-fidelity-1030: what the last copy could not carry (empty = everything pending was carried). */
+    public List<String> getPendingGaps() {
+        return java.util.Collections.unmodifiableList(pendingGaps);
+    }
+
+    /** gamecopier-fidelity-1030: pending objects (delayed triggers and commands) carried into the last copy. */
+    public int getPendingCopied() {
+        return pendingCopied;
+    }
+
+    /**
      * Lane copy-fidelity-1010: the copy's fidelity level. 0 (the default) = the copier's original behaviour, byte for
      * byte. 1 = the copy also carries the per-turn and history state the copier otherwise drops (see
      * {@link #copyTurnState}): each card's zone-entry turn, damage history (attacked / blocked this turn: boast, raid-style
@@ -434,6 +484,13 @@ public class GameCopier {
             // Lane copy-fidelity-1010: per-turn and history state, before statics and state-based actions read it.
             copyTurnState(newGame);
         }
+        if (copyPending) {
+            // gamecopier-fidelity-1030: delayed triggers and pending commands, before state-based actions can fire them
+            copyPendingState(newGame);
+            if (pendingStrict && !pendingGaps.isEmpty()) {
+                throw new IllegalStateException("pending gap: " + pendingGaps);
+            }
+        }
 
         // Undo effects first before calculating them below, to avoid them applying twice.
         for (StaticEffect effect : origGame.getStaticEffects().getEffects()) {
@@ -463,7 +520,7 @@ public class GameCopier {
 
         // TODO update thisTurnCast
 
-        if (copyUntilEot) {
+        if (copyUntilEot && !copyPending) {
             untilCopied = 0;
             untilRefused = 0;
             copyUntil(origGame.getEndOfTurn(), newGame.getEndOfTurn(), newGame);
@@ -814,6 +871,945 @@ public class GameCopier {
             return out;
         }
         return REFUSE;
+    }
+
+    // ------------------------------------------------------------ pending delayed triggers and commands (gamecopier-fidelity-1030)
+
+    /** The six phases whose commands a game can have pending, with their names (a fixed order). */
+    private static forge.game.phase.Phase[] phases(Game g) {
+        return new forge.game.phase.Phase[] {g.getUntap(), g.getUpkeep(), g.getBeginOfCombat(), g.getEndOfCombat(),
+                g.getEndOfTurn(), g.getCleanup()};
+    }
+
+    private static final String[] PHASE_NAMES = {"Untap", "Upkeep", "BeginOfCombat", "EndOfCombat", "EndOfTurn", "Cleanup"};
+
+    /** Whether {@code g} has anything pending that {@link #copyPending} carries (cheap; no copy). */
+    public static boolean hasPending(Game g) {
+        final forge.game.trigger.TriggerHandler th = g.getTriggerHandler();
+        if (!th.getDelayedTriggersView().isEmpty() || !th.getPlayerDefinedDelayedTriggersView().isEmpty()) {
+            return true;
+        }
+        for (forge.game.phase.Phase ph : phases(g)) {
+            if (ph.hasPendingCommands()) {
+                return true;
+            }
+        }
+        if (!g.sbaCheckedCommandList.isEmpty() || g.getPhaseHandler().hasExtraTurnsOrPhases()) {
+            return true;
+        }
+        for (Card c : g.getCardsInGame()) {
+            if (c.hasTempControllers()) {
+                return true;
+            }
+            if (!c.getStaticCommandList().isEmpty()) {
+                return true;
+            }
+            for (List<GameCommand> l : c.getCommandListsForCopy()) {
+                if (!l.isEmpty()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * gamecopier-fidelity-1030: what a pending-carrying copy of {@code g} would leave out, or null when it carries
+     * everything (also null when nothing is pending: then no copy is made, nothing is consumed). Each gap is
+     * {@code where:what}; {@link #gapsMatterOnlyAfterThisTurn} tells whether all of them act only after this turn.
+     */
+    public static List<String> unsupportedPending(Game g) {
+        if (!hasPending(g)) {
+            return null;
+        }
+        // isolated like the solver's own copies: its own ids, random stream and AI cache (a copy draws from the thread's
+        // random; a diagnostic dry run in a live decision must not move the live game's stream)
+        final Object prevIds = forge.util.IdScope.capture();
+        final java.util.Random prevRandom = forge.util.MyRandom.getThreadRandom();
+        final Object prevCache = forge.ai.AiCache.captureScope();
+        forge.util.MyRandom.setThreadRandom(new java.util.Random(0x9e3779b97f4a7c15L));
+        forge.ai.AiCache.openScope();
+        forge.util.IdScope.open();
+        try {
+            synchronized (g) {
+                final GameCopier c = new GameCopier(g, true);
+                c.setCopyFidelity(1);
+                c.setCopyPending(true);
+                c.makeCopy();
+                return c.pendingGaps.isEmpty() ? null : new ArrayList<>(c.pendingGaps);
+            }
+        } catch (RuntimeException e) {
+            final List<String> r = new ArrayList<>();
+            r.add("copy:" + e.getClass().getSimpleName());
+            return r;
+        } finally {
+            forge.ai.AiCache.installScope(prevCache);
+            forge.util.IdScope.install(prevIds);
+            forge.util.MyRandom.setThreadRandom(prevRandom);
+        }
+    }
+
+    /**
+     * Whether every gap acts only after the current turn's cleanup (an until-end-of-turn or until-your-next command): a
+     * line that ends the game during this turn is not changed by them. A delayed trigger, an end-of-combat or end-step
+     * "at" command, a state-based or a card's own command can act this turn.
+     */
+    public static boolean gapsMatterOnlyAfterThisTurn(List<String> gaps) {
+        if (gaps == null) {
+            return true;
+        }
+        for (String s : gaps) {
+            if (!(s.startsWith("EndOfTurn.until") || s.startsWith("EndOfTurn.register") || s.startsWith("Cleanup.")
+                    || s.startsWith("Untap.") || s.startsWith("Upkeep."))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void gap(String where, Object what) {
+        pendingGaps.add(where + ":" + (what instanceof Class ? ((Class<?>) what).getName() : String.valueOf(what)));
+    }
+
+    private void copyPendingState(Game newGame) {
+        pendingGaps.clear();
+        pendingCopied = 0;
+        trigMap.clear();
+        cmdMap.clear();
+        saMap.clear();
+        staleMap.clear();
+        // delayed triggers first: commands that register one later ("next turn") map to the same copy
+        final forge.game.trigger.TriggerHandler from = origGame.getTriggerHandler(), to = newGame.getTriggerHandler();
+        for (Trigger t : new ArrayList<>(from.getDelayedTriggersView())) {
+            final Trigger m = copyTrigger(t, newGame, "delayed");
+            if (m == null) {
+                continue;
+            }
+            if (from.isThisTurnDelayedTrigger(t)) {
+                to.registerThisTurnDelayedTrigger(m);
+            } else {
+                to.registerDelayedTrigger(m);
+            }
+            pendingCopied++;
+        }
+        for (Map.Entry<Player, Trigger> e : new ArrayList<>(from.getPlayerDefinedDelayedTriggersView().entries())) {
+            final Player p = playerMap.get(e.getKey());
+            final Trigger m = p == null ? null : copyTrigger(e.getValue(), newGame, "delayedPlayer");
+            if (p == null) {
+                gap("delayedPlayer", "player");
+            }
+            if (m != null) {
+                to.registerPlayerDefinedDelayedTrigger(p, m);
+                pendingCopied++;
+            }
+        }
+        final forge.game.phase.Phase[] fp = phases(origGame), tp = phases(newGame);
+        for (int i = 0; i < fp.length; i++) {
+            final String n = PHASE_NAMES[i];
+            for (GameCommand c : new ArrayList<>(fp[i].getAtCommands())) {
+                final GameCommand m = mapCommand(c, newGame, n + ".at");
+                if (m != null) {
+                    tp[i].addAt(m);
+                }
+            }
+            for (GameCommand c : new ArrayList<>(fp[i].getUntilCommands())) {
+                final GameCommand m = mapCommand(c, newGame, n + ".until");
+                if (m != null) {
+                    tp[i].addUntil(m);
+                }
+            }
+            final forge.game.phase.Phase dst = tp[i];
+            copyPlayerCommands(fp[i].getUntilMapCommands(), newGame, n + ".untilPlayer", dst::addUntil);
+            copyPlayerCommands(fp[i].getUntilEndMapCommands(), newGame, n + ".untilEnd", dst::addUntilEnd);
+            copyPlayerCommands(fp[i].getRegisterMapCommands(), newGame, n + ".register", dst::registerUntilEnd);
+        }
+        for (GameCommand c : new ArrayList<>(origGame.sbaCheckedCommandList)) {
+            final GameCommand m = mapCommand(c, newGame, "sba");
+            if (m != null) {
+                newGame.addSBACheckedCommand(m);
+            }
+        }
+        copyExtraTurns(newGame);
+        // review #156 S1-1: temporary controllers with their timestamps (Threaten's "lose control" removes its own)
+        for (Card c : origGame.getCardsIn(ZoneType.Battlefield)) {
+            final Card nc = cardMap.get(c);
+            if (nc != null && c.hasTempControllers()) {
+                nc.copyControllersFrom(c, p -> {
+                    final Player m = playerMap.get(p);
+                    if (m == null) {
+                        throw new IllegalStateException("controller " + p);
+                    }
+                    return m;
+                });
+                pendingCopied++;
+            }
+        }
+        // a card outside the copied zones that holds commands: they cannot be carried (review #156 S3)
+        final java.util.Set<ZoneType> copied = java.util.EnumSet.noneOf(ZoneType.class);
+        java.util.Collections.addAll(copied, ZONES);
+        for (Card c : origGame.getCardsInGame()) {
+            if (c.getZone() != null && copied.contains(c.getZone().getZoneType())) {
+                continue;
+            }
+            boolean any = !c.getStaticCommandList().isEmpty();
+            for (List<GameCommand> l : c.getCommandListsForCopy()) {
+                any |= !l.isEmpty();
+            }
+            if (any) {
+                gap("card-outside", c.getName() + "@" + (c.getZone() == null ? "none" : c.getZone().getZoneType()));
+            }
+        }
+        for (ZoneType zone : ZONES) {
+            for (Card c : origGame.getCardsIn(zone)) {
+                final Card nc = cardMap.get(c);
+                if (nc == null) {
+                    continue;
+                }
+                final List<List<GameCommand>> src = c.getCommandListsForCopy(), dst = nc.getCommandListsForCopy();
+                for (int i = 0; i < src.size(); i++) {
+                    for (GameCommand cmd : new ArrayList<>(src.get(i))) {
+                        final GameCommand m = mapCommand(cmd, newGame, "card" + i);
+                        if (m != null) {
+                            dst.get(i).add(m);
+                        }
+                    }
+                }
+                for (Object[] sc : new ArrayList<>(c.getStaticCommandList())) {
+                    final Object m = mapPending(sc, newGame, "cardStatic");
+                    if (m == REFUSE) {
+                        gap("cardStatic", "entry");
+                    } else {
+                        nc.addStaticCommandList((Object[]) m);
+                        pendingCopied++;
+                    }
+                }
+            }
+        }
+    }
+
+    private void copyPlayerCommands(com.google.common.collect.Multimap<Player, GameCommand> src, Game newGame, String where,
+            java.util.function.BiConsumer<Player, GameCommand> add) {
+        // players in seat order (the multimap's own order is by hash), each player's commands in their order
+        for (Player op : origGame.getPlayers()) {
+            for (GameCommand c : new ArrayList<>(src.get(op))) {
+                final GameCommand m = mapCommand(c, newGame, where);
+                if (m != null) {
+                    add.accept(playerMap.get(op), m);
+                }
+            }
+        }
+        for (Player op : src.keySet()) {
+            if (!playerMap.containsKey(op)) {
+                gap(where, "player");
+            }
+        }
+    }
+
+    /**
+     * Review #156 S1-2: the pending extra turns (Time Walk) and extra phases (an additional combat), with their delayed
+     * triggers and skip-untap / no-schemes abilities, mapped into the copy; a part that cannot be mapped is a gap.
+     */
+    private void copyExtraTurns(Game newGame) {
+        final forge.game.phase.PhaseHandler from = origGame.getPhaseHandler();
+        if (!from.hasExtraTurnsOrPhases()) {
+            return;
+        }
+        final List<forge.game.phase.ExtraTurn> turns = new ArrayList<>();
+        for (forge.game.phase.ExtraTurn et : from.getExtraTurnsView()) {
+            final Player p = et.getPlayer() == null ? null : playerMap.get(et.getPlayer());
+            if (p == null) {
+                gap("extraTurn", "player");
+                return;
+            }
+            final forge.game.phase.ExtraTurn n = new forge.game.phase.ExtraTurn(p);
+            for (Trigger t : new ArrayList<>(et.getDelayedTriggers())) {
+                final Trigger m = copyTrigger(t, newGame, "extraTurn");
+                if (m == null) {
+                    return;
+                }
+                n.addTrigger(m);
+            }
+            if (et.getSkipUntapSA() != null) {
+                final Object m = mapPending(et.getSkipUntapSA(), newGame, "extraTurn.skipUntap");
+                if (m == REFUSE) {
+                    gap("extraTurn", "skipUntap");
+                    return;
+                }
+                n.setSkipUntapSA((SpellAbility) m);
+            }
+            if (et.getCantSetSchemesInMotionSA() != null) {
+                final Object m = mapPending(et.getCantSetSchemesInMotionSA(), newGame, "extraTurn.schemes");
+                if (m == REFUSE) {
+                    gap("extraTurn", "schemes");
+                    return;
+                }
+                n.setCantSetSchemesInMotionSA((SpellAbility) m);
+            }
+            turns.add(n);
+        }
+        // extra phases: one object can sit in two stacks (a chain), so map them by identity
+        final Map<forge.game.phase.ExtraPhase, forge.game.phase.ExtraPhase> pm = new java.util.IdentityHashMap<>();
+        final Map<forge.game.phase.PhaseType, List<forge.game.phase.ExtraPhase>> phases = new java.util.EnumMap<>(forge.game.phase.PhaseType.class);
+        for (Map.Entry<forge.game.phase.PhaseType, List<forge.game.phase.ExtraPhase>> e : from.getExtraPhasesView().entrySet()) {
+            final List<forge.game.phase.ExtraPhase> l = new ArrayList<>();
+            for (forge.game.phase.ExtraPhase ep : e.getValue()) {
+                forge.game.phase.ExtraPhase n = pm.get(ep);
+                if (n == null) {
+                    n = new forge.game.phase.ExtraPhase(ep.getPhase());
+                    for (Trigger t : new ArrayList<>(ep.getDelayedTriggers())) {
+                        final Trigger m = copyTrigger(t, newGame, "extraPhase");
+                        if (m == null) {
+                            return;
+                        }
+                        n.addTrigger(m);
+                    }
+                    pm.put(ep, n);
+                }
+                l.add(n);
+            }
+            phases.put(e.getKey(), l);
+        }
+        newGame.getPhaseHandler().dangerouslySetExtra(turns, phases);
+        pendingCopied += turns.size() + pm.size();
+    }
+
+    /** A command of the original as a command of the copy (memoized: one command in two lists stays one), or null. */
+    private GameCommand mapCommand(GameCommand cmd, Game newGame, String where) {
+        final Object done = cmdMap.get(cmd);
+        if (done != null) {
+            return done == REFUSE ? null : (GameCommand) done;
+        }
+        final Object m = remapPendingCommand(cmd, newGame, where);
+        cmdMap.put(cmd, m == null ? REFUSE : m);
+        if (m == null) {
+            return null;
+        }
+        final String lk = leaks(m, newGame);
+        if (lk != null) {
+            gap(where, "leak:" + cmd.getClass().getName() + " " + lk);
+            cmdMap.put(cmd, REFUSE);
+            return null;
+        }
+        pendingCopied++;
+        return (GameCommand) m;
+    }
+
+    private GameCommand remapPendingCommand(GameCommand cmd, Game newGame, String where) {
+        final Class<?> k = cmd.getClass();
+        if (cmd == GameCommand.BLANK) {
+            return cmd;
+        }
+        if (k.isSynthetic() || k.isHidden() || k.getName().contains("$$Lambda")) {
+            return remapLambda(cmd, newGame, where);
+        }
+        try {
+            final Object copy = allocate(k);
+            for (Class<?> c = k; c != null && c != Object.class; c = c.getSuperclass()) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                        continue;
+                    }
+                    f.setAccessible(true);
+                    final Object v = mapPending(f.get(cmd), newGame, where);
+                    if (v == REFUSE) {
+                        gap(where, k.getName() + "." + f.getName() + "=" + className(f.get(cmd)));
+                        return null;
+                    }
+                    f.set(copy, v);
+                }
+            }
+            return (GameCommand) copy;
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            gap(where, k.getName() + "!" + e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
+     * A command that is a lambda (GameCommand is Serializable, so every one is a serializable lambda): its serialized
+     * form names the method it calls and its captured values; the copy is the same lambda, re-made by its capturing
+     * class from the captured values mapped into the copy.
+     */
+    private GameCommand remapLambda(GameCommand cmd, Game newGame, String where) {
+        final Class<?> k = cmd.getClass();
+        try {
+            final java.lang.reflect.Method wr = k.getDeclaredMethod("writeReplace");
+            wr.setAccessible(true);
+            final java.lang.invoke.SerializedLambda sl = (java.lang.invoke.SerializedLambda) wr.invoke(cmd);
+            final Object[] args = new Object[sl.getCapturedArgCount()];
+            for (int i = 0; i < args.length; i++) {
+                final Object v = mapPending(sl.getCapturedArg(i), newGame, where);
+                if (v == REFUSE) {
+                    gap(where, "lambda " + sl.getImplClass() + "." + sl.getImplMethodName() + " arg" + i + "="
+                            + className(sl.getCapturedArg(i)));
+                    return null;
+                }
+                args[i] = v;
+            }
+            final Class<?> cap = Class.forName(sl.getCapturingClass().replace('/', '.'), false, k.getClassLoader());
+            final java.lang.invoke.SerializedLambda n = new java.lang.invoke.SerializedLambda(cap,
+                    sl.getFunctionalInterfaceClass(), sl.getFunctionalInterfaceMethodName(),
+                    sl.getFunctionalInterfaceMethodSignature(), sl.getImplMethodKind(), sl.getImplClass(),
+                    sl.getImplMethodName(), sl.getImplMethodSignature(), sl.getInstantiatedMethodType(), args);
+            final java.lang.reflect.Method d = cap.getDeclaredMethod("$deserializeLambda$", java.lang.invoke.SerializedLambda.class);
+            d.setAccessible(true);
+            return (GameCommand) d.invoke(null, n);
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            gap(where, "lambda " + k.getName() + "!" + e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    private static String className(Object o) {
+        return o == null ? "null" : o.getClass().getName();
+    }
+
+    /**
+     * A card object of the original as the copy's: the copy's own card when it is a card the copy holds, else (a
+     * last-known or stale object of a card that has since moved) a last-known copy of the copy's card of that id with the
+     * original object's game timestamp, so "is it still the same object" checks (equalsWithGameTimestamp) answer as in
+     * the original; a card of an id the copy does not hold is a stand-in in no zone.
+     */
+    private Card mapCardPending(Card c, Game newGame) {
+        final Card memo = staleMap.get(c);
+        if (memo != null) {
+            return memo;
+        }
+        // cards are equal by id: cardMap finds the copy's card of this id, and its key is the original's zone object
+        final Card m = cardMap.get(c);
+        if (m != null) {
+            final Card key = cardMap.inverse().get(m);
+            if (key == c || !c.isLKI() && key != null && c.getGameTimestamp() == key.getGameTimestamp()
+                    && c.getCurrentStateName() == key.getCurrentStateName()) {
+                return m;
+            }
+            // a last-known or stale object (the card has moved since): a last-known copy of the copy's card, with the
+            // object's game timestamp
+            final Card lki = CardCopyService.getLKICopy(m);
+            final forge.card.CardStateName st = c.getCurrentStateName();
+            if (st != null && st != lki.getCurrentStateName() && lki.hasState(st)) {
+                lki.setState(st, false);
+            }
+            lki.setGameTimestamp(c.getGameTimestamp());
+            staleMap.put(c, lki);
+            return lki;
+        }
+        final Card st = standIn(newGame, c);
+        st.setGameTimestamp(c.getGameTimestamp());
+        staleMap.put(c, st);
+        return st;
+    }
+
+    private static final Class<?>[] PASS = {String.class, Number.class, Boolean.class, Character.class, Enum.class,
+            forge.game.ability.SpellAbilityEffect.class, forge.card.CardStateName.class};
+
+    /** A captured value of a pending object, mapped into the copy, or {@link #REFUSE}. */
+    private Object mapPending(Object v, Game newGame, String where) {
+        if (v == null) {
+            return null;
+        }
+        for (Class<?> k : PASS) {
+            if (k.isInstance(v)) {
+                return v;
+            }
+        }
+        if (v instanceof Card) {
+            final Card c = (Card) v;
+            if (c.getGame() != origGame) {
+                return c.getGame() == newGame ? c : REFUSE;
+            }
+            return mapCardPending(c, newGame);
+        }
+        if (v instanceof Player) {
+            // players are equal by id: a player of another game must not map to ours (review #156 S3)
+            final Player m = ((Player) v).getGame() == origGame ? playerMap.get(v) : null;
+            return m == null ? REFUSE : m;
+        }
+        if (v instanceof Game) {
+            return v == origGame ? newGame : REFUSE;
+        }
+        if (v instanceof forge.game.GameAction) {
+            return v == origGame.getAction() ? newGame.getAction() : REFUSE;
+        }
+        if (v instanceof forge.game.trigger.TriggerHandler) {
+            return v == origGame.getTriggerHandler() ? newGame.getTriggerHandler() : REFUSE;
+        }
+        if (v instanceof forge.game.phase.Phase) {
+            final forge.game.phase.Phase[] fp = phases(origGame), tp = phases(newGame);
+            for (int i = 0; i < fp.length; i++) {
+                if (fp[i] == v) {
+                    return tp[i];
+                }
+            }
+            return REFUSE;
+        }
+        if (v instanceof Trigger) {
+            final Trigger m = copyTrigger((Trigger) v, newGame, where);
+            return m == null ? REFUSE : m;
+        }
+        if (v instanceof GameCommand) {
+            final GameCommand m = mapCommand((GameCommand) v, newGame, where);
+            return m == null ? REFUSE : m;
+        }
+        if (v instanceof forge.game.card.CardZoneTable) {
+            // "until this leaves the battlefield" (Portable Hole, Deep-Cavern Bat): the cards it moved, by zones
+            final forge.game.card.CardZoneTable out = new forge.game.card.CardZoneTable();
+            for (Table.Cell<ZoneType, ZoneType, forge.game.card.CardCollection> cell : ((forge.game.card.CardZoneTable) v).cellSet()) {
+                final Object m = mapPending(cell.getValue(), newGame, where);
+                if (m == REFUSE) {
+                    return REFUSE;
+                }
+                out.put(cell.getRowKey(), cell.getColumnKey(), (forge.game.card.CardCollection) m);
+            }
+            return out;
+        }
+        if (v instanceof SpellAbility) {
+            // a command's own ability (its params, its activator; an exile-until-leaves return reads them)
+            final Object done = saMap.get(v);
+            if (done != null) {
+                return done;
+            }
+            final SpellAbility m = copyPendingSa((SpellAbility) v, newGame, where + ".ability");
+            saMap.put(v, m == null ? REFUSE : m);
+            return m == null ? REFUSE : m;
+        }
+        if (v instanceof forge.game.card.CardCollection) {
+            final forge.game.card.CardCollection out = new forge.game.card.CardCollection();
+            for (Card c : (forge.game.card.CardCollection) v) {
+                final Object m = mapPending(c, newGame, where);
+                if (m == REFUSE) {
+                    return REFUSE;
+                }
+                out.add((Card) m);
+            }
+            return out;
+        }
+        if (v instanceof forge.game.player.PlayerCollection) {
+            final forge.game.player.PlayerCollection out = new forge.game.player.PlayerCollection();
+            for (Player p : (forge.game.player.PlayerCollection) v) {
+                final Object m = mapPending(p, newGame, where);
+                if (m == REFUSE) {
+                    return REFUSE;
+                }
+                out.add((Player) m);
+            }
+            return out;
+        }
+        if (v instanceof List) {
+            final List<Object> out = new ArrayList<>();
+            for (Object o : (List<?>) v) {
+                final Object m = mapPending(o, newGame, where);
+                if (m == REFUSE) {
+                    return REFUSE;
+                }
+                out.add(m);
+            }
+            return out;
+        }
+        if (v instanceof Object[]) {
+            final Object[] a = (Object[]) v;
+            final Object[] out = (Object[]) java.lang.reflect.Array.newInstance(a.getClass().getComponentType(), a.length);
+            for (int i = 0; i < a.length; i++) {
+                final Object m = mapPending(a[i], newGame, where);
+                if (m == REFUSE) {
+                    return REFUSE;
+                }
+                out[i] = m;
+            }
+            return out;
+        }
+        return REFUSE;
+    }
+
+    /**
+     * A delayed trigger of the original as one of the copy (memoized), or null (a gap): the same trigger (id, params,
+     * text) on its host's card in the copy, its remembered objects, spawning ability (activator, targets, triggering
+     * objects, paid objects) and overriding ability mapped into the copy.
+     */
+    private Trigger copyTrigger(Trigger t, Game newGame, String where) {
+        final Trigger done = trigMap.get(t);
+        if (done != null) {
+            return done;
+        }
+        final String w = where + "[" + t.getMode() + " " + (t.getHostCard() == null ? "-" : t.getHostCard().getName()) + "]";
+        if (t.getHostCard() == null) {
+            gap(w, "host");
+            return null;
+        }
+        final Object host = mapPending(t.getHostCard(), newGame, w);
+        if (!(host instanceof Card)) {
+            gap(w, "host");
+            return null;
+        }
+        final Card nh = (Card) host;
+        final Trigger c = t.copy(nh, true, true);
+        if (c.getTriggerRemembered() == t.getTriggerRemembered()) {
+            gap(w, "shared-remembered");
+            return null;
+        }
+        // memoized now: its own abilities name it (an ability's trigger), and a command can capture it
+        trigMap.put(t, c);
+        if (!fillTrigger(t, c, nh, newGame, w)) {
+            trigMap.remove(t);
+            return null;
+        }
+        return c;
+    }
+
+    private boolean fillTrigger(Trigger t, Trigger c, Card nh, Game newGame, String w) {
+        c.getTriggerRemembered().clear();
+        for (Object o : t.getTriggerRemembered()) {
+            final Object m = mapPending(o, newGame, w);
+            if (m == REFUSE) {
+                gap(w, "remembered=" + className(o));
+                return false;
+            }
+            c.addRemembered(m);
+        }
+        if (t.getCardState() != null) {
+            final forge.card.CardStateName sn = t.getCardState().getStateName();
+            c.setCardState(sn != null && nh.hasState(sn) ? nh.getState(sn) : nh.getCurrentState());
+        }
+        if (t.getKeyword() != null) {
+            c.setKeyword(null); // a keyword instance of the original card; the copy's trigger is a plain delayed trigger
+        }
+        if (t.getSpawningAbility() != null) {
+            final SpellAbility sp = copyPendingSa(t.getSpawningAbility(), newGame, w + ".spawner");
+            if (sp == null) {
+                return false;
+            }
+            c.setSpawningAbility(sp);
+        }
+        if (t.getOverridingAbility() != null) {
+            if (c.getOverridingAbility() == null || !fixSaChain(t.getOverridingAbility(), c.getOverridingAbility(), newGame, w + ".execute")) {
+                if (c.getOverridingAbility() == null) {
+                    gap(w, "execute");
+                }
+                return false;
+            }
+            c.getOverridingAbility().setTrigger(c);
+        }
+        final String lk = leaks(c, newGame);
+        if (lk != null) {
+            gap(w, "leak " + lk);
+            return false;
+        }
+        return true;
+    }
+
+    private SpellAbility copyPendingSa(SpellAbility o, Game newGame, String where) {
+        final SpellAbility root = o.getRootAbility();
+        if (root != o) {
+            // a sub-ability (a spell's "then, at the beginning of ..." part): copy its whole ability, take the same sub
+            // the sub by identity, else (o is itself a copy whose parent is the ability it was copied from) by id
+            int d = 0;
+            SpellAbility a = root;
+            while (a != null && a != o) {
+                a = a.getSubAbility();
+                d++;
+            }
+            if (a == null) {
+                d = 0;
+                a = root;
+                while (a != null && a.getId() != o.getId()) {
+                    a = a.getSubAbility();
+                    d++;
+                }
+            }
+            if (a == null) {
+                gap(where, "parent");
+                return null;
+            }
+            SpellAbility n = copyPendingSa(root, newGame, where);
+            for (int k = 0; n != null && k < d; k++) {
+                n = n.getSubAbility();
+            }
+            if (n == null) {
+                gap(where, "sub");
+                return null;
+            }
+            // the sub's own state (targets, triggering objects, paid) as o holds it
+            return fixSaChain(o, n, newGame, where) ? n : null;
+        }
+        final Object host = o.getHostCard() == null ? null : mapPending(o.getHostCard(), newGame, where);
+        if (!(host instanceof Card)) {
+            gap(where, "host");
+            return null;
+        }
+        final Object act = o.getActivatingPlayer() == null ? null : mapPending(o.getActivatingPlayer(), newGame, where);
+        if (act == REFUSE) {
+            gap(where, "activator");
+            return null;
+        }
+        final SpellAbility n = o.copy((Card) host, (Player) act, true);
+        return fixSaChain(o, n, newGame, where) ? n : null;
+    }
+
+    /** The copy {@code n} of {@code o} (and its sub-abilities) with every object it holds mapped into the copy. */
+    private boolean fixSaChain(SpellAbility o, SpellAbility n, Game newGame, String where) {
+        for (SpellAbility a = o, b = n; a != null; a = a.getSubAbility(), b = b == null ? null : b.getSubAbility()) {
+            if (b == null) {
+                gap(where, "sub");
+                return false;
+            }
+            // its additional abilities (a delayed trigger's Execute, an unless-cost's ability): the same, by name
+            for (Map.Entry<String, SpellAbility> e : a.getAdditionalAbilities().entrySet()) {
+                final SpellAbility bx = b.getAdditionalAbility(e.getKey());
+                if (bx == null || !fixSaChain(e.getValue(), bx, newGame, where + "+" + e.getKey())) {
+                    if (bx == null) {
+                        gap(where, "additional " + e.getKey());
+                    }
+                    return false;
+                }
+            }
+            for (Map.Entry<String, List<forge.game.spellability.AbilitySub>> e : a.getAdditionalAbilityLists().entrySet()) {
+                final List<forge.game.spellability.AbilitySub> bl = b.getAdditionalAbilityList(e.getKey());
+                if (bl == null || bl.size() != e.getValue().size()) {
+                    gap(where, "additional list " + e.getKey());
+                    return false;
+                }
+                for (int i = 0; i < bl.size(); i++) {
+                    if (!fixSaChain(e.getValue().get(i), bl.get(i), newGame, where + "+" + e.getKey() + i)) {
+                        return false;
+                    }
+                }
+            }
+            if (a.getOriginalAbility() != null) {
+                b.setOriginalAbility(null); // the ability it was granted from, in the original: not read for a carried one
+            }
+            if (a.getGrantorStatic() != null) {
+                b.setGrantorStatic(null); // the static that granted it (Splinter Twin): its activation and mode records only
+            }
+            if (a.getActivatingPlayer() != null) {
+                final Object p = mapPending(a.getActivatingPlayer(), newGame, where);
+                if (p == REFUSE) {
+                    gap(where, "activator");
+                    return false;
+                }
+                b.setActivatingPlayer((Player) p);
+            }
+            if (a.getCardState() != null && b.getHostCard() != null) {
+                final Card bh = b.getHostCard();
+                final forge.card.CardStateName sn = a.getCardState().getStateName();
+                b.setCardState(sn != null && bh.hasState(sn) ? bh.getState(sn) : bh.getCurrentState());
+            }
+            if (a.getKeyword() != null) {
+                b.setKeyword(null);
+            }
+            if (a.getTrigger() != null) {
+                final Object m = mapPending(a.getTrigger(), newGame, where);
+                if (m == REFUSE) {
+                    gap(where, "trigger");
+                    return false;
+                }
+                b.setTrigger((Trigger) m);
+            }
+            if (a.usesTargeting()) {
+                b.resetTargets();
+                for (GameObject t : a.getTargets()) {
+                    final Object m = mapPending(t, newGame, where);
+                    if (!(m instanceof GameObject)) {
+                        gap(where, "target=" + className(t));
+                        return false;
+                    }
+                    b.getTargets().add((GameObject) m);
+                }
+            }
+            final Map<forge.game.ability.AbilityKey, Object> trig = forge.game.ability.AbilityKey.newMap();
+            for (Map.Entry<forge.game.ability.AbilityKey, Object> e : a.getTriggeringObjects().entrySet()) {
+                final Object m = mapPending(e.getValue(), newGame, where);
+                if (m == REFUSE) {
+                    gap(where, "triggering " + e.getKey() + "=" + className(e.getValue()));
+                    return false;
+                }
+                trig.put(e.getKey(), m);
+            }
+            b.setTriggeringObjects(trig);
+            // replacing objects: an LKI copy shares the original's map (review #156 S3); give it its own, mapped
+            final Map<forge.game.ability.AbilityKey, Object> rep = forge.game.ability.AbilityKey.newMap();
+            for (Map.Entry<forge.game.ability.AbilityKey, Object> e : a.getReplacingObjects().entrySet()) {
+                final Object m = mapPending(e.getValue(), newGame, where);
+                if (m == REFUSE) {
+                    gap(where, "replacing " + e.getKey() + "=" + className(e.getValue()));
+                    return false;
+                }
+                rep.put(e.getKey(), m);
+            }
+            b.setReplacingObjects(rep);
+            if (!a.getPaidHash().isEmpty()) {
+                final TreeBasedTable<String, Boolean, forge.game.card.CardCollection> paid = TreeBasedTable.create();
+                for (Table.Cell<String, Boolean, forge.game.card.CardCollection> cell : a.getPaidHash().cellSet()) {
+                    final Object m = mapPending(cell.getValue(), newGame, where);
+                    if (m == REFUSE) {
+                        gap(where, "paid");
+                        return false;
+                    }
+                    paid.put(cell.getRowKey(), cell.getColumnKey(), (forge.game.card.CardCollection) m);
+                }
+                b.setPaidHash(paid);
+            }
+            // resolution-time state of an ability that has resolved (the spawner): not read again
+            b.getPayingMana().clear();
+            b.clearLastState();
+            b.setMayPlay(null);
+        }
+        return true;
+    }
+
+    /**
+     * Where a carried object still holds a card or player of the original game (a copy acting on the live game), or
+     * null: walks its fields (forge classes), collections, maps and arrays to a bounded depth, stopping at cards,
+     * players, games and card states (only their game is checked).
+     */
+    private String leaks(Object root, Game newGame) {
+        return leaks(root, newGame, java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), 0, "");
+    }
+
+    /** Values that hold no game object (walk stops, clean). */
+    private static boolean inert(Object v) {
+        return v instanceof String || v instanceof Number || v instanceof Boolean || v instanceof Character
+                || v instanceof Enum || v instanceof Class || v instanceof java.util.regex.Pattern
+                || v instanceof java.time.temporal.TemporalAccessor || v instanceof java.util.UUID
+                || v instanceof java.util.Locale || v instanceof forge.card.mana.ManaCost
+                || v instanceof forge.card.mana.ManaCostShard || v instanceof forge.card.ColorSet;
+    }
+
+    /**
+     * {@code onPath}: the objects on the walk's current path only (a cycle stops; an object reached by another path is
+     * walked again). Too deep, or a holder it does not know how to walk, counts as a leak (review #156 S2).
+     */
+    private String leaks(Object v, Game newGame, java.util.Set<Object> onPath, int depth, String path) {
+        if (v == null || inert(v)) {
+            return null;
+        }
+        if (depth > 24) {
+            return path + "!depth";
+        }
+        if (v instanceof Card) {
+            return ((Card) v).getGame() == origGame ? path + "=card " + v : null;
+        }
+        if (v instanceof Player) {
+            return ((Player) v).getGame() == origGame ? path + "=player" : null;
+        }
+        if (v instanceof Game) {
+            return v == origGame ? path + "=game" : null;
+        }
+        if (v instanceof forge.game.card.CardState) {
+            final Card c = ((forge.game.card.CardState) v).getCard();
+            return c != null && c.getGame() == origGame ? path + "=state of " + c : null;
+        }
+        if (v instanceof forge.trackable.TrackableObject || v instanceof forge.game.ability.SpellAbilityEffect
+                || v instanceof forge.game.GameAction || v instanceof forge.game.trigger.TriggerHandler
+                || v instanceof forge.game.phase.Phase) {
+            return v == origGame.getAction() || v == origGame.getTriggerHandler() || isOrigPhase(v) ? path + "=" + className(v) : null;
+        }
+        if (!onPath.add(v)) {
+            return null; // a cycle on this path
+        }
+        try {
+            return leaks0(v, newGame, onPath, depth, path);
+        } finally {
+            onPath.remove(v);
+        }
+    }
+
+    private String leaks0(Object v, Game newGame, java.util.Set<Object> onPath, int depth, String path) {
+        String r;
+        if (v instanceof Map) {
+            for (Map.Entry<?, ?> e : ((Map<?, ?>) v).entrySet()) {
+                if ((r = leaks(e.getKey(), newGame, onPath, depth + 1, path + "{key}")) != null
+                        || (r = leaks(e.getValue(), newGame, onPath, depth + 1, path + "{" + e.getKey() + "}")) != null) {
+                    return r;
+                }
+            }
+            return null;
+        }
+        if (v instanceof Table) {
+            for (Table.Cell<?, ?, ?> c : ((Table<?, ?, ?>) v).cellSet()) {
+                if ((r = leaks(c.getRowKey(), newGame, onPath, depth + 1, path + "{row}")) != null
+                        || (r = leaks(c.getColumnKey(), newGame, onPath, depth + 1, path + "{col}")) != null
+                        || (r = leaks(c.getValue(), newGame, onPath, depth + 1, path + "{cell}")) != null) {
+                    return r;
+                }
+            }
+            return null;
+        }
+        if (v instanceof Multimap) {
+            return leaks(((Multimap<?, ?>) v).asMap(), newGame, onPath, depth + 1, path);
+        }
+        if (v instanceof Iterable && !(v instanceof GameObject) && !v.getClass().getName().startsWith("forge.game.card.Card$")) {
+            int i = 0;
+            for (Object o : (Iterable<?>) v) {
+                if ((r = leaks(o, newGame, onPath, depth + 1, path + "[" + i++ + "]")) != null) {
+                    return r;
+                }
+            }
+            if (!v.getClass().getName().startsWith("forge.")) {
+                return null; // a JDK / Guava collection: its elements are all it holds
+            }
+        }
+        if (v.getClass().isArray()) {
+            if (v.getClass().getComponentType().isPrimitive()) {
+                return null;
+            }
+            int i = 0;
+            for (Object o : (Object[]) v) {
+                if ((r = leaks(o, newGame, onPath, depth + 1, path + "[" + i++ + "]")) != null) {
+                    return r;
+                }
+            }
+            return null;
+        }
+        if (v instanceof java.util.Optional) {
+            return leaks(((java.util.Optional<?>) v).orElse(null), newGame, onPath, depth + 1, path + ".get");
+        }
+        if (v instanceof com.google.common.base.Optional) {
+            return leaks(((com.google.common.base.Optional<?>) v).orNull(), newGame, onPath, depth + 1, path + ".get");
+        }
+        if (v instanceof java.util.concurrent.atomic.AtomicReference) {
+            return leaks(((java.util.concurrent.atomic.AtomicReference<?>) v).get(), newGame, onPath, depth + 1, path + ".get");
+        }
+        if (v instanceof org.apache.commons.lang3.tuple.Pair) {
+            final org.apache.commons.lang3.tuple.Pair<?, ?> pr = (org.apache.commons.lang3.tuple.Pair<?, ?>) v;
+            return (r = leaks(pr.getLeft(), newGame, onPath, depth + 1, path + ".left")) != null ? r
+                    : leaks(pr.getRight(), newGame, onPath, depth + 1, path + ".right");
+        }
+        if (v instanceof com.google.common.base.Supplier) {
+            return leaks(((com.google.common.base.Supplier<?>) v).get(), newGame, onPath, depth + 1, path + ".get");
+        }
+        if (v instanceof java.util.concurrent.atomic.AtomicInteger || v instanceof java.util.concurrent.atomic.AtomicLong
+                || v instanceof java.util.concurrent.atomic.AtomicBoolean) {
+            return null;
+        }
+        final Class<?> k = v.getClass();
+        if (!(k.getName().startsWith("forge.") || k.isSynthetic() || k.isHidden())) {
+            return path + "!holder " + k.getName(); // not known to hold no game object: refused
+        }
+        for (Class<?> c = k; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers()) || f.getType().isPrimitive()) {
+                    continue;
+                }
+                try {
+                    f.setAccessible(true);
+                    if ((r = leaks(f.get(v), newGame, onPath, depth + 1, path + "." + f.getName())) != null) {
+                        return r;
+                    }
+                } catch (ReflectiveOperationException | RuntimeException e) {
+                    return path + "." + f.getName() + "!" + e.getClass().getSimpleName(); // unknown: left out
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean isOrigPhase(Object v) {
+        for (forge.game.phase.Phase ph : phases(origGame)) {
+            if (ph == v) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void copyStack(Game origGame, Game newGame, IEntityMap map) {

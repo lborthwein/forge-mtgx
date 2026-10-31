@@ -235,6 +235,7 @@ public final class ForcedWinProbe {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1); // storm count, per-turn records
+                copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030 (review #156 S2: a research copy that feeds labels)
                 g = copier.makeCopy();
                 me = (Player) copier.find(liveMe);
             }

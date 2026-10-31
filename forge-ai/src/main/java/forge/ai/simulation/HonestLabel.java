@@ -332,6 +332,15 @@ public final class HonestLabel {
         public int turnsToEnd = -1;
         public double ms;
         public String error;
+        /**
+         * gamecopier-fidelity-1030: what the solver's copies of this position cannot carry (pending delayed triggers or
+         * commands; null = nothing left out). A proof that could depend on it is not accepted: the label stays unresolved.
+         */
+        public String copyGap;
+        /** gamecopier-fidelity-1030: proofs refused because of {@link #copyGap}. */
+        public int gapRefused;
+        /** gamecopier-fidelity-1030: "carried" when the root had pending triggers or commands and the copies carry them all. */
+        public String copyPending;
         /** bvw-step1-build-1024: the check's solver work (null unless the spec meters). */
         public JsonObject meter;
 
@@ -358,6 +367,13 @@ public final class HonestLabel {
             o.addProperty("ms", Math.round(ms * 10) / 10.0);
             if (error != null) o.addProperty("error", error);
             if (meter != null) o.add("meter", meter);
+            if (copyPending != null) {
+                o.addProperty("copy_pending", copyPending);
+            }
+            if (copyGap != null) {
+                o.addProperty("copy_gap", copyGap);
+                o.addProperty("gap_refused", gapRefused);
+            }
             return o;
         }
 
@@ -458,6 +474,23 @@ public final class HonestLabel {
             final boolean mine = ph.isPlayerTurn(liveMe);
             final boolean main = ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2);
             final boolean end = ph.is(PhaseType.END_OF_TURN);
+            if ((mine && main || !mine && end || spec.loss && (!mine && main || mine && end)) && GameCopier.SOLVER_COPY_PENDING) {
+                // gamecopier-fidelity-1030: what the copies cannot carry; a gap that can act this turn leaves the
+                // position unresolved (no check runs), one that acts only after this turn refuses proofs past it
+                final List<String> gaps = GameCopier.unsupportedPending(live);
+                if (gaps == null && GameCopier.hasPending(live)) {
+                    r.copyPending = "carried";
+                    ForcedWinSolver.receipt("FORCED_WIN copy-pending label turn=" + ph.getTurn() + " phase=" + ph.getPhase() + " carried");
+                }
+                if (gaps != null) {
+                    r.copyGap = String.join("; ", gaps);
+                    ForcedWinSolver.receipt("FORCED_WIN copy-gap turn=" + ph.getTurn() + " phase=" + ph.getPhase() + " " + r.copyGap);
+                    if (!GameCopier.gapsMatterOnlyAfterThisTurn(gaps)) {
+                        r.gate = "copy-gap";
+                        return;
+                    }
+                }
+            }
             if (mine && main || !mine && end) {
                 r.check = "win";
                 win(live, liveMe, liveOpp, key, r, known);
@@ -479,6 +512,7 @@ public final class HonestLabel {
                 final Set<Integer> knownOwn) {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
+                copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setCopyFidelity(1); // storm count, per-turn records (as the solver's own play-outs)
                 ForcedWinEngine.copyStackIf(copier, live, spec.winConfig().engineStack); // R3-5
                 final Game g = copier.makeCopy();
@@ -525,6 +559,10 @@ public final class HonestLabel {
             for (ForcedWinSolver.Proposal p : props) {
                 if (best == null || p.pBelief > best.pBelief + 1e-9) {
                     best = p;
+                }
+                if (p.proven(spec.worlds) && r.copyGap != null && p.endTurn != live.getPhaseHandler().getTurn()) {
+                    r.gapRefused++; // gamecopier-fidelity-1030: past this turn the copies lack a pending command
+                    continue;
                 }
                 if (p.proven(spec.worlds) && (proven == null || p.endTurn >= 0 && p.endTurn < proven.endTurn)) {
                     proven = p;
@@ -581,6 +619,10 @@ public final class HonestLabel {
                 }
                 ForcedWinSolver.Proposal proven = null;
                 for (ForcedWinSolver.Proposal p : props) {
+                    if (p.proven(1) && r.copyGap != null && p.endTurn != live.getPhaseHandler().getTurn()) {
+                        r.gapRefused++; // gamecopier-fidelity-1030 (as the win check)
+                        continue;
+                    }
                     if (p.proven(1) && (proven == null || p.endTurn >= 0 && p.endTurn < proven.endTurn)) {
                         proven = p;
                     }

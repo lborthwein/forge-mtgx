@@ -2481,6 +2481,7 @@ public final class ChooseACard implements CacHook {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyFidelity(1);
+                copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030 (review #156 S2: a research copy that feeds labels)
                 if ("legendRule".equals(ask.method)) {
                     copier.setDeferStateEffects(true); // the legend rule is resumed on the copy with the answer
                 }
