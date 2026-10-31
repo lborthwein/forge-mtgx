@@ -1180,7 +1180,8 @@ public final class R3LabelSearch {
             final Card h = sa.getHostCard();
             final List<String> ts = new ArrayList<>();
             final List<String> names = new ArrayList<>();
-            for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            // the root's targets (a modal action's mode targets travel in its modes)
+            for (SpellAbility s = sa; s == sa; s = null) {
                 if (s.usesTargeting() && s.getTargets() != null) {
                     for (forge.game.GameObject o : s.getTargets()) {
                         ts.add(OppMin.targetId(o));
@@ -1206,7 +1207,12 @@ public final class R3LabelSearch {
             for (SpellAbility sa : all) {
                 if (sa.isLandAbility() == land && desc.equals(sa.getDescription())) {
                     sa.setActivatingPlayer(p);
-                    if (modes != null) sa.setSVar(OppMin.MODES, modes);
+                    if (modes == null && targets.isEmpty()) return sa;
+                    // review #148 S3: modes and targets go on a copy, so the card's own ability stays clean for a
+                    // later recast in the same line
+                    final SpellAbility cp = sa.copy(p);
+                    cp.setActivatingPlayer(p);
+                    if (modes != null) cp.setSVar(OppMin.MODES, modes);
                     if (!targets.isEmpty()) {
                         // the same targets in this copy (ids survive copies); a target gone: not this action
                         final List<forge.game.GameObject> objs = new ArrayList<>();
@@ -1215,11 +1221,11 @@ public final class R3LabelSearch {
                             if (o == null) return null;
                             objs.add(o);
                         }
-                        sa.resetTargets();
-                        for (forge.game.GameObject o : objs) sa.getTargets().add(o);
-                        if (!sa.isTargetNumberValid()) return null;
+                        cp.resetTargets();
+                        for (forge.game.GameObject o : objs) cp.getTargets().add(o);
+                        if (!cp.isTargetNumberValid()) return null;
                     }
-                    return sa;
+                    return cp;
                 }
             }
             return null;

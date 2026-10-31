@@ -579,52 +579,80 @@ public final class OppMin {
         final int k = repeat ? num : Math.min(num, modes.size());
         final List<int[]> combos = new ArrayList<>();
         combo(modes.size(), k, repeat, 0, new int[k], 0, combos, 24);
+        int added = 0;
         for (int[] cmb : combos) {
-            int cat = -1;
-            final StringBuilder key = new StringBuilder();
+            // review #148 S1 (round 2): every mode's distinct target classes (collapsed by name as for other answers),
+            // and every product of them; past CHARM_CAP answers the point's set is over the per-point cap (a cap hit)
+            final List<List<Object>> optT = new ArrayList<>();
+            final List<List<Integer>> optC = new ArrayList<>();
             boolean ok = true;
             for (int m : cmb) {
                 final forge.game.spellability.AbilitySub sub = modes.get(m);
                 sub.setActivatingPlayer(opp);
                 final List<Object> ts = new ArrayList<>();
                 targetsOf(sub, top, victim, opp, ts, new ArrayList<>());
-                int best = -1;
-                Object bestT = null;
+                final List<Object> oT = new ArrayList<>();
+                final List<Integer> oC = new ArrayList<>();
                 for (Object t : ts) {
+                    int x;
                     try {
-                        final int x = category(sub, t, top, victim, opp, attack);
-                        if (x >= 0 && (best < 0 || x < best)) {
-                            best = x;
-                            bestT = t;
-                        }
+                        x = category(sub, t, top, victim, opp, attack);
                     } catch (RuntimeException e) {
-                        // a mode Forge cannot test here: not a reason to answer
+                        x = -1; // a mode Forge cannot test here: not a reason to answer
+                    }
+                    if (x >= 0 || !sub.usesTargeting()) {
+                        oT.add(t);
+                        oC.add(x);
                     }
                 }
-                if (sub.usesTargeting() && bestT == null) {
+                if (oT.isEmpty()) {
                     // a targeted mode with no real target: its first legal one (a bonus mode), else not castable
                     if (ts.isEmpty()) {
                         ok = false;
                         break;
                     }
-                    bestT = ts.get(0);
+                    oT.add(ts.get(0));
+                    oC.add(-1);
                 }
-                if (best >= 0 && (cat < 0 || best < cat)) cat = best;
-                key.append(sub.getSVar("CharmOrder")).append('@').append(bestT == null ? "-" : targetId(bestT)).append(',');
+                optT.add(oT);
+                optC.add(oC);
             }
             if (!ok) continue;
-            if (cat < 0) continue;
-            final SpellAbility cs = sa0.copy(opp);
-            cs.setActivatingPlayer(opp);
-            cs.setSVar(MODES, key.toString());
-            try {
-                if (!cs.canPlay() || !ComputerUtilCost.canPayCost(cs, opp, false)) continue;
-            } catch (RuntimeException e) {
-                continue;
+            final int[] pick = new int[cmb.length];
+            while (added <= CHARM_CAP) {
+                int cat = -1;
+                final StringBuilder key = new StringBuilder();
+                for (int q = 0; q < cmb.length; q++) {
+                    final int x = optC.get(q).get(pick[q]);
+                    if (x >= 0 && (cat < 0 || x < cat)) cat = x;
+                    final Object t = optT.get(q).get(pick[q]);
+                    key.append(modes.get(cmb[q]).getSVar("CharmOrder")).append('@').append(t == null ? "-" : targetId(t))
+                            .append(',');
+                }
+                if (cat >= 0) {
+                    final SpellAbility cs = sa0.copy(opp);
+                    cs.setActivatingPlayer(opp);
+                    cs.setSVar(MODES, key.toString());
+                    boolean play;
+                    try {
+                        play = cs.canPlay() && ComputerUtilCost.canPayCost(cs, opp, false);
+                    } catch (RuntimeException e) {
+                        play = false;
+                    }
+                    if (play && byKey.putIfAbsent(cat + "|" + c.getName() + "|Charm|" + cost + "|modes:" + key, cs) == null) {
+                        added++;
+                    }
+                }
+                int q = cmb.length - 1;
+                while (q >= 0 && ++pick[q] >= optT.get(q).size()) pick[q--] = 0;
+                if (q < 0) break;
             }
-            byKey.putIfAbsent(cat + "|" + c.getName() + "|Charm|" + cost + "|modes:" + key, cs);
+            if (added > CHARM_CAP) break;
         }
     }
+
+    /** At most this many answers per modal card (one more than the default per-point cap would already be a cap hit). */
+    static final int CHARM_CAP = 24;
 
     static void combo(final int n, final int k, final boolean repeat, final int from, final int[] cur, final int depth,
             final List<int[]> out, final int cap) {
