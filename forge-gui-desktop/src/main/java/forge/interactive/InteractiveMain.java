@@ -949,6 +949,8 @@ public final class InteractiveMain {
                 case "deadEtb": c.deadEtb = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "zeroX": c.zeroX = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "crewNoop": c.crewNoop = forge.ai.AiFixes.Mode.parse(p[1]); break;
+                case "dudCast": c.dudCast = forge.ai.AiFixes.Mode.parse(p[1]); break; // live-ai-quality-1030
+                case "dudWorlds": c.dudWorlds = Integer.parseInt(p[1].trim()); break;
                 case "copyEot": c.copyEot = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "copyFidelity": c.copyFidelity = forge.ai.simulation.LookaheadSearch.Config.copyFidelityLevel(Integer.parseInt(p[1].trim())); break;
                 case "departMedian": c.departMedian = forge.ai.AiFixes.Mode.parse(p[1]); break;

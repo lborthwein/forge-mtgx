@@ -16,7 +16,21 @@ public class RepeatEffect extends SpellAbilityEffect {
 
     @Override
     protected String getStackDescription(final SpellAbility sa) {
-        return "Repeat something. Somebody should really write a better StackDescription!";
+        // mtgx live-ai-quality-1030 (JAR-TEXT-ASKS 4): upstream's placeholder "Repeat something. Somebody should really
+        // write a better StackDescription!" showed in the payment prompt and the stack rail (Fiery Gambit). Say the
+        // card's own words instead: this ability's description, else its root's when the root's stack text is
+        // suppressed (StackDescription$ None, Fiery Gambit), else the card's oracle text.
+        if (sa.hasParam("SpellDescription")) {
+            return sa.getDescription();
+        }
+        final SpellAbility root = sa.getRootAbility();
+        if (root != null && root != sa && root.hasParam("SpellDescription")
+                && "None".equalsIgnoreCase(root.getParam("StackDescription"))) {
+            return root.getDescription();
+        }
+        final Card host = sa.getHostCard();
+        final String oracle = host == null ? null : host.getOracleText();
+        return oracle == null ? "" : oracle.replace("\\n", " ").replace("\n", " ");
     }
 
     @Override
