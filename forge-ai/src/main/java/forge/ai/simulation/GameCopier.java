@@ -905,7 +905,13 @@ public class GameCopier {
         if (!hasPending(g)) {
             return null;
         }
+        // isolated like the solver's own copies: its own ids, random stream and AI cache (a copy draws from the thread's
+        // random; a diagnostic dry run in a live decision must not move the live game's stream)
         final Object prevIds = forge.util.IdScope.capture();
+        final java.util.Random prevRandom = forge.util.MyRandom.getThreadRandom();
+        final Object prevCache = forge.ai.AiCache.captureScope();
+        forge.util.MyRandom.setThreadRandom(new java.util.Random(0x9e3779b97f4a7c15L));
+        forge.ai.AiCache.openScope();
         forge.util.IdScope.open();
         try {
             synchronized (g) {
@@ -920,7 +926,9 @@ public class GameCopier {
             r.add("copy:" + e.getClass().getSimpleName());
             return r;
         } finally {
+            forge.ai.AiCache.installScope(prevCache);
             forge.util.IdScope.install(prevIds);
+            forge.util.MyRandom.setThreadRandom(prevRandom);
         }
     }
 
