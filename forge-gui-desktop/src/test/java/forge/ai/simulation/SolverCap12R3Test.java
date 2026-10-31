@@ -15,12 +15,12 @@ import forge.game.player.Player;
  */
 public class SolverCap12R3Test extends forge.ai.AITest {
 
-    static final String[] BOOL_KEYS = {"engineLadder", "engineX", "engineCostChoice", "engineStack"};
+    static final String[] BOOL_KEYS = {"engineLadder", "engineX", "engineCostChoice", "engineStack", "loopMacro3"};
 
     @Test
     public void theRoundThreeKeysAreOffAndUnrecordedByDefault() {
         final ForcedWinSolver.Config off = ForcedWinSolver.Config.fromProps(k -> null);
-        Assert.assertFalse(off.engineLadder || off.engineX || off.engineCostChoice || off.engineStack);
+        Assert.assertFalse(off.engineLadder || off.engineX || off.engineCostChoice || off.engineStack || off.loopMacro3);
         Assert.assertEquals(off.engineOrder, "off");
         Assert.assertEquals(off.engineEvalSteps, 0);
         for (String k : ForcedWinSolver.Config.R3_DEFAULTS.keySet()) {
@@ -65,6 +65,7 @@ public class SolverCap12R3Test extends forge.ai.AITest {
         lim.cycles = true;
         lim.passTurn = true;
         lim.loopMacro = true;
+        lim.loopMacro3 = true; // review #154 S2: round 3's loop extensions (the mana-sink ceiling)
         lim.order = order ? StaticValuer.INSTANCE : null;
         lim.xChoice = x;
         return lim;

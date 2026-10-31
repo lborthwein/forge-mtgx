@@ -184,6 +184,10 @@ public class WinConditionCoverageTest extends forge.ai.AITest {
                 "negative control: the same Ballista with 19 counters cannot ping 20 before Swords resolves")
                 .k("activeplayer", "ai").k("activephase", "MAIN1").k("aiputonstack", "Swords to Plowshares->501")
                 .k("humanbattlefield", "Walking Ballista|Counters:P1P1=19|Id:501;Forest"));
+        ps.add(new P("bolt-at-us-lethal-next-turn-control", V.NOT_PROVEN,
+                "review #154 S2 control: their Bolt targets us at 3 life, our lethal is next turn: only dropping or postponing their spell proves it")
+                .k("activeplayer", "ai").k("activephase", "MAIN1").k("aiputonstack", "Lightning Bolt->human")
+                .k("humanlife", "3").k("humanbattlefield", "Craw Wurm;Forest").k("ailife", "6"));
         // --- advantage, lock and extra-turn families (edge item 6): no same-turn or next-turn proof
         ps.add(new P("witness-ephemerate-timewarp", V.NOT_PROVEN, "an extra-turn chain: a lock, value territory")
                 .k("humanhand", "Ephemerate;Time Warp").k("humanbattlefield", j("Eternal Witness", n("Island", 3), n("Plains", 3))));

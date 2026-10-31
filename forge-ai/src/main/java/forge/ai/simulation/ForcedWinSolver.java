@@ -222,6 +222,12 @@ public final class ForcedWinSolver {
          * our priority with a non-empty stack.
          */
         public boolean engineLadder = false, engineX = false, engineCostChoice = false, engineStack = false;
+        /**
+         * Review #154 S2 (false = off): round 3's loopMacro extensions under their own key, so loopMacro keeps its R2
+         * meaning: the follower's own line steps skip RolloutAi's play-out loop breaker (D4), and the loop ceilings count a
+         * repeatable mana sink (D5). Read only with loopMacro.
+         */
+        public boolean loopMacro3 = false;
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         public String engineOrder = "off";
@@ -271,7 +277,8 @@ public final class ForcedWinSolver {
                 java.util.Map.entry("ladderPathCards", 60000), java.util.Map.entry("engineEvalSteps", 0),
                 java.util.Map.entry("engineOrder", "off"), java.util.Map.entry("orderCap", 24),
                 java.util.Map.entry("engineX", false), java.util.Map.entry("xVariants", 8),
-                java.util.Map.entry("engineCostChoice", false), java.util.Map.entry("engineStack", false));
+                java.util.Map.entry("engineCostChoice", false), java.util.Map.entry("engineStack", false),
+                java.util.Map.entry("loopMacro3", false));
 
         /** Labeller v2 (PREDECLARATION-labeller-v2): its keys, with their defaults (absent from a recorded config at these). */
         public static final java.util.Map<String, Object> V2_DEFAULTS = java.util.Map.ofEntries(
@@ -323,6 +330,7 @@ public final class ForcedWinSolver {
             c.xVariants = intOr(get.apply("xVariants"), c.xVariants);
             c.engineCostChoice = "true".equals(get.apply("engineCostChoice"));
             c.engineStack = "true".equals(get.apply("engineStack"));
+            c.loopMacro3 = "true".equals(get.apply("loopMacro3"));
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -415,7 +423,8 @@ public final class ForcedWinSolver {
                 + (engineLadder ? " engineLadder N=" + ladderNodes + " S=" + ladderSteps : "")
                 + (engineEvalSteps > 0 ? " engineEvalSteps=" + engineEvalSteps : "")
                 + (!"off".equals(engineOrder) ? " engineOrder=" + engineOrder : "") + (engineX ? " engineX" : "")
-                + (engineCostChoice ? " engineCostChoice" : "") + (engineStack ? " engineStack" : "");
+                + (engineCostChoice ? " engineCostChoice" : "") + (engineStack ? " engineStack" : "")
+                + (loopMacro3 ? " loopMacro3" : "");
         }
     }
 
@@ -1859,6 +1868,7 @@ public final class ForcedWinSolver {
         el.nodes = cfg.engineNodes;
         el.perSearchNodes = cfg.engineNodesPerSearch;
         el.loopMacro = cfg.loopMacro; // R2-3
+        el.loopMacro3 = cfg.loopMacro3; // review #154 S2
         el.anyWindow = cfg.engineAnyWindow; // R2-4 (c)
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
@@ -2907,7 +2917,7 @@ public final class ForcedWinSolver {
             final Follower fo = new Follower(line);
             fo.cacLine = cfg.cacLine;
             fo.payRecord = cfg.payRecord;
-            fo.uncapped = cfg.loopMacro;
+            fo.uncapped = cfg.loopMacro && cfg.loopMacro3; // review #154 S2: its own key
             fo.costLine = cfg.engineCostChoice;
             return fo;
         }
@@ -3471,7 +3481,7 @@ public final class ForcedWinSolver {
             if (f.costLine && wrapper != null && wrapper.getHostCard() != null) {
                 // R3-4 (b): the line's recorded answer to our optional trigger
                 final String t = f.choices.next(ForcedWinChoices.TRIG);
-                if (t != null && t.startsWith(ForcedWinChoices.TRIG + ":" + wrapper.getHostCard().getName() + "=")) {
+                if (t != null && t.startsWith(ForcedWinChoices.TRIG + ":" + ForcedWinChoices.trigHost(wrapper) + "=")) {
                     f.choices.hits++;
                     return t.endsWith("=y");
                 }

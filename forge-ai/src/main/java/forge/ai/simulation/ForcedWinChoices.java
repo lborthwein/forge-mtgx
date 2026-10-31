@@ -25,8 +25,17 @@ final class ForcedWinChoices {
     static final String PICK = "pick", SCRY = "scry", SURV = "surv", DISC = "disc", ORDER = "order", SHUF = "shuf";
     /** solver-cap12 round 3 (R3-4 b, engineCostChoice): a cost part's cards (sacrifice, exile, discard, tap-type). */
     static final String COST = "cost";
-    /** R3-4 (b), engineCostChoice: our optional trigger's "you may" (trig:y / trig:n, by the trigger's host name). */
+    /**
+     * R3-4 (b), engineCostChoice: our optional trigger's "you may" (trig:y / trig:n), keyed by {@link #trigHost}: the
+     * host's name and id and the trigger's description (review #154 S3: the name alone matched another copy's trigger).
+     */
     static final String TRIG = "trig";
+
+    /** The TRIG key of a wrapped trigger: host name, host id and the trigger's description (stable across copies). */
+    static String trigHost(final forge.game.trigger.WrappedAbility w) {
+        final String d = w.getTrigger() == null ? "" : w.getTrigger().getParamOrDefault("TriggerDescription", "");
+        return w.getHostCard().getName() + "#" + w.getHostCard().getId() + "/" + Integer.toHexString(d.hashCode());
+    }
 
     static String trigTok(final String host, final boolean yes) {
         return TRIG + ":" + host + "=" + (yes ? "y" : "n");

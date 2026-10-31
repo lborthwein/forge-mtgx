@@ -256,6 +256,8 @@ final class ForcedWinEngine {
          * counter is below its generic ceiling ({@link #ceilings}: the stop rule). The cap is {@link #loopCap}.
          */
         boolean loopMacro;
+        /** Review #154 S2 (loopMacro3; false = off): the loop ceilings count a repeatable mana sink (D5). */
+        boolean loopMacro3;
         /**
          * R2-4 (c), engineAnyWindow (false = off): a search rooted outside our main phase (the opponent's end step, say)
          * rests a move at our next priority with an empty stack in the root's turn and phase, not only at our main phase.
@@ -496,6 +498,11 @@ final class ForcedWinEngine {
      * they end in a terminal state, a failed repetition or the cap.
      */
     static long[] ceilings(Game g, Player me) {
+        return ceilings(g, me, false);
+    }
+
+    /** As above; {@code sinks} (loopMacro3): plus a repeatable mana sink's mana once per point of their life. */
+    static long[] ceilings(Game g, Player me, boolean sinks) {
         final long[] c = new long[PROGRESS + 2];
         java.util.Arrays.fill(c, Long.MAX_VALUE);
         int payLife = 0, oppPower = 0, oppLife = 0;
@@ -554,7 +561,7 @@ final class ForcedWinEngine {
         c[LIFE] = 1L + Math.max(20, Math.max(payLife, 2L * oppPower));
         // a repeatable mana sink (an activated ability that neither taps nor sacrifices) turns mana into its effect again
         // and again: enough mana for it once per point of their life (and one more) earns value (solver-cap12 round 3)
-        c[MANA] = mana + (x ? 2L * oppLife : 0L) + sink * (oppLife + 1L);
+        c[MANA] = mana + (x ? 2L * oppLife : 0L) + (sinks ? sink * (oppLife + 1L) : 0L);
         c[HAND] = me.getCardsIn(ZoneType.Hand).size() + me.getCardsIn(ZoneType.Library).size();
         return c;
     }
@@ -678,7 +685,7 @@ final class ForcedWinEngine {
         Node cur = from;
         final Forward f = new Forward();
         // R2-3 (loopMacro): the stop rule's ceilings and loopCap apply to the literal fast-forward too (off: unchanged)
-        final long[] ceil = lim.loopMacro ? ceilings(from.g, from.me) : null;
+        final long[] ceil = lim.loopMacro ? ceilings(from.g, from.me, lim.loopMacro3) : null;
         final int cap = lim.loopMacro ? lim.loopCap : lim.repeatCap;
         while (reps < cap && !out()) {
             Node next = cur;
@@ -1469,7 +1476,7 @@ final class ForcedWinEngine {
             if (lim.loopMacro) {
                 // R2-3: a loop by state recurrence (any body up to loopWindow), N chosen by the search
                 a.child.mk = macroKey(a.child.g, a.child.me);
-                final long[] ceil = ceilings(node.g, node.me);
+                final long[] ceil = ceilings(node.g, node.me, lim.loopMacro3);
                 List<Step> mb = macroBody(a.child, ceil);
                 if (mb != null && done(node, mb)) {
                     mb = null; // review #152-6: this path already fast-forwarded the same loop (N = 1 continues)
@@ -2664,7 +2671,7 @@ final class ForcedWinEngine {
             if (rec != null && lim.costChoice && wrapper != null && wrapper.getHostCard() != null) {
                 // R3-4 (b), engineCostChoice: our optional trigger ("you may") is a choice point: Forge AI's answer and
                 // the other one
-                final String host = wrapper.getHostCard().getName();
+                final String host = ForcedWinChoices.trigHost(wrapper);
                 final String t = rec.at(ForcedWinChoices.TRIG);
                 if (t != null && t.startsWith(ForcedWinChoices.TRIG + ":" + host + "=")) {
                     rec.played(t);
