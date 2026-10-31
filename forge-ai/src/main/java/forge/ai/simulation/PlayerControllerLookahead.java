@@ -30,7 +30,9 @@ public class PlayerControllerLookahead extends PlayerControllerAi {
             return def;
         }
         search.noteForgeNanos(System.nanoTime() - t0);
-        return search.decide(this, def);
+        final List<SpellAbility> answer = search.decide(this, def);
+        // lane live-ai-quality-1030: the dud-cast guard (OFF by default: the answer as decided)
+        return search.getConfig().dudCast == forge.ai.AiFixes.Mode.OFF ? answer : DudCast.guard(search, this, answer);
     }
 
     @Override

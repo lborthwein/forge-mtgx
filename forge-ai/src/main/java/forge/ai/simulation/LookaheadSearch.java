@@ -152,6 +152,15 @@ public final class LookaheadSearch {
          */
         public AiFixes.Mode crewNoop = AiFixes.Mode.OFF;
         /**
+         * Dud-cast guard (lane live-ai-quality-1030, owner 2026-10-30; off|shadow|on, OFF by default: nothing runs and every
+         * decision is unchanged). Before the live seat commits a non-permanent spell or a non-mana activated ability (Forge's
+         * answer or a departure), {@link DudCast} resolves it in {@link #dudWorlds} belief-redrawn copies; when no copy's state
+         * changes apart from the card and mana spent, ON vetoes it and asks Forge AI again; SHADOW counts and logs.
+         */
+        public AiFixes.Mode dudCast = AiFixes.Mode.OFF;
+        /** Dud-cast guard: copies per check (a dud must do nothing in every one). */
+        public int dudWorlds = 2;
+        /**
          * Until-end-of-turn copy fidelity (lane misplays-1005; off|shadow|on, OFF by default: copies and decisions
          * unchanged). The copier did not carry the live game's pending "until end of turn" / "until end of combat"
          * commands, so a copy made after a live Crew (or pump, or animation) kept the change for good: a crewed Vehicle
@@ -404,6 +413,10 @@ public final class LookaheadSearch {
             if (crewNoop != AiFixes.Mode.OFF) {
                 o.addProperty("crewNoop", crewNoop.key());
             }
+            if (dudCast != AiFixes.Mode.OFF) {
+                o.addProperty("dudCast", dudCast.key());
+                o.addProperty("dudWorlds", dudWorlds);
+            }
             if (copyEot != AiFixes.Mode.OFF) {
                 o.addProperty("copyEot", copyEot.key());
             }
@@ -507,6 +520,10 @@ public final class LookaheadSearch {
         /** crewNoop guard (null = off): the same counters as deadEtb, for Crew activations that cannot matter this turn. */
         public String crewNoopMode;
         public long crewNoopCands, crewNoopDecisions, crewNoopDropped, crewNoopShadowBest, crewNoopForge;
+        /** dudCast guard (null = off): answers checked, duds found, vetoed (re-asked), passed, unknown; time; dud cards. */
+        public String dudCastMode;
+        public long dudChecks, dudFound, dudVetoed, dudPassed, dudUnknown, dudNanos;
+        public final Map<String, Long> dudCards = new TreeMap<>();
         /** copyEot (null = off): searched decisions with live until commands pending, those commands, how many remap. */
         public String copyEotMode;
         public long copyEotDecisions, copyEotCommands, copyEotRemappable, copyEotDepartures;
@@ -708,6 +725,22 @@ public final class LookaheadSearch {
                 d.addProperty("shadowBest", crewNoopShadowBest);
                 d.addProperty("forgeAnswer", crewNoopForge);
                 o.add("crewNoop", d);
+            }
+            if (dudCastMode != null) {
+                JsonObject d = new JsonObject();
+                d.addProperty("mode", dudCastMode);
+                d.addProperty("checks", dudChecks);
+                d.addProperty("found", dudFound);
+                d.addProperty("vetoed", dudVetoed);
+                d.addProperty("passed", dudPassed);
+                d.addProperty("unknown", dudUnknown);
+                d.addProperty("ms", Math.round(dudNanos / 1e5) / 10.0);
+                JsonObject cards = new JsonObject();
+                for (Map.Entry<String, Long> e : dudCards.entrySet()) {
+                    cards.addProperty(e.getKey(), e.getValue());
+                }
+                d.add("cards", cards);
+                o.add("dudCast", d);
             }
             if (copyEotMode != null) {
                 JsonObject d = new JsonObject();
@@ -1443,6 +1476,9 @@ public final class LookaheadSearch {
         }
         if (cfg.crewNoop != AiFixes.Mode.OFF) {
             stats.crewNoopMode = cfg.crewNoop.key();
+        }
+        if (cfg.dudCast != AiFixes.Mode.OFF) {
+            stats.dudCastMode = cfg.dudCast.key();
         }
         if (cfg.copyEot != AiFixes.Mode.OFF) {
             stats.copyEotMode = cfg.copyEot.key();
