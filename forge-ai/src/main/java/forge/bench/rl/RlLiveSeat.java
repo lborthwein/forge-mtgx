@@ -549,6 +549,45 @@ public final class RlLiveSeat {
         return game;
     }
 
+    /** lane live-ai-quality-1030: the dud-cast guard's look-ahead (the live K8 spec's config; null while dudCast is off). */
+    private volatile LookaheadSearch dudGuard;
+
+    /**
+     * The look-ahead the dud-cast guard runs its copies with: the degraded seat's K8 once there is one, else the seat's own
+     * (made on first use from the live K8 spec, honest belief as the K8 seat's). Null when the server has no look-ahead
+     * spec or its dudCast is off (the default): the seat's answers are then unchanged.
+     */
+    synchronized LookaheadSearch dudGuard() {
+        if (k8Config == null || k8Config.dudCast == AiFixes.Mode.OFF) {
+            return null;
+        }
+        if (degraded && k8 != null) {
+            return k8;
+        }
+        if (dudGuard == null) {
+            try {
+                dudGuard = new LookaheadSearch(k8Config);
+            } catch (RuntimeException e) {
+                k8Config.dudCast = AiFixes.Mode.OFF; // never retried: the seat plays as without the guard
+                System.err.println("[policy-seat] dud-cast guard could not start, off for this game: " + e);
+                return null;
+            }
+        }
+        return dudGuard;
+    }
+
+    /** The guard's stats block ({"dudCast": ...} of the look-aheads it ran in), or null when it never ran. */
+    private JsonObject dudStats() {
+        final JsonObject o = new JsonObject();
+        for (LookaheadSearch s : new LookaheadSearch[] {dudGuard, k8}) {
+            final JsonObject st = s == null ? null : s.getStats().toJson();
+            if (st != null && st.has("dudCast")) {
+                o.add(s == dudGuard ? "seat" : "k8", st.get("dudCast"));
+            }
+        }
+        return o.size() == 0 ? null : o;
+    }
+
     /** The K8 look-ahead of a degraded seat (null before a degrade, or when the server has no look-ahead spec). */
     LookaheadSearch k8() {
         return k8;
@@ -758,6 +797,10 @@ public final class RlLiveSeat {
             if (search != null) {
                 o.add("search", search.summary());
             }
+            final JsonObject dud = dudStats(); // lane live-ai-quality-1030: only when the guard ran (dudCast on)
+            if (dud != null) {
+                o.add("dudCast", dud);
+            }
             if (k8 != null) {
                 o.add("k8", k8.getStats().toJson());
             }
@@ -773,6 +816,9 @@ public final class RlLiveSeat {
                     k8.finishGame(game);
                 }
                 k8.shutdown();
+            }
+            if (dudGuard != null) {
+                dudGuard.shutdown();
             }
             seatClient.close();
         }

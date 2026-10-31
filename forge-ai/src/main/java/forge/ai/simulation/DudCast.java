@@ -167,10 +167,11 @@ public final class DudCast {
     }
 
     /**
-     * The guarded answer (ON) or the answer itself (SHADOW); counts in the search's stats. Called by
-     * {@link PlayerControllerLookahead} in the live game only, after the search, and only when dudCast is not OFF.
+     * The guarded answer (ON) or the answer itself (SHADOW); counts in the search's stats. Called in the live game only, and
+     * only when dudCast is not OFF: by {@link PlayerControllerLookahead} after the search, and by the live policy seat
+     * ({@code forge.bench.rl.PlayerControllerPolicy}) after the policy's answer or its degraded K8 search.
      */
-    static List<SpellAbility> guard(LookaheadSearch search, PlayerControllerAi ctrl, List<SpellAbility> answer) {
+    public static List<SpellAbility> guard(LookaheadSearch search, PlayerControllerAi ctrl, List<SpellAbility> answer) {
         final LookaheadSearch.Config cfg = search.getConfig();
         final LookaheadSearch.Stats st = search.getStats();
         final Game live = ctrl.getGame();
@@ -438,6 +439,11 @@ public final class DudCast {
         try {
             final Game g = p.g;
             final Player me = p.me;
+            // the policy seat's copy holds its bridge controller (which would ask the closed session): Forge AI casts and pays
+            // in the copy, as it does for the K8 seat (whose copies' controller is plain Forge AI already)
+            if (!(me.getController() instanceof PlayerControllerAi) || me.getController() instanceof forge.bench.PlayerControllerBridge) {
+                me.dangerouslySetController(new PlayerControllerAi(g, me, me.getLobbyPlayer()));
+            }
             final SpellAbility sa = p.first.get(0);
             final Card host = sa.getHostCard();
             final int stackBefore = g.getStack().size();

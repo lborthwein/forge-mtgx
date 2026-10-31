@@ -31,15 +31,25 @@ public class PlayerControllerPolicy extends PlayerControllerBridge {
     public List<SpellAbility> chooseSpellAbilityToPlay() {
         final long t0 = System.nanoTime();
         final List<SpellAbility> chosen = super.chooseSpellAbilityToPlay();
-        if (!live.degraded() || getGame() != live.liveGame()) {
+        if (getGame() != live.liveGame()) {
             return chosen;
+        }
+        if (!live.degraded()) {
+            // lane live-ai-quality-1030 (owner 2026-10-31, "extend to policy AI"): the policy's answer through the dud-cast
+            // guard; null (dudCast off in the live K8 spec, the default) = the answer as chosen
+            final LookaheadSearch guard = live.dudGuard();
+            return guard == null ? chosen : forge.ai.simulation.DudCast.guard(guard, this, chosen);
         }
         final LookaheadSearch k8 = live.k8();
         if (k8 == null) {
-            return chosen;
+            final LookaheadSearch guard = live.dudGuard();
+            return guard == null ? chosen : forge.ai.simulation.DudCast.guard(guard, this, chosen);
         }
         // degraded (possibly during this very ask): `chosen` is Forge AI's own answer
         k8.noteForgeNanos(System.nanoTime() - t0);
-        return k8.decide(this, chosen);
+        final List<SpellAbility> answer = k8.decide(this, chosen);
+        // the degraded K8 search goes through the guard as the pure K8 seat's does (PlayerControllerLookahead)
+        return k8.getConfig().dudCast == forge.ai.AiFixes.Mode.OFF ? answer
+                : forge.ai.simulation.DudCast.guard(k8, this, answer);
     }
 }
