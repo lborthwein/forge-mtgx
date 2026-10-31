@@ -71,7 +71,7 @@ public final class DudCast {
     /** APIs whose effect may be invisible to the key (information, mana, turn structure): never called a dud. */
     static final Set<ApiType> EXEMPT = EnumSet.of(ApiType.Scry, ApiType.Surveil, ApiType.RearrangeTopOfLibrary,
             ApiType.PeekAndReveal, ApiType.RevealHand, ApiType.Reveal, ApiType.LookAt, ApiType.Clash, ApiType.Dig,
-            ApiType.DigMultiple, ApiType.DigUntil, ApiType.Mana, ApiType.ManaReflected);
+            ApiType.DigMultiple, ApiType.DigUntil, ApiType.Mana, ApiType.ManaReflected, ApiType.EndTurn);
 
     /** The check's verdict for one answer. */
     enum Verdict { EFFECT, DUD, UNKNOWN, SKIPPED }
@@ -112,6 +112,10 @@ public final class DudCast {
         }
         return true;
     }
+
+    /** Root parameters whose setup only the vote / choice effect itself performs: such a choice is never tried outcome by outcome. */
+    static final String[] LISTED_SETUP = {"TempRemember", "DamageMap", "ChangeZoneTable", "AtRandom", "NumRandomChoices",
+        "ChoiceAmount", "SetChosenMode", "FallbackAbility", "Secretly"};
 
     /** Resolution-time votes and choices: the copy's AI pick need not be the live game's. */
     static final Set<ApiType> CHOICES = EnumSet.of(ApiType.Vote, ApiType.GenericChoice, ApiType.Charm, ApiType.ChooseCard,
@@ -363,7 +367,6 @@ public final class DudCast {
         return null;
     }
 
-    /** In the prepared copy's own scopes: cast, key, resolve the item, key. Null = could not tell. */
     /**
      * True when the answer's only resolution-time choice is its own root Vote or GenericChoice over a listed set of abilities
      * (Plea for Power: time or knowledge), and no listed ability makes a choice of its own: then every outcome is tried.
@@ -375,6 +378,13 @@ public final class DudCast {
         // council's dilemma (an outcome per vote: StoreVoteNum's VoteNum, EachVote) is only set while the vote resolves
         if (sa.hasParam("StoreVoteNum") || sa.hasParam("EachVote")) {
             return false;
+        }
+        // the effect's own setup (who chose, a fallback, random or several picks, damage and zone tables) does not run when
+        // one outcome resolves on its own: Polygraph Orb's Defined$ Remembered outcomes act on nobody (review of #158, S1)
+        for (String setup : LISTED_SETUP) {
+            if (sa.hasParam(setup)) {
+                return false;
+            }
         }
         final List<AbilitySub> choices = sa.getAdditionalAbilityList("Choices");
         if (choices == null || choices.isEmpty()) {
@@ -484,6 +494,9 @@ public final class DudCast {
         final StringBuilder sb = new StringBuilder(4096);
         final Player monarch = g.getMonarch();
         sb.append("mon=").append(monarch == null ? -1 : monarch.getId());
+        final forge.game.phase.PhaseHandler phz = g.getPhaseHandler();
+        sb.append(" turn=").append(phz.getTurn()).append(" phase=").append(phz.getPhase()).append(" active=")
+                .append(phz.getPlayerTurn() == null ? -1 : phz.getPlayerTurn().getId());
         final int[] until = GameCopier.untilCounts(g);
         sb.append(" until=").append(until[0]).append(" delayed=").append(delayedTriggers(g)).append(" phases=")
                 .append(phaseCommands(g)).append(" turns=").append(turnStructure(g)).append('\n');
@@ -507,7 +520,7 @@ public final class DudCast {
         for (Player p : g.getPlayers()) {
             sb.append("P").append(p.getId()).append(" life=").append(p.getLife()).append(" poison=")
                     .append(p.getPoisonCounters()).append(" lost=").append(p.hasLost()).append(" won=").append(p.hasWon())
-                    .append(" hand=").append(p.getMaxHandSize());
+                    .append(" hand=").append(p.getMaxHandSize()).append(p.hasInitiative() ? " initiative" : "");
             counters(sb, p);
             final List<String> kw = new ArrayList<>();
             for (KeywordInterface k : p.getKeywords()) {

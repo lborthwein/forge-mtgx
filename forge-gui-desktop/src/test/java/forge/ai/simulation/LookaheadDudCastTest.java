@@ -644,7 +644,13 @@ public class LookaheadDudCastTest extends SimulationTest {
             "Catastrophe",
             "Essence Filter",
             "Truth or Consequences",
-            "Fiery Gambit"
+            "Fiery Gambit",
+            "Polygraph Orb",
+            "Prisoner's Dilemma",
+            "Nicol Bolas, the Deceiver",
+            "Sundial of the Infinite",
+            "Time Stop",
+            "Discontinuity"
     };
 
     /**
@@ -695,5 +701,73 @@ public class LookaheadDudCastTest extends SimulationTest {
             }
         }
         AssertJUnit.assertTrue("duds on a full board: " + duds, duds.isEmpty());
+    }
+
+    /**
+     * Review of #158, S1: a GenericChoice whose outcomes read its own setup (Polygraph Orb: TempRemember$ Chooser, so each
+     * outcome's Defined$ Remembered is the opponent who chose; a FallbackAbility) cannot be resolved outcome by outcome.
+     */
+    @Test
+    public void choicesWithTheirOwnSetupAreUnknown() {
+        Game g = board();
+        Player me = g.getPlayers().get(1);
+        Player opp = g.getPlayers().get(0);
+        addCardToZone("Lightning Bolt", opp, ZoneType.Hand);
+        addCard("Grizzly Bears", opp);
+        Card orb = addCard("Polygraph Orb", me);
+        addCardToZone("Grizzly Bears", me, ZoneType.Graveyard);
+        addCardToZone("Grizzly Bears", me, ZoneType.Graveyard);
+        g.getAction().checkStateEffects(true);
+        SpellAbility orbSa = null;
+        for (SpellAbility sa : orb.getSpellAbilities()) {
+            if (sa.getApi() == forge.game.ability.ApiType.GenericChoice) {
+                orbSa = sa;
+            }
+        }
+        orbSa.setActivatingPlayer(me);
+        AssertJUnit.assertFalse(DudCast.listedChoice(orbSa));
+        AssertJUnit.assertEquals("Polygraph Orb", DudCast.Verdict.UNKNOWN, check(g, orbSa));
+        SpellAbility pd = spellOf(addCardToZone("Prisoner's Dilemma", me, ZoneType.Hand));
+        AssertJUnit.assertFalse(DudCast.listedChoice(pd));
+        AssertJUnit.assertEquals("Prisoner's Dilemma", DudCast.Verdict.UNKNOWN, check(g, pd));
+        // Plea for Power and Essence Filter still try every outcome
+        AssertJUnit.assertTrue(DudCast.listedChoice(spellOf(addCardToZone("Plea for Power", me, ZoneType.Hand))));
+        AssertJUnit.assertTrue(DudCast.listedChoice(spellOf(addCardToZone("Essence Filter", me, ZoneType.Hand))));
+    }
+
+    /** Review of #158, S2 raised to blocking: ending the turn changes only the phase. The phase and step are in the key. */
+    @Test
+    public void phaseAndInitiativeAreInTheKey() {
+        Game g = board();
+        Player me = g.getPlayers().get(1);
+        String before = DudCast.effectKey(g, -1);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN2, me);
+        AssertJUnit.assertFalse("the step", before.equals(DudCast.effectKey(g, -1)));
+        String main2 = DudCast.effectKey(g, -1);
+        g.getAction().takeInitiative(me, null);
+        AssertJUnit.assertFalse("the initiative", main2.equals(DudCast.effectKey(g, -1)));
+    }
+
+    /** Sneak Attack + Sundial of the Infinite: ending the turn before the sneaked creature's sacrifice trigger is never vetoed. */
+    @Test
+    public void sundialWithSneakAttackIsNeverVetoed() {
+        PlayerControllerLookahead c = seatAt(AiFixes.Mode.ON, PhaseType.MAIN1, true,
+                new String[] {"Sundial of the Infinite", "Sneak Attack", "Mountain", "Mountain", "Mountain"},
+                new String[] {}, new String[] {});
+        Card sundial = findCardWithName(c.getGame(), "Sundial of the Infinite");
+        SpellAbility end = null;
+        for (SpellAbility sa : sundial.getSpellAbilities()) {
+            if (sa.getApi() == forge.game.ability.ApiType.EndTurn) {
+                end = sa;
+            }
+        }
+        end.setActivatingPlayer(c.getPlayer());
+        AssertJUnit.assertEquals(DudCast.Verdict.SKIPPED, DudCast.check(searchOf(c), c.getGame(), c.getPlayer(), end, 0));
+        List<SpellAbility> live = new ArrayList<>();
+        live.add(end);
+        List<SpellAbility> a = DudCast.guard(searchOf(c), c, live);
+        AssertJUnit.assertTrue("Sundial's end-the-turn stands: " + label(a), a != null && a.size() == 1 && a.get(0) == end);
+        AssertJUnit.assertEquals(0, searchOf(c).getStats().dudVetoed);
+        searchOf(c).shutdown();
     }
 }
