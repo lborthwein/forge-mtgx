@@ -159,14 +159,19 @@ public final class StepSearch {
             final int k = label.worlds;
             final JsonObject rs = o.getAsJsonObject("rlsearch");
             final RlSearch.Config c = RlSearch.Config.parse(rs.deepCopy());
-            if (!("uniform".equals(c.belief) || "codraft".equals(c.belief)) || c.beliefCube == null) {
+            if (!("uniform".equals(c.belief) || "codraft".equals(c.belief) || "deck".equals(c.belief))
+                    || c.beliefCube == null) {
                 throw new IllegalArgumentException("refused: the step-1 search needs belief \"uniform\" (or S2T's "
-                        + "\"codraft\") with a beliefCube (every world's hidden cards from the observation-only pool), not "
+                        + "\"codraft\", or N11's \"deck\") with a beliefCube (every world's hidden cards from the observation-only pool), not "
                         + c.belief);
             }
             if ("codraft".equals(c.belief)) {
                 // bvw-step2-fork-1027 (S2T): the co-draft table's pin is checked at the start (refused: exit 2)
                 PlanSearch.loadSynPinned(c.beliefPrior, c.beliefPriorSha256);
+            }
+            if ("deck".equals(c.belief)) {
+                // belief-n11-1030 (N11): the learned deck model's pin is checked at the start (refused: exit 2)
+                forge.ai.simulation.DeckBeliefModel.loadPinned(c.beliefDeck, c.beliefDeckSha256);
             }
             // review #15: the search's belief pool is the proof check's
             if (!c.beliefCube.equals(label.beliefCube) || !java.util.Objects.equals(c.beliefCubeSha256, label.beliefCubeSha256)
@@ -297,7 +302,8 @@ public final class StepSearch {
 
         static S2tKeys parse(final JsonObject o, final RlSearch.Config c) {
             final S2tKeys s = new S2tKeys();
-            final boolean playoutKeys = "policy".equals(c.opponent) || c.leafSym || "codraft".equals(c.belief);
+            final boolean playoutKeys = "policy".equals(c.opponent) || c.leafSym || "codraft".equals(c.belief)
+                    || "deck".equals(c.belief); // review #150 S2-3: the deck belief needs an explicit target, as codraft
             if (o.has("target") && !o.get("target").isJsonNull()) {
                 if (!o.get("target").isJsonObject()) {
                     throw new IllegalArgumentException("label.search.target is {\"variant\": ..., \"k\": ...}");

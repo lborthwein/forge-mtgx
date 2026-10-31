@@ -241,6 +241,14 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         public String beliefPrior;
         public String beliefPriorSha256;
         public double beliefPriorGain = 20.0;
+        /**
+         * belief-n11-1030 (N11), belief "deck": the learned opponent-deck model export
+         * ({@code mtgx-deckbelief-export/1}; {@code classpath:} = a jar resource) and its sha256 pin. Every world (and the
+         * plans', step searches' and choose-a-card's solver worlds) draws the opponent's hidden hand and library from it,
+         * given the cards they showed in this game. Off (null) by default, and then nothing changes.
+         */
+        public String beliefDeck;
+        public String beliefDeckSha256;
         // ---- step3-playout-fixes-1028 (BVW step 3; every key off by default, and then nothing changes)
         /**
          * The "Cancel Search?" loop guard ({@link RlLoopGuard}) on every search play-out seat (ours and, with opponent
@@ -268,7 +276,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
                 "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "opponent", "leafSym", "beliefPrior",
-                "beliefPriorSha256", "beliefPriorGain", "playoutLoopGuard", "playoutMaxDecisions", "replayMayPlayLoose",
+                "beliefPriorSha256", "beliefPriorGain", "beliefDeck", "beliefDeckSha256", "playoutLoopGuard", "playoutMaxDecisions", "replayMayPlayLoose",
                 "chooseACard"));
 
         public static Config parse(final JsonObject o) {
@@ -341,6 +349,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 c.beliefPriorSha256 = o.get("beliefPriorSha256").getAsString();
             }
             if (o.has("beliefPriorGain")) c.beliefPriorGain = o.get("beliefPriorGain").getAsDouble();
+            if (o.has("beliefDeck") && !o.get("beliefDeck").isJsonNull()) c.beliefDeck = o.get("beliefDeck").getAsString();
+            if (o.has("beliefDeckSha256") && !o.get("beliefDeckSha256").isJsonNull()) {
+                c.beliefDeckSha256 = o.get("beliefDeckSha256").getAsString();
+            }
             if (o.has("playoutLoopGuard")) c.playoutLoopGuard = o.get("playoutLoopGuard").getAsInt();
             if (o.has("playoutMaxDecisions")) c.playoutMaxDecisions = o.get("playoutMaxDecisions").getAsInt();
             if (o.has("replayMayPlayLoose")) c.replayMayPlayLoose = o.get("replayMayPlayLoose").getAsBoolean();
@@ -400,10 +412,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (blockSamples < 0 || blockSamples > 64 || blockTop < 1 || blockTop > 8) {
                 throw new IllegalArgumentException("search: 0 <= blockSamples <= 64, 1 <= blockTop <= 8");
             }
-            if (!"off".equals(belief) && !"uniform".equals(belief) && !"codraft".equals(belief)) {
-                throw new IllegalArgumentException("search.belief must be off, uniform or codraft, not " + belief);
+            if (!"off".equals(belief) && !"uniform".equals(belief) && !"codraft".equals(belief) && !"deck".equals(belief)) {
+                throw new IllegalArgumentException("search.belief must be off, uniform, codraft or deck, not " + belief);
             }
-            if (("uniform".equals(belief) || "codraft".equals(belief)) && beliefCube == null && beliefPool == null) {
+            if (("uniform".equals(belief) || "codraft".equals(belief) || "deck".equals(belief)) && beliefCube == null
+                    && beliefPool == null) {
                 throw new IllegalArgumentException("search.belief=" + belief + " needs beliefCube (or the event's pool)");
             }
             // bvw-step2-fork-1027 (S2T)
@@ -413,6 +426,13 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             }
             if (!"codraft".equals(belief) && (beliefPrior != null || beliefPriorSha256 != null)) {
                 throw new IllegalArgumentException("search.beliefPrior is for belief=codraft only");
+            }
+            // belief-n11-1030 (N11)
+            if ("deck".equals(belief) && (beliefDeck == null || beliefDeckSha256 == null)) {
+                throw new IllegalArgumentException("search.belief=deck needs beliefDeck and its beliefDeckSha256 pin");
+            }
+            if (!"deck".equals(belief) && (beliefDeck != null || beliefDeckSha256 != null)) {
+                throw new IllegalArgumentException("search.beliefDeck is for belief=deck only");
             }
             if (!"forge".equals(opponent) && !"policy".equals(opponent)) {
                 throw new IllegalArgumentException("search.opponent must be forge or policy, not " + opponent);
@@ -516,6 +536,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                     o.addProperty("beliefPrior", beliefPrior);
                     o.addProperty("beliefPriorSha256", beliefPriorSha256);
                     o.addProperty("beliefPriorGain", beliefPriorGain);
+                }
+                if ("deck".equals(belief)) {
+                    // belief-n11-1030: only with deck
+                    o.addProperty("beliefDeck", beliefDeck);
+                    o.addProperty("beliefDeckSha256", beliefDeckSha256);
                 }
             }
             if (!"forge".equals(opponent)) {
@@ -773,6 +798,10 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 // bvw-step2-fork-1027 (S2T): the co-draft deck prior, its table pinned by sha256
                 lc.beliefPriorTable = PlanSearch.loadSynPinned(cfg.beliefPrior, cfg.beliefPriorSha256);
                 lc.beliefPriorGain = cfg.beliefPriorGain;
+            }
+            if ("deck".equals(cfg.belief)) {
+                // belief-n11-1030 (N11): the learned deck model, its export pinned by sha256
+                lc.beliefDeckModel = forge.ai.simulation.DeckBeliefModel.loadPinned(cfg.beliefDeck, cfg.beliefDeckSha256);
             }
         }
         // bvw-step2-fork-1027 (S2T): the opponent's play-out seat and the symmetric leaf
