@@ -253,7 +253,11 @@ public class R3LabelSearchTest extends SimulationTest {
         System.err.println("[r3-test] doomsday row " + j);
         AssertJUnit.assertEquals("SEARCH", res.kind);
         AssertJUnit.assertEquals("forge", res.cands.get(0).src);
-        AssertJUnit.assertTrue("Forge's answer plus at most m", res.cands.size() >= 2 && res.cands.size() <= 7);
+        AssertJUnit.assertTrue("Forge's answer plus at most m, plus the exploration slots",
+                res.cands.size() >= 2 && res.cands.size() <= 7 + 2);
+        int explored = 0;
+        for (R3LabelSearch.CandOut co : res.cands) if ("explore".equals(co.src)) explored++;
+        AssertJUnit.assertEquals(j.toString(), Math.min(2, j.getAsJsonArray("ranked").size() - 7), explored);
         AssertJUnit.assertTrue(j.toString(), res.cands.get(res.pick).desc.contains("Island"));
         AssertJUnit.assertTrue(res.departed);
         AssertJUnit.assertEquals("the max: the blue land", 0.8, res.target, 1e-9);
@@ -574,6 +578,63 @@ public class R3LabelSearchTest extends SimulationTest {
         final JsonArray ca = j.getAsJsonArray("cands");
         AssertJUnit.assertTrue(j.toString(), ca.size() >= 2 && ca.get(1).getAsJsonObject().has("cut_at"));
         AssertJUnit.assertEquals(1, ca.get(1).getAsJsonObject().get("cut_at").getAsInt());
+    }
+
+    /**
+     * Architect review (N12) response rows: the opponent casts Doomsday and we hold Force of Will with a blue card to
+     * pitch. Countering is a candidate, and under a stub that values their library left whole it scores higher than
+     * letting the pile resolve.
+     */
+    @Test
+    public void aResponseRowCountersTheirDoomsday() {
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        for (int i = 0; i < 20; i++) addCardToZone("Island", a, ZoneType.Library);
+        for (int i = 0; i < 20; i++) addCardToZone("Swamp", b, ZoneType.Library);
+        addCardToZone("Force of Will", a, ZoneType.Hand);
+        addCardToZone("Brainstorm", a, ZoneType.Hand);
+        addCardToZone("Doomsday", b, ZoneType.Hand);
+        for (int i = 0; i < 3; i++) addCard("Swamp", b);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, b);
+        g.getAction().checkStateEffects(true);
+        final SpellAbility dd = firstSpell(b, "Doomsday");
+        AssertJUnit.assertTrue("cast Doomsday", ((PlayerControllerAi) b.getController()).playChosenSpellAbility(dd));
+        AssertJUnit.assertFalse(g.getStack().isEmpty());
+        final ChooseACardTest.Stub whole = new ChooseACardTest.Stub((x, p) ->
+                p.getOpponents().get(0).getCardsIn(ZoneType.Library).size() > 5 ? 0.8 : 0.2);
+        final JsonObject o = base();
+        o.addProperty("leaf", "value");
+        o.addProperty("horizon", 0);
+        final R3LabelSearch r3 = new R3LabelSearch(spec(o), env(whole, null));
+        final List<R3LabelSearch.PCand> cands = r3.candidates(g, a, null);
+        AssertJUnit.assertTrue(String.valueOf(cands), R3LabelSearch.responseRow(cands));
+        int fow = -1, pass = -1;
+        for (int i = 0; i < cands.size(); i++) {
+            if ("respond".equals(cands.get(i).src) && cands.get(i).label.startsWith("Force of Will")) fow = i;
+            if (cands.get(i).pass && cands.get(i).hold == null) pass = i;
+        }
+        AssertJUnit.assertTrue(String.valueOf(cands.size()), fow >= 0 && pass >= 0);
+        final R3LabelSearch.Result res = r3.priorityRow(g, a, cands, 51L);
+        final JsonObject j = res.toJson();
+        System.err.println("[r3-test] response row " + j);
+        final JsonArray ca = j.getAsJsonArray("cands");
+        AssertJUnit.assertTrue("countering scores higher: " + j, ca.get(fow).getAsJsonObject().get("mean").getAsDouble()
+                > ca.get(pass).getAsJsonObject().get("mean").getAsDouble());
+        AssertJUnit.assertEquals(j.toString(), "respond", cands.get(res.pick).src);
+        AssertJUnit.assertEquals(0.8, res.target, 1e-9);
+    }
+
+    /** Architect review (N12): any card spent (not only route pieces) offers the keep-the-card hold. */
+    @Test
+    public void anySpentCardOffersTheHold() {
+        final Game g = boltBoard(6, 20, false, false);
+        final Player a = g.getPlayers().get(0);
+        final R3LabelSearch r3 = new R3LabelSearch(spec(base()), env(flat(0.5), null));
+        final List<R3LabelSearch.PCand> cands = r3.candidates(g, a,
+                Collections.singletonList(firstSpell(a, "Lightning Bolt")));
+        AssertJUnit.assertTrue(String.valueOf(cands.get(0).spends), cands.get(0).spends.contains("Lightning Bolt"));
+        AssertJUnit.assertEquals("hold", cands.get(1).src);
+        AssertJUnit.assertEquals("hold: pass", cands.get(1).label);
     }
 
     // ------------------------------------------------------------------------------------------------ hold the piece

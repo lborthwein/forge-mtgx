@@ -787,7 +787,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     /**
      * r3-labelsearch-1030 (E1): turn on the R3 label search for this game (before its first decision). Rows are
      * schema {@link #SCHEMA_R3}: priority rows (the first contested empty-stack priority per seat, turn and phase, and
-     * every priority with a costed draw) and choice rows (every choose-a-card-hooked ask, through the forced replay's
+     * every priority with a costed draw, and response rows: every priority where we hold a real answer to their object on
+     * the stack) and choice rows (every choose-a-card-hooked ask, through the forced replay's
      * probe). Refused with a step-1 search block (one teacher per row).
      */
     public void setR3(final forge.ai.simulation.R3LabelSearch.Spec r3spec, final R3Ranker ranker) {
@@ -968,7 +969,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 final String win = seat + "|" + pend[3] + "|" + pend[5];
                 final boolean first = g.getStack().isEmpty() && forge.ai.simulation.R3LabelSearch.contested(cands)
                         && (!r3Windows.contains(win) || R3_SEARCH_ALL);
-                if (!draw && !first) {
+                // architect review (N12): a response row at every priority where we can answer their object
+                final boolean respond = forge.ai.simulation.R3LabelSearch.responseRow(cands);
+                if (!draw && !first && !respond) {
                     return null;
                 }
                 if (first) {
