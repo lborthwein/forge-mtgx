@@ -191,7 +191,8 @@ public class LookaheadDudCastTest extends SimulationTest {
                 check(g, spellOf(addCardToZone("Grizzly Bears", me, ZoneType.Hand))));
         AssertJUnit.assertEquals("mana", DudCast.Verdict.SKIPPED, check(g, spellOf(addCardToZone("Dark Ritual", me, ZoneType.Hand))));
         AssertJUnit.assertEquals("scry", DudCast.Verdict.SKIPPED, check(g, spellOf(addCardToZone("Preordain", me, ZoneType.Hand))));
-        AssertJUnit.assertEquals("extra turn", DudCast.Verdict.SKIPPED, check(g, spellOf(addCardToZone("Time Walk", me, ZoneType.Hand))));
+        AssertJUnit.assertEquals("extra turn (in the key's turn structure)", DudCast.Verdict.EFFECT,
+                check(g, spellOf(addCardToZone("Time Walk", me, ZoneType.Hand))));
         AssertJUnit.assertEquals("draw", DudCast.Verdict.EFFECT, check(g, spellOf(addCardToZone("Brainstorm", me, ZoneType.Hand))));
     }
 
@@ -544,5 +545,155 @@ public class LookaheadDudCastTest extends SimulationTest {
         AssertJUnit.assertNull(DudCast.historyLost(g, cp.makeCopy()));
         me.addCreaturesAttackedThisTurn(bears, g.getPlayers().get(0));
         AssertJUnit.assertEquals("creatures attacked this turn (raid)", DudCast.historyLost(g, new GameCopier(g, true).makeCopy()));
+    }
+
+    // ------------------------------------------------------------------ cut-4 smoke: votes and choices (2026-10-30)
+
+    /** Plea for Power: six false vetoes in the cut-4 smoke. Both outcomes are tried; time (an extra turn) is an effect. */
+    @Test
+    public void pleaForPowerEitherOutcomeIsAnEffect() {
+        Game g = board();
+        Player me = g.getPlayers().get(1);
+        SpellAbility plea = spellOf(addCardToZone("Plea for Power", me, ZoneType.Hand));
+        boolean addTurn = false;
+        for (SpellAbility s : DudCast.chain(plea)) {
+            addTurn |= s.getApi() == forge.game.ability.ApiType.AddTurn;
+        }
+        AssertJUnit.assertTrue("the scan follows the vote's choices", addTurn);
+        AssertJUnit.assertTrue(DudCast.listedChoice(plea));
+        AssertJUnit.assertEquals(DudCast.Verdict.EFFECT, check(g, plea));
+        // each outcome alone changes the key: time by the extra-turn queue, knowledge by the hand and library
+        LookaheadSearch s = new LookaheadSearch(cfg(AiFixes.Mode.ON));
+        try {
+            for (int i = 0; i < 2; i++) {
+                LookaheadSearch.Prepared p = s.prepare(g, me, new LookaheadSearch.Cand(plea, true), plea, 5L, true, null);
+                AssertJUnit.assertEquals("outcome " + i, Boolean.TRUE, DudCast.resolveInCopy(p, true, i));
+            }
+        } finally {
+            s.shutdown();
+        }
+    }
+
+    /** A listed choice that does nothing either way is a dud: Essence Filter with no enchantment in play. */
+    @Test
+    public void essenceFilterWithNoEnchantmentIsADud() {
+        Game g = board();
+        Player me = g.getPlayers().get(1);
+        addCard("Forest", me);
+        addCard("Forest", me);
+        g.getAction().checkStateEffects(true);
+        SpellAbility ef = spellOf(addCardToZone("Essence Filter", me, ZoneType.Hand));
+        AssertJUnit.assertTrue(DudCast.listedChoice(ef));
+        AssertJUnit.assertEquals("no enchantments", DudCast.Verdict.DUD, check(g, ef));
+        addCard("Glorious Anthem", g.getPlayers().get(0));
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals("an opposing Glorious Anthem", DudCast.Verdict.EFFECT, check(g, ef));
+    }
+
+    /** A choice nested inside a vote's outcome, or a Charm, is resolved with an AI's pick in the copy: UNKNOWN. */
+    @Test
+    public void nestedChoicesAreUnknown() {
+        Game g = board();
+        Player me = g.getPlayers().get(1);
+        SpellAbility toc = spellOf(addCardToZone("Truth or Consequences", me, ZoneType.Hand));
+        AssertJUnit.assertNotNull(DudCast.resolutionChoice(toc));
+        AssertJUnit.assertFalse(DudCast.listedChoice(toc));
+        AssertJUnit.assertEquals(DudCast.Verdict.UNKNOWN, check(g, toc));
+    }
+
+    /** The turn structure is part of the key: an extra turn taken in the game changes it. */
+    @Test
+    public void extraTurnQueueIsInTheKey() {
+        Game g = board();
+        Player me = g.getPlayers().get(1);
+        String before = DudCast.effectKey(g, -1);
+        g.getPhaseHandler().addExtraTurn(me);
+        AssertJUnit.assertFalse(before.equals(DudCast.effectKey(g, -1)));
+    }
+
+    /** The live cube's vote / choice / repeat cards (and the vote cards of the identity decks): cube-choice-cards.txt. */
+    static final String[] CHOICE_CARDS = {
+            "Abrade",
+            "Angrath's Rampage",
+            "Ashiok, Nightmare Weaver",
+            "Cast into the Fire",
+            "Collective Brutality",
+            "Comet, Stellar Pup",
+            "Concealing Curtains",
+            "Council's Judgment",
+            "Cryptic Command",
+            "Dauthi Voidwalker",
+            "Fiery Confluence",
+            "Goblin Cratermaker",
+            "Grist, the Hunger Tide",
+            "Kolaghan's Command",
+            "Mana Crypt",
+            "Mystic Confluence",
+            "Red Elemental Blast",
+            "Sail into the West",
+            "Tamiyo, Collector of Tales",
+            "Turnabout",
+            "Umezawa's Jitte",
+            "Valki, God of Lies",
+            "Winds of Abandon",
+            "Wishclaw Talisman",
+            "Plea for Power",
+            "Expropriate",
+            "Tyrant's Choice",
+            "Capital Punishment",
+            "Catastrophe",
+            "Essence Filter",
+            "Truth or Consequences",
+            "Fiery Gambit"
+    };
+
+    /**
+     * Every vote / choice / repeat card, on a board where each has something to do (creatures, an enchantment and an
+     * artifact on both sides, cards in both hands and graveyards, three of each basic land): none is called a dud.
+     */
+    @Test
+    public void cubeChoiceCardsAreNeverDudsOnAFullBoard() {
+        final List<String> duds = new ArrayList<>();
+        for (String name : CHOICE_CARDS) {
+            Game g = board();
+            Player me = g.getPlayers().get(1);
+            Player opp = g.getPlayers().get(0);
+            for (String b : new String[] {"Plains", "Island", "Swamp", "Mountain", "Forest"}) {
+                for (int i = 0; i < 3; i++) {
+                    addCard(b, me);
+                }
+            }
+            for (Player p : new Player[] {me, opp}) {
+                addCard("Grizzly Bears", p).setSickness(false);
+                addCard("Glorious Anthem", p);
+                addCard("Mind Stone", p);
+                addCardToZone("Lightning Bolt", p, ZoneType.Hand);
+                addCardToZone("Grizzly Bears", p, ZoneType.Graveyard);
+            }
+            Card c = addCardToZone(name, me, ZoneType.Hand);
+            g.getAction().checkStateEffects(true);
+            if (c.isPermanent() && !c.isInstant() && !c.isSorcery()) {
+                g.getAction().moveToPlay(c, null, null);
+                c.setSickness(false);
+                if (c.isPlaneswalker()) {
+                    c.setCounters(forge.game.card.CounterEnumType.LOYALTY, 6);
+                }
+                g.getAction().checkStateEffects(true);
+            }
+            for (SpellAbility sa : c.getSpellAbilities()) {
+                if (sa.isManaAbility() || (c.isInZone(ZoneType.Battlefield) && sa.isSpell())) {
+                    continue;
+                }
+                sa.setActivatingPlayer(me);
+                ((forge.ai.PlayerControllerAi) me.getController()).getAi().canPlaySa(sa);
+                DudCast.Verdict v = check(g, sa);
+                System.err.println("[dud-test] choice card " + name + " :: " + sa.toString().replace('\n', ' ') + " -> " + v
+                        + (DudCast.lastWhy == null ? "" : " (" + DudCast.lastWhy + ")"));
+                if (v == DudCast.Verdict.DUD) {
+                    duds.add(name + " :: " + sa);
+                }
+            }
+        }
+        AssertJUnit.assertTrue("duds on a full board: " + duds, duds.isEmpty());
     }
 }

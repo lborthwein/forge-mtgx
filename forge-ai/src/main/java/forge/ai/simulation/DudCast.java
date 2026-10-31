@@ -25,6 +25,7 @@ import forge.game.card.CounterType;
 import forge.game.combat.Combat;
 import forge.game.keyword.KeywordInterface;
 import forge.game.player.Player;
+import forge.game.spellability.AbilitySub;
 import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
 import forge.util.MyRandom;
@@ -55,7 +56,12 @@ import forge.util.MyRandom;
  * stack, where a stack-only effect such as Stifle is outside the key; the answer not found or not payable in a copy; a copy
  * or resolution error) keeps the answer. Never checked: permanent spells (Auras too), planeswalker abilities and any ability
  * whose cost adds counters (the gain is the cost), and abilities whose point is information or mana the key cannot see:
- * scry, surveil, look at / reveal / dig, a reveal-and-choose discard (Duress), rearrange, clash, mana, extra turns and phases.
+ * scry, surveil, look at / reveal / dig, a reveal-and-choose discard (Duress), rearrange, clash, mana. Every ability the card
+ * can resolve is scanned (the SubAbility chain and every ability held outside it: vote and choice lists, Charm modes, Repeat
+ * and RepeatEach sub-abilities). A resolution-time vote or choice is UNKNOWN, since the copy's AI pick need not be the live
+ * game's, except a root Vote or GenericChoice over listed outcomes (Plea for Power): each outcome is resolved in its own
+ * copy and the answer is a dud only when none changes the key. The key holds the turn structure to come (the extra-turn
+ * queue, extra phases, skipped damage steps).
  */
 public final class DudCast {
 
@@ -65,7 +71,7 @@ public final class DudCast {
     /** APIs whose effect may be invisible to the key (information, mana, turn structure): never called a dud. */
     static final Set<ApiType> EXEMPT = EnumSet.of(ApiType.Scry, ApiType.Surveil, ApiType.RearrangeTopOfLibrary,
             ApiType.PeekAndReveal, ApiType.RevealHand, ApiType.Reveal, ApiType.LookAt, ApiType.Clash, ApiType.Dig,
-            ApiType.DigMultiple, ApiType.DigUntil, ApiType.Mana, ApiType.ManaReflected, ApiType.AddTurn, ApiType.AddPhase);
+            ApiType.DigMultiple, ApiType.DigUntil, ApiType.Mana, ApiType.ManaReflected);
 
     /** The check's verdict for one answer. */
     enum Verdict { EFFECT, DUD, UNKNOWN, SKIPPED }
@@ -95,7 +101,7 @@ public final class DudCast {
             // a cost that adds counters (a loyalty +N) is itself a gain, paid before the key is taken (review S1-b)
             return false;
         }
-        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+        for (SpellAbility s : chain(sa)) {
             if (s.getApi() == null || EXEMPT.contains(s.getApi())) {
                 return false;
             }
@@ -105,6 +111,50 @@ public final class DudCast {
             }
         }
         return true;
+    }
+
+    /** Resolution-time votes and choices: the copy's AI pick need not be the live game's. */
+    static final Set<ApiType> CHOICES = EnumSet.of(ApiType.Vote, ApiType.GenericChoice, ApiType.Charm, ApiType.ChooseCard,
+            ApiType.ChooseColor, ApiType.ChooseDirection, ApiType.ChooseEvenOdd, ApiType.ChooseNumber, ApiType.ChoosePlayer,
+            ApiType.ChooseSector, ApiType.ChooseSource, ApiType.ChooseType, ApiType.FlipCoin, ApiType.RollDice,
+            ApiType.NameCard, ApiType.RepeatEach);
+
+    /**
+     * Every ability a card may resolve from {@code sa}: its SubAbility chain and every ability held outside it (vote and
+     * generic-choice lists, Charm modes, RepeatEach / Repeat sub-abilities, additional abilities), each once.
+     */
+    static List<SpellAbility> chain(SpellAbility sa) {
+        final List<SpellAbility> out = new ArrayList<>();
+        final Set<SpellAbility> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        final java.util.ArrayDeque<SpellAbility> todo = new java.util.ArrayDeque<>();
+        todo.add(sa);
+        while (!todo.isEmpty()) {
+            final SpellAbility s = todo.poll();
+            if (s == null || !seen.add(s)) {
+                continue;
+            }
+            out.add(s);
+            if (s.getSubAbility() != null) {
+                todo.add(s.getSubAbility());
+            }
+            for (SpellAbility x : s.getAdditionalAbilities().values()) {
+                todo.add(x);
+            }
+            for (List<? extends SpellAbility> l : s.getAdditionalAbilityLists().values()) {
+                todo.addAll(l);
+            }
+        }
+        return out;
+    }
+
+    /** The first vote or choice API anywhere in the answer's abilities, or null. */
+    static ApiType resolutionChoice(SpellAbility sa) {
+        for (SpellAbility s : chain(sa)) {
+            if (s.getApi() != null && CHOICES.contains(s.getApi())) {
+                return s.getApi();
+            }
+        }
+        return null;
     }
 
     /** The veto key of an answer: its host card and description (the look-ahead candidate key's). */
@@ -175,6 +225,14 @@ public final class DudCast {
             lastWhy = "the stack is not empty";
             return Verdict.UNKNOWN;
         }
+        final ApiType choice = resolutionChoice(liveSa);
+        final boolean perChoice = choice != null && listedChoice(liveSa);
+        if (choice != null && !perChoice) {
+            // a vote or a choice the copy resolves with an AI's pick (Plea for Power: time or knowledge) need not match
+            // the live game's (cut-4 smoke, 2026-10-30: six false Plea for Power vetoes)
+            lastWhy = "resolution makes a choice (" + choice + ")";
+            return Verdict.UNKNOWN;
+        }
         final String ref = copylessReference(liveSa);
         if (ref != null && hasLinks(live, liveSa.getHostCard())) {
             // GameCopier does not carry "exiled with" / imprint links (its TODO ExiledWith): Currency Converter with a card
@@ -207,7 +265,8 @@ public final class DudCast {
                 lastWhy = "turn history not in the copy: " + lost;
                 return Verdict.UNKNOWN;
             }
-            final Boolean changed = resolveInCopy(p, liveSa.isSpell());
+            final Boolean changed = perChoice ? anyChoiceChanges(search, live, liveMe, c, liveSa, seed, p)
+                    : resolveInCopy(p, liveSa.isSpell(), -1);
             if (changed == null) {
                 return Verdict.UNKNOWN;
             }
@@ -282,7 +341,7 @@ public final class DudCast {
 
     /** The first copy-less link (exiled with / imprint) any part of the answer's chain names, or null. */
     static String copylessReference(SpellAbility sa) {
-        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+        for (SpellAbility s : chain(sa)) {
             for (java.util.Map.Entry<String, String> e : s.getMapParams().entrySet()) {
                 for (String w : COPYLESS) {
                     if (e.getKey().contains(w) || (e.getValue() != null && e.getValue().contains(w))) {
@@ -305,7 +364,61 @@ public final class DudCast {
     }
 
     /** In the prepared copy's own scopes: cast, key, resolve the item, key. Null = could not tell. */
+    /**
+     * True when the answer's only resolution-time choice is its own root Vote or GenericChoice over a listed set of abilities
+     * (Plea for Power: time or knowledge), and no listed ability makes a choice of its own: then every outcome is tried.
+     */
+    static boolean listedChoice(SpellAbility sa) {
+        if (sa.getApi() != ApiType.Vote && sa.getApi() != ApiType.GenericChoice) {
+            return false;
+        }
+        // council's dilemma (an outcome per vote: StoreVoteNum's VoteNum, EachVote) is only set while the vote resolves
+        if (sa.hasParam("StoreVoteNum") || sa.hasParam("EachVote")) {
+            return false;
+        }
+        final List<AbilitySub> choices = sa.getAdditionalAbilityList("Choices");
+        if (choices == null || choices.isEmpty()) {
+            return false;
+        }
+        for (SpellAbility s : chain(sa)) {
+            if (s != sa && s.getApi() != null && CHOICES.contains(s.getApi())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Every outcome of a listed vote or choice, each in its own copy of the world {@code first} was prepared for: cast the
+     * answer, then resolve that one outcome (and the answer's own sub-abilities) in place of the vote. TRUE when any outcome
+     * changes the key, FALSE when none does, null when one cannot be told.
+     */
+    static Boolean anyChoiceChanges(LookaheadSearch search, Game live, Player liveMe, LookaheadSearch.Cand c, SpellAbility liveSa,
+            long seed, LookaheadSearch.Prepared first) {
+        final int n = liveSa.getAdditionalAbilityList("Choices").size();
+        for (int i = 0; i < n; i++) {
+            final LookaheadSearch.Prepared p = i == 0 ? first : search.prepare(live, liveMe, c, liveSa, seed, true, null);
+            if (p.failed || p.first == null || p.first.isEmpty()) {
+                return null;
+            }
+            final Boolean changed = resolveInCopy(p, liveSa.isSpell(), i);
+            if (changed == null || changed) {
+                return changed;
+            }
+        }
+        return Boolean.FALSE;
+    }
+
+    /** As {@link #resolveInCopy(LookaheadSearch.Prepared, boolean, int)} with no forced outcome. */
     static Boolean resolveInCopy(LookaheadSearch.Prepared p, boolean spell) {
+        return resolveInCopy(p, spell, -1);
+    }
+
+    /**
+     * In the prepared copy's own scopes: cast, key, resolve the item, key. With {@code outcome} >= 0 the item is taken off the
+     * stack and that listed outcome resolves in its place (then the item's own sub-abilities). Null = could not tell.
+     */
+    static Boolean resolveInCopy(LookaheadSearch.Prepared p, boolean spell, int outcome) {
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
         final Object prevCache = AiCache.captureScope();
@@ -335,7 +448,21 @@ public final class DudCast {
             }
             final int exclude = spell ? host.getId() : -1;
             final String before = effectKey(g, exclude);
-            g.getStack().resolveStack();
+            if (outcome >= 0) {
+                final SpellAbility played = g.getStack().peekAbility();
+                final List<AbilitySub> choices = played.getAdditionalAbilityList("Choices");
+                if (choices == null || outcome >= choices.size()) {
+                    lastWhy = "outcome " + outcome + " not in the copy";
+                    return null;
+                }
+                g.getStack().remove(g.getStack().peek());
+                forge.game.ability.AbilityUtils.resolve(choices.get(outcome));
+                if (played.getSubAbility() != null) {
+                    forge.game.ability.AbilityUtils.resolve(played.getSubAbility());
+                }
+            } else {
+                g.getStack().resolveStack();
+            }
             g.getAction().checkStateEffects(false, new HashSet<>());
             g.getStack().addAllTriggeredAbilitiesToStack();
             if (g.getStack().size() > stackBefore) {
@@ -359,7 +486,7 @@ public final class DudCast {
         sb.append("mon=").append(monarch == null ? -1 : monarch.getId());
         final int[] until = GameCopier.untilCounts(g);
         sb.append(" until=").append(until[0]).append(" delayed=").append(delayedTriggers(g)).append(" phases=")
-                .append(phaseCommands(g)).append('\n');
+                .append(phaseCommands(g)).append(" turns=").append(turnStructure(g)).append('\n');
         final Combat combat = g.getPhaseHandler().getCombat();
         if (combat != null) {
             sb.append("combat");
@@ -483,6 +610,40 @@ public final class DudCast {
                 }
             }
             sb.append('|');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * The turn structure to come (cut-4 smoke: an extra turn was invisible): the extra-turn queue (whose turns, in order),
+     * the extra phases per phase type (extra combats, extra mains), skipped damage steps and a repeated cleanup.
+     */
+    static String turnStructure(Game g) {
+        final StringBuilder sb = new StringBuilder();
+        final forge.game.phase.PhaseHandler ph = g.getPhaseHandler();
+        try {
+            java.lang.reflect.Field f = forge.game.phase.PhaseHandler.class.getDeclaredField("extraTurns");
+            f.setAccessible(true);
+            sb.append("x[");
+            for (Object t : (java.util.Collection<?>) f.get(ph)) {
+                final Player p = t instanceof forge.game.phase.ExtraTurn et ? et.getPlayer() : null;
+                sb.append(p == null ? "?" : p.getId()).append(',');
+            }
+            sb.append(']');
+            f = forge.game.phase.PhaseHandler.class.getDeclaredField("extraPhases");
+            f.setAccessible(true);
+            sb.append(" xp{");
+            for (java.util.Map.Entry<?, ?> e : ((Map<?, ?>) f.get(ph)).entrySet()) {
+                sb.append(e.getKey()).append('=').append(((java.util.Collection<?>) e.getValue()).size()).append(',');
+            }
+            sb.append('}');
+            for (String b : new String[] {"skipDamageSteps", "bRepeatCleanup"}) {
+                f = forge.game.phase.PhaseHandler.class.getDeclaredField(b);
+                f.setAccessible(true);
+                sb.append(' ').append(b).append('=').append(f.get(ph));
+            }
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            sb.append(" ?").append(e.getClass().getSimpleName());
         }
         return sb.toString();
     }
