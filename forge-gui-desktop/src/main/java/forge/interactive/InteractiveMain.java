@@ -839,7 +839,7 @@ public final class InteractiveMain {
      * from an observation-only pool: the event's card pool when the host sent one, else the jar's live pool; never their
      * real cards. Carried worlds (reuse) hold real cards, so reuse is off. A belief=human spec stays as given.
      */
-    static void honest(final forge.ai.simulation.LookaheadSearch.Config c) {
+    public static void honest(final forge.ai.simulation.LookaheadSearch.Config c) {
         if (!"human".equals(c.belief)) {
             c.belief = "uniform";
         }

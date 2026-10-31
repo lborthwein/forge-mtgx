@@ -617,7 +617,9 @@ public final class RlLiveSeat {
         }
         if (dudGuard == null) {
             try {
-                dudGuard = new LookaheadSearch(guardConfig(k8Config));
+                // the live K8 spec's config: honest already (InteractiveMain.parseLookahead ends in honest(): belief uniform over
+                // the event or jar pool, reuse off), as the degraded K8 fallback's
+                dudGuard = new LookaheadSearch(k8Config);
             } catch (RuntimeException e) {
                 // the seat's own guard only: the shared K8 config is untouched (a degraded K8 keeps its own guard)
                 dudGuardFailed = true;
@@ -631,36 +633,6 @@ public final class RlLiveSeat {
     /** The seat's own guard could not start: never retried this game. */
     private boolean dudGuardFailed;
 
-    /**
-     * The guard look-ahead's config (review of #159, S2-b): a copy of the K8 spec's; its copies' hidden cards come from the
-     * honest belief. The live spec is honest already (InteractiveMain.parseLookahead: belief=uniform from the event or
-     * jar pool, reuse off); a spec with belief off (tests, benches) would re-draw the opponent's real hidden cards, so
-     * the guard's copy takes the jar's live pool instead. The K8 config itself (the degraded fallback's) is unchanged.
-     */
-    static LookaheadSearch.Config guardConfig(final LookaheadSearch.Config k8) {
-        final LookaheadSearch.Config c = new LookaheadSearch.Config();
-        for (java.lang.reflect.Field f : LookaheadSearch.Config.class.getFields()) {
-            if (java.lang.reflect.Modifier.isStatic(f.getModifiers()) || java.lang.reflect.Modifier.isFinal(f.getModifiers())) {
-                continue;
-            }
-            try {
-                f.set(c, f.get(k8));
-            } catch (IllegalAccessException e) {
-                throw new IllegalStateException(e);
-            }
-        }
-        if ("off".equals(c.belief) && !c.beliefShadow) {
-            c.belief = "uniform";
-            c.beliefPool = null;
-            c.beliefCube = forge.ai.simulation.BeliefSampler.LIVE_CUBE;
-            c.beliefCubeSha256 = forge.ai.simulation.BeliefSampler.LIVE_CUBE_SHA256;
-            c.beliefSingleton = forge.ai.simulation.BeliefSampler.LIVE_CUBE_SINGLETON;
-            c.reuse = false;
-            c.reuseVerify = false;
-            c.reuseShadowFresh = false;
-        }
-        return c;
-    }
 
     /** The guard's stats block ({"dudCast": ...} of the look-aheads it ran in), or null when it never ran. */
     private JsonObject dudStats() {

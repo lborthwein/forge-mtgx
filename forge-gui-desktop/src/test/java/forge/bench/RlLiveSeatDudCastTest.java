@@ -52,6 +52,9 @@ public class RlLiveSeatDudCastTest {
         c.threads = 1;
         c.seed = 1031L;
         c.dudCast = dud;
+        // the live config (review of #159, A3): InteractiveMain.parseLookahead ends in honest(): belief uniform over the
+        // jar's live pool here (no event pool), reuse off
+        forge.interactive.InteractiveMain.honest(c);
         return c;
     }
 
@@ -219,7 +222,7 @@ public class RlLiveSeatDudCastTest {
         }
         try (FakeSearchService svc = new FakeSearchService(RlLiveSeatTest.SHA)) {
             final RlLiveSeat live = RlLiveSeat.connect(RlLiveSeatTest.spec(svc.address(), "worlds=2,threads=2,budgetMs=4000"), "t");
-            final String err = RlLiveSeatTest.captureErr(() -> RlLiveSeatTest.play(live, 722159001L, k -> k.dudCast = AiFixes.Mode.ON));
+            final String err = RlLiveSeatTest.captureErr(() -> RlLiveSeatTest.play(live, 722159001L, k -> { forge.interactive.InteractiveMain.honest(k); k.dudCast = AiFixes.Mode.ON; }));
             final String end = err.lines().filter(l -> l.startsWith("[policy-seat] {\"end\":true")).findFirst().orElse("");
             System.err.println("[dud-test] policy normal end: " + end);
             Assert.assertFalse(live.degraded());
@@ -241,7 +244,7 @@ public class RlLiveSeatDudCastTest {
         try (FakeSearchService svc = new FakeSearchService(RlLiveSeatTest.SHA)) {
             svc.failAfterDecides = 150;
             final RlLiveSeat live = RlLiveSeat.connect(RlLiveSeatTest.spec(svc.address(), "worlds=2,threads=2,budgetMs=4000"), "t");
-            final String err = RlLiveSeatTest.captureErr(() -> RlLiveSeatTest.play(live, 722159002L, k -> k.dudCast = AiFixes.Mode.ON));
+            final String err = RlLiveSeatTest.captureErr(() -> RlLiveSeatTest.play(live, 722159002L, k -> { forge.interactive.InteractiveMain.honest(k); k.dudCast = AiFixes.Mode.ON; }));
             final String end = err.lines().filter(l -> l.startsWith("[policy-seat] {\"end\":true")).findFirst().orElse("");
             System.err.println("[dud-test] policy degraded end: " + end);
             Assert.assertTrue(live.degraded());
