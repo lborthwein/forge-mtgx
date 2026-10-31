@@ -517,10 +517,10 @@ final class InteractivePuzzle {
             try {
                 t = PhaseType.smartValueOf(phase);
             } catch (RuntimeException e) {
-                throw refuse("puzzle.script names a phase Forge does not know");
+                throw refuse("puzzle.script names an unknown phase");
             }
             if (t == null) {
-                throw refuse("puzzle.script names a phase Forge does not know");
+                throw refuse("puzzle.script names an unknown phase");
             }
         }
         return script;

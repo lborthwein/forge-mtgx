@@ -193,17 +193,45 @@ public final class LessonScriptController extends PlayerControllerAi implements 
             super.declareAttackers(attacker, combat);
             return;
         }
+        // never an invalid declaration (the phase handler would ask again forever): a requirement the script did not
+        // meet ("attacks each combat if able") is the wrapped Forge AI's to meet
+        if (!attackValid(combat, chosen)) {
+            drift(-1, "attack", "invalid");
+            super.declareAttackers(attacker, combat);
+            return;
+        }
         final GameEntity defender = defenderOf(combat);
         for (Card c : chosen) {
             combat.addAttacker(c, defender);
         }
-        // never an invalid declaration (the phase handler would ask again forever): a requirement the script did not
-        // meet ("attacks each combat if able") is the wrapped Forge AI's to meet
-        if (!CombatUtil.validateAttackers(combat)) {
-            combat.clearAttackers();
-            drift(-1, "attack", "invalid");
-            super.declareAttackers(attacker, combat);
+    }
+
+    /**
+     * Would Forge take {@code chosen} as the declaration? Tried on the combat and undone, so the live seat and a forced
+     * re-plan ({@link #beforeForcedChoice}) decide the same way and leave the combat as it was.
+     */
+    private boolean attackValid(final Combat combat, final List<Card> chosen) {
+        final GameEntity defender = defenderOf(combat);
+        for (Card c : chosen) {
+            combat.addAttacker(c, defender);
         }
+        final boolean valid = CombatUtil.validateAttackers(combat);
+        for (Card c : chosen) {
+            combat.removeFromCombat(c);
+        }
+        return valid;
+    }
+
+    /** As {@link #attackValid}, for the {blocker, attacker} pairs: tried, then undone. */
+    private boolean blockValid(final Combat combat, final Player defender, final List<Card[]> chosen) {
+        for (Card[] pair : chosen) {
+            combat.addBlocker(pair[1], pair[0]);
+        }
+        final boolean valid = CombatUtil.validateBlocks(combat, defender) == null;
+        for (Card[] pair : chosen) {
+            combat.removeBlockAssignment(pair[1], pair[0]);
+        }
+        return valid;
     }
 
     @Override
@@ -213,15 +241,13 @@ public final class LessonScriptController extends PlayerControllerAi implements 
             super.declareBlockers(defender, combat);
             return;
         }
-        for (Card[] pair : chosen) {
-            combat.addBlocker(pair[1], pair[0]);
-        }
-        if (CombatUtil.validateBlocks(combat, defender) != null) {
-            for (Card[] pair : chosen) {
-                combat.removeBlockAssignment(pair[1], pair[0]);
-            }
+        if (!blockValid(combat, defender, chosen)) {
             drift(-1, "block", "invalid");
             super.declareBlockers(defender, combat);
+            return;
+        }
+        for (Card[] pair : chosen) {
+            combat.addBlocker(pair[1], pair[0]);
         }
     }
 
@@ -232,16 +258,24 @@ public final class LessonScriptController extends PlayerControllerAi implements 
         try {
             switch (method) {
                 case "chooseSpellAbilityToPlay" -> planPriority(true);
+                // the live seat's hand-over on an invalid declaration is re-planned too (review #139 S3-1), so the seat
+                // is the wrapped Forge AI's from that decision on in the replay exactly as it was live
                 case "declareAttackers" -> {
                     final Combat combat = getGame().getPhaseHandler().getCombat();
                     if (combat != null) {
-                        planAttack(combat, true);
+                        final List<Card> chosen = planAttack(combat, true);
+                        if (chosen != null && !attackValid(combat, chosen)) {
+                            drift(-1, "attack", "invalid");
+                        }
                     }
                 }
                 case "declareBlockers" -> {
                     final Combat combat = getGame().getPhaseHandler().getCombat();
                     if (combat != null) {
-                        planBlock(combat, true);
+                        final List<Card[]> chosen = planBlock(combat, true);
+                        if (chosen != null && !blockValid(combat, getPlayer(), chosen)) {
+                            drift(-1, "block", "invalid");
+                        }
                     }
                 }
                 default -> { }

@@ -458,7 +458,7 @@ public class LessonScriptTest extends AITest {
     // ------------------------------------------------------------------------------------------------ J2: the AI tape
 
     /** One taped run: the game log, the tape lines and the script's lines. */
-    private record Taped(String log, List<String> tape, List<String> script, int acts) {
+    private record Taped(String log, List<String> tape, List<String> script, int acts, boolean handed, int drifts) {
     }
 
     private Taped taped(final String position, final String aiScript, final String playerLine, final String mode,
@@ -489,7 +489,7 @@ public class LessonScriptTest extends AITest {
                 lines.add(l.substring(AiTape.PREFIX.length()));
             }
         }
-        return new Taped(log(game), lines, List.of(), seat(ai).actsTaken());
+        return new Taped(log(game), lines, List.of(), seat(ai).actsTaken(), seat(ai).handedToBot(), seat(ai).drifts());
     }
 
     private static String log(final Game game) {
@@ -523,6 +523,35 @@ public class LessonScriptTest extends AITest {
             }
         }
         return null;
+    }
+
+    /**
+     * Review #139 S3-1: a scripted declaration Forge would refuse (Juggernaut must attack, the script names only the
+     * Bears) hands the seat to the wrapped Forge AI live; a forced replay re-plans that same hand-over (the record answers
+     * the declaration, the seat is the wrapped Forge AI's from there on), and a resume after it plays on as the bot.
+     */
+    @Test
+    public void anInvalidScriptedDeclarationHandsOverInTheReplayAsLive() throws Exception {
+        final String position = state("turn=2", "activeplayer=ai", "activephase=MAIN1", "humanlife=20", "ailife=20",
+                "humanhand=", HUMAN_LIBRARY, "humanbattlefield=Plains",
+                "aihand=Centaur Courser;Grizzly Bears", AI_LIBRARY,
+                "aibattlefield=Forest;Forest;Forest;Forest;Forest;Juggernaut;Llanowar Elves");
+        final String script = "attack=Llanowar Elves\nrest=pass";
+        final Taped rec = taped(position, script, null, "record", null, 6);
+        assertTrue(rec.handed(), "live: the invalid declaration handed the seat over");
+        assertTrue(rec.drifts() >= 1);
+        final List<String> entries = entries(rec.tape());
+        final Taped forced = taped(position, script, null, "forced", entries, 6);
+        assertNull(status(forced.tape(), "divergence"), "no divergence: " + forced.tape());
+        assertEquals(forced.log(), rec.log(), "the forced replay is the recorded game");
+        assertTrue(forced.handed(), "the forced re-plan handed over at the same declaration");
+        assertEquals(forced.drifts(), rec.drifts());
+        assertEquals(forced.acts(), rec.acts());
+        // resume once the hand-over is in the record: live from there, as the wrapped Forge AI, the same game
+        final Taped resumed = taped(position, script, null, "resume", entries.subList(0, (entries.size() * 3) / 4), 6);
+        assertNull(status(resumed.tape(), "divergence"), "no divergence: " + resumed.tape());
+        assertTrue(resumed.handed());
+        assertEquals(resumed.log(), rec.log(), "resumed, the seat plays on as the bot it was live");
     }
 
     @Test
