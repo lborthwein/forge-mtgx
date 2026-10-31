@@ -2627,6 +2627,10 @@ public final class ChooseACard implements CacHook {
                     if (o.hasLost() && !cm.hasLost()) p.terminal = 1.0;
                 }
             } else if (!leaf.reached) {
+                if (DEBUG) System.err.println("[cac-dbg] settle " + ask.src + " phase=" + g.getPhaseHandler().getPhase()
+                        + " turn=" + g.getPhaseHandler().getTurn() + " stack=" + g.getStack().size() + " simul="
+                        + g.getStack().hasSimultaneousStackEntries() + " top=" + (g.getStack().isEmpty() ? "-"
+                        : g.getStack().peekAbility()) + " prio=" + g.getPhaseHandler().getPriorityPlayer());
                 why = "settle";
                 return null;
             } else {
@@ -2729,6 +2733,11 @@ public final class ChooseACard implements CacHook {
             sc.playChosenSpellAbility(cs);
         } finally {
             sc.setCacHook(null);
+        }
+        // the cast's own triggers (storm, cast triggers) go on the stack now, as the game loop puts them there before
+        // the next priority; a cast made outside the loop otherwise leaves them pending and the copy never settles
+        if (g.getStack().hasSimultaneousStackEntries()) {
+            g.getStack().addAllTriggeredAbilitiesToStack();
         }
         if (g.getStack().size() <= before) {
             if (DEBUG) System.err.println("[cac-dbg] notCast " + host + " zone=" + host.getZone() + " life=" + cm.getLife()
