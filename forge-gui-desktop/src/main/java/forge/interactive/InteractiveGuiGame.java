@@ -459,6 +459,16 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
      */
     private volatile InteractiveContinuation continuation;
 
+    /** Lane lessons-forge-jar-1027 (J3, null unless a lesson game armed it): lesson positions installed in this game. */
+    private volatile InteractiveLessons lessons;
+
+    void setLessons(final InteractiveLessons lessons) {
+        if (table != null || readerThread != null) {
+            throw new IllegalStateException("lesson installs are a one-seat game's, set before its reader starts");
+        }
+        this.lessons = lessons;
+    }
+
     void setContinuation(final InteractiveContinuation continuation) {
         if (table != null || readerThread != null) {
             throw new IllegalStateException("a continuation is a one-seat game's, set before its reader starts");
@@ -515,6 +525,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
             acceptSeatConcede(input, pending);
             return;
         }
+        // lane lessons-forge-jar-1027 (J3): a lesson game takes an install; any other game refuses its kind, as before
+        final InteractiveLessons lesson = lessons;
+        if (lesson != null && InteractiveLessons.KIND.equals(input.kind())) {
+            acceptInstall(lesson, input, pending);
+            return;
+        }
 
         final ModalRequest modal = modalRequest.get();
         if (modal != null && modal.requestId.equals(input.requestId())) {
@@ -527,6 +543,73 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         engineGate.lock();
         try {
             claimActiveRequest(input, pending);
+        } finally {
+            engineGate.unlock();
+        }
+    }
+
+    /**
+     * Lane lessons-forge-jar-1027 (J3, {@link InteractiveLessons}): an install answers the browser's open PRIORITY
+     * request. The position is checked here (a refusal names no card); then, under the engine gate and only while Forge
+     * is parked on that request, the request is claimed as an action's is, the install is handed to the game thread and
+     * the priority is passed (as the pass control passes it): the game thread installs the position right after that
+     * decision. The ack goes out before (accepted, or not with a reason, and then nothing changes).
+     */
+    private void acceptInstall(final InteractiveLessons lesson, final InteractiveProtocol.InputMessage input,
+                               final PendingInput pending) {
+        if (!InteractiveLessons.KIND.equals(string(input.action(), "type"))) {
+            finishInput(input, pending, false, "an install's action is {type:'install', position}");
+            return;
+        }
+        final InteractiveLessons.Install install;
+        try {
+            install = lesson.parse(input.action());
+        } catch (InteractiveProtocol.ProtocolException e) {
+            // the detail may quote the position's line (a card name): stderr only, never the wire (review #140 S3)
+            finishInput(input, pending, false, "not a lesson position");
+            System.err.println("[forge.interactive] lesson install refused: " + e.getMessage());
+            return;
+        } catch (RuntimeException e) {
+            finishInput(input, pending, false, "not a lesson position");
+            System.err.println("[forge.interactive] lesson install refused: " + safeThrowable(e));
+            return;
+        }
+        engineGate.lock();
+        try {
+            final ActiveRequest request = activeRequest.get();
+            if (modalRequest.get() != null || request == null || !request.requestId.equals(input.requestId())
+                    || !(request.input instanceof InputPassPriority) || request.claimed.get()
+                    || request.input != controller.getInputProxy().getInput() || inFlightInputs.contains(request.input)
+                    || game == null || game.isGameOver()) {
+                finishInput(input, pending, false, "an install answers the browser's open priority request");
+                return;
+            }
+            if (!request.claimed.compareAndSet(false, true) || !inFlightInputs.add(request.input)) {
+                request.claimed.set(false);
+                finishInput(input, pending, false, "another input is already executing for this request");
+                return;
+            }
+            finishInput(input, pending, true, null);
+            activeRequest.compareAndSet(request, null);
+            lastInputFingerprint = "";
+            lesson.offer(install);
+            final InputPassPriority priority = (InputPassPriority) request.input;
+            actions.execute(() -> {
+                try {
+                    if (controller.getInputProxy().getInput() == priority) {
+                        priority.passPriority();
+                    } else {
+                        // no pass happened: the offer must not ride on a later, unrelated pass (review #140 S3-1)
+                        lesson.withdraw(install);
+                    }
+                } catch (Throwable failure) {
+                    lesson.withdraw(install);
+                    fail("engine", "lesson install failed: " + safeThrowable(failure),
+                            request.requestId, "dispatch:install", request.kind, failure);
+                    return;
+                }
+                settleAction(request.input, null);
+            });
         } finally {
             engineGate.unlock();
         }

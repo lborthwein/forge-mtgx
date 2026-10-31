@@ -37,6 +37,12 @@ import java.util.Set;
  * permanent that seat controls). Steps are tried in order and each is spent once taken ({@code once:false} keeps it).
  * Phase names are checked against Forge when the seat is bound ({@link LessonScriptController}), since Forge's phase
  * table needs its localizer; everything else is checked here.</p>
+ *
+ * <p><b>Casts: single-target, non-modal only</b> (review #139 S3-2). {@code lesson-script/1} names at most one
+ * {@code target:} and no mode, X or optional-cost choice: a scripted cast is the first of its card's spells castable at
+ * that moment, aimed at the one named target if it has one. Every other choice that spell asks for (a mode, X, a second
+ * target, an optional cost) is the wrapped Forge AI's. Chapter 1 needs nothing more; a script for a modal or
+ * multi-target spell needs a new format version.</p>
  */
 public final class LessonScript {
     public static final String FORMAT = "lesson-script/1";
