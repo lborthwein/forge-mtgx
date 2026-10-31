@@ -124,11 +124,14 @@ public class LabellerV2MinTest extends AITest {
      * counted seven answer x target pairs > 4 and cut it).
      */
     @Test
-    public void irrelevantAnswersCollapseAndTheLineIsProven() {
+    public void theS2BoardIsACapHitUnderTheNarrowIncidentalSet() {
         final java.util.function.Supplier<Game> g = () -> frame("Lightning Bolt;Shock;Giant Growth",
                 "Mountain;Mountain;Forest;Grizzly Bears", 3, "Lightning Bolt", "Mountain");
-        Assert.assertTrue(proven(g.get(), passive(cfg(true, 64))), "no real answer: proven");
-        Assert.assertTrue(proven(g.get(), passive(cfgEngine(true))), "no real answer: proven (engine)");
+        // review #148 re-check 4 ruling: non-lethal damage to us, harm to their own permanents and a pump on their own
+        // creature are responses now; this board's set is larger than oppResponses, so it is a cap hit, not a proof
+        Assert.assertFalse(proven(g.get(), passive(cfg(true, 64))), "a cap hit (truncated): not proven");
+        final Game x = g.get();
+        Assert.assertTrue(OppMin.responses(x, x.getPlayers().get(0), x.getPlayers().get(1), null).size() > 4);
     }
 
     /**
@@ -202,6 +205,45 @@ public class LabellerV2MinTest extends AITest {
         Assert.assertTrue(OppMin.answers(fg, fg.getPlayers().get(0), fg.getPlayers().get(1), null).gaps
                 .contains("multi-target"), "divided damage is a gap: " + OppMin.answers(fg, fg.getPlayers().get(0),
                 fg.getPlayers().get(1), null).gaps);
+    }
+
+    /**
+     * Review #148 re-check 4: answers the old deny-list dropped (a pump or protection on their own creature, a Dig to the
+     * battlefield, a sac outlet) answer the line; an unreadable answer is a gap. Our Flame Slash on their blocker, then a
+     * Hill Giant attack, against them at 3.
+     */
+    @Test
+    public void answersOnTheirOwnPermanentsAnswerTheLine() {
+        for (String c : new String[] {"Giant Growth", "Blossoming Defense"}) {
+            Assert.assertFalse(proven(frame(c, "Grizzly Bears;Forest", 3, "Flame Slash", "Hill Giant;Mountain"),
+                    engineMin(true, 2)), c + " saves the blocker");
+        }
+        Assert.assertTrue(proven(frame("", "Grizzly Bears;Forest", 3, "Flame Slash", "Hill Giant;Mountain"),
+                engineMin(true, 2)), "open control: Flame Slash, then the attack, proven");
+        // Collected Company at the attack point: two Bears from their library block (their library is Bears)
+        final String bears = "Grizzly Bears;Grizzly Bears;Grizzly Bears;Grizzly Bears;Grizzly Bears;Grizzly Bears;"
+                + "Grizzly Bears;Grizzly Bears;Grizzly Bears;Grizzly Bears";
+        final String st = ForcedWinSolverTest.frame("Collected Company", "Forest;Forest;Forest;Forest", 3, "",
+                "Hill Giant;Mountain", 20, "ai").replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + bears);
+        Assert.assertFalse(proven(ForcedWinSolverTest.game("Default", "Default", st), engineMin(true, 2)),
+                "Collected Company puts blockers in");
+        // Ashnod's Altar: sacrificing their creature fizzles our Act of Treason (a mana ability with a sacrifice cost)
+        final Game alt = frame("", "Ashnod's Altar;Hill Giant", 3, "Act of Treason", "Mountain;Mountain;Mountain");
+        Assert.assertTrue(OppMin.answers(alt, alt.getPlayers().get(0), alt.getPlayers().get(1), null).gaps
+                .contains("mana-ability"), "a sac outlet is a gap");
+        Assert.assertFalse(proven(frame("", "Ashnod's Altar;Hill Giant", 3, "Act of Treason", "Mountain;Mountain;Mountain"),
+                engineMin(true, 2)), "Ashnod's Altar: not proven");
+        // a synthetic exception in canPlay: the answer is a gap ("unreadable"), not a silent drop
+        OppMin.TEST_THROW = sa -> sa.getHostCard() != null && "Healing Salve".equals(sa.getHostCard().getName());
+        try {
+            final Game cs = frame("Healing Salve", "Plains", 3, "Lightning Bolt", "Mountain");
+            Assert.assertTrue(OppMin.answers(cs, cs.getPlayers().get(0), cs.getPlayers().get(1), null).gaps
+                    .contains("unreadable"), "a canPlay exception is the gap unreadable");
+            Assert.assertFalse(proven(frame("Healing Salve", "Plains", 3, "Lightning Bolt", "Mountain"),
+                    passive(cfg(true, 64))), "an unreadable answer: not proven");
+        } finally {
+            OppMin.TEST_THROW = null;
+        }
     }
 
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */

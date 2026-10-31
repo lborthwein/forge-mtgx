@@ -527,7 +527,13 @@ public final class OppMin {
         final boolean attack = top == null;
         for (Card c : sources) {
             for (SpellAbility sa0 : c.getAllPossibleAbilities(opp, true)) {
-                if (sa0.isManaAbility() || sa0.isLandAbility()) continue;
+                if (sa0.isLandAbility()) continue;
+                if (sa0.isManaAbility()) {
+                    // review #148 re-check 4: a mana ability with a non-mana cost (a sac outlet) answers a line; it is
+                    // not played by OppMin, so a castable one is a gap
+                    if (manaAbilityWithCost(sa0) && castable(sa0, opp, gaps)) gaps.add("mana-ability");
+                    continue;
+                }
                 if (sa0.isSpell() && c.isInZone(ZoneType.Battlefield)) continue;
                 // review S3: alternative costs are separate answers (Force of Will hard-cast vs pitched)
                 final String cost = sa0.getPayCosts() == null ? "-" : sa0.getPayCosts().toSimpleString();
@@ -537,13 +543,31 @@ public final class OppMin {
                 }
                 final List<Object> targets = new ArrayList<>();
                 final List<String> keys = new ArrayList<>();
-                targetsOf(sa0, top, victim, opp, targets, keys);
+                try {
+                    targetsOf(sa0, top, victim, opp, targets, keys);
+                } catch (RuntimeException e) {
+                    gaps.add("unreadable");
+                    continue;
+                }
+                if (targets.isEmpty() && sa0.usesTargeting()) {
+                    // a targeted answer with no enumerated target: a gap when it has a legal one and is castable
+                    boolean legal;
+                    try {
+                        sa0.setActivatingPlayer(opp);
+                        legal = sa0.getTargetRestrictions() == null || sa0.getTargetRestrictions().getNumCandidates(sa0) > 0;
+                    } catch (RuntimeException e) {
+                        legal = true;
+                    }
+                    if (legal && castable(sa0, opp, gaps) && !incidentalAnswer(sa0)) gaps.add("no-target-enum");
+                    continue;
+                }
                 for (int ti = 0; ti < targets.size(); ti++) {
                     final Object t = targets.get(ti);
                     final int cat;
                     try {
                         cat = category(sa0, t, top, victim, opp, attack);
                     } catch (RuntimeException e) {
+                        gaps.add("unreadable");
                         continue;
                     }
                     if (cat < 0) continue;
@@ -555,11 +579,7 @@ public final class OppMin {
                         else cs.getTargets().add((GameObject) t);
                         if (!cs.isTargetNumberValid()) continue;
                     }
-                    try {
-                        if (!cs.canPlay() || !ComputerUtilCost.canPayCost(cs, opp, false)) continue;
-                    } catch (RuntimeException e) {
-                        continue;
-                    }
+                    if (!castable(cs, opp, gaps)) continue;
                     final String gap = gapOf(cs);
                     if (gap != null) gaps.add(gap);
                     byKey.putIfAbsent(cat + "|" + c.getName() + "|" + sa0.getApi() + "|" + cost + "|" + keys.get(ti), cs);
@@ -568,6 +588,20 @@ public final class OppMin {
         }
         return new Answers(new ArrayList<>(byKey.values()), gaps);
     }
+
+    /** Whether {@code sa} can be played and paid now; an exception is a gap ("unreadable"), not a silent drop. */
+    static boolean castable(final SpellAbility sa, final Player opp, final java.util.Set<String> gaps) {
+        try {
+            if (TEST_THROW != null && TEST_THROW.test(sa)) throw new IllegalStateException("test: canPlay throws");
+            return sa.canPlay() && ComputerUtilCost.canPayCost(sa, opp, false);
+        } catch (RuntimeException e) {
+            gaps.add("unreadable");
+            return false;
+        }
+    }
+
+    /** Tests only: make {@link #castable} throw for the answers it matches (a synthetic unreadable answer). */
+    static java.util.function.Predicate<SpellAbility> TEST_THROW;
 
     /**
      * Review #148 (fail closed): why OppMin cannot enumerate this castable answer's options completely, or null. Unknown
@@ -727,6 +761,7 @@ public final class OppMin {
                     try {
                         x = category(sub, t, top, victim, opp, attack);
                     } catch (RuntimeException e) {
+                        gaps.add("unreadable");
                         x = -1;
                     }
                     if (x >= 0 || !sub.usesTargeting()) {
@@ -762,12 +797,7 @@ public final class OppMin {
                     final SpellAbility cs = sa0.copy(opp);
                     cs.setActivatingPlayer(opp);
                     cs.setSVar(MODES, key.toString());
-                    boolean play;
-                    try {
-                        play = cs.canPlay() && ComputerUtilCost.canPayCost(cs, opp, false);
-                    } catch (RuntimeException e) {
-                        play = false;
-                    }
+                    final boolean play = castable(cs, opp, gaps);
                     if (play) {
                         real = true;
                         gaps.addAll(modeGaps);
@@ -855,56 +885,72 @@ public final class OppMin {
      */
     static int category(final SpellAbility sa, final Object t, final SpellAbility top, final Player victim,
             final Player opp, final boolean attack) {
+        if (incidentalAnswer(sa)) return -1;
         final ApiType api = sa.getApi();
         if (t instanceof SpellAbility) {
             return api == ApiType.Counter ? COUNTER : OTHER; // a counter, a stack bounce, a redirect: all answer it
         }
-        if (incidentalChain(sa, t, victim, opp, attack)) return -1;
         if (t instanceof Card c) {
             if (c.getController() == victim || c.isInZone(ZoneType.Graveyard)) return REMOVAL;
-            return attack && c.isCreature() ? SHIELD : OTHER;
+            return SHIELD; // their own permanent: a pump, protection, a sacrifice, anything
         }
         if (t instanceof Player p) {
             if (p == victim) return api == ApiType.Discard ? DISCARD : REMOVAL;
             return SHIELD;
         }
         if (sa.isSpell() && sa.getHostCard() != null && sa.getHostCard().isCreature()) return BLOCKER;
-        if (api == ApiType.Animate || api == ApiType.Token || api == ApiType.CopyPermanent) return BLOCKER;
-        if (api == ApiType.Counter) return top != null ? COUNTER : -1;
+        if (api == ApiType.Animate || api == ApiType.Token || api == ApiType.CopyPermanent || api == ApiType.Dig) {
+            return BLOCKER;
+        }
+        if (api == ApiType.Counter) return COUNTER;
         return OTHER;
     }
 
-    /** Effects that never answer a line by themselves. */
-    static final Set<ApiType> INCIDENTAL = java.util.EnumSet.of(ApiType.Draw, ApiType.Mana, ApiType.ManaReflected,
-            ApiType.Scry, ApiType.Surveil, ApiType.Dig, ApiType.DigUntil, ApiType.RearrangeTopOfLibrary, ApiType.Shuffle,
-            ApiType.Investigate, ApiType.Explore);
+    /** Effects that only give their controller cards (the ruling's incidental chain). */
+    static final Set<ApiType> INCIDENTAL = java.util.EnumSet.of(ApiType.Draw, ApiType.Scry, ApiType.Surveil);
 
-    /** Whether every part of {@code sa}'s chain is incidental for this target. */
-    static boolean incidentalChain(final SpellAbility sa, final Object t, final Player victim, final Player opp,
-            final boolean attack) {
+    /**
+     * Review #148 re-check 4 ruling: an answer is incidental only if (a) its whole effect chain is draw, scry, surveil
+     * or a search to hand, for its controller, and (b) its cost is mana only (no sacrifice, discard, life, tap or
+     * exile). Anything else, a pump or protection on their own creature, a Dig or library-to-battlefield, damage or life
+     * loss to us, a sacrifice outlet, is a response.
+     */
+    static boolean incidentalAnswer(final SpellAbility sa) {
         boolean any = false;
         for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
             final ApiType api = s.getApi();
-            if (api == null) continue;
+            if (api == null) return false;
             any = true;
-            if (!incidental(s, api, s == sa ? t : null, victim, opp, attack)) return false;
+            final boolean mine = !s.usesTargeting() && (!s.hasParam("Defined") || "You".equals(s.getParam("Defined")));
+            if (INCIDENTAL.contains(api) && mine) continue;
+            if (api == ApiType.ChangeZone && mine && "Library".equals(s.getParam("Origin"))
+                    && "Hand".equals(s.getParam("Destination"))) {
+                continue; // a search to hand
+            }
+            return false;
         }
-        return any;
+        return any && manaOnly(sa);
     }
 
-    static boolean incidental(final SpellAbility s, final ApiType api, final Object t, final Player victim,
-            final Player opp, final boolean attack) {
-        if (INCIDENTAL.contains(api)) return true;
-        if (api == ApiType.ChangeZone && !s.usesTargeting() && "Library".equals(s.getParam("Origin"))) {
-            return !"Battlefield".equals(s.getParam("Destination")) || !attack; // a search (a fetch, a tutor)
+    /** Whether {@code sa}'s cost is mana only. */
+    static boolean manaOnly(final SpellAbility sa) {
+        if (sa.getPayCosts() == null) return true;
+        for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
+            if (!(part instanceof forge.game.cost.CostPartMana)) return false;
         }
-        if (t instanceof Player p && p == victim && (api == ApiType.DealDamage || api == ApiType.LoseLife)) {
-            return !lethal(s, victim);
-        }
-        if (t instanceof Player p && p == opp && (api == ApiType.DealDamage || api == ApiType.LoseLife)) return true;
-        if (t instanceof Card c && c.getController() == opp && c.isInZone(ZoneType.Battlefield)) {
-            if (api == ApiType.DealDamage || api == ApiType.Destroy) return true; // harm to their own permanent
-            if (!attack && (api == ApiType.Pump && !negative(s) || api == ApiType.PutCounter)) return true;
+        return true;
+    }
+
+    /**
+     * Whether a mana ability's cost has a part beyond mana and tapping itself (a sacrifice outlet such as Ashnod's
+     * Altar, a discard, life, tapping another permanent): such an ability answers a line and OppMin does not play mana
+     * abilities, so it is a gap.
+     */
+    static boolean manaAbilityWithCost(final SpellAbility sa) {
+        if (sa.getPayCosts() == null) return false;
+        for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
+            if (part instanceof forge.game.cost.CostPartMana || part instanceof forge.game.cost.CostTap) continue;
+            return true;
         }
         return false;
     }
