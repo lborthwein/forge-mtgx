@@ -513,4 +513,36 @@ public class LookaheadDudCastTest extends SimulationTest {
                 && a.get(0).getHostCard() == pushCard && a.get(0).getTargets().contains(seeker));
         searchOf(c).shutdown();
     }
+
+    /**
+     * Review of #153 re-check, probe H3: GameCopier does not carry "exiled with" (its TODO ExiledWith). A Currency
+     * Converter with a Lightning Bolt exiled with it read as empty in every copy and was called a dud. Loaded: UNKNOWN;
+     * empty (no link to lose): DUD, as before.
+     */
+    @Test
+    public void currencyConverterLoadedAndEmpty() {
+        Game g = board();
+        Player me = g.getPlayers().get(1);
+        Card cc = addCard("Currency Converter", me);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertEquals("empty", DudCast.Verdict.DUD, check(g, abilityOf(cc, "Put a card exiled")));
+        Card bolt = addCardToZone("Lightning Bolt", me, ZoneType.Exile);
+        bolt.setExiledWith(cc);
+        bolt.setExiledBy(me);
+        AssertJUnit.assertTrue(DudCast.hasLinks(g, cc));
+        AssertJUnit.assertEquals("H3: a Bolt exiled with it", DudCast.Verdict.UNKNOWN, check(g, abilityOf(cc, "Put a card exiled")));
+        AssertJUnit.assertEquals("its loot does not read the link", DudCast.Verdict.EFFECT, check(g, abilityOf(cc, "Draw a card")));
+    }
+
+    /** Raid and ThisTurnCast read per-turn history the copy does not carry: never a dud while it differs. */
+    @Test
+    public void raidAndThisTurnCastHistory() {
+        Game g = board();
+        Player me = g.getPlayers().get(1);
+        Card bears = addCard("Grizzly Bears", me);
+        GameCopier cp = new GameCopier(g, true);
+        AssertJUnit.assertNull(DudCast.historyLost(g, cp.makeCopy()));
+        me.addCreaturesAttackedThisTurn(bears, g.getPlayers().get(0));
+        AssertJUnit.assertEquals("creatures attacked this turn (raid)", DudCast.historyLost(g, new GameCopier(g, true).makeCopy()));
+    }
 }

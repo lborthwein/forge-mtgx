@@ -175,6 +175,13 @@ public final class DudCast {
             lastWhy = "the stack is not empty";
             return Verdict.UNKNOWN;
         }
+        final String ref = copylessReference(liveSa);
+        if (ref != null && hasLinks(live, liveSa.getHostCard())) {
+            // GameCopier does not carry "exiled with" / imprint links (its TODO ExiledWith): Currency Converter with a card
+            // exiled with it would read empty in every copy (review of #153, S1 of the re-check)
+            lastWhy = "references " + ref + ", which the copy does not carry";
+            return Verdict.UNKNOWN;
+        }
         final LookaheadSearch.Config cfg = search.getConfig();
         final int worlds = Math.max(1, cfg.dudWorlds);
         final LookaheadSearch.Cand c = new LookaheadSearch.Cand(liveSa, true);
@@ -238,6 +245,60 @@ public final class DudCast {
             }
             if (lp.getLandsPlayedThisTurn() != cp.getLandsPlayedThisTurn()) {
                 return "lands played this turn";
+            }
+            if (lp.getCreaturesAttackedThisTurn().size() != cp.getCreaturesAttackedThisTurn().size()) {
+                return "creatures attacked this turn (raid)";
+            }
+        }
+        if (live.getStack().getSpellsCastThisTurn().size() != copy.getStack().getSpellsCastThisTurn().size()) {
+            return "spells cast this turn (ThisTurnCast)";
+        }
+        return null;
+    }
+
+    /**
+     * True when the live game holds a link the copy would lose: a card exiled with {@code host}, or a card it imprinted.
+     * With none (Currency Converter with nothing exiled with it) the copy is faithful and the check goes on.
+     */
+    static boolean hasLinks(Game live, Card host) {
+        if (host == null) {
+            return true;
+        }
+        if (!host.getImprintedCards().isEmpty()) {
+            return true;
+        }
+        for (Player p : live.getPlayers()) {
+            for (Card c : p.getCardsIn(ZoneType.Exile)) {
+                if (c.getExiledWith() != null && c.getExiledWith().getId() == host.getId()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Words in an ability's parameters naming links GameCopier does not copy. */
+    static final String[] COPYLESS = {"ExiledWith", "ExiledBy", "Imprinted", "Imprint"};
+
+    /** The first copy-less link (exiled with / imprint) any part of the answer's chain names, or null. */
+    static String copylessReference(SpellAbility sa) {
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            for (java.util.Map.Entry<String, String> e : s.getMapParams().entrySet()) {
+                for (String w : COPYLESS) {
+                    if (e.getKey().contains(w) || (e.getValue() != null && e.getValue().contains(w))) {
+                        return w;
+                    }
+                }
+            }
+            for (String svar : new String[] {"X", "Y", "Z"}) {
+                final String v = s.getHostCard() == null ? null : s.getHostCard().getSVar(svar);
+                if (v != null) {
+                    for (String w : COPYLESS) {
+                        if (v.contains(w)) {
+                            return w;
+                        }
+                    }
+                }
             }
         }
         return null;
