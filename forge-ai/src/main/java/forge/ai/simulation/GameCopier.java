@@ -115,6 +115,7 @@ public class GameCopier {
     private int pendingCopied = 0;
     private final Map<Trigger, Trigger> trigMap = new java.util.IdentityHashMap<>();
     private final Map<Object, Object> cmdMap = new java.util.IdentityHashMap<>();
+    private final Map<Object, Object> saMap = new java.util.IdentityHashMap<>();
 
     /**
      * gamecopier-fidelity-1030: the solver's verification and search copies carry pending delayed triggers and commands
@@ -949,6 +950,7 @@ public class GameCopier {
         pendingCopied = 0;
         trigMap.clear();
         cmdMap.clear();
+        saMap.clear();
         // delayed triggers first: commands that register one later ("next turn") map to the same copy
         final forge.game.trigger.TriggerHandler from = origGame.getTriggerHandler(), to = newGame.getTriggerHandler();
         for (Trigger t : new ArrayList<>(from.getDelayedTriggersView())) {
@@ -1218,6 +1220,28 @@ public class GameCopier {
             final GameCommand m = mapCommand((GameCommand) v, newGame, where);
             return m == null ? REFUSE : m;
         }
+        if (v instanceof forge.game.card.CardZoneTable) {
+            // "until this leaves the battlefield" (Portable Hole, Deep-Cavern Bat): the cards it moved, by zones
+            final forge.game.card.CardZoneTable out = new forge.game.card.CardZoneTable();
+            for (Table.Cell<ZoneType, ZoneType, forge.game.card.CardCollection> cell : ((forge.game.card.CardZoneTable) v).cellSet()) {
+                final Object m = mapPending(cell.getValue(), newGame, where);
+                if (m == REFUSE) {
+                    return REFUSE;
+                }
+                out.put(cell.getRowKey(), cell.getColumnKey(), (forge.game.card.CardCollection) m);
+            }
+            return out;
+        }
+        if (v instanceof SpellAbility) {
+            // a command's own ability (its params, its activator; an exile-until-leaves return reads them)
+            final Object done = saMap.get(v);
+            if (done != null) {
+                return done;
+            }
+            final SpellAbility m = copyPendingSa((SpellAbility) v, newGame, where + ".ability");
+            saMap.put(v, m == null ? REFUSE : m);
+            return m == null ? REFUSE : m;
+        }
         if (v instanceof forge.game.card.CardCollection) {
             final forge.game.card.CardCollection out = new forge.game.card.CardCollection();
             for (Card c : (forge.game.card.CardCollection) v) {
@@ -1421,6 +1445,9 @@ public class GameCopier {
             }
             if (a.getOriginalAbility() != null) {
                 b.setOriginalAbility(null); // the ability it was granted from, in the original: not read for a carried one
+            }
+            if (a.getGrantorStatic() != null) {
+                b.setGrantorStatic(null); // the static that granted it (Splinter Twin): its activation and mode records only
             }
             if (a.getActivatingPlayer() != null) {
                 final Object p = mapPending(a.getActivatingPlayer(), newGame, where);

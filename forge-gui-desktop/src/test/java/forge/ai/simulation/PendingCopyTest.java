@@ -330,6 +330,32 @@ public class PendingCopyTest extends forge.ai.AITest {
         Assert.assertEquals(a.getTimestamp(), b.getTimestamp());
     }
 
+    // ------------------------------------------------------------------ Portable Hole: exiled until it leaves
+
+    @Test(timeOut = 900000)
+    public void portableHoleReturnsInTheCopy() {
+        final WinConditionCoverageTest.P p = new WinConditionCoverageTest.P("pc", WinConditionCoverageTest.V.NOT_PROVEN, "pc")
+                .k("humanhand", "Portable Hole").k("humanbattlefield", "Plains").k("aibattlefield", "Grizzly Bears");
+        final Game g = ForcedWinSolverTest.game("Default", "Default", p.frame());
+        final Player me = g.getPlayers().get(0), opp = g.getPlayers().get(1);
+        final Card hole = find(me, ZoneType.Hand, "Portable Hole");
+        final SpellAbility sa = hole.getFirstSpellAbility();
+        sa.setActivatingPlayer(me);
+        cast(g, hole, sa);
+        settle(g, me);
+        Assert.assertNull(find(opp, ZoneType.Battlefield, "Grizzly Bears"), "the Hole exiled the Bears");
+        final Card h = find(me, ZoneType.Battlefield, "Portable Hole");
+        Assert.assertFalse(h.getLeavesPlayCommands().isEmpty());
+        Assert.assertNull(GameCopier.unsupportedPending(g), String.valueOf(GameCopier.unsupportedPending(g)));
+        final GameCopier c = copier(g, true);
+        final Game cg = c.makeCopy();
+        final Card ch = c.find(h);
+        Assert.assertEquals(ch.getLeavesPlayCommands().size(), h.getLeavesPlayCommands().size());
+        cg.getAction().destroy(ch, null, true, null);
+        Assert.assertNotNull(find(c.find(opp), ZoneType.Battlefield, "Grizzly Bears"), "the copy returns the Bears");
+        Assert.assertNull(find(opp, ZoneType.Battlefield, "Grizzly Bears"), "the original is untouched");
+    }
+
     // ------------------------------------------------------------------ exiled with (Currency Converter)
 
     @Test(timeOut = 900000)
