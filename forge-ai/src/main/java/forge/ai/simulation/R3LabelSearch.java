@@ -93,6 +93,11 @@ public final class R3LabelSearch {
          * plays its best answer that keeps every piece.
          */
         public boolean holdPieces = true;
+        /**
+         * Architect review (N12): choice rows also play this many seeded random answers past the top-m cut (logged as
+         * "explore"), so the walk can learn options the ranker misranks. 0 = none.
+         */
+        public int exploreAnswers = 2;
         public int selectWorlds = 8;
         public int targetWorlds = 16;
         public boolean stratify = true;
@@ -136,7 +141,7 @@ public final class R3LabelSearch {
             return o;
         }
 
-        static final Set<String> KEYS = new TreeSet<>(Arrays.asList("maxCands", "policyTop", "holdPieces", "selectWorlds",
+        static final Set<String> KEYS = new TreeSet<>(Arrays.asList("maxCands", "policyTop", "holdPieces", "exploreAnswers", "selectWorlds",
                 "targetWorlds", "stratify", "topAnswers", "cac", "inline", "leaf", "maxTurns", "maxSteps", "horizon",
                 "proofLeaf", "profile", "solverSpec", "drawDepth", "seqCap", "samples", "oppMin", "oppMinIn",
                 "oppResponses", "oppDepth", "oppNodes", "maxUnresolvedShare", "seed"));
@@ -155,6 +160,7 @@ public final class R3LabelSearch {
             if (o.has("maxCands")) s.maxCands = o.get("maxCands").getAsInt();
             if (o.has("policyTop")) s.policyTop = o.get("policyTop").getAsInt();
             if (o.has("holdPieces")) s.holdPieces = o.get("holdPieces").getAsBoolean();
+            if (o.has("exploreAnswers")) s.exploreAnswers = o.get("exploreAnswers").getAsInt();
             if (o.has("selectWorlds")) s.selectWorlds = o.get("selectWorlds").getAsInt();
             if (o.has("targetWorlds")) s.targetWorlds = o.get("targetWorlds").getAsInt();
             if (o.has("stratify")) s.stratify = o.get("stratify").getAsBoolean();
@@ -198,7 +204,7 @@ public final class R3LabelSearch {
             }
             if (s.maxCands < 2 || s.selectWorlds < 1 || s.targetWorlds < 1 || s.topAnswers < 1 || s.maxTurns < 1
                     || s.maxSteps < 1 || s.horizon < 0 || s.drawDepth < 1 || s.seqCap < 1 || s.samples < 1
-                    || s.oppResponses < 0 || s.oppDepth < 1 || s.oppNodes < 1 || s.policyTop < 0
+                    || s.oppResponses < 0 || s.oppDepth < 1 || s.oppNodes < 1 || s.policyTop < 0 || s.exploreAnswers < 0
                     || !(s.maxUnresolvedShare >= 0 && s.maxUnresolvedShare <= 1)) {
                 throw new IllegalArgumentException("r3: counts out of range");
             }
@@ -213,6 +219,7 @@ public final class R3LabelSearch {
             o.addProperty("maxCands", maxCands);
             o.addProperty("policyTop", policyTop);
             o.addProperty("holdPieces", holdPieces);
+            o.addProperty("exploreAnswers", exploreAnswers);
             o.addProperty("selectWorlds", selectWorlds);
             o.addProperty("targetWorlds", targetWorlds);
             o.addProperty("stratify", stratify);
@@ -764,7 +771,7 @@ public final class R3LabelSearch {
             final Set<String> names = new TreeSet<>();
             for (Integer id : first.hold) {
                 final Card c = g.findById(id);
-                if (c != null && c.getController() == p && !c.isInZone(ZoneType.Battlefield)) names.add(c.getName());
+                if (c != null && c.getController() == p) names.add(c.getName());
             }
             if (names.isEmpty()) return false;
             for (SpellAbility sa : mine) {
@@ -1094,7 +1101,7 @@ public final class R3LabelSearch {
 
         String key() {
             final String k = pass ? "pass" : hostId + "|" + land + "|" + desc;
-            return hold == null ? k : "hold:" + k;
+            return hold == null ? k : "hold" + hold + ":" + k;
         }
 
         static PCand pass(final String src) {
@@ -1103,7 +1110,11 @@ public final class R3LabelSearch {
 
         /** Hold the pieces: pass now, and our own play in the rest of the root turn never spends {@code ids}. */
         static PCand holdPass(final Set<Integer> ids) {
-            return new PCand(true, -1, "", false, "hold: pass", "hold", false, ids);
+            return holdPass(ids, "hold: pass");
+        }
+
+        static PCand holdPass(final Set<Integer> ids, final String label) {
+            return new PCand(true, -1, "", false, label, "hold", false, ids);
         }
 
         /** Hold the pieces: {@code sa} (spends none) now, then the same constraint as {@link #holdPass}. */
@@ -1141,9 +1152,11 @@ public final class R3LabelSearch {
      * accepts (Force of Will's pitch, a sacrifice outlet, the host sacrificing itself); a discard by us in its chain (a
      * looter). "May": Forge pays the cost and picks the discard later, so any piece it could take counts.
      */
-    static Set<String> spends(final SpellAbility sa, final Player me, final Set<String> pieces) {
+    static Set<String> spends(final SpellAbility sa, final Player me, final Set<String> pieces0) {
         final Set<String> out = new TreeSet<>();
-        if (pieces == null || pieces.isEmpty() || sa == null) return out;
+        if (sa == null || pieces0 == null || (pieces0 != ANY && pieces0.isEmpty())) return out;
+        final java.util.function.Predicate<String> any = n -> pieces0 == ANY || pieces0.contains(n);
+        final Set<String> pieces = new AbstractNameSet(any);
         final Card host = sa.getHostCard();
         if (host != null && pieces.contains(host.getName()) && !sa.isLandAbility()
                 && (host.isInZone(ZoneType.Hand) || host.isInZone(ZoneType.Graveyard) || host.isInZone(ZoneType.Exile)
@@ -1184,11 +1197,43 @@ public final class R3LabelSearch {
         return out;
     }
 
-    /** The ids of {@code me}'s cards (any zone but the battlefield) whose names are among {@code names}. */
+    /** Architect review (N12): every card counts as spendable ({@link #spends} with this set: any name). */
+    static final Set<String> ANY = Collections.unmodifiableSet(new HashSet<String>());
+
+    /** A read-only name set by predicate (contains only). */
+    static final class AbstractNameSet extends java.util.AbstractSet<String> {
+        final java.util.function.Predicate<String> p;
+
+        AbstractNameSet(final java.util.function.Predicate<String> p) {
+            this.p = p;
+        }
+
+        @Override
+        public boolean contains(final Object o) {
+            return o instanceof String n && p.test(n);
+        }
+
+        @Override
+        public java.util.Iterator<String> iterator() {
+            return Collections.<String>emptyIterator();
+        }
+
+        @Override
+        public int size() {
+            return 0;
+        }
+
+        @Override
+        public boolean isEmpty() {
+            return false;
+        }
+    }
+
+    /** The ids of {@code me}'s cards (any zone) whose names are among {@code names}. */
     static Set<Integer> pieceIds(final Player me, final Set<String> names) {
         final Set<Integer> ids = new TreeSet<>();
         for (Card c : me.getAllCards()) {
-            if (!c.isInZone(ZoneType.Battlefield) && names.contains(c.getName())) ids.add(c.getId());
+            if (names.contains(c.getName())) ids.add(c.getId());
         }
         return ids;
     }
@@ -1211,7 +1256,9 @@ public final class R3LabelSearch {
         final boolean recPass = recorded == null || recorded.isEmpty() || recorded.get(0) == null;
         final PCand rec = recPass ? PCand.pass("recorded") : PCand.of(recorded.get(0), "recorded");
         final Set<String> pieces = spec.holdPieces ? env.routePieces(live, liveMe) : Collections.<String>emptySet();
-        if (!recPass) rec.spends = spends(recorded.get(0), liveMe, pieces);
+        // architect review (N12): any card spent offers the hold; the route pieces only order the holds
+        final Set<String> spendable = spec.holdPieces ? ANY : Collections.<String>emptySet();
+        if (!recPass) rec.spends = spends(recorded.get(0), liveMe, spendable);
         out.put(rec.key(), rec);
         // owner ruling 10-30: the hold alternatives go right after the recorded move, so no cap can drop them
         final List<PCand> holds = new ArrayList<>();
@@ -1244,7 +1291,7 @@ public final class R3LabelSearch {
                     }
                     if (drawsCards(sa) && sa.canPlay() && ComputerUtilCost.canPayCost(sa, me, false)) {
                         final PCand c = PCand.of(sa, "draw");
-                        c.spends = spends(sa, me, pieces);
+                        c.spends = spends(sa, me, spendable);
                         draws.add(c);
                     }
                 } catch (RuntimeException e) {
@@ -1256,28 +1303,45 @@ public final class R3LabelSearch {
             for (SpellAbility sa : top) {
                 if (sa != null) {
                     final PCand c = PCand.of(sa, "policy");
-                    c.spends = spends(sa, me, pieces);
+                    c.spends = spends(sa, me, spendable);
                     policy.add(c);
                 }
             }
-            boolean spending = !rec.spends.isEmpty();
-            for (PCand c : draws) spending |= !c.spends.isEmpty();
-            for (PCand c : policy) spending |= !c.spends.isEmpty();
-            if (spending) {
-                // hold every piece any candidate could spend: a hold pass, and the policy's best non-spending action
-                final Set<String> spent = new TreeSet<>(rec.spends);
-                for (PCand c : draws) spent.addAll(c.spends);
-                for (PCand c : policy) spent.addAll(c.spends);
+            // architect review (N12) response rows: an opponent object on top of the stack, our real answers to it
+            final List<PCand> answers = new ArrayList<>();
+            if (!g.getStack().isEmpty() && !me.getOpponents().isEmpty()) {
+                final SpellAbility ot = g.getStack().peek().getSpellAbility();
+                if (ot != null && ot.getActivatingPlayer() != me && !ot.isManaAbility()) {
+                    for (SpellAbility sa : OppMin.responses(g, me, ot.getActivatingPlayer(), ot)) {
+                        final PCand c = PCand.of(sa, "respond");
+                        c.spends = spends(sa, me, spendable);
+                        answers.add(c);
+                    }
+                }
+            }
+            final Set<String> spent = new TreeSet<>(rec.spends);
+            for (PCand c : draws) spent.addAll(c.spends);
+            for (PCand c : policy) spent.addAll(c.spends);
+            for (PCand c : answers) spent.addAll(c.spends);
+            if (!spent.isEmpty()) {
+                // keep the card: hold the route pieces first (the catalog orders), then every card any candidate spends;
+                // and the policy's best non-spending action
+                final Set<String> route = new TreeSet<>(spent);
+                route.retainAll(pieces);
                 final Set<Integer> ids = pieceIds(me, spent);
+                if (!route.isEmpty() && !route.equals(spent)) {
+                    holds.add(PCand.holdPass(pieceIds(me, route), "hold: pass (route pieces)"));
+                }
                 holds.add(PCand.holdPass(ids));
                 for (SpellAbility sa : top) {
-                    if (sa != null && spends(sa, me, pieces).isEmpty()) {
+                    if (sa != null && spends(sa, me, spendable).isEmpty()) {
                         holds.add(PCand.holdOf(sa, ids));
                         break;
                     }
                 }
             }
             for (PCand c : holds) out.putIfAbsent(c.key(), c);
+            for (PCand c : answers) out.putIfAbsent(c.key(), c);
             out.putIfAbsent("pass", PCand.pass("pass"));
             for (PCand c : draws) out.putIfAbsent(c.key(), c);
             for (PCand c : lands) out.putIfAbsent(c.key(), c);
@@ -1293,6 +1357,14 @@ public final class R3LabelSearch {
     public static boolean contested(final List<PCand> cands) {
         for (PCand c : cands) {
             if (!c.pass) return true;
+        }
+        return false;
+    }
+
+    /** Architect review (N12): whether the menu answers an opponent object on the stack (a response row). */
+    public static boolean responseRow(final List<PCand> cands) {
+        for (PCand c : cands) {
+            if ("respond".equals(c.src)) return true;
         }
         return false;
     }
@@ -1551,6 +1623,24 @@ public final class R3LabelSearch {
                     res.extra.addProperty("hold_answer", keep);
                 }
             }
+            // architect review (N12): exploration slots, seeded random answers past the cut
+            final Set<Integer> explore = new TreeSet<>();
+            if (spec.exploreAnswers > 0) {
+                final List<Integer> pool = new ArrayList<>();
+                for (int i : idx) {
+                    if (!played.contains(i)) pool.add(i);
+                }
+                Collections.shuffle(pool, new Random(LookaheadSearch.mix(seed0, 0x4558504CL)));
+                for (int i = 0; i < pool.size() && explore.size() < spec.exploreAnswers; i++) {
+                    explore.add(pool.get(i));
+                    played.add(pool.get(i));
+                }
+                if (!explore.isEmpty()) {
+                    final JsonArray ex = new JsonArray();
+                    for (int i : explore) ex.add(i);
+                    res.extra.add("explore", ex);
+                }
+            }
             res.extra.addProperty("n_enum", row.nEnum());
             res.extra.addProperty("capped", row.capped());
             res.extra.addProperty("n_ranked", row.size());
@@ -1567,7 +1657,7 @@ public final class R3LabelSearch {
             res.extra.add("ranked", ranked);
             final boolean minSel = spec.oppMin && "both".equals(spec.oppMinIn);
             for (int i : played) {
-                final CandOut co = new CandOut(row.desc(i), i == 0 ? "forge" : "answer");
+                final CandOut co = new CandOut(row.desc(i), i == 0 ? "forge" : explore.contains(i) ? "explore" : "answer");
                 co.key = row.key(i);
                 co.rank = row.score(i);
                 co.spends = spentNames.get(i);
