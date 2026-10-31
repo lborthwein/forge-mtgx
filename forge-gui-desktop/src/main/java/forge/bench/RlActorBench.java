@@ -997,6 +997,10 @@ public final class RlActorBench {
             voidReason = DecisionLog.VOID; // bvw-decision-log-1027: the game stopped at its log's divergence
         } else if (crash != null || game == null) {
             voidReason = "crash";
+        } else if (forge.ai.simulation.DeckBeliefModel.refusal() != null) {
+            // review #155 S1 (follow-up): a deck-belief refusal (sticky) voids every game that ends after it, and like
+            // every void its result is zeroed below
+            voidReason = "deck_belief_refused";
         }
         out.fatal = seat.fatal;
 
@@ -1057,10 +1061,6 @@ public final class RlActorBench {
         forgeDecided.keySet().removeAll(NOT_DECISIONS);
         forgeDecided.putAll(seat.forgeDecidedExtra);
 
-        if (voidReason == null && forge.ai.simulation.DeckBeliefModel.refusal() != null) {
-            // review #155 S1: a deck-belief refusal (sticky) voids every game that ends after it
-            voidReason = "deck_belief_refused";
-        }
         final JsonObject end = new JsonObject();
         end.addProperty("game_uid", Long.toUnsignedString(uid));
         end.add("result", RlWire.intArray(result));
