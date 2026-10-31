@@ -74,9 +74,11 @@ public class BeliefDeckTest extends SimulationTest {
             Assert.assertTrue(a.contains("Thraben Inspector"), "the model's partner card is missing: " + a);
         }
         // nothing shown: Thraben Inspector is no likelier than the other cards (h = 0)
+        // one generator across draws: java.util.Random's first nextDouble() is nearly equal for small consecutive seeds
         int hits = 0;
+        final Random r = new Random(12345);
         for (int i = 0; i < 400; i++) {
-            if (m.sample(Collections.emptyList(), pool, 1, new Random(i)).contains("Thraben Inspector")) {
+            if (m.sample(Collections.emptyList(), pool, 1, r).contains("Thraben Inspector")) {
                 hits++;
             }
         }
