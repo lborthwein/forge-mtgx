@@ -1,5 +1,5 @@
 Name:Noonday Glare
 ManaCost:2 W
 Types:Sorcery
-A:SP$ TapAll | ValidCards$ Creature.OppCtrl+toughnessLE2 | SpellDescription$ Tap all creatures your opponents control with toughness 2 or less.
-Oracle:Tap all creatures your opponents control with toughness 2 or less.
+A:SP$ TapAll | ValidCards$ Creature.OppCtrl+toughnessLE2 | SpellDescription$ Tap each creature an opponent controls with toughness 2 or less.
+Oracle:Tap each creature an opponent controls with toughness 2 or less.
