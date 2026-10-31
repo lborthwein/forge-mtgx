@@ -339,6 +339,8 @@ public final class HonestLabel {
         public String copyGap;
         /** gamecopier-fidelity-1030: proofs refused because of {@link #copyGap}. */
         public int gapRefused;
+        /** gamecopier-fidelity-1030: "carried" when the root had pending triggers or commands and the copies carry them all. */
+        public String copyPending;
         /** bvw-step1-build-1024: the check's solver work (null unless the spec meters). */
         public JsonObject meter;
 
@@ -365,6 +367,9 @@ public final class HonestLabel {
             o.addProperty("ms", Math.round(ms * 10) / 10.0);
             if (error != null) o.addProperty("error", error);
             if (meter != null) o.add("meter", meter);
+            if (copyPending != null) {
+                o.addProperty("copy_pending", copyPending);
+            }
             if (copyGap != null) {
                 o.addProperty("copy_gap", copyGap);
                 o.addProperty("gap_refused", gapRefused);
@@ -462,7 +467,8 @@ public final class HonestLabel {
                 // gamecopier-fidelity-1030: what the copies cannot carry; a gap that can act this turn leaves the
                 // position unresolved (no check runs), one that acts only after this turn refuses proofs past it
                 final List<String> gaps = GameCopier.unsupportedPending(live);
-                if (gaps == null && ForcedWinSolver.RECEIPTS && GameCopier.hasPending(live)) {
+                if (gaps == null && GameCopier.hasPending(live)) {
+                    r.copyPending = "carried";
                     ForcedWinSolver.receipt("FORCED_WIN copy-pending label turn=" + ph.getTurn() + " phase=" + ph.getPhase() + " carried");
                 }
                 if (gaps != null) {
