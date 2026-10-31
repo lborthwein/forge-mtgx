@@ -121,6 +121,7 @@ public final class ForcedWinPlanner {
             s.phyrexianLife = phyrexianLife;
             s.targetRefs.addAll(targetRefs);
             s.engineSpell = engineSpell;
+            s.byName = byName;
             s.triggerRef = triggerRef;
             s.pickName = pickName;
             s.expHandIdx = expHandIdx;
@@ -165,6 +166,11 @@ public final class ForcedWinPlanner {
 
         /** ENGINE steps: the ability is a spell (the adversary's counter targets). */
         boolean engineSpell;
+        /**
+         * solver-cap12-1030 R2-3 (loopMacro only; false = off): a loop body's step, located by its host's name when the
+         * host itself cannot play it (fungible copies, see Follower.locate). Not part of {@link #loopKey}.
+         */
+        boolean byName;
         /**
          * REPEAT steps (search-bones-1015, the engine search's cycles with progress): the loop body, played {@link #times}
          * times in order; null for every other step.
@@ -226,6 +232,12 @@ public final class ForcedWinPlanner {
     /** A winning line of the abstract model. */
     static final class Line {
         final List<Step> steps;
+        /**
+         * solver-cap12-1030 R2-4 (c), engineAnyWindow only (null = the line starts in our main phase, as before): the
+         * window an engine line was found in (the opponent's end step, say) and its turn; the follower also acts there.
+         */
+        forge.game.phase.PhaseType window;
+        int windowTurn = -1;
         final List<String> pileNames;
         /** 0: wins this turn; 1: wins by our next turn (after one pass). */
         final int winTurn;

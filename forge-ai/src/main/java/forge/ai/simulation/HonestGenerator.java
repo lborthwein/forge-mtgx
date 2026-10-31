@@ -93,6 +93,7 @@ public final class HonestGenerator {
         final JsonObject o = new com.google.gson.Gson().toJsonTree(c).getAsJsonObject();
         final java.util.Map<String, Object> defaults = new java.util.HashMap<>(ForcedWinSolver.Config.STEP1_DEFAULTS);
         defaults.putAll(ForcedWinSolver.Config.V2_DEFAULTS); // labeller v2: off = the recorded config unchanged
+        defaults.putAll(ForcedWinSolver.Config.R2_DEFAULTS); // solver-cap12 round 2: off = unchanged
         for (java.util.Map.Entry<String, Object> e : defaults.entrySet()) {
             final com.google.gson.JsonElement v = o.get(e.getKey());
             if (v != null && v.isJsonPrimitive() && String.valueOf(e.getValue()).equals(v.getAsString())) {
