@@ -972,6 +972,7 @@ final class ForcedWinEngine {
             synchronized (live) {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
+                copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
                 copyStackIf(copier, live, lim.stack); // R3-5
                 root.g = copier.makeCopy();
@@ -2340,6 +2341,7 @@ final class ForcedWinEngine {
             forge.util.IdScope.install(cloneScope(node.ids));
             final GameCopier copier = new GameCopier(node.g, true);
             copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
+                copier.setPendingStrict(true); // review #156 S2: a copy with a gap fails this node / world
                 copier.setCopyFidelity(1); // storm count, per-turn records
             copyStackIf(copier, node.g, lim.stack); // R3-5
             final Game g = copier.makeCopy();
@@ -2756,8 +2758,14 @@ final class ForcedWinEngine {
                 final GameCopier rc = new GameCopier(g, true);
                 rc.setCopyFidelity(1);
                 rc.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
+                rc.setPendingStrict(true); // review #156 S2
                 copyStackIf(rc, g, true);
-                snapshot = rc.makeCopy();
+                try {
+                    snapshot = rc.makeCopy();
+                } catch (IllegalStateException e) {
+                    failed = true; // review #156 S2: a pending object the copy cannot carry drops the move
+                    return null;
+                }
                 snapshotMe = (Player) rc.find(getPlayer());
                 rest = true;
             }

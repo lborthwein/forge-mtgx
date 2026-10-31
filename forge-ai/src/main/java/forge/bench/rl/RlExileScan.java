@@ -134,6 +134,7 @@ public final class RlExileScan implements PriorityDecisionListener {
                 synchronized (g) {
                     final GameCopier copier = new GameCopier(g, true);
                     copier.setCopyFidelity(1);
+                    copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030 (review #156 S2: a research copy that feeds labels)
                     c = copier.makeCopy();
                     cp = (Player) copier.find(p);
                 }

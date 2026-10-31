@@ -129,6 +129,17 @@ public class GameCopier {
         this.copyPending = on;
     }
 
+    /**
+     * gamecopier-fidelity-1030 (review #156 S2): with {@link #copyPending}, a copy that leaves anything pending out
+     * throws instead of returning an unfaithful game (a search node or verification world then fails, so no line is
+     * proven through it). Off by default.
+     */
+    private boolean pendingStrict = false;
+
+    public void setPendingStrict(boolean on) {
+        this.pendingStrict = on;
+    }
+
     /** gamecopier-fidelity-1030: what the last copy could not carry (empty = everything pending was carried). */
     public List<String> getPendingGaps() {
         return java.util.Collections.unmodifiableList(pendingGaps);
@@ -476,6 +487,9 @@ public class GameCopier {
         if (copyPending) {
             // gamecopier-fidelity-1030: delayed triggers and pending commands, before state-based actions can fire them
             copyPendingState(newGame);
+            if (pendingStrict && !pendingGaps.isEmpty()) {
+                throw new IllegalStateException("pending gap: " + pendingGaps);
+            }
         }
 
         // Undo effects first before calculating them below, to avoid them applying twice.
@@ -880,10 +894,13 @@ public class GameCopier {
                 return true;
             }
         }
-        if (!g.sbaCheckedCommandList.isEmpty()) {
+        if (!g.sbaCheckedCommandList.isEmpty() || g.getPhaseHandler().hasExtraTurnsOrPhases()) {
             return true;
         }
         for (Card c : g.getCardsInGame()) {
+            if (c.hasTempControllers()) {
+                return true;
+            }
             if (!c.getStaticCommandList().isEmpty()) {
                 return true;
             }
@@ -1012,6 +1029,36 @@ public class GameCopier {
                 newGame.addSBACheckedCommand(m);
             }
         }
+        copyExtraTurns(newGame);
+        // review #156 S1-1: temporary controllers with their timestamps (Threaten's "lose control" removes its own)
+        for (Card c : origGame.getCardsIn(ZoneType.Battlefield)) {
+            final Card nc = cardMap.get(c);
+            if (nc != null && c.hasTempControllers()) {
+                nc.copyControllersFrom(c, p -> {
+                    final Player m = playerMap.get(p);
+                    if (m == null) {
+                        throw new IllegalStateException("controller " + p);
+                    }
+                    return m;
+                });
+                pendingCopied++;
+            }
+        }
+        // a card outside the copied zones that holds commands: they cannot be carried (review #156 S3)
+        final java.util.Set<ZoneType> copied = java.util.EnumSet.noneOf(ZoneType.class);
+        java.util.Collections.addAll(copied, ZONES);
+        for (Card c : origGame.getCardsInGame()) {
+            if (c.getZone() != null && copied.contains(c.getZone().getZoneType())) {
+                continue;
+            }
+            boolean any = !c.getStaticCommandList().isEmpty();
+            for (List<GameCommand> l : c.getCommandListsForCopy()) {
+                any |= !l.isEmpty();
+            }
+            if (any) {
+                gap("card-outside", c.getName() + "@" + (c.getZone() == null ? "none" : c.getZone().getZoneType()));
+            }
+        }
         for (ZoneType zone : ZONES) {
             for (Card c : origGame.getCardsIn(zone)) {
                 final Card nc = cardMap.get(c);
@@ -1056,6 +1103,74 @@ public class GameCopier {
                 gap(where, "player");
             }
         }
+    }
+
+    /**
+     * Review #156 S1-2: the pending extra turns (Time Walk) and extra phases (an additional combat), with their delayed
+     * triggers and skip-untap / no-schemes abilities, mapped into the copy; a part that cannot be mapped is a gap.
+     */
+    private void copyExtraTurns(Game newGame) {
+        final forge.game.phase.PhaseHandler from = origGame.getPhaseHandler();
+        if (!from.hasExtraTurnsOrPhases()) {
+            return;
+        }
+        final List<forge.game.phase.ExtraTurn> turns = new ArrayList<>();
+        for (forge.game.phase.ExtraTurn et : from.getExtraTurnsView()) {
+            final Player p = et.getPlayer() == null ? null : playerMap.get(et.getPlayer());
+            if (p == null) {
+                gap("extraTurn", "player");
+                return;
+            }
+            final forge.game.phase.ExtraTurn n = new forge.game.phase.ExtraTurn(p);
+            for (Trigger t : new ArrayList<>(et.getDelayedTriggers())) {
+                final Trigger m = copyTrigger(t, newGame, "extraTurn");
+                if (m == null) {
+                    return;
+                }
+                n.addTrigger(m);
+            }
+            if (et.getSkipUntapSA() != null) {
+                final Object m = mapPending(et.getSkipUntapSA(), newGame, "extraTurn.skipUntap");
+                if (m == REFUSE) {
+                    gap("extraTurn", "skipUntap");
+                    return;
+                }
+                n.setSkipUntapSA((SpellAbility) m);
+            }
+            if (et.getCantSetSchemesInMotionSA() != null) {
+                final Object m = mapPending(et.getCantSetSchemesInMotionSA(), newGame, "extraTurn.schemes");
+                if (m == REFUSE) {
+                    gap("extraTurn", "schemes");
+                    return;
+                }
+                n.setCantSetSchemesInMotionSA((SpellAbility) m);
+            }
+            turns.add(n);
+        }
+        // extra phases: one object can sit in two stacks (a chain), so map them by identity
+        final Map<forge.game.phase.ExtraPhase, forge.game.phase.ExtraPhase> pm = new java.util.IdentityHashMap<>();
+        final Map<forge.game.phase.PhaseType, List<forge.game.phase.ExtraPhase>> phases = new java.util.EnumMap<>(forge.game.phase.PhaseType.class);
+        for (Map.Entry<forge.game.phase.PhaseType, List<forge.game.phase.ExtraPhase>> e : from.getExtraPhasesView().entrySet()) {
+            final List<forge.game.phase.ExtraPhase> l = new ArrayList<>();
+            for (forge.game.phase.ExtraPhase ep : e.getValue()) {
+                forge.game.phase.ExtraPhase n = pm.get(ep);
+                if (n == null) {
+                    n = new forge.game.phase.ExtraPhase(ep.getPhase());
+                    for (Trigger t : new ArrayList<>(ep.getDelayedTriggers())) {
+                        final Trigger m = copyTrigger(t, newGame, "extraPhase");
+                        if (m == null) {
+                            return;
+                        }
+                        n.addTrigger(m);
+                    }
+                    pm.put(ep, n);
+                }
+                l.add(n);
+            }
+            phases.put(e.getKey(), l);
+        }
+        newGame.getPhaseHandler().dangerouslySetExtra(turns, phases);
+        pendingCopied += turns.size() + pm.size();
     }
 
     /** A command of the original as a command of the copy (memoized: one command in two lists stays one), or null. */
@@ -1206,7 +1321,8 @@ public class GameCopier {
             return mapCardPending(c, newGame);
         }
         if (v instanceof Player) {
-            final Player m = playerMap.get(v);
+            // players are equal by id: a player of another game must not map to ours (review #156 S3)
+            final Player m = ((Player) v).getGame() == origGame ? playerMap.get(v) : null;
             return m == null ? REFUSE : m;
         }
         if (v instanceof Game) {
@@ -1509,6 +1625,17 @@ public class GameCopier {
                 trig.put(e.getKey(), m);
             }
             b.setTriggeringObjects(trig);
+            // replacing objects: an LKI copy shares the original's map (review #156 S3); give it its own, mapped
+            final Map<forge.game.ability.AbilityKey, Object> rep = forge.game.ability.AbilityKey.newMap();
+            for (Map.Entry<forge.game.ability.AbilityKey, Object> e : a.getReplacingObjects().entrySet()) {
+                final Object m = mapPending(e.getValue(), newGame, where);
+                if (m == REFUSE) {
+                    gap(where, "replacing " + e.getKey() + "=" + className(e.getValue()));
+                    return false;
+                }
+                rep.put(e.getKey(), m);
+            }
+            b.setReplacingObjects(rep);
             if (!a.getPaidHash().isEmpty()) {
                 final TreeBasedTable<String, Boolean, forge.game.card.CardCollection> paid = TreeBasedTable.create();
                 for (Table.Cell<String, Boolean, forge.game.card.CardCollection> cell : a.getPaidHash().cellSet()) {
@@ -1538,10 +1665,25 @@ public class GameCopier {
         return leaks(root, newGame, java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>()), 0, "");
     }
 
-    private String leaks(Object v, Game newGame, java.util.Set<Object> seen, int depth, String path) {
-        if (v == null || depth > 8 || v instanceof String || v instanceof Number || v instanceof Boolean
-                || v instanceof Enum || v instanceof Class || !seen.add(v)) {
+    /** Values that hold no game object (walk stops, clean). */
+    private static boolean inert(Object v) {
+        return v instanceof String || v instanceof Number || v instanceof Boolean || v instanceof Character
+                || v instanceof Enum || v instanceof Class || v instanceof java.util.regex.Pattern
+                || v instanceof java.time.temporal.TemporalAccessor || v instanceof java.util.UUID
+                || v instanceof java.util.Locale || v instanceof forge.card.mana.ManaCost
+                || v instanceof forge.card.mana.ManaCostShard || v instanceof forge.card.ColorSet;
+    }
+
+    /**
+     * {@code onPath}: the objects on the walk's current path only (a cycle stops; an object reached by another path is
+     * walked again). Too deep, or a holder it does not know how to walk, counts as a leak (review #156 S2).
+     */
+    private String leaks(Object v, Game newGame, java.util.Set<Object> onPath, int depth, String path) {
+        if (v == null || inert(v)) {
             return null;
+        }
+        if (depth > 24) {
+            return path + "!depth";
         }
         if (v instanceof Card) {
             return ((Card) v).getGame() == origGame ? path + "=card " + v : null;
@@ -1561,20 +1703,22 @@ public class GameCopier {
                 || v instanceof forge.game.phase.Phase) {
             return v == origGame.getAction() || v == origGame.getTriggerHandler() || isOrigPhase(v) ? path + "=" + className(v) : null;
         }
-        String r;
-        if (v instanceof Iterable && !(v instanceof GameObject)) {
-            int i = 0;
-            for (Object o : (Iterable<?>) v) {
-                if ((r = leaks(o, newGame, seen, depth + 1, path + "[" + i++ + "]")) != null) {
-                    return r;
-                }
-            }
-            return null;
+        if (!onPath.add(v)) {
+            return null; // a cycle on this path
         }
+        try {
+            return leaks0(v, newGame, onPath, depth, path);
+        } finally {
+            onPath.remove(v);
+        }
+    }
+
+    private String leaks0(Object v, Game newGame, java.util.Set<Object> onPath, int depth, String path) {
+        String r;
         if (v instanceof Map) {
             for (Map.Entry<?, ?> e : ((Map<?, ?>) v).entrySet()) {
-                if ((r = leaks(e.getKey(), newGame, seen, depth + 1, path + "{key}")) != null
-                        || (r = leaks(e.getValue(), newGame, seen, depth + 1, path + "{" + e.getKey() + "}")) != null) {
+                if ((r = leaks(e.getKey(), newGame, onPath, depth + 1, path + "{key}")) != null
+                        || (r = leaks(e.getValue(), newGame, onPath, depth + 1, path + "{" + e.getKey() + "}")) != null) {
                     return r;
                 }
             }
@@ -1582,32 +1726,64 @@ public class GameCopier {
         }
         if (v instanceof Table) {
             for (Table.Cell<?, ?, ?> c : ((Table<?, ?, ?>) v).cellSet()) {
-                if ((r = leaks(c.getRowKey(), newGame, seen, depth + 1, path + "{row}")) != null
-                        || (r = leaks(c.getColumnKey(), newGame, seen, depth + 1, path + "{col}")) != null
-                        || (r = leaks(c.getValue(), newGame, seen, depth + 1, path + "{cell}")) != null) {
+                if ((r = leaks(c.getRowKey(), newGame, onPath, depth + 1, path + "{row}")) != null
+                        || (r = leaks(c.getColumnKey(), newGame, onPath, depth + 1, path + "{col}")) != null
+                        || (r = leaks(c.getValue(), newGame, onPath, depth + 1, path + "{cell}")) != null) {
                     return r;
                 }
             }
             return null;
         }
         if (v instanceof Multimap) {
-            return leaks(((Multimap<?, ?>) v).asMap(), newGame, seen, depth + 1, path);
+            return leaks(((Multimap<?, ?>) v).asMap(), newGame, onPath, depth + 1, path);
         }
-        if (v instanceof Object[]) {
+        if (v instanceof Iterable && !(v instanceof GameObject) && !v.getClass().getName().startsWith("forge.game.card.Card$")) {
+            int i = 0;
+            for (Object o : (Iterable<?>) v) {
+                if ((r = leaks(o, newGame, onPath, depth + 1, path + "[" + i++ + "]")) != null) {
+                    return r;
+                }
+            }
+            if (!v.getClass().getName().startsWith("forge.")) {
+                return null; // a JDK / Guava collection: its elements are all it holds
+            }
+        }
+        if (v.getClass().isArray()) {
+            if (v.getClass().getComponentType().isPrimitive()) {
+                return null;
+            }
             int i = 0;
             for (Object o : (Object[]) v) {
-                if ((r = leaks(o, newGame, seen, depth + 1, path + "[" + i++ + "]")) != null) {
+                if ((r = leaks(o, newGame, onPath, depth + 1, path + "[" + i++ + "]")) != null) {
                     return r;
                 }
             }
             return null;
         }
+        if (v instanceof java.util.Optional) {
+            return leaks(((java.util.Optional<?>) v).orElse(null), newGame, onPath, depth + 1, path + ".get");
+        }
+        if (v instanceof com.google.common.base.Optional) {
+            return leaks(((com.google.common.base.Optional<?>) v).orNull(), newGame, onPath, depth + 1, path + ".get");
+        }
+        if (v instanceof java.util.concurrent.atomic.AtomicReference) {
+            return leaks(((java.util.concurrent.atomic.AtomicReference<?>) v).get(), newGame, onPath, depth + 1, path + ".get");
+        }
+        if (v instanceof org.apache.commons.lang3.tuple.Pair) {
+            final org.apache.commons.lang3.tuple.Pair<?, ?> pr = (org.apache.commons.lang3.tuple.Pair<?, ?>) v;
+            return (r = leaks(pr.getLeft(), newGame, onPath, depth + 1, path + ".left")) != null ? r
+                    : leaks(pr.getRight(), newGame, onPath, depth + 1, path + ".right");
+        }
         if (v instanceof com.google.common.base.Supplier) {
-            return leaks(((com.google.common.base.Supplier<?>) v).get(), newGame, seen, depth + 1, path + ".get");
+            return leaks(((com.google.common.base.Supplier<?>) v).get(), newGame, onPath, depth + 1, path + ".get");
+        }
+        if (v instanceof java.util.concurrent.atomic.AtomicInteger || v instanceof java.util.concurrent.atomic.AtomicLong
+                || v instanceof java.util.concurrent.atomic.AtomicBoolean) {
+            return null;
         }
         final Class<?> k = v.getClass();
         if (!(k.getName().startsWith("forge.") || k.isSynthetic() || k.isHidden())) {
-            return null;
+            return path + "!holder " + k.getName(); // not known to hold no game object: refused
         }
         for (Class<?> c = k; c != null && c != Object.class; c = c.getSuperclass()) {
             for (java.lang.reflect.Field f : c.getDeclaredFields()) {
@@ -1616,7 +1792,7 @@ public class GameCopier {
                 }
                 try {
                     f.setAccessible(true);
-                    if ((r = leaks(f.get(v), newGame, seen, depth + 1, path + "." + f.getName())) != null) {
+                    if ((r = leaks(f.get(v), newGame, onPath, depth + 1, path + "." + f.getName())) != null) {
                         return r;
                     }
                 } catch (ReflectiveOperationException | RuntimeException e) {
