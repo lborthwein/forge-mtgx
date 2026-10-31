@@ -202,6 +202,16 @@ public final class ForcedWinSolver {
          */
         public boolean engineNodesPerSearch = false;
         /**
+         * solver-cap12-1030 round 2 (PREDECLARATION-solver-cap12-APPENDIX-round2; all false = off, the default, and then
+         * nothing changes). loopMacro (R2-3): the engine's general loop abstraction (loops by state recurrence, N chosen by
+         * the search, the outlet search after a loop, the stop rule). engineAfterPlanFail (R2-4 b): the engine also runs
+         * when the planner found lines and every one failed verification. engineAnyWindow (R2-4 c): the engine also runs
+         * at our priority with an empty stack outside our main phase 1 (main 2, end step, the opponent's turn).
+         * engineGateWide (R2-4 appendix): the engine gate also counts infect power against poison and treats a card the
+         * effect probe failed to learn as unmodeled.
+         */
+        public boolean loopMacro = false, engineAfterPlanFail = false, engineAnyWindow = false, engineGateWide = false;
+        /**
          * labeller-v2 item (d) (PREDECLARATION-labeller-v2.md; false = off, the default, and then nothing changes): in
          * each world a line must win against EVERY response in the opponent's response set at each of its priorities
          * while one of our spells or abilities is on top of the stack (pass, Forge AI's own answer, and each distinct
@@ -236,6 +246,10 @@ public final class ForcedWinSolver {
                 "engineSteps", 0, "evalSteps", 0, "engineCards", 0, "enginePathCards", 0, "adoptAttack", false,
                 "engineNodesPerSearch", false);
 
+        /** solver-cap12-1030 round 2: its keys, with their defaults (absent from a recorded config at these). */
+        public static final java.util.Map<String, Object> R2_DEFAULTS = java.util.Map.of("loopMacro", false,
+                "engineAfterPlanFail", false, "engineAnyWindow", false, "engineGateWide", false);
+
         /** Labeller v2 (PREDECLARATION-labeller-v2): its keys, with their defaults (absent from a recorded config at these). */
         public static final java.util.Map<String, Object> V2_DEFAULTS = java.util.Map.ofEntries(
                 java.util.Map.entry("oppMin", false), java.util.Map.entry("oppResponses", 4),
@@ -264,6 +278,10 @@ public final class ForcedWinSolver {
             c.enginePathCards = intOr(get.apply("enginePathCards"), c.enginePathCards);
             c.adoptAttack = "true".equals(get.apply("adoptAttack"));
             c.engineNodesPerSearch = "true".equals(get.apply("engineNodesPerSearch"));
+            c.loopMacro = "true".equals(get.apply("loopMacro"));
+            c.engineAfterPlanFail = "true".equals(get.apply("engineAfterPlanFail"));
+            c.engineAnyWindow = "true".equals(get.apply("engineAnyWindow"));
+            c.engineGateWide = "true".equals(get.apply("engineGateWide"));
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -350,7 +368,9 @@ public final class ForcedWinSolver {
                 + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes : "")
                 + (cacPicks ? " cacPicks V=" + cacVariants + " cap=" + cacCap : "") + (cacLine ? " cacLine" : "")
                 + (planScry ? " planScry max=" + planScryMax : "") + (planDiscard ? " planDiscard" : "")
-                + (payRecord ? " payRecord V=" + payVariants : "") + (engineNodesPerSearch ? " engineNodesPerSearch" : "");
+                + (payRecord ? " payRecord V=" + payVariants : "") + (engineNodesPerSearch ? " engineNodesPerSearch" : "")
+                + (loopMacro ? " loopMacro" : "") + (engineAfterPlanFail ? " engineAfterPlanFail" : "")
+                + (engineAnyWindow ? " engineAnyWindow" : "") + (engineGateWide ? " engineGateWide" : "");
         }
     }
 
@@ -841,6 +861,20 @@ public final class ForcedWinSolver {
         return r;
     }
 
+    private static boolean anyUnplayable(ACard a) {
+        for (ForcedWinModel.Abil b : a.fromHand) {
+            if (b.unplayable) {
+                return true;
+            }
+        }
+        for (ForcedWinModel.Abil b : a.onBattlefield) {
+            if (b.unplayable) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private String lastOutcome = "?";
     private int lastPlannerNodes;
 
@@ -923,9 +957,28 @@ public final class ForcedWinSolver {
         final long t1 = System.nanoTime();
         final Eval best = evaluateTop(live, res.lines, index, cfg.paySearch ? t0 : System.nanoTime());
         engineNanos += System.nanoTime() - t1;
+        if (cfg.engineAfterPlanFail && evalSink != null && (best == null || best.pUnopposed < 1.0 || best.pBelief < 1.0
+                || best.worldsRun < cfg.worlds)) {
+            // R2-4 (b), a label's proposals: no planner line verified as forced (every world): the engine searches the
+            // position too, and its verified line joins the proposals (the label judges them all)
+            final Line engine = engineFallback(live, pos, index, t0, true);
+            receipt("FORCED_WIN engine-after-plan-fail" + tag() + " turn=" + pos.turn + " found=" + (engine != null));
+        }
         if (best == null || best.pBelief < cfg.threshold || best.pUnopposed < 1.0
                 || cfg.honestProbes && best.worldsRun < cfg.worlds) {
             lastOutcome = "declined";
+            if (cfg.engineAfterPlanFail) {
+                // R2-4 (b): every planner line failed verification: the engine searches the position itself
+                final Line engine = engineFallback(live, pos, index, t0, true);
+                if (engine != null) {
+                    if (!"likely-take".equals(lastOutcome)) {
+                        lastOutcome = "engine-take";
+                    }
+                    receipt("FORCED_WIN engine-after-plan-fail" + tag() + " turn=" + pos.turn + " " + engine);
+                    return engine;
+                }
+                lastOutcome = "declined";
+            }
             noLineKey = key;
             if (best == null) {
                 // diagnostics (solver-gaps-1015): a width-model mismatch, with the position the width search saw
@@ -1605,32 +1658,68 @@ public final class ForcedWinSolver {
      * side (an ability that targets a card or has a cost outside the model) or our board threatens lethal.
      */
     private Line engineFallback(Game live, Position pos, int index, long t0) {
-        if (!cfg.engine || engineTurn == pos.turn || !live.getPhaseHandler().is(PhaseType.MAIN1)) {
+        return engineFallback(live, pos, index, t0, false);
+    }
+
+    /** R2-4: the window key of the last engine run (turn and phase; MAIN1 only = the turn, as before). */
+    private String engineWindow = null;
+
+    /**
+     * As above. {@code planFailed} (R2-4 b, engineAfterPlanFail): the planner's lines all failed verification, so the
+     * width model mismatched the position: the unmodeled/power gate is skipped. R2-4 c (engineAnyWindow): the engine also
+     * runs at our main 2 and the opponent's end step (once per window). R2-4 appendix (engineGateWide): the gate counts
+     * infect power against the opponent's poison and treats a card with an ability the probe could not play as unmodeled.
+     */
+    private Line engineFallback(Game live, Position pos, int index, long t0, boolean planFailed) {
+        final PhaseHandler eph = live.getPhaseHandler();
+        final boolean main1 = eph.is(PhaseType.MAIN1) && eph.isPlayerTurn(me);
+        final boolean otherWindow = cfg.engineAnyWindow && (eph.isPlayerTurn(me) ? eph.is(PhaseType.MAIN2)
+                : eph.is(PhaseType.END_OF_TURN));
+        if (!cfg.engine || !main1 && !otherWindow && !eph.is(PhaseType.MAIN1)) {
+            return null;
+        }
+        final String window = pos.turn + (main1 || !otherWindow ? "" : ":" + eph.getPhase());
+        if (otherWindow || cfg.engineAnyWindow) {
+            if (window.equals(engineWindow)) {
+                return null;
+            }
+        } else if (engineTurn == pos.turn) {
             return null;
         }
         boolean unmodeled = false;
         for (ACard a : pos.hand) {
-            unmodeled |= a.unmodeled;
+            unmodeled |= a.unmodeled || cfg.engineGateWide && anyUnplayable(a);
         }
         for (ACard a : pos.battlefield) {
-            unmodeled |= a.unmodeled;
+            unmodeled |= a.unmodeled || cfg.engineGateWide && anyUnplayable(a);
         }
-        int power = 0;
+        int power = 0, infect = 0;
         for (Card c : me.getCreaturesInPlay()) {
             power += Math.max(0, c.getNetCombatDamage());
+            if (c.hasKeyword(forge.game.keyword.Keyword.INFECT)) {
+                infect += Math.max(0, c.getNetCombatDamage());
+            }
         }
-        if (!unmodeled && power < pos.oppLife) {
+        int poisonLeft = Integer.MAX_VALUE;
+        for (Player o : me.getOpponents()) {
+            poisonLeft = Math.min(poisonLeft, 10 - o.getPoisonCounters());
+        }
+        final boolean poisonLethal = cfg.engineGateWide && infect > 0 && infect >= poisonLeft;
+        if (!planFailed && !unmodeled && power < pos.oppLife && !poisonLethal) {
             return null;
         }
         if (!cfg.forced && !cfg.likely) {
             return null;
         }
+        engineWindow = window;
         engineTurn = pos.turn;
         engineRuns++;
         lastOutcome = "gate+engine";
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
         el.perSearchNodes = cfg.engineNodesPerSearch;
+        el.loopMacro = cfg.loopMacro; // R2-3
+        el.anyWindow = cfg.engineAnyWindow; // R2-4 (c)
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -1660,6 +1749,10 @@ public final class ForcedWinSolver {
         final int ep0 = engineStats.pathPrunes, el0 = engineStats.lifetimeStops, ca0 = engineStats.cacApplies;
         final Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
+        if (line != null && otherWindow) {
+            line.window = eph.getPhase(); // R2-4 (c): the follower acts in the window the line was found in
+            line.windowTurn = eph.getTurn();
+        }
         engineNanos += System.nanoTime() - t1;
         meter.engineRuns++;
         meter.engineNodes += engineStats.nodes - en0;
@@ -2650,7 +2743,8 @@ public final class ForcedWinSolver {
                 // starts with PASS: it means "to our next turn", not "skip our next turn")
                 passTurn = ph.getTurn();
             }
-            if (!ph.isPlayerTurn(me) || !(ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))) {
+            final boolean inWindow = line.window != null && ph.getTurn() == line.windowTurn && ph.is(line.window);
+            if (!inWindow && (!ph.isPlayerTurn(me) || !(ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2)))) {
                 n.waiting = !done;
                 if (done) {
                     n.waitingEnd = false;
@@ -2737,7 +2831,28 @@ public final class ForcedWinSolver {
 
         /** The live/copy ability for a step, prepared (targets, mana colour), or null when it cannot be played now. */
         static SpellAbility locate(Game g, Player me, Step st) {
-            final Card host = g.findById(st.hostId);
+            final SpellAbility sa = locateAt(g, me, st, st.hostId);
+            if (sa != null || !st.byName) {
+                return sa;
+            }
+            // R2-3 (loopMacro): a loop body's step is played by any card of ours with the host's name when the host
+            // itself cannot (Forge chose another copy to sacrifice or move inside the loop: the copies are fungible)
+            for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard, ZoneType.Exile,
+                    ZoneType.Command}) {
+                for (Card c : me.getCardsIn(z)) {
+                    if (c.getId() != st.hostId && c.getName().equals(st.hostName)) {
+                        final SpellAbility alt = locateAt(g, me, st, c.getId());
+                        if (alt != null) {
+                            return alt;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        private static SpellAbility locateAt(Game g, Player me, Step st, int hostId) {
+            final Card host = g.findById(hostId);
             if (host == null) {
                 return null;
             }

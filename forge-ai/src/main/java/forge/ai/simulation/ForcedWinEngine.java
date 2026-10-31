@@ -245,6 +245,22 @@ final class ForcedWinEngine {
         /** (c): the most repetitions of a loop body one REPEAT move plays. */
         int repeatCap = 64;
         /**
+         * solver-cap12-1030 round 2 (R2-3; false = off, byte-identical): the general loop abstraction, with {@link #cycles}.
+         * A child whose {@link #macroKey} equals an ancestor's on this turn's path (up to {@link #loopWindow} moves back)
+         * and whose counters dominate the ancestor's with a strict gain (progress, mana in pool or hand) is a loop; the
+         * fast-forward keeps checkpoints at 1, 2, 4, ... repetitions and the last, the DFS continues from each (largest
+         * first) with the body's own moves dropped (the outlet search), and a repetition is progress only while a gaining
+         * counter is below its generic ceiling ({@link #ceilings}: the stop rule). The cap is {@link #loopCap}.
+         */
+        boolean loopMacro;
+        /**
+         * R2-4 (c), engineAnyWindow (false = off): a search rooted outside our main phase (the opponent's end step, say)
+         * rests a move at our next priority with an empty stack in the root's turn and phase, not only at our main phase.
+         */
+        boolean anyWindow;
+        int loopWindow = 8;
+        int loopCap = 128;
+        /**
          * search-bones-1015: our library's known top in the root copy (pile memory); the rest is shuffled there. -1 (the
          * default) keeps the real order.
          */
@@ -285,6 +301,9 @@ final class ForcedWinEngine {
         long[] pv;
         /** bvw-step1-build-1024: the cards in this node's copy. */
         int cards;
+        /** R2-3 (loopMacro): this node's {@link #macroKey}, and on a loop checkpoint node the body whose moves it drops. */
+        String mk;
+        List<Step> afterLoop;
     }
 
     // ------------------------------------------------------------------ (c) cycles with progress (search-bones-1015)
@@ -375,6 +394,140 @@ final class ForcedWinEngine {
         return sb.toString();
     }
 
+    // ------------------------------------------------------------------ R2-3: the general loop abstraction (loopMacro)
+
+    /**
+     * R2-3: the loop key: the turn and phase, our hand by name, the opponents' hand sizes, and every player's non-token
+     * battlefield permanents by name with their tapped, sick, counter and attachment state. The graveyard, exile and
+     * library are left out: a loop consumes or fills them (escape fuel, self-mill, a land played from the graveyard), so
+     * they are the loop's fuel or output, not its state. A coarse key only proposes a loop: a body that can no longer be
+     * played fails on replay and ends the fast-forward.
+     */
+    static String macroKey(Game g, Player me) {
+        final StringBuilder sb = new StringBuilder(512);
+        final PhaseHandler ph = g.getPhaseHandler();
+        sb.append(ph.getTurn()).append(ph.getPhase()).append('|');
+        for (Player p : g.getPlayers()) {
+            sb.append(p == me ? "me" : "op").append('|');
+            if (p == me) {
+                names(sb, p.getCardsIn(ZoneType.Hand), false);
+            } else {
+                sb.append("h").append(p.getCardsIn(ZoneType.Hand).size());
+            }
+            sb.append("|b");
+            names(sb, p.getCardsIn(ZoneType.Battlefield), true);
+            sb.append(';');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * R2-3: a's counters dominate b's with a strict gain: no progress counter fell, and either some progress counter rose
+     * or the resources (mana in pool, hand) did not fall and one rose (an unbounded-mana or draw loop).
+     */
+    static boolean macroGain(long[] a, long[] b) {
+        boolean prog = false;
+        for (int i = 0; i < PROGRESS; i++) {
+            if (a[i] < b[i]) {
+                return false;
+            }
+            prog |= a[i] > b[i];
+        }
+        if (prog) {
+            return true;
+        }
+        for (int i = PROGRESS; i < a.length; i++) {
+            if (a[i] < b[i]) {
+                return false;
+            }
+        }
+        for (int i = PROGRESS; i < a.length; i++) {
+            if (a[i] > b[i]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The {@link #progress} index of our life, mana in pool and hand size (the counters with a ceiling). */
+    static final int LIFE = 6, MANA = 7, HAND = 8;
+
+    /**
+     * R2-3 (the stop rule): the generic ceiling of each counter, past which more of it earns nothing, from the position
+     * at the loop's start. Our life: 1 + max(20, the largest life payment among our cards' abilities, twice the
+     * opponents' board power). Our tokens: the tokens now plus their life plus their creatures plus one. Mana: the total mana value of our cards outside the library plus the mana costs of our
+     * battlefield abilities, plus twice the opponents' life when any of those has X. Hand: our hand plus library (a draw
+     * past it loses). The others (the opponents' life, library, hand and poison, the storm count) have none:
+     * they end in a terminal state, a failed repetition or the cap.
+     */
+    static long[] ceilings(Game g, Player me) {
+        final long[] c = new long[PROGRESS + 2];
+        java.util.Arrays.fill(c, Long.MAX_VALUE);
+        int payLife = 0, oppPower = 0, oppLife = 0;
+        long mana = 0;
+        boolean x = false;
+        for (Player o : me.getOpponents()) {
+            oppLife += Math.max(0, o.getLife());
+            for (Card k : o.getCreaturesInPlay()) {
+                oppPower += Math.max(0, k.getNetCombatDamage());
+            }
+        }
+        for (ZoneType z : new ZoneType[] {ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard, ZoneType.Exile,
+                ZoneType.Command}) {
+            for (Card k : me.getCardsIn(z)) {
+                if (z != ZoneType.Battlefield) {
+                    mana += Math.max(0, k.getCMC());
+                    x |= k.getManaCost() != null && k.getManaCost().countX() > 0;
+                }
+                for (SpellAbility sa : k.getSpellAbilities()) {
+                    if (sa.getPayCosts() == null) {
+                        continue;
+                    }
+                    for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
+                        if (part instanceof forge.game.cost.CostPayLife pl) {
+                            try {
+                                payLife = Math.max(payLife, pl.getAbilityAmount(sa));
+                            } catch (RuntimeException e) {
+                                // an amount the static read cannot compute: no ceiling from it
+                            }
+                        }
+                    }
+                    if (z == ZoneType.Battlefield && !sa.isManaAbility() && sa.getPayCosts().hasManaCost()) {
+                        final forge.card.mana.ManaCost mc = sa.getPayCosts().getTotalMana();
+                        mana += mc.getCMC();
+                        x |= mc.countX() > 0;
+                    }
+                }
+            }
+        }
+        // our tokens: enough to attack past every blocker for their life at one power each (more earn nothing)
+        int oppCreatures = 0;
+        for (Player o : me.getOpponents()) {
+            oppCreatures += o.getCreaturesInPlay().size();
+        }
+        int tokens = 0;
+        for (Card k : me.getCardsIn(ZoneType.Battlefield)) {
+            if (k.isToken()) {
+                tokens++;
+            }
+        }
+        c[4] = tokens + oppLife + oppCreatures + 1L;
+        c[LIFE] = 1L + Math.max(20, Math.max(payLife, 2L * oppPower));
+        c[MANA] = mana + (x ? 2L * oppLife : 0L);
+        c[HAND] = me.getCardsIn(ZoneType.Hand).size() + me.getCardsIn(ZoneType.Library).size();
+        return c;
+    }
+
+    /** R2-3: a rose over b in some counter that was still below its ceiling (a repetition that is worth playing). */
+    static boolean relevantGain(long[] a, long[] b, long[] ceil) {
+        for (int i = 0; i < a.length; i++) {
+            if (a[i] > b[i] && b[i] < ceil[i]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void names(StringBuilder sb, Iterable<Card> cards, boolean state) {
         final List<String> xs = new ArrayList<>();
         for (Card c : cards) {
@@ -459,7 +612,10 @@ final class ForcedWinEngine {
         int reps = 2;
         Node cur = from;
         final Forward f = new Forward();
-        while (reps < lim.repeatCap && !out()) {
+        // R2-3 (loopMacro): the stop rule's ceilings and loopCap apply to the literal fast-forward too (off: unchanged)
+        final long[] ceil = lim.loopMacro ? ceilings(from.g, from.me) : null;
+        final int cap = lim.loopMacro ? lim.loopCap : lim.repeatCap;
+        while (reps < cap && !out()) {
             Node next = cur;
             final List<Step> partial = new ArrayList<>();
             boolean failed = false;
@@ -505,7 +661,7 @@ final class ForcedWinEngine {
                 a.child.passed = next.passed;
                 next = a.child;
             }
-            if (failed || !progressed(next.pv, cur.pv)) {
+            if (failed || !progressed(next.pv, cur.pv) || ceil != null && !relevantGain(next.pv, cur.pv, ceil)) {
                 break;
             }
             cur = next;
@@ -530,6 +686,140 @@ final class ForcedWinEngine {
         n.path.add(Step.repeat(body, reps));
         f.node = n;
         return f;
+    }
+
+    /**
+     * R2-3: the loop that ends at {@code child}: the nearest ancestor on this turn's path, up to {@link Limits#loopWindow}
+     * moves back with no pass, attack or REPEAT between, whose {@link #macroKey} equals the child's and whose counters the
+     * child's dominate with a strict gain worth having ({@link #macroGain}, {@link #relevantGain}). Returns the body (the
+     * moves between them; one repetition is already played) or null.
+     */
+    private List<Step> macroBody(Node child, long[] ceil) {
+        final List<Step> p = child.path;
+        Node a = child.parent;
+        for (int len = 1; len <= lim.loopWindow && a != null && len <= p.size(); len++, a = a.parent) {
+            final Step s = p.get(p.size() - len);
+            if (s.pass || s.kind == AbilKind.ATTACK || s.kind == AbilKind.REPEAT || a.turn != child.turn
+                    || a.afterLoop != null) {
+                return null;
+            }
+            if (a.mk != null && a.pv != null && a.mk.equals(child.mk) && macroGain(child.pv, a.pv)
+                    && relevantGain(child.pv, a.pv, ceil)) {
+                return new ArrayList<>(p.subList(p.size() - len, p.size()));
+            }
+        }
+        return null;
+    }
+
+    /**
+     * R2-3: play {@code body} again and again from {@code from} (which ends one repetition) until we win, a body step
+     * cannot be played, a repetition gains nothing below the ceilings (the stop rule), {@link Limits#loopCap} or the
+     * budget. Returns a win, or the checkpoint nodes (1, 2, 4, ... repetitions and the last; the largest first), each
+     * with path prefix + REPEAT(body, n) and the body to drop from its moves (the outlet search).
+     */
+    private Object macroForward(Node from, List<Step> body, long[] ceil) {
+        st.loops++;
+        for (Step b : body) {
+            b.byName = true; // the copies a loop moves around are fungible (Follower.locate)
+        }
+        final int len = body.size();
+        final List<Step> prefix = new ArrayList<>(from.path.subList(0, from.path.size() - len));
+        int reps = 1;
+        Node cur = from;
+        final List<Node> marks = new ArrayList<>();
+        final List<Integer> markReps = new ArrayList<>();
+        while (reps < lim.loopCap && !out()) {
+            Node next = cur;
+            final List<Step> partial = new ArrayList<>();
+            boolean failed = false;
+            for (Step b : body) {
+                final Applied a = apply(next, b);
+                st.loopReps++;
+                if (a == null) {
+                    failed = true;
+                    break;
+                }
+                partial.add(b);
+                if (a.won) {
+                    final List<Step> win = new ArrayList<>(prefix);
+                    if (partial.size() == len) {
+                        win.add(Step.repeat(body, reps + 1));
+                    } else {
+                        win.add(Step.repeat(body, reps));
+                        win.addAll(partial);
+                    }
+                    st.loopWins++;
+                    return win;
+                }
+                if (a.child == null) {
+                    failed = true;
+                    break;
+                }
+                final long live = pathCards + from.cards + (cur != from ? cur.cards : 0) + (next != cur ? next.cards : 0)
+                        + a.child.cards + marksCards(marks);
+                if (lim.pathCards > 0 && live > lim.pathCards) {
+                    st.pathPrunes++;
+                    st.loopCardStops++;
+                    failed = true;
+                    break;
+                }
+                st.peakLive = Math.max(st.peakLive, live);
+                a.child.pv = progress(a.child.g, a.child.me);
+                a.child.passed = next.passed;
+                next = a.child;
+            }
+            if (failed || !macroGain(next.pv, cur.pv) || !relevantGain(next.pv, cur.pv, ceil)) {
+                break;
+            }
+            cur = next;
+            reps++;
+            if (Integer.bitCount(reps) == 1) {
+                marks.add(cur);
+                markReps.add(reps);
+                if (marks.size() > 3) {
+                    marks.remove(0); // keep the three largest powers of two (memory: each holds a game copy)
+                    markReps.remove(0);
+                }
+            }
+            if (lethalPastBlockers(cur)) {
+                break;
+            }
+        }
+        if (marks.isEmpty() || marks.get(marks.size() - 1) != cur) {
+            marks.add(cur);
+            markReps.add(reps);
+        }
+        final List<Node> outNodes = new ArrayList<>();
+        for (int i = marks.size() - 1; i >= 0; i--) {
+            final Node c = marks.get(i);
+            final int r = markReps.get(i);
+            if (r <= 1) {
+                continue; // one repetition is the DFS child itself
+            }
+            final Node n = new Node();
+            n.g = c.g;
+            n.cards = c.cards;
+            n.me = c.me;
+            n.ids = c.ids;
+            n.turn = c.turn;
+            n.passed = c.passed;
+            n.parent = from;
+            n.pv = c.pv;
+            n.mk = macroKey(c.g, c.me);
+            n.afterLoop = body;
+            n.path.addAll(prefix);
+            n.path.add(Step.repeat(body, r));
+            outNodes.add(n);
+        }
+        return outNodes;
+    }
+
+    private static long marksCards(List<Node> marks) {
+        long n = 0;
+        for (Node m : marks) {
+            n += m.cards;
+        }
+        return n;
     }
 
     private final Limits lim;
@@ -628,6 +918,9 @@ final class ForcedWinEngine {
             root.turn = e.startTurn;
             if (lim.cycles) {
                 root.pv = progress(root.g, root.me);
+                if (lim.loopMacro) {
+                    root.mk = macroKey(root.g, root.me);
+                }
             }
             // this turn first (same-turn wins are preferred and cheaper); then lines that pass the turn once
             final boolean twoTurns = lim.passTurn;
@@ -871,6 +1164,43 @@ final class ForcedWinEngine {
                 // search-bones-1015 (c): the progress table instead of the exact-key set, and loops fast-forwarded
                 a.child.parent = node;
                 a.child.pv = progress(a.child.g, a.child.me);
+                if (lim.loopMacro) {
+                    // R2-3: a loop by state recurrence (any body up to loopWindow), N chosen by the search
+                    a.child.mk = macroKey(a.child.g, a.child.me);
+                    final long[] ceil = ceilings(node.g, node.me);
+                    final List<Step> mb = macroBody(a.child, ceil);
+                    if (mb != null) {
+                        final Object fw = macroForward(a.child, mb, ceil);
+                        if (fw instanceof List<?> l && !l.isEmpty() && l.get(0) instanceof Step) {
+                            @SuppressWarnings("unchecked")
+                            final List<Step> win = (List<Step>) fw;
+                            return win;
+                        }
+                        @SuppressWarnings("unchecked")
+                        final List<Node> cps = (List<Node>) fw;
+                        for (Node cp : cps) {
+                            if (out()) {
+                                break;
+                            }
+                            if (seenDominated(cp)) {
+                                st.pruned++;
+                                continue;
+                            }
+                            final long held = cp.g != a.child.g ? a.child.cards : 0;
+                            pathCards += held;
+                            final List<Step> r;
+                            try {
+                                r = dfs(cp, depth + 1);
+                            } finally {
+                                pathCards -= held;
+                            }
+                            if (r != null) {
+                                return r;
+                            }
+                        }
+                        // N = 1 (the child itself) is searched below like any child
+                    }
+                }
                 final List<Step> body = loopBody(a.child);
                 if (body != null) {
                     final Forward fw = fastForward(a.child, body);
@@ -1002,11 +1332,49 @@ final class ForcedWinEngine {
                 }
             }
         }
+        if (lim.loopMacro) {
+            // R2-3: tapping an untapped nonland mana permanent (no sacrifice) is a move too: a loop that untaps its own
+            // source (an untap ability, a flicker) starts with it. One float per source, in the first colour it makes.
+            for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+                if (c.isLand() || c.isTapped()) {
+                    continue;
+                }
+                for (SpellAbility m : c.getManaAbilities()) {
+                    if (m.getPayCosts() == null || m.getPayCosts().getCostParts().stream().anyMatch(
+                            p -> p instanceof forge.game.cost.CostSacrifice)) {
+                        continue;
+                    }
+                    final SpellAbility mc = m.copy(me);
+                    mc.setActivatingPlayer(me);
+                    if (!mc.canPlay() || !ComputerUtilCost.canPayCost(mc, me, false) || mc.getManaPart() == null) {
+                        continue;
+                    }
+                    int colour = -1;
+                    for (int i = 0; i < 6 && colour < 0; i++) {
+                        if (mc.canProduce(ForcedWinModel.SHORT[i])) {
+                            colour = i;
+                        }
+                    }
+                    if (colour >= 0 && keys.add("float|" + c.getId() + "|" + colour)) {
+                        floats.add(Step.floatMana(c.getId(), c.getName(), m.getDescription(), colour));
+                    }
+                    break;
+                }
+            }
+        }
         final List<Step> out = new ArrayList<>(rep);
         out.addAll(act);
         out.addAll(spells);
         out.addAll(floats);
         out.addAll(lands);
+        if (node.afterLoop != null) {
+            // R2-3 (the outlet search): after a loop's checkpoint its body's own moves are not searched again
+            final Set<String> bodyKeys = new HashSet<>();
+            for (Step b : node.afterLoop) {
+                bodyKeys.add(b.kind + "|" + b.hostName + "|" + b.desc + "|" + b.floatColor);
+            }
+            out.removeIf(m -> bodyKeys.contains(m.kind + "|" + m.hostName + "|" + m.desc + "|" + m.floatColor));
+        }
         if (!node.passed && lim.cycles && oppDecked(me)) {
             // (c): an opponent with no library loses at their draw: passing is the first move, in the this-turn
             // phase too (a mill loop's kill is the pass; the engine still plays their turn up to the draw)
@@ -1572,6 +1940,10 @@ final class ForcedWinEngine {
             final int copyCards = cardCount(g);
             st.cards += copyCards;
             final MoveAi ai = new MoveAi(g, me, me.getController().getLobbyPlayer(), mv, node.turn);
+            if (lim.anyWindow && !(g.getPhaseHandler().isPlayerTurn(me) && (g.getPhaseHandler().is(PhaseType.MAIN1)
+                    || g.getPhaseHandler().is(PhaseType.MAIN2)))) {
+                ai.restPhase = g.getPhaseHandler().getPhase(); // R2-4 (c): rest again in the root's window
+            }
             if (lim.cac) {
                 ai.rec = new ForcedWinChoices.Recorder(mv.cac, lim.cacCap); // labeller-v2 (a)
             }
@@ -1643,6 +2015,8 @@ final class ForcedWinEngine {
         final LibraryPicks picks;
 
         final int fromTurn;
+        /** R2-4 (c): the root's phase when it is not our main phase (null = rest only at our main phase). */
+        PhaseType restPhase;
 
         MoveAi(Game g, Player p, forge.LobbyPlayer lp, Step move, int fromTurn) {
             super(g, p, lp);
@@ -1863,6 +2237,9 @@ final class ForcedWinEngine {
                     && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))
                     && (!move.pass || ph.getTurn() > fromTurn && ph.is(PhaseType.MAIN1))) {
                 rest = true;
+            } else if (restPhase != null && !move.pass && g.getStack().isEmpty() && ph.getTurn() == fromTurn
+                    && ph.is(restPhase)) {
+                rest = true; // R2-4 (c): our priority again in the root's window, the stack empty
             }
             return null;
         }
