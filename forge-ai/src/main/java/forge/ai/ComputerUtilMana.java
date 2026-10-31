@@ -720,7 +720,13 @@ public class ComputerUtilMana {
                 continue;
             }
 
-            if (saPayment == null) {
+            // r3-inline-choices-1030: the seat's choose-a-card hook may pay this Phyrexian pip with life instead of the
+            // mana source found (no hook, or the hook keeps Forge's answer: unchanged)
+            final boolean cacLife = saPayment != null && !test && toPay.isPhyrexian()
+                    && PlayerControllerAi.cacOf(ai) != null && PlayerControllerAi.cacOf(ai).getCacHook() != null
+                    && ai.canPayLife(2, false, sa) && ai.getLife() > 2
+                    && PlayerControllerAi.cacOf(ai).getCacHook().phyrexianLife(PlayerControllerAi.cacOf(ai), sa, false);
+            if (saPayment == null || cacLife) {
                 boolean lifeInsteadOfBlack = toPay.isBlack() && ai.hasKeyword("PayLifeInsteadOf:B");
                 if ((!toPay.isPhyrexian() && !lifeInsteadOfBlack) || !ai.canPayLife(phyLifeToPay, false, sa)
                         || (ai.getLife() <= phyLifeToPay && !ai.cantLoseForZeroOrLessLife())) {
@@ -731,7 +737,7 @@ public class ComputerUtilMana {
                     phyLifeToPay += 2;
                 }
 
-                if (sa.hasParam("AIPhyrexianPayment")) {
+                if (sa.hasParam("AIPhyrexianPayment") && !cacLife) { // r3: the hook's answer overrides the card's AI hint
                     if ("Never".equals(sa.getParam("AIPhyrexianPayment"))) {
                         break; // unwise to pay
                     } else if (sa.getParam("AIPhyrexianPayment").startsWith("OnFatalDamage.")) {

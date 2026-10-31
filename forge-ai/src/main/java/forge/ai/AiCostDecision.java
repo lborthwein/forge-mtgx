@@ -111,6 +111,47 @@ public class AiCostDecision extends CostDecisionMakerBase {
         return null == chosen ? null : PaymentDecision.card(chosen);
     }
 
+    /**
+     * r3-inline-choices-1030 (research): the seat's choose-a-card hook may replace the cards of an exile, discard,
+     * sacrifice or tap-type cost part (no hook: the decision, unchanged).
+     */
+    @Override
+    public PaymentDecision review(final CostPart part, final PaymentDecision decision) {
+        final PlayerControllerAi pc = PlayerControllerAi.cacOf(player); // the wrapped controller on a taped seat
+        if (pc == null || pc.getCacHook() == null || decision == null
+                || decision.cards == null || decision.cards.isEmpty() || !(part instanceof CostPartWithList pl)) {
+            return decision;
+        }
+        final java.util.List<ZoneType> zones;
+        String name = part.getClass().getSimpleName();
+        if (part instanceof CostExile ce) {
+            if (ce.payCostFromSource()) return decision;
+            zones = ce.getFrom();
+        } else if (part instanceof CostDiscard cd) {
+            final String t = cd.getType();
+            if (cd.payCostFromSource() || t.equals("Hand") || t.contains("Random") || t.equals("LastDrawn")) return decision;
+            zones = List.of(ZoneType.Hand);
+        } else if (part instanceof CostSacrifice cs) {
+            if (cs.payCostFromSource()) return decision;
+            zones = List.of(ZoneType.Battlefield);
+        } else if (part instanceof CostTapType) {
+            zones = List.of(ZoneType.Battlefield);
+        } else {
+            return decision;
+        }
+        final String type = pl.getType();
+        if (type == null || type.equals("All") || type.contains("+with") || type.contains("FromTop")) return decision;
+        CardCollection valid = CardLists.getValidCards(player.getCardsIn(zones), type.split(";"), player, source, ability);
+        if (part instanceof CostTapType) valid = CardLists.filter(valid, CardPredicates.UNTAPPED);
+        if (part instanceof CostSacrifice) valid = CardLists.filter(valid, CardPredicates.canBeSacrificedBy(ability, isEffect()));
+        for (Card x : decision.cards) {
+            if (!valid.contains(x)) return decision; // a choice the hook cannot reproduce from this list
+        }
+        final CardCollectionView out = pc.getCacHook().costCards(pc, ability, name, valid, decision.cards.size(), decision.cards);
+        if (out == decision.cards || out == null || out.size() != decision.cards.size()) return decision;
+        return PaymentDecision.card(out);
+    }
+
     @Override
     public PaymentDecision visit(CostDiscard cost) {
         final String type = cost.getType();

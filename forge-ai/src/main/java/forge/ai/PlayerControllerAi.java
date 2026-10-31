@@ -106,6 +106,16 @@ public class PlayerControllerAi extends PlayerController {
         return cacHook;
     }
 
+    /**
+     * Review #147 S2: the controller holding a player's choose-a-card hook. A taped seat's controller is the
+     * {@link AiTapeController} wrapper, and the hook is installed on the controller it wraps.
+     */
+    public static PlayerControllerAi cacOf(final Player p) {
+        final forge.game.player.PlayerController c = p == null ? null : p.getController();
+        if (c instanceof AiTapeController t) return t.inner();
+        return c instanceof PlayerControllerAi pc ? pc : null;
+    }
+
     public void setKnowledgeHook(final KnowledgeHook hook) {
         this.knowledgeHook = hook;
     }
@@ -330,7 +340,9 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView choosePermanentsToSacrifice(SpellAbility sa, int min, int max, CardCollectionView validTargets, String message) {
-        return ComputerUtil.choosePermanentsToSacrifice(player, validTargets, max, sa, false, min == 0);
+        final CardCollectionView def = ComputerUtil.choosePermanentsToSacrifice(player, validTargets, max, sa, false, min == 0);
+        // r3-inline-choices-1030: the choose-a-card hook may replace the sacrificed permanents (no hook: Forge AI's)
+        return cacHook == null || cacSuppressed ? def : cacHook.sacrifice(this, sa, min, max, validTargets, def);
     }
 
     @Override
@@ -394,7 +406,20 @@ public class PlayerControllerAi extends PlayerController {
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
-        return SpellApiToAi.Converter.get(sa).chooseSingleEntity(player, sa, optionList, isOptional, targetedPlayer, params);
+        final T def = SpellApiToAi.Converter.get(sa).chooseSingleEntity(player, sa, optionList, isOptional, targetedPlayer, params);
+        // r3-inline-choices-1030: the legend rule's keep goes to the choose-a-card hook (no hook: Forge AI's)
+        if (cacHook == null || cacSuppressed || sa == null || sa.getApi() != ApiType.InternalLegendaryRule || !(def instanceof Card)) {
+            return def;
+        }
+        final List<Card> opts = new ArrayList<>();
+        for (T t : optionList) {
+            if (!(t instanceof Card)) return def;
+            opts.add((Card) t);
+        }
+        final Card k = cacHook.legendKeep(this, opts, (Card) def);
+        @SuppressWarnings("unchecked")
+        final T out = opts.contains(k) ? (T) k : def;
+        return out;
     }
 
     @Override
@@ -834,7 +859,13 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public CardCollectionView chooseCardsToDelve(int genericAmount, CardCollection grave) {
-        return getAi().chooseCardsToDelve(genericAmount, grave);
+        final CardCollectionView def = getAi().chooseCardsToDelve(genericAmount, grave);
+        // r3-inline-choices-1030: delve's exiled cards go to the choose-a-card hook (amount = the most it may exile)
+        if (cacHook == null || cacSuppressed) {
+            return def;
+        }
+        final CardCollectionView out = cacHook.costCards(this, null, "Delve", grave, genericAmount, def);
+        return out == null || out.size() > genericAmount || !grave.containsAll(out) ? def : out;
     }
 
     @Override
@@ -1220,6 +1251,16 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public byte chooseColor(String message, SpellAbility sa, ColorSet colors) {
+        final byte def = chooseColorAi(message, sa, colors);
+        // r3-inline-choices-1030: the choose-a-card hook may pick another of the offered colours (no hook: Forge AI's)
+        if (cacHook == null || cacSuppressed || colors.countColors() < 2) {
+            return def;
+        }
+        final byte k = cacHook.chooseColor(this, sa, colors, def);
+        return (colors.getColor() & k) != 0 && Integer.bitCount(k & 0xff) == 1 ? k : def;
+    }
+
+    private byte chooseColorAi(String message, SpellAbility sa, ColorSet colors) {
         if (colors.countColors() < 2) {
             return Iterables.getFirst(colors, MagicColor.Color.WHITE).getColorMask();
         }
@@ -1432,15 +1473,26 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean payCostToPreventEffect(Cost cost, SpellAbility sa, boolean alreadyPaid, FCollectionView<Player> allPayers) {
-        if (SpellApiToAi.Converter.get(sa).willPayUnlessCost(player, sa, cost, alreadyPaid, allPayers)) {
-            if (!ComputerUtilCost.canPayCost(cost, sa, player, true)) {
+        boolean will = SpellApiToAi.Converter.get(sa).willPayUnlessCost(player, sa, cost, alreadyPaid, allPayers);
+        if (cacHook == null || cacSuppressed) {
+            if (!will) {
                 return false;
             }
-
+        } else {
+            // r3-inline-choices-1030: pay or not goes to the choose-a-card hook (no hook: exactly the branch above)
+            final boolean canPay = ComputerUtilCost.canPayCost(cost, sa, player, true);
+            will = cacHook.payToPrevent(this, cost, sa, canPay, will && canPay);
+            if (!will || !canPay) {
+                return false;
+            }
             final CostPayment pay = new CostPayment(cost, sa);
             return pay.payComputerCosts(AiCostDecision.forPayment(player, sa, true));
         }
-        return false;
+        if (!ComputerUtilCost.canPayCost(cost, sa, player, true)) {
+            return false;
+        }
+        final CostPayment pay = new CostPayment(cost, sa);
+        return pay.payComputerCosts(AiCostDecision.forPayment(player, sa, true));
     }
 
     public boolean payCostDuringRoll(final Cost cost, final SpellAbility sa) {
@@ -1450,19 +1502,40 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<SpellAbility> orderSimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        // r3-inline-choices-1030: Forge's orderPlaySa REMOVES entries from the list it is given (filterList), so the
+        // hook gets a copy taken before Forge orders (Forge itself still gets the original list, as before)
+        final List<SpellAbility> asked = cacHook == null || cacSuppressed || activePlayerSAs == null ? activePlayerSAs
+                : new ArrayList<>(activePlayerSAs);
         // lane replay-record-1021: the AI tape records the order (a forced replay plays the record's)
         final AiTape tape = AiTape.covering(player);
         if (tape != null && activePlayerSAs != null && activePlayerSAs.size() > 1) { // one ability: no order to choose
-            return tape.order(activePlayerSAs, () -> getAi().orderPlaySa(activePlayerSAs));
+            // the tape records the order actually played (the hook's, when it departs); a forced replay returns the
+            // record without asking either
+            return tape.order(activePlayerSAs, () -> cacOrder(asked, getAi().orderPlaySa(activePlayerSAs)));
         }
-        return getAi().orderPlaySa(activePlayerSAs);
+        return cacOrder(asked, getAi().orderPlaySa(activePlayerSAs));
+    }
+
+    /** r3-inline-choices-1030: 2+ simultaneous abilities' order goes to the choose-a-card hook (no hook: {@code def}). */
+    private List<SpellAbility> cacOrder(final List<SpellAbility> sas, final List<SpellAbility> def) {
+        if (cacHook == null || cacSuppressed || sas == null || sas.size() < 2 || def == null || def.size() != sas.size()) {
+            return def;
+        }
+        final List<SpellAbility> out = cacHook.orderTriggers(this, sas, def);
+        return out != null && out.size() == def.size() && out.containsAll(def) ? out : def;
     }
 
     @Override
     public void orderAndPlaySimultaneousSa(List<SpellAbility> activePlayerSAs) {
+        final boolean lone = activePlayerSAs != null && activePlayerSAs.size() == 1;
         for (final SpellAbility sa : orderSimultaneousSa(activePlayerSAs)) {
             if (sa.isTrigger() && !sa.isCopied()) {
                 if (prepareSingleSa(sa.getHostCard(), sa, true)) {
+                    // r3-target-choices-1030: a lone trigger's targets, as Forge AI set them, go to the choose-a-card
+                    // hook, which may replace them in place (no hook: unchanged)
+                    if (lone && cacHook != null && !cacSuppressed && sa.usesTargeting()) {
+                        cacHook.triggerTargets(this, sa);
+                    }
                     ComputerUtil.playStack(sa, player, getGame());
                 }
             } else {
@@ -1635,6 +1708,20 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public Map<Card, ManaCostShard> chooseCardsForConvokeOrImprovise(SpellAbility sa, ManaCost manaCost, CardCollectionView untappedCards, boolean artifacts, boolean creatures, Integer maxReduction) {
+        final Map<Card, ManaCostShard> def = chooseCardsForConvokeOrImproviseAi(sa, manaCost, untappedCards, artifacts, creatures, maxReduction);
+        // r3-inline-choices-1030: convoke / improvise tappers go to the choose-a-card hook (no hook: Forge AI's)
+        if (cacHook == null || cacSuppressed) {
+            return def;
+        }
+        final CardCollection d = new CardCollection(def.keySet());
+        final CardCollectionView out = cacHook.costCards(this, sa, "Convoke", untappedCards, d.size(), d);
+        if (out == null || out == d || !untappedCards.containsAll(out)) {
+            return def;
+        }
+        return ComputerUtilMana.getConvokeOrImproviseFromList(manaCost, new ArrayList<>(out), artifacts, creatures);
+    }
+
+    private Map<Card, ManaCostShard> chooseCardsForConvokeOrImproviseAi(SpellAbility sa, ManaCost manaCost, CardCollectionView untappedCards, boolean artifacts, boolean creatures, Integer maxReduction) {
         final Player ai = sa.getActivatingPlayer();
         final PhaseHandler ph = ai.getGame().getPhaseHandler();
         // Filter out mana sources that will interfere with payManaCost()

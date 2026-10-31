@@ -152,8 +152,10 @@ public class CostPayment extends ManaConversionMatrix {
             try {
                 game.costPaymentStack.push(part, this);
 
-                PaymentDecision pd = tap == null ? part.accept(decisionMaker)
-                        : tap.cost(decisionMaker.getPlayer(), part, partIndex, ability, () -> part.accept(decisionMaker));
+                // r3-inline-choices-1030: the decision maker's review (identity unless an AI hook is set) runs inside the
+                // tap, so a record holds the reviewed decision and a forced replay returns it without asking again
+                PaymentDecision pd = tap == null ? reviewed(decisionMaker, part)
+                        : tap.cost(decisionMaker.getPlayer(), part, partIndex, ability, () -> reviewed(decisionMaker, part));
                 partIndex++;
 
                 // Right before we start paying as decided, we need to transfer the CostPayments matrix over?
@@ -180,6 +182,12 @@ public class CostPayment extends ManaConversionMatrix {
         return true;
     }
 
+    /** r3-inline-choices-1030: the part's decision, reviewed by its maker (identity unless an AI hook is set). */
+    private static PaymentDecision reviewed(final CostDecisionMakerBase decisionMaker, final CostPart part) {
+        final PaymentDecision d = part.accept(decisionMaker);
+        return d == null ? null : decisionMaker.review(part, d);
+    }
+
     public final boolean payComputerCosts(final CostDecisionMakerBase decisionMaker) {
         // Just in case it wasn't set, but honestly it shouldn't have gotten
         // here without being set
@@ -199,8 +207,9 @@ public class CostPayment extends ManaConversionMatrix {
 
         int partIndex = 0;
         for (final CostPart part : parts) {
-            final PaymentDecision decision = tap == null ? part.accept(decisionMaker)
-                    : tap.cost(decisionMaker.getPlayer(), part, partIndex, ability, () -> part.accept(decisionMaker));
+            // r3-inline-choices-1030: reviewed inside the tap (see above)
+            final PaymentDecision decision = tap == null ? reviewed(decisionMaker, part)
+                    : tap.cost(decisionMaker.getPlayer(), part, partIndex, ability, () -> reviewed(decisionMaker, part));
             partIndex++;
             if (null == decision) return false;
 
