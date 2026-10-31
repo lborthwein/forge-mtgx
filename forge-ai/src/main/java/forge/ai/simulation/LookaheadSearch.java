@@ -8257,6 +8257,9 @@ public final class LookaheadSearch {
      * their spells on the stack, hand cards we can see), never from their real cards. Kept hand cards and the known top
      * of their library stay. Hidden counts are matched exactly; the drawn cards are shuffled and dealt hand first.
      */
+    /** review #1530 S1: (model, registered player) pairs that passed the per-deck gate. */
+    private final java.util.Set<Object> deckGateOk = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     private void redrawOpponentsDeck(Game live, Player liveMe, Game g, Player me, Random rng, DeckBeliefModel model) {
         boolean changed = false;
         final PlayerView myView = liveMe.getView();
@@ -8309,6 +8312,13 @@ public final class LookaheadSearch {
             final List<String> shown = new ArrayList<>();
             for (Card c : shownCards) {
                 shown.add(c.getPaperCard().getName());
+            }
+            // review #1530 S1 ruling: the per-deck gate, once per opponent and model
+            final forge.game.player.RegisteredPlayer rp = liveOpp.getRegisteredPlayer();
+            final Object gateKey = java.util.Arrays.asList(model, rp);
+            if (!deckGateOk.contains(gateKey)) {
+                model.requireHeld(rp == null ? null : rp.getDeck());
+                deckGateOk.add(gateKey);
             }
             final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
             final long c0 = System.nanoTime();

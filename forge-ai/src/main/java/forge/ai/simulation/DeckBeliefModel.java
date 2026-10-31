@@ -40,6 +40,8 @@ public final class DeckBeliefModel {
     public final String sha256;
     final int d;
     final Map<String, Integer> index = new HashMap<>();
+    /** review #1530 S1 ruling: the deck keys this export is held out (and lineage-held-out) from. */
+    final Set<String> heldKeys = new HashSet<>();
     final float[][] a;
     final float[][] u;
     final float[] b;
@@ -58,6 +60,10 @@ public final class DeckBeliefModel {
             throw new IllegalArgumentException("deck belief: only kind=bag is implemented, not " + o.get("kind"));
         }
         checkProvenance(o);
+        final JsonArray held = o.getAsJsonObject("source").getAsJsonArray("held_deck_keys");
+        for (int i = 0; i < held.size(); i++) {
+            heldKeys.add(held.get(i).getAsString());
+        }
         this.sha256 = sha256;
         this.d = o.get("d").getAsInt();
         final JsonArray vocab = o.getAsJsonArray("vocab");
@@ -97,14 +103,14 @@ public final class DeckBeliefModel {
         }
     }
 
+    static final String LIVE_HUMAN = "live/human";
+
     /**
      * Review #150 S1: an export must declare it was trained without the decks its seats face, nor their drafted parents.
      * Required in {@code source}: {@code mix} null (a bank mix is a hidden label), {@code near_jaccard} in (0, 0.5] and
      * a non-empty {@code near_banks} (the lineage holdout against the banks the seats face), and {@code excluded_banks}
      * containing every one of those banks. Anything else is refused.
      */
-    static final String LIVE_HUMAN = "live/human";
-
     static void checkProvenance(JsonObject o) {
         final JsonObject src = o.has("source") && o.get("source").isJsonObject() ? o.getAsJsonObject("source") : null;
         if (src == null) {
@@ -129,6 +135,10 @@ public final class DeckBeliefModel {
         if (src.has("excluded_banks") && src.get("excluded_banks").isJsonArray()) {
             src.getAsJsonArray("excluded_banks").forEach(x -> excl.add(x.getAsString()));
         }
+        if (!src.has("held_deck_keys") || !src.get("held_deck_keys").isJsonArray()
+                || src.getAsJsonArray("held_deck_keys").size() == 0) {
+            throw new IllegalArgumentException("deck belief: the export lists no held-out deck keys (held_deck_keys)");
+        }
         if (!near.contains(LIVE_HUMAN) || !excl.contains(LIVE_HUMAN)) {
             // review #150 S3 (re-check): the live human decks are excluded and lineage-held-out too
             throw new IllegalArgumentException("deck belief: the export must exclude and lineage-hold-out " + LIVE_HUMAN);
@@ -136,6 +146,45 @@ public final class DeckBeliefModel {
         if (near.isEmpty() || !excl.containsAll(near)) {
             throw new IllegalArgumentException("deck belief: the export's faced banks are not both excluded and "
                     + "lineage-held-out: near " + near + ", excluded " + excl);
+        }
+    }
+
+    /**
+     * The deck key of a main-section multiset: sha256 of the lines "name TAB count" in name order, newline-joined (mtgx
+     * deckbelief data.deck_key).
+     */
+    public static String deckKey(Map<String, Integer> main) {
+        final StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, Integer> e : new java.util.TreeMap<>(main).entrySet()) {
+            if (sb.length() > 0) {
+                sb.append('\n');
+            }
+            sb.append(e.getKey()).append('\t').append(e.getValue());
+        }
+        try {
+            return hex(MessageDigest.getInstance("SHA-256").digest(sb.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException x) {
+            throw new IllegalStateException(x);
+        }
+    }
+
+    /**
+     * review #1530 S1 ruling (the per-deck gate, on every load path: RlSearch, StepSearch, RlActorBench, harnesses): an
+     * opponent's deck must be one this export was held out from, or the game is refused. Reads the registered decklist
+     * for this check only, never for a draw.
+     */
+    public void requireHeld(forge.deck.Deck deck) {
+        if (deck == null || !deck.has(forge.deck.DeckSection.Main)) {
+            throw new IllegalStateException("deck belief: the opponent has no registered main deck to check");
+        }
+        final Map<String, Integer> main = new HashMap<>();
+        for (Map.Entry<forge.item.PaperCard, Integer> e : deck.get(forge.deck.DeckSection.Main)) {
+            main.merge(e.getKey().getName(), e.getValue(), Integer::sum);
+        }
+        final String k = deckKey(main);
+        if (!heldKeys.contains(k)) {
+            throw new IllegalStateException("deck belief: refused: the opponent's deck " + k.substring(0, 12)
+                    + " is not one this export (" + sha256.substring(0, 12) + ") was held out from");
         }
     }
 
