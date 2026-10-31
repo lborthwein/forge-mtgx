@@ -117,6 +117,20 @@ public class LabellerV2MinTest extends AITest {
         }
     }
 
+    /**
+     * Review S2 repro (the oppResponses cap counted answer x target pairs): their Bolt at our face, we are at 3, our
+     * hand Lightning Bolt + Shock + Giant Growth with Mountain x2, Forest and Grizzly Bears. None of it answers the Bolt
+     * (burn at their face at 20, a pump outside combat): the shared MIN's set is empty, so the line is PROVEN (#144
+     * counted seven answer x target pairs > 4 and cut it).
+     */
+    @Test
+    public void irrelevantAnswersCollapseAndTheLineIsProven() {
+        final java.util.function.Supplier<Game> g = () -> frame("Lightning Bolt;Shock;Giant Growth",
+                "Mountain;Mountain;Forest;Grizzly Bears", 3, "Lightning Bolt", "Mountain");
+        Assert.assertTrue(proven(g.get(), passive(cfg(true, 64))), "no real answer: proven");
+        Assert.assertTrue(proven(g.get(), passive(cfgEngine(true))), "no real answer: proven (engine)");
+    }
+
     static Game board3(String defHand, String defLands) {
         return ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame(defHand, defLands, 3,
                 "Lightning Bolt;Counterspell;Counterspell", "Mountain;Island;Island;Island;Island", 20, "ai"));
