@@ -37,7 +37,14 @@ public class BeliefDeckTest extends SimulationTest {
 
     static String export() {
         // vocab: Esper Sentinel (a = 1), Thraben Inspector (u = 10), Mox Pearl; h = relu(mean a) (d = 1, one hidden unit)
-        return "{\"schema\":\"mtgx-deckbelief-export/1\",\"kind\":\"bag\",\"d\":1,"
+        return export(PROVENANCE);
+    }
+
+    static final String PROVENANCE = "\"source\":{\"mix\":null,\"near_jaccard\":0.5,\"near_banks\":[\"train/cur-1009\"],"
+            + "\"excluded_banks\":[\"train/cur-1009\",\"live/human\"]},";
+
+    static String export(final String provenance) {
+        return "{\"schema\":\"mtgx-deckbelief-export/1\",\"kind\":\"bag\",\"d\":1," + provenance
                 + "\"vocab\":[\"Esper Sentinel\",\"Thraben Inspector\",\"Mox Pearl\"],"
                 + "\"a\":[[1.0],[0.0],[0.0]],\"u\":[[0.0],[10.0],[0.0]],\"b\":[0.0,0.0,0.0],"
                 + "\"w1\":[[1.0,0.0]],\"b1\":[0.0],\"w2\":[[1.0]],\"b2\":[0.0]}";
@@ -95,6 +102,26 @@ public class BeliefDeckTest extends SimulationTest {
             Assert.fail("a wrong pin was accepted");
         } catch (IllegalArgumentException e) {
             Assert.assertTrue(e.getMessage().contains("sha256"), e.getMessage());
+        }
+    }
+
+    @Test
+    public void anExportWithoutTheLineageHoldoutIsRefused() throws Exception {
+        final Path dir = Files.createTempDirectory("deckbelief");
+        final String[] bad = {"",
+                "\"source\":{\"mix\":\"0.5=train/cur-\",\"near_jaccard\":0.5,\"near_banks\":[\"a\"],\"excluded_banks\":[\"a\"]},",
+                "\"source\":{\"mix\":null,\"near_jaccard\":0,\"near_banks\":[\"a\"],\"excluded_banks\":[\"a\"]},",
+                "\"source\":{\"mix\":null,\"near_jaccard\":0.5,\"near_banks\":[],\"excluded_banks\":[\"a\"]},",
+                "\"source\":{\"mix\":null,\"near_jaccard\":0.5,\"near_banks\":[\"a\"],\"excluded_banks\":[\"b\"]},"};
+        for (int i = 0; i < bad.length; i++) {
+            final Path p = dir.resolve("bad" + i + ".json");
+            Files.write(p, export(bad[i]).getBytes(StandardCharsets.UTF_8));
+            try {
+                DeckBeliefModel.loadPinned(p.toString(), sha(p));
+                Assert.fail("export " + i + " without the lineage holdout was accepted");
+            } catch (IllegalArgumentException e) {
+                Assert.assertTrue(e.getMessage().startsWith("deck belief:"), e.getMessage());
+            }
         }
     }
 

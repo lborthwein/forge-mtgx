@@ -57,6 +57,7 @@ public final class DeckBeliefModel {
         if (!o.has("kind") || !"bag".equals(o.get("kind").getAsString())) {
             throw new IllegalArgumentException("deck belief: only kind=bag is implemented, not " + o.get("kind"));
         }
+        checkProvenance(o);
         this.sha256 = sha256;
         this.d = o.get("d").getAsInt();
         final JsonArray vocab = o.getAsJsonArray("vocab");
@@ -93,6 +94,38 @@ public final class DeckBeliefModel {
             if (r.length != w1.length) {
                 throw new IllegalArgumentException("deck belief: w2 rows must be of width " + w1.length);
             }
+        }
+    }
+
+    /**
+     * Review #150 S1: an export must declare it was trained without the decks its seats face, nor their drafted parents.
+     * Required in {@code source}: {@code mix} null (a bank mix is a hidden label), {@code near_jaccard} in (0, 0.5] and
+     * a non-empty {@code near_banks} (the lineage holdout against the banks the seats face), and {@code excluded_banks}
+     * containing every one of those banks. Anything else is refused.
+     */
+    static void checkProvenance(JsonObject o) {
+        final JsonObject src = o.has("source") && o.get("source").isJsonObject() ? o.getAsJsonObject("source") : null;
+        if (src == null) {
+            throw new IllegalArgumentException("deck belief: the export has no source provenance");
+        }
+        if (src.has("mix") && !src.get("mix").isJsonNull()) {
+            throw new IllegalArgumentException("deck belief: an export trained with a bank mix is refused");
+        }
+        final double j = src.has("near_jaccard") && !src.get("near_jaccard").isJsonNull()
+                ? src.get("near_jaccard").getAsDouble() : 0;
+        if (!(j > 0 && j <= 0.5)) {
+            throw new IllegalArgumentException("deck belief: the export lacks the lineage holdout (near_jaccard " + j + ")");
+        }
+        final java.util.Set<String> near = new HashSet<>(), excl = new HashSet<>();
+        if (src.has("near_banks") && src.get("near_banks").isJsonArray()) {
+            src.getAsJsonArray("near_banks").forEach(x -> near.add(x.getAsString()));
+        }
+        if (src.has("excluded_banks") && src.get("excluded_banks").isJsonArray()) {
+            src.getAsJsonArray("excluded_banks").forEach(x -> excl.add(x.getAsString()));
+        }
+        if (near.isEmpty() || !excl.containsAll(near)) {
+            throw new IllegalArgumentException("deck belief: the export's faced banks are not both excluded and "
+                    + "lineage-held-out: near " + near + ", excluded " + excl);
         }
     }
 
