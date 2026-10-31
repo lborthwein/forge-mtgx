@@ -414,7 +414,7 @@ public final class ForcedWinSolver {
                     + horizon + " budgetMs=" + budgetMs + " adversary=" + adversary + " defense=" + defense + " engine=" + engine + " engineNodes="
                 + engineNodes + " engineMs=" + engineMs + " forced=" + forced + " likely=" + likely + " likelyWorlds=" + likelyWorlds
                 + " likelyTop=" + likelyTop + " likelyCapTurns=" + likelyCapTurns + " paySearch=" + paySearch
-                + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes : "")
+                + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes + " V=" + OppMin.VERSION : "")
                 + (cacPicks ? " cacPicks V=" + cacVariants + " cap=" + cacCap : "") + (cacLine ? " cacLine" : "")
                 + (planScry ? " planScry max=" + planScryMax : "") + (planDiscard ? " planDiscard" : "")
                 + (payRecord ? " payRecord V=" + payVariants : "") + (engineNodesPerSearch ? " engineNodesPerSearch" : "")
@@ -2433,6 +2433,12 @@ public final class ForcedWinSolver {
                 o.why = "min" + script + ":" + o.why;
                 firstLost[0] = o;
             }
+            if (OppMin.DEBUG) {
+                final StringBuilder sb = new StringBuilder();
+                if (o.points != null) for (OppMin.Point pt : o.points) sb.append(pt.size).append(' ');
+                System.err.println("[oppmin] world " + world + " " + script + " won=" + o.won + " why=" + o.why
+                        + " points=" + sb);
+            }
             return new OppMin.Leaf(o.won ? 1.0 : 0.0, o.why, o.points);
         });
         if (m.v == 0.0) {
@@ -3583,6 +3589,13 @@ public final class ForcedWinSolver {
             super(g, p, lp);
             this.victim = victim;
             this.counterAt = counterAt;
+        }
+
+        @Override
+        public List<forge.game.spellability.AbilitySub> chooseModeForAbility(SpellAbility sa,
+                List<forge.game.spellability.AbilitySub> possible, int min, int num, boolean allowRepeat) {
+            final List<forge.game.spellability.AbilitySub> f = OppMin.forcedModes(sa, possible);
+            return f != null ? f : super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
         }
 
         static boolean holdsCounter(Player p) {

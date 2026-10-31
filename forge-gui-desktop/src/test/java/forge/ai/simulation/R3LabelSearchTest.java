@@ -624,6 +624,62 @@ public class R3LabelSearchTest extends SimulationTest {
         AssertJUnit.assertEquals(0.8, res.target, 1e-9);
     }
 
+    /** Their Doomsday on the stack; our hand and lands for the response-row tests. */
+    private Game theirDoomsday(final String[] ourHand, final String[] ourLands, final String[] theirCreatures) {
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        for (int i = 0; i < 20; i++) addCardToZone("Island", a, ZoneType.Library);
+        for (int i = 0; i < 20; i++) addCardToZone("Swamp", b, ZoneType.Library);
+        for (String n : ourHand) addCardToZone(n, a, ZoneType.Hand);
+        for (String n : ourLands) addCard(n, a);
+        for (String n : theirCreatures) addCard(n, b).setSickness(false);
+        addCardToZone("Doomsday", b, ZoneType.Hand);
+        for (int i = 0; i < 3; i++) addCard("Swamp", b);
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, b);
+        g.getAction().checkStateEffects(true);
+        AssertJUnit.assertTrue(((PlayerControllerAi) b.getController()).playChosenSpellAbility(firstSpell(b, "Doomsday")));
+        return g;
+    }
+
+    /**
+     * Review #148 S2-2 and S3: response candidates are keyed by target (Bolt on Pestermite and Bolt on Kiki-Jiki are two
+     * candidates) and by cost (Force of Will hard-cast and pitched are two).
+     */
+    @Test
+    public void responseCandidatesKeepTargetsAndCosts() {
+        final Game g = theirDoomsday(new String[] {"Lightning Bolt", "Force of Will", "Brainstorm"},
+                new String[] {"Mountain", "Island", "Island", "Island", "Island"},
+                new String[] {"Pestermite", "Kiki-Jiki, Mirror Breaker"});
+        final Player a = g.getPlayers().get(0);
+        final R3LabelSearch r3 = new R3LabelSearch(spec(base()), env(flat(0.5), null));
+        int bolt = 0, fow = 0;
+        final Set<String> keys = new HashSet<>();
+        for (R3LabelSearch.PCand c : r3.candidates(g, a, null)) {
+            AssertJUnit.assertTrue("keys are distinct: " + c.key(), keys.add(c.key()));
+            if (!"respond".equals(c.src)) continue;
+            if (c.label.startsWith("Lightning Bolt") && (c.label.contains("Pestermite") || c.label.contains("Kiki"))) bolt++;
+            if (c.label.startsWith("Force of Will")) fow++;
+        }
+        AssertJUnit.assertEquals("Bolt on each of their creatures", 2, bolt);
+        AssertJUnit.assertEquals("Force of Will hard-cast and pitched", 2, fow);
+    }
+
+    /** Review #148 S2-4 (N4): a row past its line cap stops and has no target. */
+    @Test
+    public void aRowPastItsWorkCapIsUnresolved() {
+        final Game g = boltBoard(3, 20, false, false);
+        final Player a = g.getPlayers().get(0);
+        final JsonObject o = base();
+        o.addProperty("rowMaxLines", 3);
+        final R3LabelSearch r3 = new R3LabelSearch(spec(o), env(flat(0.5), null));
+        final R3LabelSearch.Result res = r3.priorityRow(g, a, r3.candidates(g, a,
+                Collections.singletonList(firstSpell(a, "Lightning Bolt"))), 61L);
+        final JsonObject j = res.toJson();
+        AssertJUnit.assertEquals(j.toString(), "row_cap", res.why);
+        AssertJUnit.assertTrue(j.toString(), Double.isNaN(res.target));
+        AssertJUnit.assertEquals("row-lines", j.get("row_cap").getAsString());
+    }
+
     /** Architect review (N12): any card spent (not only route pieces) offers the keep-the-card hold. */
     @Test
     public void anySpentCardOffersTheHold() {

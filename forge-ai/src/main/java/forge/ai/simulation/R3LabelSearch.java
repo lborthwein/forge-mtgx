@@ -98,6 +98,11 @@ public final class R3LabelSearch {
          * "explore"), so the walk can learn options the ranker misranks. 0 = none.
          */
         public int exploreAnswers = 2;
+        /**
+         * Review #148 S2-4 (N4): per-row work caps (counts). A row past any of them stops; its unfinished worlds are
+         * capped ("cap:row-lines" ...) and, past the unresolved share, it has no target. 0 = no cap.
+         */
+        public int rowMaxLines = 400, rowMaxProofs = 200, rowMaxSteps = 100000;
         public int selectWorlds = 8;
         public int targetWorlds = 16;
         public boolean stratify = true;
@@ -141,10 +146,10 @@ public final class R3LabelSearch {
             return o;
         }
 
-        static final Set<String> KEYS = new TreeSet<>(Arrays.asList("maxCands", "policyTop", "holdPieces", "exploreAnswers", "selectWorlds",
+        static final Set<String> KEYS = new TreeSet<>(Arrays.asList("maxCands", "policyTop", "holdPieces", "exploreAnswers", "rowMaxLines", "rowMaxProofs", "rowMaxSteps", "selectWorlds",
                 "targetWorlds", "stratify", "topAnswers", "cac", "inline", "leaf", "maxTurns", "maxSteps", "horizon",
                 "proofLeaf", "profile", "solverSpec", "drawDepth", "seqCap", "samples", "oppMin", "oppMinIn",
-                "oppResponses", "oppDepth", "oppNodes", "maxUnresolvedShare", "seed"));
+                "oppResponses", "oppDepth", "oppNodes", "oppMinVersion", "maxUnresolvedShare", "seed"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -161,6 +166,9 @@ public final class R3LabelSearch {
             if (o.has("policyTop")) s.policyTop = o.get("policyTop").getAsInt();
             if (o.has("holdPieces")) s.holdPieces = o.get("holdPieces").getAsBoolean();
             if (o.has("exploreAnswers")) s.exploreAnswers = o.get("exploreAnswers").getAsInt();
+            if (o.has("rowMaxLines")) s.rowMaxLines = o.get("rowMaxLines").getAsInt();
+            if (o.has("rowMaxProofs")) s.rowMaxProofs = o.get("rowMaxProofs").getAsInt();
+            if (o.has("rowMaxSteps")) s.rowMaxSteps = o.get("rowMaxSteps").getAsInt();
             if (o.has("selectWorlds")) s.selectWorlds = o.get("selectWorlds").getAsInt();
             if (o.has("targetWorlds")) s.targetWorlds = o.get("targetWorlds").getAsInt();
             if (o.has("stratify")) s.stratify = o.get("stratify").getAsBoolean();
@@ -193,6 +201,10 @@ public final class R3LabelSearch {
             if (o.has("oppMinIn")) s.oppMinIn = o.get("oppMinIn").getAsString();
             if (o.has("oppResponses")) s.oppResponses = o.get("oppResponses").getAsInt();
             if (o.has("oppDepth")) s.oppDepth = o.get("oppDepth").getAsInt();
+            if (o.has("oppMinVersion") && o.get("oppMinVersion").getAsInt() != OppMin.VERSION) {
+                throw new IllegalArgumentException("r3.oppMinVersion " + o.get("oppMinVersion") + " is not this jar's "
+                        + OppMin.VERSION);
+            }
             if (o.has("oppNodes")) s.oppNodes = o.get("oppNodes").getAsInt();
             if (o.has("maxUnresolvedShare")) s.maxUnresolvedShare = o.get("maxUnresolvedShare").getAsDouble();
             if (o.has("seed")) s.seed = o.get("seed").getAsLong();
@@ -205,6 +217,7 @@ public final class R3LabelSearch {
             if (s.maxCands < 2 || s.selectWorlds < 1 || s.targetWorlds < 1 || s.topAnswers < 1 || s.maxTurns < 1
                     || s.maxSteps < 1 || s.horizon < 0 || s.drawDepth < 1 || s.seqCap < 1 || s.samples < 1
                     || s.oppResponses < 0 || s.oppDepth < 1 || s.oppNodes < 1 || s.policyTop < 0 || s.exploreAnswers < 0
+                    || s.rowMaxLines < 0 || s.rowMaxProofs < 0 || s.rowMaxSteps < 0
                     || !(s.maxUnresolvedShare >= 0 && s.maxUnresolvedShare <= 1)) {
                 throw new IllegalArgumentException("r3: counts out of range");
             }
@@ -220,6 +233,9 @@ public final class R3LabelSearch {
             o.addProperty("policyTop", policyTop);
             o.addProperty("holdPieces", holdPieces);
             o.addProperty("exploreAnswers", exploreAnswers);
+            o.addProperty("rowMaxLines", rowMaxLines);
+            o.addProperty("rowMaxProofs", rowMaxProofs);
+            o.addProperty("rowMaxSteps", rowMaxSteps);
             o.addProperty("selectWorlds", selectWorlds);
             o.addProperty("targetWorlds", targetWorlds);
             o.addProperty("stratify", stratify);
@@ -241,6 +257,7 @@ public final class R3LabelSearch {
             o.addProperty("oppResponses", oppResponses);
             o.addProperty("oppDepth", oppDepth);
             o.addProperty("oppNodes", oppNodes);
+            o.addProperty("oppMinVersion", OppMin.VERSION);
             o.addProperty("maxUnresolvedShare", maxUnresolvedShare);
             o.addProperty("seed", seed);
             return sorted(o);
@@ -377,6 +394,14 @@ public final class R3LabelSearch {
     static final class Work {
         long lines, steps, copies, proofs, proofWins, proofLosses, inlineAsks, inlineDeparted, oppNodes, oppCuts,
                 leafValues, holdPasses;
+
+        /** The first per-row cap this row has reached, or null. */
+        String over(final Spec spec) {
+            if (spec.rowMaxLines > 0 && lines >= spec.rowMaxLines) return "row-lines";
+            if (spec.rowMaxProofs > 0 && proofs >= spec.rowMaxProofs) return "row-proofs";
+            if (spec.rowMaxSteps > 0 && steps >= spec.rowMaxSteps) return "row-steps";
+            return null;
+        }
 
         JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -798,6 +823,14 @@ public final class R3LabelSearch {
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             return st.choose(this, super::chooseSpellAbilityToPlay);
         }
+
+        @Override
+        public List<forge.game.spellability.AbilitySub> chooseModeForAbility(final SpellAbility sa,
+                final List<forge.game.spellability.AbilitySub> possible, final int min, final int num,
+                final boolean allowRepeat) {
+            final List<forge.game.spellability.AbilitySub> f = OppMin.forcedModes(sa, possible);
+            return f != null ? f : super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+        }
     }
 
     /** A line seat on the generator policy (Forge AI plus the honest solver: the cube combo control). */
@@ -811,6 +844,14 @@ public final class R3LabelSearch {
         @Override
         public List<SpellAbility> chooseSpellAbilityToPlay() {
             return st.choose(this, super::chooseSpellAbilityToPlay);
+        }
+
+        @Override
+        public List<forge.game.spellability.AbilitySub> chooseModeForAbility(final SpellAbility sa,
+                final List<forge.game.spellability.AbilitySub> possible, final int min, final int num,
+                final boolean allowRepeat) {
+            final List<forge.game.spellability.AbilitySub> f = OppMin.forcedModes(sa, possible);
+            return f != null ? f : super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
         }
     }
 
@@ -902,6 +943,11 @@ public final class R3LabelSearch {
     LineOut line(final Game g, final Player me, final int rootTurn, final PCand first, final OppMin.Script script,
             final World world, final Work work, final long seed) {
         final LineOut out = new LineOut();
+        final String rowCap = work.over(spec);
+        if (rowCap != null) {
+            out.end = "cap:" + rowCap; // review #148 S2-4: the row's work cap, deterministic (counts)
+            return out;
+        }
         final LineState st = new LineState(g, me, rootTurn, out, work, seed);
         st.first = first;
         if (script != null && !me.getOpponents().isEmpty()) {
@@ -1081,6 +1127,10 @@ public final class R3LabelSearch {
         final Set<Integer> hold;
         /** The route pieces (names) this action may spend: cast, pitched, discarded or sacrificed. */
         Set<String> spends = Collections.emptySet();
+        /** Review #148 S2-2: the action's targets (OppMin.targetId, in chain order; empty = Forge AI targets it). */
+        List<String> targets = Collections.emptyList();
+        /** A modal action's forced modes (OppMin.MODES), or null. */
+        String modes;
 
         PCand(final boolean pass, final int hostId, final String desc, final boolean land, final String label,
                 final String src, final boolean draws) {
@@ -1100,7 +1150,9 @@ public final class R3LabelSearch {
         }
 
         String key() {
-            final String k = pass ? "pass" : hostId + "|" + land + "|" + desc;
+            String k = pass ? "pass" : hostId + "|" + land + "|" + desc;
+            if (!targets.isEmpty()) k += "|t" + targets;
+            if (modes != null) k += "|m:" + modes;
             return hold == null ? k : "hold" + hold + ":" + k;
         }
 
@@ -1126,8 +1178,23 @@ public final class R3LabelSearch {
 
         static PCand of(final SpellAbility sa, final String src) {
             final Card h = sa.getHostCard();
-            return new PCand(false, h == null ? -1 : h.getId(), sa.getDescription(), sa.isLandAbility(),
-                    (h == null ? "?" : h.getName()) + ": " + sa.getDescription(), src, drawsCards(sa));
+            final List<String> ts = new ArrayList<>();
+            final List<String> names = new ArrayList<>();
+            for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                if (s.usesTargeting() && s.getTargets() != null) {
+                    for (forge.game.GameObject o : s.getTargets()) {
+                        ts.add(OppMin.targetId(o));
+                        names.add(o instanceof Card c ? c.getName() : o instanceof Player pl ? pl.getName()
+                                : o instanceof SpellAbility x && x.getHostCard() != null ? x.getHostCard().getName() : "?");
+                    }
+                }
+            }
+            final PCand c = new PCand(false, h == null ? -1 : h.getId(), sa.getDescription(), sa.isLandAbility(),
+                    (h == null ? "?" : h.getName()) + ": " + sa.getDescription() + (names.isEmpty() ? "" : " -> " + names),
+                    src, drawsCards(sa));
+            c.targets = ts;
+            c.modes = sa.hasSVar(OppMin.MODES) ? sa.getSVar(OppMin.MODES) : null;
+            return c;
         }
 
         /** This action in a copy (ids survive copies), or null. */
@@ -1139,10 +1206,27 @@ public final class R3LabelSearch {
             for (SpellAbility sa : all) {
                 if (sa.isLandAbility() == land && desc.equals(sa.getDescription())) {
                     sa.setActivatingPlayer(p);
+                    if (modes != null) sa.setSVar(OppMin.MODES, modes);
+                    if (!targets.isEmpty()) {
+                        // the same targets in this copy (ids survive copies); a target gone: not this action
+                        final List<forge.game.GameObject> objs = new ArrayList<>();
+                        for (String t : targets) {
+                            final forge.game.GameObject o = findTarget(g, t);
+                            if (o == null) return null;
+                            objs.add(o);
+                        }
+                        sa.resetTargets();
+                        for (forge.game.GameObject o : objs) sa.getTargets().add(o);
+                        if (!sa.isTargetNumberValid()) return null;
+                    }
                     return sa;
                 }
             }
             return null;
+        }
+
+        static forge.game.GameObject findTarget(final Game g, final String t) {
+            return OppMin.findTarget(g, t);
         }
     }
 
@@ -1387,6 +1471,10 @@ public final class R3LabelSearch {
         res.row = "priority";
         try {
             final int rootTurn = live.getPhaseHandler().getTurn();
+            if (!live.getStack().isEmpty() && GameCopier.stackUnsupported(live) != null) {
+                // review #148 S3: the copy cannot carry this stack, so the holds and answers were not offered
+                res.extra.addProperty("holds_dropped", "stack_unsupported: " + GameCopier.stackUnsupported(live));
+            }
             final Set<Integer> knownMe = env.known(liveMe);
             final Player liveOpp = liveMe.getOpponents().isEmpty() ? null : liveMe.getOpponents().get(0);
             final Set<Integer> knownOpp = liveOpp == null ? new HashSet<>() : env.known(liveOpp);
@@ -1412,6 +1500,7 @@ public final class R3LabelSearch {
                 return res;
             }
             final PCand pc = cands.get(res.pick);
+            res.extra.addProperty("pick_src", pc.src);
             final long ts = LookaheadSearch.mix(seed0, 0x5452554557L);
             if (pc.draws) {
                 // a costed draw: the expectation over our next draws (exact name sequences, weight = probability)
@@ -1448,6 +1537,12 @@ public final class R3LabelSearch {
                 }
             }
             closeTarget(res);
+            final String rowCap = res.work.over(spec);
+            if (rowCap != null) {
+                res.extra.addProperty("row_cap", rowCap); // review #148 S2-4: overflow makes the row unresolved
+                res.target = Double.NaN;
+                res.why = "row_cap";
+            }
         } catch (RuntimeException | StackOverflowError e) {
             res.why = "error";
             res.error = e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -1679,6 +1774,7 @@ public final class R3LabelSearch {
             }
             final int pi = played.get(pj);
             res.extra.addProperty("pick_answer", pi);
+            res.extra.addProperty("pick_src", res.cands.get(pj).src);
             final long ts = LookaheadSearch.mix(seed0, 0x5452554557L);
             final int W = targetCount(liveMe, knownMe);
             res.targetKind = spec.stratify ? "stratified" : "true";
@@ -1692,6 +1788,12 @@ public final class R3LabelSearch {
                 res.targetWorlds.add(wo);
             }
             closeTarget(res);
+            final String rowCap = res.work.over(spec);
+            if (rowCap != null) {
+                res.extra.addProperty("row_cap", rowCap); // review #148 S2-4: overflow makes the row unresolved
+                res.target = Double.NaN;
+                res.why = "row_cap";
+            }
         } catch (RuntimeException | StackOverflowError e) {
             res.why = "error";
             res.error = e.getClass().getSimpleName() + ": " + e.getMessage();
