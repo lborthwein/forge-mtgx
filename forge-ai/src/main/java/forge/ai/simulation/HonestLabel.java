@@ -451,6 +451,17 @@ public final class HonestLabel {
         private void label0(final Game live, final Player liveMe, final long key, final Result r, final Set<Integer> known) {
             final PhaseHandler ph = live.getPhaseHandler();
             if (!live.getStack().isEmpty()) {
+                // solver-cap12 round 3 (R3-5, engineStack only): our priority with the opponent's item on top is a win
+                // check (a response line); otherwise, as before, no check
+                if (spec.winConfig().engineStack && live.getStack().peek().getActivatingPlayer() != liveMe
+                        && GameCopier.stackUnsupported(live) == null) {
+                    final List<Player> os = new ArrayList<>(liveMe.getOpponents());
+                    if (os.size() == 1) {
+                        r.check = "win";
+                        win(live, liveMe, os.get(0), key, r, known);
+                        return;
+                    }
+                }
                 r.gate = "stack";
                 return;
             }
@@ -503,6 +514,7 @@ public final class HonestLabel {
                 final GameCopier copier = new GameCopier(live, true);
                 copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING); // gamecopier-fidelity-1030
                 copier.setCopyFidelity(1); // storm count, per-turn records (as the solver's own play-outs)
+                ForcedWinEngine.copyStackIf(copier, live, spec.winConfig().engineStack); // R3-5
                 final Game g = copier.makeCopy();
                 final Player me = (Player) copier.find(liveMe);
                 final Player opp = (Player) copier.find(liveOpp);
