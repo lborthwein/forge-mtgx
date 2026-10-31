@@ -126,7 +126,7 @@ public class AiProfileUtil {
      * solver-cap12-1030 (CAP-2, PREDECLARATION-solver-cap12): the counted generator with engineNodesPerSearch (each
      * engine search gets its own engineNodes; HonestForcedWinCounted compares the solver's lifetime node count, so its
      * same-turn engine pass gets no nodes after the seat's first searches and it misses kills a label proves). A NEW
-     * generator version: never mixed with HonestForcedWinCounted tapes. HonestForcedWinCounted is unchanged.
+     * generator version; predeclared rule (not enforced by the bench): never mixed with HonestForcedWinCounted tapes. HonestForcedWinCounted is unchanged.
      */
     public static final String HONEST_FORCED_WIN_COUNTED2_PROFILE = "HonestForcedWinCounted2";
     public static final String HONEST_FORCED_WIN_COUNTED2_SPEC = HONEST_FORCED_WIN_COUNTED_SPEC + ",engineNodesPerSearch=true";

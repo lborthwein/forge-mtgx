@@ -212,7 +212,7 @@ final class ForcedWinEngine {
 
     static final class Limits {
         int nodes = 250;
-        /** solver-cap12-1030 (CAP-2; false = off): {@link #nodes} per search, counted from the search's start. */
+        /** solver-cap12-1030 (CAP-2; false = off): pass 1's share of {@link #nodes} counted from the search's start (pass 2 always was). */
         boolean perSearchNodes;
         int depth = 64;
         int branching = 8;
@@ -591,6 +591,9 @@ final class ForcedWinEngine {
         MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(seed));
         AiCache.openScope();
         forge.util.IdScope.open();
+        // review #149 S2-2: the caller's limits are restored in finally (an engine error must not leave pass state)
+        final int nodeCap0 = lim.nodes;
+        final boolean passTurn0 = lim.passTurn;
         try {
             final ForcedWinEngine e = new ForcedWinEngine(lim, st, deadline, seed);
             e.stepBase = st.steps;
@@ -670,6 +673,8 @@ final class ForcedWinEngine {
             ForcedWinSolver.receipt("FORCED_WIN engine error " + ex);
             return null;
         } finally {
+            lim.nodes = nodeCap0;
+            lim.passTurn = passTurn0;
             st.nanos += System.nanoTime() - t0;
             if (held[0] != null) {
                 // bvw-step1-build-1024 (diagnostics): which budget stopped this search, if any

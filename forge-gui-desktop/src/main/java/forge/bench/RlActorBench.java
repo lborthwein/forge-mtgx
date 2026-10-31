@@ -2101,7 +2101,7 @@ public final class RlActorBench {
 
     /**
      * bvw-step1-build-1024 (review-align #2): null, or why this replay is refused before any game: a label search block
-     * on HonestForcedWin tapes (the step-0 generator, profile HonestForcedWin or HonestForcedWinCounted, or a tape with
+     * on HonestForcedWin tapes (the step-0 generator, profile HonestForcedWin, HonestForcedWinCounted or HonestForcedWinCounted2, or a tape with
      * honest_generator seats) without {@code label.reference}, or with a reference window other than step 0's
      * ({@link forge.bench.rl.TrajectoryRef#STEP0_WINDOW} turns).
      */
@@ -2127,7 +2127,7 @@ public final class RlActorBench {
         return null;
     }
 
-    /** A tape of the step-0 generator: an HonestForcedWin(Counted) seat, or honest_generator seats on the tape. */
+    /** A tape of the step-0 generator: an HonestForcedWin(Counted, Counted2) seat, or honest_generator seats on the tape. */
     static boolean honestForcedWinTape(final JsonObject t) {
         if (t.has("honest_generator") && t.get("honest_generator").isJsonArray()) {
             for (JsonElement e : t.getAsJsonArray("honest_generator")) {
@@ -2150,7 +2150,7 @@ public final class RlActorBench {
     }
 
     /**
-     * bvw-step1-build-1024 (review #3): a counter-budget generator seat (the HonestForcedWinCounted profile, or a
+     * bvw-step1-build-1024 (review #3): a counter-budget generator seat (the HonestForcedWinCounted(2) profile, or a
      * forcedWin.spec override with budget=counter) refuses a run whose Forge AI clocks can bind. Null = fine.
      */
     static String counterGeneratorRefusal(final JsonArray controllers, final int aiTimeoutSec) {
