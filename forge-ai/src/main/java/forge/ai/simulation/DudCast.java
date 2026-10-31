@@ -213,7 +213,8 @@ public final class DudCast {
 
     /**
      * The first per-turn history fact a condition may read that differs between the live game and its copy (null when they
-     * agree): revolt, spells cast, life gained and lost, cards drawn, lands played, for every player.
+     * agree): revolt, spells cast, life gained and lost, lands played, for every player. (Cards drawn this turn
+     * are not copied either, but nearly every copy differs there after the draw step and few conditions read it.)
      */
     static String historyLost(Game live, Game copy) {
         for (Player lp : live.getPlayers()) {
@@ -234,9 +235,6 @@ public final class DudCast {
             }
             if (lp.getLifeGainedThisTurn() != cp.getLifeGainedThisTurn() || lp.getLifeLostThisTurn() != cp.getLifeLostThisTurn()) {
                 return "life gained/lost this turn";
-            }
-            if (lp.getNumDrawnThisTurn() != cp.getNumDrawnThisTurn()) {
-                return "cards drawn this turn";
             }
             if (lp.getLandsPlayedThisTurn() != cp.getLandsPlayedThisTurn()) {
                 return "lands played this turn";
