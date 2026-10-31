@@ -1553,6 +1553,7 @@ final class ForcedWinEngine {
         final Game g = node.g;
         final Player me = node.me;
         final List<Step> rep = new ArrayList<>(), act = new ArrayList<>(), spells = new ArrayList<>(), lands = new ArrayList<>();
+        final List<Step> wide = new ArrayList<>(); // engineX in Forge's order: wide target variants, searched last
         final Step last = node.path.isEmpty() ? null : node.path.get(node.path.size() - 1);
         final Set<String> keys = new HashSet<>();
         final List<Card> cards = new ArrayList<>();
@@ -1607,7 +1608,7 @@ final class ForcedWinEngine {
                         same.cac = new ArrayList<>(last.cacPlayed);
                         rep.add(same);
                     }
-                    (repeat ? rep : c.isInPlay() ? act : spells).add(s);
+                    (repeat ? rep : s.wideTarget ? wide : c.isInPlay() ? act : spells).add(s);
                 }
             }
         }
@@ -1705,6 +1706,16 @@ final class ForcedWinEngine {
             } else {
                 out.add(atk);
             }
+        }
+        if (!wide.isEmpty()) {
+            if (node.afterLoop != null) {
+                final Set<String> bodyKeys = new HashSet<>();
+                for (Step b : node.afterLoop) {
+                    bodyKeys.add(b.kind + "|" + b.hostName + "|" + b.desc + "|" + b.floatColor);
+                }
+                wide.removeIf(m -> bodyKeys.contains(m.kind + "|" + m.hostName + "|" + m.desc + "|" + m.floatColor));
+            }
+            out.addAll(wide);
         }
         return out;
     }
@@ -1866,11 +1877,22 @@ final class ForcedWinEngine {
         if (slot != null && firstTargeting(sa) == slot) {
             int n = 0;
             final List<GameObject> cands = new ArrayList<>();
-            if (lim.order != null || lim.xChoice) {
+            if (lim.order != null) {
                 // R3-3 (and D8: engineX): every legal single target is a candidate (players, then every permanent), up
                 // to orderCap, not a fixed few of our own permanents (which left the opponent out when we had three)
                 cands.addAll(g.getPlayers());
                 cands.addAll(g.getCardsIn(ZoneType.Battlefield));
+            } else if (lim.xChoice) {
+                // D8 in Forge's order (review fix, the kiki flip of the ladder-frequency run): players, our permanents,
+                // then the rest; past the first targetVariants the variants are wide (searched after the node's other
+                // moves), so 24 targets of one ability no longer fill the branching cap ahead of every other move
+                cands.addAll(g.getPlayers());
+                cands.addAll(me.getCardsIn(ZoneType.Battlefield));
+                for (Card p : g.getCardsIn(ZoneType.Battlefield)) {
+                    if (!p.getController().equals(me)) {
+                        cands.add(p);
+                    }
+                }
             } else {
                 for (Card p : me.getCardsIn(ZoneType.Battlefield)) {
                     cands.add(p);
@@ -1891,6 +1913,7 @@ final class ForcedWinEngine {
                 }
                 final Step s = Step.engine(AbilKind.ENGINE, c.getId(), c.getName(), desc, costKey, sa.isSpell());
                 s.targetRefs.add(ref);
+                s.wideTarget = lim.order == null && lim.xChoice && n >= lim.targetVariants;
                 out.add(s);
                 n++;
             }

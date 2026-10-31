@@ -101,6 +101,28 @@ public class SolverCap12R3Test extends forge.ai.AITest {
         }
     }
 
+    @Test(timeOut = 600000)
+    public void wideTargetsDoNotCrowdOutTheOtherMoves() {
+        // the kiki flip of the ladder-frequency run (2990164782-s1, turn 12): engineX's widened single targets (D8) were
+        // distinct moves, so Strip Mine's many land targets filled the branching cap (8) and the line through Reanimate
+        // was never tried. Here Rod of Ruin has ten targets and spends the mana the Bolt needs: the Bolt must still be
+        // among the root's moves, keys off and on
+        final Game g = ForcedWinSolverTest.game("Default", "Default", new WinConditionCoverageTest.P("rod-crowd",
+                WinConditionCoverageTest.V.PROVEN, "Bolt for 3 into 3; Rod of Ruin faces two players and eight creatures")
+                .k("humanhand", "Lightning Bolt")
+                .k("humanbattlefield", WinConditionCoverageTest.j("Rod of Ruin", WinConditionCoverageTest.n("Mountain", 3)))
+                .k("aibattlefield", WinConditionCoverageTest.n("Grizzly Bears", 8)).k("ailife", "3").frame());
+        for (boolean x : new boolean[] {false, true}) {
+            final ForcedWinEngine.Stats st = new ForcedWinEngine.Stats();
+            final ForcedWinEngine.Limits lim = limits(250, false, x);
+            lim.passTurn = false; // this turn only: no next-turn Bolt after the Rod
+            final ForcedWinPlanner.Line l = engine(g, g.getPlayers().get(0), lim, st);
+            System.out.println("SC3 rod-crowd x=" + x + " " + st.summary() + " line=" + l);
+            Assert.assertNotNull(l, "x=" + x + " " + st.summary());
+            Assert.assertTrue(l.toString().contains("Lightning Bolt"), l.toString());
+        }
+    }
+
     /**
      * R3-3 measurement (not an assertion): nodes-to-proof of the full-information engine on -Dsc3.puzzles (coverage
      * names; "breach" = the CAP-1 frame, seat 1), Forge's order vs value order, at -Dsc3.nodes (default 2000).

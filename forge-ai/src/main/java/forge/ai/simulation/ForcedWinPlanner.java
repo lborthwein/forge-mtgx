@@ -123,6 +123,7 @@ public final class ForcedWinPlanner {
             s.engineSpell = engineSpell;
             s.byName = byName;
             s.xValue = xValue;
+            s.wideTarget = wideTarget;
             s.triggerRef = triggerRef;
             s.pickName = pickName;
             s.expHandIdx = expHandIdx;
@@ -177,6 +178,12 @@ public final class ForcedWinPlanner {
          * it on the ability before paying).
          */
         int xValue = -1;
+        /**
+         * solver-cap12-1030 R3-4 (a) review fix (engineX in Forge's move order only; false = off): a single-target variant
+         * past the first few (Forge AI's target and {@code targetVariants} more), searched after the node's other moves so
+         * a widely targetable ability (a land destroyer facing many lands) does not fill the branching cap by itself.
+         */
+        boolean wideTarget;
         /**
          * REPEAT steps (search-bones-1015, the engine search's cycles with progress): the loop body, played {@link #times}
          * times in order; null for every other step.
