@@ -23,6 +23,23 @@ import forge.game.card.CardCollectionView;
 final class ForcedWinChoices {
 
     static final String PICK = "pick", SCRY = "scry", SURV = "surv", DISC = "disc", ORDER = "order", SHUF = "shuf";
+    /** solver-cap12 round 3 (R3-4 b, engineCostChoice): a cost part's cards (sacrifice, exile, discard, tap-type). */
+    static final String COST = "cost";
+    /**
+     * R3-4 (b), engineCostChoice: our optional trigger's "you may" (trig:y / trig:n), keyed by {@link #trigHost}: the
+     * host's name and id and the trigger's description (review #154 S3: the name alone matched another copy's trigger).
+     */
+    static final String TRIG = "trig";
+
+    /** The TRIG key of a wrapped trigger: host name, host id and the trigger's description (stable across copies). */
+    static String trigHost(final forge.game.trigger.WrappedAbility w) {
+        final String d = w.getTrigger() == null ? "" : w.getTrigger().getParamOrDefault("TriggerDescription", "");
+        return w.getHostCard().getName() + "#" + w.getHostCard().getId() + "/" + Integer.toHexString(d.hashCode());
+    }
+
+    static String trigTok(final String host, final boolean yes) {
+        return TRIG + ":" + host + "=" + (yes ? "y" : "n");
+    }
 
     private ForcedWinChoices() {
     }
@@ -69,6 +86,35 @@ final class ForcedWinChoices {
         }
         Collections.sort(n);
         return DISC + ":" + String.join(";", n);
+    }
+
+    /** R3-4 (b): a cost part's cards, by their sorted names (the copies are fungible). */
+    static String costTok(final Iterable<Card> cs) {
+        final List<String> n = new ArrayList<>();
+        for (Card c : cs) {
+            n.add(c.getName());
+        }
+        Collections.sort(n);
+        return COST + ":" + String.join(";", n);
+    }
+
+    /** R3-4 (b): a cost part of exactly {@code n} cards: each distinct multiset of names (Forge AI's first). */
+    static List<String> costs(final CardCollectionView valid, final int n, final CardCollectionView def, final int cap) {
+        final List<String> out = new ArrayList<>();
+        out.add(costTok(def));
+        final List<Card> cards = new ArrayList<>();
+        for (Card c : valid) {
+            cards.add(c);
+        }
+        cards.sort((a, b) -> a.getName().equals(b.getName()) ? Integer.compare(a.getId(), b.getId())
+                : a.getName().compareTo(b.getName()));
+        ChooseACard.combos(cards, n, cap * 8, list -> add(out, costTok(list), cap));
+        return out;
+    }
+
+    /** R3-4 (b): a cost token's cards among the valid ones (exactly its names), or null. */
+    static CardCollection applyCost(final String tok, final CardCollectionView valid, final int n) {
+        return applyDisc(tok, valid, n, n);
     }
 
     static String orderTok(final Iterable<Card> cs) {
@@ -311,6 +357,8 @@ final class ForcedWinChoices {
         final List<Integer> freeAt = new ArrayList<>();
         final List<List<String>> candidates = new ArrayList<>();
         boolean miss;
+        /** R3-4 (b): only the COST kind records (engineCostChoice without cacPicks); false = every kind (as before). */
+        boolean costOnly;
 
         Recorder(final List<String> forced, final int cap) {
             this.forced = forced == null ? List.of() : forced;

@@ -175,6 +175,19 @@ public class WinConditionCoverageTest extends forge.ai.AITest {
                 "flash Pestermite at their end step, Kiki loop, attack on our turn (a window outside main phase 1)")
                 .k("activeplayer", "ai").k("activephase", "END_OF_TURN").k("humanhand", "Pestermite")
                 .k("humanbattlefield", ForcedWinSolverTest.KIKI_BF).k("ailife", "6"));
+        // --- solver-cap12 round 3 (R3-5): a response window, the opponent's spell on the stack (fixed before its first run)
+        ps.add(new P("ballista-pings-in-response", V.PROVEN,
+                "their Swords to Plowshares targets our 20-counter Walking Ballista: in response, twenty pings (before it resolves; Swords exiles it whatever its size)")
+                .k("activeplayer", "ai").k("activephase", "MAIN1").k("aiputonstack", "Swords to Plowshares->501")
+                .k("humanbattlefield", "Walking Ballista|Counters:P1P1=20|Id:501;Forest"));
+        ps.add(new P("ballista-pings-no-response-control", V.NOT_PROVEN,
+                "negative control: the same Ballista with 19 counters cannot ping 20 before Swords resolves")
+                .k("activeplayer", "ai").k("activephase", "MAIN1").k("aiputonstack", "Swords to Plowshares->501")
+                .k("humanbattlefield", "Walking Ballista|Counters:P1P1=19|Id:501;Forest"));
+        ps.add(new P("bolt-at-us-lethal-next-turn-control", V.NOT_PROVEN,
+                "review #154 S2 control: their Bolt targets us at 3 life, our lethal is next turn: only dropping or postponing their spell proves it")
+                .k("activeplayer", "ai").k("activephase", "MAIN1").k("aiputonstack", "Lightning Bolt->human")
+                .k("humanlife", "3").k("humanbattlefield", "Craw Wurm;Forest").k("ailife", "6"));
         // --- advantage, lock and extra-turn families (edge item 6): no same-turn or next-turn proof
         ps.add(new P("witness-ephemerate-timewarp", V.NOT_PROVEN, "an extra-turn chain: a lock, value territory")
                 .k("humanhand", "Ephemerate;Time Warp").k("humanbattlefield", j("Eternal Witness", n("Island", 3), n("Plains", 3))));
