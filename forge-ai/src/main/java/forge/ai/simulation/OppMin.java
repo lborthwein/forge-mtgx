@@ -51,6 +51,12 @@ public final class OppMin {
     private OppMin() {
     }
 
+    /** The MIN's version (review #148 S2-1): in the proof spec's identity and the solver config string. */
+    public static final int VERSION = 2;
+
+    /** -Dforge.oppmin.debug=true: one stderr line per branch and per answered point (diagnostics only). */
+    public static final boolean DEBUG = Boolean.getBoolean("forge.oppmin.debug");
+
     // ------------------------------------------------------------------------------------------------ config
 
     /** The counts (no clock). {@code depth} caps the budget (k max = min(2, depth)). */
@@ -290,15 +296,68 @@ public final class OppMin {
             }
             final SpellAbility top = g.getStack().isEmpty() ? null : g.getStack().peek().getSpellAbility();
             final int idx = points.size();
+            if (DEBUG) {
+                final StringBuilder b = new StringBuilder();
+                for (Card c : opp.getCardsIn(ZoneType.Battlefield)) b.append(c.getName()).append(c.isTapped() ? "/T" : "/U")
+                        .append(c.isCreature() ? "/cr " : " ");
+                System.err.println("[oppmin] point " + idx + " " + pk + " " + g.getPhaseHandler().getPhase() + " opp bf: " + b
+                        + " stack " + g.getStack().size());
+            }
+            final String state = stateKey(g);
             final List<SpellAbility> rs = responses(g, opp, victim, top);
-            points.add(new Point(rs.size(), stateKey(g), impact(top), budgetHint(opp, rs)));
-            if (script.forge) return own.get();
+            // review S1 (safety net, the base's behaviour): Forge AI's own answer at this point is a candidate too
+            final List<SpellAbility> mine = own.get();
+            if (script.forge) {
+                points.add(new Point(rs.size(), state, impact(top), budgetHint(opp, rs)));
+                return mine;
+            }
+            final SpellAbility fa = mine == null || mine.isEmpty() ? null : mine.get(0);
+            if (fa != null && fa.getActivatingPlayer() == opp && !fa.isManaAbility() && !sameAsAny(fa, rs)) {
+                rs.add(fa);
+            }
+            points.add(new Point(rs.size(), state, impact(top), budgetHint(opp, rs)));
             final int r = script.respAt(idx);
             if (r < 0 || r >= rs.size()) return null;
             final SpellAbility sa = rs.get(r);
+            if (DEBUG) System.err.println("[oppmin] point " + idx + " answer " + answerKey(sa) + " of " + rs.size());
+            final Card host = sa.getHostCard();
+            if (host != null && host.isInZone(ZoneType.Battlefield) && sa.getApi() == ApiType.Animate
+                    && (!sa.hasParam("Defined") || "Self".equals(sa.getParam("Defined")))) {
+                // a manland animating itself to block must not pay with itself (Forge AI would tap it for mana)
+                forge.ai.AiCardMemory.rememberCard(opp, host, forge.ai.AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL);
+            }
             answered = (top == null ? "attack" : top.getHostCard().getName()) + " answered by " + sa.getHostCard().getName();
             return new ArrayList<>(Collections.singletonList(sa));
         }
+    }
+
+    /** Whether {@code fa} is already in {@code rs} (same card, same ability, same targets). */
+    static boolean sameAsAny(final SpellAbility fa, final List<SpellAbility> rs) {
+        final String k = answerKey(fa);
+        for (SpellAbility sa : rs) {
+            if (answerKey(sa).equals(k)) return true;
+        }
+        return false;
+    }
+
+    static String answerKey(final SpellAbility sa) {
+        final StringBuilder sb = new StringBuilder();
+        sb.append(sa.getHostCard() == null ? -1 : sa.getHostCard().getId()).append('|').append(sa.getDescription());
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.usesTargeting() && s.getTargets() != null) {
+                for (GameObject o : s.getTargets()) sb.append('|').append(targetId(o));
+            }
+        }
+        if (sa.hasSVar(MODES)) sb.append("|m:").append(sa.getSVar(MODES));
+        return sb.toString();
+    }
+
+    static String targetId(final Object o) {
+        if (o instanceof Card c) return "c" + c.getId();
+        if (o instanceof Player p) return "p" + p.getId();
+        if (o instanceof SpellAbility s) return "s" + (s.getHostCard() == null ? -1 : s.getHostCard().getId()) + "x"
+                + Integer.toHexString(String.valueOf(s.getDescription()).hashCode());
+        return String.valueOf(o);
     }
 
     /**
@@ -326,17 +385,41 @@ public final class OppMin {
         }
     }
 
-    /** The point's state class: the position fingerprint, the stack by name and the mana pools. */
+    /**
+     * The point's state (review S2-3, a full key): the position fingerprint; every card by id with its zone, tapped,
+     * sickness, counters, damage, attachment and combat role; the stack with its targets and modes; spells cast this
+     * turn, land drops and mana pools by colour per player; the phase; and the random stream's state.
+     */
     static String stateKey(final Game g) {
         final StringBuilder sb = new StringBuilder(LookaheadSearch.fingerprint(g));
+        final forge.game.combat.Combat cb = g.getCombat();
+        for (Player p : g.getPlayers()) {
+            sb.append("|P").append(p.getId()).append(":lands").append(p.getLandsPlayedThisTurn()).append(":pool");
+            for (byte c : forge.card.MagicColor.WUBRGC) sb.append(p.getManaPool().getAmountOfColor(c)).append(',');
+            for (ZoneType z : List.of(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard, ZoneType.Exile,
+                    ZoneType.Library)) {
+                sb.append("|").append(z.name().charAt(0));
+                for (Card c : p.getCardsIn(z)) {
+                    sb.append(c.getId());
+                    if (z == ZoneType.Battlefield) {
+                        sb.append(c.isTapped() ? "T" : "U").append(c.isSick() ? "s" : "").append(c.getCounters())
+                                .append("d").append(c.getDamage());
+                        if (c.getEntityAttachedTo() != null) sb.append("@").append(targetId(c.getEntityAttachedTo()));
+                        if (cb != null && cb.isAttacking(c)) sb.append("A").append(targetId(cb.getDefenderByAttacker(c)));
+                        if (cb != null && cb.isBlocking(c)) sb.append("B");
+                    }
+                    sb.append(',');
+                }
+            }
+        }
         for (SpellAbilityStackInstance si : g.getStack()) {
             final SpellAbility sa = si.getSpellAbility();
-            sb.append("|st:").append(sa == null || sa.getHostCard() == null ? "?" : sa.getHostCard().getName())
-                    .append(sa == null ? "" : ":" + sa.getDescription());
+            sb.append("|st:").append(sa == null ? "?" : answerKey(sa));
         }
-        for (Player p : g.getPlayers()) {
-            sb.append("|pool").append(p.getId()).append(':').append(p.getManaPool().totalMana());
-        }
+        sb.append("|cast").append(g.getStack().getSpellsCastThisTurn().size());
+        sb.append("|ph").append(g.getPhaseHandler().getPhase()).append(g.getPhaseHandler().getPlayerTurn() == null ? ""
+                : g.getPhaseHandler().getPlayerTurn().getId());
+        sb.append("|rng").append(PlayoutKeys.rngState());
         return PlayoutKeys.digest(sb);
     }
 
@@ -381,7 +464,7 @@ public final class OppMin {
     // ------------------------------------------------------------------------------------------------ the response set
 
     /** Categories, in exploration order. */
-    static final int COUNTER = 0, REMOVAL = 1, DISCARD = 2, BLOCKER = 3, SHIELD = 4;
+    static final int COUNTER = 0, REMOVAL = 1, DISCARD = 2, BLOCKER = 3, SHIELD = 4, OTHER = 5;
 
     /**
      * The opponent's real responses to {@code top} (null: an attack point), collapsed and in a fixed order (category,
@@ -400,30 +483,15 @@ public final class OppMin {
             for (SpellAbility sa0 : c.getAllPossibleAbilities(opp, true)) {
                 if (sa0.isManaAbility() || sa0.isLandAbility()) continue;
                 if (sa0.isSpell() && c.isInZone(ZoneType.Battlefield)) continue;
+                // review S3: alternative costs are separate answers (Force of Will hard-cast vs pitched)
+                final String cost = sa0.getPayCosts() == null ? "-" : sa0.getPayCosts().toSimpleString();
+                if (sa0.getApi() == ApiType.Charm) {
+                    charmResponses(byKey, c, sa0, cost, top, victim, opp, attack);
+                    continue;
+                }
                 final List<Object> targets = new ArrayList<>();
                 final List<String> keys = new ArrayList<>();
-                if (sa0.usesTargeting()) {
-                    if (top != null && sa0.canTargetSpellAbility(top)) {
-                        targets.add(top);
-                        keys.add("stack");
-                    }
-                    for (Player who : List.of(victim, opp)) {
-                        final Set<String> names = new HashSet<>();
-                        for (Card v : who.getCardsIn(ZoneType.Battlefield)) {
-                            if (names.add(v.getName()) && sa0.canTarget(v)) {
-                                targets.add(v);
-                                keys.add((who == opp ? "own:" : "card:") + v.getName());
-                            }
-                        }
-                        if (sa0.canTarget(who)) {
-                            targets.add(who);
-                            keys.add(who == opp ? "self" : "player");
-                        }
-                    }
-                } else {
-                    targets.add(null);
-                    keys.add("-");
-                }
+                targetsOf(sa0, top, victim, opp, targets, keys);
                 for (int ti = 0; ti < targets.size(); ti++) {
                     final Object t = targets.get(ti);
                     final int cat;
@@ -446,7 +514,7 @@ public final class OppMin {
                     } catch (RuntimeException e) {
                         continue;
                     }
-                    byKey.putIfAbsent(cat + "|" + c.getName() + "|" + sa0.getApi() + "|" + keys.get(ti), cs);
+                    byKey.putIfAbsent(cat + "|" + c.getName() + "|" + sa0.getApi() + "|" + cost + "|" + keys.get(ti), cs);
                 }
             }
         }
@@ -454,59 +522,228 @@ public final class OppMin {
     }
 
     /**
-     * The response's category, or -1 when it is not real interaction with the line. {@code t}: its target (a stack
-     * object, a card, a player or null).
+     * {@code sa}'s target candidates: our top stack object; both players' permanents by name (only names it can target:
+     * review S3); both graveyards' cards by name (review S1: Ooze, Deathrite, Relic); both players. No target: null.
+     */
+    static void targetsOf(final SpellAbility sa, final SpellAbility top, final Player victim, final Player opp,
+            final List<Object> targets, final List<String> keys) {
+        if (!sa.usesTargeting()) {
+            targets.add(null);
+            keys.add("-");
+            return;
+        }
+        if (top != null && sa.canTargetSpellAbility(top)) {
+            targets.add(top);
+            keys.add("stack");
+        }
+        for (Player who : List.of(victim, opp)) {
+            for (ZoneType z : List.of(ZoneType.Battlefield, ZoneType.Graveyard)) {
+                final Set<String> names = new HashSet<>();
+                for (Card v : who.getCardsIn(z)) {
+                    if (!names.contains(v.getName()) && sa.canTarget(v)) {
+                        names.add(v.getName());
+                        targets.add(v);
+                        keys.add((who == opp ? "own" : "card") + (z == ZoneType.Graveyard ? "-gy:" : ":") + v.getName());
+                    }
+                }
+            }
+            if (sa.canTarget(who)) {
+                targets.add(who);
+                keys.add(who == opp ? "self" : "player");
+            }
+        }
+    }
+
+    /** The SVar a modal response carries: its forced modes (CharmOrder values, comma separated). */
+    public static final String MODES = "OppMinModes";
+
+    /**
+     * Review S1: a modal spell's responses, one per mode combination (CharmNum of the possible modes, repeats when the
+     * card allows them; at most 24 combinations), each with its modes forced ({@link #forcedModes}). A combination is a
+     * response when any of its modes is (incidental modes alone are not).
+     */
+    static void charmResponses(final TreeMap<String, SpellAbility> byKey, final Card c, final SpellAbility sa0,
+            final String cost, final SpellAbility top, final Player victim, final Player opp, final boolean attack) {
+        final List<forge.game.spellability.AbilitySub> modes;
+        final int num;
+        final boolean repeat;
+        try {
+            sa0.setActivatingPlayer(opp);
+            modes = forge.game.ability.effects.CharmEffect.makePossibleOptions(sa0);
+            num = Math.max(1, AbilityUtils.calculateAmount(c, sa0.getParamOrDefault("CharmNum", "1"), sa0));
+            repeat = sa0.hasParam("CanRepeatModes");
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (modes.isEmpty()) return;
+        final int k = repeat ? num : Math.min(num, modes.size());
+        final List<int[]> combos = new ArrayList<>();
+        combo(modes.size(), k, repeat, 0, new int[k], 0, combos, 24);
+        for (int[] cmb : combos) {
+            int cat = -1;
+            final StringBuilder key = new StringBuilder();
+            boolean ok = true;
+            for (int m : cmb) {
+                final forge.game.spellability.AbilitySub sub = modes.get(m);
+                sub.setActivatingPlayer(opp);
+                final List<Object> ts = new ArrayList<>();
+                targetsOf(sub, top, victim, opp, ts, new ArrayList<>());
+                int best = -1;
+                Object bestT = null;
+                for (Object t : ts) {
+                    try {
+                        final int x = category(sub, t, top, victim, opp, attack);
+                        if (x >= 0 && (best < 0 || x < best)) {
+                            best = x;
+                            bestT = t;
+                        }
+                    } catch (RuntimeException e) {
+                        // a mode Forge cannot test here: not a reason to answer
+                    }
+                }
+                if (sub.usesTargeting() && bestT == null) {
+                    // a targeted mode with no real target: its first legal one (a bonus mode), else not castable
+                    if (ts.isEmpty()) {
+                        ok = false;
+                        break;
+                    }
+                    bestT = ts.get(0);
+                }
+                if (best >= 0 && (cat < 0 || best < cat)) cat = best;
+                key.append(sub.getSVar("CharmOrder")).append('@').append(bestT == null ? "-" : targetId(bestT)).append(',');
+            }
+            if (!ok) continue;
+            if (cat < 0) continue;
+            final SpellAbility cs = sa0.copy(opp);
+            cs.setActivatingPlayer(opp);
+            cs.setSVar(MODES, key.toString());
+            try {
+                if (!cs.canPlay() || !ComputerUtilCost.canPayCost(cs, opp, false)) continue;
+            } catch (RuntimeException e) {
+                continue;
+            }
+            byKey.putIfAbsent(cat + "|" + c.getName() + "|Charm|" + cost + "|modes:" + key, cs);
+        }
+    }
+
+    static void combo(final int n, final int k, final boolean repeat, final int from, final int[] cur, final int depth,
+            final List<int[]> out, final int cap) {
+        if (out.size() >= cap) return;
+        if (depth == k) {
+            out.add(cur.clone());
+            return;
+        }
+        for (int i = from; i < n; i++) {
+            cur[depth] = i;
+            combo(n, k, repeat, repeat ? i : i + 1, cur, depth + 1, out, cap);
+        }
+    }
+
+    /**
+     * The forced modes of a modal response ({@link #MODES}), picked from {@code possible} by CharmOrder (repeats
+     * included), or null: not one of ours, or a mode no longer possible (the controller then chooses).
+     */
+    public static List<forge.game.spellability.AbilitySub> forcedModes(final SpellAbility sa,
+            final List<forge.game.spellability.AbilitySub> possible) {
+        if (sa == null || !sa.hasSVar(MODES) || possible == null) return null;
+        final List<forge.game.spellability.AbilitySub> out = new ArrayList<>();
+        final Game g = sa.getHostCard() == null ? null : sa.getHostCard().getGame();
+        for (String o : sa.getSVar(MODES).split(",")) {
+            if (o.isEmpty()) continue;
+            final String[] ot = o.split("@", 2);
+            forge.game.spellability.AbilitySub hit = null;
+            for (forge.game.spellability.AbilitySub sub : possible) {
+                if (ot[0].equals(sub.getSVar("CharmOrder"))) hit = sub;
+            }
+            if (hit == null) return null;
+            if (hit.usesTargeting() && ot.length > 1 && !"-".equals(ot[1]) && g != null) {
+                final GameObject t = findTarget(g, ot[1]);
+                if (t == null) return null;
+                // a repeated mode gets its own copy (chainAbilities clones each chosen sub)
+                hit.resetTargets();
+                hit.getTargets().add(t);
+            }
+            out.add(hit);
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    /** The object {@link #targetId} names in {@code g} (ids survive copies), or null. */
+    public static GameObject findTarget(final Game g, final String t) {
+        if (t.startsWith("c")) return g.findById(Integer.parseInt(t.substring(1)));
+        if (t.startsWith("p")) {
+            for (Player pl : g.getPlayers()) if (("p" + pl.getId()).equals(t)) return pl;
+            return null;
+        }
+        if (t.startsWith("s")) {
+            for (SpellAbilityStackInstance si : g.getStack()) {
+                final SpellAbility x = si.getSpellAbility();
+                if (x != null && targetId(x).equals(t)) return x;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Review S1: the response's category, or -1 when it is incidental. A deny-list: only effects known not to answer a
+     * line are dropped (a draw, mana, scry or surveil, a library search, non-lethal damage or life loss to us, harm to
+     * their own permanents, a pump or counters on their own creature outside combat); anything else, unknown effects
+     * included, is a response. {@code t}: its target (a stack object, a card, a player or null).
      */
     static int category(final SpellAbility sa, final Object t, final SpellAbility top, final Player victim,
             final Player opp, final boolean attack) {
-        ApiType api = sa.getApi();
-        for (SpellAbility s = sa; api == null && s != null; s = s.getSubAbility()) api = s.getApi();
-        if (api == null) return -1;
+        final ApiType api = sa.getApi();
         if (t instanceof SpellAbility) {
-            // a counter (spells and abilities: Stifle), or a stack bounce (Remand)
-            return api == ApiType.Counter || api == ApiType.ChangeZone ? COUNTER : -1;
+            return api == ApiType.Counter ? COUNTER : OTHER; // a counter, a stack bounce, a redirect: all answer it
         }
+        if (incidentalChain(sa, t, victim, opp, attack)) return -1;
         if (t instanceof Card c) {
-            if (c.getController() == victim) {
-                switch (api) {
-                    case Destroy: case DealDamage: case ChangeZone: case Sacrifice: case Tap: case GainControl:
-                    case Debuff: case Fight:
-                        return REMOVAL;
-                    case Pump: case PumpAll:
-                        return negative(sa) ? REMOVAL : -1;
-                    default:
-                        return -1;
-                }
-            }
-            // their own permanent: protection, regeneration or a pump is aimed at the line only in combat
-            if (attack && c.isCreature() && (api == ApiType.Pump || api == ApiType.Protection
-                    || api == ApiType.Regenerate)) {
-                return SHIELD;
-            }
-            return -1;
+            if (c.getController() == victim || c.isInZone(ZoneType.Graveyard)) return REMOVAL;
+            return attack && c.isCreature() ? SHIELD : OTHER;
         }
         if (t instanceof Player p) {
-            if (p == victim) {
-                if (api == ApiType.Discard) return DISCARD;
-                if ((api == ApiType.DealDamage || api == ApiType.LoseLife) && lethal(sa, victim)) return REMOVAL;
-                return -1;
-            }
-            return api == ApiType.GainLife || api == ApiType.PreventDamage || api == ApiType.Protection ? SHIELD : -1;
+            if (p == victim) return api == ApiType.Discard ? DISCARD : REMOVAL;
+            return SHIELD;
         }
-        // no target
         if (sa.isSpell() && sa.getHostCard() != null && sa.getHostCard().isCreature()) return BLOCKER;
-        switch (api) {
-            case Counter:
-                return top != null ? COUNTER : -1;
-            case Discard:
-                return DISCARD;
-            case DestroyAll: case DamageAll: case ChangeZoneAll: case SacrificeAll:
-                return victim.getCreaturesInPlay().isEmpty() && !attack ? -1 : REMOVAL;
-            case Fog: case PreventDamage: case GainLife: case ProtectionAll:
-                return SHIELD;
-            default:
-                return -1;
+        if (api == ApiType.Animate || api == ApiType.Token || api == ApiType.CopyPermanent) return BLOCKER;
+        if (api == ApiType.Counter) return top != null ? COUNTER : -1;
+        return OTHER;
+    }
+
+    /** Effects that never answer a line by themselves. */
+    static final Set<ApiType> INCIDENTAL = java.util.EnumSet.of(ApiType.Draw, ApiType.Mana, ApiType.ManaReflected,
+            ApiType.Scry, ApiType.Surveil, ApiType.Dig, ApiType.DigUntil, ApiType.RearrangeTopOfLibrary, ApiType.Shuffle,
+            ApiType.Investigate, ApiType.Explore);
+
+    /** Whether every part of {@code sa}'s chain is incidental for this target. */
+    static boolean incidentalChain(final SpellAbility sa, final Object t, final Player victim, final Player opp,
+            final boolean attack) {
+        boolean any = false;
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            final ApiType api = s.getApi();
+            if (api == null) continue;
+            any = true;
+            if (!incidental(s, api, s == sa ? t : null, victim, opp, attack)) return false;
         }
+        return any;
+    }
+
+    static boolean incidental(final SpellAbility s, final ApiType api, final Object t, final Player victim,
+            final Player opp, final boolean attack) {
+        if (INCIDENTAL.contains(api)) return true;
+        if (api == ApiType.ChangeZone && !s.usesTargeting() && "Library".equals(s.getParam("Origin"))) {
+            return !"Battlefield".equals(s.getParam("Destination")) || !attack; // a search (a fetch, a tutor)
+        }
+        if (t instanceof Player p && p == victim && (api == ApiType.DealDamage || api == ApiType.LoseLife)) {
+            return !lethal(s, victim);
+        }
+        if (t instanceof Player p && p == opp && (api == ApiType.DealDamage || api == ApiType.LoseLife)) return true;
+        if (t instanceof Card c && c.getController() == opp && c.isInZone(ZoneType.Battlefield)) {
+            if (api == ApiType.DealDamage || api == ApiType.Destroy) return true; // harm to their own permanent
+            if (!attack && (api == ApiType.Pump && !negative(s) || api == ApiType.PutCounter)) return true;
+        }
+        return false;
     }
 
     static boolean negative(final SpellAbility sa) {
