@@ -51,10 +51,10 @@ public final class DeckBeliefModel {
     static final Set<String> BASICS = new HashSet<>(java.util.Arrays.asList(BeliefSampler.BASICS));
 
     DeckBeliefModel(JsonObject o, String sha256) {
-        if (!SCHEMA.equals(o.get("schema").getAsString())) {
+        if (!o.has("schema") || !SCHEMA.equals(o.get("schema").getAsString())) {
             throw new IllegalArgumentException("deck belief: schema " + o.get("schema") + ", want " + SCHEMA);
         }
-        if (!"bag".equals(o.get("kind").getAsString())) {
+        if (!o.has("kind") || !"bag".equals(o.get("kind").getAsString())) {
             throw new IllegalArgumentException("deck belief: only kind=bag is implemented, not " + o.get("kind"));
         }
         this.sha256 = sha256;
@@ -76,8 +76,23 @@ public final class DeckBeliefModel {
         w2 = mat(o.getAsJsonArray("w2"));
         b2 = vec(o.getAsJsonArray("b2"));
         if (a.length != vocab.size() || u.length != vocab.size() || b.length != vocab.size() || w1[0].length != d + 1
-                || w2.length != d || w2[0].length != w1.length) {
+                || w2.length != d || w2[0].length != w1.length || b1.length != w1.length || b2.length != d) {
             throw new IllegalArgumentException("deck belief: inconsistent export shapes");
+        }
+        for (int i = 0; i < a.length; i++) {
+            if (a[i].length != d || u[i].length != d) {
+                throw new IllegalArgumentException("deck belief: card vector " + i + " is not of width " + d);
+            }
+        }
+        for (float[] r : w1) {
+            if (r.length != d + 1) {
+                throw new IllegalArgumentException("deck belief: w1 rows must be of width d + 1");
+            }
+        }
+        for (float[] r : w2) {
+            if (r.length != w1.length) {
+                throw new IllegalArgumentException("deck belief: w2 rows must be of width " + w1.length);
+            }
         }
     }
 
@@ -171,7 +186,12 @@ public final class DeckBeliefModel {
     /** Score of card {@code name} under context h (an unknown name: min b). */
     double score(float[] h, String name) {
         final Integer i = index.get(name);
-        if (i == null) {
+        return score(h, i == null ? -1 : i);
+    }
+
+    /** Score of vocabulary row i under context h (i < 0: an unknown name, min b). */
+    double score(float[] h, int i) {
+        if (i < 0) {
             return bMin;
         }
         double s = b[i];
@@ -185,6 +205,8 @@ public final class DeckBeliefModel {
     /**
      * Draw {@code total} hidden card names from the pool (names; basics may repeat, any other name at most once and
      * never one of {@code shown}), autoregressively given the shown card instances (names, with repeats for basics).
+     * Basics are not capped (the other beliefs cap them at beliefBasics). A non-basic is never drawn twice, whatever
+     * beliefSingleton says: the model is trained on near-singleton cube decks (review #150 S2-2, documented).
      */
     public List<String> sample(Collection<String> shown, List<String> pool, int total, Random rng) {
         final float[] sum = new float[d];
@@ -200,9 +222,11 @@ public final class DeckBeliefModel {
                 used.add(s);
             }
         }
-        final List<String> cand = new ArrayList<>();
-        for (String p : new java.util.LinkedHashSet<>(pool)) {
-            cand.add(p);
+        final List<String> cand = new ArrayList<>(new java.util.LinkedHashSet<>(pool));
+        final int[] ci = new int[cand.size()];
+        for (int c = 0; c < ci.length; c++) {
+            final Integer i = index.get(cand.get(c));
+            ci[c] = i == null ? -1 : i;
         }
         final double[] lg = new double[cand.size()];
         final List<String> out = new ArrayList<>(total);
@@ -211,7 +235,7 @@ public final class DeckBeliefModel {
             double max = Double.NEGATIVE_INFINITY;
             for (int c = 0; c < lg.length; c++) {
                 final String nm = cand.get(c);
-                lg[c] = used.contains(nm) ? Double.NEGATIVE_INFINITY : score(h, nm);
+                lg[c] = used.contains(nm) ? Double.NEGATIVE_INFINITY : score(h, ci[c]);
                 max = Math.max(max, lg[c]);
             }
             if (max == Double.NEGATIVE_INFINITY) {

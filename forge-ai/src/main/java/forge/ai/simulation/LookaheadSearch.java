@@ -1673,6 +1673,10 @@ public final class LookaheadSearch {
                 // A carried world keeps live card ids; a belief world holds cards the live game does not have.
                 throw new IllegalStateException("belief does not combine with reuse (carried worlds hold live card ids)");
             }
+            if (cfg.beliefShadow && cfg.deck()) {
+                // review #150 S2-4: the shadow builds uniform worlds, so it would never exercise the deck model
+                throw new IllegalStateException("beliefShadow does not combine with belief=deck");
+            }
             if (cfg.beliefShadow && "off".equals(cfg.belief)) {
                 throw new IllegalStateException("beliefShadow needs belief=human or uniform (the belief to build and discard)");
             }
@@ -8288,15 +8292,16 @@ public final class LookaheadSearch {
             // the card instances they have shown (a name per card, so basics repeat), by card id order
             final List<Card> shownCards = new ArrayList<>();
             for (Card c : live.getCardsInGame()) {
-                if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && c.getPaperCard() != null
-                        && c.getView().canBeShownTo(myView)) {
+                if (c.getOwner() == liveOpp && !c.isToken() && !c.isFaceDown() && !c.isCopiedSpell()
+                        && c.getPaperCard() != null && c.getView().canBeShownTo(myView)) {
                     shownCards.add(c);
                 }
             }
             for (forge.game.spellability.SpellAbilityStackInstance si : live.getStack()) {
                 final Card sc = si.getSourceCard();
                 if (si.getActivatingPlayer() == liveOpp && sc != null && sc.getPaperCard() != null && !sc.isFaceDown()
-                        && !sc.isToken() && sc.getView().canBeShownTo(myView) && !shownCards.contains(sc)) {
+                        && !sc.isToken() && !sc.isCopiedSpell() && sc.getView().canBeShownTo(myView)
+                        && !shownCards.contains(sc)) {
                     shownCards.add(sc);
                 }
             }

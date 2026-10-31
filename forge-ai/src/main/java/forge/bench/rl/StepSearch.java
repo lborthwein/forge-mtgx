@@ -162,7 +162,7 @@ public final class StepSearch {
             if (!("uniform".equals(c.belief) || "codraft".equals(c.belief) || "deck".equals(c.belief))
                     || c.beliefCube == null) {
                 throw new IllegalArgumentException("refused: the step-1 search needs belief \"uniform\" (or S2T's "
-                        + "\"codraft\") with a beliefCube (every world's hidden cards from the observation-only pool), not "
+                        + "\"codraft\", or N11's \"deck\") with a beliefCube (every world's hidden cards from the observation-only pool), not "
                         + c.belief);
             }
             if ("codraft".equals(c.belief)) {
@@ -302,7 +302,8 @@ public final class StepSearch {
 
         static S2tKeys parse(final JsonObject o, final RlSearch.Config c) {
             final S2tKeys s = new S2tKeys();
-            final boolean playoutKeys = "policy".equals(c.opponent) || c.leafSym || "codraft".equals(c.belief);
+            final boolean playoutKeys = "policy".equals(c.opponent) || c.leafSym || "codraft".equals(c.belief)
+                    || "deck".equals(c.belief); // review #150 S2-3: the deck belief needs an explicit target, as codraft
             if (o.has("target") && !o.get("target").isJsonNull()) {
                 if (!o.get("target").isJsonObject()) {
                     throw new IllegalArgumentException("label.search.target is {\"variant\": ..., \"k\": ...}");
