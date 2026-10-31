@@ -198,6 +198,7 @@ public class LessonInstallTest extends AITest {
         final int restarts = play(game, lessons, g -> lessons.installs() > 0, humanPriorityAt(4, PhaseType.MAIN1, true), p2);
         assertEquals(restarts, 1);
         assertTrue(game.getStack().isEmpty(), "the stack is empty");
+        assertTrue(game.getCardsIn(ZoneType.Stack).isEmpty(), "and so is the stack zone: no spell's card left on it");
         assertNull(game.getPhaseHandler().getCombat(), "no combat");
         assertEquals(game.getPhaseHandler().getTurn(), 7);
         assertEquals(game.getPhaseHandler().getPhase(), PhaseType.MAIN1);
@@ -211,7 +212,10 @@ public class LessonInstallTest extends AITest {
         assertEquals(names(human, ZoneType.Battlefield), "[Glory Seeker, Plains, Plains]");
         assertEquals(names(human, ZoneType.Hand), "[Plains, Savannah Lions]");
         assertEquals(names(ai, ZoneType.Battlefield), "[Centaur Courser, Forest]");
-        assertEquals(names(ai, ZoneType.Graveyard), "[]", "the pump never resolved: it is in no zone");
+        assertEquals(names(ai, ZoneType.Graveyard), "[]", "the pump never resolved: it went with the old stack, not to the graveyard");
+        for (ZoneType z : ZoneType.values()) {
+            assertNull(named(ai, z, "Monstrous Growth"), "the old position's pump is in none of the AI's zones: " + z);
+        }
         for (Player p : game.getPlayers()) {
             assertNull(named(p, ZoneType.Command, InteractivePuzzle.GOAL_CARD), "no goal card");
         }
@@ -220,6 +224,37 @@ public class LessonInstallTest extends AITest {
         // and the game goes on from the new position: their scripted attack on turn 8
         play(game, lessons, at(9, PhaseType.MAIN1), null, null);
         assertEquals(human.getLife(), 2, "the Courser attacked as the new script says");
+    }
+
+    /** Review #140 S2-2: a position that names no life and no player counters starts them as a fresh game has them. */
+    @Test
+    public void anInstallThatNamesNoLifeOrCountersStartsThemFresh() throws Exception {
+        freshIds();
+        MyRandom.setRandom(new Random(2032));
+        final Object[] l = lesson(P1 + "\nhumancounters=POISON=3,ENERGY=2\naicounters=EXPERIENCE=1", P1_SCRIPT, "rest=pass");
+        final Game game = (Game) l[0];
+        final InteractiveLessons lessons = (InteractiveLessons) l[1];
+        final Player human = game.getPlayers().get(0);
+        final Player ai = game.getPlayers().get(1);
+        assertEquals(human.getLife(), 8);
+        assertEquals(human.getPoisonCounters(), 3, "the old position's counters are on");
+        assertFalse(ai.getCounters().isEmpty());
+        final String noLife = P2.replace("humanlife=5\n", "").replace("ailife=6\n", "");
+        assertFalse(noLife.contains("life="), noLife);
+        final InteractiveLessons.Install p2 = lessons.parse(installAction(noLife, null));
+        assertEquals(play(game, lessons, g -> lessons.installs() > 0, humanPriorityAt(4, PhaseType.MAIN1, true), p2), 1);
+        for (Player p : game.getPlayers()) {
+            assertEquals(p.getLife(), p.getStartingLife(), "life as a fresh game has it: " + p);
+            assertTrue(p.getCounters().isEmpty(), "no player counter carried over: " + p + " " + p.getCounters());
+        }
+        assertEquals(human.getPoisonCounters(), 0);
+        // and a position that names them still sets them
+        final InteractiveLessons.Install p1 = lessons.parse(installAction(P1 + "\nhumancounters=POISON=1", null));
+        lessons.offer(p1);
+        assertEquals(play(game, lessons, g -> lessons.installs() > 1, null, null), 1);
+        assertEquals(human.getLife(), 8);
+        assertEquals(ai.getLife(), 7);
+        assertEquals(human.getPoisonCounters(), 1);
     }
 
     @Test
@@ -472,7 +507,7 @@ public class LessonInstallTest extends AITest {
             w.send(first, InteractiveLessons.KIND, installAction(P1.replace("Grizzly Bears", "Grizzly Baers"), null));
             final JsonObject bad = w.next("ack");
             assertFalse(bad.get("accepted").getAsBoolean());
-            assertTrue(bad.get("reason").getAsString().startsWith("not a lesson position"), bad.toString());
+            assertEquals(bad.get("reason").getAsString(), "not a lesson position", "no detail on the wire: " + bad);
             assertFalse(bad.toString().contains("Baers"), "the refusal names no card: " + bad);
             // a lesson position: accepted, and the next priority request is the new position's
             w.send(first, InteractiveLessons.KIND, installAction(P1, P1_SCRIPT));

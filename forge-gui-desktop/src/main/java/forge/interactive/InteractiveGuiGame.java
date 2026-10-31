@@ -565,7 +565,9 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
         try {
             install = lesson.parse(input.action());
         } catch (InteractiveProtocol.ProtocolException e) {
-            finishInput(input, pending, false, "not a lesson position: " + e.getMessage());
+            // the detail may quote the position's line (a card name): stderr only, never the wire (review #140 S3)
+            finishInput(input, pending, false, "not a lesson position");
+            System.err.println("[forge.interactive] lesson install refused: " + e.getMessage());
             return;
         } catch (RuntimeException e) {
             finishInput(input, pending, false, "not a lesson position");
@@ -596,8 +598,12 @@ final class InteractiveGuiGame extends AbstractGuiGame implements AutoCloseable 
                 try {
                     if (controller.getInputProxy().getInput() == priority) {
                         priority.passPriority();
+                    } else {
+                        // no pass happened: the offer must not ride on a later, unrelated pass (review #140 S3-1)
+                        lesson.withdraw(install);
                     }
                 } catch (Throwable failure) {
+                    lesson.withdraw(install);
                     fail("engine", "lesson install failed: " + safeThrowable(failure),
                             request.requestId, "dispatch:install", request.kind, failure);
                     return;

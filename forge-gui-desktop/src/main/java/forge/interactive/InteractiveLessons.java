@@ -47,8 +47,8 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p><b>What an install resets</b> (everything a fresh puzzle start of the position has fresh):
  * <ul>
- *   <li>the stack: every spell and ability on it, the simultaneous-trigger list, a frozen stack, this turn's cast and
- *   activation history, the undo stack ({@code MagicStack.reset});</li>
+ *   <li>the stack: every spell and ability on it and their cards (the stack zone emptied), the simultaneous-trigger
+ *   list, a frozen stack, this turn's cast and activation history, the undo stack ({@code MagicStack.reset});</li>
  *   <li>triggers: waiting triggers, delayed triggers (also player-defined), every "until"/"at" command of the untap,
  *   upkeep, beginning of combat, end of combat, end of turn and cleanup ({@code Phase.clearCommands});</li>
  *   <li>combat: ended and gone (the position's combat step, if any, is set up as a puzzle's is);</li>
@@ -59,13 +59,25 @@ import java.util.concurrent.atomic.AtomicReference;
  *   <li>per-turn history: Forge's turn-boundary reset run twice (this turn's and last turn's: lands, spells cast,
  *   life lost and gained, cards drawn, damage, left-the-battlefield), then the position's own lands played; every
  *   zone of both players is the position's (no card object survives);</li>
+ *   <li>each player's life and counters: life back to the starting life, every player counter (poison, energy, rad,
+ *   experience, ...) removed, then the position's {@code humanlife=}/{@code ailife=} and {@code humancounters=}/
+ *   {@code aicounters=} (GameState sets them only when named);</li>
  *   <li>the AI seat: its card memory cleared; its script replaced by the position's (a fresh place in it; none:
  *   {@code rest=bot}, the plain Forge AI); the browser seat's auto-pass cancelled;</li>
  *   <li>the journal and AI tape: the install is an input (above), and the AI tape is untouched: its next entry records
  *   the state the install left (ids, RNG), so a forced replay that re-sends the install is exact.</li>
  * </ul>
  * NOT reset: the game log (an install adds a line), the process-wide id counters and the game's timestamp (only ever
- * forward), the RNG stream, the players' names and seats, and the browser seat's yield preferences.</p>
+ * forward), the RNG stream, the players' names and seats, the browser seat's yield preferences; player-level effects
+ * that last until end of turn or longer and live on the player rather than a card (e.g. "you can't gain life this turn",
+ * a player keyword granted until end of turn); the day/night state; and an attached {@code RlReviewObserver} (a review
+ * keeps observing across the install). Chapter 1 positions use none of these; a lesson that does must name them.</p>
+ *
+ * <p><b>A failed install is a session fatal.</b> The position was checked on the reader thread, so an install that still
+ * throws on the game thread (in {@code applyToGame} or the resets) leaves the game in no defined state: it is thrown as
+ * {@link InteractivePuzzle.Refused} ("the lesson position could not be installed", the detail on stderr only), and the
+ * game thread reports it as the fatal {@code invalid_puzzle}, as a position that fails at the game start is. The host
+ * ends the session; there is no rollback to the old position.</p>
  */
 final class InteractiveLessons implements PriorityDecisionListener {
     /** The input kind (and action type) of an install. */
@@ -150,6 +162,11 @@ final class InteractiveLessons implements PriorityDecisionListener {
         pending.set(install);
     }
 
+    /** The offer taken back when its pass never happened (the request was gone when the pass ran); else nothing. */
+    void withdraw(final Install install) {
+        pending.compareAndSet(install, null);
+    }
+
     // ------------------------------------------------------------------ the game thread
 
     @Override
@@ -223,6 +240,12 @@ final class InteractiveLessons implements PriorityDecisionListener {
             final PhaseHandler ph = game.getPhaseHandler();
             // the stack, triggers and every pending "until"/"at" command of the old position
             game.getStack().reset();
+            // reset() clears the stack's instances only; their cards stay in the stack zone (review #140 S2-1)
+            game.getStackZone().removeAllCards(true);
+            // a stack that will not clear fails the install (the session fatal below), never a position over it
+            if (!game.getStack().isEmpty() || !game.getStackZone().isEmpty()) {
+                throw new IllegalStateException("the stack did not clear");
+            }
             game.getTriggerHandler().clearWaitingTriggers();
             game.getTriggerHandler().clearDelayedTrigger();
             game.getTriggerHandler().clearPlayerDefinedDelayedTrigger();
@@ -241,6 +264,15 @@ final class InteractiveLessons implements PriorityDecisionListener {
             seat.getAi().getCardMemory().clearAllRemembered();
             seat.load(install.script());
             human.getController().autoPassCancel();
+            // life and player counters as a fresh game has them: GameState sets life only when the position names it
+            // and player counters only when it names some (review #140 S2-2); raw, so no life or counter trigger runs
+            for (Player p : game.getPlayers()) {
+                p.setStartingLife(p.getStartingLife());
+                if (p.getCounters(forge.game.card.CounterEnumType.RAD) > 0) {
+                    p.setCounters(forge.game.card.CounterEnumType.RAD, 0, null, false); // and its radiation effect
+                }
+                p.clearCounters();
+            }
             // the position, installed as a puzzle's is (no goal: a lesson position)
             InteractivePuzzle.position(install.spec(), install.lines(), humanSeat).applyToGame(game);
             InteractivePuzzle.beginCombat(game);
