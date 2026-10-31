@@ -194,6 +194,14 @@ public final class ForcedWinSolver {
          */
         public boolean adoptAttack = false;
         /**
+         * solver-cap12-1030 (CAP-2, PREDECLARATION-solver-cap12; false = off, the default, and then nothing changes):
+         * each engine search gets its own engineNodes (each pass its share, counted from the search's start). Off, the
+         * cap compares the solver's LIFETIME node count, so a seat whose solver lives the whole game (the generator)
+         * gets no same-turn engine nodes after its first searches (engine_lifetime_stops), while a label's fresh
+         * solver gets the full cap: the generator then misses kills the label proves.
+         */
+        public boolean engineNodesPerSearch = false;
+        /**
          * labeller-v2 item (d) (PREDECLARATION-labeller-v2.md; false = off, the default, and then nothing changes): in
          * each world a line must win against EVERY response in the opponent's response set at each of its priorities
          * while one of our spells or abilities is on top of the stack (pass, Forge AI's own answer, and each distinct
@@ -225,7 +233,8 @@ public final class ForcedWinSolver {
 
         /** bvw-step1-build-1024: the keys added to the config after the step-0 freeze, with their defaults. */
         public static final java.util.Map<String, Object> STEP1_DEFAULTS = java.util.Map.of("counter", false,
-                "engineSteps", 0, "evalSteps", 0, "engineCards", 0, "enginePathCards", 0, "adoptAttack", false);
+                "engineSteps", 0, "evalSteps", 0, "engineCards", 0, "enginePathCards", 0, "adoptAttack", false,
+                "engineNodesPerSearch", false);
 
         /** Labeller v2 (PREDECLARATION-labeller-v2): its keys, with their defaults (absent from a recorded config at these). */
         public static final java.util.Map<String, Object> V2_DEFAULTS = java.util.Map.ofEntries(
@@ -254,6 +263,7 @@ public final class ForcedWinSolver {
             c.engineCards = intOr(get.apply("engineCards"), c.engineCards);
             c.enginePathCards = intOr(get.apply("enginePathCards"), c.enginePathCards);
             c.adoptAttack = "true".equals(get.apply("adoptAttack"));
+            c.engineNodesPerSearch = "true".equals(get.apply("engineNodesPerSearch"));
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -340,7 +350,7 @@ public final class ForcedWinSolver {
                 + (oppMin ? " oppMin R=" + oppResponses + " D=" + oppDepth + " N=" + oppNodes : "")
                 + (cacPicks ? " cacPicks V=" + cacVariants + " cap=" + cacCap : "") + (cacLine ? " cacLine" : "")
                 + (planScry ? " planScry max=" + planScryMax : "") + (planDiscard ? " planDiscard" : "")
-                + (payRecord ? " payRecord V=" + payVariants : "");
+                + (payRecord ? " payRecord V=" + payVariants : "") + (engineNodesPerSearch ? " engineNodesPerSearch" : "");
         }
     }
 
@@ -1620,6 +1630,7 @@ public final class ForcedWinSolver {
         lastOutcome = "gate+engine";
         final ForcedWinEngine.Limits el = new ForcedWinEngine.Limits();
         el.nodes = cfg.engineNodes;
+        el.perSearchNodes = cfg.engineNodesPerSearch;
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
