@@ -33,10 +33,10 @@ import forge.game.zone.ZoneType;
  * <li><b>Response set</b> ({@link #answers}): every answer the opponent can cast or activate now and pay for is a
  * response (review #148 rulings: there is no incidental set): from their hand, battlefield, graveyard, exile and command
  * zone, and from any card they may play or activate elsewhere (our battlefield and stack objects with "any player may
- * activate", our exile, either library top, our command zone). The only non-answers are pure mana abilities (only mana
- * and tapping themselves, no rider). Equivalent responses collapse only by the same card name, effect, cost and target,
- * where a permanent target is keyed by its card id (re-check 7 ruling: no state collapse) and a stack target by its
- * stack entry.</li>
+ * activate", our hand, graveyard and exile, either library top, our command zone). The only non-answers are pure mana
+ * abilities (only mana and tapping themselves, no rider). Equivalent responses collapse only by the same source card (by
+ * id), effect, cost and target, where a permanent target is keyed by its card id (re-check 7 ruling: no state collapse)
+ * and a stack target by its stack entry.</li>
  * <li><b>Fail closed</b>: an answer OppMin cannot enumerate faithfully is a gap that makes the point a cap hit (never
  * "no response"), logged by reason ({@link Answers#gaps}).</li>
  * <li><b>Budget</b>: the responses the opponent MAKES are bounded, not the points. Every point is eligible. The budget is
@@ -535,6 +535,10 @@ public final class OppMin {
         // review #148 re-check 7 (S1-2): "any player may activate" abilities on our permanents (Ribbon Snake) and on our
         // stack objects' host cards (Lightning Storm)
         sources.addAll(victim.getCardsIn(ZoneType.Battlefield));
+        // review #148 re-check 8 (S2): our hand and graveyard (their effects that cast our cards: Sen Triplets, Great
+        // Work), behind the same castable gate
+        sources.addAll(victim.getCardsIn(ZoneType.Hand));
+        sources.addAll(victim.getCardsIn(ZoneType.Graveyard));
         for (SpellAbilityStackInstance si : g.getStack()) {
             final SpellAbility x = si.getSpellAbility();
             if (x != null && x.getHostCard() != null && !sources.contains(x.getHostCard())) sources.add(x.getHostCard());
@@ -624,7 +628,10 @@ public final class OppMin {
                     if (!castable(cs, opp, gaps)) continue;
                     final String gap = gapOf(cs);
                     if (gap != null) gaps.add(gap);
-                    byKey.putIfAbsent(cat + "|" + c.getName() + "|" + sa0.getApi() + "|" + cost + "|" + keys.get(ti), cs);
+                    // review #148 re-check 8: keyed by the source card's id, so two copies in different states (a 1/1 and a 3/3
+                    // Spikeshot Elder) are two answers
+                    byKey.putIfAbsent(cat + "|" + c.getName() + "#" + c.getId() + "|" + sa0.getApi() + "|" + cost + "|"
+                            + keys.get(ti), cs);
                 }
             }
         }
@@ -874,7 +881,7 @@ public final class OppMin {
                     final boolean play = castable(cs, opp, gaps);
                     if (play) {
                         real = true;
-                        if (byKey.putIfAbsent(cat + "|" + c.getName() + "|Charm|" + cost + "|modes:" + key, cs) == null) {
+                        if (byKey.putIfAbsent(cat + "|" + c.getName() + "#" + c.getId() + "|Charm|" + cost + "|modes:" + key, cs) == null) {
                             added++;
                         }
                     }

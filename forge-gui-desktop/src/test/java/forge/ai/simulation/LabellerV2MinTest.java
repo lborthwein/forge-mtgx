@@ -361,6 +361,13 @@ public class LabellerV2MinTest extends AITest {
      */
     @Test
     public void abilitiesTheyMayActivateOnOurPermanentsAreAnswers() {
+        final Game rs = frame("", "Grizzly Bears;Mountain;Mountain", 2, "", "Ribbon Snake;Island");
+        boolean snake = false;
+        for (forge.game.spellability.SpellAbility sa : OppMin.answers(rs, rs.getPlayers().get(0), rs.getPlayers().get(1),
+                null).list) {
+            snake |= sa.getHostCard().getName().equals("Ribbon Snake");
+        }
+        Assert.assertTrue(snake, "the Ribbon Snake activation is their answer");
         Assert.assertFalse(proven(frame("", "Grizzly Bears;Mountain;Mountain", 2, "", "Ribbon Snake;Island"),
                 engineMin(true, 2)), "they pay {2}: the Snake loses flying and is blocked");
         Assert.assertTrue(proven(frame("", "Grizzly Bears", 2, "", "Ribbon Snake;Island"), engineMin(true, 2)),
@@ -398,6 +405,32 @@ public class LabellerV2MinTest extends AITest {
         Assert.assertEquals(murders, 2, "a Murder on each Bears (not one for both)");
         Assert.assertFalse(proven(board.apply("Murder"), engineMin(true, 2)), "Murder on the other Bears");
         Assert.assertTrue(proven(board.apply(""), engineMin(true, 2)), "open control: no Murder, the Bears are lethal");
+    }
+
+    /**
+     * Review #148 re-check 8: answers are keyed by their source card's id. Two tapped Spikeshot Elders, a 1/1 and a 3/3,
+     * with mana for one activation, against our lethal Hill Giant: the 3/3's shot kills it. Only the 1/1: proven. Our own
+     * hand is a source only behind the castable gate: our Bolt is not their answer.
+     */
+    @Test
+    public void answersAreKeyedBySourceCard() {
+        final String two = "Spikeshot Elder|Tapped;Spikeshot Elder|Tapped|Counters:P1P1=2;Mountain;Mountain;Mountain";
+        final Game eg = frame("", two, 3, "", "Hill Giant;Mountain");
+        boolean big = false;
+        for (forge.game.spellability.SpellAbility sa : OppMin.answers(eg, eg.getPlayers().get(0), eg.getPlayers().get(1),
+                null).list) {
+            big |= sa.getHostCard().getNetPower() == 3;
+        }
+        Assert.assertTrue(big, "the 3/3 Elder (the higher id) is a source too");
+        Assert.assertFalse(proven(frame("", two, 3, "", "Hill Giant;Mountain"), engineMin(true, 2)), "the 3/3 Elder's shot");
+        Assert.assertTrue(proven(frame("", "Spikeshot Elder|Tapped;Mountain;Mountain;Mountain", 3, "", "Hill Giant;Mountain"),
+                engineMin(true, 2)), "open control: only the 1/1 Elder, proven");
+        final Game g = frame("", "Mountain;Mountain", 20, "Lightning Bolt", "Mountain");
+        for (forge.game.spellability.SpellAbility sa : OppMin.answers(g, g.getPlayers().get(0), g.getPlayers().get(1),
+                null).list) {
+            Assert.assertFalse(sa.getHostCard().getOwner() == g.getPlayers().get(1)
+                    && sa.getHostCard().isInZone(forge.game.zone.ZoneType.Hand), "our hand card as their answer: " + sa);
+        }
     }
 
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
