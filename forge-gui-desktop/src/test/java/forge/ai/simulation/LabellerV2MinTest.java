@@ -312,6 +312,94 @@ public class LabellerV2MinTest extends AITest {
                 "open control: a pure mana ability is not an answer");
     }
 
+    /** Put {@code p}'s spell or ability on the stack with its target set (no resolution). */
+    static forge.game.spellability.SpellAbility put(final Game g, final Player p, final String name,
+            final forge.game.zone.ZoneType z, final forge.game.GameObject target) {
+        forge.game.card.Card host = null;
+        for (forge.game.card.Card c : p.getCardsIn(z)) if (c.getName().equals(name)) host = c;
+        Assert.assertNotNull(host, name);
+        forge.game.spellability.SpellAbility sa = null;
+        for (forge.game.spellability.SpellAbility x : host.getSpellAbilities()) {
+            if (!x.isManaAbility() && (z != forge.game.zone.ZoneType.Battlefield || !x.isSpell())) {
+                sa = x;
+                break;
+            }
+        }
+        sa.setActivatingPlayer(p);
+        sa.resetTargets();
+        sa.getTargets().add(target);
+        Assert.assertTrue(((forge.ai.PlayerControllerAi) p.getController()).playChosenSpellAbility(sa), name);
+        return g.getStack().peekAbility();
+    }
+
+    /** Their Lightning Bolt (at us) below our Rod of Ruin activation (at them): their answer set at our ability. */
+    static OppMin.Answers theirBoltBelowOurRod(final String answer) {
+        final Game g = frame("Lightning Bolt;" + answer, "Mountain;Mountain;Mountain;Island;Island;Island;Island", 20, "",
+                "Rod of Ruin;Mountain;Mountain;Mountain");
+        final Player def = g.getPlayers().get(0), ai = g.getPlayers().get(1);
+        put(g, def, "Lightning Bolt", forge.game.zone.ZoneType.Hand, ai);
+        final forge.game.spellability.SpellAbility rod = put(g, ai, "Rod of Ruin", forge.game.zone.ZoneType.Battlefield, def);
+        Assert.assertEquals(g.getStack().size(), 2);
+        return OppMin.answers(g, def, ai, rod);
+    }
+
+    /**
+     * Review #148 re-check 7 (S1-1): a modal answer whose only targets are their own stack objects (Insidious Will:
+     * counter or copy their Bolt below our ability) is a gap, not "no response"; S2: Reverberate (non-modal) likewise.
+     */
+    @Test
+    public void targetsOnTheirOwnStackAreGaps() {
+        final OppMin.Answers iw = theirBoltBelowOurRod("Insidious Will");
+        Assert.assertTrue(iw.gaps.contains("own-stack-target"), "Insidious Will: " + iw.gaps);
+        final OppMin.Answers rv = theirBoltBelowOurRod("Reverberate");
+        Assert.assertTrue(rv.gaps.contains("own-stack-target"), "Reverberate: " + rv.gaps);
+    }
+
+    /**
+     * Review #148 re-check 7 (S1-2): an "any player may activate" ability on our permanent is their answer. Ribbon Snake
+     * loses flying for their {2}, and their Bears block it; without the {2} the attack is proven.
+     */
+    @Test
+    public void abilitiesTheyMayActivateOnOurPermanentsAreAnswers() {
+        Assert.assertFalse(proven(frame("", "Grizzly Bears;Mountain;Mountain", 2, "", "Ribbon Snake;Island"),
+                engineMin(true, 2)), "they pay {2}: the Snake loses flying and is blocked");
+        Assert.assertTrue(proven(frame("", "Grizzly Bears", 2, "", "Ribbon Snake;Island"), engineMin(true, 2)),
+                "open control: no {2}, the flyer is unblockable for them");
+    }
+
+    /**
+     * Review #148 re-check 7 (S1-3): permanents are keyed by card id. Two attacking Bears, one made indestructible by our
+     * Sheltering Light, against them at 4 with one Murder: Murder on the other Bears refutes the attack.
+     */
+    @Test
+    public void permanentsAreKeyedByCardId() {
+        final java.util.function.Function<String, Game> board = h -> {
+            final Game g = frame(h, "Swamp;Swamp;Swamp", 4, "Sheltering Light", "Grizzly Bears;Grizzly Bears;Plains");
+            final Player ai = g.getPlayers().get(1);
+            forge.game.card.Card first = null;
+            for (forge.game.card.Card c : ai.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+                if (first == null && c.getName().equals("Grizzly Bears")) first = c;
+            }
+            put(g, ai, "Sheltering Light", forge.game.zone.ZoneType.Hand, first);
+            int guard = 0;
+            while (!g.getStack().isEmpty() && guard++ < 5) {
+                g.getStack().resolveStack();
+                g.getAction().checkStateEffects(true);
+            }
+            Assert.assertTrue(first.hasKeyword(forge.game.keyword.Keyword.INDESTRUCTIBLE), "the first Bears is indestructible");
+            return g;
+        };
+        final Game mg = board.apply("Murder");
+        int murders = 0;
+        for (forge.game.spellability.SpellAbility sa : OppMin.responses(mg, mg.getPlayers().get(0), mg.getPlayers().get(1),
+                null)) {
+            murders += sa.getHostCard().getName().equals("Murder") ? 1 : 0;
+        }
+        Assert.assertEquals(murders, 2, "a Murder on each Bears (not one for both)");
+        Assert.assertFalse(proven(board.apply("Murder"), engineMin(true, 2)), "Murder on the other Bears");
+        Assert.assertTrue(proven(board.apply(""), engineMin(true, 2)), "open control: no Murder, the Bears are lethal");
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {
