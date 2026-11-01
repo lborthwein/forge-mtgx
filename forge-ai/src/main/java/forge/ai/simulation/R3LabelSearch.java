@@ -969,6 +969,7 @@ public final class R3LabelSearch {
             out.points = st.driver.points;
         }
         work.lines++;
+        ChooseACard inline = null;
         try {
             if (world != null) {
                 world.atStart(me);
@@ -991,7 +992,7 @@ public final class R3LabelSearch {
                 }
                 p.dangerouslySetController(ctrl);
                 if (p == me && spec.inline) {
-                    installInline(g, me, ctrl, rootTurn, world, work);
+                    inline = installInline(g, me, ctrl, rootTurn, world, work);
                 }
                 for (LineHook h : lineHooks) {
                     h.onSeat(g, p, ctrl, p == me, rootTurn);
@@ -1038,10 +1039,16 @@ public final class R3LabelSearch {
                 System.err.println("[r3] line failed: " + e);
             }
             return out;
+        } finally {
+            // heap fix: keep the line's in-line counts, not its engine (the engine holds the line's game copy, so every
+            // line of a row stayed reachable until the row ended: 14.5 GB live on the heaviest rows)
+            if (inline != null) {
+                for (Map.Entry<String, Long> e : inline.counts.entrySet()) inlineCounts.merge(e.getKey(), e.getValue(), Long::sum);
+            }
         }
     }
 
-    private void installInline(final Game g, final Player me, final PlayerControllerAi ctrl, final int rootTurn,
+    private ChooseACard installInline(final Game g, final Player me, final PlayerControllerAi ctrl, final int rootTurn,
             final World world, final Work work) {
         final ChooseACard c = new ChooseACard(spec.cacConfig("on"), env.ranker(),
                 env.proof() == null ? null : ChooseACard.honest(env.proof()));
@@ -1051,18 +1058,15 @@ public final class R3LabelSearch {
             c.memory().noteLooked(cardsOf(me, world.memory.known(me)));
         }
         ctrl.setCacHook(new TurnGate(c, g, rootTurn));
-        inlineEngines.add(c);
+        return c;
     }
 
-    /** The in-line engines of the row in progress (their counts go to the row's work). */
-    private final List<ChooseACard> inlineEngines = new ArrayList<>();
+    /** The in-line engines' counts of the row in progress (merged at each line's end; the engines are dropped). */
+    private final Map<String, Long> inlineCounts = new TreeMap<>();
 
     private void drainInline(final Work work, final JsonObject extra) {
-        final Map<String, Long> sum = new TreeMap<>();
-        for (ChooseACard c : inlineEngines) {
-            for (Map.Entry<String, Long> e : c.counts.entrySet()) sum.merge(e.getKey(), e.getValue(), Long::sum);
-        }
-        inlineEngines.clear();
+        final Map<String, Long> sum = new TreeMap<>(inlineCounts);
+        inlineCounts.clear();
         work.inlineAsks += sum.getOrDefault("kept", 0L) + sum.getOrDefault("departed", 0L) + sum.getOrDefault("single", 0L);
         work.inlineDeparted += sum.getOrDefault("departed", 0L);
         if (!sum.isEmpty()) {
