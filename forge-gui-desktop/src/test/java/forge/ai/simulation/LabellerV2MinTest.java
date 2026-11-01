@@ -124,7 +124,7 @@ public class LabellerV2MinTest extends AITest {
      * counted seven answer x target pairs > 4 and cut it).
      */
     @Test
-    public void theS2BoardIsACapHitUnderTheNarrowIncidentalSet() {
+    public void theS2BoardIsACapHitNow() {
         final java.util.function.Supplier<Game> g = () -> frame("Lightning Bolt;Shock;Giant Growth",
                 "Mountain;Mountain;Forest;Grizzly Bears", 3, "Lightning Bolt", "Mountain");
         // review #148 re-check 4 ruling: non-lethal damage to us, harm to their own permanents and a pump on their own
@@ -258,6 +258,58 @@ public class LabellerV2MinTest extends AITest {
                 passive(cfg(true, 64))), "open control: no cantrip, the Bolt is proven");
         Assert.assertFalse(proven(frame("Opt", "Young Pyromancer|Tapped;Island", 3, "", "Hill Giant;Mountain"),
                 engineMin(true, 2)), "Opt makes a Young Pyromancer token that blocks");
+    }
+
+    /**
+     * Review #148 re-check 6 (fail closed): Ghostly Flicker's two targets (Man-o'-War bounces our attacker), a Counterspell
+     * they may cast from their library top under Future Sight, and Pristine Talisman's life gain (a mana ability with a
+     * rider) are not proven; each open control is. Same-named targets in different states (a +1/+1 counter, a
+     * Bonesplitter) are separate answers.
+     */
+    @Test
+    public void twoTargetAnswersFailClosed() {
+        Assert.assertFalse(proven(frame("Ghostly Flicker", "Man-o'-War|Tapped;Island;Island;Island", 3, "",
+                "Hill Giant;Mountain"), engineMin(true, 2)), "Ghostly Flicker on Man-o'-War and a land bounces the Giant");
+        Assert.assertTrue(proven(frame("", "Man-o'-War|Tapped;Island;Island;Island", 3, "", "Hill Giant;Mountain"),
+                engineMin(true, 2)), "open control: no Flicker, the attack is proven");
+    }
+
+    @Test
+    public void cardsTheyMayPlayFromElsewhereAreAnswers() {
+        final String top = "Counterspell;Island;Island;Island;Island;Island;Island;Island;Island;Island";
+        final String fs = ForcedWinSolverTest.frame("", "Future Sight;Island;Island", 3, "Lightning Bolt", "Mountain", 20,
+                "ai").replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + top);
+        Assert.assertFalse(proven(ForcedWinSolverTest.game("Default", "Default", fs), passive(cfg(true, 64))),
+                "Future Sight: the Counterspell on their library top answers the Bolt");
+        final String nofs = ForcedWinSolverTest.frame("", "Island;Island", 3, "Lightning Bolt", "Mountain", 20, "ai")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=" + top);
+        Assert.assertTrue(proven(ForcedWinSolverTest.game("Default", "Default", nofs), passive(cfg(true, 64))),
+                "open control: no Future Sight, the library top is not playable");
+    }
+
+    @Test
+    public void sameNamedTargetsInDifferentStatesAreSeparate() {
+        // same-named targets in different states are separate answers (the name collapse kept one Shock for both)
+        for (String bf : new String[] {"Grizzly Bears;Grizzly Bears|Counters:P1P1=1;Forest",
+                "Grizzly Bears|Id:901;Bonesplitter|AttachedTo:901;Grizzly Bears;Forest"}) {
+            final Game sg = frame("Shock", "Mountain", 20, "", bf);
+            final Player def = sg.getPlayers().get(0), ai = sg.getPlayers().get(1);
+            int bears = 0;
+            for (forge.game.spellability.SpellAbility sa : OppMin.responses(sg, def, ai, null)) {
+                for (forge.game.GameObject o : sa.getTargets()) {
+                    bears += o instanceof forge.game.card.Card c && c.getName().equals("Grizzly Bears") ? 1 : 0;
+                }
+            }
+            Assert.assertEquals(bears, 2, "a Shock on each Bears: " + bf);
+        }
+    }
+
+    @Test
+    public void manaAbilitiesWithARiderAreAnswers() {
+        Assert.assertFalse(proven(frame("", "Pristine Talisman", 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                "Pristine Talisman gains them 1");
+        Assert.assertTrue(proven(frame("", "Sol Ring", 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                "open control: a pure mana ability is not an answer");
     }
 
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */

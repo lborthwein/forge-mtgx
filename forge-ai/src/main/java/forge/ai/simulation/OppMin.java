@@ -30,11 +30,13 @@ import forge.game.zone.ZoneType;
  * <ul>
  * <li><b>Response points</b>: one of our spells, activated abilities or triggers on top of the stack, or our
  * declare-attackers step with attackers declared ({@link #pointKey}).</li>
- * <li><b>Response set</b> ({@link #responses}): only real interaction with the line (counters, also on abilities and
- * Stifle effects; removal of our permanents; discard; flash or ambush blockers; lifegain, prevention and protection aimed
- * at the line; lethal burn), each castable or activatable now and payable. Incidental instant-speed abilities (a
- * fetchland crack, a draw, a pump outside combat) are not responses. Equivalent responses collapse to one: the same card
- * name, effect and target class (copies of a card, and the same answer on same-named targets, are one response).</li>
+ * <li><b>Response set</b> ({@link #answers}): every answer the opponent can cast or activate now and pay for, from any
+ * zone it may play from, is a response (review #148 rulings: there is no incidental set). The only non-answers are pure
+ * mana abilities (only mana and tapping themselves, no rider). Equivalent responses collapse: the same card name, effect,
+ * cost and target, where a target is its name plus its state (power, toughness, tapped, combat role, attachments,
+ * counters, damage, controller), so same-named targets in different states stay apart.</li>
+ * <li><b>Fail closed</b>: an answer OppMin cannot enumerate faithfully is a gap that makes the point a cap hit (never
+ * "no response"), logged by reason ({@link Answers#gaps}).</li>
  * <li><b>Budget</b>: the responses the opponent MAKES are bounded, not the points. Every point is eligible. The budget is
  * min(k, the answers it holds that it can cast and pay for): 1, or 2 when it holds two or more castable answers with the
  * mana for both (k max = min(2, depth)). A point met with the budget spent and a non-empty set is a cap hit.</li>
@@ -520,14 +522,37 @@ public final class OppMin {
         final java.util.TreeSet<String> gaps = new java.util.TreeSet<>();
         final TreeMap<String, SpellAbility> byKey = new TreeMap<>();
         final List<Card> sources = new ArrayList<>();
-        for (ZoneType z : List.of(ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile)) {
+        for (ZoneType z : List.of(ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile,
+                ZoneType.Command)) {
             sources.addAll(opp.getCardsIn(z));
+        }
+        // review #148 re-check 6 (S1-b): cards they may play from elsewhere: our exile (Thief of Sanity), both library
+        // tops (Future Sight, Bolas's Citadel), our command zone; only abilities they can play are kept below
+        sources.addAll(victim.getCardsIn(ZoneType.Exile));
+        sources.addAll(victim.getCardsIn(ZoneType.Command));
+        for (Player who : List.of(opp, victim)) {
+            final List<Card> lib = new ArrayList<>(who.getCardsIn(ZoneType.Library));
+            if (!lib.isEmpty()) sources.add(lib.get(0));
         }
         sources.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
         final boolean attack = top == null;
         for (Card c : sources) {
-            for (SpellAbility sa0 : c.getAllPossibleAbilities(opp, true)) {
+            final boolean foreign = c.getController() != opp || c.isInZone(ZoneType.Library) || c.isInZone(ZoneType.Command);
+            final List<SpellAbility> abilities;
+            try {
+                abilities = c.getAllPossibleAbilities(opp, true);
+            } catch (RuntimeException e) {
+                gaps.add("unreadable");
+                continue;
+            }
+            for (SpellAbility sa0 : abilities) {
                 if (sa0.isLandAbility()) continue;
+                if (foreign) {
+                    // a card of another zone or player: an answer only if they may play it now (a MayPlay effect)
+                    sa0.setActivatingPlayer(opp);
+                    if (!castable(sa0, opp, gaps)) continue;
+                    if (!c.isInZone(ZoneType.Exile) && !c.isInZone(ZoneType.Library) && !c.isInZone(ZoneType.Command)) continue;
+                }
                 if (sa0.isManaAbility()) {
                     // review #148 re-check 4: a mana ability with a non-mana cost (a sac outlet) answers a line; it is
                     // not played by OppMin, so a castable one is a gap
@@ -548,6 +573,12 @@ public final class OppMin {
                 } catch (RuntimeException e) {
                     gaps.add("unreadable");
                     continue;
+                }
+                if (sa0.usesTargeting() && (sa0.getMinTargets() > 1 || ownStackTarget(sa0, opp))) {
+                    // review #148 re-check 6 (S1-a, S2): more than one target at once (Ghostly Flicker), or their own
+                    // stack object (Reverberate on their own removal), is not enumerated: a gap when castable
+                    if (castable(sa0, opp, gaps)) gaps.add(sa0.getMinTargets() > 1 ? "multi-target" : "own-stack-target");
+                    if (sa0.getMinTargets() > 1) continue;
                 }
                 if (targets.isEmpty() && sa0.usesTargeting()) {
                     // a targeted answer with no enumerated target: a gap when it has a legal one and is castable
@@ -577,7 +608,10 @@ public final class OppMin {
                         cs.resetTargets();
                         if (t instanceof SpellAbility ts) cs.getTargets().add(ts);
                         else cs.getTargets().add((GameObject) t);
-                        if (!cs.isTargetNumberValid()) continue;
+                        if (!cs.isTargetNumberValid()) {
+                            if (castable(sa0, opp, gaps)) gaps.add("multi-target"); // never a silent drop
+                            continue;
+                        }
                     }
                     if (!castable(cs, opp, gaps)) continue;
                     final String gap = gapOf(cs);
@@ -665,12 +699,15 @@ public final class OppMin {
         }
         for (Player who : List.of(victim, opp)) {
             for (ZoneType z : List.of(ZoneType.Battlefield, ZoneType.Graveyard)) {
-                final Set<String> names = new HashSet<>();
+                // review #148 re-check 6 (S1-c): collapsed by name and state, so a Shock on the unequipped Bears does
+                // not hide the Bears carrying the Bonesplitter
+                final Set<String> classes = new HashSet<>();
                 for (Card v : who.getCardsIn(z)) {
-                    if (!names.contains(v.getName()) && sa.canTarget(v)) {
-                        names.add(v.getName());
+                    final String cls = z == ZoneType.Battlefield ? stateClass(v) : v.getName();
+                    if (!classes.contains(cls) && sa.canTarget(v)) {
+                        classes.add(cls);
                         targets.add(v);
-                        keys.add((who == opp ? "own" : "card") + (z == ZoneType.Graveyard ? "-gy:" : ":") + v.getName());
+                        keys.add((who == opp ? "own" : "card") + (z == ZoneType.Graveyard ? "-gy:" : ":") + cls);
                     }
                 }
             }
@@ -679,6 +716,36 @@ public final class OppMin {
                 keys.add(who == opp ? "self" : "player");
             }
         }
+    }
+
+    /** A permanent's target class: its name and the state an answer can tell apart. */
+    static String stateClass(final Card v) {
+        final StringBuilder sb = new StringBuilder(v.getName());
+        sb.append('/').append(v.getController() == null ? -1 : v.getController().getId());
+        if (v.isCreature()) sb.append('/').append(v.getNetPower()).append('/').append(v.getNetToughness());
+        sb.append(v.isTapped() ? "/T" : "/U").append("/d").append(v.getDamage()).append(v.getCounters());
+        final forge.game.combat.Combat cb = v.getGame().getCombat();
+        if (cb != null && cb.isAttacking(v)) sb.append("/A");
+        if (cb != null && cb.isBlocking(v)) sb.append("/B");
+        final List<String> att = new ArrayList<>();
+        for (Card a : v.getAttachedCards()) att.add(a.getName());
+        Collections.sort(att);
+        if (!att.isEmpty()) sb.append("/att").append(att);
+        if (v.getEntityAttachedTo() != null) sb.append("/on").append(targetId(v.getEntityAttachedTo()));
+        return sb.toString();
+    }
+
+    /** Whether {@code sa} can target one of its own controller's objects on the stack (Reverberate, Misdirection). */
+    static boolean ownStackTarget(final SpellAbility sa, final Player opp) {
+        try {
+            for (SpellAbilityStackInstance si : opp.getGame().getStack()) {
+                final SpellAbility x = si.getSpellAbility();
+                if (x != null && x.getActivatingPlayer() == opp && sa.canTargetSpellAbility(x)) return true;
+            }
+        } catch (RuntimeException e) {
+            return true;
+        }
+        return false;
     }
 
     /** The SVar a modal response carries: its forced modes (CharmOrder values, comma separated). */
@@ -751,6 +818,8 @@ public final class OppMin {
                 sub.setActivatingPlayer(opp);
                 final String mg = gapOf(sub);
                 if (mg != null) modeGaps.add(mg);
+                if (sub.usesTargeting() && sub.getMinTargets() > 1) modeGaps.add("multi-target");
+                if (sub.usesTargeting() && ownStackTarget(sub, opp)) modeGaps.add("own-stack-target");
                 final List<Object> ts = new ArrayList<>();
                 targetsOf(sub, top, victim, opp, ts, new ArrayList<>());
                 final List<Object> oT = new ArrayList<>();
@@ -792,7 +861,8 @@ public final class OppMin {
                     key.append(modes.get(cmb[q]).getSVar("CharmOrder")).append('@').append(t == null ? "-" : targetId(t))
                             .append(',');
                 }
-                if (cat >= 0) {
+                if (cat < 0) cat = OTHER; // review #148 S2: modes with no legal target still make an answer
+                {
                     final SpellAbility cs = sa0.copy(opp);
                     cs.setActivatingPlayer(opp);
                     cs.setSVar(MODES, key.toString());
@@ -903,16 +973,15 @@ public final class OppMin {
     }
 
     /**
-     * Review #148 re-check 5 ruling: there is no incidental set. Every castable answer is a response (enumerated, or a
-     * gap); a draw, scry or search can trigger their permanents (Sheoldred, Niv-Mizzet, prowess, Young Pyromancer) or
-     * find the answer they cast next. The only non-answers are mana abilities whose only cost is tapping themselves.
-     */
-    /**
-     * Whether a mana ability's cost has a part beyond mana and tapping itself (a sacrifice outlet such as Ashnod's
-     * Altar, a discard, life, tapping another permanent): such an ability answers a line and OppMin does not play mana
-     * abilities, so it is a gap.
+     * Whether a mana ability is an answer (review #148 re-check 4 and 6): its cost has a part beyond mana and tapping
+     * itself (a sacrifice outlet such as Ashnod's Altar, a discard, life, tapping another permanent), or its effect has
+     * a rider beyond adding mana (Pristine Talisman gains life, Selvala). OppMin does not play mana abilities, so a
+     * castable one is a gap. Only pure mana abilities are non-answers.
      */
     static boolean manaAbilityWithCost(final SpellAbility sa) {
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            if (s.getApi() != ApiType.Mana && s.getApi() != ApiType.ManaReflected) return true; // a rider
+        }
         if (sa.getPayCosts() == null) return false;
         for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
             if (part instanceof forge.game.cost.CostPartMana || part instanceof forge.game.cost.CostTap) continue;
