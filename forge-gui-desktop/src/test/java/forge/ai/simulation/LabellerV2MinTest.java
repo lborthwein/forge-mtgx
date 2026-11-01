@@ -246,6 +246,20 @@ public class LabellerV2MinTest extends AITest {
         }
     }
 
+    /**
+     * Review #148 re-check 5: no incidental set. A cantrip can trigger their permanents: Opt with Sheoldred out gains
+     * them 2 against our Bolt at 3; Opt with Young Pyromancer (tapped) makes a token that blocks our Hill Giant.
+     */
+    @Test
+    public void triggersOnTheirCantripsAnswerTheLine() {
+        Assert.assertFalse(proven(frame("Opt", "Sheoldred, the Apocalypse;Island", 3, "Lightning Bolt", "Mountain"),
+                passive(cfg(true, 64))), "Opt draws: Sheoldred gains them 2");
+        Assert.assertTrue(proven(frame("", "Sheoldred, the Apocalypse;Island", 3, "Lightning Bolt", "Mountain"),
+                passive(cfg(true, 64))), "open control: no cantrip, the Bolt is proven");
+        Assert.assertFalse(proven(frame("Opt", "Young Pyromancer|Tapped;Island", 3, "", "Hill Giant;Mountain"),
+                engineMin(true, 2)), "Opt makes a Young Pyromancer token that blocks");
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {

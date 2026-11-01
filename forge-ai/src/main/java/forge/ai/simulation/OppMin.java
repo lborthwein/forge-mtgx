@@ -558,7 +558,7 @@ public final class OppMin {
                     } catch (RuntimeException e) {
                         legal = true;
                     }
-                    if (legal && castable(sa0, opp, gaps) && !incidentalAnswer(sa0)) gaps.add("no-target-enum");
+                    if (legal && castable(sa0, opp, gaps)) gaps.add("no-target-enum");
                     continue;
                 }
                 for (int ti = 0; ti < targets.size(); ti++) {
@@ -686,8 +686,7 @@ public final class OppMin {
 
     /**
      * Review S1: a modal spell's responses, one per mode combination (CharmNum of the possible modes, repeats when the
-     * card allows them; at most 24 combinations), each with its modes forced ({@link #forcedModes}). A combination is a
-     * response when any of its modes is (incidental modes alone are not).
+     * card allows them; at most 24 combinations), each with its modes forced ({@link #forcedModes}).
      */
     static void charmResponses(final TreeMap<String, SpellAbility> byKey, final java.util.TreeSet<String> gaps,
             final Card c, final SpellAbility sa0, final String cost, final SpellAbility top, final Player victim,
@@ -878,14 +877,11 @@ public final class OppMin {
     }
 
     /**
-     * Review S1: the response's category, or -1 when it is incidental. A deny-list: only effects known not to answer a
-     * line are dropped (a draw, mana, scry or surveil, a library search, non-lethal damage or life loss to us, harm to
-     * their own permanents, a pump or counters on their own creature outside combat); anything else, unknown effects
-     * included, is a response. {@code t}: its target (a stack object, a card, a player or null).
+     * The response's category (its exploration order: counters first). Every answer is a response (re-check 5 ruling);
+     * {@code t}: its target (a stack object, a card, a player or null).
      */
     static int category(final SpellAbility sa, final Object t, final SpellAbility top, final Player victim,
             final Player opp, final boolean attack) {
-        if (incidentalAnswer(sa)) return -1;
         final ApiType api = sa.getApi();
         if (t instanceof SpellAbility) {
             return api == ApiType.Counter ? COUNTER : OTHER; // a counter, a stack bounce, a redirect: all answer it
@@ -906,41 +902,11 @@ public final class OppMin {
         return OTHER;
     }
 
-    /** Effects that only give their controller cards (the ruling's incidental chain). */
-    static final Set<ApiType> INCIDENTAL = java.util.EnumSet.of(ApiType.Draw, ApiType.Scry, ApiType.Surveil);
-
     /**
-     * Review #148 re-check 4 ruling: an answer is incidental only if (a) its whole effect chain is draw, scry, surveil
-     * or a search to hand, for its controller, and (b) its cost is mana only (no sacrifice, discard, life, tap or
-     * exile). Anything else, a pump or protection on their own creature, a Dig or library-to-battlefield, damage or life
-     * loss to us, a sacrifice outlet, is a response.
+     * Review #148 re-check 5 ruling: there is no incidental set. Every castable answer is a response (enumerated, or a
+     * gap); a draw, scry or search can trigger their permanents (Sheoldred, Niv-Mizzet, prowess, Young Pyromancer) or
+     * find the answer they cast next. The only non-answers are mana abilities whose only cost is tapping themselves.
      */
-    static boolean incidentalAnswer(final SpellAbility sa) {
-        boolean any = false;
-        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
-            final ApiType api = s.getApi();
-            if (api == null) return false;
-            any = true;
-            final boolean mine = !s.usesTargeting() && (!s.hasParam("Defined") || "You".equals(s.getParam("Defined")));
-            if (INCIDENTAL.contains(api) && mine) continue;
-            if (api == ApiType.ChangeZone && mine && "Library".equals(s.getParam("Origin"))
-                    && "Hand".equals(s.getParam("Destination"))) {
-                continue; // a search to hand
-            }
-            return false;
-        }
-        return any && manaOnly(sa);
-    }
-
-    /** Whether {@code sa}'s cost is mana only. */
-    static boolean manaOnly(final SpellAbility sa) {
-        if (sa.getPayCosts() == null) return true;
-        for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
-            if (!(part instanceof forge.game.cost.CostPartMana)) return false;
-        }
-        return true;
-    }
-
     /**
      * Whether a mana ability's cost has a part beyond mana and tapping itself (a sacrifice outlet such as Ashnod's
      * Altar, a discard, life, tapping another permanent): such an ability answers a line and OppMin does not play mana
