@@ -105,6 +105,10 @@ final class ForcedWinEngine {
         if (wall != 0 && System.nanoTime() > wall) {
             throw new OutOfBudget("wall: " + where);
         }
+        if (forge.ai.AiWork.spent()) {
+            // rollout-budget-1101: the decision's Forge AI work cap is spent (no budget open = never here)
+            throw new OutOfBudget(forge.ai.AiWork.CAP + ": " + where);
+        }
     }
 
     /**
@@ -1118,6 +1122,10 @@ final class ForcedWinEngine {
         }
         if (System.nanoTime() > deadline) {
             stoppedByTime = true;
+            return true;
+        }
+        if (forge.ai.AiWork.spent()) {
+            stoppedByCap = true; // rollout-budget-1101: the decision's Forge AI work cap (no budget open = never here)
             return true;
         }
         return false;
@@ -2419,8 +2427,9 @@ final class ForcedWinEngine {
             a.child = child;
             a.key = PlayoutKeys.stateKey(child.g);
             return a;
-        } catch (OutOfBudget ex) {
-            // the move did not finish by the wall (or the rules refused its attack twice): dropped
+        } catch (OutOfBudget | forge.ai.AiWork.Exhausted ex) {
+            // the move did not finish by the wall (or the rules refused its attack twice, or rollout-budget-1101: the
+            // decision's Forge AI work cap is spent): dropped
             st.cut++;
             lastError = String.valueOf(ex);
             ForcedWinSolver.receipt("FORCED_WIN engine cut move=" + mv + " " + ex.getMessage());

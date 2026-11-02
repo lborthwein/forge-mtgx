@@ -496,6 +496,11 @@ public final class StepSearch {
          * ({@link HiddenExile#scan}); non-empty = no target for this row, proof included. Null = none.
          */
         public JsonArray hiddenExile;
+        /**
+         * rollout-budget-1101 (review #160 S2-2): plan points of this row whose solver proposal hit its Forge AI work cap
+         * ({@link forge.ai.AiWork#CAP}); in the JSON (solver_caps) only when non-zero.
+         */
+        public int solverCaps;
         /** bvw-step2-fork-1027 (S2T blocks only; null otherwise): the variants, re-plays and pairs of this row. */
         public S2t s2t;
 
@@ -536,6 +541,7 @@ public final class StepSearch {
             o.addProperty("ms", Math.round(ms * 10) / 10.0);
             if (error != null) o.addProperty("error", error);
             if (hiddenExile != null) o.add("hidden_exile", hiddenExile);
+            if (solverCaps > 0) o.addProperty("solver_caps", solverCaps);
             return o;
         }
 
@@ -747,6 +753,7 @@ public final class StepSearch {
                 throw new PinError("refused: the step-1 search service failed a SCORE (" + cfg.server + ")");
             }
             fill(res, got);
+            res.solverCaps = ps.solverCaps; // rollout-budget-1101: this row's plan search (one per row)
             if (s2t) {
                 fillS2t(res, got, cfg.leafSym);
             }

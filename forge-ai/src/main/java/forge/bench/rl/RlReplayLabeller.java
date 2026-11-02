@@ -384,6 +384,17 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + e.getMessage());
                 System.err.println("[bvw-label] FATAL " + e.getMessage());
                 return;
+            } catch (IllegalStateException e) {
+                if (forge.ai.simulation.DeckBeliefModel.refusal() == null) {
+                    throw e;
+                }
+            }
+            if (forge.ai.simulation.DeckBeliefModel.refusal() != null) {
+                // review #155 (follow-up): a deck-belief refusal is fatal for the run (exit 2; the summary names it)
+                fatal = "deck_belief_refused: " + forge.ai.simulation.DeckBeliefModel.refusal();
+                FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + fatal);
+                System.err.println("[bvw-label] FATAL " + fatal);
+                return;
             }
             searchMs += sr.ms;
             searchWhy.merge(sr.why, 1, Integer::sum);
@@ -489,18 +500,41 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         records.add(record(h, payload));
         headers.add(h);
         labels.merge(r.label, 1, Integer::sum);
+        idx.add(indexRow(h));
+    }
+
+    /**
+     * The index row's fields (each copied when the header has it). rollout-budget-1101 (review #160 S2-2): cap,
+     * cap_hits, worlds_capped and proof_cap (present only when a solver hit its Forge AI work cap). r3-labelsearch-1030:
+     * row_kind, choice_ord, r3, r3_sha and r3_ranker (the R3 label-search rows).
+     */
+    static final String[] INDEX_FIELDS = {"game_uid", "seed", "seat", "dec_idx", "turn", "phase", "stack",
+            "turns_before_end", "tape_turns", "tape_reason", "tape_result", "label", "check", "gate", "p_win",
+            "p_loss", "worlds_win", "worlds_loss", "lost_worlds", "proposals", "how", "end_reason", "line_how",
+            "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
+            "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof",
+            "state_sha", "s2t", "row_kind", "choice_ord", "r3", "r3_sha", "r3_ranker", "cap", "cap_hits", "worlds_capped",
+            "proof_cap"};
+
+    /**
+     * rollout-budget-1101 (review #160 S2-2): a step row whose proof check was capped says so (proof_cap): its "no proof"
+     * is unknown, not a result; the target falls through to the search as before.
+     */
+    static void markCap(final JsonObject h, final HonestLabel.Result r) {
+        if (r.cap != null) {
+            h.addProperty("proof_cap", r.cap);
+        }
+    }
+
+    /** A row header's index row. */
+    static JsonObject indexRow(final JsonObject h) {
         final JsonObject ir = new JsonObject();
-        for (String k : new String[] {"game_uid", "seed", "seat", "dec_idx", "turn", "phase", "stack",
-                "turns_before_end", "tape_turns", "tape_reason", "tape_result", "label", "check", "gate", "p_win",
-                "p_loss", "worlds_win", "worlds_loss", "lost_worlds", "proposals", "how", "end_reason", "line_how",
-                "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
-                "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof",
-                "state_sha", "s2t", "row_kind", "choice_ord", "r3", "r3_sha", "r3_ranker"}) {
+        for (String k : INDEX_FIELDS) {
             if (h.has(k)) {
                 ir.add(k, h.get(k));
             }
         }
-        idx.add(ir);
+        return ir;
     }
 
     /**
@@ -516,6 +550,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         final StepTarget st = StepTarget.of(r.label, sr);
         h.add("proof", st.proof == null ? com.google.gson.JsonNull.INSTANCE : new com.google.gson.JsonPrimitive(st.proof));
         h.addProperty("target_source", st.source);
+        markCap(h, r);
         h.add("target", StepSearch.Result.num(st.target));
         if (st.hiddenExile != null) {
             // OPEN-6 ruling: no target, the proof withheld (kept for the audit as unsupported_proof)
@@ -1014,6 +1049,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         targets.merge(source, 1, Integer::sum);
         h.addProperty("target_source", source);
+        markCap(h, r); // merge of #160 into #148: an R3 row's capped proof check is unknown too (proof_cap), as a step row's
         h.add("target", StepSearch.Result.num(target));
         h.add("r3", res == null ? com.google.gson.JsonNull.INSTANCE : res.toJson());
         h.addProperty("r3_sha", r3Sha);

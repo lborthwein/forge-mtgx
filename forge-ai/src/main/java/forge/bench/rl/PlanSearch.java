@@ -425,6 +425,8 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
     final List<Double> defendMs = new ArrayList<>();
 
     // counters
+    /** rollout-budget-1101: plan points whose solver proposal hit its Forge AI work cap. */
+    int solverCaps;
     int planPoints, solverRuns, provenLinesTaken, lineCands, sampledPlans, recordings, recordFails, planDecisions,
             planDepartures, lineDepartures, policyPlanDepartures, provenPicks, liveSteps, liveBreaks, liveDone, lineHookActs;
     final List<Double> proposeMs = new ArrayList<>();
@@ -785,6 +787,11 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
             final long a = System.nanoTime();
             final List<ForcedWinSolver.Proposal> props = driver.probe(() -> solver.propose(g));
             solverRuns++;
+            if (solver.lastCap() != null) {
+                // rollout-budget-1101 (review #160 S2-2): the proposal hit its Forge AI work cap (it proposes nothing)
+                solverCaps++;
+                st.note = solver.lastCap();
+            }
             solverMs.add((System.nanoTime() - a) / 1e6);
             ForcedWinSolver.Proposal proven = null;
             for (ForcedWinSolver.Proposal pr : props) {
@@ -1022,6 +1029,9 @@ public final class PlanSearch implements PlayerControllerBridge.PlanHook {
         o.addProperty("planPoints", planPoints);
         o.addProperty("solverRuns", solverRuns);
         o.addProperty("provenLinesTaken", provenLinesTaken);
+        if (solverCaps > 0) {
+            o.addProperty("solverCaps", solverCaps); // rollout-budget-1101
+        }
         o.addProperty("lineCands", lineCands);
         o.addProperty("sampledPlans", sampledPlans);
         o.addProperty("recordings", recordings);

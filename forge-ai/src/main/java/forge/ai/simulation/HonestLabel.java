@@ -356,6 +356,19 @@ public final class HonestLabel {
         public String copyPending;
         /** bvw-step1-build-1024: the check's solver work (null unless the spec meters). */
         public JsonObject meter;
+        /**
+         * rollout-budget-1101: the cap a solver of this check hit ({@link forge.ai.AiWork#CAP}: its Forge AI work), or
+         * null; with the solvers (the win check's one, the loss check's per-world ones) that hit it. A capped solver
+         * proposes no line, so a capped check proves nothing it did not prove before the cap.
+         */
+        public String cap;
+        public int capHits;
+        /**
+         * rollout-budget-1101 (review #160 S2-1): loss-check worlds whose solver hit the cap. They are left out of
+         * {@link #worldsLoss} and the p_loss denominator (a capped world is unknown, not "safe"), so a check with one
+         * is never a "loss" label (that needs every world run and lost).
+         */
+        public int worldsCapped;
 
         public JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -380,6 +393,13 @@ public final class HonestLabel {
             o.addProperty("ms", Math.round(ms * 10) / 10.0);
             if (error != null) o.addProperty("error", error);
             if (meter != null) o.add("meter", meter);
+            if (cap != null) {
+                o.addProperty("cap", cap);
+                o.addProperty("cap_hits", capHits);
+                if ("loss".equals(check)) {
+                    o.addProperty("worlds_capped", worldsCapped);
+                }
+            }
             if (copyPending != null) {
                 o.addProperty("copy_pending", copyPending);
             }
@@ -564,6 +584,10 @@ public final class HonestLabel {
                 throw new IllegalStateException("refused: dishonest win solver");
             }
             final List<ForcedWinSolver.Proposal> props = s.propose(root);
+            if (s.lastCap() != null) {
+                r.cap = s.lastCap(); // rollout-budget-1101
+                r.capHits++;
+            }
             r.proposals = props.size();
             if (spec.meter) {
                 r.meter = s.meter.toJson();
@@ -621,15 +645,23 @@ public final class HonestLabel {
                 // the opponent's solver in this world (their sampled hand is theirs to know); exact: the line is checked
                 // in this world as it stands, our real hand countering; no re-draw (the world already holds no real
                 // hidden card of theirs), their own library hidden from their engine root (hideOwnLibrary)
-                final ForcedWinSolver s = new ForcedWinSolver(opp, cfg);
+                final ForcedWinSolver s = new ForcedWinSolver(opp, TEST_CAP_LOSS_WORLD != null
+                        && TEST_CAP_LOSS_WORLD.test(j) ? capOne(spec.lossConfig()) : cfg);
                 if (s.redraw != null || !s.config().hideOwnLibrary || !s.config().exact) {
                     throw new IllegalStateException("refused: dishonest loss solver");
                 }
                 final List<ForcedWinSolver.Proposal> props = s.propose(g);
-                ran++;
                 if (sum != null) {
                     sum.plus(s.meter);
                 }
+                if (s.lastCap() != null) {
+                    // rollout-budget-1101 (review #160 S2-1): a capped world is not run: out of ran and worlds_loss
+                    r.cap = s.lastCap();
+                    r.capHits++;
+                    r.worldsCapped++;
+                    continue;
+                }
+                ran++;
                 ForcedWinSolver.Proposal proven = null;
                 for (ForcedWinSolver.Proposal p : props) {
                     if (p.proven(1) && r.copyGap != null && p.endTurn != live.getPhaseHandler().getTurn()) {
@@ -678,6 +710,17 @@ public final class HonestLabel {
             }
             return "null".equals(best) ? null : best;
         }
+    }
+
+    /**
+     * rollout-budget-1101 (tests only; null = off, the default): loss-check world indices whose solver gets
+     * {@code aiWork=1} (a cap hit), to test the capped-world accounting with K worlds and one capped.
+     */
+    static java.util.function.IntPredicate TEST_CAP_LOSS_WORLD;
+
+    private static ForcedWinSolver.Config capOne(final ForcedWinSolver.Config c) {
+        c.aiWork = 1;
+        return c;
     }
 
     private HonestLabel() {

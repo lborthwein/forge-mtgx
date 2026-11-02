@@ -609,7 +609,9 @@ public final class ForcedWinModel {
                 } finally {
                     ForcedWinProbe.PLAN_SCRY.set(prev);
                 }
-                templates.put(key, t);
+                if (!forge.ai.AiWork.spent()) {
+                    templates.put(key, t); // rollout-budget-1101 (review #160 S3-4): a template learned past the cap is not kept
+                }
             }
             return t.instance(c.getId());
         }

@@ -40,6 +40,12 @@ public class BeliefDeckTest extends SimulationTest {
         DeckBeliefModel.resetRefusalForTests();
     }
 
+    /** review #155 (follow-up): never leave a sticky refusal to the next test class in this JVM. */
+    @org.testng.annotations.AfterMethod(alwaysRun = true)
+    public void resetRefusalAfter() {
+        DeckBeliefModel.resetRefusalForTests();
+    }
+
     static String export() {
         // vocab: Esper Sentinel (a = 1), Thraben Inspector (u = 10), Mox Pearl; h = relu(mean a) (d = 1, one hidden unit)
         return export(provenance("\"k0\""));
