@@ -147,6 +147,12 @@ public final class OppMin {
         final int budgetHint;
         /** Review #148 (fail closed): why the set is not complete (an answer OppMin cannot enumerate), or null. */
         public final String gap;
+        /**
+         * coverage-fix-1102 (diagnostics only, never read to decide): the source cards of each gap reason, and the
+         * point's answers (host names, set order), for the meter's per-row cap read-out.
+         */
+        java.util.Map<String, java.util.TreeSet<String>> gapCards = java.util.Collections.emptyMap();
+        List<String> answerNames = java.util.Collections.emptyList();
 
         Point(final int size, final String state, final int impact, final int budgetHint) {
             this(size, state, impact, budgetHint, null);
@@ -186,10 +192,16 @@ public final class OppMin {
         public Leaf firstLeaf;
         /** Every cap event of the tree by reason (review #148: the recall cost of failing closed). */
         public final java.util.TreeMap<String, Integer> caps = new java.util.TreeMap<>();
+        /** coverage-fix-1102 (diagnostics only): the answer cards behind each cap reason (gaps, truncated, budget). */
+        public final java.util.TreeMap<String, java.util.TreeSet<String>> capCards = new java.util.TreeMap<>();
 
         void cap(final String why) {
             if (cap == null) cap = why;
             caps.merge(why, 1, Integer::sum);
+        }
+
+        void capCards(final String why, final java.util.Collection<String> names) {
+            if (names != null && !names.isEmpty()) capCards.computeIfAbsent(why, k -> new java.util.TreeSet<>()).addAll(names);
         }
     }
 
@@ -245,15 +257,20 @@ public final class OppMin {
                 if (p.gap != null) {
                     // fail closed: an answer this point's set could not enumerate completely makes it a cap hit
                     out.cap("gap:" + p.gap);
+                    for (java.util.Map.Entry<String, java.util.TreeSet<String>> e : p.gapCards.entrySet()) {
+                        out.capCards("gap:" + e.getKey(), e.getValue());
+                    }
                 }
                 if (p.size == 0) continue;
                 out.maxResponses = Math.max(out.maxResponses, p.size);
                 if (p.size > cfg.perPoint) {
                     out.cap("truncated");
+                    out.capCards("truncated", p.answerNames);
                     continue;
                 }
                 if (left <= 0) {
                     out.cap("budget");
+                    out.capCards("budget", p.answerNames);
                     continue;
                 }
                 if (cfg.memo && !memo.add(p.state + "|" + left)) {
@@ -337,14 +354,14 @@ public final class OppMin {
             // review S1 (safety net, the base's behaviour): Forge AI's own answer at this point is a candidate too
             final List<SpellAbility> mine = own.get();
             if (script.forge) {
-                points.add(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()));
+                points.add(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs));
                 return mine;
             }
             final SpellAbility fa = mine == null || mine.isEmpty() ? null : mine.get(0);
             if (fa != null && fa.getActivatingPlayer() == opp && !fa.isManaAbility() && !sameAsAny(fa, rs)) {
                 rs.add(fa);
             }
-            points.add(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()));
+            points.add(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs));
             if (DEBUG && as.gap() != null) System.err.println("[oppmin] point " + idx + " gap " + as.gap());
             final int r = script.respAt(idx);
             if (r < 0 || r >= rs.size()) return null;
@@ -505,10 +522,24 @@ public final class OppMin {
         return answers(g, opp, victim, top).list;
     }
 
+    /** coverage-fix-1102 (diagnostics only): a point's gap cards and answer names, for the meter. */
+    static Point diag(final Point p, final Answers as, final List<SpellAbility> rs) {
+        p.gapCards = as.gapCards;
+        final List<String> names = new ArrayList<>();
+        for (SpellAbility sa : rs) {
+            final String n = sa.getHostCard() == null ? "?" : sa.getHostCard().getName();
+            if (!names.contains(n)) names.add(n);
+        }
+        p.answerNames = names;
+        return p;
+    }
+
     /** A point's response set and why it is not complete (review #148, fail closed: each reason is a cap hit). */
     public static final class Answers {
         public final List<SpellAbility> list;
         public final java.util.TreeSet<String> gaps;
+        /** coverage-fix-1102 (diagnostics only): the source cards of each gap reason. */
+        public final java.util.TreeMap<String, java.util.TreeSet<String>> gapCards = new java.util.TreeMap<>();
 
         Answers(final List<SpellAbility> list, final java.util.TreeSet<String> gaps) {
             this.list = list;
@@ -522,7 +553,8 @@ public final class OppMin {
 
     /** {@link #responses} with the reasons the set is not complete (answers OppMin cannot enumerate fully). */
     public static Answers answers(final Game g, final Player opp, final Player victim, final SpellAbility top) {
-        final java.util.TreeSet<String> gaps = new java.util.TreeSet<>();
+        final java.util.TreeSet<String> allGaps = new java.util.TreeSet<>();
+        final java.util.TreeMap<String, java.util.TreeSet<String>> gapCards = new java.util.TreeMap<>();
         final TreeMap<String, SpellAbility> byKey = new TreeMap<>();
         final List<Card> sources = new ArrayList<>();
         for (ZoneType z : List.of(ZoneType.Hand, ZoneType.Battlefield, ZoneType.Graveyard, ZoneType.Exile,
@@ -552,6 +584,9 @@ public final class OppMin {
         sources.sort((x, y) -> Integer.compare(x.getId(), y.getId()));
         final boolean attack = top == null;
         for (Card c : sources) {
+            // coverage-fix-1102: each card's gaps apart (the same reasons, merged below), to name the cards behind them
+            final java.util.TreeSet<String> gaps = new java.util.TreeSet<>();
+            try {
             final boolean foreign = c.getController() != opp || c.isInZone(ZoneType.Library) || c.isInZone(ZoneType.Command);
             final List<SpellAbility> abilities;
             try {
@@ -645,8 +680,14 @@ public final class OppMin {
                             + keys.get(ti), cs);
                 }
             }
+            } finally {
+                allGaps.addAll(gaps);
+                for (String r : gaps) gapCards.computeIfAbsent(r, k -> new java.util.TreeSet<>()).add(c.getName());
+            }
         }
-        return new Answers(new ArrayList<>(byKey.values()), gaps);
+        final Answers out = new Answers(new ArrayList<>(byKey.values()), allGaps);
+        out.gapCards.putAll(gapCards);
+        return out;
     }
 
     /** Whether {@code sa} can be played and paid now; an exception is a gap ("unreadable"), not a silent drop. */

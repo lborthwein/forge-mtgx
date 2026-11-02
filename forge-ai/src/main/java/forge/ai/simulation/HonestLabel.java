@@ -92,10 +92,16 @@ public final class HonestLabel {
          * line read the opponent's hidden library is likewise sampled, never "loss". Which line is played is unchanged.
          */
         public boolean libLabels = false;
+        /**
+         * coverage-fix-1102 (false = off, the default, and then nothing changes, the sha included): with {@link #meter},
+         * each row's meter also carries why its OppMin worlds were cut (by reason, with up to three answer cards each)
+         * and which engine counter stopped its engine searches (ForcedWinSolver.Meter#reasons). Diagnostics only.
+         */
+        public boolean meterReasons = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels"));
+                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "meterReasons"));
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
@@ -127,6 +133,7 @@ public final class HonestLabel {
             if (o.has("sequentialAi") && !o.get("sequentialAi").isJsonNull()) s.sequentialAi = o.get("sequentialAi").getAsBoolean();
             if (o.has("aiTimeoutSec") && !o.get("aiTimeoutSec").isJsonNull()) s.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
             if (o.has("libLabels")) s.libLabels = o.get("libLabels").getAsBoolean();
+            if (o.has("meterReasons")) s.meterReasons = o.get("meterReasons").getAsBoolean();
             s.checkHonest();
             return s;
         }
@@ -282,6 +289,9 @@ public final class HonestLabel {
             }
             if (libLabels) {
                 o.addProperty("libLabels", true); // e1-q8-1101: only when on, so every other spec's sha is unchanged
+            }
+            if (meterReasons) {
+                o.addProperty("meterReasons", true); // coverage-fix-1102: only when on
             }
             return o;
         }
@@ -608,6 +618,7 @@ public final class HonestLabel {
             final Game root = (Game) w[0];
             final Player me = (Player) w[1];
             final ForcedWinSolver s = new ForcedWinSolver(me, spec.winConfig());
+            s.meter.reasons = spec.meterReasons; // coverage-fix-1102 (meter only)
             if (knownOwn != null) {
                 final List<forge.game.card.Card> placed = new ArrayList<>();
                 for (forge.game.card.Card c : me.getCardsIn(forge.game.zone.ZoneType.Library)) {
@@ -724,6 +735,9 @@ public final class HonestLabel {
             int steps = -1;
             int libLost = 0, libTakes = 0;
             final ForcedWinSolver.Meter sum = spec.meter ? new ForcedWinSolver.Meter() : null;
+            if (sum != null) {
+                sum.reasons = spec.meterReasons; // coverage-fix-1102 (meter only)
+            }
             boolean wallStop = false;
             for (int j = 0; j < spec.worlds; j++) {
                 if (System.nanoTime() > wall) {
