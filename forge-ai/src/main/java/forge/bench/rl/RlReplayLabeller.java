@@ -851,7 +851,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         final forge.ai.simulation.ChooseACard.Valuer val = ranker.valuer(game, knowledge);
         final List<Player> ps = game.getRegisteredPlayers();
         for (int s = 0; s < 2 && s < ps.size(); s++) {
-            r3Memory[s] = new forge.ai.simulation.OwnLibraryMemory(ps.get(s));
+            r3Memory[s] = new forge.ai.simulation.OwnLibraryMemory(ps.get(s), r3spec.knownLib);
             r3Memory[s].watch(game);
         }
         final forge.ai.simulation.R3LabelSearch.Env env = new forge.ai.simulation.R3LabelSearch.Env() {

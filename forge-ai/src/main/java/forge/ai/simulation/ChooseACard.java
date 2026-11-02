@@ -99,6 +99,11 @@ public final class ChooseACard implements CacHook {
          * refuses ON without the value tower and the solver check, and ON or SHADOW without the belief re-draw.
          */
         public boolean testUnsafe = false;
+        /**
+         * order-memory-1102 (never a JSON key; the R3 spec's knownLib sets it): the seat's library memory is
+         * {@link KnownOwnLibrary}'s ({@link OwnLibraryMemory#OwnLibraryMemory(Player, boolean)}). False = the legacy rule.
+         */
+        public boolean knownLib = false;
 
         public static Config fromJson(final JsonObject o) {
             final Config c = new Config();
@@ -441,7 +446,7 @@ public final class ChooseACard implements CacHook {
      */
     public void bind(final Game g, final Player p) {
         if (memory == null || live != g || me != p) {
-            this.memory = new OwnLibraryMemory(p);
+            this.memory = new OwnLibraryMemory(p, cfg.knownLib);
             memory.watch(g);
         }
         this.live = g;
@@ -580,7 +585,7 @@ public final class ChooseACard implements CacHook {
             return; // already installed (a re-install after a controller swap is a no-op on the same controller)
         }
         if (memory == null || live != ctrl.getGame() || me != ctrl.getPlayer()) {
-            this.memory = new OwnLibraryMemory(ctrl.getPlayer());
+            this.memory = new OwnLibraryMemory(ctrl.getPlayer(), cfg.knownLib);
             memory.watch(ctrl.getGame());
         }
         this.live = ctrl.getGame();

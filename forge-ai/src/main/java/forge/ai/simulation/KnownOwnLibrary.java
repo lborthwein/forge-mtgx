@@ -404,6 +404,19 @@ public final class KnownOwnLibrary {
         return out;
     }
 
+    /**
+     * order-memory-1102: a copy's tracker starts knowing these cards (the root's known positions; {@link
+     * OwnLibraryMemory#seedKnown}), top-anchored: a hidden take from the middle can only void more of them. Call before
+     * {@link #watch}, or with no event since the last one (the snapshot is unchanged).
+     */
+    public void pin(final Iterable<Card> cards) {
+        for (Card c : cards) {
+            if (c != null) {
+                top.add(c.getId());
+            }
+        }
+    }
+
     /** The known top count of {@code me}'s library (diagnostics). */
     public int topCount(final Player me) {
         final Set<Integer> k = known(me);

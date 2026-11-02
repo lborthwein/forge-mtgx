@@ -132,6 +132,12 @@ public final class R3LabelSearch {
         public boolean testUnsafe = false;
         /** Tests only (never a JSON key): the opponent's own play at a response point is a pass (labeller v2's passive). */
         public boolean testPassiveOpp = false;
+        /**
+         * order-memory-1102 (off by default; in the identity only when on, so every other spec's sha is unchanged): the
+         * library memory of the R3 rows, worlds and choose-a-card ({@link OwnLibraryMemory}) delegates to
+         * {@link KnownOwnLibrary}: random-order blocks and orders the opponent chose are not known.
+         */
+        public boolean knownLib = false;
         /** The block as given (sorted), for the identity. */
         JsonObject json = new JsonObject();
 
@@ -149,7 +155,7 @@ public final class R3LabelSearch {
         static final Set<String> KEYS = new TreeSet<>(Arrays.asList("maxCands", "policyTop", "holdPieces", "exploreAnswers", "rowMaxLines", "rowMaxProofs", "rowMaxSteps", "selectWorlds",
                 "targetWorlds", "stratify", "topAnswers", "cac", "inline", "leaf", "maxTurns", "maxSteps", "horizon",
                 "proofLeaf", "profile", "solverSpec", "drawDepth", "seqCap", "samples", "oppMin", "oppMinIn",
-                "oppResponses", "oppDepth", "oppNodes", "oppMinVersion", "maxUnresolvedShare", "seed"));
+                "oppResponses", "oppDepth", "oppNodes", "oppMinVersion", "maxUnresolvedShare", "seed", "knownLib"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -208,6 +214,7 @@ public final class R3LabelSearch {
             if (o.has("oppNodes")) s.oppNodes = o.get("oppNodes").getAsInt();
             if (o.has("maxUnresolvedShare")) s.maxUnresolvedShare = o.get("maxUnresolvedShare").getAsDouble();
             if (o.has("seed")) s.seed = o.get("seed").getAsLong();
+            if (o.has("knownLib")) s.knownLib = o.get("knownLib").getAsBoolean();
             if (!"rollout".equals(s.leaf) && !"value".equals(s.leaf)) {
                 throw new IllegalArgumentException("r3.leaf is \"rollout\" or \"value\", not " + s.leaf);
             }
@@ -260,6 +267,9 @@ public final class R3LabelSearch {
             o.addProperty("oppMinVersion", OppMin.VERSION);
             o.addProperty("maxUnresolvedShare", maxUnresolvedShare);
             o.addProperty("seed", seed);
+            if (knownLib) {
+                o.addProperty("knownLib", true); // order-memory-1102: only when on
+            }
             return sorted(o);
         }
 
@@ -273,6 +283,7 @@ public final class R3LabelSearch {
             c.addProperty("mode", mode);
             final ChooseACard.Config cc = ChooseACard.Config.fromJson(c);
             cc.testUnsafe = testUnsafe;
+            cc.knownLib = knownLib;
             return cc;
         }
     }
@@ -633,8 +644,8 @@ public final class R3LabelSearch {
                 }
                 OwnLibraryMemory.shuffleUnknown(me, knownMe, new Random(LookaheadSearch.mix(seed, 0x4D45L)));
             }
-            memory = new OwnLibraryMemory(me);
-            memory.noteLooked(cardsOf(me, knownMe));
+            memory = new OwnLibraryMemory(me, spec.knownLib);
+            memory.seedKnown(cardsOf(me, knownMe));
             memory.watch(g);
         }
 
@@ -1055,7 +1066,7 @@ public final class R3LabelSearch {
         c.setRedraw(env.redraw());
         c.install(ctrl);
         if (world != null && world.memory != null && c.memory() != null) {
-            c.memory().noteLooked(cardsOf(me, world.memory.known(me)));
+            c.memory().seedKnown(cardsOf(me, world.memory.known(me)));
         }
         ctrl.setCacHook(new TurnGate(c, g, rootTurn));
         return c;
