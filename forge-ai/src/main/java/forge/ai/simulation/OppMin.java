@@ -318,6 +318,16 @@ public final class OppMin {
         public String answered;
 
         /** {@code onlyTurn}: points only in that turn (-1: any). */
+        /**
+         * covfix-a-1102 (ARCH-PROPOSAL-1102 layer 3; false = off, the default, and then nothing changes): the opponent's
+         * mana abilities with a non-mana part (a cost beyond mana and tapping itself, a rider, or a mana trigger on the
+         * battlefield) are responses like any other: activated on the copy, their costs and effects resolved, the MIN
+         * continuing from there. Pure mana abilities with no trigger are the "no response" branch.
+         */
+        public boolean manaSearch;
+        /** covfix-a-1102: a scripted mana-ability response could not be activated on the copy (fail closed: a cap). */
+        public boolean manaSimFailed;
+
         public Driver(final Script script, final Player opp, final Player victim, final int onlyTurn) {
             this.script = script;
             this.opp = opp;
@@ -349,7 +359,7 @@ public final class OppMin {
                         + " stack " + g.getStack().size());
             }
             final String state = stateKey(g);
-            final Answers as = answers(g, opp, victim, top);
+            final Answers as = answers(g, opp, victim, top, manaSearch);
             final List<SpellAbility> rs = as.list;
             // review S1 (safety net, the base's behaviour): Forge AI's own answer at this point is a candidate too
             final List<SpellAbility> mine = own.get();
@@ -374,6 +384,18 @@ public final class OppMin {
                 forge.ai.AiCardMemory.rememberCard(opp, host, forge.ai.AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL);
             }
             answered = (top == null ? "attack" : top.getHostCard().getName()) + " answered by " + sa.getHostCard().getName();
+            if (sa.isManaAbility()) {
+                // covfix-a-1102: a mana-ability response is activated here (mana abilities do not use the stack): its
+                // costs (life, sacrifice, counters, tapping) and riders resolve now, then Forge AI plays on from that state
+                boolean ok;
+                try {
+                    ok = forge.ai.ComputerUtil.handlePlayingSpellAbility(opp, sa, null);
+                } catch (RuntimeException e) {
+                    ok = false;
+                }
+                if (!ok) manaSimFailed = true;
+                return own.get();
+            }
             return new ArrayList<>(Collections.singletonList(sa));
         }
     }
@@ -553,6 +575,28 @@ public final class OppMin {
 
     /** {@link #responses} with the reasons the set is not complete (answers OppMin cannot enumerate fully). */
     public static Answers answers(final Game g, final Player opp, final Player victim, final SpellAbility top) {
+        return answers(g, opp, victim, top, false);
+    }
+
+    /** covfix-a-1102: whether a mana trigger (taps for mana, mana added) is on either player's battlefield. */
+    static boolean manaTriggers(final Player opp, final Player victim) {
+        for (Player p : List.of(opp, victim)) {
+            for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+                for (forge.game.trigger.Trigger t : c.getTriggers()) {
+                    final forge.game.trigger.TriggerType m = t.getMode();
+                    if (m == forge.game.trigger.TriggerType.TapsForMana || m == forge.game.trigger.TriggerType.ManaAdded) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** As above; {@code manaSearch} (covfix-a-1102): mana abilities with a non-mana part are answers, not gaps. */
+    public static Answers answers(final Game g, final Player opp, final Player victim, final SpellAbility top,
+            final boolean manaSearch) {
+        final boolean manaTrig = manaSearch && manaTriggers(opp, victim);
         final java.util.TreeSet<String> allGaps = new java.util.TreeSet<>();
         final java.util.TreeMap<String, java.util.TreeSet<String>> gapCards = new java.util.TreeMap<>();
         final TreeMap<String, SpellAbility> byKey = new TreeMap<>();
@@ -602,6 +646,17 @@ public final class OppMin {
                     // effect, an "any player may activate" ability)
                     sa0.setActivatingPlayer(opp);
                     if (!castable(sa0, opp, gaps)) continue;
+                }
+                if (sa0.isManaAbility() && manaSearch) {
+                    // covfix-a-1102: a response like any other, one per source name and cost (copies of one card are
+                    // one outcome); a pure mana ability with no mana trigger in play is the "no response" branch
+                    if ((manaAbilityWithCost(sa0) || manaTrig) && castable(sa0, opp, gaps)) {
+                        final SpellAbility cs = sa0.copy(opp);
+                        cs.setActivatingPlayer(opp);
+                        final String mcost = sa0.getPayCosts() == null ? "-" : sa0.getPayCosts().toSimpleString();
+                        byKey.putIfAbsent(OTHER + "|mana|" + c.getName() + "|" + mcost + "|" + sa0.getDescription(), cs);
+                    }
+                    continue;
                 }
                 if (sa0.isManaAbility()) {
                     // review #148 re-check 4: a mana ability with a non-mana cost (a sac outlet) answers a line; it is

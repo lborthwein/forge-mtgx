@@ -98,10 +98,16 @@ public final class HonestLabel {
          * and which engine counter stopped its engine searches (ForcedWinSolver.Meter#reasons). Diagnostics only.
          */
         public boolean meterReasons = false;
+        /**
+         * covfix-a-1102 (1 = the default, and then nothing changes, the sha included): the OppMin label defaults. 2: the
+         * MIN searches the opponent's mana abilities (solver key oppManaSearch, ARCH-PROPOSAL-1102 layer 3) and
+         * oppResponses defaults to 16 (was 4), in both checks, unless a solver config sets the key itself.
+         */
+        public int oppMinRev = 1;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "meterReasons"));
+                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "meterReasons", "oppMinRev"));
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
@@ -134,6 +140,7 @@ public final class HonestLabel {
             if (o.has("aiTimeoutSec") && !o.get("aiTimeoutSec").isJsonNull()) s.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
             if (o.has("libLabels")) s.libLabels = o.get("libLabels").getAsBoolean();
             if (o.has("meterReasons")) s.meterReasons = o.get("meterReasons").getAsBoolean();
+            if (o.has("oppMinRev")) s.oppMinRev = o.get("oppMinRev").getAsInt();
             s.checkHonest();
             return s;
         }
@@ -153,6 +160,9 @@ public final class HonestLabel {
             }
             if (beliefCube == null || beliefCube.isBlank()) {
                 throw new IllegalArgumentException("refused: the label mode needs a belief cube");
+            }
+            if (oppMinRev < 1 || oppMinRev > 2) {
+                throw new IllegalArgumentException("label: oppMinRev in [1, 2]");
             }
             if (worlds < 1 || worlds > 64 || beliefBasics < 1) {
                 throw new IllegalArgumentException("label: worlds in [1, 64], beliefBasics >= 1");
@@ -211,6 +221,7 @@ public final class HonestLabel {
             o.addProperty("act", "false");
             o.addProperty("defense", "false");
             o.addProperty("exact", "false");
+            revDefaults(o);
             final ForcedWinSolver.Config c = config(o);
             c.libWatch = libLabels; // e1-q8-1101
             return c;
@@ -225,9 +236,19 @@ public final class HonestLabel {
             o.addProperty("act", "false");
             o.addProperty("defense", "false");
             o.addProperty("exact", "true");
+            revDefaults(o);
             final ForcedWinSolver.Config c = config(o);
             c.libWatch = libLabels; // e1-q8-1101
             return c;
+        }
+
+        /** covfix-a-1102: the oppMinRev defaults, for keys the solver config does not set itself. */
+        private void revDefaults(final JsonObject o) {
+            if (oppMinRev < 2) {
+                return;
+            }
+            if (!o.has("oppResponses")) o.addProperty("oppResponses", "16");
+            if (!o.has("oppManaSearch")) o.addProperty("oppManaSearch", "true");
         }
 
         private static JsonObject defaults() {
@@ -292,6 +313,9 @@ public final class HonestLabel {
             }
             if (meterReasons) {
                 o.addProperty("meterReasons", true); // coverage-fix-1102: only when on
+            }
+            if (oppMinRev != 1) {
+                o.addProperty("oppMinRev", oppMinRev); // covfix-a-1102: only when not the default
             }
             return o;
         }
