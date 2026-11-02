@@ -578,6 +578,42 @@ public class LabellerV2MinTest extends AITest {
                 passive(cfg(true, 64)))[0]);
     }
 
+    static ForcedWinSolver.Config manaSearchEngine() {
+        final ForcedWinSolver.Config c = cfgEngine(true);
+        c.oppDepth = 2;
+        c.oppManaSearch = true;
+        return passive(c);
+    }
+
+    /**
+     * Review #169 S1-1: the permanent a mana ability's cost sacrifices is the MIN's choice, one response per legal
+     * choice, never Forge AI's. Our Act of Treason on their Craw Wurm, attacking for their last 6: their Ashnod's Altar
+     * can sacrifice the Wurm in response (the line fails) or their Grizzly Bears (it does not). Not proven; with no Altar,
+     * proven.
+     */
+    @Test
+    public void aSacrificeCostIsTheMinsChoice() {
+        final Object[] alt = run(frame("", "Ashnod's Altar;Craw Wurm;Grizzly Bears", 6, "Act of Treason",
+                "Mountain;Mountain;Mountain"), manaSearchEngine());
+        final Object[] none = run(frame("", "Craw Wurm;Grizzly Bears", 6, "Act of Treason", "Mountain;Mountain;Mountain"),
+                manaSearchEngine());
+        Assert.assertTrue((Boolean) none[0], "control: the steal-and-attack line is proven with no Altar: " + none[1]);
+        Assert.assertFalse((Boolean) alt[0], "sacrificing the stolen Wurm is a response: " + alt[1] + " " + alt[2]);
+    }
+
+    /**
+     * Review #169 S1-2: after a mana activation the same priority is a new point, its answers read again. Their Mana
+     * Flare and two Islands, Cancel (1UU) in hand: not castable before a tap, castable after one (Mana Flare doubles
+     * it). Our Bolt at their 3: not proven. With no Mana Flare, Cancel is never castable: proven.
+     */
+    @Test
+    public void aCounterCastableOnlyAfterAManaTapIsSearched() {
+        final Object[] flare = run(frame("Cancel", "Mana Flare;Island;Island", 3, "Lightning Bolt", "Mountain"), manaSearch());
+        final Object[] none = run(frame("Cancel", "Island;Island", 3, "Lightning Bolt", "Mountain"), manaSearch());
+        Assert.assertTrue((Boolean) none[0], "control: Cancel is never castable: " + none[1]);
+        Assert.assertFalse((Boolean) flare[0], "the tap, then Cancel: " + flare[1] + " " + flare[2]);
+    }
+
     /** covfix-a-1102: oppMinRev 2 is a recorded change (its own sha); rev 1 (absent or explicit) is the old spec. */
     @Test
     public void oppMinRevTwoIsARecordedChange() {
