@@ -237,7 +237,12 @@ public final class ForcedWinSolver {
          * ({@link forge.ai.AiWork#CAP}): it takes and proposes no line. Below the cap nothing changes.
          */
         public long aiWork = 0;
-        public static final long DEFAULT_AI_WORK = 2_000_000L;
+        /**
+         * rollout-budget-1101 calibration: E1's off-identity set (1,892 counted decisions) spends at most 1,364,069 units
+         * (62 s), p99 81,528, median 78; the B8 hung decision spends ~75k units per CPU second without end. 8M is ~6x
+         * the set's maximum and caps a hung decision in ~2 min of CPU.
+         */
+        public static final long DEFAULT_AI_WORK = 8_000_000L;
 
         /** rollout-budget-1101: the decision's Forge AI work cap in effect (0 = none). */
         public long aiWorkCap() {
