@@ -447,6 +447,21 @@ public class LabellerV2MinTest extends AITest {
                 "open control: no mana for it, proven");
     }
 
+    /**
+     * Ruling 2026-11-01 (self-damage mana riders): Ancient Tomb's rider only damages its controller, so with nothing of
+     * theirs reading their life it is not an answer and our Bolt line is proven; with their Death's Shadow out (its size
+     * reads their life) it stays a gap and the line is not proven.
+     */
+    @Test
+    public void selfDamageManaRidersAreNotAnswersUnlessLifeMatters() {
+        Assert.assertTrue(proven(frame("", "Ancient Tomb", 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                "Ancient Tomb alone: proven");
+        Assert.assertFalse(proven(frame("", "Ancient Tomb;Death's Shadow", 3, "Lightning Bolt", "Mountain"),
+                passive(cfg(true, 64))), "with Death's Shadow: a gap, not proven");
+        Assert.assertFalse(proven(frame("", "Pristine Talisman", 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                "a life-gain rider is still an answer");
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {
