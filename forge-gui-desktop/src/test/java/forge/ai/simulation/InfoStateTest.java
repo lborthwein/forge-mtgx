@@ -268,7 +268,12 @@ public class InfoStateTest extends forge.ai.AITest {
         KnownLibTest.playAndResolve(g2, me(g2), ChooseACardTest.find(me(g2), ZoneType.Hand, "Shardless Agent").getFirstSpellAbility(), null);
         Assert.assertTrue(known(s2, me(g2), me(g2)).isEmpty(), known(s2, me(g2), me(g2)).toString());
         Assert.assertTrue(known(s2, opp(g2), me(g2)).isEmpty());
-        Assert.assertTrue(s2.runs(me(g2), me(g2)).isEmpty(), "exile is never a seen origin: no set-known run");
+        // cascade reveals the exiled cards to everyone: their SET is known to both, the order to nobody
+        for (Player o : new Player[] {me(g2), opp(g2)}) {
+            final List<Set<Integer>> runs = s2.runs(o, me(g2));
+            Assert.assertEquals(runs.size(), 1, "observer " + o + ": " + s2.describe());
+            Assert.assertEquals(runs.get(0).size(), 3, s2.describe());
+        }
     }
 
     /**
@@ -553,6 +558,8 @@ public class InfoStateTest extends forge.ai.AITest {
             final InfoStates s = track(g);
             g.getAction().checkStaticAbilities();
             final String last = top(me(g), 1).get(0);
+            // a read (in play: the next priority) while Courser shows it
+            Assert.assertEquals(known(s, opp(g), me(g)), List.of(last));
             g.getAction().moveToGraveyard(ChooseACardTest.find(me(g), ZoneType.Battlefield, "Courser of Kruphix"), null);
             g.getAction().checkStaticAbilities();
             Assert.assertEquals(known(s, opp(g), me(g)), List.of(last));

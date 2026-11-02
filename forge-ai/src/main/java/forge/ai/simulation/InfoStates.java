@@ -694,7 +694,16 @@ public final class InfoStates implements LibraryInfoListener {
         if (to != null) {
             final List<Integer> cur = now.get(to);
             final int j = cur.indexOf(id), n1 = cur.size();
-            final SpellAbility res = KnownOwnLibrary.resolvingSa(game);
+            SpellAbility res0 = KnownOwnLibrary.resolvingSa(game);
+            if (res0 == null && game.getStack().isResolving()) {
+                // a spell that puts itself into a library (Approach of the Second Sun) has left the stack already: its
+                // own spell is the resolution (the moved card is the resolving card)
+                final Card mc = game.findById(id);
+                if (mc != null && game.getStack().isResolving(mc) && mc.getFirstSpellAbility() != null) {
+                    res0 = mc.getFirstSpellAbility();
+                }
+            }
+            final SpellAbility res = res0;
             if (libRes.get(to) != res || !libRes.containsKey(to)) {
                 libRes.put(to, res);
                 libResCount.put(to, 0);
