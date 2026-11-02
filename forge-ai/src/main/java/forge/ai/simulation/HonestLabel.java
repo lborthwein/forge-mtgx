@@ -92,10 +92,18 @@ public final class HonestLabel {
          * line read the opponent's hidden library is likewise sampled, never "loss". Which line is played is unchanged.
          */
         public boolean libLabels = false;
+        /**
+         * known-lib-1102 (GOAL N5b / N10; false = off, the default, and then nothing changes, the spec's sha included):
+         * the replay labeller tracks, per seat, which own-library cards the seat knows the position of
+         * ({@link KnownOwnLibrary}: a Doomsday pile, a put-back, a Ponder keep, a searched card put on top; a shuffle
+         * forgets) and passes them to {@link Seat#label(Game, Player, long, Set)}: every belief world keeps them in place,
+         * and the win solver knows its top and bottom (it plans lines that draw and cast them; drawing them is no q^8 read).
+         */
+        public boolean knownLib = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels"));
+                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "knownLib"));
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
@@ -127,6 +135,7 @@ public final class HonestLabel {
             if (o.has("sequentialAi") && !o.get("sequentialAi").isJsonNull()) s.sequentialAi = o.get("sequentialAi").getAsBoolean();
             if (o.has("aiTimeoutSec") && !o.get("aiTimeoutSec").isJsonNull()) s.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
             if (o.has("libLabels")) s.libLabels = o.get("libLabels").getAsBoolean();
+            if (o.has("knownLib")) s.knownLib = o.get("knownLib").getAsBoolean();
             s.checkHonest();
             return s;
         }
@@ -283,6 +292,9 @@ public final class HonestLabel {
             if (libLabels) {
                 o.addProperty("libLabels", true); // e1-q8-1101: only when on, so every other spec's sha is unchanged
             }
+            if (knownLib) {
+                o.addProperty("knownLib", true); // known-lib-1102: only when on, so every other spec's sha is unchanged
+            }
             return o;
         }
 
@@ -393,6 +405,11 @@ public final class HonestLabel {
          */
         public String libTag, libWhy;
         public int libW, libTakes, libSeqs;
+        /**
+         * known-lib-1102 (knownLib only, and only when the seat knows some; -1 otherwise): the root's known own-library
+         * cards passed to the label, as the known top count and the known bottom count.
+         */
+        public int knownTop = -1, knownBottom = -1;
 
         public JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -434,6 +451,10 @@ public final class HonestLabel {
             if (copyGap != null) {
                 o.addProperty("copy_gap", copyGap);
                 o.addProperty("gap_refused", gapRefused);
+            }
+            if (knownTop >= 0) {
+                o.addProperty("known_top", knownTop);
+                o.addProperty("known_bottom", knownBottom);
             }
             if (libTag != null) {
                 o.addProperty("lib_tag", libTag);
@@ -510,6 +531,11 @@ public final class HonestLabel {
             final Set<Integer> known = knownOwn == null || knownOwn.isEmpty() ? null : knownOwn;
             final long t0 = System.nanoTime();
             final Result r = new Result();
+            if (known != null && spec.knownLib) {
+                final int[] tb = topBottom(liveMe, known);
+                r.knownTop = tb[0];
+                r.knownBottom = tb[1];
+            }
             try {
                 label0(live, liveMe, key, r, known);
             } catch (RuntimeException | StackOverflowError e) {
@@ -575,6 +601,20 @@ public final class HonestLabel {
             }
         }
 
+        /** known-lib-1102: the counts of {@code known} that are a prefix (top) and a suffix (bottom) of our library. */
+        static int[] topBottom(final Player me, final Set<Integer> known) {
+            final List<forge.game.card.Card> lib = new ArrayList<>(me.getCardsIn(forge.game.zone.ZoneType.Library));
+            int t = 0;
+            while (t < lib.size() && known.contains(lib.get(t).getId())) {
+                t++;
+            }
+            int b = 0;
+            while (b < lib.size() - t && known.contains(lib.get(lib.size() - 1 - b).getId())) {
+                b++;
+            }
+            return new int[] {t, b};
+        }
+
         /** An honest world: a copy of the live game, their hidden cards from our belief, our library shuffled. */
         private Object[] world(final Game live, final Player liveMe, final Player liveOpp, final Random rng) {
             return world(live, liveMe, liveOpp, rng, null);
@@ -616,6 +656,12 @@ public final class HonestLabel {
                     }
                 }
                 s.notePlaced(placed);
+                if (spec.knownLib) {
+                    // known-lib-1102: the known bottom stays in place in the solver's worlds too
+                    final List<forge.game.card.Card> lib = new ArrayList<>(me.getCardsIn(forge.game.zone.ZoneType.Library));
+                    final int b = topBottom(me, knownOwn)[1];
+                    s.noteBottom(lib.subList(lib.size() - b, lib.size()));
+                }
             }
             // every world the solver copies from the root (verification worlds, the engine's root) re-draws their hidden
             // cards again from OUR pool, with visibility from the live game

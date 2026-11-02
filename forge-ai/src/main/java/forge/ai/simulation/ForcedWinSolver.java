@@ -913,6 +913,38 @@ public final class ForcedWinSolver {
         }
     }
 
+    /**
+     * known-lib-1102 (empty unless {@link #noteBottom} is called: HonestLabel's knownLib only): ids of our library cards
+     * whose position relative to the BOTTOM the seat knows at the root. Their longest suffix stays in place in every
+     * world this solver shuffles ({@link #bottomCount}).
+     */
+    final Set<Integer> placedBottom = new HashSet<>();
+
+    /** known-lib-1102: our seat knows these cards are at the bottom of our library (in this order). */
+    public void noteBottom(Iterable<Card> cards) {
+        if (cards == null) {
+            return;
+        }
+        for (Card c : cards) {
+            if (c != null && c.getOwner() == me) {
+                placedBottom.add(c.getId());
+            }
+        }
+    }
+
+    /** known-lib-1102: the known bottom of {@code p}'s library (a copy keeps the ids): the longest suffix noted; 0 none. */
+    int bottomCount(Player p) {
+        if (placedBottom.isEmpty()) {
+            return 0;
+        }
+        final List<Card> lib = new ArrayList<>(p.getCardsIn(ZoneType.Library));
+        int n = 0;
+        while (n < lib.size() && placedBottom.contains(lib.get(lib.size() - 1 - n).getId())) {
+            n++;
+        }
+        return n;
+    }
+
     /** The known top of our library: the longest prefix whose cards the seat placed; null when none. */
     List<Integer> knownTop(Game live) {
         watch(live);
@@ -988,12 +1020,20 @@ public final class ForcedWinSolver {
         String why;
 
         HiddenWatch(Player me, int knownTop, Set<Integer> cover) {
+            this(me, knownTop, 0, cover);
+        }
+
+        /** known-lib-1102: as above, the root's known bottom ({@code knownBottom} cards; 0 = none) known too. */
+        HiddenWatch(Player me, int knownTop, int knownBottom, Set<Integer> cover) {
             this.me = me;
             this.meId = me.getId();
             this.cover = cover;
             this.snap = ids();
             for (int i = 0; i < Math.min(Math.max(knownTop, 0), snap.size()); i++) {
                 known.add(snap.get(i));
+            }
+            for (int i = 0; i < Math.min(Math.max(knownBottom, 0), snap.size()); i++) {
+                known.add(snap.get(snap.size() - 1 - i));
             }
         }
 
@@ -1346,6 +1386,9 @@ public final class ForcedWinSolver {
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         for (int i = 0; i < Math.min(p.knownTop, lib.size()); i++) {
             knownIds.add(lib.get(i).getId());
+        }
+        for (int i = 0, b = bottomCount(me); i < b; i++) {
+            knownIds.add(lib.get(lib.size() - 1 - i).getId()); // known-lib-1102: the known bottom is not drawn over
         }
         final DrawExpectation.Draws d = DrawExpectation.draws(me, knownIds, p.hiddenTakes, seqCap, 0, mix(cfg.seed, key));
         if (!d.exact || d.depth < p.hiddenTakes || d.seqs.isEmpty()) {
@@ -2512,6 +2555,7 @@ public final class ForcedWinSolver {
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
             el.ownKnownTop = kt == null ? 0 : kt.size();
+            el.ownKnownBottom = bottomCount(me); // known-lib-1102 (0 unless noted)
         }
         el.wall = decisionWall;
         // bvw-step1-build-1024: budget=counter: the engine's move steps per search are capped (0 = none), no deadline,
@@ -2753,7 +2797,7 @@ public final class ForcedWinSolver {
                 for (Player o : cm.getOpponents()) {
                     hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
                 }
-                shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, rng);
+                shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, bottomCount(cm), rng);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             if (line != null) {
@@ -2829,7 +2873,7 @@ public final class ForcedWinSolver {
             final Random rng = new Random(mix(cfg.seed, 0x425657L + decisionIndex));
             copies++;
             redraw.apply(live, me, g, cm, rng);
-            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), rng);
+            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), bottomCount(cm), rng);
             return g;
         }
     }
@@ -3162,14 +3206,14 @@ public final class ForcedWinSolver {
                     if (libArrange != null) {
                         libArrange.apply(cm, rng); // e1-q8-1101: an exact-draw sequence at the first hidden slots
                     } else {
-                        shuffleUnknownOwnLibrary(cm, line, rng);
+                        shuffleUnknownOwnLibrary(cm, line.knownTop, bottomCount(cm), rng);
                     }
                 } else if (libArrange != null) {
                     libArrange.apply(cm, rng);
                 }
             }
             if (cfg.libWatch) {
-                hw = new HiddenWatch(cm, line.knownTop, libArrange == null ? null : libArrange.cover);
+                hw = new HiddenWatch(cm, line.knownTop, bottomCount(cm), libArrange == null ? null : libArrange.cover);
                 g.subscribeToEvents(hw);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
@@ -3334,15 +3378,22 @@ public final class ForcedWinSolver {
     }
 
     static void shuffleUnknownOwnLibrary(Player me, int knownTop, Random rng) {
+        shuffleUnknownOwnLibrary(me, knownTop, 0, rng);
+    }
+
+    /** known-lib-1102: as above, the known bottom ({@code knownBottom} cards, 0 = none: exactly the above) kept too. */
+    static void shuffleUnknownOwnLibrary(Player me, int knownTop, int knownBottom, Random rng) {
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         final int k = Math.min(knownTop, lib.size());
         if (k >= lib.size()) {
             return;
         }
-        final List<Card> rest = new ArrayList<>(lib.subList(k, lib.size()));
+        final int end = lib.size() - Math.max(0, Math.min(knownBottom, lib.size() - k));
+        final List<Card> rest = new ArrayList<>(lib.subList(k, end));
         Collections.shuffle(rest, rng);
         final List<Card> out = new ArrayList<>(lib.subList(0, k));
         out.addAll(rest);
+        out.addAll(lib.subList(end, lib.size()));
         me.getZone(ZoneType.Library).setCards(out);
     }
 
