@@ -258,4 +258,49 @@ public class OwnLibraryDelegateTest extends forge.ai.AITest {
             Assert.assertTrue(kl.known(me(g)).isEmpty(), "an unexplained reorder still forgets");
         }
     }
+    // ------------------------------------------------------------------ ruling 2026-11-02 (FLAG-R3-3)
+
+    /** A set that fails on any read: a world that reads it throws. */
+    static final class Poisoned extends java.util.AbstractSet<Integer> {
+        @Override
+        public java.util.Iterator<Integer> iterator() {
+            throw new IllegalStateException("read the opponent's memory");
+        }
+
+        @Override
+        public int size() {
+            throw new IllegalStateException("read the opponent's memory");
+        }
+
+        @Override
+        public boolean contains(final Object o) {
+            throw new IllegalStateException("read the opponent's memory");
+        }
+    }
+
+    /**
+     * The belief (selection) worlds never read the opponent's own known positions; only the T (truth) target worlds do
+     * (FLAG-R3-3: their known positions are real facts of the target's truth). A later change that moved the opponent's
+     * memory into selection fails here.
+     */
+    @Test
+    public void beliefWorldsNeverReadTheOpponentsMemory() {
+        final Game g = KnownLibTest.game("", "Island", "Island;Swamp;Island;Swamp;Island;Swamp", 20);
+        final R3LabelSearch r3 = new R3LabelSearch(R3LabelSearchTest.spec(R3LabelSearchTest.base()),
+                R3LabelSearchTest.env(StaticValuer.INSTANCE, null));
+        for (boolean truth : new boolean[] {false, true}) {
+            final GameCopier copier = new GameCopier(g, true);
+            final Game copy = copier.makeCopy();
+            final Player cm = (Player) copier.find(me(g));
+            final R3LabelSearch.World w = r3.new World(truth, 7L, -1, 0, null, null, new java.util.HashSet<>(), new Poisoned());
+            boolean read = false;
+            try {
+                w.make(g, me(g), copy, cm);
+            } catch (IllegalStateException e) {
+                read = String.valueOf(e.getMessage()).contains("opponent's memory");
+            }
+            Assert.assertEquals(read, truth, truth ? "the T world pins the opponent's own positions (the test reaches it)"
+                    : "a belief world read the opponent's memory");
+        }
+    }
 }

@@ -626,6 +626,8 @@ public final class R3LabelSearch {
         public void make(final Game live, final Player liveMe, final Game g, final Player me) {
             if (truth) {
                 // FLAG-R3-3: the real position, hands kept; every library shuffled below its known positions
+                // (ruling 2026-11-02: knownOpp is the OPPONENT's own known positions, real facts that decide their draws,
+                // so T pins them; our decisions come from the belief worlds below, which never read it)
                 for (Player o : me.getOpponents()) {
                     OwnLibraryMemory.shuffleUnknown(o, knownOpp, new Random(LookaheadSearch.mix(seed, 0x4F50L)));
                 }
