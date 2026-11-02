@@ -15,11 +15,12 @@ import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.Test;
 
+import forge.ai.AITest;
 import forge.game.GameRules;
 import forge.game.GameType;
 
-/** decisionpoint-1102 PR-A: the interface's pure parts (no game needed). */
-public class DecisionPointsTest {
+/** decisionpoint-1102 PR-A: the interface's pure parts (Forge booted by AITest: GameRules needs the static data). */
+public class DecisionPointsTest extends AITest {
     @AfterMethod
     public void reset() {
         DecisionPoints.setObserver(null);
