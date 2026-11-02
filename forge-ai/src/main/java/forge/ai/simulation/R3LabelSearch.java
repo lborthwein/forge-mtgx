@@ -843,7 +843,12 @@ public final class R3LabelSearch {
                 final List<forge.game.spellability.AbilitySub> possible, final int min, final int num,
                 final boolean allowRepeat) {
             final List<forge.game.spellability.AbilitySub> f = OppMin.forcedModes(sa, possible);
-            return f != null ? f : super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            if (f != null) { // decisionpoint-1102 census: OppMin's scripted modes answered (no-op without an observer)
+                forge.ai.dp.DecisionPoints.note(getPlayer(), forge.ai.dp.Kind.SELECT, "chooseModeForAbility",
+                        possible == null ? -1 : possible.size(), "oppmin");
+                return f;
+            }
+            return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
         }
     }
 
@@ -865,7 +870,12 @@ public final class R3LabelSearch {
                 final List<forge.game.spellability.AbilitySub> possible, final int min, final int num,
                 final boolean allowRepeat) {
             final List<forge.game.spellability.AbilitySub> f = OppMin.forcedModes(sa, possible);
-            return f != null ? f : super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
+            if (f != null) { // decisionpoint-1102 census: OppMin's scripted modes answered (no-op without an observer)
+                forge.ai.dp.DecisionPoints.note(getPlayer(), forge.ai.dp.Kind.SELECT, "chooseModeForAbility",
+                        possible == null ? -1 : possible.size(), "oppmin");
+                return f;
+            }
+            return super.chooseModeForAbility(sa, possible, min, num, allowRepeat);
         }
     }
 

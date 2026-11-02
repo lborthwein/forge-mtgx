@@ -117,6 +117,18 @@ public class AiCostDecision extends CostDecisionMakerBase {
      */
     @Override
     public PaymentDecision review(final CostPart part, final PaymentDecision decision) {
+        final PaymentDecision out = reviewCac(part, decision);
+        // decisionpoint-1102 (PR-B, observation only): one cost part's decision (PR-C makes it a point)
+        if (decision != null && forge.ai.dp.DecisionPoints.observer() != null
+                && !(part instanceof forge.game.cost.CostPartMana) && !(part instanceof forge.game.cost.CostTap)
+                && !(part instanceof forge.game.cost.CostUntap)) {
+            forge.ai.dp.DecisionPoints.note(player, forge.ai.dp.Kind.SELECT, "seam:cost:" + part.getClass().getSimpleName(),
+                    -1, out == decision ? "forge" : "cac");
+        }
+        return out;
+    }
+
+    private PaymentDecision reviewCac(final CostPart part, final PaymentDecision decision) {
         final PlayerControllerAi pc = PlayerControllerAi.cacOf(player); // the wrapped controller on a taped seat
         if (pc == null || pc.getCacHook() == null || decision == null
                 || decision.cards == null || decision.cards.isEmpty() || !(part instanceof CostPartWithList pl)) {

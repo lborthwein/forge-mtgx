@@ -113,6 +113,8 @@ public final class RlActorBench {
     // ------------------------------------------------------------------------------------------------ config
 
     static final class Cfg {
+        /** decisionpoint-1102: write the dynamic decision census (forge.ai.dp.CensusObserver) here; null = off. */
+        String dpCensus;
         String mode = "train";
         String server = null;
         String actorId = "a00";
@@ -258,6 +260,8 @@ public final class RlActorBench {
 
     static Cfg parse(final JsonObject o) {
         final Cfg c = new Cfg();
+        // decisionpoint-1102 (PR-B): the dynamic decision census's output file (absent = off, the default)
+        if (o.has("dpCensus") && !o.get("dpCensus").isJsonNull()) c.dpCensus = o.get("dpCensus").getAsString();
         if (o.has("mode")) c.mode = o.get("mode").getAsString();
         if (o.has("server") && !o.get("server").isJsonNull()) c.server = o.get("server").getAsString();
         if (o.has("actorId")) c.actorId = o.get("actorId").getAsString();
@@ -1412,8 +1416,25 @@ public final class RlActorBench {
         System.exit(run(cfg));
     }
 
-    /** The whole actor run; returns the exit code. Boots Forge once per JVM. */
+    /**
+     * The whole actor run; returns the exit code. decisionpoint-1102: with {@code dpCensus} set, every decision point
+     * of the run (both seats, live games and copies) is counted and the census written at the end.
+     */
     public static int run(final Cfg cfg) throws Exception {
+        if (cfg.dpCensus == null) {
+            return run0(cfg);
+        }
+        final forge.ai.dp.CensusObserver census = new forge.ai.dp.CensusObserver(Paths.get(cfg.dpCensus));
+        forge.ai.dp.DecisionPoints.setObserver(census);
+        try {
+            return run0(cfg);
+        } finally {
+            census.write();
+        }
+    }
+
+    /** The whole actor run; returns the exit code. Boots Forge once per JVM. */
+    private static int run0(final Cfg cfg) throws Exception {
         ensureBooted(cfg.globalSeed);
         final CardIndex index = CardIndex.load(Paths.get(cfg.cardIndex));
         final String jarSha = jarSha(cfg);

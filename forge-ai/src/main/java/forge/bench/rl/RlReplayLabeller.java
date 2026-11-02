@@ -347,6 +347,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         // review-align #3: the position's public-state hash (step rows only; read before anything else reads the game)
         final String stateSha = search == null && r3 == null ? null : TrajectoryRef.stateSha(g);
         final long key = RlSearch.splitmix(uid ^ (0x6276774c4142454cL + 2L * ord + seat));
+        forge.ai.dp.DecisionPoints.enterRow(uidStr + ":" + seat + ":" + ord); // decisionpoint-1102 census (no-op when off)
         final Object[] got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
             // the seat's own observation (its knowledge only), before anything else reads the game
             final long f0 = System.nanoTime();
@@ -402,6 +403,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                 oprDone[seat] = true;
             }
         }
+        forge.ai.dp.DecisionPoints.exitRow();
         final byte[] payload = (byte[]) got[0];
         final HonestLabel.Result r = (HonestLabel.Result) got[1];
         frameMs += (Double) got[2];
@@ -948,6 +950,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         if (LABEL_ONLY != null && !LABEL_ONLY.contains(ckey) && !LABEL_ONLY.contains(uidStr + ":" + seat + ":c*")) {
             return;
         }
+        forge.ai.dp.DecisionPoints.enterRow(ckey); // decisionpoint-1102 census (no-op when off)
         final long t0 = System.nanoTime();
         try {
             PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
@@ -975,6 +978,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             }));
         } finally {
             r3Ms += (System.nanoTime() - t0) / 1e6;
+            forge.ai.dp.DecisionPoints.exitRow();
         }
     }
 
