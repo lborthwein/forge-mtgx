@@ -189,6 +189,10 @@ final class InteractiveGameEvents {
      * put into a library or exile from a hidden zone, and any other move out of a hidden zone into one the viewer
      * cannot see carry no identity at all, not even an id.</p>
      *
+     * <p>Lane order-memory-1102: a public card moving into a library during a resolution with a random-order step
+     * ({@link #randomOrderResolution}: Endurance) carries no name either. Forge moves such a batch one card at a time
+     * after shuffling it, so per-move names would give both seats the library's hidden random order.</p>
+     *
      * <p>No {@code playerSeat}: who moved it is not claimed, and the game log therefore leaves the event out.</p>
      */
     private static void zoneChanged(final JsonObject result, final Game game, final GameEventCardChangeZone e,
@@ -213,7 +217,8 @@ final class InteractiveGameEvents {
             card = moved;
         }
         final boolean publicOrigin = from != null && PUBLIC_ORIGINS.contains(from) && e.card() != null
-                && !e.card().isFaceDown() && moved != null && !moved.isFaceDown();
+                && !e.card().isFaceDown() && moved != null && !moved.isFaceDown()
+                && !(to == ZoneType.Library && randomOrderResolution(game));
         if (card == null && !publicOrigin) {
             return;
         }
@@ -271,7 +276,8 @@ final class InteractiveGameEvents {
         final Card moved = cardOf(game, e.card());
         final Card shown = e.actual() == null ? null : publicIn(game, e.card(), e.actual(), viewer);
         final boolean publicOrigin = e.from() != null && PUBLIC_ORIGINS.contains(e.from()) && e.card() != null
-                && !e.card().isFaceDown() && moved != null && !moved.isFaceDown();
+                && !e.card().isFaceDown() && moved != null && !moved.isFaceDown()
+                && !(e.actual() == ZoneType.Library && randomOrderResolution(game));
         if (shown != null || publicOrigin) {
             final String name = nameOf(shown != null ? shown.getView() : e.card());
             if (name != null) {
@@ -497,6 +503,91 @@ final class InteractiveGameEvents {
             return null;
         }
         return card;
+    }
+
+    /** Parameters that put cards into a library in a random order (no player chooses it). */
+    private static final String[] RANDOM_PARAMS = {"RandomOrder", "RestRandomOrder", "RevealRandomOrder", "ShuffleChangedPile"};
+    /** Keys whose value names the SVar a choice or a repeat runs (an unresolvable name there fails closed). */
+    private static final java.util.Set<String> RUN_KEYS = java.util.Set.of("Choices", "RepeatSubAbility", "Execute", "SubAbility");
+
+    /**
+     * Lane order-memory-1102 (live info leak): is a spell or ability resolving whose chain can put cards into a library
+     * in a random order (Endurance, ChangeZoneAll RandomOrder, a dig's random rest, discover)? Forge shuffles such a
+     * batch and then moves it one card at a time, so the names of public cards moving into the library, sent per move,
+     * would tell both seats the hidden random order. Those moves then carry no name (the set was public in its zone
+     * before the move). Fails closed: a resolution whose ability cannot be found, or whose chain cannot be read, counts
+     * as random. The same scan as research KnownOwnLibrary.staticallyOrdered (forge-mtgx #163).
+     */
+    static boolean randomOrderResolution(final Game game) {
+        if (game == null || !game.getStack().isResolving()) {
+            return false;
+        }
+        SpellAbility root = null;
+        for (forge.game.spellability.SpellAbilityStackInstance si : game.getStack()) {
+            final Card src = si.getSourceCard();
+            if (src != null && game.getStack().isResolving(src)) {
+                root = si.getSpellAbility();
+                break;
+            }
+        }
+        if (root == null) {
+            return true;
+        }
+        final SpellAbility base = root instanceof forge.game.trigger.WrappedAbility w ? w.getWrappedAbility() : root;
+        final java.util.ArrayDeque<Map<String, String>> todo = new java.util.ArrayDeque<>();
+        for (SpellAbility sa = base; sa != null; sa = sa.getSubAbility()) {
+            if (sa.getApi() == forge.game.ability.ApiType.Discover) {
+                return true;
+            }
+            todo.add(new HashMap<>(sa.getMapParams()));
+        }
+        final java.util.Set<String> seen = new java.util.HashSet<>();
+        int guard = 0;
+        while (!todo.isEmpty()) {
+            if (++guard > 256) {
+                return true;
+            }
+            final Map<String, String> m = todo.pop();
+            for (String k : RANDOM_PARAMS) {
+                if (m.containsKey(k)) {
+                    return true;
+                }
+            }
+            for (String k : new String[] {"DB", "AB", "SP"}) {
+                if ("Discover".equals(m.get(k))) {
+                    return true;
+                }
+            }
+            for (Map.Entry<String, String> en : m.entrySet()) {
+                if (en.getValue() == null) {
+                    continue;
+                }
+                for (String tok : en.getValue().split("[,\\s]+")) {
+                    if (tok.isEmpty() || !seen.add(tok)) {
+                        continue;
+                    }
+                    final String txt = base.getSVar(tok);
+                    if (txt == null || txt.isEmpty()) {
+                        if (RUN_KEYS.contains(en.getKey())) {
+                            return true;
+                        }
+                        continue;
+                    }
+                    final String t = txt.trim();
+                    if (t.startsWith("DB$") || t.startsWith("AB$") || t.startsWith("SP$")) {
+                        final Map<String, String> sub = new HashMap<>();
+                        for (String part : t.split("\\|")) {
+                            final int i = part.indexOf('$');
+                            if (i > 0) {
+                                sub.put(part.substring(0, i).trim(), part.substring(i + 1).trim());
+                            }
+                        }
+                        todo.add(sub);
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /** {@code fid}, {@code ownerSeat}, {@code isToken}, {@code isCopy} of a card {@link #publicIn} returned. */
