@@ -433,6 +433,20 @@ public class LabellerV2MinTest extends AITest {
         }
     }
 
+    /**
+     * Review #148 re-check 9: an optional-target answer (TargetMin 0) is castable with no target and its untargeted rider
+     * still resolves. Turn the Earth with both graveyards empty gains them 2 against our Hill Giant attack at 3: not
+     * proven. Without the Forests to cast it: proven.
+     */
+    @Test
+    public void optionalTargetAnswersWithNoCandidateAreAnswers() {
+        // at our attack point (no stack object to target): our Hill Giant for their last 3
+        Assert.assertFalse(proven(frame("Turn the Earth", "Forest;Forest", 3, "", "Hill Giant;Mountain"), engineMin(true, 2)),
+                "Turn the Earth with no target gains them 2");
+        Assert.assertTrue(proven(frame("Turn the Earth", "", 3, "", "Hill Giant;Mountain"), engineMin(true, 2)),
+                "open control: no mana for it, proven");
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {

@@ -33,7 +33,8 @@ import forge.game.zone.ZoneType;
  * <li><b>Response set</b> ({@link #answers}): every answer the opponent can cast or activate now and pay for is a
  * response (review #148 rulings: there is no incidental set): from their hand, battlefield, graveyard, exile and command
  * zone, and from any card they may play or activate elsewhere (our battlefield and stack objects with "any player may
- * activate", our hand, graveyard and exile, either library top, our command zone). The only non-answers are pure mana
+ * activate", our hand, graveyard and exile, either library top, our command zone; casting from our hand is blocked by the
+ * engine's owner check in this build). The only non-answers are pure mana
  * abilities (only mana and tapping themselves, no rider). Equivalent responses collapse only by the same source card (by
  * id), effect, cost and target, where a permanent target is keyed by its card id (re-check 7 ruling: no state collapse)
  * and a stack target by its stack entry.</li>
@@ -535,8 +536,9 @@ public final class OppMin {
         // review #148 re-check 7 (S1-2): "any player may activate" abilities on our permanents (Ribbon Snake) and on our
         // stack objects' host cards (Lightning Storm)
         sources.addAll(victim.getCardsIn(ZoneType.Battlefield));
-        // review #148 re-check 8 (S2): our hand and graveyard (their effects that cast our cards: Sen Triplets, Great
-        // Work), behind the same castable gate
+        // review #148 re-check 8 (S2): our hand and graveyard, behind the same castable gate (their effects that cast or
+        // activate our cards from there; in this build the engine's owner check in checkZoneRestrictions blocks casting
+        // from our hand, so Sen Triplets is not a real source here, but a cross-zone effect that works will be read)
         sources.addAll(victim.getCardsIn(ZoneType.Hand));
         sources.addAll(victim.getCardsIn(ZoneType.Graveyard));
         for (SpellAbilityStackInstance si : g.getStack()) {
@@ -593,6 +595,12 @@ public final class OppMin {
                     if (castable(sa0, opp, gaps)) gaps.add(sa0.getMinTargets() > 1 ? "multi-target" : "own-stack-target");
                     if (sa0.getMinTargets() > 1) continue;
                 }
+                if (sa0.usesTargeting() && sa0.getMinTargets() == 0) {
+                    // review #148 re-check 9: an optional target (TargetMin 0) may be cast with none, its untargeted
+                    // rider still resolving (Turn the Earth's life gain): the zero-target answer is enumerated too
+                    targets.add(null);
+                    keys.add("none");
+                }
                 if (targets.isEmpty() && sa0.usesTargeting()) {
                     // a targeted answer with no enumerated target: a gap when it has a legal one and is castable
                     boolean legal;
@@ -616,6 +624,7 @@ public final class OppMin {
                     }
                     final SpellAbility cs = sa0.copy(opp);
                     cs.setActivatingPlayer(opp);
+                    if (t == null && sa0.usesTargeting()) cs.resetTargets(); // the zero-target answer
                     if (t != null) {
                         cs.resetTargets();
                         if (t instanceof SpellAbility ts) cs.getTargets().add(ts);
