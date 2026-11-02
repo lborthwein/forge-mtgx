@@ -180,6 +180,7 @@ public final class InteractiveMain {
             rules.setAISideboardingEnabled(false);
             rules.setSideboardForAI(false);
             rules.setAllowCheatShuffle(false);
+            forge.ai.dp.DecisionPoints.assertNoCheatShuffle(rules, "InteractiveMain"); // decisionpoint-1102: research/live games never allow AI cheat shuffles
             // Desktop deck-advice modal, not a rules failure or human choice.
             // Its opponent-card list is inappropriate for a hidden-information game.
             rules.setWarnAboutAICards(false);
@@ -362,6 +363,7 @@ public final class InteractiveMain {
             rules.setAISideboardingEnabled(false);
             rules.setSideboardForAI(false);
             rules.setAllowCheatShuffle(false);
+            forge.ai.dp.DecisionPoints.assertNoCheatShuffle(rules, "InteractiveMain"); // decisionpoint-1102: research/live games never allow AI cheat shuffles
             rules.setWarnAboutAICards(false);
             if (config.startingChooser() >= 0) {
                 rules.setStartingChooser(registered.get(config.startingChooser()), config.gameNumber() == 1);

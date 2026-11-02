@@ -881,6 +881,7 @@ public final class RlActorBench {
         final GameRules rules = new GameRules(GameType.Constructed);
         rules.setAppliedVariants(EnumSet.of(GameType.Constructed));
         rules.setSimTimeout(cfg.gameTimeoutSec);
+        forge.ai.dp.DecisionPoints.assertNoCheatShuffle(rules, "RlActorBench"); // decisionpoint-1102: research/live games never allow AI cheat shuffles
         final Match match = new Match(rules, seats, "rl-sim");
 
         // bvw-decision-log-1027: a logged game's random stream is TrackedRandom (new Random(seed)'s stream, its state

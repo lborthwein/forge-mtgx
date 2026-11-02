@@ -221,6 +221,7 @@ final class InteractiveWatch {
         rules.setAISideboardingEnabled(false);
         rules.setSideboardForAI(false);
         rules.setAllowCheatShuffle(false);
+        forge.ai.dp.DecisionPoints.assertNoCheatShuffle(rules, "InteractiveWatch"); // decisionpoint-1102: research/live games never allow AI cheat shuffles
         rules.setWarnAboutAICards(false);
         if (config.startingChooser() >= 0) {
             rules.setStartingChooser(registered.get(config.startingChooser()), config.gameNumber() == 1);
