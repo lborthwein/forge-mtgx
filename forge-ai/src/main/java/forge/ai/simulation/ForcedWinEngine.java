@@ -59,6 +59,11 @@ final class ForcedWinEngine {
         long steps;
         int deadlineStops, capStops;
         /**
+         * coverage-fix-1102 (diagnostics only, never read to decide): one entry per cap stop: which counter stopped the
+         * search and its value and limit there ({@code {reason, value, limit}}; reason nodes, steps, cards or aiWork).
+         */
+        final java.util.List<Object[]> capEvents = new java.util.ArrayList<>();
+        /**
          * bvw-step1-build-1024 (review #10): searches whose pass stopped at the node cap with nodes spent by EARLIER
          * searches (the cap compares the solver's lifetime node count; known generator limit), counted apart from
          * {@link #capStops} (this search's own node, step or card cap).
@@ -912,6 +917,18 @@ final class ForcedWinEngine {
     /** bvw-step1-build-1024: the move steps when this search began, and which budget stopped it (diagnostics). */
     private long stepBase, cardBase, pathCards;
     private boolean stoppedByTime, stoppedByCap, stoppedByLifetime;
+    /** coverage-fix-1102 (diagnostics only): the counter that stopped the search, its value and limit. */
+    private String capWhy;
+    private long capValue, capLimit;
+
+    private void capAt(final String why, final long value, final long limit) {
+        stoppedByCap = true;
+        if (capWhy == null) {
+            capWhy = why;
+            capValue = value;
+            capLimit = limit;
+        }
+    }
     /** bvw-step1-build-1024 (review #10): the current pass's node budget and the node count when it began. */
     private int passCap;
     private long passStart;
@@ -1057,6 +1074,8 @@ final class ForcedWinEngine {
                 // bvw-step1-build-1024 (diagnostics): which budget stopped this search, if any
                 if (held[0].stoppedByCap) {
                     st.capStops++;
+                    st.capEvents.add(new Object[] {held[0].capWhy == null ? "?" : held[0].capWhy, held[0].capValue,
+                            held[0].capLimit});
                 } else if (held[0].stoppedByTime) {
                     st.deadlineStops++;
                 }
@@ -1110,16 +1129,16 @@ final class ForcedWinEngine {
             if (st.nodes - passStart < passCap) {
                 stoppedByLifetime = true; // review #10: the cap was reached with earlier searches' nodes
             } else {
-                stoppedByCap = true;
+                capAt("nodes", st.nodes, lim.nodes);
             }
             return true;
         }
         if (lim.totalSteps > 0 && st.steps - stepBase >= lim.totalSteps) {
-            stoppedByCap = true; // bvw-step1-build-1024: budget=counter's step cap (0 = off: never here)
+            capAt("steps", st.steps - stepBase, lim.totalSteps); // bvw-step1-build-1024: budget=counter's step cap
             return true;
         }
         if (lim.totalCards > 0 && st.cards - cardBase >= lim.totalCards) {
-            stoppedByCap = true; // bvw-step1-build-1024: budget=counter's copied-card cap (0 = off: never here)
+            capAt("cards", st.cards - cardBase, lim.totalCards); // bvw-step1-build-1024: budget=counter's copied-card cap
             return true;
         }
         if (System.nanoTime() > deadline) {
@@ -1127,7 +1146,7 @@ final class ForcedWinEngine {
             return true;
         }
         if (forge.ai.AiWork.spent()) {
-            stoppedByCap = true; // rollout-budget-1101: the decision's Forge AI work cap (no budget open = never here)
+            capAt("aiWork", 0, 0); // rollout-budget-1101: the decision's Forge AI work cap (no budget open = never here)
             return true;
         }
         return false;

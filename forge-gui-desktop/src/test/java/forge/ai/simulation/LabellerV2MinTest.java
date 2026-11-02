@@ -509,6 +509,32 @@ public class LabellerV2MinTest extends AITest {
         }
     }
 
+    /**
+     * coverage-fix-1102 (meter only): a world cut by a gap records its reason and the answer card behind it in the row
+     * meter when Meter#reasons is on, and nothing new when it is off. Pristine Talisman (a rider beyond mana) is the
+     * mana-ability gap against our Bolt.
+     */
+    @Test
+    public void cutReasonsAndCardsAreMeteredOnlyWhenAsked() {
+        for (boolean on : new boolean[] {false, true}) {
+            final Game g = frame("", "Pristine Talisman", 3, "Lightning Bolt", "Mountain");
+            g.AI_TIMEOUT = 600;
+            final ForcedWinSolver s = new ForcedWinSolver(g.getPlayers().get(1), passive(cfg(true, 64)));
+            s.meter.reasons = on;
+            for (ForcedWinSolver.Proposal p : s.propose(g)) {
+                Assert.assertFalse(p.proven(1), p.text);
+            }
+            final com.google.gson.JsonObject m = s.meter.toJson();
+            Assert.assertTrue(m.get("opp_min_cuts").getAsLong() > 0, m.toString());
+            Assert.assertEquals(m.has("opp_min_cut_reasons"), on, m.toString());
+            if (on) {
+                Assert.assertTrue(m.getAsJsonObject("opp_min_cut_reasons").get("mana-ability").getAsLong() > 0, m.toString());
+                Assert.assertEquals(m.getAsJsonObject("opp_min_cap_cards").getAsJsonArray("mana-ability").get(0).getAsString(),
+                        "Pristine Talisman", m.toString());
+            }
+        }
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {

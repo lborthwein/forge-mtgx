@@ -569,6 +569,48 @@ public final class ForcedWinSolver {
             for (java.util.Map.Entry<String, Integer> e : caps.entrySet()) oppMinCapReasons.merge(e.getKey(), (long) e.getValue(), Long::sum);
             if (OppMin.DEBUG) System.err.println("[oppmin] cut " + caps);
         }
+
+        /**
+         * coverage-fix-1102 (meter only; never read to decide, emitted only when non-empty): per cut world, the reasons
+         * of the cap that withheld it (the first cap, gap reasons split: multi-target, unreadable, ...; oppNodes,
+         * oppResponses, oppDepth, branch), and up to three answer cards behind each reason of the world's tree.
+         */
+        public final java.util.Map<String, Long> oppMinCutReasons = new java.util.TreeMap<>();
+        public final java.util.Map<String, java.util.TreeSet<String>> oppMinCapCards = new java.util.TreeMap<>();
+        /** coverage-fix-1102 (meter only): engine cap stops by counter, and the largest value and limit seen there. */
+        public final java.util.Map<String, Long> engineCapReasons = new java.util.TreeMap<>();
+        /**
+         * coverage-fix-1102: emit the reason fields above in {@link #toJson} (false = the default: the row's meter is
+         * byte-identical to before; set from the label spec's {@code meterReasons}).
+         */
+        public boolean reasons;
+        public final java.util.Map<String, long[]> engineCapAt = new java.util.TreeMap<>();
+
+        static java.util.List<String> capReasons(final String cap) {
+            if (cap == null) return java.util.List.of("oppMin");
+            if (cap.startsWith("nodes")) return java.util.List.of("oppNodes");
+            if (cap.startsWith("truncated")) return java.util.List.of("oppResponses");
+            if (cap.startsWith("budget")) return java.util.List.of("oppDepth");
+            if (cap.startsWith("gap:")) return java.util.Arrays.asList(cap.substring(4).split("\\+"));
+            if (cap.startsWith("branch:")) return java.util.List.of("branch");
+            return java.util.List.of(cap);
+        }
+
+        void noteMinCut(final String cap, final java.util.Map<String, java.util.TreeSet<String>> cards) {
+            for (String r : capReasons(cap)) oppMinCutReasons.merge(r, 1L, Long::sum);
+            for (java.util.Map.Entry<String, java.util.TreeSet<String>> e : cards.entrySet()) {
+                for (String r : capReasons(e.getKey())) {
+                    oppMinCapCards.computeIfAbsent(r, k -> new java.util.TreeSet<>()).addAll(e.getValue());
+                }
+            }
+        }
+
+        void noteEngineCap(final String why, final long value, final long limit) {
+            engineCapReasons.merge(why, 1L, Long::sum);
+            final long[] at = engineCapAt.computeIfAbsent(why, k -> new long[2]);
+            at[0] = Math.max(at[0], value);
+            at[1] = Math.max(at[1], limit);
+        }
         /** labeller-v2 (a): engine moves applied to rank choice variants; reported only when non-zero. */
         public long cacApplies;
         /** solver-cap12 round 3 (R3-1): ladder escalations, the lines they found, their nodes and steps; only when non-zero. */
@@ -581,6 +623,7 @@ public final class ForcedWinSolver {
 
         public Meter copy() {
             final Meter m = new Meter();
+            m.reasons = reasons;
             m.add(this, 1);
             return m;
         }
@@ -617,6 +660,21 @@ public final class ForcedWinSolver {
             ladderSteps += sign * o.ladderSteps;
             aiWorkCaps += sign * o.aiWorkCaps;
             playoutAiWorkCuts += sign * o.playoutAiWorkCuts;
+            // coverage-fix-1102 (meter only): counts add with the sign; card names and maxima only add (since() keeps them)
+            for (java.util.Map.Entry<String, Long> e : o.oppMinCutReasons.entrySet()) oppMinCutReasons.merge(e.getKey(), sign * e.getValue(), Long::sum);
+            for (java.util.Map.Entry<String, Long> e : o.engineCapReasons.entrySet()) engineCapReasons.merge(e.getKey(), sign * e.getValue(), Long::sum);
+            oppMinCutReasons.values().removeIf(v -> v == 0);
+            engineCapReasons.values().removeIf(v -> v == 0);
+            if (sign > 0) {
+                for (java.util.Map.Entry<String, java.util.TreeSet<String>> e : o.oppMinCapCards.entrySet()) {
+                    oppMinCapCards.computeIfAbsent(e.getKey(), k -> new java.util.TreeSet<>()).addAll(e.getValue());
+                }
+                for (java.util.Map.Entry<String, long[]> e : o.engineCapAt.entrySet()) {
+                    final long[] at = engineCapAt.computeIfAbsent(e.getKey(), k -> new long[2]);
+                    at[0] = Math.max(at[0], e.getValue()[0]);
+                    at[1] = Math.max(at[1], e.getValue()[1]);
+                }
+            }
         }
 
         /** This meter minus {@code before} (one call's work), or a copy when {@code before} is null. */
@@ -679,6 +737,40 @@ public final class ForcedWinSolver {
             if (aiWorkCaps != 0 || playoutAiWorkCuts != 0) {
                 o.addProperty("ai_work_caps", aiWorkCaps);
                 o.addProperty("playout_ai_work_cuts", playoutAiWorkCuts);
+            }
+            if (reasons && !oppMinCutReasons.isEmpty()) {
+                // coverage-fix-1102 (meter only): why the cut worlds were cut, and up to three answer cards per reason
+                final com.google.gson.JsonObject r = new com.google.gson.JsonObject();
+                for (java.util.Map.Entry<String, Long> e : oppMinCutReasons.entrySet()) r.addProperty(e.getKey(), e.getValue());
+                o.add("opp_min_cut_reasons", r);
+                final com.google.gson.JsonObject c = new com.google.gson.JsonObject();
+                for (java.util.Map.Entry<String, java.util.TreeSet<String>> e : oppMinCapCards.entrySet()) {
+                    final com.google.gson.JsonArray a = new com.google.gson.JsonArray();
+                    for (String n : e.getValue()) {
+                        if (a.size() >= 3) break;
+                        a.add(n);
+                    }
+                    c.add(e.getKey(), a);
+                }
+                o.add("opp_min_cap_cards", c);
+                final com.google.gson.JsonObject ev = new com.google.gson.JsonObject();
+                for (java.util.Map.Entry<String, Long> e : oppMinCapReasons.entrySet()) ev.addProperty(e.getKey(), e.getValue());
+                o.add("opp_min_cap_events", ev);
+            }
+            if (reasons && !engineCapReasons.isEmpty()) {
+                // coverage-fix-1102 (meter only): which engine counter stopped the searches, its largest value and limit
+                final com.google.gson.JsonObject r = new com.google.gson.JsonObject();
+                for (java.util.Map.Entry<String, Long> e : engineCapReasons.entrySet()) {
+                    final com.google.gson.JsonObject x = new com.google.gson.JsonObject();
+                    x.addProperty("stops", e.getValue());
+                    final long[] at = engineCapAt.get(e.getKey());
+                    if (at != null) {
+                        x.addProperty("max_value", at[0]);
+                        x.addProperty("limit", at[1]);
+                    }
+                    r.add(e.getKey(), x);
+                }
+                o.add("engine_cap_reasons", r);
             }
             return o;
         }
@@ -2601,6 +2693,7 @@ public final class ForcedWinSolver {
         final long es0 = engineStats.steps, ecd0 = engineStats.cards;
         final int ep0 = engineStats.pathPrunes, el0 = engineStats.lifetimeStops, ca0 = engineStats.cacApplies;
         final int lp0 = engineStats.loops, cs0 = engineStats.capStops, ls0 = engineStats.lifetimeStops;
+        final int ce0 = engineStats.capEvents.size(); // coverage-fix-1102 (meter only)
         Line line = ForcedWinEngine.search(live, me, el, engineStats, engineDeadline,
                 mix(cfg.seed, 7_000_000L + index), likelyCands, cfg.likelyTop);
         if (line == null && cfg.engineLadder && cfg.counter) {
@@ -2658,6 +2751,9 @@ public final class ForcedWinSolver {
         meter.engineWallCuts += engineStats.cut - ec0;
         meter.engineDeadlineStops += engineStats.deadlineStops - ed0;
         meter.engineCapStops += engineStats.capStops - ek0;
+        for (Object[] ev : engineStats.capEvents.subList(ce0, engineStats.capEvents.size())) {
+            meter.noteEngineCap((String) ev[0], (Long) ev[1], (Long) ev[2]);
+        }
         receipt("FORCED_WIN engine" + tag() + " turn=" + pos.turn + " found=" + (line != null) + " " + engineStats.summary()
                 + (line == null ? "" : " " + line) + (likelyCands == null ? "" : " likelyCands=" + likelyCands.size()));
         if (line == null || !cfg.forced) {
@@ -3168,6 +3264,7 @@ public final class ForcedWinSolver {
         }
         if (Double.isNaN(m.v)) {
             meter.noteMinCaps(m.caps);
+            meter.noteMinCut(m.cap, m.capCards); // coverage-fix-1102 (meter only)
             return minCut(m.cap == null ? "oppMin" : m.cap.startsWith("nodes") ? "oppNodes"
                     : m.cap.startsWith("truncated") ? "oppResponses" : m.cap.startsWith("budget") ? "oppDepth" : m.cap);
         }
