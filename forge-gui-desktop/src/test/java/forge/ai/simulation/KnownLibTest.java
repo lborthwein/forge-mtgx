@@ -71,6 +71,22 @@ public class KnownLibTest extends forge.ai.AITest {
             return i < 0 ? topFirst.size() : i;
         }
 
+        /** A GenericChoice option whose description contains this (null = the AI's own pick). */
+        String pick;
+
+        @Override
+        public SpellAbility chooseSingleSpellForEffect(final List<SpellAbility> spells, final SpellAbility sa, final String title,
+                final Map<String, Object> params) {
+            if (pick != null) {
+                for (SpellAbility x : spells) {
+                    if (String.valueOf(x.getDescription()).contains(pick)) {
+                        return x;
+                    }
+                }
+            }
+            return super.chooseSingleSpellForEffect(spells, sa, title, params);
+        }
+
         @Override
         public boolean confirmAction(final SpellAbility sa, final PlayerActionConfirmMode mode, final String message,
                 final List<String> options, final Card cardToShow, final Map<String, Object> params) {
@@ -506,67 +522,15 @@ public class KnownLibTest extends forge.ai.AITest {
     // ------------------------------------------------------------------ same-turn Doomsday, and a fetch after the pile
 
     /**
-     * The HOF row 2988847130 (Doomsday this turn after Thassa's Oracle's look): the look at the top hidden cards was a
-     * read, though Doomsday's search then rebuilt the library from cards chosen by identity and exiled the rest. With
-     * knownLib the whole-library reset erases the looks: no read. A look whose card is drawn before the reset still is.
-     */
-    @Test
-    public void aWholeLibraryResetErasesLooks() {
-        for (boolean erase : new boolean[] {false, true}) {
-            final Game g = LibLabelsTest.lib(20);
-            final ForcedWinSolver.HiddenWatch hw = LibLabelsTest.watch(g, 0);
-            hw.erase = erase;
-            final Player me = me(g);
-            // Oracle's look at the top seven, one kept on top and the rest bottomed
-            final List<Card> seven = new ArrayList<>(me.getCardsIn(ZoneType.Library).subList(0, 7));
-            hw.peekOwnLibrary(seven);
-            for (Card c : seven.subList(1, 7)) {
-                g.getAction().moveToLibrary(c, -1, null);
-            }
-            // Doomsday: five searched to the top, the rest exiled
-            final List<Card> pile = new ArrayList<>();
-            for (int i : new int[] {17, 3, 11, 8, 0}) {
-                pile.add(me.getCardsIn(ZoneType.Library).get(i));
-            }
-            for (Card c : pile) {
-                hw.searchPick(List.of(ZoneType.Graveyard, ZoneType.Library), c);
-                g.getAction().moveToLibrary(c, 0, null);
-            }
-            for (Card c : new ArrayList<>(me.getCardsIn(ZoneType.Library))) {
-                if (!pile.contains(c)) {
-                    g.getAction().exile(c, null, forge.game.ability.AbilityKey.newMap());
-                }
-            }
-            me.drawCards(2);
-            final int reads = LibLabelsTest.reads(hw);
-            System.out.println("KLIB reset erase=" + erase + " reads=" + reads + " why=" + hw.why);
-            Assert.assertEquals(reads == 0, erase, "erase=" + erase + " reads=" + reads);
-        }
-        // a looked card drawn before the reset was used: still a read
-        final Game g = LibLabelsTest.lib(20);
-        final ForcedWinSolver.HiddenWatch hw = LibLabelsTest.watch(g, 0);
-        hw.erase = true;
-        hw.peekOwnLibrary(new ArrayList<>(me(g).getCardsIn(ZoneType.Library).subList(0, 3)));
-        me(g).drawCards(1);
-        for (Card c : new ArrayList<>(me(g).getCardsIn(ZoneType.Library))) {
-            g.getAction().exile(c, null, forge.game.ability.AbilityKey.newMap());
-        }
-        Assert.assertTrue(LibLabelsTest.reads(hw) >= 1, "the drawn looked card stays a read");
-    }
-
-    /**
-     * Same-turn Doomsday into a draw into the win (the coverage suite's doomsday-recall-oracle and doomsday-jace-recall,
-     * and Thassa's Oracle looked first): PROVEN with knownLib and libLabels on, no lib_tag.
+     * Same-turn Doomsday into a draw into the win (the coverage suite's doomsday-recall-oracle and doomsday-jace-recall):
+     * PROVEN with knownLib and libLabels on, no lib_tag. (A line that casts Thassa's Oracle BEFORE Doomsday reads the
+     * cards Oracle looks at: library-dependent, labelled by its fresh k/W; review #163 re-check S1-B/C removed the
+     * erase rules.)
      */
     @Test(timeOut = 900000)
     public void sameTurnDoomsdayIsProven() {
         final List<WinConditionCoverageTest.P> ps = new ArrayList<>(List.of(LibLabelsTest.puzzle("doomsday-recall-oracle"),
                 LibLabelsTest.puzzle("doomsday-jace-recall")));
-        ps.add(new WinConditionCoverageTest.P("oracle-look-then-doomsday", WinConditionCoverageTest.V.PROVEN,
-                "Thassa's Oracle looks first, then Doomsday, Ancestral Recall, a second Oracle")
-                .k("humanhand", "Thassa's Oracle;Doomsday;Ancestral Recall;Thassa's Oracle")
-                .k("humanbattlefield", WinConditionCoverageTest.n("Underground Sea", 8))
-                .k("humanlibrary", WinConditionCoverageTest.n("Island", 15)));
         for (WinConditionCoverageTest.P p : ps) {
             final Game g = ForcedWinSolverTest.game("Default", "Default", p.frame());
             final KnownOwnLibrary k = track(g);
@@ -577,27 +541,25 @@ public class KnownLibTest extends forge.ai.AITest {
     }
 
     /**
-     * The owner's case: a Doomsday pile of five (Oracle and four Islands), then a fetch (Polluted Delta takes an Island
-     * and shuffles): the library is the known SET of four, order unknown. Strix (one draw) then Oracle needs the Oracle
-     * on top: exact-draw 1/4 when it must win this turn (their three attackers are lethal), 1/2 when it can also wait
-     * for next turn's draw (the better line). Divination (two draws) then Oracle: 1/2. Never PROVEN, never sampled.
-     * Without the fetch the pile is known and each line is PROVEN.
+     * The owner's case: a Doomsday pile of five (Lightning Bolt and four Islands; their life 3), then a fetch (Polluted
+     * Delta takes an Island and shuffles): the library is the known SET of four, order unknown. Strix (one draw) then
+     * Bolt needs the Bolt on top: exact-draw 1/4 when it must win this turn (their three attackers are lethal), 1/2 when
+     * it can also wait for next turn's draw (the better line). Divination (two draws) then Bolt: 1/2. Never PROVEN, never
+     * sampled. Without the fetch the pile is known and each line is PROVEN. (Bolt, not Thassa's Oracle: Oracle's own
+     * look at the cards left is a read, so an Oracle line after a fetch is library-dependent beyond two reads.)
      */
     @Test(timeOut = 900000)
     public void aFetchAfterThePileIsAnExactFraction() {
-        // Delver of Secrets adds one blue devotion, so the unshuffled pile of five also wins (the control).
-        // {our card, their board, our life, fraction, takes}: Strix with their three attackers lethal next turn must win
-        // now (one draw: 1/4); unthreatened, Strix can also wait for next turn's draw (two draws: 1/2, the better line);
-        // Divination draws two now (1/2)
+        // {our card, their board, our life, fraction, takes}
         final String[][] cases = {{"Baleful Strix", "Memnite;Memnite;Memnite", "4", "0.25", "1"}, {"Baleful Strix", "", "20", "0.5", "2"},
                 {"Divination", "", "20", "0.5", "2"}};
         for (String[] cs : cases) for (boolean fetch : new boolean[] {true, false}) {
             final String frame = ForcedWinSolverTest.frame("Doomsday;" + cs[0],
-                    "Delver of Secrets;Swamp;Swamp;Swamp;Swamp;Polluted Delta;Island;Island;Island;Island", Integer.parseInt(cs[2]), "", cs[1], 20, "human")
-                    .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Island;Island;Island;Island;Thassa's Oracle");
+                    "Swamp;Swamp;Swamp;Swamp;Polluted Delta;Island;Island;Island;Mountain", Integer.parseInt(cs[2]), "", cs[1], 3, "human")
+                    .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Island;Island;Island;Island;Lightning Bolt");
             final Game g = ForcedWinSolverTest.game("Default", "Default", frame);
             g.AI_TIMEOUT = 600;
-            me(g).dangerouslySetController(new Ordered(g, me(g), List.of("Thassa's Oracle", "Island"), false));
+            me(g).dangerouslySetController(new Ordered(g, me(g), List.of("Lightning Bolt", "Island"), false));
             final KnownOwnLibrary k = track(g);
             castAndResolve(g, "Doomsday");
             Assert.assertEquals(me(g).getCardsIn(ZoneType.Library).size(), 5);
@@ -611,7 +573,7 @@ public class KnownLibTest extends forge.ai.AITest {
                 Assert.assertTrue(k.known(me(g)).isEmpty(), "shuffled");
             }
             final List<String> lib = top(g, 10);
-            Assert.assertEquals(new java.util.TreeSet<>(lib), new java.util.TreeSet<>(List.of("Island", "Thassa's Oracle")),
+            Assert.assertEquals(new java.util.TreeSet<>(lib), new java.util.TreeSet<>(List.of("Island", "Lightning Bolt")),
                     "the pool is the remaining pile: " + lib);
             final JsonObject on = label(g, k, true, true, "fetch-" + cs[0] + "-" + cs[1] + "-" + fetch);
             if (fetch) {
@@ -625,7 +587,6 @@ public class KnownLibTest extends forge.ai.AITest {
             }
         }
     }
-
     // ------------------------------------------------------------------ owner 2026-11-02: the opponent's fixed placements
 
     /** Their Memory Lapse counters our Bolt: it goes on top of our library (public card, fixed place): known; drawn next. */
@@ -722,5 +683,69 @@ public class KnownLibTest extends forge.ai.AITest {
         g.subscribeToEvents(hw);
         me.drawCards(3);
         Assert.assertEquals(LibLabelsTest.reads(hw), 2, "the two above are reads, the pinned third is not");
+    }
+
+    // ------------------------------------------------------------------ review #163 re-check S1-A, S2-1
+
+    /**
+     * Abundant Harvest (GenericChoice into DigUntil RevealRandomOrder): the revealed lands go to the bottom in a random
+     * order. Our own spell, but the random step sits in the chosen Choices$ SVar: unknown.
+     */
+    @Test
+    public void anAbundantHarvestBottomIsNotKnown() {
+        final Game g = game("Abundant Harvest", "Forest", "Island;Swamp;Mountain;Lightning Bolt;Island;Swamp;Island;Swamp", 20);
+        final Ordered c = new Ordered(g, me(g), null, false);
+        c.pick = "Nonland";
+        me(g).dangerouslySetController(c);
+        final KnownOwnLibrary k = track(g);
+        playAndResolve(g, me(g), ChooseACardTest.find(me(g), ZoneType.Hand, "Abundant Harvest").getFirstSpellAbility(), null);
+        final List<String> lib = top(g, 20);
+        System.out.println("KLIB harvest library=" + lib + " hand=" + me(g).getCardsIn(ZoneType.Hand) + " known=" + names(g, k.known(me(g))));
+        Assert.assertNotNull(ForcedWinSolverTest.inZone(me(g), ZoneType.Hand, "Lightning Bolt"), "the nonland found");
+        Assert.assertTrue(lib.subList(lib.size() - 3, lib.size()).containsAll(List.of("Island", "Swamp", "Mountain")), lib.toString());
+        Assert.assertTrue(k.known(me(g)).isEmpty(), names(g, k.known(me(g))).toString());
+    }
+
+    /**
+     * RepeatEach with a random-order step in its RepeatSubAbility$ SVar (and a GenericChoice with one reached through a
+     * Choices$ SVar's SubAbility$): not statically ordered; the same shapes with clean SVars are; an unresolvable name
+     * fails closed. A literal LibraryPosition is a fixed offset, an X is not.
+     */
+    @Test
+    public void reachableRandomStepsAndLiteralOffsets() {
+        final Game g = game("Lightning Bolt", "Island", "Island;Swamp", 20);
+        final Card host = ChooseACardTest.find(me(g), ZoneType.Hand, "Lightning Bolt");
+        host.setSVar("RandBottom", "DB$ ChangeZoneAll | Origin$ Graveyard | Destination$ Library | LibraryPosition$ -1 | RandomOrder$ True");
+        host.setSVar("CleanTop", "DB$ ChangeZone | Origin$ Hand | Destination$ Library | ChangeNum$ 1 | LibraryPosition$ 0");
+        host.setSVar("Indirect", "DB$ Pump | Defined$ You | SubAbility$ RandBottom");
+        final String[][] cases = {
+            {"DB$ RepeatEach | RepeatPlayers$ You | RepeatSubAbility$ RandBottom", "false"},
+            {"DB$ RepeatEach | RepeatPlayers$ You | RepeatSubAbility$ CleanTop", "true"},
+            {"DB$ GenericChoice | Choices$ CleanTop,Indirect", "false"},
+            {"DB$ GenericChoice | Choices$ CleanTop", "true"},
+        };
+        for (String[] cs : cases) {
+            final SpellAbility sa;
+            try {
+                sa = forge.game.ability.AbilityFactory.getAbility(cs[0], host);
+            } catch (RuntimeException ex) {
+                throw new AssertionError("building " + cs[0] + ": " + ex.getCause(), ex);
+            }
+            Assert.assertEquals(KnownOwnLibrary.staticallyOrdered(sa), Boolean.parseBoolean(cs[1]), cs[0]);
+        }
+        // a name a choice runs that does not resolve (the SVar gone after the ability was built): fails closed
+        host.setSVar("Ghost", "DB$ Pump | Defined$ You");
+        final SpellAbility ghost = forge.game.ability.AbilityFactory.getAbility("DB$ GenericChoice | Choices$ CleanTop,Ghost", host);
+        Assert.assertTrue(KnownOwnLibrary.staticallyOrdered(ghost));
+        host.removeSVar("Ghost");
+        Assert.assertFalse(KnownOwnLibrary.staticallyOrdered(ghost), "an unresolvable choice fails closed");
+        final SpellAbility lit = forge.game.ability.AbilityFactory.getAbility(
+                "DB$ ChangeZone | Origin$ Battlefield | Destination$ Library | LibraryPosition$ 2 | Defined$ Self", host);
+        Assert.assertTrue(KnownOwnLibrary.literalOffset(lit, 2, 10));
+        Assert.assertFalse(KnownOwnLibrary.literalOffset(lit, 3, 10));
+        host.setSVar("X", "Count$CardsInYourHand");
+        final SpellAbility x = forge.game.ability.AbilityFactory.getAbility(
+                "DB$ ChangeZone | Origin$ Battlefield | Destination$ Library | LibraryPosition$ X | Defined$ Self", host);
+        Assert.assertFalse(KnownOwnLibrary.literalOffset(x, 1, 10), "a computed position is not a fixed offset");
     }
 }

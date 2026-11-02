@@ -163,7 +163,7 @@ public final class KnownOwnLibrary {
             final boolean ordered = res == null ? !game.getStack().isResolving() : seatOrders(res);
             final boolean seen = wasKnown || (fromLib ? res != null && ordered : seenFrom(e.from(), e.card()));
             final boolean atTop = j == 0, atBottom = j >= 0 && j == now.size() - 1;
-            final boolean fixed = atTop || atBottom || j > 0 && res != null && hasLibraryPosition(res);
+            final boolean fixed = atTop || atBottom || j > 0 && res != null && literalOffset(res, j, now.size());
             boolean learn = seen && fixed;
             if (!ordered && resCount > 1) {
                 // a block whose order nobody of ours chose: its set is known, the order of its cards is not
@@ -213,11 +213,24 @@ public final class KnownOwnLibrary {
         }
     }
 
-    /** The resolving effect names a fixed library position (Teferi's "third from the top", Commit's second). */
-    static boolean hasLibraryPosition(final SpellAbility root) {
+    /**
+     * Review #163 re-check S2-1: the card's index {@code j} (of {@code size}) is a literal LibraryPosition of the resolving
+     * effect (Teferi's "third from the top" = 2, Commit's second = 1; a negative literal counts from the bottom). An X or
+     * any computed position is not a fixed offset (the caller then forgets everything).
+     */
+    static boolean literalOffset(final SpellAbility root, final int j, final int size) {
         for (SpellAbility sa = root; sa != null; sa = sa.getSubAbility()) {
-            if (sa.hasParam("LibraryPosition")) {
-                return true;
+            final String v = sa.getParam("LibraryPosition");
+            if (v == null) {
+                continue;
+            }
+            try {
+                final int l = Integer.parseInt(v.trim());
+                if (l >= 0 ? j == l : j == size + l) {
+                    return true;
+                }
+            } catch (NumberFormatException ex) {
+                return false; // computed: fail closed
             }
         }
         return false;
@@ -260,17 +273,93 @@ public final class KnownOwnLibrary {
         if (root.getActivatingPlayer() == null || root.getActivatingPlayer().getId() != seatId) {
             return false;
         }
-        for (SpellAbility sa = root; sa != null; sa = sa.getSubAbility()) {
-            for (String k : RANDOM_PARAMS) {
-                if (sa.hasParam(k)) {
-                    return false;
-                }
-            }
+        return staticallyOrdered(root);
+    }
+
+    /** Keys whose value names the SVar a choice or a repeat runs (an unresolvable name there fails closed). */
+    static final java.util.Set<String> RUN_KEYS = java.util.Set.of("Choices", "RepeatSubAbility", "Execute", "SubAbility");
+
+    /**
+     * Review #163 re-check S1-A: the whole set of sub-abilities the resolution can reach, statically, is free of
+     * random-order steps: the sub-ability chain, and every SVar any parameter names (GenericChoice's Choices$,
+     * RepeatEach's RepeatSubAbility$, a trigger's Execute$, ...), followed transitively. Fails closed: a random-order
+     * parameter or a Discover anywhere, a name a choice or repeat runs that does not resolve, or a scan past its bound.
+     */
+    static boolean staticallyOrdered(final SpellAbility root) {
+        final java.util.ArrayDeque<java.util.Map<String, String>> todo = new java.util.ArrayDeque<>();
+        for (SpellAbility sa0 = root; sa0 != null; sa0 = sa0.getSubAbility()) {
+            // a triggered ability resolves wrapped: its parameters are the wrapped ability's
+            final SpellAbility sa = sa0 instanceof forge.game.trigger.WrappedAbility w ? w.getWrappedAbility() : sa0;
             if (sa.getApi() == forge.game.ability.ApiType.Discover) {
                 return false;
             }
+            for (String k : RANDOM_PARAMS) {
+                if (sa.hasParam(k) || sa0.hasParam(k)) {
+                    return false;
+                }
+            }
+            todo.add(new java.util.HashMap<>(sa.getMapParams()));
+            if (sa != sa0 && sa.getSubAbility() != null) {
+                for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+                    todo.add(new java.util.HashMap<>(sub.getMapParams()));
+                    if (sub.getApi() == forge.game.ability.ApiType.Discover) {
+                        return false;
+                    }
+                }
+            }
+        }
+        final Set<String> seen = new HashSet<>();
+        int guard = 0;
+        while (!todo.isEmpty()) {
+            if (++guard > 256) {
+                return false;
+            }
+            final java.util.Map<String, String> m = todo.pop();
+            for (String k : RANDOM_PARAMS) {
+                if (m.containsKey(k)) {
+                    return false;
+                }
+            }
+            for (String k : new String[] {"DB", "AB", "SP"}) {
+                if ("Discover".equals(m.get(k))) {
+                    return false;
+                }
+            }
+            for (java.util.Map.Entry<String, String> e : m.entrySet()) {
+                if (e.getValue() == null) {
+                    continue;
+                }
+                for (String tok : e.getValue().split("[,\\s]+")) {
+                    if (tok.isEmpty() || !seen.add(tok)) {
+                        continue;
+                    }
+                    final String txt = (root instanceof forge.game.trigger.WrappedAbility w ? w.getWrappedAbility() : root).getSVar(tok);
+                    if (txt == null || txt.isEmpty()) {
+                        if (RUN_KEYS.contains(e.getKey())) {
+                            return false; // a sub-ability we cannot read
+                        }
+                        continue;
+                    }
+                    final String t = txt.trim();
+                    if (t.startsWith("DB$") || t.startsWith("AB$") || t.startsWith("SP$")) {
+                        todo.add(parseParams(t));
+                    }
+                }
+            }
         }
         return true;
+    }
+
+    /** "DB$ DigUntil | Valid$ Card | ..." as a key-value map (DB -> DigUntil, Valid -> Card, ...). */
+    static java.util.Map<String, String> parseParams(final String text) {
+        final java.util.Map<String, String> m = new java.util.HashMap<>();
+        for (String part : text.split("\\|")) {
+            final int i = part.indexOf('$');
+            if (i > 0) {
+                m.put(part.substring(0, i).trim(), part.substring(i + 1).trim());
+            }
+        }
+        return m;
     }
 
     /** The seat saw the card where it came from (its own hand, a public zone, face-up exile). */

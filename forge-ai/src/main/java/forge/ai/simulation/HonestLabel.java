@@ -215,7 +215,6 @@ public final class HonestLabel {
             o.addProperty("exact", "false");
             final ForcedWinSolver.Config c = config(o);
             c.libWatch = libLabels; // e1-q8-1101
-            c.libErase = libLabels && knownLib; // known-lib-1102
             return c;
         }
 
@@ -794,7 +793,7 @@ public final class HonestLabel {
             for (ForcedWinPlanner.Line line : lines) {
                 line.knownTop = kt; // the seat does not know the draws
                 final ForcedWinSolver.Proposal p = new ForcedWinSolver.Proposal(
-                        s.evaluate(root, line, LookaheadSearch.mix(spec.seed, key ^ 0x44524157L), Long.MAX_VALUE));
+                        s.evaluateBudgeted(root, line, LookaheadSearch.mix(spec.seed, key ^ 0x44524157L)));
                 if (p.proven(spec.worlds) && !p.libDependent) {
                     return p; // a real proof after all
                 }
