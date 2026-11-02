@@ -649,7 +649,7 @@ public final class HonestLabel {
             }
             if (proven != null && spec.libLabels && proven.libDependent) {
                 // e1-q8-1101 (ruling 2026-11-01 06:40:01): a proven line that read hidden cards of our library
-                proven = libLabel(s, root, proven, props, live, r);
+                proven = libLabel(s, root, proven, props, live, r, key);
                 if (spec.meter) {
                     r.meter = s.meter.toJson(); // the exact-draw work included
                 }
@@ -672,7 +672,7 @@ public final class HonestLabel {
          * deeper reads or an uncoverable enumeration the sampled k/W. Returns the proposal still proven, or null.
          */
         private ForcedWinSolver.Proposal libLabel(final ForcedWinSolver s, final Game root, final ForcedWinSolver.Proposal dep,
-                final List<ForcedWinSolver.Proposal> props, final Game live, final Result r) {
+                final List<ForcedWinSolver.Proposal> props, final Game live, final Result r, final long key) {
             ForcedWinSolver.Proposal clean = null;
             for (ForcedWinSolver.Proposal p : props) {
                 if (!p.proven(spec.worlds) || p.libDependent || r.copyGap != null && p.endTurn != live.getPhaseHandler().getTurn()) {
@@ -688,7 +688,7 @@ public final class HonestLabel {
             r.libTakes = dep.hiddenTakes;
             r.worldsWin = dep.worldsRun;
             if (dep.hiddenTakes <= 2) {
-                final ForcedWinSolver.LibExact x = s.libExact(root, dep, LIB_SEQ_CAP);
+                final ForcedWinSolver.LibExact x = s.libExact(root, dep, LIB_SEQ_CAP, key);
                 if (x.exact) {
                     r.libTag = "exact-draw";
                     r.libSeqs = x.seqs;
@@ -697,9 +697,16 @@ public final class HonestLabel {
                 }
                 r.libWhy = x.why;
             }
+            // review #161 S2-1: k/W re-estimated on fresh worlds keyed by the decision (the proof's own worlds picked the
+            // line, so their k = W says nothing); withheld (null) when the re-estimate was cut
+            final ForcedWinSolver.LibExact w = s.libResample(root, dep, LookaheadSearch.mix(key, 0x5A3D1EL));
             r.libTag = "sampled";
-            r.libW = dep.worldsRun;
-            r.pWin = dep.pBelief; // k/W of the proof's belief worlds
+            r.libW = Double.isNaN(w.fraction) ? 0 : w.worlds;
+            r.pWin = w.fraction;
+            r.worldsWin = r.libW;
+            if (w.why != null) {
+                r.libWhy = r.libWhy == null ? w.why : r.libWhy + "+" + w.why;
+            }
             return null;
         }
 
@@ -754,6 +761,16 @@ public final class HonestLabel {
                     }
                 }
                 if (proven != null && spec.libLabels && proven.libDependent) {
+                    // review #161 S3-3: a proven line of theirs that reads nothing hidden, when there is one
+                    for (ForcedWinSolver.Proposal p : props) {
+                        if (p.proven(1) && !p.libDependent
+                                && !(r.copyGap != null && p.endTurn != live.getPhaseHandler().getTurn())) {
+                            proven = p;
+                            break;
+                        }
+                    }
+                }
+                if (proven != null && spec.libLabels && proven.libDependent) {
                     libLost++; // e1-q8-1101: their proving line read their own hidden library
                     libTakes = Math.max(libTakes, proven.hiddenTakes);
                 }
@@ -779,6 +796,9 @@ public final class HonestLabel {
                 r.libTag = "sampled";
                 r.libW = ran;
                 r.libTakes = libTakes;
+                // review #161 S2-1: each world's line was found and verified in that same world, so lost/ran is not an
+                // estimate of the dependent lines: p_loss is withheld (null) for a sampled loss
+                r.pLoss = Double.NaN;
             } else if (ran == spec.worlds && lost == ran && ran > 0) {
                 r.label = "loss";
                 r.endReason = mode(reasons);

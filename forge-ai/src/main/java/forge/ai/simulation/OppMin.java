@@ -1044,13 +1044,24 @@ public final class OppMin {
 
     /**
      * Whether anything {@code p} controls or may play reads their life total or damage or life loss to them: the text of
-     * every card in their battlefield, hand, graveyard, exile and command zone (fail closed: any mention of "life" or of
+     * every card in their battlefield, hand, graveyard, exile and command zone, and of their items on the stack (fail closed: any mention of "life" or of
      * damage to them counts; an unreadable card counts).
      */
     static boolean lifeSensitive(final Player p) {
+        // review #161 S2-3: their spells and abilities on the stack (by the controller of the item)
+        final List<Card> stack = new java.util.ArrayList<>();
+        try {
+            for (forge.game.spellability.SpellAbilityStackInstance si : p.getGame().getStack()) {
+                if (si.getActivatingPlayer() == p && si.getSourceCard() != null) {
+                    stack.add(si.getSourceCard());
+                }
+            }
+        } catch (RuntimeException e) {
+            return true;
+        }
         for (ZoneType z : List.of(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard, ZoneType.Exile,
-                ZoneType.Command)) {
-            for (Card c : p.getCardsIn(z)) {
+                ZoneType.Command, ZoneType.Stack)) {
+            for (Card c : z == ZoneType.Stack ? stack : p.getCardsIn(z)) {
                 final String text;
                 try {
                     text = String.valueOf(c.getOracleText()).toLowerCase(java.util.Locale.ROOT);

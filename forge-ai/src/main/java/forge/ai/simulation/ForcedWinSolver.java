@@ -947,9 +947,12 @@ public final class ForcedWinSolver {
      * and a shuffle of the library forgets them all.
      *
      * <p>A READ: a hidden card leaving the library for any zone but exile (hand, stack, battlefield, graveyard, ...); a
-     * hidden card exiled from the library that later leaves exile for any zone (Necropotence, impulse draws; exile that
-     * stays, as Doomsday's rest, is not a read); a hidden card revealed to either seat outside a search (a peek: Thassa's
-     * Oracle's look, Delver). Takes are positional within the top {@link #WINDOW} hidden cards, at the bottom, or after a
+     * hidden card moved within the library (a scry kept on top or bottomed, Ponder's or Top's reorder, a dig's rest to
+     * the bottom) unless a search of our library picked it (Doomsday's pile); a hidden card exiled from the library
+     * (Necropotence, impulse draws, a dig's exile), unless that exile leaves no hidden card in the library (Doomsday's
+     * rest: then the order and the identities of what left do not matter), and a hidden exiled card that later leaves
+     * exile; a hidden card shown to either seat outside a search (reveals, scry / surveil / reorder choices, temporary
+     * shows: Thassa's Oracle's look, Delver, Ponder). Review #161 S1-1. Takes are positional within the top {@link #WINDOW} hidden cards, at the bottom, or after a
      * change of the library the events did not explain, and then a read even when a search took them (a tutor in the
      * window is a false dependence: fail closed). A deeper take is a read unless a search of our library picked that card
      * (an identity search does not read the order).
@@ -969,6 +972,8 @@ public final class ForcedWinSolver {
         final Set<Integer> known = new HashSet<>();
         /** Hidden cards exiled from the library (a later move out of exile is a read). */
         final Set<Integer> exiled = new HashSet<>();
+        /** Hidden cards just exiled from the library: reads unless the exile left no hidden card there ({@link #settle}). */
+        final Set<Integer> pendingExile = new java.util.TreeSet<>();
         /** Cards a search of our library picked. */
         final Set<Integer> searched = new HashSet<>();
         /** The hidden cards read, by id. */
@@ -1030,6 +1035,26 @@ public final class ForcedWinSolver {
             }
         }
 
+        /**
+         * Exiles from the library since the last other event: reads, unless no hidden card is left in the library (a
+         * whole-library exile, Doomsday's rest).
+         */
+        private void settle() {
+            if (pendingExile.isEmpty()) {
+                return;
+            }
+            boolean hiddenLeft = false;
+            for (int x : ids()) {
+                hiddenLeft |= !known.contains(x);
+            }
+            if (hiddenLeft) {
+                for (int x : pendingExile) {
+                    read(x, "exile");
+                }
+            }
+            pendingExile.clear();
+        }
+
         /** Hidden cards that left the library with no event of their own: reads (fail closed). */
         private void silentLoss(List<Integer> before, List<Integer> after) {
             final Set<Integer> now = new HashSet<>(after);
@@ -1054,6 +1079,7 @@ public final class ForcedWinSolver {
         public void on(forge.game.event.GameEventShuffle e) {
             try {
                 if (e.player() != null && e.player().getId() == meId) {
+                    settle();
                     final List<Integer> now = ids();
                     silentLoss(snap, now);
                     known.clear();
@@ -1083,6 +1109,9 @@ public final class ForcedWinSolver {
             }
             final int id = e.card().getId();
             final ZoneType to = e.to() == null ? null : e.to().zoneType();
+            if (!(fromLib && to == ZoneType.Exile)) {
+                settle();
+            }
             if (!fromLib && !toLib) {
                 if (exiled.contains(id) && e.from() != null && e.from().zoneType() == ZoneType.Exile && to != ZoneType.Exile) {
                     exiled.remove(id);
@@ -1109,12 +1138,17 @@ public final class ForcedWinSolver {
                         read(id, "untracked->" + to);
                     } else if (to == ZoneType.Exile) {
                         exiled.add(id);
+                        pendingExile.add(id); // review #161 S3-6: a read unless the whole hidden library goes
                     } else {
                         final boolean window = silent || i == snap.size() - 1 || hiddenAbove(snap, i) < WINDOW;
                         if (window || !searched.contains(id)) {
                             read(id, (window ? "top" : "deep") + "->" + to);
                         }
                     }
+                } else if (!wasKnown && !searched.contains(id)) {
+                    // review #161 S1-1: a hidden card moved within the library (scry, a reorder, a dig's rest to the
+                    // bottom) was seen by the seat: a read unless a search picked it (Doomsday's pile)
+                    read(id, i < 0 ? "untracked->Library" : "library->library");
                 }
             }
             if (toLib) {
@@ -1146,6 +1180,7 @@ public final class ForcedWinSolver {
                 if (inSearch || zone != ZoneType.Library || ownerId != meId || ids == null) {
                     return;
                 }
+                settle();
                 final List<Integer> now = ids();
                 for (int id : ids) {
                     if (!known.contains(id) && now.contains(id)) {
@@ -1155,6 +1190,20 @@ public final class ForcedWinSolver {
             } catch (RuntimeException ex) {
                 fail("peek " + ex);
             }
+        }
+
+        /** Our library cards among {@code cards} were shown to a seat (scry, surveil, reorder, a temporary show). */
+        void peekOwnLibrary(Iterable<Card> cards) {
+            if (cards == null) {
+                return;
+            }
+            final List<Integer> ids = new ArrayList<>();
+            for (Card c : cards) {
+                if (c != null && c.getOwner() != null && c.getOwner().getId() == meId) {
+                    ids.add(c.getId());
+                }
+            }
+            peek(ids, ZoneType.Library, meId);
         }
 
         void peekCards(Iterable<Card> cards, ZoneType zone, Player owner) {
@@ -1194,6 +1243,7 @@ public final class ForcedWinSolver {
         /** The play-out's end: cards that left the library with no event. */
         void end() {
             try {
+                settle();
                 silentLoss(snap, ids());
             } catch (RuntimeException ex) {
                 fail("end " + ex);
@@ -1203,6 +1253,11 @@ public final class ForcedWinSolver {
 
     /** e1-q8-1101: the current evaluation's hidden-library record (every play-out of it adds; {@link #evaluate}). */
     private boolean libDep, libUncov;
+    /**
+     * Review #161 S2-2: a play-out or MIN of the current exact-draw / resample evaluation was cut (wall, step or call
+     * cap, Forge AI cap, error, a MIN cap or gap): its 0 is unknown, not a loss, so the result is not exact.
+     */
+    private boolean libCut;
     private int libReads;
 
     private void libNote(HiddenWatch hw) {
@@ -1256,6 +1311,8 @@ public final class ForcedWinSolver {
         public boolean exact;
         public double fraction = Double.NaN;
         public int seqs;
+        /** {@link #libResample}: the fresh worlds W. */
+        public int worlds;
         public String why;
     }
 
@@ -1269,6 +1326,11 @@ public final class ForcedWinSolver {
      * a sequence ran fewer than its worlds, or the Forge AI work cap was spent. Each sequence has the decision's budgets.
      */
     public LibExact libExact(Game live, Proposal p, int seqCap) {
+        return libExact(live, p, seqCap, 0L);
+    }
+
+    /** As above; {@code key} (the decision's key) is mixed into every sequence's seed (review #161 S3-4). */
+    public LibExact libExact(Game live, Proposal p, int seqCap, long key) {
         final LibExact x = new LibExact();
         if (!cfg.libWatch || !p.libDependent || p.hiddenTakes < 1 || p.hiddenTakes > 2) {
             x.why = "takes";
@@ -1280,7 +1342,7 @@ public final class ForcedWinSolver {
         for (int i = 0; i < Math.min(p.knownTop, lib.size()); i++) {
             knownIds.add(lib.get(i).getId());
         }
-        final DrawExpectation.Draws d = DrawExpectation.draws(me, knownIds, p.hiddenTakes, seqCap, 0, cfg.seed);
+        final DrawExpectation.Draws d = DrawExpectation.draws(me, knownIds, p.hiddenTakes, seqCap, 0, mix(cfg.seed, key));
         if (!d.exact || d.depth < p.hiddenTakes || d.seqs.isEmpty()) {
             x.why = d.exact ? "library" : "seqCap";
             return x;
@@ -1288,6 +1350,7 @@ public final class ForcedWinSolver {
         double sum = 0;
         for (int s = 0; s < d.seqs.size(); s++) {
             libArrange = new Arrange(d.seqs.get(s), d.unknownById, d.unknownSlots);
+            libCut = false;
             decisionSteps0 = meter.playoutSteps;
             if (p.engine && cfg.engineEvalSteps > 0) {
                 engineEvalBudget = cfg.engineEvalSteps;
@@ -1298,7 +1361,8 @@ public final class ForcedWinSolver {
             final forge.ai.AiWork.Budget work = workCap > 0 ? forge.ai.AiWork.current() : null;
             Eval e = null;
             try {
-                e = evaluate(live, line, mix(cfg.seed, 0x9B800L + s), deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
+                e = evaluate(live, line, mix(mix(cfg.seed, key), 0x9B800L + s),
+                        deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
             } catch (RuntimeException ex) {
                 x.why = "error:" + ex.getClass().getSimpleName();
             } finally {
@@ -1317,6 +1381,10 @@ public final class ForcedWinSolver {
                 x.why = "uncovered";
                 return x;
             }
+            if (libCut) {
+                x.why = "cut"; // review #161 S2-2: a cut play-out's 0 is unknown
+                return x;
+            }
             if (e.pUnopposed >= 1.0 && !cfg.exact && e.worldsRun < cfg.worlds) {
                 x.why = "worlds";
                 return x;
@@ -1327,6 +1395,48 @@ public final class ForcedWinSolver {
         x.exact = true;
         x.fraction = Math.min(1.0, sum);
         x.seqs = d.seqs.size();
+        return x;
+    }
+
+    /**
+     * Review #161 S2-1: the sampled k/W of a library-dependent proposal, re-estimated on fresh worlds (seeds keyed by the
+     * decision, not the worlds that picked the line, so a proof's k = W is not reported as the value): the line's
+     * evaluation as the proof ran it (unopposed world and belief worlds, MIN when oppMin), our library shuffled below
+     * its known top in each. {@link LibExact#fraction} = k/W, {@link LibExact#worlds} = W; NaN with {@link LibExact#why}
+     * when a play-out was cut, the worlds were short, or the Forge AI cap was spent.
+     */
+    public LibExact libResample(Game live, Proposal p, long key) {
+        final LibExact x = new LibExact();
+        libCut = false;
+        decisionSteps0 = meter.playoutSteps;
+        if (p.engine && cfg.engineEvalSteps > 0) {
+            engineEvalBudget = cfg.engineEvalSteps;
+            engineEvalBase = meter.playoutSteps;
+        }
+        final long workCap = cfg.aiWorkCap();
+        final forge.ai.AiWork.Budget outer = forge.ai.AiWork.open(workCap);
+        final forge.ai.AiWork.Budget work = workCap > 0 ? forge.ai.AiWork.current() : null;
+        Eval e = null;
+        try {
+            e = evaluate(live, (Line) p.line, mix(mix(cfg.seed, key), 0x5A3B1EL),
+                    deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
+        } catch (RuntimeException ex) {
+            x.why = "error:" + ex.getClass().getSimpleName();
+        } finally {
+            forge.ai.AiWork.restore(outer);
+            engineEvalBudget = 0;
+        }
+        if (work != null && work.spent()) {
+            x.why = forge.ai.AiWork.CAP;
+        } else if (e != null && libCut) {
+            x.why = "cut";
+        } else if (e != null && e.pUnopposed >= 1.0 && !cfg.exact && e.worldsRun < cfg.worlds) {
+            x.why = "worlds";
+        } else if (e != null) {
+            x.worlds = cfg.exact ? 1 : cfg.worlds;
+            x.fraction = e.pUnopposed >= 1.0 ? e.pBelief : 0.0;
+        }
+        receipt("FORCED_WIN lib-resample" + tag() + " " + e + " why=" + x.why);
         return x;
     }
 
@@ -2916,6 +3026,7 @@ public final class ForcedWinSolver {
                 if (wall != 0 && System.nanoTime() > wall) {
                     worst = new Outcome();
                     worst.why = "wall";
+                    libCut = true;
                     break;
                 }
                 if (evalStepsSpent()) {
@@ -2924,6 +3035,7 @@ public final class ForcedWinSolver {
                     meter.evalCapStops++;
                     worst = new Outcome();
                     worst.why = "evalSteps";
+                    libCut = true;
                     break;
                 }
                 final Outcome o = playout(live, line, mix(seed, 0), -1, j, wall);
@@ -3001,6 +3113,7 @@ public final class ForcedWinSolver {
     }
 
     private Outcome minCut(String why) {
+        libCut = true; // review #161 S2-2 (read only by libExact / libResample)
         meter.oppMinCuts++;
         final Outcome cut = new Outcome();
         cut.why = why;
@@ -3087,6 +3200,7 @@ public final class ForcedWinSolver {
                 meter.playoutSteps++;
             }
             if (steps >= cfg.maxSteps && !g.isGameOver() && !watch.reached) {
+                libCut = true; // review #161 S2-2
                 meter.playoutStepCaps++;
             }
             out.won = cm.hasWon() || cm.getOpponents().stream().anyMatch(Player::hasLost);
@@ -3123,6 +3237,7 @@ public final class ForcedWinSolver {
                 }
             }
         } catch (ForcedWinEngine.OutOfBudget | forge.ai.AiWork.Exhausted ex) {
+            libCut = true; // review #161 S2-2
             if (forge.ai.AiWork.spent()) {
                 // rollout-budget-1101: the decision's Forge AI work cap is spent: not a win, and not dropped as at the wall
                 out.won = false;
@@ -3142,6 +3257,7 @@ public final class ForcedWinSolver {
             }
             receipt("FORCED_WIN playout cut world=" + world + " " + ex.getMessage());
         } catch (RuntimeException | StackOverflowError ex) {
+            libCut = true; // review #161 S2-2
             out.won = false;
             out.why = "error:" + ex.getClass().getSimpleName();
             receipt("FORCED_WIN playout error " + ex);
@@ -3996,8 +4112,19 @@ public final class ForcedWinSolver {
         }
 
         @Override
+        public void tempShowCards(Iterable<Card> cards) {
+            if (hw != null) {
+                hw.peekOwnLibrary(cards); // review #161 S1-1
+            }
+            super.tempShowCards(cards);
+        }
+
+        @Override
         public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone,
                 SpellAbility source) {
+            if (hw != null && destinationZone == ZoneType.Library) {
+                hw.peekOwnLibrary(cards); // review #161 S1-1: Ponder's / Top's reorder shows the cards
+            }
             if (f.cacLine && destinationZone == ZoneType.Library && cards != null && cards.size() >= 2
                     && cards.stream().allMatch(c -> c.getOwner() == getPlayer())) {
                 final String t = f.choices.next(ForcedWinChoices.ORDER);
@@ -4032,6 +4159,9 @@ public final class ForcedWinSolver {
 
         @Override
         public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+            if (hw != null) {
+                hw.peekOwnLibrary(topN); // review #161 S1-1: a scry looks at the cards
+            }
             final ImmutablePair<CardCollection, CardCollection> r = recordedArr(ForcedWinChoices.SCRY, topN);
             return r != null ? r : ImmutablePair.of(new CardCollection(topN), new CardCollection());
         }
@@ -4100,6 +4230,9 @@ public final class ForcedWinSolver {
 
         @Override
         public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+            if (hw != null) {
+                hw.peekOwnLibrary(topN); // review #161 S1-1
+            }
             final ImmutablePair<CardCollection, CardCollection> r = recordedArr(ForcedWinChoices.SURV, topN);
             return r != null ? r : ImmutablePair.of(new CardCollection(topN), new CardCollection());
         }
@@ -4214,6 +4347,31 @@ public final class ForcedWinSolver {
                 hw.peekViews(cards, zone, owner);
             }
             super.reveal(cards, zone, owner, messagePrefix, addSuffix);
+        }
+
+        @Override
+        public void tempShowCards(Iterable<Card> cards) {
+            if (hw != null) {
+                hw.peekOwnLibrary(cards); // review #161 S1-1
+            }
+            super.tempShowCards(cards);
+        }
+
+        @Override
+        public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone,
+                SpellAbility source) {
+            if (hw != null && destinationZone == ZoneType.Library) {
+                hw.peekOwnLibrary(cards); // review #161 S1-1: they order our library cards (fateseal-like)
+            }
+            return super.orderMoveToZoneList(cards, destinationZone, source);
+        }
+
+        @Override
+        public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+            if (hw != null) {
+                hw.peekOwnLibrary(topN);
+            }
+            return super.arrangeForScry(topN);
         }
 
         @Override

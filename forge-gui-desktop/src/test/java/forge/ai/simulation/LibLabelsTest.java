@@ -151,25 +151,55 @@ public class LibLabelsTest extends forge.ai.AITest {
             }
         }
         Assert.assertEquals(me.getCardsIn(ZoneType.Library).size(), 5);
-        // RearrangeTopOfLibrary: a reorder with no event, of known cards only
-        final List<Card> order = new ArrayList<>(me.getCardsIn(ZoneType.Library));
-        Collections.reverse(order);
-        me.getZone(ZoneType.Library).setCards(order);
+        // RearrangeTopOfLibrary (review #161 S1-1: orderMoveToZoneList, then moveToLibrary(next, 0) per card): moves of
+        // known cards only; the rest's exile left no hidden card in the library, so it is no read
+        for (Card c : new ArrayList<>(me.getCardsIn(ZoneType.Library))) {
+            g.getAction().moveToLibrary(c, 0, null);
+        }
+        hw.peekOwnLibrary(me.getCardsIn(ZoneType.Library));
         me.drawCards(2);
         Assert.assertEquals(reads(hw), 0, hw.why);
         Assert.assertFalse(hw.dependent());
     }
 
-    /** Necropotence: the top card exiled face down (no read yet), then put into our hand (a read). */
+    /**
+     * Necropotence / an impulse draw / a dig's exile (review #161 S3-6): a hidden card exiled from the library while
+     * hidden cards remain there is a read; moving on from exile to our hand adds none.
+     */
     @Test
-    public void aHiddenCardLeavingExileIsARead() {
+    public void aHiddenCardExiledFromTheLibraryIsARead() {
         final Game g = lib(10);
         final ForcedWinSolver.HiddenWatch hw = watch(g, 0);
         final Card top = at(g, 0);
         final Card exiled = g.getAction().exile(top, null, AbilityKey.newMap());
-        Assert.assertEquals(reads(hw), 0, "exile alone is not a read");
+        Assert.assertEquals(reads(hw), 1, "the exile of one hidden card with nine left");
         g.getAction().moveToHand(exiled, null);
-        Assert.assertEquals(reads(hw), 1, "the exiled hidden card reached our hand");
+        Assert.assertEquals(reads(hw), 1, "the same card reaching our hand");
+    }
+
+    /**
+     * Review #161 S1-1: a hidden card the seat looks at and moves within the library is a read: a scry kept on top
+     * (GameAction.scry: moveToLibrary per kept card), a card bottomed (a dig's rest), a reorder shown to the seat
+     * (orderMoveToZoneList / arrangeForScry / tempShowCards); a known card moved is not, nor a card a search picked.
+     */
+    @Test
+    public void looksAndMovesWithinTheLibraryAreReads() {
+        final Game g = lib(10);
+        final ForcedWinSolver.HiddenWatch hw = watch(g, 1);
+        g.getAction().moveToLibrary(at(g, 0), 0, null);
+        Assert.assertEquals(reads(hw), 0, "the known top kept on top");
+        g.getAction().moveToLibrary(at(g, 1), 0, null);
+        Assert.assertEquals(reads(hw), 1, "a hidden card scried and kept on top");
+        me(g).drawCards(1);
+        Assert.assertEquals(reads(hw), 1, "drawing it adds no new card: it was read");
+        g.getAction().moveToLibrary(at(g, 1), -1, null);
+        Assert.assertEquals(reads(hw), 2, "a hidden card put on the bottom (a dig's rest, scry to the bottom)");
+        final Card picked = at(g, 4);
+        hw.searchPick(List.of(ZoneType.Library), picked);
+        g.getAction().moveToLibrary(picked, 0, null);
+        Assert.assertEquals(reads(hw), 2, "a searched card put on top (Doomsday's pile) is not a read");
+        hw.peekOwnLibrary(List.of(at(g, 2), at(g, 3)));
+        Assert.assertEquals(reads(hw), 4, "a reorder or scry shows two hidden cards");
     }
 
     @Test
@@ -288,18 +318,22 @@ public class LibLabelsTest extends forge.ai.AITest {
         Assert.assertTrue(on.get("lib_takes").getAsInt() > 2 || on.get("lib_takes").getAsInt() == -1, on.toString());
     }
 
-    /** Ad Nauseam digs our hidden library: never PROVEN with libLabels (sampled when the line was proven before). */
+    /**
+     * The loss side (review #161 S3-5): their Jace, Wielder of Mysteries +1 mills their own two hidden cards and draws
+     * from the empty library: a proven loss without libLabels; with them, sampled and p_loss withheld (review S2-1).
+     */
     @Test(timeOut = 900000)
-    public void anAdNauseamDigIsNeverProven() {
-        final WinConditionCoverageTest.P p = new WinConditionCoverageTest.P("ad-nauseam-oracle",
-                WinConditionCoverageTest.V.PROVEN, "Ad Nauseam digs the library to two, Oracle")
-                .k("humanhand", "Ad Nauseam;Thassa's Oracle").k("humanbattlefield", WinConditionCoverageTest.n("Underground Sea", 7))
-                .k("humanlibrary", WinConditionCoverageTest.n("Island", 6));
+    public void aLossByTheirLibraryReadIsSampled() {
+        final WinConditionCoverageTest.P p = new WinConditionCoverageTest.P("their-jace-mill-self", WinConditionCoverageTest.V.PROVEN,
+                "their Jace +1 on themselves: mill 2, draw from empty")
+                .k("activeplayer", "ai").k("aibattlefield", "Jace, Wielder of Mysteries|Counters:LOYALTY=4;Island")
+                .k("ailibrary", "Island;Island");
         final JsonObject off = label(p, false, 42L), on = label(p, true, 42L);
-        Assert.assertNotEquals(str(on, "label"), "win", on.toString());
-        if ("win".equals(str(off, "label"))) {
-            Assert.assertEquals(str(on, "lib_tag"), "sampled", on.toString());
-        }
+        Assert.assertEquals(str(off, "check"), "loss", off.toString());
+        Assert.assertEquals(str(off, "label"), "loss", "precondition: proven loss without libLabels: " + off);
+        Assert.assertEquals(str(on, "label"), "unresolved", on.toString());
+        Assert.assertEquals(str(on, "lib_tag"), "sampled", on.toString());
+        Assert.assertTrue(on.get("p_loss").isJsonNull(), "p_loss withheld: " + on);
     }
 
     /**
@@ -399,5 +433,61 @@ public class LibLabelsTest extends forge.ai.AITest {
             Assert.assertEquals(x.fraction, 0.5, 1e-9);
         }
         Assert.assertTrue(ran > 0, "neither two-draw line was found");
+    }
+
+    /**
+     * Review #161 S1-1: Opt (scry 1, draw), Ponder (look at three, reorder, draw) and Impulse (look at four, one to
+     * hand, the rest to the bottom) each find the one Mountain to Bolt their last 3. Planned on a fully known library,
+     * then the known top is forgotten: the re-verified line reads hidden cards, and its label is not a win: sampled
+     * (more than two reads or not exact) or an exact fraction below 1.
+     */
+    @Test(timeOut = 900000)
+    public void looksThenDrawsAreNotProvenWhenTheyNeedTheCard() {
+        final String[][] lines = {{"Opt;Lightning Bolt", "Island"}, {"Ponder;Lightning Bolt", "Island"},
+                {"Impulse;Lightning Bolt", "Island;Island"}};
+        final List<String> found = new ArrayList<>();
+        for (String[] l : lines) {
+            boolean any = false;
+            for (int ci = 0; ci < 2 && !any; ci++) {
+                final String frame = ForcedWinSolverTest.frame(l[0], l[1], 20, "", "", 3, "human")
+                        .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Mountain;Island;Island;Island");
+                final Game g = ForcedWinSolverTest.game("Default", "Default", frame);
+                final Player me = g.getPlayers().get(0);
+                g.AI_TIMEOUT = 600;
+                final ForcedWinSolver s = new ForcedWinSolver(me, exactCfgs().get(ci));
+                s.notePlaced(new ArrayList<>(me.getCardsIn(ZoneType.Library)));
+                final Object[] got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+                    for (ForcedWinSolver.Proposal p0 : s.propose(g)) {
+                        if (!p0.proven(1)) {
+                            continue;
+                        }
+                        final ForcedWinPlanner.Line line = (ForcedWinPlanner.Line) p0.line;
+                        line.knownTop = 0;
+                        final ForcedWinSolver.Proposal p = new ForcedWinSolver.Proposal(s.evaluate(g, line, 7L, Long.MAX_VALUE));
+                        final ForcedWinSolver.LibExact x = p.proven(1) && p.hiddenTakes <= 2 ? s.libExact(g, p, 64, 9L) : null;
+                        return new Object[] {p0, p, x};
+                    }
+                    return new Object[] {null, null, null};
+                }));
+                final ForcedWinSolver.Proposal p0 = (ForcedWinSolver.Proposal) got[0], p = (ForcedWinSolver.Proposal) got[1];
+                final ForcedWinSolver.LibExact x = (ForcedWinSolver.LibExact) got[2];
+                System.out.println("LIBL " + l[0] + " cfg=" + ci + " planned=" + (p0 == null ? null : p0.text) + " forgotten="
+                        + (p == null ? null : p.text + " dep=" + p.libDependent + " takes=" + p.hiddenTakes) + " exact="
+                        + (x == null ? null : x.exact + " " + x.fraction + " seqs=" + x.seqs + " why=" + x.why));
+                if (p0 == null) {
+                    continue;
+                }
+                any = true;
+                found.add(l[0]);
+                if (!p.proven(1)) {
+                    continue; // the position as it stands no longer wins: not proven either way
+                }
+                Assert.assertTrue(p.libDependent, l[0] + ": " + p.text);
+                final boolean wouldWin = p.hiddenTakes <= 2 && x != null && x.exact && x.fraction >= 1.0 - 1e-9;
+                Assert.assertFalse(wouldWin, l[0] + " labelled a win: " + p.text);
+            }
+        }
+        System.out.println("LIBL found " + found);
+        Assert.assertEquals(found.size(), lines.length, "every look line was found: " + found);
     }
 }

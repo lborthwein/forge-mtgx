@@ -490,6 +490,25 @@ public class LabellerV2MinTest extends AITest {
                 "no mana for it: proven");
     }
 
+    /**
+     * Review #161 S2-3: their life-reading spell on the stack makes their Ancient Tomb's rider an answer again (a gap):
+     * lifeSensitive reads their items on the stack.
+     */
+    @Test
+    public void aLifeReadingSpellOnTheStackKeepsTheRiderAnAnswer() {
+        final Game quiet = frame("", "Ancient Tomb", 3, "Lightning Bolt", "Mountain");
+        Assert.assertFalse(OppMin.lifeSensitive(quiet.getPlayers().get(0)), "Ancient Tomb alone reads no life");
+        final Game g = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame("", "Ancient Tomb", 3,
+                "Lightning Bolt", "Mountain", 20, "ai") + "humanputonstack=Death's Shadow\n");
+        final Player def = g.getPlayers().get(0);
+        Assert.assertFalse(g.getStack().isEmpty(), "Death's Shadow is on the stack");
+        Assert.assertTrue(OppMin.lifeSensitive(def), "their Death's Shadow on the stack reads their life");
+        final forge.game.card.Card tomb = ForcedWinSolverTest.inZone(def, forge.game.zone.ZoneType.Battlefield, "Ancient Tomb");
+        for (forge.game.spellability.SpellAbility sa : tomb.getManaAbilities()) {
+            Assert.assertFalse(OppMin.selfDamageOnly(sa, def), "the rider stays an answer: " + sa);
+        }
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {
