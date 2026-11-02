@@ -965,6 +965,10 @@ public final class ForcedWinSolver {
         } finally {
             forge.ai.AiWork.restore(outer);
         }
+        if (work != null && forge.ai.AiWork.TRACE) {
+            System.err.println("AIWORK used=" + work.used() + " cap=" + workCap + " spent=" + work.spent() + tag() + " turn="
+                    + live.getPhaseHandler().getTurn() + " ms=" + (System.nanoTime() - t0) / 1_000_000);
+        }
         if (work != null && work.spent()) {
             // a cap hit, never a proof: no line is taken or proposed, whatever was found before the cap
             l = null;

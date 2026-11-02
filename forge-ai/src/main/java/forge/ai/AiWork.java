@@ -25,6 +25,9 @@ public final class AiWork {
     /** The cap's name in receipts, meters and label rows. */
     public static final String CAP = "cap:rollout-ai";
 
+    /** Diagnostics only (budget calibration): each counted decision's units to stderr, -Dforge.ai.aiWork.trace=true. */
+    public static final boolean TRACE = Boolean.getBoolean("forge.ai.aiWork.trace");
+
     /** Thrown by {@link #tick} on a spent budget. No stack trace: it is control flow. */
     public static final class Exhausted extends RuntimeException {
         private static final long serialVersionUID = 1L;
