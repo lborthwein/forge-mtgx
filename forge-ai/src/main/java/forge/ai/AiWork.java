@@ -10,7 +10,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Work units are counts, never time, so the same position spends the same units on any host: one unit for each
  * spell ability Forge AI weighs for play ({@code AiController.canPlayAndPayFor}), each board evaluation
  * ({@code ComputerUtil.evaluateBoardPosition}, counted before its cache), and each (attacker, blocker) pair the block
- * predictor checks ({@code AiBlockController.getPossibleBlockers}), which is where the B8 hang (job
+ * predictor checks ({@code AiBlockController.getPossibleBlockers}, charged 1 + the combat's attackers, since the
+ * must-block test inside each check walks them all), which is where the B8 hang (job
  * 2988764574:1:150:surveil|0, ETB target choice -> board evaluation -> block prediction, ~90 s CPU per priority call)
  * spent its time.
  *
@@ -69,7 +70,11 @@ public final class AiWork {
 
         void charge(final String site, final long n) {
             for (Budget b = this; b != null; b = b.parent) {
-                if (b.used.addAndGet(n) > b.limit && b.spentAt == null) {
+                final long u = b.used.addAndGet(n);
+                if (TRACE && b == this && Long.numberOfLeadingZeros(u - n) != Long.numberOfLeadingZeros(u) && u >= 1L << 16) {
+                    System.err.println("AIWORK progress used=" + u + " cap=" + limit + " site=" + site); // diagnostics only
+                }
+                if (u > b.limit && b.spentAt == null) {
                     b.spentAt = site;
                 }
             }
