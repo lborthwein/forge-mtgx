@@ -370,8 +370,8 @@ public class KnownLibTest extends forge.ai.AITest {
     }
 
     /**
-     * The control: the Bolt is somewhere in our library and nothing is known. Strix's draw is an unknown card: not proven,
-     * and the row is byte-identical with knownLib on and off.
+     * The control: the Bolt is somewhere in our library and nothing is known. Strix's draw is an unknown card: not proven
+     * either way; with knownLib the row carries the line's exact-draw fraction (per-draw planning on a small library).
      */
     @Test(timeOut = 900000)
     public void anUnknownDrawIsNotProvenAndTheRowIsUnchanged() {
@@ -380,7 +380,236 @@ public class KnownLibTest extends forge.ai.AITest {
         final KnownOwnLibrary k = track(g);
         final JsonObject off = label(g, k, false, true, "unknown-off");
         final JsonObject on = label(g, k, true, true, "unknown-on");
+        Assert.assertNotEquals(str(off, "label"), "win", off.toString());
+        Assert.assertFalse(off.has("lib_tag"), "the base: no line at all " + off);
         Assert.assertNotEquals(str(on, "label"), "win", on.toString());
-        Assert.assertEquals(on, off, "nothing known: the same row");
+        // the library is a small set (Bolt and two land names): knownLib plans per draw and labels the line by its exact
+        // fraction: Strix's draw plus the next turn's draw find the one Bolt among ten with p = 1 - 9/10 * 8/9 = 0.2
+        Assert.assertEquals(str(on, "lib_tag"), "exact-draw", on.toString());
+        Assert.assertEquals(on.get("p_win").getAsDouble(), 0.2, 1e-9, on.toString());
+    }
+
+    // ------------------------------------------------------------------ review #163 S1-1 / S3-1: orders nobody of ours chose
+
+    /** Plays {@code sa} for {@code who} and resolves the stack; {@code beforeResolve} sees each top item first. */
+    static void playAndResolve(final Game g, final Player who, final SpellAbility sa,
+            final java.util.function.Consumer<SpellAbility> beforeResolve) {
+        sa.setActivatingPlayer(who);
+        Assert.assertTrue(((PlayerControllerAi) who.getController()).playChosenSpellAbility(sa), "play " + sa);
+        MyRandom.setRandom(new Random(42));
+        int guard = 0;
+        g.getAction().checkStateEffects(true);
+        g.getStack().addAllTriggeredAbilitiesToStack();
+        while (!g.getStack().isEmpty() && guard++ < 12) {
+            if (beforeResolve != null) {
+                beforeResolve.accept(g.getStack().peekAbility());
+            }
+            g.getStack().resolveStack();
+            g.getAction().checkStateEffects(true);
+            g.getStack().addAllTriggeredAbilitiesToStack();
+        }
+    }
+
+    static Player opp(final Game g) {
+        return g.getPlayers().get(1);
+    }
+
+    /**
+     * Cascade (Shardless Agent): the exiled cards go to the bottom in a random order (ChangeZoneAll RandomOrder, built
+     * in): their order is never learnt, though the trigger is ours.
+     */
+    @Test
+    public void aCascadeBottomIsNotKnown() {
+        final Game g = game("Shardless Agent", "Tropical Island;Island;Forest",
+                "Island;Swamp;Mountain;Lightning Bolt;Island;Swamp;Island;Swamp;Island;Swamp", 20);
+        me(g).dangerouslySetController(new Ordered(g, me(g), null, false));
+        final KnownOwnLibrary k = track(g);
+        playAndResolve(g, me(g), ChooseACardTest.find(me(g), ZoneType.Hand, "Shardless Agent").getFirstSpellAbility(), null);
+        final List<String> lib = top(g, 20);
+        System.out.println("KLIB cascade library=" + lib + " known=" + names(g, k.known(me(g))));
+        Assert.assertTrue(lib.subList(lib.size() - 3, lib.size()).containsAll(List.of("Island", "Swamp", "Mountain")),
+                "the three lands went to the bottom: " + lib);
+        Assert.assertTrue(k.known(me(g)).isEmpty(), "a random order is never learnt: " + names(g, k.known(me(g))));
+    }
+
+    /**
+     * The opponent's Endurance targeting us: our graveyard to the bottom of our library in a random order: unknown (their
+     * resolution, and a random order); our own Endurance on ourselves: unknown too (a random order).
+     */
+    @Test
+    public void anEnduranceBottomIsNotKnown() {
+        for (boolean theirs : new boolean[] {true, false}) {
+            final String frame = ForcedWinSolverTest.frame(theirs ? "" : "Endurance", theirs ? "Island" : "Forest;Forest;Forest",
+                    20, theirs ? "Endurance" : "", theirs ? "Forest;Forest;Forest" : "", 20, "human")
+                    .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Island;Swamp;Island;Swamp;Island")
+                    .replace("humangraveyard=", "humangraveyard=Lightning Bolt;Shock;Giant Growth");
+            final Game g = ForcedWinSolverTest.game("Default", "Default", frame);
+            final KnownOwnLibrary k = track(g);
+            final Player caster = theirs ? opp(g) : me(g);
+            final Player target = me(g);
+            playAndResolve(g, caster, ChooseACardTest.find(caster, ZoneType.Hand, "Endurance").getFirstSpellAbility(), sa -> {
+                if (sa != null && sa.isTrigger() && sa.usesTargeting()) {
+                    sa.resetTargets();
+                    sa.getTargets().add(target);
+                }
+            });
+            final List<String> lib = top(g, 20);
+            System.out.println("KLIB endurance theirs=" + theirs + " library=" + lib + " known=" + names(g, k.known(me(g))));
+            Assert.assertTrue(me(g).getCardsIn(ZoneType.Graveyard).isEmpty(), "our graveyard went to the bottom");
+            Assert.assertEquals(lib.size(), 8, lib.toString());
+            Assert.assertTrue(k.known(me(g)).isEmpty(), "theirs=" + theirs + ": " + names(g, k.known(me(g))));
+        }
+    }
+
+    /** S3-1: their Agonizing Memories puts two cards of our hand on top in THEIR order: the order is unknown to us. */
+    @Test
+    public void theirOrderOfOurHandIsNotKnown() {
+        final String frame = ForcedWinSolverTest.frame("Lightning Bolt;Shock;Giant Growth", "Island", 20, "Agonizing Memories",
+                "Swamp;Swamp;Swamp;Swamp", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Island;Swamp;Island;Swamp;Island");
+        final Game g = ForcedWinSolverTest.game("Default", "Default", frame);
+        final KnownOwnLibrary k = track(g);
+        final SpellAbility sa = ChooseACardTest.find(opp(g), ZoneType.Hand, "Agonizing Memories").getFirstSpellAbility();
+        sa.setActivatingPlayer(opp(g));
+        sa.resetTargets();
+        sa.getTargets().add(me(g));
+        playAndResolve(g, opp(g), sa, null);
+        System.out.println("KLIB agonizing library=" + top(g, 3) + " hand=" + me(g).getCardsIn(ZoneType.Hand));
+        Assert.assertEquals(me(g).getCardsIn(ZoneType.Hand).size(), 1, "two of our cards went to the top");
+        Assert.assertTrue(k.known(me(g)).isEmpty(), names(g, k.known(me(g))).toString());
+    }
+
+    /** The control: our own Brainstorm (we choose the two and their order) is still learnt. */
+    @Test
+    public void ourBrainstormPutBackIsStillKnown() {
+        final Game g = game("Brainstorm;Lightning Bolt;Shock", "Island", "Island;Swamp;Island;Swamp;Island;Swamp", 20);
+        me(g).dangerouslySetController(new Ordered(g, me(g), null, false));
+        final KnownOwnLibrary k = track(g);
+        playAndResolve(g, me(g), ChooseACardTest.find(me(g), ZoneType.Hand, "Brainstorm").getFirstSpellAbility(), null);
+        System.out.println("KLIB brainstorm library=" + top(g, 3) + " known=" + names(g, k.known(me(g))));
+        Assert.assertEquals(k.topCount(me(g)), 2, "the two put-backs, in our order");
+    }
+
+    // ------------------------------------------------------------------ same-turn Doomsday, and a fetch after the pile
+
+    /**
+     * The HOF row 2988847130 (Doomsday this turn after Thassa's Oracle's look): the look at the top hidden cards was a
+     * read, though Doomsday's search then rebuilt the library from cards chosen by identity and exiled the rest. With
+     * knownLib the whole-library reset erases the looks: no read. A look whose card is drawn before the reset still is.
+     */
+    @Test
+    public void aWholeLibraryResetErasesLooks() {
+        for (boolean erase : new boolean[] {false, true}) {
+            final Game g = LibLabelsTest.lib(20);
+            final ForcedWinSolver.HiddenWatch hw = LibLabelsTest.watch(g, 0);
+            hw.erase = erase;
+            final Player me = me(g);
+            // Oracle's look at the top seven, one kept on top and the rest bottomed
+            final List<Card> seven = new ArrayList<>(me.getCardsIn(ZoneType.Library).subList(0, 7));
+            hw.peekOwnLibrary(seven);
+            for (Card c : seven.subList(1, 7)) {
+                g.getAction().moveToLibrary(c, -1, null);
+            }
+            // Doomsday: five searched to the top, the rest exiled
+            final List<Card> pile = new ArrayList<>();
+            for (int i : new int[] {17, 3, 11, 8, 0}) {
+                pile.add(me.getCardsIn(ZoneType.Library).get(i));
+            }
+            for (Card c : pile) {
+                hw.searchPick(List.of(ZoneType.Graveyard, ZoneType.Library), c);
+                g.getAction().moveToLibrary(c, 0, null);
+            }
+            for (Card c : new ArrayList<>(me.getCardsIn(ZoneType.Library))) {
+                if (!pile.contains(c)) {
+                    g.getAction().exile(c, null, forge.game.ability.AbilityKey.newMap());
+                }
+            }
+            me.drawCards(2);
+            final int reads = LibLabelsTest.reads(hw);
+            System.out.println("KLIB reset erase=" + erase + " reads=" + reads + " why=" + hw.why);
+            Assert.assertEquals(reads == 0, erase, "erase=" + erase + " reads=" + reads);
+        }
+        // a looked card drawn before the reset was used: still a read
+        final Game g = LibLabelsTest.lib(20);
+        final ForcedWinSolver.HiddenWatch hw = LibLabelsTest.watch(g, 0);
+        hw.erase = true;
+        hw.peekOwnLibrary(new ArrayList<>(me(g).getCardsIn(ZoneType.Library).subList(0, 3)));
+        me(g).drawCards(1);
+        for (Card c : new ArrayList<>(me(g).getCardsIn(ZoneType.Library))) {
+            g.getAction().exile(c, null, forge.game.ability.AbilityKey.newMap());
+        }
+        Assert.assertTrue(LibLabelsTest.reads(hw) >= 1, "the drawn looked card stays a read");
+    }
+
+    /**
+     * Same-turn Doomsday into a draw into the win (the coverage suite's doomsday-recall-oracle and doomsday-jace-recall,
+     * and Thassa's Oracle looked first): PROVEN with knownLib and libLabels on, no lib_tag.
+     */
+    @Test(timeOut = 900000)
+    public void sameTurnDoomsdayIsProven() {
+        final List<WinConditionCoverageTest.P> ps = new ArrayList<>(List.of(LibLabelsTest.puzzle("doomsday-recall-oracle"),
+                LibLabelsTest.puzzle("doomsday-jace-recall")));
+        ps.add(new WinConditionCoverageTest.P("oracle-look-then-doomsday", WinConditionCoverageTest.V.PROVEN,
+                "Thassa's Oracle looks first, then Doomsday, Ancestral Recall, a second Oracle")
+                .k("humanhand", "Thassa's Oracle;Doomsday;Ancestral Recall;Thassa's Oracle")
+                .k("humanbattlefield", WinConditionCoverageTest.n("Underground Sea", 8))
+                .k("humanlibrary", WinConditionCoverageTest.n("Island", 15)));
+        for (WinConditionCoverageTest.P p : ps) {
+            final Game g = ForcedWinSolverTest.game("Default", "Default", p.frame());
+            final KnownOwnLibrary k = track(g);
+            final JsonObject on = label(g, k, true, true, p.name);
+            Assert.assertEquals(str(on, "label"), "win", p.name + " " + on);
+            Assert.assertFalse(on.has("lib_tag"), p.name + " " + on);
+        }
+    }
+
+    /**
+     * The owner's case: a Doomsday pile of five (Oracle and four Islands), then a fetch (Polluted Delta takes an Island
+     * and shuffles): the library is the known SET of four, order unknown. Strix (one draw) then Oracle needs the Oracle
+     * on top: exact-draw 1/4 when it must win this turn (their three attackers are lethal), 1/2 when it can also wait
+     * for next turn's draw (the better line). Divination (two draws) then Oracle: 1/2. Never PROVEN, never sampled.
+     * Without the fetch the pile is known and each line is PROVEN.
+     */
+    @Test(timeOut = 900000)
+    public void aFetchAfterThePileIsAnExactFraction() {
+        // Delver of Secrets adds one blue devotion, so the unshuffled pile of five also wins (the control).
+        // {our card, their board, our life, fraction, takes}: Strix with their three attackers lethal next turn must win
+        // now (one draw: 1/4); unthreatened, Strix can also wait for next turn's draw (two draws: 1/2, the better line);
+        // Divination draws two now (1/2)
+        final String[][] cases = {{"Baleful Strix", "Memnite;Memnite;Memnite", "4", "0.25", "1"}, {"Baleful Strix", "", "20", "0.5", "2"},
+                {"Divination", "", "20", "0.5", "2"}};
+        for (String[] cs : cases) for (boolean fetch : new boolean[] {true, false}) {
+            final String frame = ForcedWinSolverTest.frame("Doomsday;" + cs[0],
+                    "Delver of Secrets;Swamp;Swamp;Swamp;Swamp;Polluted Delta;Island;Island;Island;Island", Integer.parseInt(cs[2]), "", cs[1], 20, "human")
+                    .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Island;Island;Island;Island;Thassa's Oracle");
+            final Game g = ForcedWinSolverTest.game("Default", "Default", frame);
+            g.AI_TIMEOUT = 600;
+            me(g).dangerouslySetController(new Ordered(g, me(g), List.of("Thassa's Oracle", "Island"), false));
+            final KnownOwnLibrary k = track(g);
+            castAndResolve(g, "Doomsday");
+            Assert.assertEquals(me(g).getCardsIn(ZoneType.Library).size(), 5);
+            Assert.assertEquals(k.known(me(g)).size(), 5);
+            if (fetch) {
+                final Card delta = ChooseACardTest.find(me(g), ZoneType.Battlefield, "Polluted Delta");
+                final SpellAbility crack = delta.getSpellAbilities().stream().filter(SpellAbility::isActivatedAbility)
+                        .findFirst().orElseThrow();
+                playAndResolve(g, me(g), crack, null);
+                Assert.assertEquals(me(g).getCardsIn(ZoneType.Library).size(), 4, "the fetch took an Island");
+                Assert.assertTrue(k.known(me(g)).isEmpty(), "shuffled");
+            }
+            final List<String> lib = top(g, 10);
+            Assert.assertEquals(new java.util.TreeSet<>(lib), new java.util.TreeSet<>(List.of("Island", "Thassa's Oracle")),
+                    "the pool is the remaining pile: " + lib);
+            final JsonObject on = label(g, k, true, true, "fetch-" + cs[0] + "-" + cs[1] + "-" + fetch);
+            if (fetch) {
+                Assert.assertNotEquals(str(on, "label"), "win", on.toString());
+                Assert.assertEquals(str(on, "lib_tag"), "exact-draw", on.toString());
+                Assert.assertEquals(on.get("p_win").getAsDouble(), Double.parseDouble(cs[3]), 1e-9, on.toString());
+                Assert.assertEquals(on.get("lib_takes").getAsInt(), Integer.parseInt(cs[4]), on.toString());
+            } else {
+                Assert.assertEquals(str(on, "label"), "win", on.toString());
+                Assert.assertFalse(on.has("lib_tag"), on.toString());
+            }
+        }
     }
 }

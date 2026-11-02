@@ -99,6 +99,14 @@ public final class ForcedWinSolver {
          */
         public transient boolean libWatch;
         /**
+         * known-lib-1102 (HonestLabel's knownLib with libLabels; false otherwise, and then nothing changes): a whole-library
+         * reset erases looks. When an exile leaves no hidden card in our library (Doomsday's rest), the reads of cards that
+         * were only looked at or moved within the library (and never left it for hand, stack, battlefield or graveyard)
+         * are erased: what the line saw of their identities or order cannot change a library rebuilt from cards it chose
+         * by identity ({@link HiddenWatch#erase}). A same-turn Doomsday after Thassa's Oracle's look was "sampled".
+         */
+        public transient boolean libErase;
+        /**
          * solver-gaps-1015 (off by default): the width search searches the payment of its own casts (a bounded set of
          * payment orders: greedy, one-shot sources first, most flexible first, keep each colour, Phyrexian in life)
          * instead of paying greedily.
@@ -1006,6 +1014,10 @@ public final class ForcedWinSolver {
         final Set<Integer> exiled = new HashSet<>();
         /** Hidden cards just exiled from the library: reads unless the exile left no hidden card there ({@link #settle}). */
         final Set<Integer> pendingExile = new java.util.TreeSet<>();
+        /** known-lib-1102 ({@link Config#libErase}): erase looks at a whole-library reset. */
+        boolean erase;
+        /** known-lib-1102: reads of cards only looked at or moved within the library (they never left it but to exile). */
+        final Set<Integer> looked = new HashSet<>();
         /** Cards a search of our library picked. */
         final Set<Integer> searched = new HashSet<>();
         /** The hidden cards read, by id. */
@@ -1091,6 +1103,11 @@ public final class ForcedWinSolver {
                 for (int x : pendingExile) {
                     read(x, "exile");
                 }
+            } else if (erase && !looked.isEmpty()) {
+                // known-lib-1102: the library now holds only known cards and the rest went to exile: the looks are moot
+                reads.removeAll(looked);
+                looked.clear();
+                recover();
             }
             pendingExile.clear();
         }
@@ -1156,10 +1173,14 @@ public final class ForcedWinSolver {
                 if (exiled.contains(id) && e.from() != null && e.from().zoneType() == ZoneType.Exile && to != ZoneType.Exile) {
                     exiled.remove(id);
                     read(id, "exile->" + to);
+                    looked.remove(id);
                 }
                 return;
             }
             final List<Integer> now = ids();
+            if (lookRes != null && curRes() != lookRes) {
+                lookStale = true; // known-lib-1102
+            }
             if (fromLib) {
                 final int i = snap.indexOf(id);
                 final List<Integer> exp = new ArrayList<>(snap);
@@ -1171,6 +1192,9 @@ public final class ForcedWinSolver {
                 final boolean silent = !exp.equals(cur);
                 if (silent) {
                     silentLoss(exp, cur);
+                }
+                if (!toLib && to != ZoneType.Exile) {
+                    looked.remove(id); // known-lib-1102: it left the library for use: no longer only looked at
                 }
                 final boolean wasKnown = known.remove(id);
                 if (!wasKnown && !toLib) {
@@ -1189,6 +1213,9 @@ public final class ForcedWinSolver {
                     // review #161 S1-1: a hidden card moved within the library (scry, a reorder, a dig's rest to the
                     // bottom) was seen by the seat: a read unless a search picked it (Doomsday's pile)
                     read(id, i < 0 ? "untracked->Library" : "library->library");
+                    if (i >= 0) {
+                        looked.add(id);
+                    }
                 }
             }
             if (toLib) {
@@ -1225,6 +1252,9 @@ public final class ForcedWinSolver {
                 for (int id : ids) {
                     if (!known.contains(id) && now.contains(id)) {
                         read(id, "peek");
+                        looked.add(id);
+                        lookRes = curRes();
+                        lookStale = lookRes == null;
                     }
                 }
             } catch (RuntimeException ex) {
@@ -1285,9 +1315,44 @@ public final class ForcedWinSolver {
             try {
                 settle();
                 silentLoss(snap, ids());
+                if (erase && !looked.isEmpty() && lookRes != null && !lookStale && wonNow()) {
+                    // known-lib-1102: the game was won in the very resolution that looked (Thassa's Oracle's look at a
+                    // library no bigger than its devotion): no decision could use what it saw
+                    reads.removeAll(looked);
+                    looked.clear();
+                    recover();
+                }
             } catch (RuntimeException ex) {
                 fail("end " + ex);
             }
+        }
+
+        /** known-lib-1102: after an erase, whether a read lies outside the exact-draw cover (and why) is recomputed. */
+        private void recover() {
+            if (failed) {
+                return;
+            }
+            uncovered = false;
+            for (int x : reads) {
+                uncovered |= cover != null && !cover.contains(x);
+            }
+            if (reads.isEmpty()) {
+                why = null;
+            }
+        }
+
+        private boolean wonNow() {
+            final forge.game.Game g = me.getGame();
+            return g.isGameOver() && (me.hasWon() || me.getOpponents().stream().allMatch(Player::hasLost));
+        }
+
+        /** known-lib-1102: the resolution of the last look (null = none, or a look outside any resolution). */
+        Object lookRes;
+        /** known-lib-1102: our library changed in another resolution after the last look. */
+        boolean lookStale;
+
+        private Object curRes() {
+            return KnownOwnLibrary.resolvingSa(me.getGame());
         }
     }
 
@@ -3214,6 +3279,7 @@ public final class ForcedWinSolver {
             }
             if (cfg.libWatch) {
                 hw = new HiddenWatch(cm, line.knownTop, bottomCount(cm), libArrange == null ? null : libArrange.cover);
+                hw.erase = cfg.libErase;
                 g.subscribeToEvents(hw);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));

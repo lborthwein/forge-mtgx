@@ -215,6 +215,7 @@ public final class HonestLabel {
             o.addProperty("exact", "false");
             final ForcedWinSolver.Config c = config(o);
             c.libWatch = libLabels; // e1-q8-1101
+            c.libErase = libLabels && knownLib; // known-lib-1102
             return c;
         }
 
@@ -704,6 +705,14 @@ public final class HonestLabel {
                     r.meter = s.meter.toJson(); // the exact-draw work included
                 }
             }
+            if (proven == null && spec.knownLib && spec.libLabels && r.libTag == null && r.copyGap == null) {
+                // known-lib-1102 (N5b): no line proves it, and our unknown library is a small known set (a Doomsday
+                // pile after a fetch): plan per draw, then label the best line by its exact-draw fraction
+                proven = drawPlans(s, root, me, r, key);
+                if (spec.meter) {
+                    r.meter = s.meter.toJson();
+                }
+            }
             if (proven != null) {
                 r.label = "win";
                 r.pWin = proven.pBelief;
@@ -714,6 +723,99 @@ public final class HonestLabel {
                 r.lineSteps = proven.steps;
                 r.turnsToEnd = proven.endTurn < 0 ? -1 : Math.max(0, proven.endTurn - live.getPhaseHandler().getTurn());
             }
+        }
+
+        /**
+         * known-lib-1102 (knownLib with libLabels; N5b's "enumerate the distinct names, weight by count, solve each"):
+         * when no line is proven and the unknown part of our library has at most {@link #PLAN_SEQ_CAP} distinct name
+         * sequences for its next two draws (a Doomsday pile after a fetch, a tiny library), plan in a copy of the root
+         * with each sequence put on the known top (the planner can then cast what it draws), and collect the proven lines.
+         * Planning on a sequence is clairvoyant, so a line is never labelled by those plans: each collected line is
+         * re-verified in the real root (our library unknown below the known top) and labelled by its exact-draw fraction
+         * ({@link ForcedWinSolver#libExact}, the q^8 path: one or two reads). The best fraction is the row's p_win with tag
+         * exact-draw (lib_why "per-draw"); "win" only at 1. Returns the proposal still proven, or null.
+         */
+        private ForcedWinSolver.Proposal drawPlans(final ForcedWinSolver s, final Game root, final Player me, final Result r,
+                final long key) {
+            final List<forge.game.card.Card> lib = new ArrayList<>(me.getCardsIn(forge.game.zone.ZoneType.Library));
+            final int kt = Math.min(s.knownTopCount(root), lib.size());
+            final int kb = Math.min(s.bottomCount(me), lib.size() - kt);
+            final Set<Integer> known = new java.util.HashSet<>();
+            for (int i = 0; i < kt; i++) {
+                known.add(lib.get(i).getId());
+            }
+            for (int i = lib.size() - kb; i < lib.size(); i++) {
+                known.add(lib.get(i).getId());
+            }
+            final DrawExpectation.Draws d = DrawExpectation.draws(me, known, 2, PLAN_SEQ_CAP, 0, LookaheadSearch.mix(spec.seed, key));
+            if (!d.exact || d.seqs.isEmpty() || d.depth < 1) {
+                return null;
+            }
+            final List<ForcedWinPlanner.Line> lines = new ArrayList<>();
+            final Set<String> seen = new java.util.HashSet<>();
+            for (int q = 0; q < d.seqs.size(); q++) {
+                final Game g2;
+                final Player me2;
+                synchronized (root) {
+                    final GameCopier copier = new GameCopier(root, true);
+                    copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING);
+                    copier.setCopyFidelity(1);
+                    ForcedWinEngine.copyStackIf(copier, root, spec.winConfig().engineStack);
+                    g2 = copier.makeCopy();
+                    me2 = (Player) copier.find(me);
+                }
+                DrawExpectation.arrange(me2, d.seqs.get(q), d.unknownById, d.unknownSlots,
+                        new Random(LookaheadSearch.mix(key, 0x504C414EL + q)));
+                final ForcedWinSolver s2 = new ForcedWinSolver(me2, spec.winConfig());
+                s2.redraw = s.redraw;
+                final List<forge.game.card.Card> lib2 = new ArrayList<>(me2.getCardsIn(forge.game.zone.ZoneType.Library));
+                s2.notePlaced(lib2.subList(0, Math.min(lib2.size(), kt + d.depth)));
+                s2.noteBottom(lib2.subList(lib2.size() - kb, lib2.size()));
+                final List<ForcedWinSolver.Proposal> props2 = s2.propose(g2);
+                ForcedWinSolver.receipt("FORCED_WIN per-draw seq=" + d.seqs.get(q) + " knownTop=" + s2.knownTopCount(g2)
+                        + " proposals=" + props2.size() + " proven=" + props2.stream().filter(p -> p.proven(spec.worlds)).count());
+                for (ForcedWinSolver.Proposal p : props2) {
+                    if (p.proven(spec.worlds) && p.line instanceof ForcedWinPlanner.Line && lines.size() < PLAN_LINE_CAP
+                            && seen.add(String.valueOf(((ForcedWinPlanner.Line) p.line).steps))) {
+                        lines.add((ForcedWinPlanner.Line) p.line);
+                    }
+                }
+                if (s2.lastCap() != null) {
+                    r.cap = s2.lastCap();
+                    r.capHits++;
+                }
+            }
+            ForcedWinSolver.Proposal best = null;
+            ForcedWinSolver.LibExact bestX = null;
+            for (ForcedWinPlanner.Line line : lines) {
+                line.knownTop = kt; // the seat does not know the draws
+                final ForcedWinSolver.Proposal p = new ForcedWinSolver.Proposal(
+                        s.evaluate(root, line, LookaheadSearch.mix(spec.seed, key ^ 0x44524157L), Long.MAX_VALUE));
+                if (p.proven(spec.worlds) && !p.libDependent) {
+                    return p; // a real proof after all
+                }
+                if (!p.libDependent || p.hiddenTakes < 1 || p.hiddenTakes > 2) {
+                    ForcedWinSolver.receipt("FORCED_WIN per-draw skip dep=" + p.libDependent + " takes=" + p.hiddenTakes + " " + p.text);
+                    continue;
+                }
+                final ForcedWinSolver.LibExact x = s.libExact(root, p, LIB_SEQ_CAP, key);
+                ForcedWinSolver.receipt("FORCED_WIN per-draw verify takes=" + p.hiddenTakes + " exact=" + x.exact + " fraction="
+                        + x.fraction + " why=" + x.why + " " + p.text);
+                if (x.exact && (bestX == null || x.fraction > bestX.fraction + 1e-12)) {
+                    best = p;
+                    bestX = x;
+                }
+            }
+            if (best == null) {
+                return null;
+            }
+            r.libTag = "exact-draw";
+            r.libWhy = "per-draw";
+            r.libSeqs = bestX.seqs;
+            r.libTakes = best.hiddenTakes;
+            r.pWin = bestX.fraction;
+            r.worldsWin = best.worldsRun;
+            return bestX.fraction >= 1.0 - 1e-9 ? best : null;
         }
 
         /**
@@ -884,6 +986,8 @@ public final class HonestLabel {
 
     /** e1-q8-1101: the most name sequences an exact-draw label enumerates (more: sampled). */
     static final int LIB_SEQ_CAP = 64;
+    /** known-lib-1102: the most draw sequences {@link Seat#drawPlans} plans on, and the most lines it re-verifies. */
+    static final int PLAN_SEQ_CAP = 16, PLAN_LINE_CAP = 8;
 
     private static ForcedWinSolver.Config capOne(final ForcedWinSolver.Config c) {
         c.aiWork = 1;

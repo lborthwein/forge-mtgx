@@ -33,13 +33,17 @@ import forge.game.zone.ZoneView;
  * unknown position voids what it could have shifted. A card is known when it enters the seat's library
  * <ul>
  * <li>from a zone the seat sees it in (its own hand, a graveyard, the battlefield, the stack, the command zone, face-up
- * exile) onto the known top (every card above it known: a Brainstorm put-back, a card put on top or a mulligan's
+ * exile is not one: the event cannot tell face-down) onto the known top (every card above it known: a Brainstorm put-back, a card put on top or a mulligan's
  * bottom), or onto the known bottom; or</li>
- * <li>from the seat's own library onto the known top while a spell or ability the seat controls resolves: a search that
+ * <li>from the seat's own library onto the known top while a spell or ability the seat controls resolves, with no
+ * random-order step: a search that
  * puts the card on top (Doomsday's pile, Vampiric, Mystical and Personal Tutor), a look that reorders the top (Ponder,
  * Sensei's Top, Doomsday's own rearrange) and a scry kept on top.</li>
  * </ul>
- * A move within the library to anywhere but the known top (a scry or dig to the bottom: Forge's "in a random order" looks
+ * Review #163 S1-1: when a resolution the seat does not order (the opponent's, or one with a random-order step:
+ * cascade, Endurance, a dig's random rest, discover) puts a second card into the library, the order of what it put
+ * there is unknown: neither card is learnt (one card alone keeps its known place). A move within the library to
+ * anywhere but the known top (a scry or dig to the bottom: Forge's "in a random order" looks
  * the same), a move the seat does not control (the opponent's Portent) and a card whose identity the seat did not see
  * are unknown, and void what they could have shifted (fails closed). Any shuffle of the library, and any change of it
  * the events do not explain, forgets everything. Read-only: it never changes the game.
@@ -143,7 +147,30 @@ public final class KnownOwnLibrary {
         bottom.remove(id);
         if (toLib) {
             final int j = now.indexOf(id);
-            final boolean seen = fromLib ? ownResolving(game) : seenFrom(e.from(), e.card());
+            // review #163 S1-1: which resolution moves the card, and does the seat choose the order of what it moves
+            final SpellAbility res = resolvingSa(game);
+            final Object resKey = res == null ? null : res;
+            if (resKey != resolution) {
+                resolution = resKey;
+                resEntered.clear();
+                resCount = 0;
+            }
+            resCount++;
+            final boolean ordered = res == null ? !game.getStack().isResolving() : seatOrders(res);
+            boolean seen = fromLib ? res != null && ordered : seenFrom(e.from(), e.card());
+            if (seen && !ordered) {
+                // a move the seat does not order (the opponent's, or a random order): one card's place is still known,
+                // but once a second card enters in the same resolution their order is not: learn neither
+                if (resCount > 1) {
+                    for (int x : resEntered) {
+                        top.remove(x);
+                        bottom.remove(x);
+                        voidShifted(now, now.indexOf(x));
+                    }
+                    resEntered.clear();
+                    seen = false;
+                }
+            }
             boolean onTop = seen && j >= 0, onBottom = seen && j >= 0 && !fromLib;
             for (int k = 0; onTop && k < j; k++) {
                 onTop = top.contains(now.get(k));
@@ -158,28 +185,78 @@ public final class KnownOwnLibrary {
                 bottom.add(id);
                 learnt++;
             } else {
-                // an unknown card (or a known one at an unknown place): it may have shifted every known card below it
-                // relative to the top, and every one above it relative to the bottom
-                for (int k = 0; k < now.size(); k++) {
-                    if (k > j || j < 0) {
-                        top.remove(now.get(k));
-                    }
-                    if (k < j || j < 0) {
-                        bottom.remove(now.get(k));
-                    }
-                }
+                voidShifted(now, j);
+            }
+            if ((onTop || onBottom) && !ordered) {
+                resEntered.add(id);
             }
         }
         snap = now;
     }
 
-    /** Our spell or ability is resolving: its library-to-library moves are the seat's own search, look or order. */
-    private boolean ownResolving(final Game g) {
-        if (!g.getStack().isResolving() || g.getStack().isEmpty()) {
+    /**
+     * An unknown card (or a known one at an unknown place) at index {@code j} of {@code now}: it may have shifted every
+     * known card below it relative to the top, and every one above it relative to the bottom.
+     */
+    private void voidShifted(final List<Integer> now, final int j) {
+        for (int k = 0; k < now.size(); k++) {
+            if (k > j || j < 0) {
+                top.remove(now.get(k));
+            }
+            if (k < j || j < 0) {
+                bottom.remove(now.get(k));
+            }
+        }
+    }
+
+    /** The resolution the last library entry belonged to (identity), and the cards it taught with an order nobody chose. */
+    private Object resolution = null;
+    private final List<Integer> resEntered = new ArrayList<>();
+    /** The cards that entered our library in that resolution so far. */
+    private int resCount = 0;
+
+    /**
+     * The spell or ability now resolving, or null. Not simply the top of the stack: a resolution can put a spell above
+     * itself (cascade casts the card it found before it puts the rest on the bottom), so it is the topmost stack item
+     * whose source is the resolving card.
+     */
+    static SpellAbility resolvingSa(final Game g) {
+        if (!g.getStack().isResolving()) {
+            return null;
+        }
+        for (forge.game.spellability.SpellAbilityStackInstance si : g.getStack()) {
+            final forge.game.card.Card src = si.getSourceCard();
+            if (src != null && g.getStack().isResolving(src)) {
+                return si.getSpellAbility();
+            }
+        }
+        return null;
+    }
+
+    /** Parameters that put cards into a library in a random order (no player chooses it). */
+    static final String[] RANDOM_PARAMS = {"RandomOrder", "RestRandomOrder", "RevealRandomOrder", "ShuffleChangedPile"};
+
+    /**
+     * Review #163 S1-1 (and S3-1): the seat chooses the order of the cards this resolution puts into its library: its
+     * own spell or ability, with no random-order step anywhere in the chain (cascade, Endurance, a dig's random rest,
+     * discover). The opponent's ordering (Agonizing Memories from our hand) is treated as unknown (fail closed: Forge does
+     * not show the seat that order).
+     */
+    boolean seatOrders(final SpellAbility root) {
+        if (root.getActivatingPlayer() == null || root.getActivatingPlayer().getId() != seatId) {
             return false;
         }
-        final SpellAbility sa = g.getStack().peekAbility();
-        return sa != null && sa.getActivatingPlayer() != null && sa.getActivatingPlayer().getId() == seatId;
+        for (SpellAbility sa = root; sa != null; sa = sa.getSubAbility()) {
+            for (String k : RANDOM_PARAMS) {
+                if (sa.hasParam(k)) {
+                    return false;
+                }
+            }
+            if (sa.getApi() == forge.game.ability.ApiType.Discover) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** The seat saw the card where it came from (its own hand, a public zone, face-up exile). */
@@ -193,7 +270,9 @@ public final class KnownOwnLibrary {
             case Graveyard: case Battlefield: case Stack: case Command:
                 return true;
             case Exile:
-                return !cv.isFaceDown();
+                // review #163 S3-2: the event fires after the move, so the view shows the card as it is in the library,
+                // not whether it was face down in exile: fail closed (exile is never a seen origin)
+                return false;
             default:
                 return false;
         }
