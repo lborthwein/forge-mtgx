@@ -307,6 +307,45 @@ public class RlLabelReplayTest {
         Assert.assertEquals(records(mut).size(), written);
     }
 
+    // ------------------------------------------------------------------------------------------------ 2b. the cap
+
+    @Test
+    public void aCappedSolverIsNamedInTheLabelAndIndexRows() throws Exception {
+        // rollout-budget-1101 (review #160 S2-2): a counted spec whose Forge AI work cap is 1 unit: every check that asks
+        // Forge AI is a cap hit, named in the record header and the index row, and never a proof
+        final Path lab = Files.createTempDirectory(out, "cap-");
+        final RlActorBench.Cfg c = replayCfg(lab, 3);
+        final JsonObject l = honest();
+        l.addProperty("turns", 3);
+        l.addProperty("out", lab.toString());
+        l.addProperty("sequentialAi", true);
+        l.addProperty("aiTimeoutSec", 600);
+        l.addProperty("lossWallMs", 0);
+        for (String k : new String[] {"solverCfg", "lossCfg"}) {
+            final JsonObject sc = l.getAsJsonObject(k);
+            sc.addProperty("budget", "counter");
+            sc.addProperty("aiWork", "1");
+        }
+        c.labelSpec = HonestLabel.Spec.parse(l);
+        Assert.assertEquals(RlActorBench.replay(c, index, "test"), 0, "capped labelled replay");
+        final List<JsonObject> idx = jsonl(lab, "index-");
+        final List<Object[]> recs = records(lab);
+        Assert.assertEquals(idx.size(), recs.size());
+        int capped = 0;
+        for (int i = 0; i < idx.size(); i++) {
+            final JsonObject h = (JsonObject) recs.get(i)[0];
+            Assert.assertEquals(idx.get(i).has("cap"), h.has("cap"), "index and header agree: " + idx.get(i));
+            if (h.has("cap")) {
+                capped++;
+                Assert.assertEquals(idx.get(i).get("cap").getAsString(), forge.ai.AiWork.CAP);
+                Assert.assertTrue(idx.get(i).get("cap_hits").getAsInt() >= 1);
+                Assert.assertEquals(h.get("label").getAsString(), "unresolved", "a capped check proves nothing: " + h);
+            }
+        }
+        System.err.println("[ai-work label test] rows " + idx.size() + " capped " + capped);
+        Assert.assertTrue(capped > 0, "no row reached a capped check");
+    }
+
     // ------------------------------------------------------------------------------------------------ 3. row schema
 
     @Test

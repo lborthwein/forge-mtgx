@@ -241,8 +241,13 @@ public final class ForcedWinSolver {
          * rollout-budget-1101 calibration: E1's off-identity set (1,892 counted decisions) spends at most 1,364,069 units
          * (62 s), p99 81,528, median 78; the B8 hung decision spends ~75k units per CPU second without end. 8M is ~6x
          * the set's maximum and caps a hung decision in ~2 min of CPU.
+         *
+         * <p>CONTRACT CONSTANT (review #160 S2-3; docs/heuristic-training-contract.md): frozen. Changing it changes which
+         * counted decisions are cap hits, so it makes a NEW label and generator version; record the new value in every
+         * manifest. The effective cap is recorded in the generator's spec ({@link HonestGenerator#solverCfgJson}).
          */
-        public static final long DEFAULT_AI_WORK = 8_000_000L;
+        public static final long DEFAULT_AI_WORK = 8_000_000L; // CONTRACT CONSTANT: see above
+
 
         /** rollout-budget-1101: the decision's Forge AI work cap in effect (0 = none). */
         public long aiWorkCap() {
@@ -945,6 +950,9 @@ public final class ForcedWinSolver {
         lastCap = null; // rollout-budget-1101
         final String key = positionKey(live, me);
         if (key.equals(noLineKey)) {
+            if (key.equals(capKey)) {
+                lastCap = forge.ai.AiWork.CAP; // review #160 S3-6: the cached "no line" of a capped position is the cap
+            }
             return null;
         }
         final long t0 = System.nanoTime();
@@ -965,8 +973,11 @@ public final class ForcedWinSolver {
         Line l;
         try {
             l = offense0(live, key);
-        } catch (forge.ai.AiWork.Exhausted ex) {
-            l = null; // spent outside a play-out's or move's own catch: the cap below
+        } catch (RuntimeException ex) {
+            if (work == null || !work.spent()) {
+                throw ex;
+            }
+            l = null; // review #160 S3-5: any error once the cap is spent is the cap (below), not an error
         } finally {
             forge.ai.AiWork.restore(outer);
         }
@@ -979,6 +990,8 @@ public final class ForcedWinSolver {
             l = null;
             lastCap = forge.ai.AiWork.CAP;
             lastOutcome = lastOutcome + "+" + forge.ai.AiWork.CAP;
+            noLineKey = key; // review #160 S3-6: the same position is not searched again (it would cap again)
+            capKey = key;
             meter.aiWorkCaps++;
             if (evalSink != null) {
                 evalSink.clear();
@@ -1029,6 +1042,8 @@ public final class ForcedWinSolver {
     private int lastPlannerNodes;
     /** rollout-budget-1101: the last offense's cap hit ({@link forge.ai.AiWork#CAP}), or null. */
     private String lastCap;
+    /** review #160 S3-6: the position key whose search hit the cap (its cached no-line answer is the cap). */
+    private String capKey;
 
     /** rollout-budget-1101: the last offense (or proposal) spent its Forge AI work cap: {@link forge.ai.AiWork#CAP}, or null. */
     public String lastCap() {
@@ -2231,10 +2246,16 @@ public final class ForcedWinSolver {
                 return 1;
             }
             return cm.hasLost() ? 0 : 0.5;
-        } catch (ForcedWinEngine.OutOfBudget ex) {
+        } catch (ForcedWinEngine.OutOfBudget | forge.ai.AiWork.Exhausted ex) {
+            if (forge.ai.AiWork.spent()) {
+                return 0; // review #160 S3-8: the Forge AI work cap, as the play-out: not a win, not dropped
+            }
             wallCuts++;
             return -1; // cut at the wall: the world is dropped
         } catch (RuntimeException | StackOverflowError ex) {
+            if (forge.ai.AiWork.spent()) {
+                return 0; // review #160 S3-8
+            }
             receipt("FORCED_WIN likely rollout error " + ex);
             return 0.5;
         } finally {

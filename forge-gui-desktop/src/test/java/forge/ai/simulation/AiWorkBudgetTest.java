@@ -76,13 +76,19 @@ public class AiWorkBudgetTest extends SimulationTest {
     }
 
     @Test
-    public void theCapIsOnByDefaultForCountedDecisionsAndUnrecorded() {
+    public void theCapIsOnByDefaultForCountedDecisionsAndRecorded() {
         final ForcedWinSolver.Config counted = BvwCounterBudgetTest.fromSpec("budget=counter,defense=false");
         Assert.assertEquals(counted.aiWorkCap(), ForcedWinSolver.Config.DEFAULT_AI_WORK);
         Assert.assertEquals(BvwCounterBudgetTest.fromSpec("defense=false").aiWorkCap(), 0L, "the ms path: no cap");
         Assert.assertEquals(BvwCounterBudgetTest.fromSpec("budget=counter,defense=false,aiWork=-1").aiWorkCap(), 0L);
         Assert.assertEquals(BvwCounterBudgetTest.fromSpec("budget=counter,defense=false,aiWork=77").aiWorkCap(), 77L);
-        Assert.assertFalse(HonestGenerator.solverCfgJson(counted).has("aiWork"), "the default is not recorded");
+        // review #160 S2-3: the effective cap is recorded whenever there is one (the counted default included)
+        Assert.assertEquals(ForcedWinSolver.Config.DEFAULT_AI_WORK, 8_000_000L, "a contract constant");
+        Assert.assertEquals(HonestGenerator.solverCfgJson(counted).get("aiWork").getAsLong(), 8_000_000L);
+        Assert.assertFalse(HonestGenerator.solverCfgJson(BvwCounterBudgetTest.fromSpec("defense=false")).has("aiWork"),
+                "the ms path: no cap, no key");
+        Assert.assertEquals(HonestGenerator.solverCfgJson(BvwCounterBudgetTest.fromSpec("budget=counter,defense=false,"
+                + "aiWork=-1")).get("aiWork").getAsLong(), -1L, "off under counter is recorded as off");
         Assert.assertFalse(counted.toString().contains("aiWork"));
         Assert.assertEquals(HonestGenerator.solverCfgJson(BvwCounterBudgetTest.fromSpec("budget=counter,defense=false,"
                 + "aiWork=77")).get("aiWork").getAsLong(), 77L);
@@ -140,6 +146,33 @@ public class AiWorkBudgetTest extends SimulationTest {
         Assert.assertEquals(BvwCounterBudgetTest.label(g, me, spec("1")).toString(), capped.toString(), "deterministic");
         Assert.assertEquals(LookaheadSearch.fingerprint(g), before, "labelling moved the game");
         Assert.assertNull(AiWork.current(), "no budget left open");
+    }
+
+    @Test(timeOut = 600000)
+    public void aCappedLossWorldIsLeftOutOfTheLossCheck() {
+        // review #160 S2-1: the Oracle holder's forced win, labelled from the other seat during the holder's main phase
+        // (a loss check, K = 8 worlds). One capped world is counted apart: not run, not "safe", and no loss label
+        final Game g = oracle();
+        final Player victim = g.getPlayers().get(1);
+        final JsonObject free = BvwCounterBudgetTest.label(g, victim, spec(null));
+        Assert.assertEquals(free.get("check").getAsString(), "loss", free.toString());
+        Assert.assertEquals(free.get("label").getAsString(), "loss", free.toString());
+        Assert.assertEquals(free.get("worlds_loss").getAsInt(), 8, free.toString());
+        Assert.assertFalse(free.has("worlds_capped"), free.toString());
+        final JsonObject capped;
+        HonestLabel.TEST_CAP_LOSS_WORLD = j -> j == 3;
+        try {
+            capped = BvwCounterBudgetTest.label(g, victim, spec(null));
+        } finally {
+            HonestLabel.TEST_CAP_LOSS_WORLD = null;
+        }
+        Assert.assertEquals(capped.get("worlds_capped").getAsInt(), 1, capped.toString());
+        Assert.assertEquals(capped.get("worlds_loss").getAsInt(), 7, capped.toString());
+        Assert.assertEquals(capped.get("lost_worlds").getAsInt(), 7, capped.toString());
+        Assert.assertEquals(capped.get("p_loss").getAsDouble(), 1.0, 1e-9, "p_loss is over the worlds run");
+        Assert.assertEquals(capped.get("cap").getAsString(), AiWork.CAP);
+        Assert.assertEquals(capped.get("cap_hits").getAsInt(), 1);
+        Assert.assertNotEquals(capped.get("label").getAsString(), "loss", "a capped world leaves the check unresolved");
     }
 
     @Test(timeOut = 900000)
