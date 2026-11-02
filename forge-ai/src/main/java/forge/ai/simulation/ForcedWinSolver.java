@@ -1013,6 +1013,40 @@ public final class ForcedWinSolver {
         }
     }
 
+    /**
+     * known-lib-1102 (empty unless {@link #notePinned} is called: HonestLabel's knownLib only): ids of our library cards
+     * whose position the seat knows at the root, beyond the known top (a fixed offset from the top or the bottom, not
+     * necessarily contiguous: Teferi's third from the top under two unknown cards). Every world this solver shuffles keeps
+     * them at their index ({@link #pinnedIn}).
+     */
+    final Set<Integer> pinned = new HashSet<>();
+
+    /** known-lib-1102: our seat knows the positions of these library cards (each stays at its index). */
+    public void notePinned(Iterable<Card> cards) {
+        if (cards == null) {
+            return;
+        }
+        for (Card c : cards) {
+            if (c != null && c.getOwner() == me) {
+                pinned.add(c.getId());
+            }
+        }
+    }
+
+    /** known-lib-1102: the pinned ids in {@code p}'s library (a copy keeps the ids); empty when none are noted. */
+    Set<Integer> pinnedIn(Player p) {
+        if (pinned.isEmpty()) {
+            return Collections.emptySet();
+        }
+        final Set<Integer> out = new HashSet<>();
+        for (Card c : p.getCardsIn(ZoneType.Library)) {
+            if (pinned.contains(c.getId())) {
+                out.add(c.getId());
+            }
+        }
+        return out;
+    }
+
     /** The known top of our library: the longest prefix whose cards the seat placed; null when none. */
     List<Integer> knownTop(Game live) {
         watch(live);
@@ -1088,12 +1122,22 @@ public final class ForcedWinSolver {
         String why;
 
         HiddenWatch(Player me, int knownTop, Set<Integer> cover) {
+            this(me, knownTop, null, cover);
+        }
+
+        /** known-lib-1102: as above, the root's pinned positions ({@code pinnedIds}; empty = none) known too. */
+        HiddenWatch(Player me, int knownTop, Set<Integer> pinnedIds, Set<Integer> cover) {
             this.me = me;
             this.meId = me.getId();
             this.cover = cover;
             this.snap = ids();
             for (int i = 0; i < Math.min(Math.max(knownTop, 0), snap.size()); i++) {
                 known.add(snap.get(i));
+            }
+            for (int x : snap) {
+                if (pinnedIds != null && pinnedIds.contains(x)) {
+                    known.add(x);
+                }
             }
         }
 
@@ -1430,6 +1474,14 @@ public final class ForcedWinSolver {
      * row sampled) when the sequences exceed {@code seqCap}, a play-out read a hidden card outside the arranged slots,
      * a sequence ran fewer than its worlds, or the Forge AI work cap was spent. Each sequence has the decision's budgets.
      */
+    /**
+     * known-lib-1102 (review #163 re-check S2-2): a line's evaluation with the decision's own deadline (as libExact
+     * gives each sequence), never Long.MAX_VALUE (which overflows where the evaluation adds its grace).
+     */
+    Eval evaluateBudgeted(Game live, Line line, long seed) {
+        return evaluate(live, line, seed, deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
+    }
+
     public LibExact libExact(Game live, Proposal p, int seqCap) {
         return libExact(live, p, seqCap, 0L);
     }
@@ -1447,6 +1499,7 @@ public final class ForcedWinSolver {
         for (int i = 0; i < Math.min(p.knownTop, lib.size()); i++) {
             knownIds.add(lib.get(i).getId());
         }
+        knownIds.addAll(pinnedIn(me)); // known-lib-1102: pinned positions are not drawn over
         final DrawExpectation.Draws d = DrawExpectation.draws(me, knownIds, p.hiddenTakes, seqCap, 0, mix(cfg.seed, key));
         if (!d.exact || d.depth < p.hiddenTakes || d.seqs.isEmpty()) {
             x.why = d.exact ? "library" : "seqCap";
@@ -2612,6 +2665,7 @@ public final class ForcedWinSolver {
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
             el.ownKnownTop = kt == null ? 0 : kt.size();
+            el.ownPinned = pinnedIn(me); // known-lib-1102 (empty unless noted)
         }
         el.wall = decisionWall;
         // bvw-step1-build-1024: budget=counter: the engine's move steps per search are capped (0 = none), no deadline,
@@ -2857,7 +2911,7 @@ public final class ForcedWinSolver {
                 for (Player o : cm.getOpponents()) {
                     hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
                 }
-                shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, rng);
+                shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, pinnedIn(cm), rng);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             if (line != null) {
@@ -2933,7 +2987,7 @@ public final class ForcedWinSolver {
             final Random rng = new Random(mix(cfg.seed, 0x425657L + decisionIndex));
             copies++;
             redraw.apply(live, me, g, cm, rng);
-            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), rng);
+            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), pinnedIn(cm), rng);
             return g;
         }
     }
@@ -3272,14 +3326,14 @@ public final class ForcedWinSolver {
                     if (libArrange != null) {
                         libArrange.apply(cm, rng); // e1-q8-1101: an exact-draw sequence at the first hidden slots
                     } else {
-                        shuffleUnknownOwnLibrary(cm, line, rng);
+                        shuffleUnknownOwnLibrary(cm, line.knownTop, pinnedIn(cm), rng);
                     }
                 } else if (libArrange != null) {
                     libArrange.apply(cm, rng);
                 }
             }
             if (cfg.libWatch) {
-                hw = new HiddenWatch(cm, line.knownTop, libArrange == null ? null : libArrange.cover);
+                hw = new HiddenWatch(cm, line.knownTop, pinnedIn(cm), libArrange == null ? null : libArrange.cover);
                 g.subscribeToEvents(hw);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
@@ -3446,15 +3500,31 @@ public final class ForcedWinSolver {
     }
 
     static void shuffleUnknownOwnLibrary(Player me, int knownTop, Random rng) {
+        shuffleUnknownOwnLibrary(me, knownTop, null, rng);
+    }
+
+    /**
+     * known-lib-1102: as above, the {@code pinned} cards (null or empty = none: exactly the above, RNG draws included)
+     * kept at their index too; the other cards below the known top are shuffled into the other slots.
+     */
+    static void shuffleUnknownOwnLibrary(Player me, int knownTop, Set<Integer> pinned, Random rng) {
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         final int k = Math.min(knownTop, lib.size());
         if (k >= lib.size()) {
             return;
         }
-        final List<Card> rest = new ArrayList<>(lib.subList(k, lib.size()));
+        final List<Card> rest = new ArrayList<>();
+        for (int i = k; i < lib.size(); i++) {
+            if (pinned == null || !pinned.contains(lib.get(i).getId())) {
+                rest.add(lib.get(i));
+            }
+        }
         Collections.shuffle(rest, rng);
         final List<Card> out = new ArrayList<>(lib.subList(0, k));
-        out.addAll(rest);
+        int r = 0;
+        for (int i = k; i < lib.size(); i++) {
+            out.add(pinned != null && pinned.contains(lib.get(i).getId()) ? lib.get(i) : rest.get(r++));
+        }
         me.getZone(ZoneType.Library).setCards(out);
     }
 
