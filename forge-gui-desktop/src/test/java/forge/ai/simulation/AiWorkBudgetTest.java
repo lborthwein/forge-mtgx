@@ -150,11 +150,14 @@ public class AiWorkBudgetTest extends SimulationTest {
 
     @Test(timeOut = 600000)
     public void aCappedLossWorldIsLeftOutOfTheLossCheck() {
-        // review #160 S2-1: the Oracle holder's forced win, labelled from the other seat during the holder's main phase
-        // (a loss check, K = 8 worlds). One capped world is counted apart: not run, not "safe", and no loss label
-        final Game g = oracle();
+        // review #160 S2-1: a lethal Craw Wurm on the board (a visible threat; a hand card would be re-drawn from belief),
+        // labelled from the defender (with a Mind Stone Forge AI weighs) during the attacker's main phase: a loss check,
+        // K = 8 worlds. One capped world is counted apart: not run, not "safe", and no loss label
+        final Game g = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame("", "Craw Wurm;Forest", 20,
+                "", "Mind Stone", 6, "human"));
         final Player victim = g.getPlayers().get(1);
         final JsonObject free = BvwCounterBudgetTest.label(g, victim, spec(null));
+        System.err.println("[ai-work loss test] free " + free);
         Assert.assertEquals(free.get("check").getAsString(), "loss", free.toString());
         Assert.assertEquals(free.get("label").getAsString(), "loss", free.toString());
         Assert.assertEquals(free.get("worlds_loss").getAsInt(), 8, free.toString());
@@ -166,6 +169,7 @@ public class AiWorkBudgetTest extends SimulationTest {
         } finally {
             HonestLabel.TEST_CAP_LOSS_WORLD = null;
         }
+        System.err.println("[ai-work loss test] capped " + capped);
         Assert.assertEquals(capped.get("worlds_capped").getAsInt(), 1, capped.toString());
         Assert.assertEquals(capped.get("worlds_loss").getAsInt(), 7, capped.toString());
         Assert.assertEquals(capped.get("lost_worlds").getAsInt(), 7, capped.toString());
