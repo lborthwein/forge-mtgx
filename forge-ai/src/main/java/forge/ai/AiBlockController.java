@@ -84,6 +84,7 @@ public class AiBlockController {
         final List<Card> blockers = new ArrayList<>();
 
         for (final Card blocker : blockersLeft) {
+            AiWork.tick("getPossibleBlockers"); // rollout-budget-1101: one counted unit per pair (no budget = no-op)
             // if the blocker can block a creature with lure it can't block a creature without
             if (CombatUtil.canBlock(attacker, blocker, combat)) {
                 boolean cantBlockAlone = blocker.hasKeyword("CARDNAME can't attack or block alone.") || blocker.hasKeyword("CARDNAME can't block alone.");

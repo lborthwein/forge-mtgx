@@ -343,6 +343,13 @@ public final class HonestLabel {
         public String copyPending;
         /** bvw-step1-build-1024: the check's solver work (null unless the spec meters). */
         public JsonObject meter;
+        /**
+         * rollout-budget-1101: the cap a solver of this check hit ({@link forge.ai.AiWork#CAP}: its Forge AI work), or
+         * null; with the solvers (the win check's one, the loss check's per-world ones) that hit it. A capped solver
+         * proposes no line, so a capped check proves nothing it did not prove before the cap.
+         */
+        public String cap;
+        public int capHits;
 
         public JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -367,6 +374,10 @@ public final class HonestLabel {
             o.addProperty("ms", Math.round(ms * 10) / 10.0);
             if (error != null) o.addProperty("error", error);
             if (meter != null) o.add("meter", meter);
+            if (cap != null) {
+                o.addProperty("cap", cap);
+                o.addProperty("cap_hits", capHits);
+            }
             if (copyPending != null) {
                 o.addProperty("copy_pending", copyPending);
             }
@@ -551,6 +562,10 @@ public final class HonestLabel {
                 throw new IllegalStateException("refused: dishonest win solver");
             }
             final List<ForcedWinSolver.Proposal> props = s.propose(root);
+            if (s.lastCap() != null) {
+                r.cap = s.lastCap(); // rollout-budget-1101
+                r.capHits++;
+            }
             r.proposals = props.size();
             if (spec.meter) {
                 r.meter = s.meter.toJson();
@@ -613,6 +628,10 @@ public final class HonestLabel {
                     throw new IllegalStateException("refused: dishonest loss solver");
                 }
                 final List<ForcedWinSolver.Proposal> props = s.propose(g);
+                if (s.lastCap() != null) {
+                    r.cap = s.lastCap(); // rollout-budget-1101
+                    r.capHits++;
+                }
                 ran++;
                 if (sum != null) {
                     sum.plus(s.meter);

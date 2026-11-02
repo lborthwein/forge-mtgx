@@ -230,6 +230,19 @@ public final class ForcedWinSolver {
         public boolean loopMacro3 = false;
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
+        /**
+         * rollout-budget-1101 (DESIGN-R3 N4/N9 blocker): Forge AI's own evaluation work in one counted decision, in
+         * {@link forge.ai.AiWork} units. 0 (the default, unrecorded) = {@link #DEFAULT_AI_WORK} with budget=counter and
+         * none on the ms path; a value below 0 = none; above 0 = that cap. A decision that spends it is a cap hit
+         * ({@link forge.ai.AiWork#CAP}): it takes and proposes no line. Below the cap nothing changes.
+         */
+        public long aiWork = 0;
+        public static final long DEFAULT_AI_WORK = 2_000_000L;
+
+        /** rollout-budget-1101: the decision's Forge AI work cap in effect (0 = none). */
+        public long aiWorkCap() {
+            return aiWork > 0 ? aiWork : aiWork == 0 && counter ? DEFAULT_AI_WORK : 0L;
+        }
         public String engineOrder = "off";
         /**
          * labeller-v2 item (d) (PREDECLARATION-labeller-v2.md; false = off, the default, and then nothing changes): in
@@ -280,6 +293,9 @@ public final class ForcedWinSolver {
                 java.util.Map.entry("engineCostChoice", false), java.util.Map.entry("engineStack", false),
                 java.util.Map.entry("loopMacro3", false));
 
+        /** rollout-budget-1101: its key, with its default (absent from a recorded config at it). */
+        public static final java.util.Map<String, Object> AIWORK_DEFAULTS = java.util.Map.of("aiWork", 0L);
+
         /** Labeller v2 (PREDECLARATION-labeller-v2): its keys, with their defaults (absent from a recorded config at these). */
         public static final java.util.Map<String, Object> V2_DEFAULTS = java.util.Map.ofEntries(
                 java.util.Map.entry("oppMin", false), java.util.Map.entry("oppResponses", 4),
@@ -318,6 +334,14 @@ public final class ForcedWinSolver {
             c.ladderCards = intOr(get.apply("ladderCards"), c.ladderCards);
             c.ladderPathCards = intOr(get.apply("ladderPathCards"), c.ladderPathCards);
             c.engineEvalSteps = intOr(get.apply("engineEvalSteps"), c.engineEvalSteps);
+            final String aiWork = get.apply("aiWork");
+            if (aiWork != null && !aiWork.isEmpty()) {
+                try {
+                    c.aiWork = Long.parseLong(aiWork);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("forced-win aiWork must be an integer, not " + aiWork);
+                }
+            }
             final String order = get.apply("engineOrder");
             if (order != null && !order.isEmpty()) {
                 if (!order.equals("off") && !order.equals("static") && !order.equals("service")) {
@@ -424,7 +448,7 @@ public final class ForcedWinSolver {
                 + (engineEvalSteps > 0 ? " engineEvalSteps=" + engineEvalSteps : "")
                 + (!"off".equals(engineOrder) ? " engineOrder=" + engineOrder : "") + (engineX ? " engineX" : "")
                 + (engineCostChoice ? " engineCostChoice" : "") + (engineStack ? " engineStack" : "")
-                + (loopMacro3 ? " loopMacro3" : "");
+                + (loopMacro3 ? " loopMacro3" : "") + (aiWork != 0 ? " aiWork=" + aiWork : "");
         }
     }
 
@@ -520,6 +544,11 @@ public final class ForcedWinSolver {
         public long cacApplies;
         /** solver-cap12 round 3 (R3-1): ladder escalations, the lines they found, their nodes and steps; only when non-zero. */
         public long ladderRuns, ladderFound, ladderNodes, ladderSteps;
+        /**
+         * rollout-budget-1101: decisions that spent their Forge AI work cap ({@link forge.ai.AiWork#CAP}), and play-outs
+         * cut by it (not wins); reported only when non-zero.
+         */
+        public long aiWorkCaps, playoutAiWorkCuts;
 
         public Meter copy() {
             final Meter m = new Meter();
@@ -557,6 +586,8 @@ public final class ForcedWinSolver {
             ladderFound += sign * o.ladderFound;
             ladderNodes += sign * o.ladderNodes;
             ladderSteps += sign * o.ladderSteps;
+            aiWorkCaps += sign * o.aiWorkCaps;
+            playoutAiWorkCuts += sign * o.playoutAiWorkCuts;
         }
 
         /** This meter minus {@code before} (one call's work), or a copy when {@code before} is null. */
@@ -615,6 +646,10 @@ public final class ForcedWinSolver {
                 o.addProperty("ladder_found", ladderFound);
                 o.addProperty("ladder_nodes", ladderNodes);
                 o.addProperty("ladder_steps", ladderSteps);
+            }
+            if (aiWorkCaps != 0 || playoutAiWorkCuts != 0) {
+                o.addProperty("ai_work_caps", aiWorkCaps);
+                o.addProperty("playout_ai_work_cuts", playoutAiWorkCuts);
             }
             return o;
         }
@@ -902,6 +937,7 @@ public final class ForcedWinSolver {
 
     /** Evaluate the position; the chosen line, or null. */
     Line offense(Game live) {
+        lastCap = null; // rollout-budget-1101
         final String key = positionKey(live, me);
         if (key.equals(noLineKey)) {
             return null;
@@ -917,11 +953,35 @@ public final class ForcedWinSolver {
             receipt("FORCED_WIN copy-pending offense" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " phase="
                     + live.getPhaseHandler().getPhase() + (gaps == null ? " carried" : " gap=" + gaps));
         }
-        final Line l = offense0(live, key);
+        // rollout-budget-1101: the decision's Forge AI work is counted against its cap (none = nothing opened)
+        final long workCap = cfg.aiWorkCap();
+        final forge.ai.AiWork.Budget outer = forge.ai.AiWork.open(workCap);
+        final forge.ai.AiWork.Budget work = workCap > 0 ? forge.ai.AiWork.current() : null;
+        Line l;
+        try {
+            l = offense0(live, key);
+        } catch (forge.ai.AiWork.Exhausted ex) {
+            l = null; // spent outside a play-out's or move's own catch: the cap below
+        } finally {
+            forge.ai.AiWork.restore(outer);
+        }
+        if (work != null && work.spent()) {
+            // a cap hit, never a proof: no line is taken or proposed, whatever was found before the cap
+            l = null;
+            lastCap = forge.ai.AiWork.CAP;
+            lastOutcome = lastOutcome + "+" + forge.ai.AiWork.CAP;
+            meter.aiWorkCaps++;
+            if (evalSink != null) {
+                evalSink.clear();
+            }
+            receipt("FORCED_WIN " + forge.ai.AiWork.CAP + tag() + " turn=" + live.getPhaseHandler().getTurn() + " phase="
+                    + live.getPhaseHandler().getPhase() + " used=" + work.used() + " cap=" + workCap + " at=" + work.spentAt());
+        }
         receipt("FORCED_WIN cost" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " phase=" + live.getPhaseHandler().getPhase()
                 + " outcome=" + lastOutcome + " ms=" + (System.nanoTime() - t0) / 1_000_000 + " plannerNodes="
                 + lastPlannerNodes + " engineNodes=" + (engineStats.nodes - eng0) + " copies="
-                + (copies + engineStats.copies - copies0) + " probes=" + (reader.probeStats.probes - probes0));
+                + (copies + engineStats.copies - copies0) + " probes=" + (reader.probeStats.probes - probes0)
+                + (work != null ? " aiWork=" + work.used() : ""));
         if (m0 != null) {
             // bvw-step1-build-1024: the decision's work in counter units (diagnostics only; budget calibration)
             System.err.println("FORCED_WIN meter" + tag() + " turn=" + live.getPhaseHandler().getTurn() + " phase="
@@ -958,6 +1018,13 @@ public final class ForcedWinSolver {
 
     private String lastOutcome = "?";
     private int lastPlannerNodes;
+    /** rollout-budget-1101: the last offense's cap hit ({@link forge.ai.AiWork#CAP}), or null. */
+    private String lastCap;
+
+    /** rollout-budget-1101: the last offense (or proposal) spent its Forge AI work cap: {@link forge.ai.AiWork#CAP}, or null. */
+    public String lastCap() {
+        return lastCap;
+    }
 
     private Line offense0(Game live, String key) {
         decisions++;
@@ -1136,6 +1203,7 @@ public final class ForcedWinSolver {
      */
     public List<Proposal> propose(Game live) {
         final List<Proposal> out = new ArrayList<>();
+        lastCap = null; // rollout-budget-1101
         final PhaseHandler ph = live.getPhaseHandler();
         final boolean ourMain = ph.isPlayerTurn(me) && (ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2));
         final boolean theirEnd = !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
@@ -2251,6 +2319,9 @@ public final class ForcedWinSolver {
                 meter.evalCapStops++; // bvw-step1-build-1024: budget=counter, the decision's evalSteps are spent
                 break;
             }
+            if (forge.ai.AiWork.spent()) {
+                break; // rollout-budget-1101: the decision's Forge AI work is spent (a cap hit; offense drops the result)
+            }
             final Eval e = evaluate(live, picked.get(i), mix(cfg.seed, index * 1000L + i), deadline);
             receipt("FORCED_WIN eval #" + i + tag() + " turn=" + live.getPhaseHandler().getTurn() + " " + e);
             if (evalSink != null) {
@@ -2307,6 +2378,12 @@ public final class ForcedWinSolver {
             }
             if (n > 0 && evalStepsSpent()) {
                 meter.evalCapStops++; // bvw-step1-build-1024: budget=counter, the decision's evalSteps are spent
+                break;
+            }
+            if (forge.ai.AiWork.spent()) {
+                // rollout-budget-1101: the Forge AI work cap is spent: the world counts as not won (never a proof)
+                fails.merge(forge.ai.AiWork.CAP, 1, Integer::sum);
+                n++;
                 break;
             }
             meter.worlds++;
@@ -2584,7 +2661,15 @@ public final class ForcedWinSolver {
                     out.why += " {" + endState(g, cm, f) + "}";
                 }
             }
-        } catch (ForcedWinEngine.OutOfBudget ex) {
+        } catch (ForcedWinEngine.OutOfBudget | forge.ai.AiWork.Exhausted ex) {
+            if (forge.ai.AiWork.spent()) {
+                // rollout-budget-1101: the decision's Forge AI work cap is spent: not a win, and not dropped as at the wall
+                out.won = false;
+                out.why = forge.ai.AiWork.CAP;
+                meter.playoutAiWorkCuts++;
+                receipt("FORCED_WIN playout cut world=" + world + " " + ex.getMessage());
+                return out;
+            }
             // a step still running at the wall, or an attack the rules refused twice: not a win
             out.won = false;
             out.why = "wall";

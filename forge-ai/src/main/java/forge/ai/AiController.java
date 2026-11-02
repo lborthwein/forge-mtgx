@@ -841,6 +841,7 @@ public class AiController {
 
     private AiPlayDecision canPlayAndPayFor(final SpellAbility sa) {
         final Card host = sa.getHostCard();
+        AiWork.tick("canPlayAndPayFor"); // rollout-budget-1101: a counted unit (no budget open = no-op)
 
         if (sa instanceof Spell sp) {
             Card altHost = sp.canPlayFromHost();
@@ -1738,12 +1739,25 @@ public class AiController {
         });
         // CpuAccount.charged: the eval thread's CPU is charged to the asking thread's accounts (an RL search seat's game,
         // lane s1-search-1007); with none set it is the FutureTask itself, as before
-        Thread t = new Thread(CpuAccount.charged(future), "Game AI Eval");
+        // rollout-budget-1101: AiWork.carried: the eval thread works under the asking thread's counted budget (none = the
+        // task itself, as before); a spent budget is handed back to the asking thread as AiWork.Exhausted, never a pass
+        Thread t = new Thread(AiWork.carried(CpuAccount.charged(future)), "Game AI Eval");
         t.setDaemon(true);
         t.start();
         try {
-            return future.get(game.getAITimeout(), TimeUnit.SECONDS);
+            final SpellAbility chosen = future.get(game.getAITimeout(), TimeUnit.SECONDS);
+            AiWork.check("chooseSpellAbilityToPlay");
+            return chosen;
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
+            if (AiWork.spent()) {
+                future.cancel(true);
+                try {
+                    t.join(2000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                AiWork.check("chooseSpellAbilityToPlay");
+            }
             e.printStackTrace();
             if (e instanceof TimeoutException) {
                 // log where the eval thread currently is - each timeout doubles as a
