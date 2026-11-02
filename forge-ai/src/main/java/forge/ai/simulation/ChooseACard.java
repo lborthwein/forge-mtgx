@@ -413,6 +413,149 @@ public final class ChooseACard implements CacHook {
         this.checker = c;
     }
 
+    // ------------------------------------------------------------------------------------------------ E1 label rows
+
+    /**
+     * r3-labelsearch-1030 (E1, DESIGN-R3 N1; null = none, the default: every path unchanged): the label-row search of a
+     * decision. Called once per decision with two or more answers, after its ranking (the batched value pass and the
+     * solver's top-m promotion) and before its answer is played; it never changes the answer.
+     */
+    public interface RowSearch {
+        void row(Row row);
+    }
+
+    private RowSearch rowSearch = null;
+
+    public void setRowSearch(final RowSearch r) {
+        this.rowSearch = r;
+    }
+
+    /** E1: builds an apply copy's world from the live game (in place of the unknown-slot shuffle and the re-draw). */
+    public interface WorldMaker {
+        void make(Game live, Player liveMe, Game copy, Player copyMe);
+    }
+
+    /**
+     * E1: bind to a live seat WITHOUT installing on its controller (a forced replay answers its choices from the record;
+     * the host calls the hook methods itself with the seat's inner controller, in shadow).
+     */
+    public void bind(final Game g, final Player p) {
+        if (memory == null || live != g || me != p) {
+            this.memory = new OwnLibraryMemory(p);
+            memory.watch(g);
+        }
+        this.live = g;
+        this.me = p;
+    }
+
+    /** E1: one ranked decision, as the row search sees it. Answer 0 is Forge's (the baseline). */
+    public final class Row {
+        private final Decision d;
+        private final List<Answer> list;
+        private final double[] score;
+
+        Row(final Decision d, final List<Answer> list, final double[] score) {
+            this.d = d;
+            this.list = list;
+            this.score = score;
+        }
+
+        public int size() {
+            return list.size();
+        }
+
+        public int index() {
+            return d.index;
+        }
+
+        public String kind() {
+            return d.ask.kind.name();
+        }
+
+        public String method() {
+            return d.ask.method;
+        }
+
+        public String src() {
+            return d.ask.src;
+        }
+
+        public int nEnum() {
+            return d.nEnum;
+        }
+
+        public boolean capped() {
+            return d.nEnum + 1 > cfg.cap;
+        }
+
+        /** The ranking score (v, or a solver-proven win above 1); -inf = the answer was dropped. */
+        public double score(final int i) {
+            return score[i];
+        }
+
+        public String desc(final int i) {
+            return String.join(" ", list.get(i).desc);
+        }
+
+        public String key(final int i) {
+            return list.get(i).key;
+        }
+
+        public boolean forge(final int i) {
+            return list.get(i).forge;
+        }
+
+        /** The decision's log entry (its candidates and work), as built so far. */
+        public JsonObject entry() {
+            return d.entry;
+        }
+
+        public Game live() {
+            return live;
+        }
+
+        public Player me() {
+            return me;
+        }
+
+        /** Our library ids whose positions the seat knows (the decision's memory), in the live game. */
+        public Set<Integer> known() {
+            return memory == null ? new HashSet<>() : memory.known(me);
+        }
+
+        /**
+         * E1 (owner ruling 10-30): the card ids answer {@code i} gives up from our hand: a discard's or a mulligan
+         * bottom's cards (empty for other kinds, and for Forge's own answer when it was probed, not recorded).
+         */
+        public List<Integer> spent(final int i) {
+            final Answer a = list.get(i);
+            return a.cards == null ? Collections.<Integer>emptyList() : a.cards;
+        }
+
+        /** The ids answer {@code i} places at known library positions. */
+        public Set<Integer> placed(final int i) {
+            return list.get(i).placed();
+        }
+
+        /**
+         * Apply answer {@code i} on a fresh copy whose world {@code wm} builds (null = the decision's own), settle to the
+         * leaf point (the first empty-stack priority, or the end of the game), and run {@code atLeaf} on the copy inside
+         * its own scopes. Null = the answer could not be applied (or {@code atLeaf} returned null).
+         */
+        public <T> T play(final int i, final WorldMaker wm, final long seed,
+                final java.util.function.BiFunction<Game, Player, T> atLeaf) {
+            final Prep p = apply(d, list.get(i), seed, false, wm, true);
+            if (p == null || p.g == null) {
+                return null;
+            }
+            try {
+                return inScope(p, () -> atLeaf.apply(p.g, p.me));
+            } finally {
+                p.g = null;
+            }
+        }
+    }
+
     /** Install on the live seat's controller (OFF installs nothing). */
     public void install(final PlayerControllerAi ctrl) {
         if (cfg.mode == Config.Mode.OFF) {
@@ -1898,6 +2041,15 @@ public final class ChooseACard implements CacHook {
                 return null;
             }
             out = choose(d, list, score);
+            if (rowSearch != null) {
+                // r3-labelsearch-1030 (E1): the label row over the ranked answers; it never changes the answer
+                try {
+                    rowSearch.row(new Row(d, list, lastScores.clone()));
+                } catch (RuntimeException | StackOverflowError ex) {
+                    count("rowError");
+                    e.addProperty("row_error", String.valueOf(ex));
+                }
+            }
             if (cfg.mode == Config.Mode.SHADOW && list.get(0).probed) {
                 sb[0] = list.get(0);
             }
@@ -2464,6 +2616,15 @@ public final class ChooseACard implements CacHook {
     }
 
     private Prep apply(final Decision d, final Answer a, final long seed, final boolean probe) {
+        return apply(d, a, seed, probe, null, false);
+    }
+
+    /**
+     * r3-labelsearch-1030 (E1): as above; {@code wm} (null = the decision's own world: unknown slots shuffled, the belief
+     * re-draw) builds the copy's world instead, and {@code noValue} skips the valuer (the caller plays the copy on).
+     */
+    private Prep apply(final Decision d, final Answer a, final long seed, final boolean probe, final WorldMaker wm,
+            final boolean noValue) {
         final Ask ask = d.ask;
         final Prep p = new Prep();
         final Random prev = MyRandom.getThreadRandom();
@@ -2496,11 +2657,13 @@ public final class ChooseACard implements CacHook {
                 }
                 // honesty (DESIGN-r2 §14 (2)): the copy's unknown library slots are shuffled (known positions and the
                 // cards this ask shows stay), one seed per decision so every answer sees the same arrangement
-                if (memory != null && !probe) {
+                if (wm != null && !probe) {
+                    wm.make(live, me, g, cm);
+                } else if (memory != null && !probe) {
                     OwnLibraryMemory.shuffleUnknown(cm, memory.known(cm),
                             new Random(LookaheadSearch.mix(cfg.seed, 0x5EED0000L + d.index)));
                 }
-                if (redraw != null && !probe) {
+                if (redraw != null && !probe && wm == null) {
                     redraw.apply(live, me, g, cm, new Random(LookaheadSearch.mix(cfg.seed, 0x0DD0000L + d.index)));
                 }
             }
@@ -2515,7 +2678,7 @@ public final class ChooseACard implements CacHook {
             for (Player o : g.getPlayers()) {
                 if (o != cm) o.dangerouslySetController(new Watch(g, o, o.getController().getLobbyPlayer(), leaf));
             }
-            final Object ctx = valuer == null ? null : valuer.onCopy(g, cm);
+            final Object ctx = valuer == null || noValue ? null : valuer.onCopy(g, cm);
             // resume the decision
             if (ask.cast) {
                 why = applyCast(g, cm, sc, a); // r3-inline-choices-1030
@@ -2678,7 +2841,7 @@ public final class ChooseACard implements CacHook {
                 why = "settle";
                 return null;
             } else {
-                p.leaf = valuer.capture(ctx, g, cm);
+                p.leaf = noValue ? null : valuer.capture(ctx, g, cm);
             }
             return p;
         } catch (RuntimeException | StackOverflowError ex) {

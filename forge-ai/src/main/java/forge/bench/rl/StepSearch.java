@@ -54,7 +54,7 @@ public final class StepSearch {
 
     /** A pinned identity the search service does not match, or no service: the run stops (never a row without target). */
     public static final class PinError extends IllegalStateException {
-        PinError(final String why) {
+        public PinError(final String why) {
             super(why);
         }
     }

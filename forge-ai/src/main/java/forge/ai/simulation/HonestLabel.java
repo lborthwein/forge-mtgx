@@ -91,7 +91,7 @@ public final class HonestLabel {
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
-                "search", "reference", "referenceTurns"));
+                "search", "reference", "referenceTurns", "r3", "r3Ranker"));
 
         /** The spec, or IllegalArgumentException ("refused: ...") when it is not honest or not well formed. */
         public static Spec parse(final JsonObject o) {
@@ -256,6 +256,11 @@ public final class HonestLabel {
             if (meter) {
                 o.addProperty("meter", true); // bvw-step1-build-1024: only when on, so every other spec's sha is unchanged
             }
+            if (minOn(solverCfg) || minOn(lossCfg)) {
+                // review #148 S2-1: the shared budgeted MIN (OppMin) changed what oppMin proves; only specs with oppMin
+                // on carry the version, so v1 specs keep their sha and v2 rows from before #148 cannot share one
+                o.addProperty("oppMinVersion", OppMin.VERSION);
+            }
             if (sequentialAi != null) {
                 o.addProperty("sequentialAi", sequentialAi); // review #3: only when set (counter specs set both)
             }
@@ -263,6 +268,14 @@ public final class HonestLabel {
                 o.addProperty("aiTimeoutSec", aiTimeoutSec);
             }
             return o;
+        }
+
+        static boolean minOn(final JsonObject cfg) {
+            if (cfg == null) return false;
+            for (String k : new String[] {"labellerV2", "oppMin"}) {
+                if (cfg.has(k) && "true".equals(cfg.get(k).getAsString())) return true;
+            }
+            return false;
         }
 
         /** sha256 of the spec's canonical JSON (sorted keys). */

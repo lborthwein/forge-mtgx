@@ -272,6 +272,57 @@ public final class DrawExpectation {
         return res;
     }
 
+    /**
+     * r3-labelsearch-1030 (E1): the draw sequences {@link #evaluate} would use, for a caller that plays its own leaves
+     * (the R3 label search's roll-outs): the next {@code drawDepth} unknown slots of {@code me}'s library, exact over the
+     * distinct name sequences (weight = probability) up to {@code seqCap}, else {@code samples} seeded samples.
+     */
+    public static final class Draws {
+        public final List<List<String>> seqs = new ArrayList<>();
+        public final List<Double> weights = new ArrayList<>();
+        public boolean exact;
+        public int depth, unknown, known;
+        /** The unknown cards sorted by id and their slots (top first), for {@link #arrange}. */
+        public final List<Card> unknownById = new ArrayList<>();
+        public final List<Integer> unknownSlots = new ArrayList<>();
+    }
+
+    public static Draws draws(final Player me, final Set<Integer> known, final int drawDepth, final int seqCap,
+            final int samples, final long seed0) {
+        final Draws out = new Draws();
+        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+        final List<Card> unknown = new ArrayList<>();
+        for (int i = 0; i < lib.size(); i++) {
+            if (known == null || !known.contains(lib.get(i).getId())) {
+                out.unknownSlots.add(i);
+                unknown.add(lib.get(i));
+            }
+        }
+        final Map<String, Integer> counts = new LinkedHashMap<>();
+        out.unknownById.addAll(unknown);
+        out.unknownById.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+        for (Card c : out.unknownById) counts.merge(c.getName(), 1, Integer::sum);
+        out.depth = Math.min(drawDepth, unknown.size());
+        out.unknown = unknown.size();
+        out.known = lib.size() - unknown.size();
+        enumerate(new ArrayList<>(counts.keySet()), new ArrayList<>(counts.values()), unknown.size(), out.depth,
+                new ArrayList<>(), 1.0, out.seqs, out.weights, seqCap + 1);
+        out.exact = out.seqs.size() <= seqCap;
+        if (!out.exact) {
+            out.seqs.clear();
+            out.weights.clear();
+            for (int s = 0; s < samples; s++) {
+                final List<Card> sh = new ArrayList<>(out.unknownById);
+                Collections.shuffle(sh, new Random(LookaheadSearch.mix(seed0, 0x5A3D0000L + s)));
+                final List<String> q = new ArrayList<>();
+                for (int i = 0; i < out.depth; i++) q.add(sh.get(i).getName());
+                out.seqs.add(q);
+                out.weights.add(1.0 / samples);
+            }
+        }
+        return out;
+    }
+
     private static void enumerate(final List<String> names, final List<Integer> counts, final int total, final int d,
             final List<String> cur, final double p, final List<List<String>> out, final List<Double> w, final int stop) {
         if (out.size() >= stop) return;
@@ -398,7 +449,7 @@ public final class DrawExpectation {
     }
 
     /** Our library in the copy: known slots unchanged; the first unknown slots hold the sequence; the rest shuffled. */
-    static void arrange(final Player me, final List<String> seq, final List<Card> unknownById,
+    public static void arrange(final Player me, final List<String> seq, final List<Card> unknownById,
             final List<Integer> unknownSlots, final Random rng) {
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         final Map<Integer, Card> byId = new HashMap<>();

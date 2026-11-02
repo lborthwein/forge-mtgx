@@ -180,6 +180,9 @@ public final class RlActorBench {
          */
         int labelBandLo = 0;
         forge.bench.rl.StepSearch.Spec labelSearch = null;
+        /** r3-labelsearch-1030 (E1; null = off): the R3 label search block and its ranker (label.r3, label.r3Ranker). */
+        forge.ai.simulation.R3LabelSearch.Spec labelR3 = null;
+        JsonObject labelR3Ranker = null;
         /**
          * bvw-step1-build-1024 (OPEN-6 ruling; null = off): the read-only face-down-exile scan of replayed tapes
          * ({@link forge.bench.rl.RlExileScan}): {@code exileScan} = {"turns": T, "out": DIR}. Not with a label spec.
@@ -318,6 +321,9 @@ public final class RlActorBench {
                     throw new IllegalArgumentException("label.band [lo, hi) needs 0 <= lo < hi");
                 }
             }
+            if (l.has("search") && !l.get("search").isJsonNull() && l.has("r3") && !l.get("r3").isJsonNull()) {
+                throw new IllegalArgumentException("refused: label.search and label.r3 are two teachers");
+            }
             if (l.has("search") && !l.get("search").isJsonNull()) {
                 // bvw-step1-build-1024: refused unless honest, host-independent and tied to the proof check
                 if (!c.labelSpec.counterBudgets()) {
@@ -325,6 +331,27 @@ public final class RlActorBench {
                 }
                 c.labelSearch = forge.bench.rl.StepSearch.Spec.parse(l.getAsJsonObject("search"), c.labelSpec,
                         c.labelBandLo, c.labelTurns);
+            } else if (l.has("r3") && !l.get("r3").isJsonNull()) {
+                // r3-labelsearch-1030 (E1): the R3 label search is the band's teacher (counter budgets only)
+                if (!l.has("band")) {
+                    throw new IllegalArgumentException("refused: label.r3 needs a band");
+                }
+                if (!c.labelSpec.counterBudgets()) {
+                    throw new IllegalArgumentException("refused: label.r3 needs the proof check on budget=counter");
+                }
+                c.labelR3 = forge.ai.simulation.R3LabelSearch.Spec.parse(l.getAsJsonObject("r3"));
+                if (!l.has("r3Ranker") || !l.get("r3Ranker").isJsonObject()) {
+                    throw new IllegalArgumentException("refused: label.r3 needs r3Ranker {\"kind\": \"service\", "
+                            + "\"rlsearch\": {...}, \"valueSha\": ...} (or \"static\": report only)");
+                }
+                c.labelR3Ranker = l.getAsJsonObject("r3Ranker");
+                final String rk = c.labelR3Ranker.has("kind") ? c.labelR3Ranker.get("kind").getAsString() : "";
+                if (!"static".equals(rk) && !"service".equals(rk)) {
+                    throw new IllegalArgumentException("label.r3Ranker.kind is \"service\" or \"static\"");
+                }
+                if ("service".equals(rk) && (!c.labelR3Ranker.has("rlsearch") || !c.labelR3Ranker.has("valueSha"))) {
+                    throw new IllegalArgumentException("refused: r3Ranker service needs rlsearch and valueSha");
+                }
             } else if (l.has("band")) {
                 // review #14: a band is a step-k labeller; step-0 rows come only from the turns window
                 throw new IllegalArgumentException("refused: a label band needs a search block (step-0 rows use turns)");
@@ -1764,7 +1791,8 @@ public final class RlActorBench {
                     : cfg.labelOut != null ? cfg.labelOut : ".");
             wd = ReplayStallWatchdog.start(cfg.watchdog, ts, wdir, replayed, paths, cfg.replayLines, out,
                     cfg.labelSpec != null ? labelSink : null,
-                    cfg.labelSearch != null ? forge.bench.rl.RlReplayLabeller.SCHEMA_STEP
+                    cfg.labelR3 != null ? forge.bench.rl.RlReplayLabeller.SCHEMA_R3
+                            : cfg.labelSearch != null ? forge.bench.rl.RlReplayLabeller.SCHEMA_STEP
                             : forge.bench.rl.RlReplayLabeller.SCHEMA, w, jarSha);
             if (wd != null) {
                 System.err.println("[rlactor] stall watchdog " + RlWire.canonicalString(cfg.watchdog.toJson()) + " -> "
@@ -1908,7 +1936,15 @@ public final class RlActorBench {
                 final forge.bench.rl.RlExileScan[] scans = new forge.bench.rl.RlExileScan[1];
                 final GameHook hook0 = cfg.labelSpec != null ? (game, seat, know) -> {
                     labs[0] = new forge.bench.rl.RlReplayLabeller(cfg.labelSpec, cfg.labelBandLo, cfg.labelTurns,
-                            cfg.labelSearch, t, jarSha, game, know, feat.index(), tobs);
+                            cfg.labelSearch, t, jarSha, game, know, feat.index(), tobs, cfg.labelR3 != null);
+                    if (cfg.labelR3 != null) {
+                        // r3-labelsearch-1030 (E1): the R3 rows (priority + choice) of this game
+                        final long ruid = forge.bench.rl.RlWire.parseUid(t.get("game_uid").getAsString());
+                        labs[0].setR3(cfg.labelR3, "static".equals(cfg.labelR3Ranker.get("kind").getAsString())
+                                ? forge.bench.rl.RlReplayLabeller.staticRanker()
+                                : forge.bench.rl.RlReplayLabeller.serviceRanker(cfg.labelR3Ranker.getAsJsonObject("rlsearch"),
+                                        cfg.labelR3Ranker.get("valueSha").getAsString(), feat.index(), tobs, jarSha, ruid));
+                    }
                     if (trajectoryRef != null) {
                         labs[0].setReference(trajectoryRef.of(t.get("game_uid").getAsString()), trajectoryRef.turns,
                                 trajectoryRef.provenance());
