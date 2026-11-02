@@ -195,27 +195,40 @@ public class KnownLibTest extends forge.ai.AITest {
         Assert.assertTrue(k.known(me(g)).isEmpty(), "a shuffle forgets every position");
     }
 
-    /** A card put on the bottom from a seen zone is known relative to the bottom; draws do not move it. */
+    /**
+     * A card put on the bottom from a seen zone is known relative to the bottom; draws do not move it; a hidden card
+     * moved from the top to the bottom (a fateseal) stays unknown but shifts the bottom by one, publicly; an unexplained
+     * reorder forgets everything.
+     */
     @Test
-    public void bottomsAreKnownAndAnUnknownInsertVoidsWhatItShifts() {
+    public void bottomsAreKnownAndASilentChangeForgets() {
         final Game g = game("Lightning Bolt;Shock", "Island", "Island;Swamp;Island;Swamp;Island", 20);
         final KnownOwnLibrary k = track(g);
         g.getAction().moveToLibrary(ChooseACardTest.find(me(g), ZoneType.Hand, "Lightning Bolt"), -1, null);
         me(g).drawCards(2);
         Assert.assertEquals(names(g, k.known(me(g))), List.of("Lightning Bolt"), "the bottom stays known");
-        // a hidden card moved within the library to the bottom (a dig's rest, a scry bottom: maybe in a random order)
-        // is unknown, and the known bottom above it no longer is known relative to the bottom
         final Card hidden = me(g).getCardsIn(ZoneType.Library).get(0);
         g.getAction().moveToLibrary(hidden, -1, null);
-        Assert.assertTrue(k.known(me(g)).isEmpty(), names(g, k.known(me(g))).toString());
-        // a card put on top from our hand is known; an unexplained reorder forgets it
+        Assert.assertEquals(names(g, k.known(me(g))), List.of("Lightning Bolt"), "an unknown card under it: still one up");
+        Assert.assertFalse(k.known(me(g)).contains(hidden.getId()), "the moved card itself was never seen");
         g.getAction().moveToLibrary(ChooseACardTest.find(me(g), ZoneType.Hand, "Shock"), 0, null);
-        Assert.assertEquals(names(g, k.known(me(g))), List.of("Shock"));
+        Assert.assertEquals(names(g, k.known(me(g))), List.of("Shock", "Lightning Bolt"));
         final List<Card> order = new ArrayList<>(me(g).getCardsIn(ZoneType.Library));
         Collections.swap(order, 0, 1);
         me(g).getZone(ZoneType.Library).setCards(order);
         Assert.assertTrue(k.known(me(g)).isEmpty(), "a silent change forgets everything");
         Assert.assertTrue(k.silent > 0);
+    }
+
+    /** A hidden card taken from the middle (a tutor's take) voids a known card with unknown cards above it. */
+    @Test
+    public void aHiddenTakeFromTheMiddleVoidsWhatItCouldShift() {
+        final Game g = game("", "Island", "Island;Swamp;Lightning Bolt;Swamp;Island;Swamp;Island", 20);
+        final KnownOwnLibrary k = track(g);
+        final Card c = ChooseACardTest.find(me(g), ZoneType.Battlefield, "Island");
+        g.getAction().moveToLibrary(c, 2, null); // a public card put third from the top (no resolution: an offset of 2)
+        // outside any resolution a middle place has no named offset: unknown
+        Assert.assertTrue(k.known(me(g)).isEmpty(), names(g, k.known(me(g))).toString());
     }
 
     /** Library-to-library moves outside our own resolving spell (the opponent's Portent, a stray move) are unknown. */
@@ -611,5 +624,103 @@ public class KnownLibTest extends forge.ai.AITest {
                 Assert.assertFalse(on.has("lib_tag"), on.toString());
             }
         }
+    }
+
+    // ------------------------------------------------------------------ owner 2026-11-02: the opponent's fixed placements
+
+    /** Their Memory Lapse counters our Bolt: it goes on top of our library (public card, fixed place): known; drawn next. */
+    @Test
+    public void theirMemoryLapseTopIsKnown() {
+        final String frame = ForcedWinSolverTest.frame("Lightning Bolt", "Mountain", 20, "Memory Lapse", "Island;Island", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Island;Swamp;Island;Swamp;Island");
+        final Game g = ForcedWinSolverTest.game("Default", "Default", frame);
+        final KnownOwnLibrary k = track(g);
+        final SpellAbility bolt = ChooseACardTest.find(me(g), ZoneType.Hand, "Lightning Bolt").getFirstSpellAbility();
+        bolt.setActivatingPlayer(me(g));
+        bolt.resetTargets();
+        bolt.getTargets().add(opp(g));
+        Assert.assertTrue(((PlayerControllerAi) me(g).getController()).playChosenSpellAbility(bolt));
+        final SpellAbility ml = ChooseACardTest.find(opp(g), ZoneType.Hand, "Memory Lapse").getFirstSpellAbility();
+        ml.setActivatingPlayer(opp(g));
+        ml.resetTargets();
+        ml.getTargets().add(g.getStack().peekAbility());
+        playAndResolve(g, opp(g), ml, null);
+        System.out.println("KLIB memory-lapse library=" + top(g, 3) + " known=" + names(g, k.known(me(g))));
+        Assert.assertEquals(top(g, 1), List.of("Lightning Bolt"), "countered onto our top");
+        Assert.assertEquals(names(g, k.known(me(g))), List.of("Lightning Bolt"));
+        me(g).drawCards(1);
+        Assert.assertNotNull(ForcedWinSolverTest.inZone(me(g), ZoneType.Hand, "Lightning Bolt"), "drawn next turn");
+    }
+
+    /**
+     * Their Teferi, Hero of Dominaria -3 on our Baleful Strix: third from the top (a fixed offset under two unknown
+     * cards): known at index 2, then at index 0 after two draws; with a mill of one in between, at index 1 then 0.
+     */
+    @Test
+    public void theirTeferiThirdFromTheTopIsKnown() {
+        for (boolean mill : new boolean[] {false, true}) {
+            final String frame = ForcedWinSolverTest.frame("", "Baleful Strix;Island", 20, "",
+                    "Teferi, Hero of Dominaria|Counters:LOYALTY=4", 20, "human")
+                    .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Island;Swamp;Island;Swamp;Island;Swamp");
+            final Game g = ForcedWinSolverTest.game("Default", "Default", frame);
+            final KnownOwnLibrary k = track(g);
+            final Card teferi = ChooseACardTest.find(opp(g), ZoneType.Battlefield, "Teferi, Hero of Dominaria");
+            final SpellAbility minus3 = teferi.getSpellAbilities().stream()
+                    .filter(x -> x.getApi() == forge.game.ability.ApiType.ChangeZone).findFirst().orElseThrow();
+            minus3.setActivatingPlayer(opp(g));
+            minus3.resetTargets();
+            minus3.getTargets().add(ChooseACardTest.find(me(g), ZoneType.Battlefield, "Baleful Strix"));
+            playAndResolve(g, opp(g), minus3, null);
+            final List<Card> lib = new ArrayList<>(me(g).getCardsIn(ZoneType.Library));
+            System.out.println("KLIB teferi mill=" + mill + " library=" + top(g, 4) + " known=" + names(g, k.known(me(g))));
+            Assert.assertEquals(lib.get(2).getName(), "Baleful Strix", "third from the top");
+            Assert.assertEquals(k.known(me(g)), java.util.Set.of(lib.get(2).getId()), "known at index 2, the two above unknown");
+            if (mill) {
+                g.getAction().moveToGraveyard(me(g).getCardsIn(ZoneType.Library).get(0), null);
+                Assert.assertEquals(k.known(me(g)), java.util.Set.of(me(g).getCardsIn(ZoneType.Library).get(1).getId()),
+                        "after a mill of one: index 1");
+                me(g).drawCards(1);
+            } else {
+                me(g).drawCards(2);
+            }
+            Assert.assertEquals(k.known(me(g)), java.util.Set.of(me(g).getCardsIn(ZoneType.Library).get(0).getId()),
+                    "after the draws: on top");
+            Assert.assertEquals(top(g, 1), List.of("Baleful Strix"));
+        }
+    }
+
+    /** The control: their Portent reorders our top three (we see neither the cards nor their order): unknown. */
+    @Test
+    public void theirReorderOfOurTopIsNotKnown() {
+        final String frame = ForcedWinSolverTest.frame("Lightning Bolt;Shock", "Island", 20, "Portent", "Island", 20, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Island;Swamp;Island;Swamp;Island;Swamp");
+        final Game g = ForcedWinSolverTest.game("Default", "Default", frame);
+        final KnownOwnLibrary k = track(g);
+        g.getAction().moveToLibrary(ChooseACardTest.find(me(g), ZoneType.Hand, "Lightning Bolt"), 0, null);
+        g.getAction().moveToLibrary(ChooseACardTest.find(me(g), ZoneType.Hand, "Shock"), 0, null);
+        Assert.assertEquals(k.topCount(me(g)), 2, "our two put-backs");
+        final SpellAbility portent = ChooseACardTest.find(opp(g), ZoneType.Hand, "Portent").getFirstSpellAbility();
+        portent.setActivatingPlayer(opp(g));
+        portent.resetTargets();
+        portent.getTargets().add(me(g));
+        playAndResolve(g, opp(g), portent, null);
+        System.out.println("KLIB portent library=" + top(g, 4) + " known=" + names(g, k.known(me(g))));
+        Assert.assertTrue(k.known(me(g)).isEmpty(), "their order of our top three: " + names(g, k.known(me(g))));
+    }
+
+    /** Pinned positions: the solver's shuffle keeps a pinned card at its index; the q^8 watch does not read it. */
+    @Test
+    public void pinnedPositionsSurviveShufflesAndAreNotReads() {
+        final Game g = LibLabelsTest.lib(12);
+        final Player me = me(g);
+        final Card third = me.getCardsIn(ZoneType.Library).get(2);
+        for (long seed = 1; seed <= 20; seed++) {
+            ForcedWinSolver.shuffleUnknownOwnLibrary(me, 0, java.util.Set.of(third.getId()), new Random(seed));
+            Assert.assertEquals(me.getCardsIn(ZoneType.Library).get(2).getId(), third.getId(), "seed " + seed);
+        }
+        final ForcedWinSolver.HiddenWatch hw = new ForcedWinSolver.HiddenWatch(me, 0, java.util.Set.of(third.getId()), null);
+        g.subscribeToEvents(hw);
+        me.drawCards(3);
+        Assert.assertEquals(LibLabelsTest.reads(hw), 2, "the two above are reads, the pinned third is not");
     }
 }

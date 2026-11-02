@@ -292,8 +292,8 @@ final class ForcedWinEngine {
          * default) keeps the real order.
          */
         int ownKnownTop = -1;
-        /** known-lib-1102: our library's known bottom in the root copy (kept with the known top; 0 = none). */
-        int ownKnownBottom = 0;
+        /** known-lib-1102: our library's pinned cards in the root copy (kept at their index with the known top; null none). */
+        java.util.Set<Integer> ownPinned = null;
         /** honest-belief-1020: the solver's re-draw of the opponents' hidden cards at the root (null = off). */
         ForcedWinSolver.Redraw redraw;
         /**
@@ -994,7 +994,7 @@ final class ForcedWinEngine {
                     ForcedWinSolver.hideOrSample(live, liveMe, (Player) live.getPlayer(o.getId()), o, true, rng);
                 }
                 if (lim.ownKnownTop >= 0) {
-                    ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, lim.ownKnownBottom, rng);
+                    ForcedWinSolver.shuffleUnknownOwnLibrary(root.me, lim.ownKnownTop, lim.ownPinned, rng);
                 }
             }
             root.ids = cloneScope(forge.util.IdScope.capture());

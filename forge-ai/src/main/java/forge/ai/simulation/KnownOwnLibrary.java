@@ -18,39 +18,38 @@ import forge.game.zone.ZoneView;
 /**
  * known-lib-1102 (GOAL N5b / N10; {@link HonestLabel.Spec#knownLib} only, off by default): which cards of a seat's OWN
  * library the seat knows the position of at the ROOT of a label, kept from the live game's events. The label's belief
- * worlds keep these cards where they are and shuffle only the rest ({@link HonestLabel}); the win solver is told they are
- * placed (its known top and known bottom), so it can plan lines that draw them and cast them (a Doomsday pile drawn by
- * Baleful Strix or Chart a Course, a Brainstorm put-back, a Ponder keep), and its q^8 watch does not count drawing them
- * as a read of a hidden card.
+ * worlds pin these cards at their index and shuffle only the rest ({@link HonestLabel}); the win solver is told the known
+ * top (it plans lines that draw and cast those cards: a Doomsday pile drawn by Baleful Strix, a Brainstorm put-back, a
+ * Ponder keep) and pins the others in its own worlds, and its q^8 watch does not count them as hidden.
  *
  * <p>Why: Forge marks none of these cards visible to their owner, so the belief worlds (hideOwnLibrary, which keep only
  * the prefix Forge shows the seat) re-shuffled them away, and the label solver (a fresh solver per position, watching a
- * copy) had no pile memory of moves made turns earlier. Rows on held-out Doomsday kill turns found no proposal for any
- * line that casts a card drawn from the pile.
+ * copy) had no memory of moves made turns earlier.
  *
- * <p>Positions are kept relative to the TOP (the longest prefix of known cards) or to the BOTTOM (the longest suffix):
- * draws, mills and takes from below a known prefix never move it, and a card put above or among known cards at an
- * unknown position voids what it could have shifted. A card is known when it enters the seat's library
+ * <p><b>The rule</b> (owner, 2026-11-02): a card is known at offset k from the top (or the bottom) iff the seat saw its
+ * identity and its resulting place is fixed, whoever controls the effect: the opponent's Memory Lapse or Griptide puts it
+ * on top, Teferi, Hero of Dominaria's -3 third from the top. Known positions need not be contiguous (third from the top
+ * under two unknown cards). Offsets are anchored to the top or to the bottom and follow the card: draws and mills from the
+ * top, cards put on top, on the bottom or at a fixed offset, and any move of a known card shift them by public amounts.
  * <ul>
- * <li>from a zone the seat sees it in (its own hand, a graveyard, the battlefield, the stack, the command zone, face-up
- * exile is not one: the event cannot tell face-down) onto the known top (every card above it known: a Brainstorm put-back, a card put on top or a mulligan's
- * bottom), or onto the known bottom; or</li>
- * <li>from the seat's own library onto the known top while a spell or ability the seat controls resolves, with no
- * random-order step: a search that
- * puts the card on top (Doomsday's pile, Vampiric, Mystical and Personal Tutor), a look that reorders the top (Ponder,
- * Sensei's Top, Doomsday's own rearrange) and a scry kept on top.</li>
+ * <li><b>Identity seen:</b> the card came from the seat's own hand, a graveyard, the battlefield, the stack or the command
+ * zone (exile is never: the event cannot tell face-down, review #163 S3-2); or it was already known; or it moved within
+ * the library in the seat's own resolution with no random-order step (a search or look: Doomsday, a tutor to the top,
+ * Ponder, Top, a scry).</li>
+ * <li><b>Place fixed:</b> the top, the bottom, or a fixed offset (the resolving effect's LibraryPosition).</li>
+ * <li><b>Order (review #163 S1-1, S3-1):</b> when a resolution the seat does not order (the opponent's, or one with a
+ * random-order step: cascade, Endurance, a dig's random rest, discover) puts a second card into the library, the order
+ * of that block is unknown: none of its cards is learnt (the block's size, and so every other offset, stays public).</li>
+ * <li><b>Fails closed:</b> a hidden card taken from neither the top nor the bottom (a tutor's take) voids every known card
+ * with an unknown card between it and its anchor (it may have been above it); a card put in at an unfixed place voids
+ * everything; any shuffle, and any change of the library the events do not explain, forgets everything.</li>
  * </ul>
- * Review #163 S1-1: when a resolution the seat does not order (the opponent's, or one with a random-order step:
- * cascade, Endurance, a dig's random rest, discover) puts a second card into the library, the order of what it put
- * there is unknown: neither card is learnt (one card alone keeps its known place). A move within the library to
- * anywhere but the known top (a scry or dig to the bottom: Forge's "in a random order" looks
- * the same), a move the seat does not control (the opponent's Portent) and a card whose identity the seat did not see
- * are unknown, and void what they could have shifted (fails closed). Any shuffle of the library, and any change of it
- * the events do not explain, forgets everything. Read-only: it never changes the game.
+ * Known limit: a hidden card taken from the very top by a search is read as a take from the top (the seat would not
+ * know it came from there); searches nearly always shuffle. Read-only: it never changes the game.
  */
 public final class KnownOwnLibrary {
     private final int seatId;
-    /** Card ids known relative to the top / to the bottom (only their contiguous prefix / suffix counts). */
+    /** Card ids known at a fixed offset from the top / from the bottom (not necessarily contiguous). */
     private final Set<Integer> top = new HashSet<>(), bottom = new HashSet<>();
     /** The library order after the last event (a silent change forgets everything). */
     private List<Integer> snap = null;
@@ -130,9 +129,10 @@ public final class KnownOwnLibrary {
         }
         final int id = e.card().getId();
         final List<Integer> now = ids(me);
+        final List<Integer> before = snap;
         // explained? the order before, less this card, equals the order now, less this card
-        if (snap != null) {
-            final List<Integer> exp = new ArrayList<>(snap);
+        if (before != null) {
+            final List<Integer> exp = new ArrayList<>(before);
             exp.remove(Integer.valueOf(id));
             final List<Integer> cur = new ArrayList<>(now);
             cur.remove(Integer.valueOf(id));
@@ -141,72 +141,86 @@ public final class KnownOwnLibrary {
                 forgetAll();
             }
         } else {
-            forgetAll(); // after a shuffle (already forgotten) or an unexplained state: start from nothing known
+            forgetAll(); // after an unexplained state: start from nothing known
         }
-        top.remove(id);
-        bottom.remove(id);
+        final boolean wasKnown = top.remove(id) | bottom.remove(id);
+        if (fromLib && !wasKnown && before != null) {
+            final int i = before.indexOf(id);
+            if (i != 0 && i != before.size() - 1) {
+                // a hidden card taken from an unknown place: it may have been above (or below) any known card
+                voidBehindUnknown(before, i);
+            }
+        }
         if (toLib) {
             final int j = now.indexOf(id);
-            // review #163 S1-1: which resolution moves the card, and does the seat choose the order of what it moves
             final SpellAbility res = resolvingSa(game);
-            final Object resKey = res == null ? null : res;
-            if (resKey != resolution) {
-                resolution = resKey;
+            if (res != resolution) {
+                resolution = res;
                 resEntered.clear();
                 resCount = 0;
             }
             resCount++;
             final boolean ordered = res == null ? !game.getStack().isResolving() : seatOrders(res);
-            boolean seen = fromLib ? res != null && ordered : seenFrom(e.from(), e.card());
-            if (seen && !ordered) {
-                // a move the seat does not order (the opponent's, or a random order): one card's place is still known,
-                // but once a second card enters in the same resolution their order is not: learn neither
-                if (resCount > 1) {
-                    for (int x : resEntered) {
-                        top.remove(x);
-                        bottom.remove(x);
-                        voidShifted(now, now.indexOf(x));
-                    }
-                    resEntered.clear();
-                    seen = false;
+            final boolean seen = wasKnown || (fromLib ? res != null && ordered : seenFrom(e.from(), e.card()));
+            final boolean atTop = j == 0, atBottom = j >= 0 && j == now.size() - 1;
+            final boolean fixed = atTop || atBottom || j > 0 && res != null && hasLibraryPosition(res);
+            boolean learn = seen && fixed;
+            if (!ordered && resCount > 1) {
+                // a block whose order nobody of ours chose: its set is known, the order of its cards is not
+                for (int x : resEntered) {
+                    top.remove(x);
+                    bottom.remove(x);
                 }
+                learn = false;
             }
-            boolean onTop = seen && j >= 0, onBottom = seen && j >= 0 && !fromLib;
-            for (int k = 0; onTop && k < j; k++) {
-                onTop = top.contains(now.get(k));
-            }
-            for (int k = now.size() - 1; onBottom && k > j; k--) {
-                onBottom = bottom.contains(now.get(k));
-            }
-            if (onTop) {
-                top.add(id);
+            if (learn) {
+                if (atBottom && !atTop) {
+                    bottom.add(id);
+                } else {
+                    top.add(id);
+                }
                 learnt++;
-            } else if (onBottom) {
-                bottom.add(id);
-                learnt++;
-            } else {
-                voidShifted(now, j);
-            }
-            if ((onTop || onBottom) && !ordered) {
-                resEntered.add(id);
+                if (!ordered) {
+                    resEntered.add(id);
+                }
+            } else if (!fixed) {
+                forgetAll(); // put in at a place nobody can name: every offset may have shifted
             }
         }
         snap = now;
     }
 
     /**
-     * An unknown card (or a known one at an unknown place) at index {@code j} of {@code now}: it may have shifted every
-     * known card below it relative to the top, and every one above it relative to the bottom.
+     * A hidden card left {@code before} at index {@code i} (not the top or the bottom): every top-anchored card with an
+     * unknown card above it, and every bottom-anchored card with an unknown card below it, may have shifted.
      */
-    private void voidShifted(final List<Integer> now, final int j) {
-        for (int k = 0; k < now.size(); k++) {
-            if (k > j || j < 0) {
-                top.remove(now.get(k));
+    private void voidBehindUnknown(final List<Integer> before, final int i) {
+        boolean unknownAbove = false;
+        for (int k = 0; k < before.size(); k++) {
+            final int x = before.get(k);
+            if (unknownAbove) {
+                top.remove(x);
             }
-            if (k < j || j < 0) {
-                bottom.remove(now.get(k));
+            unknownAbove |= k == i || !top.contains(x) && !bottom.contains(x);
+        }
+        boolean unknownBelow = false;
+        for (int k = before.size() - 1; k >= 0; k--) {
+            final int x = before.get(k);
+            if (unknownBelow) {
+                bottom.remove(x);
+            }
+            unknownBelow |= k == i || !top.contains(x) && !bottom.contains(x);
+        }
+    }
+
+    /** The resolving effect names a fixed library position (Teferi's "third from the top", Commit's second). */
+    static boolean hasLibraryPosition(final SpellAbility root) {
+        for (SpellAbility sa = root; sa != null; sa = sa.getSubAbility()) {
+            if (sa.hasParam("LibraryPosition")) {
+                return true;
             }
         }
+        return false;
     }
 
     /** The resolution the last library entry belonged to (identity), and the cards it taught with an order nobody chose. */
@@ -279,8 +293,9 @@ public final class KnownOwnLibrary {
     }
 
     /**
-     * The ids of {@code me}'s library cards (in the watched game) whose position the seat knows: the known top prefix and
-     * the known bottom suffix. An unexplained change since the last event forgets everything first.
+     * The ids of {@code me}'s library cards (in the watched game) whose position the seat knows, top first (each at a
+     * fixed offset from the top or the bottom; the label pins them at their index). An unexplained change since the last
+     * event forgets everything first.
      */
     public Set<Integer> known(final Player me) {
         final List<Integer> now = ids(me);
@@ -292,12 +307,10 @@ public final class KnownOwnLibrary {
             snap = now;
         }
         final Set<Integer> out = new LinkedHashSet<>();
-        int i = 0;
-        while (i < now.size() && top.contains(now.get(i))) {
-            out.add(now.get(i++));
-        }
-        for (int k = now.size() - 1; k >= i && bottom.contains(now.get(k)); k--) {
-            out.add(now.get(k));
+        for (int x : now) {
+            if (top.contains(x) || bottom.contains(x)) {
+                out.add(x);
+            }
         }
         return out;
     }

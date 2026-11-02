@@ -408,9 +408,10 @@ public final class HonestLabel {
         public int libW, libTakes, libSeqs;
         /**
          * known-lib-1102 (knownLib only, and only when the seat knows some; -1 otherwise): the root's known own-library
-         * cards passed to the label, as the known top count and the known bottom count.
+         * cards passed to the label: the known top (a contiguous prefix) and the other known cards (pinned at fixed
+         * offsets from the top or the bottom).
          */
-        public int knownTop = -1, knownBottom = -1;
+        public int knownTop = -1, knownPinned = -1;
 
         public JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -455,7 +456,7 @@ public final class HonestLabel {
             }
             if (knownTop >= 0) {
                 o.addProperty("known_top", knownTop);
-                o.addProperty("known_bottom", knownBottom);
+                o.addProperty("known_pinned", knownPinned);
             }
             if (libTag != null) {
                 o.addProperty("lib_tag", libTag);
@@ -535,7 +536,7 @@ public final class HonestLabel {
             if (known != null && spec.knownLib) {
                 final int[] tb = topBottom(liveMe, known);
                 r.knownTop = tb[0];
-                r.knownBottom = tb[1];
+                r.knownPinned = tb[1];
             }
             try {
                 label0(live, liveMe, key, r, known);
@@ -602,7 +603,7 @@ public final class HonestLabel {
             }
         }
 
-        /** known-lib-1102: the counts of {@code known} that are a prefix (top) and a suffix (bottom) of our library. */
+        /** known-lib-1102: the counts of {@code known} that are the library's prefix (top), and the other known cards. */
         static int[] topBottom(final Player me, final Set<Integer> known) {
             final List<forge.game.card.Card> lib = new ArrayList<>(me.getCardsIn(forge.game.zone.ZoneType.Library));
             int t = 0;
@@ -610,8 +611,8 @@ public final class HonestLabel {
                 t++;
             }
             int b = 0;
-            while (b < lib.size() - t && known.contains(lib.get(lib.size() - 1 - b).getId())) {
-                b++;
+            for (int i = t; i < lib.size(); i++) {
+                b += known.contains(lib.get(i).getId()) ? 1 : 0;
             }
             return new int[] {t, b};
         }
@@ -658,10 +659,8 @@ public final class HonestLabel {
                 }
                 s.notePlaced(placed);
                 if (spec.knownLib) {
-                    // known-lib-1102: the known bottom stays in place in the solver's worlds too
-                    final List<forge.game.card.Card> lib = new ArrayList<>(me.getCardsIn(forge.game.zone.ZoneType.Library));
-                    final int b = topBottom(me, knownOwn)[1];
-                    s.noteBottom(lib.subList(lib.size() - b, lib.size()));
+                    // known-lib-1102: every known card beyond the known top stays at its index in the solver's worlds too
+                    s.notePinned(placed);
                 }
             }
             // every world the solver copies from the root (verification worlds, the engine's root) re-draws their hidden
@@ -739,12 +738,9 @@ public final class HonestLabel {
                 final long key) {
             final List<forge.game.card.Card> lib = new ArrayList<>(me.getCardsIn(forge.game.zone.ZoneType.Library));
             final int kt = Math.min(s.knownTopCount(root), lib.size());
-            final int kb = Math.min(s.bottomCount(me), lib.size() - kt);
-            final Set<Integer> known = new java.util.HashSet<>();
+            final Set<Integer> pins = s.pinnedIn(me);
+            final Set<Integer> known = new java.util.HashSet<>(pins);
             for (int i = 0; i < kt; i++) {
-                known.add(lib.get(i).getId());
-            }
-            for (int i = lib.size() - kb; i < lib.size(); i++) {
                 known.add(lib.get(i).getId());
             }
             final DrawExpectation.Draws d = DrawExpectation.draws(me, known, 2, PLAN_SEQ_CAP, 0, LookaheadSearch.mix(spec.seed, key));
@@ -769,8 +765,16 @@ public final class HonestLabel {
                 final ForcedWinSolver s2 = new ForcedWinSolver(me2, spec.winConfig());
                 s2.redraw = s.redraw;
                 final List<forge.game.card.Card> lib2 = new ArrayList<>(me2.getCardsIn(forge.game.zone.ZoneType.Library));
-                s2.notePlaced(lib2.subList(0, Math.min(lib2.size(), kt + d.depth)));
-                s2.noteBottom(lib2.subList(lib2.size() - kb, lib2.size()));
+                // the known cards and the arranged draws are placed (the known top then runs through them); pins stay pinned
+                final List<forge.game.card.Card> placed2 = new ArrayList<>();
+                for (int i = 0; i < lib2.size(); i++) {
+                    final int slot = d.unknownSlots.indexOf(i);
+                    if (known.contains(lib2.get(i).getId()) || slot >= 0 && slot < d.depth) {
+                        placed2.add(lib2.get(i));
+                    }
+                }
+                s2.notePlaced(placed2);
+                s2.notePinned(placed2);
                 final List<ForcedWinSolver.Proposal> props2 = s2.propose(g2);
                 ForcedWinSolver.receipt("FORCED_WIN per-draw seq=" + d.seqs.get(q) + " knownTop=" + s2.knownTopCount(g2)
                         + " proposals=" + props2.size() + " proven=" + props2.stream().filter(p -> p.proven(spec.worlds)).count());
