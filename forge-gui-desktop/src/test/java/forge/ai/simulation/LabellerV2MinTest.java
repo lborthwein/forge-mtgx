@@ -462,6 +462,34 @@ public class LabellerV2MinTest extends AITest {
                 "a life-gain rider is still an answer");
     }
 
+    /**
+     * Review #148 re-check 10 S3: a TargetMax-1 optional answer (TargetMin 0) enumerated and actually played with zero
+     * targets. Courageous Resolve ("up to one target creature you control gains protection from your opponents; draw a
+     * card; fateful hour: with 5 or less life you can't lose life or the game this turn") with no creature of theirs to
+     * target, at their 3 life against our Bolt: enumerated with no target, played (the line's failure is a lost MIN
+     * branch, not a cap or gap), and the line is not proven. With no mana for it: proven.
+     */
+    @Test
+    public void optionalTargetMax1AnswerIsPlayedWithZeroTargets() {
+        final Game g = frame("Courageous Resolve", "Plains;Plains;Plains", 3, "Lightning Bolt", "Mountain");
+        final Player def = g.getPlayers().get(0), ai = g.getPlayers().get(1);
+        boolean zero = false;
+        for (forge.game.spellability.SpellAbility sa : OppMin.responses(g, def, ai, null)) {
+            zero |= sa.getHostCard().getName().equals("Courageous Resolve") && sa.getTargets().isEmpty();
+        }
+        Assert.assertTrue(zero, "Courageous Resolve is enumerated with zero targets");
+        final Game g2 = frame("Courageous Resolve", "Plains;Plains;Plains", 3, "Lightning Bolt", "Mountain");
+        g2.AI_TIMEOUT = 600;
+        final List<ForcedWinSolver.Proposal> ps = new ForcedWinSolver(g2.getPlayers().get(1), passive(cfg(true, 64))).propose(g2);
+        Assert.assertFalse(ps.isEmpty(), "the Bolt line wins unopposed");
+        for (ForcedWinSolver.Proposal p : ps) {
+            Assert.assertFalse(p.proven(1), p.text);
+            Assert.assertTrue(p.text.contains("fails=min"), "a played and lost MIN branch, not a cap: " + p.text);
+        }
+        Assert.assertTrue(proven(frame("Courageous Resolve", "", 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                "no mana for it: proven");
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {
