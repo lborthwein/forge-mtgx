@@ -169,16 +169,9 @@ public final class OwnLibraryMemory {
             if (me.getGame() == delegate.watched()) {
                 return new HashSet<>(delegate.known(me));
             }
-            // review #168 S2: a copy (another order): read the watched game's known ids without mutating, keep those in
-            // the copy's library (ids survive a copy)
-            final Set<Integer> ro = delegate.knownReadOnly();
-            final Set<Integer> out = new HashSet<>();
-            for (Card c : me.getCardsIn(ZoneType.Library)) {
-                if (ro.contains(c.getId())) {
-                    out.add(c.getId());
-                }
-            }
-            return out;
+            // review #168 S2 / S1 re-check: a copy: read the watched game's known ids without mutating, and only when the
+            // copy's library is in the watched order (each known card at its computed index); otherwise none
+            return new HashSet<>(delegate.knownIn(me));
         }
         final Set<Integer> out = new HashSet<>();
         synchronized (known) {

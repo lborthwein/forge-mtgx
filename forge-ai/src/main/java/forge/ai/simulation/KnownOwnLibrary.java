@@ -444,6 +444,24 @@ public final class KnownOwnLibrary {
         return out;
     }
 
+    /**
+     * Review #168 S1 (re-check): the known ids for a COPY's player {@code copyMe}, without mutating. They are returned
+     * only when the copy's library is in exactly the watched library's order (every known card at its computed index);
+     * any other copy order (a shuffle, a tutor's take, a draw or a reorder in the copy) gives none, since the seat's
+     * knowledge of where a card is does not carry over to a copy whose library has moved (fails closed).
+     */
+    public Set<Integer> knownIn(final Player copyMe) {
+        final Set<Integer> ro = knownReadOnly();
+        if (ro.isEmpty() || copyMe == null) {
+            return new LinkedHashSet<>();
+        }
+        final Player me = game.getPlayer(seatId);
+        if (me == null || !ids(me).equals(ids(copyMe))) {
+            return new LinkedHashSet<>();
+        }
+        return ro;
+    }
+
     /** The game this tracker watches (null before {@link #watch}). */
     public Game watched() {
         return game;
