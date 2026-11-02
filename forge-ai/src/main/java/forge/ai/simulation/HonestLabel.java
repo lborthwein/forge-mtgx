@@ -401,7 +401,11 @@ public final class HonestLabel {
             o.addProperty("gate", gate);
             add(o, "p_win", pWin);
             add(o, "p_loss", pLoss);
-            o.addProperty("worlds_win", worldsWin);
+            if ("sampled".equals(libTag) && worldsWin < 0) {
+                o.add("worlds_win", com.google.gson.JsonNull.INSTANCE); // follow-up #161: a withheld re-estimate
+            } else {
+                o.addProperty("worlds_win", worldsWin);
+            }
             o.addProperty("worlds_loss", worldsLoss);
             o.addProperty("lost_worlds", lostWorlds);
             o.addProperty("proposals", proposals);
@@ -436,7 +440,7 @@ public final class HonestLabel {
                 o.addProperty("lib_takes", libTakes >= ForcedWinSolver.HiddenWatch.FAILED ? -1 : libTakes);
                 if ("exact-draw".equals(libTag)) {
                     o.addProperty("lib_seqs", libSeqs);
-                } else {
+                } else if (libW >= 0) {
                     o.addProperty("lib_w", libW);
                 }
                 if (libWhy != null) {
@@ -701,7 +705,7 @@ public final class HonestLabel {
             // line, so their k = W says nothing); withheld (null) when the re-estimate was cut
             final ForcedWinSolver.LibExact w = s.libResample(root, dep, LookaheadSearch.mix(key, 0x5A3D1EL));
             r.libTag = "sampled";
-            r.libW = Double.isNaN(w.fraction) ? 0 : w.worlds;
+            r.libW = Double.isNaN(w.fraction) ? -1 : w.worlds; // re-check S3: withheld = absent, not 0
             r.pWin = w.fraction;
             r.worldsWin = r.libW;
             if (w.why != null) {
@@ -762,12 +766,16 @@ public final class HonestLabel {
                 }
                 if (proven != null && spec.libLabels && proven.libDependent) {
                     // review #161 S3-3: a proven line of theirs that reads nothing hidden, when there is one
+                    ForcedWinSolver.Proposal clean = null;
                     for (ForcedWinSolver.Proposal p : props) {
                         if (p.proven(1) && !p.libDependent
-                                && !(r.copyGap != null && p.endTurn != live.getPhaseHandler().getTurn())) {
-                            proven = p;
-                            break;
+                                && !(r.copyGap != null && p.endTurn != live.getPhaseHandler().getTurn())
+                                && (clean == null || p.endTurn >= 0 && p.endTurn < clean.endTurn)) {
+                            clean = p; // re-check S3: the shortest clean line, as the win check
                         }
+                    }
+                    if (clean != null) {
+                        proven = clean;
                     }
                 }
                 if (proven != null && spec.libLabels && proven.libDependent) {

@@ -490,4 +490,50 @@ public class LibLabelsTest extends forge.ai.AITest {
         System.out.println("LIBL found " + found);
         Assert.assertEquals(found.size(), lines.length, "every look line was found: " + found);
     }
+
+    /**
+     * Follow-up to #161 (re-check S2): libResample's k/W is over every belief world, even when the fresh unopposed
+     * play-out's shuffle loses. Divination then Bolt needs the one Mountain among two draws from four (p = 1/2): the
+     * line planned on a known library, then forgotten, re-estimated on the kill spec's win config (K = 8 shuffled worlds)
+     * under several decision keys: always W = 8 worlds, and k/W strictly between 0 and 1 for some key.
+     */
+    @Test(timeOut = 900000)
+    public void resampledKOverWCountsEveryBeliefWorld() {
+        final String frame = ForcedWinSolverTest.frame("Divination;Lightning Bolt", "Island;Island;Island", 20, "", "", 3, "human")
+                .replace("humanlibrary=" + ForcedWinSolverTest.OURLIB, "humanlibrary=Mountain;Island;Island;Island");
+        final Game g = ForcedWinSolverTest.game("Default", "Default", frame);
+        final Player me = g.getPlayers().get(0);
+        g.AI_TIMEOUT = 600;
+        final ForcedWinSolver plan = new ForcedWinSolver(me, exactCfgs().get(0));
+        plan.notePlaced(new ArrayList<>(me.getCardsIn(ZoneType.Library)));
+        final ForcedWinSolver.Config wc = HonestLabel.Spec.parse(spec(true)).winConfig();
+        final ForcedWinSolver s = new ForcedWinSolver(me, wc);
+        final List<String> seen = new ArrayList<>();
+        PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+            for (ForcedWinSolver.Proposal p0 : plan.propose(g)) {
+                if (!p0.proven(1)) {
+                    continue;
+                }
+                ((ForcedWinPlanner.Line) p0.line).knownTop = 0;
+                final ForcedWinSolver.Proposal p = new ForcedWinSolver.Proposal(plan.evaluate(g,
+                        (ForcedWinPlanner.Line) p0.line, 7L, Long.MAX_VALUE));
+                for (long key = 1; key <= 6; key++) {
+                    final ForcedWinSolver.LibExact x = s.libResample(g, p, key);
+                    seen.add(x.worlds + ":" + x.fraction + ":" + x.why);
+                }
+                break;
+            }
+            return null;
+        }));
+        System.out.println("LIBR " + seen);
+        Assert.assertFalse(seen.isEmpty(), "the line was found");
+        boolean between = false;
+        for (String r : seen) {
+            final String[] f = r.split(":");
+            Assert.assertEquals(f[0], "8", "all eight belief worlds: " + seen);
+            final double v = Double.parseDouble(f[1]);
+            between |= v > 0 && v < 1;
+        }
+        Assert.assertTrue(between, "some key gives 0 < k/W < 1: " + seen);
+    }
 }

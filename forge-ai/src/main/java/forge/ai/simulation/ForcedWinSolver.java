@@ -1258,6 +1258,11 @@ public final class ForcedWinSolver {
      * cap, Forge AI cap, error, a MIN cap or gap): its 0 is unknown, not a loss, so the result is not exact.
      */
     private boolean libCut;
+    /**
+     * Follow-up to #161 (re-check S2; false = off, the default): {@link #libResample}'s evaluation runs every belief
+     * world even when its unopposed play-out lost, so k/W is over all W worlds (one lost shuffle is not 0/W).
+     */
+    private boolean libAllWorlds;
     private int libReads;
 
     private void libNote(HiddenWatch hw) {
@@ -1418,11 +1423,13 @@ public final class ForcedWinSolver {
         final forge.ai.AiWork.Budget work = workCap > 0 ? forge.ai.AiWork.current() : null;
         Eval e = null;
         try {
+            libAllWorlds = true;
             e = evaluate(live, (Line) p.line, mix(mix(cfg.seed, key), 0x5A3B1EL),
                     deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
         } catch (RuntimeException ex) {
             x.why = "error:" + ex.getClass().getSimpleName();
         } finally {
+            libAllWorlds = false;
             forge.ai.AiWork.restore(outer);
             engineEvalBudget = 0;
         }
@@ -1430,11 +1437,12 @@ public final class ForcedWinSolver {
             x.why = forge.ai.AiWork.CAP;
         } else if (e != null && libCut) {
             x.why = "cut";
-        } else if (e != null && e.pUnopposed >= 1.0 && !cfg.exact && e.worldsRun < cfg.worlds) {
+        } else if (e != null && !cfg.exact && e.worldsRun < cfg.worlds) {
             x.why = "worlds";
         } else if (e != null) {
-            x.worlds = cfg.exact ? 1 : cfg.worlds;
-            x.fraction = e.pUnopposed >= 1.0 ? e.pBelief : 0.0;
+            // re-check S2: k/W over every belief world that ran (the unopposed world's own shuffle is one sample, not a veto)
+            x.worlds = cfg.exact ? 1 : e.worldsRun;
+            x.fraction = cfg.exact ? (e.pUnopposed >= 1.0 ? e.pBelief : 0.0) : e.pBelief;
         }
         receipt("FORCED_WIN lib-resample" + tag() + " " + e + " why=" + x.why);
         return x;
@@ -2938,7 +2946,7 @@ public final class ForcedWinSolver {
         e.pUnopposed = u.won ? 1 : 0;
         e.endReason = u.endReason;
         e.endTurn = u.endTurn;
-        if (!u.won) {
+        if (!u.won && !libAllWorlds) {
             e.failures = "unopposed:" + u.why;
             return e;
         }
