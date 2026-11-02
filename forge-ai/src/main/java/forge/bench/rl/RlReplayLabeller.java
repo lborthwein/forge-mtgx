@@ -174,6 +174,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
     private final Game game;
     private final RlFeaturizer feat;
     private final HonestLabel.Seat[] seats = new HonestLabel.Seat[2];
+    /** known-lib-1102 (spec knownLib only; null otherwise): each seat's known own-library positions, from this game. */
+    private final forge.ai.simulation.KnownOwnLibrary[] knownLib = new forge.ai.simulation.KnownOwnLibrary[2];
     private final List<byte[]> records = new ArrayList<>();
     private final List<JsonObject> idx = new ArrayList<>();
     /** Priority decisions seen (both seats, from the start), those in the window, and those a solver check ran at. */
@@ -280,6 +282,13 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         this.specSha = spec.sha();
         this.jarSha = jarSha;
         this.game = game;
+        if (game != null && spec.knownLib) {
+            final List<Player> ps = game.getRegisteredPlayers();
+            for (int s = 0; s < 2 && s < ps.size(); s++) {
+                knownLib[s] = new forge.ai.simulation.KnownOwnLibrary(ps.get(s));
+                knownLib[s].watch(game);
+            }
+        }
         this.feat = game == null ? null : new RlFeaturizer(index);
         if (feat != null) {
             feat.setVersion(obs);
@@ -365,7 +374,9 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             if (probe != null) {
                 probe.accept(g);
             }
-            return new Object[] {payload, seats[seat].label(g, p, key), fms, f.C};
+            // known-lib-1102: the seat's known own-library positions (null when knownLib is off: the plain call)
+            final java.util.Set<Integer> kl = knownLib[seat] == null ? null : knownLib[seat].known(p);
+            return new Object[] {payload, seats[seat].label(g, p, key, kl), fms, f.C};
         }));
         // bvw-step1-build-1024: the search value, in its own isolation (a copy of the live game; never moves it)
         StepSearch.Result sr = null;
@@ -508,6 +519,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      * cap_hits, worlds_capped and proof_cap (present only when a solver hit its Forge AI work cap). r3-labelsearch-1030:
      * row_kind, choice_ord, r3, r3_sha and r3_ranker (the R3 label-search rows). e1-q8-1101: lib_tag, lib_takes, lib_w,
      * lib_seqs and lib_why (present only with the spec's libLabels on and a proving line that read our hidden library).
+     * known-lib-1102: known_top and known_pinned (present only with the spec's knownLib on and some position known).
      */
     static final String[] INDEX_FIELDS = {"game_uid", "seed", "seat", "dec_idx", "turn", "phase", "stack",
             "turns_before_end", "tape_turns", "tape_reason", "tape_result", "label", "check", "gate", "p_win",
@@ -515,7 +527,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
             "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof",
             "state_sha", "s2t", "row_kind", "choice_ord", "r3", "r3_sha", "r3_ranker", "cap", "cap_hits", "worlds_capped",
-            "proof_cap", "lib_tag", "lib_takes", "lib_w", "lib_seqs", "lib_why"};
+            "proof_cap", "lib_tag", "lib_takes", "lib_w", "lib_seqs", "lib_why", "known_top", "known_pinned"};
 
     /**
      * rollout-budget-1101 (review #160 S2-2): a step row whose proof check was capped says so (proof_cap): its "no proof"

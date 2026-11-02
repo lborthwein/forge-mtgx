@@ -93,6 +93,14 @@ public final class HonestLabel {
          */
         public boolean libLabels = false;
         /**
+         * known-lib-1102 (GOAL N5b / N10; false = off, the default, and then nothing changes, the spec's sha included):
+         * the replay labeller tracks, per seat, which own-library cards the seat knows the position of
+         * ({@link KnownOwnLibrary}: a Doomsday pile, a put-back, a Ponder keep, a searched card put on top; a shuffle
+         * forgets) and passes them to {@link Seat#label(Game, Player, long, Set)}: every belief world keeps them in place,
+         * and the win solver knows its top and bottom (it plans lines that draw and cast them; drawing them is no q^8 read).
+         */
+        public boolean knownLib = false;
+        /**
          * coverage-fix-1102 (false = off, the default, and then nothing changes, the sha included): with {@link #meter},
          * each row's meter also carries why its OppMin worlds were cut (by reason, with up to three answer cards each)
          * and which engine counter stopped its engine searches (ForcedWinSolver.Meter#reasons). Diagnostics only.
@@ -101,7 +109,7 @@ public final class HonestLabel {
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "meterReasons"));
+                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "knownLib", "meterReasons"));
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
@@ -133,6 +141,7 @@ public final class HonestLabel {
             if (o.has("sequentialAi") && !o.get("sequentialAi").isJsonNull()) s.sequentialAi = o.get("sequentialAi").getAsBoolean();
             if (o.has("aiTimeoutSec") && !o.get("aiTimeoutSec").isJsonNull()) s.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
             if (o.has("libLabels")) s.libLabels = o.get("libLabels").getAsBoolean();
+            if (o.has("knownLib")) s.knownLib = o.get("knownLib").getAsBoolean();
             if (o.has("meterReasons")) s.meterReasons = o.get("meterReasons").getAsBoolean();
             s.checkHonest();
             return s;
@@ -290,6 +299,9 @@ public final class HonestLabel {
             if (libLabels) {
                 o.addProperty("libLabels", true); // e1-q8-1101: only when on, so every other spec's sha is unchanged
             }
+            if (knownLib) {
+                o.addProperty("knownLib", true); // known-lib-1102: only when on, so every other spec's sha is unchanged
+            }
             if (meterReasons) {
                 o.addProperty("meterReasons", true); // coverage-fix-1102: only when on
             }
@@ -403,6 +415,12 @@ public final class HonestLabel {
          */
         public String libTag, libWhy;
         public int libW, libTakes, libSeqs;
+        /**
+         * known-lib-1102 (knownLib only, and only when the seat knows some; -1 otherwise): the root's known own-library
+         * cards passed to the label: the known top (a contiguous prefix) and the other known cards (pinned at fixed
+         * offsets from the top or the bottom).
+         */
+        public int knownTop = -1, knownPinned = -1;
 
         public JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -444,6 +462,10 @@ public final class HonestLabel {
             if (copyGap != null) {
                 o.addProperty("copy_gap", copyGap);
                 o.addProperty("gap_refused", gapRefused);
+            }
+            if (knownTop >= 0) {
+                o.addProperty("known_top", knownTop);
+                o.addProperty("known_pinned", knownPinned);
             }
             if (libTag != null) {
                 o.addProperty("lib_tag", libTag);
@@ -520,6 +542,11 @@ public final class HonestLabel {
             final Set<Integer> known = knownOwn == null || knownOwn.isEmpty() ? null : knownOwn;
             final long t0 = System.nanoTime();
             final Result r = new Result();
+            if (known != null && spec.knownLib) {
+                final int[] tb = topBottom(liveMe, known);
+                r.knownTop = tb[0];
+                r.knownPinned = tb[1];
+            }
             try {
                 label0(live, liveMe, key, r, known);
             } catch (RuntimeException | StackOverflowError e) {
@@ -585,6 +612,20 @@ public final class HonestLabel {
             }
         }
 
+        /** known-lib-1102: the counts of {@code known} that are the library's prefix (top), and the other known cards. */
+        static int[] topBottom(final Player me, final Set<Integer> known) {
+            final List<forge.game.card.Card> lib = new ArrayList<>(me.getCardsIn(forge.game.zone.ZoneType.Library));
+            int t = 0;
+            while (t < lib.size() && known.contains(lib.get(t).getId())) {
+                t++;
+            }
+            int b = 0;
+            for (int i = t; i < lib.size(); i++) {
+                b += known.contains(lib.get(i).getId()) ? 1 : 0;
+            }
+            return new int[] {t, b};
+        }
+
         /** An honest world: a copy of the live game, their hidden cards from our belief, our library shuffled. */
         private Object[] world(final Game live, final Player liveMe, final Player liveOpp, final Random rng) {
             return world(live, liveMe, liveOpp, rng, null);
@@ -627,6 +668,10 @@ public final class HonestLabel {
                     }
                 }
                 s.notePlaced(placed);
+                if (spec.knownLib) {
+                    // known-lib-1102: every known card beyond the known top stays at its index in the solver's worlds too
+                    s.notePinned(placed);
+                }
             }
             // every world the solver copies from the root (verification worlds, the engine's root) re-draws their hidden
             // cards again from OUR pool, with visibility from the live game
@@ -669,6 +714,14 @@ public final class HonestLabel {
                     r.meter = s.meter.toJson(); // the exact-draw work included
                 }
             }
+            if (proven == null && spec.knownLib && spec.libLabels && r.libTag == null && r.copyGap == null) {
+                // known-lib-1102 (N5b): no line proves it, and our unknown library is a small known set (a Doomsday
+                // pile after a fetch): plan per draw, then label the best line by its exact-draw fraction
+                proven = drawPlans(s, root, me, r, key);
+                if (spec.meter) {
+                    r.meter = s.meter.toJson();
+                }
+            }
             if (proven != null) {
                 r.label = "win";
                 r.pWin = proven.pBelief;
@@ -679,6 +732,104 @@ public final class HonestLabel {
                 r.lineSteps = proven.steps;
                 r.turnsToEnd = proven.endTurn < 0 ? -1 : Math.max(0, proven.endTurn - live.getPhaseHandler().getTurn());
             }
+        }
+
+        /**
+         * known-lib-1102 (knownLib with libLabels; N5b's "enumerate the distinct names, weight by count, solve each"):
+         * when no line is proven and the unknown part of our library has at most {@link #PLAN_SEQ_CAP} distinct name
+         * sequences for its next two draws (a Doomsday pile after a fetch, a tiny library), plan in a copy of the root
+         * with each sequence put on the known top (the planner can then cast what it draws), and collect the proven lines.
+         * Planning on a sequence is clairvoyant, so a line is never labelled by those plans: each collected line is
+         * re-verified in the real root (our library unknown below the known top) and labelled by its exact-draw fraction
+         * ({@link ForcedWinSolver#libExact}, the q^8 path: one or two reads). The best fraction is the row's p_win with tag
+         * exact-draw (lib_why "per-draw"); "win" only at 1. Returns the proposal still proven, or null.
+         */
+        private ForcedWinSolver.Proposal drawPlans(final ForcedWinSolver s, final Game root, final Player me, final Result r,
+                final long key) {
+            final List<forge.game.card.Card> lib = new ArrayList<>(me.getCardsIn(forge.game.zone.ZoneType.Library));
+            final int kt = Math.min(s.knownTopCount(root), lib.size());
+            final Set<Integer> pins = s.pinnedIn(me);
+            final Set<Integer> known = new java.util.HashSet<>(pins);
+            for (int i = 0; i < kt; i++) {
+                known.add(lib.get(i).getId());
+            }
+            final DrawExpectation.Draws d = DrawExpectation.draws(me, known, 2, PLAN_SEQ_CAP, 0, LookaheadSearch.mix(spec.seed, key));
+            if (!d.exact || d.seqs.isEmpty() || d.depth < 1) {
+                return null;
+            }
+            final List<ForcedWinPlanner.Line> lines = new ArrayList<>();
+            final Set<String> seen = new java.util.HashSet<>();
+            for (int q = 0; q < d.seqs.size(); q++) {
+                final Game g2;
+                final Player me2;
+                synchronized (root) {
+                    final GameCopier copier = new GameCopier(root, true);
+                    copier.setCopyPending(GameCopier.SOLVER_COPY_PENDING);
+                    copier.setCopyFidelity(1);
+                    ForcedWinEngine.copyStackIf(copier, root, spec.winConfig().engineStack);
+                    g2 = copier.makeCopy();
+                    me2 = (Player) copier.find(me);
+                }
+                DrawExpectation.arrange(me2, d.seqs.get(q), d.unknownById, d.unknownSlots,
+                        new Random(LookaheadSearch.mix(key, 0x504C414EL + q)));
+                final ForcedWinSolver s2 = new ForcedWinSolver(me2, spec.winConfig());
+                s2.redraw = s.redraw;
+                final List<forge.game.card.Card> lib2 = new ArrayList<>(me2.getCardsIn(forge.game.zone.ZoneType.Library));
+                // the known cards and the arranged draws are placed (the known top then runs through them); pins stay pinned
+                final List<forge.game.card.Card> placed2 = new ArrayList<>();
+                for (int i = 0; i < lib2.size(); i++) {
+                    final int slot = d.unknownSlots.indexOf(i);
+                    if (known.contains(lib2.get(i).getId()) || slot >= 0 && slot < d.depth) {
+                        placed2.add(lib2.get(i));
+                    }
+                }
+                s2.notePlaced(placed2);
+                s2.notePinned(placed2);
+                final List<ForcedWinSolver.Proposal> props2 = s2.propose(g2);
+                ForcedWinSolver.receipt("FORCED_WIN per-draw seq=" + d.seqs.get(q) + " knownTop=" + s2.knownTopCount(g2)
+                        + " proposals=" + props2.size() + " proven=" + props2.stream().filter(p -> p.proven(spec.worlds)).count());
+                for (ForcedWinSolver.Proposal p : props2) {
+                    if (p.proven(spec.worlds) && p.line instanceof ForcedWinPlanner.Line && lines.size() < PLAN_LINE_CAP
+                            && seen.add(String.valueOf(((ForcedWinPlanner.Line) p.line).steps))) {
+                        lines.add((ForcedWinPlanner.Line) p.line);
+                    }
+                }
+                if (s2.lastCap() != null) {
+                    r.cap = s2.lastCap();
+                    r.capHits++;
+                }
+            }
+            ForcedWinSolver.Proposal best = null;
+            ForcedWinSolver.LibExact bestX = null;
+            for (ForcedWinPlanner.Line line : lines) {
+                line.knownTop = kt; // the seat does not know the draws
+                final ForcedWinSolver.Proposal p = new ForcedWinSolver.Proposal(
+                        s.evaluateBudgeted(root, line, LookaheadSearch.mix(spec.seed, key ^ 0x44524157L)));
+                if (p.proven(spec.worlds) && !p.libDependent) {
+                    return p; // a real proof after all
+                }
+                if (!p.libDependent || p.hiddenTakes < 1 || p.hiddenTakes > 2) {
+                    ForcedWinSolver.receipt("FORCED_WIN per-draw skip dep=" + p.libDependent + " takes=" + p.hiddenTakes + " " + p.text);
+                    continue;
+                }
+                final ForcedWinSolver.LibExact x = s.libExact(root, p, LIB_SEQ_CAP, key);
+                ForcedWinSolver.receipt("FORCED_WIN per-draw verify takes=" + p.hiddenTakes + " exact=" + x.exact + " fraction="
+                        + x.fraction + " why=" + x.why + " " + p.text);
+                if (x.exact && (bestX == null || x.fraction > bestX.fraction + 1e-12)) {
+                    best = p;
+                    bestX = x;
+                }
+            }
+            if (best == null) {
+                return null;
+            }
+            r.libTag = "exact-draw";
+            r.libWhy = "per-draw";
+            r.libSeqs = bestX.seqs;
+            r.libTakes = best.hiddenTakes;
+            r.pWin = bestX.fraction;
+            r.worldsWin = best.worldsRun;
+            return bestX.fraction >= 1.0 - 1e-9 ? best : null;
         }
 
         /**
@@ -852,6 +1003,8 @@ public final class HonestLabel {
 
     /** e1-q8-1101: the most name sequences an exact-draw label enumerates (more: sampled). */
     static final int LIB_SEQ_CAP = 64;
+    /** known-lib-1102: the most draw sequences {@link Seat#drawPlans} plans on, and the most lines it re-verifies. */
+    static final int PLAN_SEQ_CAP = 16, PLAN_LINE_CAP = 8;
 
     private static ForcedWinSolver.Config capOne(final ForcedWinSolver.Config c) {
         c.aiWork = 1;
