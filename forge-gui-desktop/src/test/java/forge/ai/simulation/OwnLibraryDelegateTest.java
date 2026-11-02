@@ -230,10 +230,11 @@ public class OwnLibraryDelegateTest extends forge.ai.AITest {
         final GameCopier copier = new GameCopier(g, true);
         final Game copy = copier.makeCopy();
         final Player cm = (Player) copier.find(me(g));
+        Assert.assertEquals(kl.known(cm), live, "an unchanged copy: the live known ids, at the same indices");
         final List<Card> order = new ArrayList<>(cm.getCardsIn(ZoneType.Library));
         java.util.Collections.reverse(order);
         cm.getZone(ZoneType.Library).setCards(order); // the copy's order differs from the live one
-        Assert.assertEquals(kl.known(cm), live, "the copy query reads the live known ids (they survive the copy)");
+        Assert.assertTrue(kl.known(cm).isEmpty(), "a reordered copy: none (S1 re-check: no pin at a moved index)");
         Assert.assertEquals(kl.known(me(g)), live, "and the live tracker still knows them at the next row");
         Assert.assertNotNull(copy);
     }
@@ -301,6 +302,70 @@ public class OwnLibraryDelegateTest extends forge.ai.AITest {
             }
             Assert.assertEquals(read, truth, truth ? "the T world pins the opponent's own positions (the test reaches it)"
                     : "a belief world read the opponent's memory");
+        }
+    }
+    // ------------------------------------------------------------------ review #168 S1 re-check: copy order
+
+    /**
+     * An applied copy where the answer was a tutor's pick: the copy's library is shuffled, so the live seat's known card X
+     * is at a random index there and must not be pinned. In an unshuffled copy, X is still known at its index.
+     */
+    @Test
+    public void aTutorShuffledCopyPinsNothingAndAnUnshuffledOneKeepsTheIndex() {
+        final Game g = KnownLibTest.game("Brainstorm;Lightning Bolt;Shock", "Island", "Island;Swamp;Island;Swamp;Island;Swamp;Island;Swamp", 20);
+        me(g).dangerouslySetController(new KnownLibTest.Ordered(g, me(g), null, false));
+        final OwnLibraryMemory kl = new OwnLibraryMemory(me(g), true);
+        kl.watch(g);
+        KnownLibTest.playAndResolve(g, me(g), ChooseACardTest.find(me(g), ZoneType.Hand, "Brainstorm").getFirstSpellAbility(), null);
+        final Set<Integer> live = kl.known(me(g));
+        Assert.assertEquals(live.size(), 2);
+        final int x = new ArrayList<>(me(g).getCardsIn(ZoneType.Library)).get(1).getId();
+        // unshuffled copy: X at the same index, still known
+        final GameCopier c1 = new GameCopier(g, true);
+        c1.makeCopy();
+        final Player m1 = (Player) c1.find(me(g));
+        Assert.assertEquals(kl.known(m1), live);
+        Assert.assertEquals(new ArrayList<>(m1.getCardsIn(ZoneType.Library)).get(1).getId(), x, "the same index");
+        // the tutor's shuffle in the copy (Forge's own shuffle, no watcher there)
+        final GameCopier c2 = new GameCopier(g, true);
+        c2.makeCopy();
+        final Player m2 = (Player) c2.find(me(g));
+        MyRandomSeed.set(5);
+        m2.shuffle(null);
+        Assert.assertFalse(kl.known(m2).contains(x), "a shuffled copy never pins X");
+        Assert.assertTrue(kl.known(m2).isEmpty());
+        Assert.assertEquals(kl.known(me(g)), live, "the live tracker is untouched");
+    }
+
+    /** The same pair for an R3 world's memory (it watches its own copy) queried on a sub-copy of that copy. */
+    @Test
+    public void anR3SubCopyFollowsTheSameRule() {
+        final Game g = KnownLibTest.game("", "Island", "Island;Swamp;Lightning Bolt;Swamp;Island;Swamp;Island;Swamp", 20);
+        final GameCopier wc = new GameCopier(g, true);
+        final Game world = wc.makeCopy();
+        final Player wm = (Player) wc.find(me(g));
+        final List<Card> wl = new ArrayList<>(wm.getCardsIn(ZoneType.Library));
+        final OwnLibraryMemory mem = new OwnLibraryMemory(wm, true);
+        mem.seedKnown(List.of(wl.get(0), wl.get(2)));
+        mem.watch(world);
+        final Set<Integer> pins = Set.of(wl.get(0).getId(), wl.get(2).getId());
+        Assert.assertEquals(mem.known(wm), pins);
+        final GameCopier s1 = new GameCopier(world, true);
+        s1.makeCopy();
+        Assert.assertEquals(mem.known((Player) s1.find(wm)), pins, "an unchanged sub-copy keeps the pins");
+        final GameCopier s2 = new GameCopier(world, true);
+        s2.makeCopy();
+        final Player sm = (Player) s2.find(wm);
+        MyRandomSeed.set(11);
+        sm.shuffle(null);
+        Assert.assertTrue(mem.known(sm).isEmpty(), "a shuffled sub-copy pins nothing");
+        Assert.assertEquals(mem.known(wm), pins, "the world's memory is untouched");
+    }
+
+    /** Seeds Forge's shuffle RNG (MyRandom) for a deterministic test shuffle. */
+    static final class MyRandomSeed {
+        static void set(final long seed) {
+            forge.util.MyRandom.setRandom(new java.util.Random(seed));
         }
     }
 }
