@@ -653,6 +653,7 @@ public final class R3LabelSearch {
         void atStart(final Player me) {
             if (truth && seq == null && spec.stratify && W > 0) {
                 firstDraw = stratify(me, memory.known(me), w, W, new Random(LookaheadSearch.mix(seed, 0x5354L)));
+                memory.resync(); // review #168 S3: stratify keeps the known cards at their indices
             }
         }
     }

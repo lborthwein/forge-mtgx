@@ -212,4 +212,50 @@ public class OwnLibraryDelegateTest extends forge.ai.AITest {
         Assert.assertEquals(legacy.known(me(g)), Set.of(top.getId()));
         Assert.assertTrue(((PlayerControllerAi) me(g).getController()) != null);
     }
+    // ------------------------------------------------------------------ review #168 S2 / S3
+
+    /**
+     * S2: a choose-a-card query on a copy whose library order differs from the live one (an applied answer, a shuffled
+     * world) must not wipe the live tracker: the Brainstorm put-backs are still known at the live seat's next row.
+     */
+    @Test
+    public void aCopyQueryDoesNotWipeTheLiveTracker() {
+        final Game g = KnownLibTest.game("Brainstorm;Lightning Bolt;Shock", "Island", "Island;Swamp;Island;Swamp;Island;Swamp", 20);
+        me(g).dangerouslySetController(new KnownLibTest.Ordered(g, me(g), null, false));
+        final OwnLibraryMemory kl = new OwnLibraryMemory(me(g), true);
+        kl.watch(g);
+        KnownLibTest.playAndResolve(g, me(g), ChooseACardTest.find(me(g), ZoneType.Hand, "Brainstorm").getFirstSpellAbility(), null);
+        final Set<Integer> live = kl.known(me(g));
+        Assert.assertEquals(live.size(), 2, "the two put-backs");
+        final GameCopier copier = new GameCopier(g, true);
+        final Game copy = copier.makeCopy();
+        final Player cm = (Player) copier.find(me(g));
+        final List<Card> order = new ArrayList<>(cm.getCardsIn(ZoneType.Library));
+        java.util.Collections.reverse(order);
+        cm.getZone(ZoneType.Library).setCards(order); // the copy's order differs from the live one
+        Assert.assertEquals(kl.known(cm), live, "the copy query reads the live known ids (they survive the copy)");
+        Assert.assertEquals(kl.known(me(g)), live, "and the live tracker still knows them at the next row");
+        Assert.assertNotNull(copy);
+    }
+
+    /** S3: an R3 world's stratify reorders the watched copy's unknown slots (setCards): the pins survive a resync. */
+    @Test
+    public void pinsSurviveAPinnedReorderAfterAResync() {
+        final Game g = KnownLibTest.game("", "Island", "Island;Swamp;Lightning Bolt;Swamp;Island;Swamp;Island;Swamp", 20);
+        final List<Card> lib = new ArrayList<>(me(g).getCardsIn(ZoneType.Library));
+        final OwnLibraryMemory kl = new OwnLibraryMemory(me(g), true);
+        kl.seedKnown(List.of(lib.get(0), lib.get(2)));
+        kl.watch(g);
+        final Set<Integer> pins = Set.of(lib.get(0).getId(), lib.get(2).getId());
+        R3LabelSearch.stratify(me(g), kl.known(me(g)), 1, 4, new java.util.Random(7));
+        kl.resync();
+        Assert.assertEquals(kl.known(me(g)), pins, "the pins stay at their indices and stay known");
+        Assert.assertEquals(me(g).getCardsIn(ZoneType.Library).get(2).getId(), lib.get(2).getId());
+        // without the resync, a silent reorder forgets (fail closed)
+        final List<Card> before = new ArrayList<>(me(g).getCardsIn(ZoneType.Library));
+        OwnLibraryMemory.shuffleUnknown(me(g), pins, new java.util.Random(9));
+        if (!new ArrayList<>(me(g).getCardsIn(ZoneType.Library)).equals(before)) {
+            Assert.assertTrue(kl.known(me(g)).isEmpty(), "an unexplained reorder still forgets");
+        }
+    }
 }

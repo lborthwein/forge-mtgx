@@ -123,7 +123,19 @@ public final class OwnLibraryMemory {
     /** The ids of {@code me}'s library cards (in {@code g}, a copy or the live game) whose positions the seat knows. */
     public Set<Integer> known(final Player me) {
         if (delegate != null) {
-            return new HashSet<>(delegate.known(me));
+            if (me.getGame() == delegate.watched()) {
+                return new HashSet<>(delegate.known(me));
+            }
+            // review #168 S2: a copy (another order): read the watched game's known ids without mutating, keep those in
+            // the copy's library (ids survive a copy)
+            final Set<Integer> ro = delegate.knownReadOnly();
+            final Set<Integer> out = new HashSet<>();
+            for (Card c : me.getCardsIn(ZoneType.Library)) {
+                if (ro.contains(c.getId())) {
+                    out.add(c.getId());
+                }
+            }
+            return out;
         }
         final Set<Integer> out = new HashSet<>();
         synchronized (known) {
@@ -134,6 +146,16 @@ public final class OwnLibraryMemory {
             }
         }
         return out;
+    }
+
+    /**
+     * Review #168 S3: the caller just reordered the watched game's library with every known card kept at its index (an
+     * R3 world's stratify). Delegating: the tracker accepts the order (its pins survive); legacy: nothing to do.
+     */
+    public void resync() {
+        if (delegate != null) {
+            delegate.acceptPinnedReorder();
+        }
     }
 
     /** Library ids of {@code me}, top first. */
