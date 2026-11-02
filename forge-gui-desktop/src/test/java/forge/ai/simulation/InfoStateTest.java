@@ -815,4 +815,29 @@ public class InfoStateTest extends forge.ai.AITest {
         KnownLibTest.playAndResolve(g, me(g), sa, null);
         Assert.assertTrue(got.contains("PEEK:1"), got.toString());
     }
+    /**
+     * Review #171 S1 (= #168 S1): a query made with a COPY's player returns the watched knowledge only when the copy's
+     * library is in exactly the watched order. A tutor-shuffled apply copy pins nothing (X would sit at a random index);
+     * an unshuffled copy keeps X at the same index. The same for set-known runs.
+     */
+    @Test
+    public void aCopyQueryNeedsTheWatchedOrder() {
+        final Game g = game("Brainstorm;Lightning Bolt;Shock", "Island", "Island;Swamp;Island;Swamp;Island;Swamp;Island;Swamp");
+        me(g).dangerouslySetController(new KnownLibTest.Ordered(g, me(g), null, false));
+        final InfoStates s = track(g);
+        KnownLibTest.playAndResolve(g, me(g), ChooseACardTest.find(me(g), ZoneType.Hand, "Brainstorm").getFirstSpellAbility(), null);
+        final Set<Integer> live = s.known(me(g), me(g));
+        Assert.assertEquals(live.size(), 2);
+        final Game c1 = new GameCopier(g, true).makeCopy();
+        final Player m1 = c1.getPlayer(me(g).getId());
+        Assert.assertEquals(s.known(me(g), m1), live, "an unshuffled copy: the same ids");
+        Assert.assertEquals(s.knownIndex(me(g), m1), s.knownIndex(me(g), me(g)), "at the same indices");
+        final Game c2 = new GameCopier(g, true).makeCopy();
+        final Player m2 = c2.getPlayer(me(g).getId());
+        forge.util.MyRandom.setRandom(new Random(5));
+        m2.shuffle(null); // the tutor's shuffle in the applied copy (no tracker there)
+        Assert.assertTrue(s.known(me(g), m2).isEmpty(), "a shuffled copy pins nothing: " + s.knownIndex(me(g), m2));
+        Assert.assertTrue(s.runs(me(g), m2).isEmpty());
+        Assert.assertEquals(s.known(me(g), me(g)), live, "the live state is untouched");
+    }
 }

@@ -896,10 +896,11 @@ public final class InfoStates implements LibraryInfoListener {
             }
             return sortByIndex(out);
         }
-        // a copy: read-only against the watched state
+        // a copy: read-only against the watched state, and only when the copy's library is in exactly the watched
+        // order (review #171 S1 / #168 S1: a shuffled or reordered copy would pin known cards at moved indices)
         final List<Integer> cur = ids(wp);
         final List<Integer> s = snap.get(w);
-        if (s == null || !s.equals(cur)) {
+        if (s == null || !s.equals(cur) || !ids(owner).equals(cur)) {
             return out;
         }
         final int n = cur.size();
@@ -935,6 +936,13 @@ public final class InfoStates implements LibraryInfoListener {
     public synchronized List<Set<Integer>> runs(final Player observer, final Player owner) {
         if (owner.getGame() == game) {
             refresh(owner.getId());
+        } else {
+            // a copy: only when its library is in exactly the watched order (review #171 S1)
+            final Player wp = game.getPlayer(owner.getId());
+            final List<Integer> s = snap.get(owner.getId());
+            if (wp == null || s == null || !s.equals(ids(wp)) || !ids(owner).equals(s)) {
+                return new ArrayList<>();
+            }
         }
         final View v = views.get(key(observer.getId(), owner.getId()));
         final Map<Integer, Set<Integer>> by = new LinkedHashMap<>();
