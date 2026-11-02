@@ -447,6 +447,68 @@ public class LabellerV2MinTest extends AITest {
                 "open control: no mana for it, proven");
     }
 
+    /**
+     * Ruling 2026-11-01 (self-damage mana riders): Ancient Tomb's rider only damages its controller, so with nothing of
+     * theirs reading their life it is not an answer and our Bolt line is proven; with their Death's Shadow out (its size
+     * reads their life) it stays a gap and the line is not proven.
+     */
+    @Test
+    public void selfDamageManaRidersAreNotAnswersUnlessLifeMatters() {
+        Assert.assertTrue(proven(frame("", "Ancient Tomb", 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                "Ancient Tomb alone: proven");
+        Assert.assertFalse(proven(frame("", "Ancient Tomb;Death's Shadow", 3, "Lightning Bolt", "Mountain"),
+                passive(cfg(true, 64))), "with Death's Shadow: a gap, not proven");
+        Assert.assertFalse(proven(frame("", "Pristine Talisman", 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                "a life-gain rider is still an answer");
+    }
+
+    /**
+     * Review #148 re-check 10 S3: a TargetMax-1 optional answer (TargetMin 0) enumerated and actually played with zero
+     * targets. Courageous Resolve ("up to one target creature you control gains protection from your opponents; draw a
+     * card; fateful hour: with 5 or less life you can't lose life or the game this turn") with no creature of theirs to
+     * target, at their 3 life against our Bolt: enumerated with no target, played (the line's failure is a lost MIN
+     * branch, not a cap or gap), and the line is not proven. With no mana for it: proven.
+     */
+    @Test
+    public void optionalTargetMax1AnswerIsPlayedWithZeroTargets() {
+        final Game g = frame("Courageous Resolve", "Plains;Plains;Plains", 3, "Lightning Bolt", "Mountain");
+        final Player def = g.getPlayers().get(0), ai = g.getPlayers().get(1);
+        boolean zero = false;
+        for (forge.game.spellability.SpellAbility sa : OppMin.responses(g, def, ai, null)) {
+            zero |= sa.getHostCard().getName().equals("Courageous Resolve") && sa.getTargets().isEmpty();
+        }
+        Assert.assertTrue(zero, "Courageous Resolve is enumerated with zero targets");
+        final Game g2 = frame("Courageous Resolve", "Plains;Plains;Plains", 3, "Lightning Bolt", "Mountain");
+        g2.AI_TIMEOUT = 600;
+        final List<ForcedWinSolver.Proposal> ps = new ForcedWinSolver(g2.getPlayers().get(1), passive(cfg(true, 64))).propose(g2);
+        Assert.assertFalse(ps.isEmpty(), "the Bolt line wins unopposed");
+        for (ForcedWinSolver.Proposal p : ps) {
+            Assert.assertFalse(p.proven(1), p.text);
+            Assert.assertTrue(p.text.contains("fails=min"), "a played and lost MIN branch, not a cap: " + p.text);
+        }
+        Assert.assertTrue(proven(frame("Courageous Resolve", "", 3, "Lightning Bolt", "Mountain"), passive(cfg(true, 64))),
+                "no mana for it: proven");
+    }
+
+    /**
+     * Review #161 S2-3: their life-reading spell on the stack makes their Ancient Tomb's rider an answer again (a gap):
+     * lifeSensitive reads their items on the stack.
+     */
+    @Test
+    public void aLifeReadingSpellOnTheStackKeepsTheRiderAnAnswer() {
+        final Game quiet = frame("", "Ancient Tomb", 3, "Lightning Bolt", "Mountain");
+        Assert.assertFalse(OppMin.lifeSensitive(quiet.getPlayers().get(0)), "Ancient Tomb alone reads no life");
+        final Game g = ForcedWinSolverTest.game("Default", "Default", ForcedWinSolverTest.frame("", "Ancient Tomb", 3,
+                "Lightning Bolt", "Mountain", 20, "ai") + "humanputonstack=Death's Shadow\n");
+        final Player def = g.getPlayers().get(0);
+        Assert.assertFalse(g.getStack().isEmpty(), "Death's Shadow is on the stack");
+        Assert.assertTrue(OppMin.lifeSensitive(def), "their Death's Shadow on the stack reads their life");
+        final forge.game.card.Card tomb = ForcedWinSolverTest.inZone(def, forge.game.zone.ZoneType.Battlefield, "Ancient Tomb");
+        for (forge.game.spellability.SpellAbility sa : tomb.getManaAbilities()) {
+            Assert.assertFalse(OppMin.selfDamageOnly(sa, def), "the rider stays an answer: " + sa);
+        }
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {

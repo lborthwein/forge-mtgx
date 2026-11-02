@@ -571,7 +571,9 @@ public final class OppMin {
                 if (sa0.isManaAbility()) {
                     // review #148 re-check 4: a mana ability with a non-mana cost (a sac outlet) answers a line; it is
                     // not played by OppMin, so a castable one is a gap
-                    if (manaAbilityWithCost(sa0) && castable(sa0, opp, gaps)) gaps.add("mana-ability");
+                    if (manaAbilityWithCost(sa0) && !selfDamageOnly(sa0, opp) && castable(sa0, opp, gaps)) {
+                        gaps.add("mana-ability");
+                    }
                     continue;
                 }
                 if (sa0.isSpell() && c.isInZone(ZoneType.Battlefield)) continue;
@@ -1008,6 +1010,90 @@ public final class OppMin {
             return true;
         }
         return false;
+    }
+
+    /**
+     * Ruling 2026-11-01 (#148 follow-up): a mana ability whose cost is mana and tapping itself and whose only rider is
+     * damage to, or life loss by, its own controller (Ancient Tomb, the Talismans, painlands) is not an answer, but only
+     * when nothing that player controls or may play references their life total or damage or life loss dealt to them
+     * (Death's Shadow, "whenever you lose life", "N or less life"). An undecidable check keeps the gap.
+     */
+    static boolean selfDamageOnly(final SpellAbility sa, final Player opp) {
+        if (sa.getPayCosts() != null) {
+            for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
+                if (!(part instanceof forge.game.cost.CostPartMana || part instanceof forge.game.cost.CostTap)) return false;
+            }
+        }
+        boolean rider = false;
+        for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+            final ApiType api = s.getApi();
+            if (api == ApiType.Mana || api == ApiType.ManaReflected) continue;
+            if (api != ApiType.DealDamage && api != ApiType.LoseLife) return false;
+            if (s.usesTargeting()) return false;
+            // LoseLife defaults to its controller; DealDamage must name it (fail closed otherwise)
+            final String who = s.hasParam("Defined") ? s.getParam("Defined") : api == ApiType.LoseLife ? "You" : "";
+            if (!"You".equals(who)) return false; // damage to anything but its controller
+            rider = true;
+        }
+        return rider && !lifeSensitive(opp);
+    }
+
+    /** Words that make a card's text depend on its controller's life or the damage or life loss dealt to them. */
+    static final String[] LIFE_WORDS = {"life", "damage to you", "dealt damage", "deals damage to you", "loses life",
+            "lose life"};
+
+    /**
+     * Whether anything {@code p} controls or may play reads their life total or damage or life loss to them: the text of
+     * every card in their battlefield, hand, graveyard, exile and command zone, and of their items on the stack (fail closed: any mention of "life" or of
+     * damage to them counts; an unreadable card counts).
+     */
+    static boolean lifeSensitive(final Player p) {
+        // review #161 S2-3: their spells and abilities on the stack (by the controller of the item)
+        final List<Card> stack = new java.util.ArrayList<>();
+        try {
+            for (forge.game.spellability.SpellAbilityStackInstance si : p.getGame().getStack()) {
+                if (si.getActivatingPlayer() == p && si.getSourceCard() != null) {
+                    stack.add(si.getSourceCard());
+                }
+            }
+        } catch (RuntimeException e) {
+            return true;
+        }
+        for (ZoneType z : List.of(ZoneType.Battlefield, ZoneType.Hand, ZoneType.Graveyard, ZoneType.Exile,
+                ZoneType.Command, ZoneType.Stack)) {
+            for (Card c : z == ZoneType.Stack ? stack : p.getCardsIn(z)) {
+                final String text;
+                try {
+                    text = String.valueOf(c.getOracleText()).toLowerCase(java.util.Locale.ROOT);
+                } catch (RuntimeException e) {
+                    return true;
+                }
+                if (c.isFaceDown() || text.isEmpty()) return true;
+                for (String w : LIFE_WORDS) {
+                    if (text.contains(w)) {
+                        // a card's own rider text ("deals 2 damage to you") is the ability under test: skip lands and
+                        // artifacts whose only life text is their own mana rider
+                        if (c.isLand() || c.isArtifact() && !c.isCreature()) {
+                            if (ownManaRiderOnly(c)) continue;
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Whether every ability of {@code c} that is not a pure mana ability is a self-damage mana rider. */
+    static boolean ownManaRiderOnly(final Card c) {
+        try {
+            for (SpellAbility a : c.getSpellAbilities()) {
+                if (!a.isManaAbility() && !a.isLandAbility()) return false; // a land's play ability is not text
+            }
+            return c.getTriggers().isEmpty() && c.getStaticAbilities().isEmpty();
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     static boolean negative(final SpellAbility sa) {

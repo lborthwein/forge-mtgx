@@ -84,10 +84,18 @@ public final class HonestLabel {
          */
         public Boolean sequentialAi = null;
         public Integer aiTimeoutSec = null;
+        /**
+         * e1-q8-1101 (DESIGN-R3 ruling 2026-11-01 06:40:01, q^8; false = off, the default, and then nothing changes, the
+         * spec's sha included): PROVEN only for lines that read no hidden card of the seat's own library. A proven line
+         * that read one or two is labelled by its exact-draw fraction (tag exact-draw: "win" only at 1); a deeper one, or
+         * one the enumeration cannot cover, by its belief worlds k/W (tag sampled), never "win". A loss whose proving
+         * line read the opponent's hidden library is likewise sampled, never "loss". Which line is played is unchanged.
+         */
+        public boolean libLabels = false;
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed", "meter", "sequentialAi", "aiTimeoutSec"));
+                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels"));
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
@@ -118,6 +126,7 @@ public final class HonestLabel {
             if (o.has("meter")) s.meter = o.get("meter").getAsBoolean();
             if (o.has("sequentialAi") && !o.get("sequentialAi").isJsonNull()) s.sequentialAi = o.get("sequentialAi").getAsBoolean();
             if (o.has("aiTimeoutSec") && !o.get("aiTimeoutSec").isJsonNull()) s.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
+            if (o.has("libLabels")) s.libLabels = o.get("libLabels").getAsBoolean();
             s.checkHonest();
             return s;
         }
@@ -195,7 +204,9 @@ public final class HonestLabel {
             o.addProperty("act", "false");
             o.addProperty("defense", "false");
             o.addProperty("exact", "false");
-            return config(o);
+            final ForcedWinSolver.Config c = config(o);
+            c.libWatch = libLabels; // e1-q8-1101
+            return c;
         }
 
         /** The loss check's (the opponent's) solver config: exact (one world, the position as it stands), act=false. */
@@ -207,7 +218,9 @@ public final class HonestLabel {
             o.addProperty("act", "false");
             o.addProperty("defense", "false");
             o.addProperty("exact", "true");
-            return config(o);
+            final ForcedWinSolver.Config c = config(o);
+            c.libWatch = libLabels; // e1-q8-1101
+            return c;
         }
 
         private static JsonObject defaults() {
@@ -266,6 +279,9 @@ public final class HonestLabel {
             }
             if (aiTimeoutSec != null) {
                 o.addProperty("aiTimeoutSec", aiTimeoutSec);
+            }
+            if (libLabels) {
+                o.addProperty("libLabels", true); // e1-q8-1101: only when on, so every other spec's sha is unchanged
             }
             return o;
         }
@@ -369,6 +385,14 @@ public final class HonestLabel {
          * is never a "loss" label (that needs every world run and lost).
          */
         public int worldsCapped;
+        /**
+         * e1-q8-1101 (libLabels only; null otherwise): the proving line read hidden own-library cards: "exact-draw" (the
+         * label is its exact fraction over {@link #libSeqs} name sequences) or "sampled" (k/W over {@link #libW} worlds,
+         * never proven); {@link #libTakes} = the most hidden cards one play-out read; {@link #libWhy} = why an exact-draw
+         * was not possible.
+         */
+        public String libTag, libWhy;
+        public int libW, libTakes, libSeqs;
 
         public JsonObject toJson() {
             final JsonObject o = new JsonObject();
@@ -406,6 +430,18 @@ public final class HonestLabel {
             if (copyGap != null) {
                 o.addProperty("copy_gap", copyGap);
                 o.addProperty("gap_refused", gapRefused);
+            }
+            if (libTag != null) {
+                o.addProperty("lib_tag", libTag);
+                o.addProperty("lib_takes", libTakes >= ForcedWinSolver.HiddenWatch.FAILED ? -1 : libTakes);
+                if ("exact-draw".equals(libTag)) {
+                    o.addProperty("lib_seqs", libSeqs);
+                } else {
+                    o.addProperty("lib_w", libW);
+                }
+                if (libWhy != null) {
+                    o.addProperty("lib_why", libWhy);
+                }
             }
             return o;
         }
@@ -611,6 +647,13 @@ public final class HonestLabel {
             } else {
                 r.pWin = Double.NaN; // no line won unopposed: no forced line found (not P = 0)
             }
+            if (proven != null && spec.libLabels && proven.libDependent) {
+                // e1-q8-1101 (ruling 2026-11-01 06:40:01): a proven line that read hidden cards of our library
+                proven = libLabel(s, root, proven, props, live, r, key);
+                if (spec.meter) {
+                    r.meter = s.meter.toJson(); // the exact-draw work included
+                }
+            }
             if (proven != null) {
                 r.label = "win";
                 r.pWin = proven.pBelief;
@@ -623,6 +666,50 @@ public final class HonestLabel {
             }
         }
 
+        /**
+         * e1-q8-1101: the label of a proven, library-dependent proposal. A proven proposal that read no hidden card wins
+         * as before (the shortest such); else one or two hidden reads get the exact-draw fraction (a win only at 1), and
+         * deeper reads or an uncoverable enumeration the sampled k/W. Returns the proposal still proven, or null.
+         */
+        private ForcedWinSolver.Proposal libLabel(final ForcedWinSolver s, final Game root, final ForcedWinSolver.Proposal dep,
+                final List<ForcedWinSolver.Proposal> props, final Game live, final Result r, final long key) {
+            ForcedWinSolver.Proposal clean = null;
+            for (ForcedWinSolver.Proposal p : props) {
+                if (!p.proven(spec.worlds) || p.libDependent || r.copyGap != null && p.endTurn != live.getPhaseHandler().getTurn()) {
+                    continue;
+                }
+                if (clean == null || p.endTurn >= 0 && p.endTurn < clean.endTurn) {
+                    clean = p;
+                }
+            }
+            if (clean != null) {
+                return clean;
+            }
+            r.libTakes = dep.hiddenTakes;
+            r.worldsWin = dep.worldsRun;
+            if (dep.hiddenTakes <= 2) {
+                final ForcedWinSolver.LibExact x = s.libExact(root, dep, LIB_SEQ_CAP, key);
+                if (x.exact) {
+                    r.libTag = "exact-draw";
+                    r.libSeqs = x.seqs;
+                    r.pWin = x.fraction;
+                    return x.fraction >= 1.0 - 1e-9 ? dep : null;
+                }
+                r.libWhy = x.why;
+            }
+            // review #161 S2-1: k/W re-estimated on fresh worlds keyed by the decision (the proof's own worlds picked the
+            // line, so their k = W says nothing); withheld (null) when the re-estimate was cut
+            final ForcedWinSolver.LibExact w = s.libResample(root, dep, LookaheadSearch.mix(key, 0x5A3D1EL));
+            r.libTag = "sampled";
+            r.libW = Double.isNaN(w.fraction) ? 0 : w.worlds;
+            r.pWin = w.fraction;
+            r.worldsWin = r.libW;
+            if (w.why != null) {
+                r.libWhy = r.libWhy == null ? w.why : r.libWhy + "+" + w.why;
+            }
+            return null;
+        }
+
         private void loss(final Game live, final Player liveMe, final Player liveOpp, final long key, final Result r,
                 final Set<Integer> knownOwn) {
             final long wall = spec.lossWallMs <= 0 ? Long.MAX_VALUE : System.nanoTime() + spec.lossWallMs * 1_000_000L;
@@ -631,6 +718,7 @@ public final class HonestLabel {
             final Map<String, Integer> reasons = new TreeMap<>();
             final Map<String, Integer> kinds = new TreeMap<>();
             int steps = -1;
+            int libLost = 0, libTakes = 0;
             final ForcedWinSolver.Meter sum = spec.meter ? new ForcedWinSolver.Meter() : null;
             boolean wallStop = false;
             for (int j = 0; j < spec.worlds; j++) {
@@ -672,6 +760,20 @@ public final class HonestLabel {
                         proven = p;
                     }
                 }
+                if (proven != null && spec.libLabels && proven.libDependent) {
+                    // review #161 S3-3: a proven line of theirs that reads nothing hidden, when there is one
+                    for (ForcedWinSolver.Proposal p : props) {
+                        if (p.proven(1) && !p.libDependent
+                                && !(r.copyGap != null && p.endTurn != live.getPhaseHandler().getTurn())) {
+                            proven = p;
+                            break;
+                        }
+                    }
+                }
+                if (proven != null && spec.libLabels && proven.libDependent) {
+                    libLost++; // e1-q8-1101: their proving line read their own hidden library
+                    libTakes = Math.max(libTakes, proven.hiddenTakes);
+                }
                 if (proven != null) {
                     lost++;
                     reasons.merge(String.valueOf(proven.endReason), 1, Integer::sum);
@@ -689,7 +791,15 @@ public final class HonestLabel {
                 r.meter.addProperty("loss_wall_stop", wallStop); // lossWallMs stopped the worlds (ms specs only)
             }
             r.pLoss = ran == 0 ? Double.NaN : (double) lost / ran;
-            if (ran == spec.worlds && lost == ran && ran > 0) {
+            if (ran == spec.worlds && lost == ran && ran > 0 && libLost > 0) {
+                // e1-q8-1101: every world lost, but some by lines that read their hidden library: sampled, never "loss"
+                r.libTag = "sampled";
+                r.libW = ran;
+                r.libTakes = libTakes;
+                // review #161 S2-1: each world's line was found and verified in that same world, so lost/ran is not an
+                // estimate of the dependent lines: p_loss is withheld (null) for a sampled loss
+                r.pLoss = Double.NaN;
+            } else if (ran == spec.worlds && lost == ran && ran > 0) {
                 r.label = "loss";
                 r.endReason = mode(reasons);
                 r.how = r.endReason == null ? "unknown" : howOf(r.endReason);
@@ -717,6 +827,9 @@ public final class HonestLabel {
      * {@code aiWork=1} (a cap hit), to test the capped-world accounting with K worlds and one capped.
      */
     static java.util.function.IntPredicate TEST_CAP_LOSS_WORLD;
+
+    /** e1-q8-1101: the most name sequences an exact-draw label enumerates (more: sampled). */
+    static final int LIB_SEQ_CAP = 64;
 
     private static ForcedWinSolver.Config capOne(final ForcedWinSolver.Config c) {
         c.aiWork = 1;

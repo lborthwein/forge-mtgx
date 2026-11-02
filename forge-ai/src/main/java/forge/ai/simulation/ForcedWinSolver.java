@@ -91,6 +91,14 @@ public final class ForcedWinSolver {
          */
         public boolean frameMemory;
         /**
+         * e1-q8-1101 (DESIGN-R3 ruling 2026-11-01 06:40:01, q^8; false = off, the default, and then nothing changes): each
+         * play-out watches which cards hidden from the seat at its start it reads from the seat's own library
+         * ({@link HiddenWatch}); evaluations and proposals carry it. Set only by {@link HonestLabel}'s {@code libLabels}
+         * (never a props key); it changes labels, never which line is played. Transient: a generator's recorded
+         * config JSON (HonestGenerator.solverCfgJson, Gson) does not carry it, so recorded specs are unchanged.
+         */
+        public transient boolean libWatch;
+        /**
          * solver-gaps-1015 (off by default): the width search searches the payment of its own casts (a bounded set of
          * payment orders: greedy, one-shot sources first, most flexible first, keep each colour, Phyrexian in life)
          * instead of paying greedily.
@@ -929,6 +937,509 @@ public final class ForcedWinSolver {
         return n;
     }
 
+    // ------------------------------------------------------------------ q^8: hidden own-library reads (e1-q8-1101)
+
+    /**
+     * e1-q8-1101 (DESIGN-R3 ruling 2026-11-01 06:40:01, the q^8 blocker; {@link Config#libWatch} only): one play-out's
+     * record of the cards hidden from the seat at its start that it READ from the seat's own library. Hidden = every
+     * library card but the known top the play-out keeps in place ({@link Line#knownTop}); a card the seat puts into its
+     * library where every card above it is known (a put-back, Doomsday's pile, a card searched to the top) becomes known,
+     * and a shuffle of the library forgets them all.
+     *
+     * <p>A READ: a hidden card leaving the library for any zone but exile (hand, stack, battlefield, graveyard, ...); a
+     * hidden card moved within the library (a scry kept on top or bottomed, Ponder's or Top's reorder, a dig's rest to
+     * the bottom) unless a search of our library picked it (Doomsday's pile); a hidden card exiled from the library
+     * (Necropotence, impulse draws, a dig's exile), unless that exile leaves no hidden card in the library (Doomsday's
+     * rest: then the order and the identities of what left do not matter), and a hidden exiled card that later leaves
+     * exile; a hidden card shown to either seat outside a search (reveals, scry / surveil / reorder choices, temporary
+     * shows: Thassa's Oracle's look, Delver, Ponder). Review #161 S1-1. Takes are positional within the top {@link #WINDOW} hidden cards, at the bottom, or after a
+     * change of the library the events did not explain, and then a read even when a search took them (a tutor in the
+     * window is a false dependence: fail closed). A deeper take is a read unless a search of our library picked that card
+     * (an identity search does not read the order).
+     *
+     * <p>Fails closed: a card the shadow does not know, a card that left the library with no event, or any error while
+     * watching makes the play-out library-dependent ({@link #failed}). Read-only: it never changes the copy.
+     */
+    static final class HiddenWatch {
+        /** The positional window below the known top. */
+        static final int WINDOW = 12;
+        /** {@link Eval#hiddenTakes} of a play-out whose detection failed (more than any exact-draw depth). */
+        static final int FAILED = 1 << 20;
+
+        final Player me;
+        final int meId;
+        /** Library card ids whose position the seat knows. */
+        final Set<Integer> known = new HashSet<>();
+        /** Hidden cards exiled from the library (a later move out of exile is a read). */
+        final Set<Integer> exiled = new HashSet<>();
+        /** Hidden cards just exiled from the library: reads unless the exile left no hidden card there ({@link #settle}). */
+        final Set<Integer> pendingExile = new java.util.TreeSet<>();
+        /** Cards a search of our library picked. */
+        final Set<Integer> searched = new HashSet<>();
+        /** The hidden cards read, by id. */
+        final Set<Integer> reads = new java.util.TreeSet<>();
+        /** Exact-draw: the arranged cards (a read of any other hidden card is {@link #uncovered}); null otherwise. */
+        final Set<Integer> cover;
+        /** The library's order after the last event. */
+        List<Integer> snap;
+        boolean failed, uncovered;
+        /** A search of our library is choosing (its look at the whole library is not a peek). */
+        boolean inSearch;
+        String why;
+
+        HiddenWatch(Player me, int knownTop, Set<Integer> cover) {
+            this.me = me;
+            this.meId = me.getId();
+            this.cover = cover;
+            this.snap = ids();
+            for (int i = 0; i < Math.min(Math.max(knownTop, 0), snap.size()); i++) {
+                known.add(snap.get(i));
+            }
+        }
+
+        List<Integer> ids() {
+            final List<Integer> out = new ArrayList<>();
+            for (Card c : me.getCardsIn(ZoneType.Library)) {
+                out.add(c.getId());
+            }
+            return out;
+        }
+
+        private boolean mine(forge.game.zone.ZoneView z, ZoneType t) {
+            return z != null && z.zoneType() == t && z.player() != null && z.player().getId() == meId;
+        }
+
+        boolean dependent() {
+            return failed || !reads.isEmpty();
+        }
+
+        int takes() {
+            return failed ? FAILED : reads.size();
+        }
+
+        private void read(int id, String how) {
+            reads.add(id);
+            if (why == null) {
+                why = how + ":" + id;
+            }
+            if (cover != null && !cover.contains(id)) {
+                uncovered = true;
+            }
+        }
+
+        private void fail(String how) {
+            failed = true;
+            uncovered = true;
+            if (why == null) {
+                why = "failed:" + how;
+            }
+        }
+
+        /**
+         * Exiles from the library since the last other event: reads, unless no hidden card is left in the library (a
+         * whole-library exile, Doomsday's rest).
+         */
+        private void settle() {
+            if (pendingExile.isEmpty()) {
+                return;
+            }
+            boolean hiddenLeft = false;
+            for (int x : ids()) {
+                hiddenLeft |= !known.contains(x);
+            }
+            if (hiddenLeft) {
+                for (int x : pendingExile) {
+                    read(x, "exile");
+                }
+            }
+            pendingExile.clear();
+        }
+
+        /** Hidden cards that left the library with no event of their own: reads (fail closed). */
+        private void silentLoss(List<Integer> before, List<Integer> after) {
+            final Set<Integer> now = new HashSet<>(after);
+            for (int x : before) {
+                if (!now.contains(x) && !known.contains(x)) {
+                    read(x, "silent");
+                }
+            }
+        }
+
+        private int hiddenAbove(List<Integer> order, int i) {
+            int n = 0;
+            for (int k = 0; k < i; k++) {
+                if (!known.contains(order.get(k))) {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        @com.google.common.eventbus.Subscribe
+        public void on(forge.game.event.GameEventShuffle e) {
+            try {
+                if (e.player() != null && e.player().getId() == meId) {
+                    settle();
+                    final List<Integer> now = ids();
+                    silentLoss(snap, now);
+                    known.clear();
+                    snap = now;
+                }
+            } catch (RuntimeException ex) {
+                fail("shuffle " + ex);
+            }
+        }
+
+        @com.google.common.eventbus.Subscribe
+        public void on(forge.game.event.GameEventCardChangeZone e) {
+            try {
+                change(e);
+            } catch (RuntimeException ex) {
+                fail("move " + ex);
+            }
+        }
+
+        private void change(forge.game.event.GameEventCardChangeZone e) {
+            final boolean fromLib = mine(e.from(), ZoneType.Library), toLib = mine(e.to(), ZoneType.Library);
+            if (e.card() == null) {
+                if (fromLib || toLib) {
+                    fail("no card");
+                }
+                return;
+            }
+            final int id = e.card().getId();
+            final ZoneType to = e.to() == null ? null : e.to().zoneType();
+            if (!(fromLib && to == ZoneType.Exile)) {
+                settle();
+            }
+            if (!fromLib && !toLib) {
+                if (exiled.contains(id) && e.from() != null && e.from().zoneType() == ZoneType.Exile && to != ZoneType.Exile) {
+                    exiled.remove(id);
+                    read(id, "exile->" + to);
+                }
+                return;
+            }
+            final List<Integer> now = ids();
+            if (fromLib) {
+                final int i = snap.indexOf(id);
+                final List<Integer> exp = new ArrayList<>(snap);
+                exp.remove(Integer.valueOf(id));
+                final List<Integer> cur = new ArrayList<>(now);
+                if (toLib) {
+                    cur.remove(Integer.valueOf(id));
+                }
+                final boolean silent = !exp.equals(cur);
+                if (silent) {
+                    silentLoss(exp, cur);
+                }
+                final boolean wasKnown = known.remove(id);
+                if (!wasKnown && !toLib) {
+                    if (i < 0) {
+                        read(id, "untracked->" + to);
+                    } else if (to == ZoneType.Exile) {
+                        exiled.add(id);
+                        pendingExile.add(id); // review #161 S3-6: a read unless the whole hidden library goes
+                    } else {
+                        final boolean window = silent || i == snap.size() - 1 || hiddenAbove(snap, i) < WINDOW;
+                        if (window || !searched.contains(id)) {
+                            read(id, (window ? "top" : "deep") + "->" + to);
+                        }
+                    }
+                } else if (!wasKnown && !searched.contains(id)) {
+                    // review #161 S1-1: a hidden card moved within the library (scry, a reorder, a dig's rest to the
+                    // bottom) was seen by the seat: a read unless a search picked it (Doomsday's pile)
+                    read(id, i < 0 ? "untracked->Library" : "library->library");
+                }
+            }
+            if (toLib) {
+                final int j = now.indexOf(id);
+                boolean top = j >= 0;
+                for (int k = 0; top && k < j; k++) {
+                    top = known.contains(now.get(k));
+                }
+                if (top) {
+                    known.add(id);
+                } else {
+                    known.remove(id);
+                }
+                exiled.remove(id);
+                if (!fromLib) {
+                    final List<Integer> cur = new ArrayList<>(now);
+                    cur.remove(Integer.valueOf(id));
+                    if (!snap.equals(cur)) {
+                        silentLoss(snap, cur);
+                    }
+                }
+            }
+            snap = now;
+        }
+
+        /** Cards revealed to a seat (either seat's controller): hidden cards of our library seen outside a search. */
+        void peek(Iterable<Integer> ids, ZoneType zone, int ownerId) {
+            try {
+                if (inSearch || zone != ZoneType.Library || ownerId != meId || ids == null) {
+                    return;
+                }
+                settle();
+                final List<Integer> now = ids();
+                for (int id : ids) {
+                    if (!known.contains(id) && now.contains(id)) {
+                        read(id, "peek");
+                    }
+                }
+            } catch (RuntimeException ex) {
+                fail("peek " + ex);
+            }
+        }
+
+        /** Our library cards among {@code cards} were shown to a seat (scry, surveil, reorder, a temporary show). */
+        void peekOwnLibrary(Iterable<Card> cards) {
+            if (cards == null) {
+                return;
+            }
+            final List<Integer> ids = new ArrayList<>();
+            for (Card c : cards) {
+                if (c != null && c.getOwner() != null && c.getOwner().getId() == meId) {
+                    ids.add(c.getId());
+                }
+            }
+            peek(ids, ZoneType.Library, meId);
+        }
+
+        void peekCards(Iterable<Card> cards, ZoneType zone, Player owner) {
+            if (cards == null || owner == null) {
+                return;
+            }
+            final List<Integer> ids = new ArrayList<>();
+            for (Card c : cards) {
+                if (c != null) {
+                    ids.add(c.getId());
+                }
+            }
+            peek(ids, zone, owner.getId());
+        }
+
+        void peekViews(Iterable<forge.game.card.CardView> cards, ZoneType zone, forge.game.player.PlayerView owner) {
+            if (cards == null || owner == null) {
+                return;
+            }
+            final List<Integer> ids = new ArrayList<>();
+            for (forge.game.card.CardView c : cards) {
+                if (c != null) {
+                    ids.add(c.getId());
+                }
+            }
+            peek(ids, zone, owner.getId());
+        }
+
+        /** A search choosing from {@code origin} picked {@code c}. */
+        void searchPick(List<ZoneType> origin, Card c) {
+            if (c != null && origin != null && origin.contains(ZoneType.Library) && c.getOwner() != null
+                    && c.getOwner().getId() == meId) {
+                searched.add(c.getId());
+            }
+        }
+
+        /** The play-out's end: cards that left the library with no event. */
+        void end() {
+            try {
+                settle();
+                silentLoss(snap, ids());
+            } catch (RuntimeException ex) {
+                fail("end " + ex);
+            }
+        }
+    }
+
+    /** e1-q8-1101: the current evaluation's hidden-library record (every play-out of it adds; {@link #evaluate}). */
+    private boolean libDep, libUncov;
+    /**
+     * Review #161 S2-2: a play-out or MIN of the current exact-draw / resample evaluation was cut (wall, step or call
+     * cap, Forge AI cap, error, a MIN cap or gap): its 0 is unknown, not a loss, so the result is not exact.
+     */
+    private boolean libCut;
+    private int libReads;
+
+    private void libNote(HiddenWatch hw) {
+        hw.end();
+        if (hw.dependent()) {
+            libDep = true;
+        }
+        if (hw.uncovered) {
+            libUncov = true;
+        }
+        libReads = Math.max(libReads, hw.takes());
+        if (RECEIPTS && hw.dependent()) {
+            receipt("FORCED_WIN lib-read" + tag() + " reads=" + hw.takes() + " first=" + hw.why);
+        }
+    }
+
+    /** e1-q8-1101: an exact-draw sequence's arrangement of our library in each play-out copy (null = none, the default). */
+    private Arrange libArrange;
+
+    static final class Arrange {
+        final List<String> seq;
+        final List<Card> byId;
+        final List<Integer> slots;
+        /** The cards {@link DrawExpectation#arrange} puts at the first hidden slots (it picks by name in id order). */
+        final Set<Integer> cover = new HashSet<>();
+
+        Arrange(List<String> seq, List<Card> byId, List<Integer> slots) {
+            this.seq = seq;
+            this.byId = byId;
+            this.slots = slots;
+            final List<Card> pool = new ArrayList<>(byId);
+            for (String n : seq) {
+                for (Card c : pool) {
+                    if (c.getName().equals(n)) {
+                        cover.add(c.getId());
+                        pool.remove(c);
+                        break;
+                    }
+                }
+            }
+        }
+
+        void apply(Player cm, Random rng) {
+            DrawExpectation.arrange(cm, seq, byId, slots, rng);
+        }
+    }
+
+    /** e1-q8-1101: a library-dependent proposal's exact-draw result. */
+    public static final class LibExact {
+        /** The fraction is exact (every sequence of the hidden reads enumerated and covered); else {@link #why}. */
+        public boolean exact;
+        public double fraction = Double.NaN;
+        public int seqs;
+        /** {@link #libResample}: the fresh worlds W. */
+        public int worlds;
+        public String why;
+    }
+
+    /**
+     * e1-q8-1101 (ruling 2026-11-01 06:40:01, N5b): the exact expectation of {@code p}'s line over its {@code
+     * p.hiddenTakes} (1 or 2) hidden reads: every distinct name sequence of the first hidden slots of our library in
+     * {@code live} (without replacement, weighted by count, DrawExpectation#draws), each evaluated as the proof was (the
+     * unopposed world and the belief worlds, MIN when oppMin) with those cards arranged at those slots and the rest
+     * shuffled; a sequence's value is its belief share when it won unopposed, else 0. Not exact (the caller labels the
+     * row sampled) when the sequences exceed {@code seqCap}, a play-out read a hidden card outside the arranged slots,
+     * a sequence ran fewer than its worlds, or the Forge AI work cap was spent. Each sequence has the decision's budgets.
+     */
+    public LibExact libExact(Game live, Proposal p, int seqCap) {
+        return libExact(live, p, seqCap, 0L);
+    }
+
+    /** As above; {@code key} (the decision's key) is mixed into every sequence's seed (review #161 S3-4). */
+    public LibExact libExact(Game live, Proposal p, int seqCap, long key) {
+        final LibExact x = new LibExact();
+        if (!cfg.libWatch || !p.libDependent || p.hiddenTakes < 1 || p.hiddenTakes > 2) {
+            x.why = "takes";
+            return x;
+        }
+        final Line line = (Line) p.line;
+        final Set<Integer> knownIds = new HashSet<>();
+        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+        for (int i = 0; i < Math.min(p.knownTop, lib.size()); i++) {
+            knownIds.add(lib.get(i).getId());
+        }
+        final DrawExpectation.Draws d = DrawExpectation.draws(me, knownIds, p.hiddenTakes, seqCap, 0, mix(cfg.seed, key));
+        if (!d.exact || d.depth < p.hiddenTakes || d.seqs.isEmpty()) {
+            x.why = d.exact ? "library" : "seqCap";
+            return x;
+        }
+        double sum = 0;
+        for (int s = 0; s < d.seqs.size(); s++) {
+            libArrange = new Arrange(d.seqs.get(s), d.unknownById, d.unknownSlots);
+            libCut = false;
+            decisionSteps0 = meter.playoutSteps;
+            if (p.engine && cfg.engineEvalSteps > 0) {
+                engineEvalBudget = cfg.engineEvalSteps;
+                engineEvalBase = meter.playoutSteps;
+            }
+            final long workCap = cfg.aiWorkCap();
+            final forge.ai.AiWork.Budget outer = forge.ai.AiWork.open(workCap);
+            final forge.ai.AiWork.Budget work = workCap > 0 ? forge.ai.AiWork.current() : null;
+            Eval e = null;
+            try {
+                e = evaluate(live, line, mix(mix(cfg.seed, key), 0x9B800L + s),
+                        deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
+            } catch (RuntimeException ex) {
+                x.why = "error:" + ex.getClass().getSimpleName();
+            } finally {
+                forge.ai.AiWork.restore(outer);
+                libArrange = null;
+                engineEvalBudget = 0;
+            }
+            if (work != null && work.spent()) {
+                x.why = forge.ai.AiWork.CAP;
+                return x;
+            }
+            if (e == null) {
+                return x;
+            }
+            if (e.libUncovered) {
+                x.why = "uncovered";
+                return x;
+            }
+            if (libCut) {
+                x.why = "cut"; // review #161 S2-2: a cut play-out's 0 is unknown
+                return x;
+            }
+            if (e.pUnopposed >= 1.0 && !cfg.exact && e.worldsRun < cfg.worlds) {
+                x.why = "worlds";
+                return x;
+            }
+            sum += d.weights.get(s) * (e.pUnopposed >= 1.0 ? e.pBelief : 0.0);
+            receipt("FORCED_WIN lib-exact" + tag() + " seq=" + d.seqs.get(s) + " w=" + d.weights.get(s) + " " + e);
+        }
+        x.exact = true;
+        x.fraction = Math.min(1.0, sum);
+        x.seqs = d.seqs.size();
+        return x;
+    }
+
+    /**
+     * Review #161 S2-1: the sampled k/W of a library-dependent proposal, re-estimated on fresh worlds (seeds keyed by the
+     * decision, not the worlds that picked the line, so a proof's k = W is not reported as the value): the line's
+     * evaluation as the proof ran it (unopposed world and belief worlds, MIN when oppMin), our library shuffled below
+     * its known top in each. {@link LibExact#fraction} = k/W, {@link LibExact#worlds} = W; NaN with {@link LibExact#why}
+     * when a play-out was cut, the worlds were short, or the Forge AI cap was spent.
+     */
+    public LibExact libResample(Game live, Proposal p, long key) {
+        final LibExact x = new LibExact();
+        libCut = false;
+        decisionSteps0 = meter.playoutSteps;
+        if (p.engine && cfg.engineEvalSteps > 0) {
+            engineEvalBudget = cfg.engineEvalSteps;
+            engineEvalBase = meter.playoutSteps;
+        }
+        final long workCap = cfg.aiWorkCap();
+        final forge.ai.AiWork.Budget outer = forge.ai.AiWork.open(workCap);
+        final forge.ai.AiWork.Budget work = workCap > 0 ? forge.ai.AiWork.current() : null;
+        Eval e = null;
+        try {
+            e = evaluate(live, (Line) p.line, mix(mix(cfg.seed, key), 0x5A3B1EL),
+                    deadlineAt(System.nanoTime() + budgetMs() * 1_000_000L));
+        } catch (RuntimeException ex) {
+            x.why = "error:" + ex.getClass().getSimpleName();
+        } finally {
+            forge.ai.AiWork.restore(outer);
+            engineEvalBudget = 0;
+        }
+        if (work != null && work.spent()) {
+            x.why = forge.ai.AiWork.CAP;
+        } else if (e != null && libCut) {
+            x.why = "cut";
+        } else if (e != null && e.pUnopposed >= 1.0 && !cfg.exact && e.worldsRun < cfg.worlds) {
+            x.why = "worlds";
+        } else if (e != null) {
+            x.worlds = cfg.exact ? 1 : cfg.worlds;
+            x.fraction = e.pUnopposed >= 1.0 ? e.pBelief : 0.0;
+        }
+        receipt("FORCED_WIN lib-resample" + tag() + " " + e + " why=" + x.why);
+        return x;
+    }
+
     // ------------------------------------------------------------------ offense: width search, then engine
 
     /** The position key the width search's verdict is cached under (same key, same verdict). */
@@ -1208,6 +1719,12 @@ public final class ForcedWinSolver {
         public final int endTurn;
         /** Lane bvw-plr-1023: the line's kind (the width search's win: storm, drain, enters, ...; "engine"). */
         public final String how;
+        /**
+         * e1-q8-1101 (libWatch only; false otherwise): the line's verification read a hidden own-library card (or could
+         * not tell), and the most such cards one play-out read. {@link #proven} is unchanged (N10: play is unchanged).
+         */
+        public final boolean libDependent;
+        public final int hiddenTakes;
 
         Proposal(Eval e) {
             this.line = e.line;
@@ -1222,6 +1739,8 @@ public final class ForcedWinSolver {
             this.endReason = e.endReason;
             this.endTurn = e.endTurn;
             this.how = e.line.how;
+            this.libDependent = e.libDependent;
+            this.hiddenTakes = e.hiddenTakes;
         }
 
         /** Verified forced: won unopposed and in every belief world it ran (at least {@code minWorlds}), adversary on. */
@@ -2318,6 +2837,12 @@ public final class ForcedWinSolver {
         /** Lane bvw-plr-1023: the unopposed play-out's end (Outcome#endReason, Outcome#endTurn). */
         String endReason;
         int endTurn = -1;
+        /** e1-q8-1101 (libWatch only): some play-out of this evaluation read a hidden own-library card, or could not tell. */
+        boolean libDependent;
+        /** The most hidden own-library cards one play-out read (detection failed: {@link HiddenWatch#FAILED}). */
+        int hiddenTakes;
+        /** Exact-draw evaluations: a play-out read a hidden card outside the arranged slots (the enumeration misses it). */
+        boolean libUncovered;
 
         Eval(Line line) {
             this.line = line;
@@ -2386,6 +2911,21 @@ public final class ForcedWinSolver {
      * a play-out already running is cut only at the wall (the decision's, and at least the deadline plus the grace).
      */
     Eval evaluate(Game live, Line line, long seed, long deadline) {
+        if (!cfg.libWatch) {
+            return evaluate0(live, line, seed, deadline);
+        }
+        // e1-q8-1101: every play-out of this evaluation (unopposed, belief worlds, adversary and MIN branches) adds to it
+        libDep = false;
+        libUncov = false;
+        libReads = 0;
+        final Eval e = evaluate0(live, line, seed, deadline);
+        e.libDependent = libDep;
+        e.hiddenTakes = libReads;
+        e.libUncovered = libUncov;
+        return e;
+    }
+
+    private Eval evaluate0(Game live, Line line, long seed, long deadline) {
         if (cfg.exact) {
             return evaluateExact(live, line, seed, deadline);
         }
@@ -2486,6 +3026,7 @@ public final class ForcedWinSolver {
                 if (wall != 0 && System.nanoTime() > wall) {
                     worst = new Outcome();
                     worst.why = "wall";
+                    libCut = true;
                     break;
                 }
                 if (evalStepsSpent()) {
@@ -2494,6 +3035,7 @@ public final class ForcedWinSolver {
                     meter.evalCapStops++;
                     worst = new Outcome();
                     worst.why = "evalSteps";
+                    libCut = true;
                     break;
                 }
                 final Outcome o = playout(live, line, mix(seed, 0), -1, j, wall);
@@ -2571,6 +3113,7 @@ public final class ForcedWinSolver {
     }
 
     private Outcome minCut(String why) {
+        libCut = true; // review #161 S2-2 (read only by libExact / libResample)
         meter.oppMinCuts++;
         final Outcome cut = new Outcome();
         cut.why = why;
@@ -2579,6 +3122,7 @@ public final class ForcedWinSolver {
 
     Outcome playout(Game live, Line line, long seed, int world, int counterAt, long wall, OppMin.Script script) {
         final Outcome out = new Outcome();
+        HiddenWatch hw = null;
         final Random prev = MyRandom.getThreadRandom();
         final Object prevIds = forge.util.IdScope.capture();
         final Object prevCache = AiCache.captureScope();
@@ -2607,12 +3151,23 @@ public final class ForcedWinSolver {
                         final Player liveOpp = (Player) live.getPlayer(o.getId());
                         hideOrSample(live, me, liveOpp, o, world == 0, rng);
                     }
-                    shuffleUnknownOwnLibrary(cm, line, rng);
+                    if (libArrange != null) {
+                        libArrange.apply(cm, rng); // e1-q8-1101: an exact-draw sequence at the first hidden slots
+                    } else {
+                        shuffleUnknownOwnLibrary(cm, line, rng);
+                    }
+                } else if (libArrange != null) {
+                    libArrange.apply(cm, rng);
                 }
+            }
+            if (cfg.libWatch) {
+                hw = new HiddenWatch(cm, line.knownTop, libArrange == null ? null : libArrange.cover);
+                g.subscribeToEvents(hw);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             final Follower f = Follower.of(line, cfg);
             final LineAi lineAi = new LineAi(g, cm, cm.getController().getLobbyPlayer(), f);
+            lineAi.hw = hw;
             // bvw-step1-build-1024: budget=counter: each seat's calls in the play-out are capped (the wall's stand-in)
             final long callLimit = cfg.counter ? 2L * cfg.maxSteps : 0L;
             lineAi.bounded(wall).callLimited(callLimit);
@@ -2622,6 +3177,7 @@ public final class ForcedWinSolver {
                 if (o != cm) {
                     adv = new AdversaryAi(g, o, o.getController().getLobbyPlayer(), cm, counterAt);
                     adv.passive = cfg.testPassiveOpp;
+                    adv.hw = hw;
                     if (script != null) {
                         adv.driver = new OppMin.Driver(script, o, cm, -1); // labeller-v2 (d), the shared MIN
                         out.points = adv.driver.points;
@@ -2644,6 +3200,7 @@ public final class ForcedWinSolver {
                 meter.playoutSteps++;
             }
             if (steps >= cfg.maxSteps && !g.isGameOver() && !watch.reached) {
+                libCut = true; // review #161 S2-2
                 meter.playoutStepCaps++;
             }
             out.won = cm.hasWon() || cm.getOpponents().stream().anyMatch(Player::hasLost);
@@ -2680,6 +3237,7 @@ public final class ForcedWinSolver {
                 }
             }
         } catch (ForcedWinEngine.OutOfBudget | forge.ai.AiWork.Exhausted ex) {
+            libCut = true; // review #161 S2-2
             if (forge.ai.AiWork.spent()) {
                 // rollout-budget-1101: the decision's Forge AI work cap is spent: not a win, and not dropped as at the wall
                 out.won = false;
@@ -2699,10 +3257,14 @@ public final class ForcedWinSolver {
             }
             receipt("FORCED_WIN playout cut world=" + world + " " + ex.getMessage());
         } catch (RuntimeException | StackOverflowError ex) {
+            libCut = true; // review #161 S2-2
             out.won = false;
             out.why = "error:" + ex.getClass().getSimpleName();
             receipt("FORCED_WIN playout error " + ex);
         } finally {
+            if (hw != null) {
+                libNote(hw); // e1-q8-1101
+            }
             AiCache.installScope(prevCache);
             forge.util.IdScope.install(prevIds);
             MyRandom.setThreadRandom(prev);
@@ -3513,13 +4075,56 @@ public final class ForcedWinSolver {
                 }
             }
             final Card c = decider == getPlayer() ? f.pick(sa, fetchList) : null;
-            return c != null ? c : super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
-                    selectPrompt, isOptional, decider);
+            if (hw == null) {
+                return c != null ? c : super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList, delayedReveal,
+                        selectPrompt, isOptional, decider);
+            }
+            // e1-q8-1101: a search of our library looks at all of it (not a peek) and picks by identity
+            hw.inSearch = true;
+            try {
+                final Card got = c != null ? c : super.chooseSingleCardForZoneChange(destination, origin, sa, fetchList,
+                        delayedReveal, selectPrompt, isOptional, decider);
+                hw.searchPick(origin, got);
+                return got;
+            } finally {
+                hw.inSearch = false;
+            }
+        }
+
+        /** e1-q8-1101 (libWatch only; null otherwise): the play-out's hidden-library watch, told of reveals. */
+        HiddenWatch hw;
+
+        @Override
+        public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addSuffix) {
+            if (hw != null) {
+                hw.peekCards(cards, zone, owner);
+            }
+            super.reveal(cards, zone, owner, messagePrefix, addSuffix);
+        }
+
+        @Override
+        public void reveal(List<forge.game.card.CardView> cards, ZoneType zone, forge.game.player.PlayerView owner,
+                String messagePrefix, boolean addSuffix) {
+            if (hw != null) {
+                hw.peekViews(cards, zone, owner);
+            }
+            super.reveal(cards, zone, owner, messagePrefix, addSuffix);
+        }
+
+        @Override
+        public void tempShowCards(Iterable<Card> cards) {
+            if (hw != null) {
+                hw.peekOwnLibrary(cards); // review #161 S1-1
+            }
+            super.tempShowCards(cards);
         }
 
         @Override
         public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone,
                 SpellAbility source) {
+            if (hw != null && destinationZone == ZoneType.Library) {
+                hw.peekOwnLibrary(cards); // review #161 S1-1: Ponder's / Top's reorder shows the cards
+            }
             if (f.cacLine && destinationZone == ZoneType.Library && cards != null && cards.size() >= 2
                     && cards.stream().allMatch(c -> c.getOwner() == getPlayer())) {
                 final String t = f.choices.next(ForcedWinChoices.ORDER);
@@ -3554,6 +4159,9 @@ public final class ForcedWinSolver {
 
         @Override
         public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+            if (hw != null) {
+                hw.peekOwnLibrary(topN); // review #161 S1-1: a scry looks at the cards
+            }
             final ImmutablePair<CardCollection, CardCollection> r = recordedArr(ForcedWinChoices.SCRY, topN);
             return r != null ? r : ImmutablePair.of(new CardCollection(topN), new CardCollection());
         }
@@ -3622,6 +4230,9 @@ public final class ForcedWinSolver {
 
         @Override
         public ImmutablePair<CardCollection, CardCollection> arrangeForSurveil(CardCollection topN) {
+            if (hw != null) {
+                hw.peekOwnLibrary(topN); // review #161 S1-1
+            }
             final ImmutablePair<CardCollection, CardCollection> r = recordedArr(ForcedWinChoices.SURV, topN);
             return r != null ? r : ImmutablePair.of(new CardCollection(topN), new CardCollection());
         }
@@ -3716,6 +4327,51 @@ public final class ForcedWinSolver {
             super(g, p, lp);
             this.victim = victim;
             this.counterAt = counterAt;
+        }
+
+        /** e1-q8-1101 (libWatch only; null otherwise): the play-out's hidden-library watch, told of reveals. */
+        HiddenWatch hw;
+
+        @Override
+        public void reveal(CardCollectionView cards, ZoneType zone, Player owner, String messagePrefix, boolean addSuffix) {
+            if (hw != null) {
+                hw.peekCards(cards, zone, owner);
+            }
+            super.reveal(cards, zone, owner, messagePrefix, addSuffix);
+        }
+
+        @Override
+        public void reveal(List<forge.game.card.CardView> cards, ZoneType zone, forge.game.player.PlayerView owner,
+                String messagePrefix, boolean addSuffix) {
+            if (hw != null) {
+                hw.peekViews(cards, zone, owner);
+            }
+            super.reveal(cards, zone, owner, messagePrefix, addSuffix);
+        }
+
+        @Override
+        public void tempShowCards(Iterable<Card> cards) {
+            if (hw != null) {
+                hw.peekOwnLibrary(cards); // review #161 S1-1
+            }
+            super.tempShowCards(cards);
+        }
+
+        @Override
+        public CardCollectionView orderMoveToZoneList(CardCollectionView cards, ZoneType destinationZone,
+                SpellAbility source) {
+            if (hw != null && destinationZone == ZoneType.Library) {
+                hw.peekOwnLibrary(cards); // review #161 S1-1: they order our library cards (fateseal-like)
+            }
+            return super.orderMoveToZoneList(cards, destinationZone, source);
+        }
+
+        @Override
+        public ImmutablePair<CardCollection, CardCollection> arrangeForScry(CardCollection topN) {
+            if (hw != null) {
+                hw.peekOwnLibrary(topN);
+            }
+            return super.arrangeForScry(topN);
         }
 
         @Override
