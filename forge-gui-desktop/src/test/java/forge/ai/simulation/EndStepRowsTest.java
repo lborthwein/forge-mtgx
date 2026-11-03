@@ -339,4 +339,27 @@ public class EndStepRowsTest extends SimulationTest {
         AssertJUnit.assertFalse(HonestGenerator.solverCfgJson(c).has("loopMarginal"));
         AssertJUnit.assertFalse(HonestGenerator.solverCfgJson(c).has("loopEps"));
     }
+
+    @Test
+    public void affordabilityReadsManaNotNames() {
+        final java.util.List<String> en = java.util.List.of("Pestermite"), pay = java.util.List.of("Kiki-Jiki, Mirror Breaker");
+        final java.util.function.Function<String, com.google.gson.JsonObject> at = bf -> {
+            final Game g = ForcedWinSolverTest.game("Default", "Default",
+                    setupFrame("END_OF_TURN", "ai", "Pestermite;Kiki-Jiki, Mirror Breaker" + (bf.contains("|hand:") ? ";"
+                            + bf.split("\\|hand:")[1] : ""), bf.split("\\|hand:")[0]));
+            return Affordability.of(g.getPlayers().get(0), en, pay);
+        };
+        final com.google.gson.JsonObject five = at.apply("Volcanic Island;Volcanic Island;Mountain;Mountain;Mountain");
+        final com.google.gson.JsonObject three = at.apply("Volcanic Island;Mountain;Mountain");
+        final com.google.gson.JsonObject threeDrop = at.apply("Volcanic Island;Mountain;Mountain|hand:Mountain");
+        final com.google.gson.JsonObject petal = at.apply("Volcanic Island;Mountain;Mountain|hand:Mountain;Lotus Petal");
+        final com.google.gson.JsonObject noBlue = at.apply("Mountain;Mountain;Mountain;Mountain;Mountain");
+        System.err.println("[endstep-test] afford five " + five + " three " + three + " drop " + threeDrop + " petal " + petal
+                + " noBlue " + noBlue);
+        AssertJUnit.assertTrue(five.get("affordable").getAsBoolean());
+        AssertJUnit.assertFalse(three.get("affordable").getAsBoolean());
+        AssertJUnit.assertFalse(threeDrop.get("affordable").getAsBoolean()); // 4 next turn < 5
+        AssertJUnit.assertTrue(petal.get("affordable").getAsBoolean()); // the land drop and a Petal: 5 next turn
+        AssertJUnit.assertFalse("colours: no blue source for Pestermite", noBlue.get("affordable").getAsBoolean());
+    }
 }

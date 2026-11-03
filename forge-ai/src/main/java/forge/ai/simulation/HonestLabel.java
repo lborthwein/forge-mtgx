@@ -430,6 +430,8 @@ public final class HonestLabel {
         public String endReason, how = "unresolved", lineHow;
         /** endstep-rows-1103 diagnostics only (-Dforge.bench.lineText=true; null otherwise): the best proposal's text. */
         public String lineText;
+        /** endstep-rows-1103 measurement only (-Dforge.bench.affordOnly=true; null otherwise): {@link Affordability#of}. */
+        public JsonObject afford;
         public int lineSteps = -1;
         /** Turns from the position to the proven end (global turn numbers; -1 = not proven). */
         public int turnsToEnd = -1;
@@ -493,6 +495,7 @@ public final class HonestLabel {
             if (endReason != null) o.addProperty("end_reason", endReason);
             if (lineHow != null) o.addProperty("line_how", lineHow);
             if (lineText != null) o.addProperty("line_text", lineText); // endstep-rows-1103 (diagnostics only)
+            if (afford != null) o.add("afford", afford); // endstep-rows-1103 (measurement only)
             o.addProperty("line_steps", lineSteps);
             if (turnsToEnd >= 0) {
                 o.addProperty("turns_to_end", turnsToEnd);
@@ -595,6 +598,14 @@ public final class HonestLabel {
             final Set<Integer> known = knownOwn == null || knownOwn.isEmpty() ? null : knownOwn;
             final long t0 = System.nanoTime();
             final Result r = new Result();
+            if (Boolean.getBoolean("forge.bench.affordOnly")) {
+                // endstep-rows-1103 (measurement only): the row's affordability, no label search
+                r.gate = "afford-only";
+                r.afford = Affordability.of(liveMe,
+                        java.util.Arrays.asList(System.getProperty("forge.bench.affordEnablers", "").split(";")),
+                        java.util.Arrays.asList(System.getProperty("forge.bench.affordPayoffs", "").split(";")));
+                return r;
+            }
             if (known != null && spec.knownLib) {
                 final int[] tb = topBottom(liveMe, known);
                 r.knownTop = tb[0];
