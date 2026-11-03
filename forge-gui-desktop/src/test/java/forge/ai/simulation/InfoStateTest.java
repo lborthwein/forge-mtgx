@@ -639,6 +639,7 @@ public class InfoStateTest extends forge.ai.AITest {
         me(g).dangerouslySetController(new KnownLibTest.Ordered(g, me(g), null, false));
         final ForcedWinSolver.Config cfg = new ForcedWinSolver.Config();
         cfg.infoState = true;
+        InfoStates.attach(g); // review #172 S2: attached at game setup; the solver only finds it
         final ForcedWinSolver s = new ForcedWinSolver(me(g), cfg);
         Assert.assertEquals(s.knownTopCount(g), 0);
         KnownLibTest.playAndResolve(g, me(g), ChooseACardTest.find(me(g), ZoneType.Hand, "Brainstorm").getFirstSpellAbility(), null);

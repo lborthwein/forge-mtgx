@@ -618,6 +618,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * keys is set, so every other spec's game is unchanged.
      */
     public void attach(final Game g, final boolean[] rlSeat, final RlSeat seat) {
+        if (cfg.infoState && g != null) {
+            // review #172 S2: the game's InfoStates is attached here, at the seat's setup on the game's own thread (a
+            // consumer only finds it)
+            forge.ai.simulation.InfoStates.attach(g);
+        }
         if (cfg.forcedWin == null && cfg.plans == null && cfg.cac == null) {
             return;
         }

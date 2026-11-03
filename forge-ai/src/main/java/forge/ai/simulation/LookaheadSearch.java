@@ -7643,6 +7643,10 @@ public final class LookaheadSearch {
      * canonical order (by id), and our library through {@link InfoStates#keepOwnLibrary}.
      */
     static void resample(Game live, Player liveMe, Game g, Player me, Random rng, InfoStates is) {
+        if (is == null) {
+            resample(live, liveMe, g, me, rng); // review #172 S2: none attached = the key-off path
+            return;
+        }
         final PlayerView myView = liveMe.getView();
         for (Player opp : me.getOpponents()) {
             Player liveOpp = (Player) live.getPlayer(opp.getId());
