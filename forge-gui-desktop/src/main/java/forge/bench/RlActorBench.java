@@ -1438,15 +1438,22 @@ public final class RlActorBench {
             forge.ai.dp.DecisionPoints.setCopyAnswerers(forge.ai.dp.DecisionPoints.FORGE_DEFAULT);
         }
         forge.ai.dp.DecisionPoints.setMeter(cfg.dpMeter);
-        if (cfg.dpCensus == null) {
-            return run0(cfg);
-        }
-        final forge.ai.dp.CensusObserver census = new forge.ai.dp.CensusObserver(Paths.get(cfg.dpCensus));
-        forge.ai.dp.DecisionPoints.setObserver(census);
         try {
-            return run0(cfg);
+            if (cfg.dpCensus == null) {
+                return run0(cfg);
+            }
+            final forge.ai.dp.CensusObserver census = new forge.ai.dp.CensusObserver(Paths.get(cfg.dpCensus));
+            forge.ai.dp.DecisionPoints.setObserver(census);
+            try {
+                return run0(cfg);
+            } finally {
+                census.write();
+                forge.ai.dp.DecisionPoints.setObserver(null);
+            }
         } finally {
-            census.write();
+            // review #176 S2: a run leaves no copy answerer or meter behind (in-process callers, tests)
+            forge.ai.dp.DecisionPoints.setCopyAnswerers(null);
+            forge.ai.dp.DecisionPoints.setMeter(false);
         }
     }
 

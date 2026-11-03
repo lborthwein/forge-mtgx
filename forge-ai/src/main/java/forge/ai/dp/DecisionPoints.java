@@ -35,11 +35,24 @@ public final class DecisionPoints {
     private static volatile DecisionObserver observer;
 
     // ------------------------------------------------------------------ PR-E: answerers on game copies, row meter
-    /** Answers the decision points of copies (label lines, roll-outs, solver copies), for both seats. */
+    /**
+     * Answers the decision points of copies (label lines, roll-outs, solver copies), for both seats.
+     *
+     * <p>Review #176 S1, the observation contract: a copy's game is a full copy, and {@code dp.seat().getGame()}
+     * reaches hidden zones (both libraries, the other hand). No observer InfoState is passed yet, so an answerer other
+     * than {@link #FORGE_DEFAULT} must declare {@link ObservationOnly} (it reads only what the deciding seat may see:
+     * public zones, its own hand, the options) and {@link #setCopyAnswerers} refuses any other.
+     * TODO(layer 3, ARCH-PROPOSAL-1102): pass the seat's InfoState view in forSeat, and extend layer 1's generic leak
+     * test to copy answerers (re-randomise what the InfoState calls unknown; a copy answerer's answers must not move).
+     */
     @FunctionalInterface
     public interface CopyAnswerers {
         /** The answerer for {@code seat}'s points in a copy made for label row {@code row} (null: none). */
         DecisionAnswerer forSeat(Player seat, String row);
+    }
+
+    /** Marker of a copy answerer that reads only the deciding seat's observation (see {@link CopyAnswerers}). */
+    public interface ObservationOnly extends CopyAnswerers {
     }
 
     /** The Forge-default copy answerer: every copy point keeps Forge AI's answer (byte-identical by construction). */
@@ -47,10 +60,15 @@ public final class DecisionPoints {
 
     private static volatile CopyAnswerers copyAnswerers;
     private static volatile boolean meter;
-    /** Row -> "kind|by" -> count (the meter; only while {@link #setMeter} is on). */
-    private static final Map<String, Map<String, int[]>> METER = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Row -> "kind|by" -> count (the meter; only while {@link #setMeter} is on; atomic counts, review #176 S3). */
+    private static final Map<String, Map<String, java.util.concurrent.atomic.LongAdder>> METER =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public static void setCopyAnswerers(final CopyAnswerers c) {
+        if (c != null && c != FORGE_DEFAULT && !(c instanceof ObservationOnly)) {
+            throw new IllegalArgumentException("decisionpoint-1102: a copy answerer other than FORGE_DEFAULT must be"
+                    + " ObservationOnly (no InfoState is passed yet; hidden zones are reachable through the copy)");
+        }
         copyAnswerers = c;
     }
 
@@ -90,13 +108,13 @@ public final class DecisionPoints {
 
     /** The meter's counts for {@code row} ("kind|by" -> n), removed; null when nothing was counted. */
     public static Map<String, Integer> takeMeter(final String row) {
-        final Map<String, int[]> m = row == null ? null : METER.remove(row);
+        final Map<String, java.util.concurrent.atomic.LongAdder> m = row == null ? null : METER.remove(row);
         if (m == null) {
             return null;
         }
         final Map<String, Integer> out = new java.util.TreeMap<>();
-        for (Map.Entry<String, int[]> e : m.entrySet()) {
-            out.put(e.getKey(), e.getValue()[0]);
+        for (Map.Entry<String, java.util.concurrent.atomic.LongAdder> e : m.entrySet()) {
+            out.put(e.getKey(), e.getValue().intValue());
         }
         return out;
     }
@@ -201,7 +219,7 @@ public final class DecisionPoints {
             final String row = rowOf(dp.seat() == null ? null : dp.seat().getGame());
             if (row != null) {
                 METER.computeIfAbsent(row, k -> new java.util.concurrent.ConcurrentHashMap<>())
-                        .computeIfAbsent(dp.kind() + "|" + by, k -> new int[1])[0]++;
+                        .computeIfAbsent(dp.kind() + "|" + by, k -> new java.util.concurrent.atomic.LongAdder()).increment();
             }
         }
         return out;

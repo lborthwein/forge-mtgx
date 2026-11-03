@@ -402,6 +402,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                     fatal = e.getMessage();
                     FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + e.getMessage());
                     System.err.println("[bvw-label] FATAL " + e.getMessage());
+                    forge.ai.dp.DecisionPoints.takeMeter(uidStr + ":" + seat + ":" + ord); // review #176 S3: no row
                     return;
                 } catch (IllegalStateException e) {
                     if (forge.ai.simulation.DeckBeliefModel.refusal() == null) {
@@ -413,6 +414,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
                     fatal = "deck_belief_refused: " + forge.ai.simulation.DeckBeliefModel.refusal();
                     FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + fatal);
                     System.err.println("[bvw-label] FATAL " + fatal);
+                    forge.ai.dp.DecisionPoints.takeMeter(uidStr + ":" + seat + ":" + ord); // review #176 S3: no row
                     return;
                 }
                 searchMs += sr.ms;
@@ -1030,6 +1032,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         } finally {
             r3Ms += (System.nanoTime() - t0) / 1e6;
             forge.ai.dp.DecisionPoints.exitRow();
+            forge.ai.dp.DecisionPoints.takeMeter(ckey); // review #176 S3: a choice row that wrote nothing leaves no counts
         }
     }
 
