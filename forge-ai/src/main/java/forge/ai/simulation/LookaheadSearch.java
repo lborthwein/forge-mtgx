@@ -299,6 +299,15 @@ public final class LookaheadSearch {
         public String belief = "off";
         /** Belief shadow (do-no-harm gate): compute the belief and build its worlds in throwaway copies, play the default worlds. */
         public boolean beliefShadow = false;
+        /**
+         * order-memory-1102 layer 1 (false = off, the default: every world exactly as before). Set by a research spec's
+         * infoState key (HonestLabel, R3, RlSearch); never armed on a live seat here. The world re-draw reads the live
+         * game's {@link InfoStates}: our library keeps every card InfoState(me) knows at its index and permutes each
+         * set-known run within its slots ({@link InfoStates#keepOwnLibrary}); the opponent's library keeps every card
+         * InfoState(me) knows of it at its index (a revealed top that outlived Courser), in resample and the uniform
+         * belief re-draw; every unknown slot is drawn from a canonical order.
+         */
+        public boolean infoState = false;
         public String beliefUrl = null;
         public int beliefTimeoutMs = 2000;
         public String beliefCheckpointSha256 = null;
@@ -415,6 +424,9 @@ public final class LookaheadSearch {
             JsonObject o = new JsonObject();
             o.addProperty("worlds", worlds);
             o.addProperty("breadth", breadth);
+            if (infoState) {
+                o.addProperty("infoState", true); // order-memory-1102: only when on
+            }
             o.addProperty("horizonTurns", horizonTurns);
             o.addProperty("maxSteps", maxSteps);
             o.addProperty("seed", seed);
@@ -7625,6 +7637,44 @@ public final class LookaheadSearch {
      * The belief is uniform over the opponent's registered deck remainder, the same prior
      * the mtgx belief sampler starts from.
      */
+    /**
+     * order-memory-1102 (Config#infoState): as {@link #resample(Game, Player, Game, Player, Random)}, the opponent-library
+     * cards InfoState(me) knows kept at their indices (not only the visible top), every hidden card drawn from a
+     * canonical order (by id), and our library through {@link InfoStates#keepOwnLibrary}.
+     */
+    static void resample(Game live, Player liveMe, Game g, Player me, Random rng, InfoStates is) {
+        if (is == null) {
+            resample(live, liveMe, g, me, rng); // review #172 S2: none attached = the key-off path
+            return;
+        }
+        final PlayerView myView = liveMe.getView();
+        for (Player opp : me.getOpponents()) {
+            Player liveOpp = (Player) live.getPlayer(opp.getId());
+            List<Card> hand = new ArrayList<>(opp.getCardsIn(ZoneType.Hand));
+            List<Card> lib = new ArrayList<>(opp.getCardsIn(ZoneType.Library));
+            List<Card> keep = new ArrayList<>();
+            List<Card> pool = new ArrayList<>(lib);
+            for (Card c : hand) {
+                Card lc = live.findById(c.getId());
+                if (lc != null && lc.getView().canBeShownTo(myView)) {
+                    keep.add(c);
+                } else {
+                    pool.add(c);
+                }
+            }
+            final Map<Integer, Card> pins = liveOpp == null ? new java.util.TreeMap<>() : InfoStates.oppPins(is, liveMe, liveOpp, g);
+            pool.removeAll(pins.values());
+            pool.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+            Collections.shuffle(pool, rng);
+            int need = hand.size() - keep.size();
+            List<Card> newHand = new ArrayList<>(keep);
+            newHand.addAll(pool.subList(0, need));
+            opp.getZone(ZoneType.Hand).setCards(newHand);
+            opp.getZone(ZoneType.Library).setCards(InfoStates.assemble(lib.size(), pins, pool.subList(need, pool.size())));
+        }
+        InfoStates.keepOwnLibrary(is, liveMe, me, rng);
+    }
+
     static void resample(Game live, Player liveMe, Game g, Player me, Random rng) {
         final PlayerView myView = liveMe.getView();
         for (Player opp : me.getOpponents()) {
@@ -7896,16 +7946,30 @@ public final class LookaheadSearch {
         if (beliefCube != null && !cfg.beliefShadow && cfg.deck()) {
             // belief-n11-1030: the learned deck model over the cards they showed in this game, then our own library
             redrawOpponentsDeck(live, liveMe, g, me, rng, cfg.beliefDeckModel);
-            shuffleOwnLibrary(liveMe, me, rng);
+            ownLibrary(live, liveMe, me, rng);
         } else if (beliefCube != null && !cfg.beliefShadow && cfg.codraft()) {
             // bvw-step2-fork-1027 (S2T): the co-draft deck prior over the cards they showed in this game (honest: public
             // co-draft data and public cards), then our own library below its known top
             redrawOpponentsPrior(live, liveMe, g, me, rng, cfg.beliefPriorTable, cfg.beliefPriorGain, false, null, 0);
-            shuffleOwnLibrary(liveMe, me, rng);
+            ownLibrary(live, liveMe, me, rng);
         } else if (beliefCube != null && !cfg.beliefShadow) {
             resampleBelief(live, liveMe, g, me, rng, decisionBelief);
+        } else if (cfg.infoState) {
+            resample(live, liveMe, g, me, rng, InfoStates.forConsumer(live));
         } else {
             resample(live, liveMe, g, me, rng);
+        }
+    }
+
+    /**
+     * order-memory-1102: our own library in a world: the visible top (the default) or, with {@link Config#infoState},
+     * every position InfoState(me) knows ({@link InfoStates#keepOwnLibrary}).
+     */
+    private void ownLibrary(Game live, Player liveMe, Player me, Random rng) {
+        if (cfg.infoState) {
+            InfoStates.keepOwnLibrary(InfoStates.forConsumer(live), liveMe, me, rng);
+        } else {
+            shuffleOwnLibrary(liveMe, me, rng);
         }
     }
 
@@ -8167,7 +8231,7 @@ public final class LookaheadSearch {
      */
     void resampleBelief(Game live, Player liveMe, Game g, Player me, Random rng, BeliefSampler.Dist bd) {
         redrawOpponents(live, liveMe, g, me, rng, bd);
-        shuffleOwnLibrary(liveMe, me, rng);
+        ownLibrary(live, liveMe, me, rng);
     }
 
     private void redrawOpponents(Game live, Player liveMe, Game g, Player me, Random rng, BeliefSampler.Dist bd) {
@@ -8184,7 +8248,10 @@ public final class LookaheadSearch {
                 }
             }
             final List<Card> libKnownTop = new ArrayList<>();
-            final List<Card> liveLib = liveOpp == null ? Collections.emptyList() : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library));
+            // order-memory-1102 (infoState): every opponent-library card InfoState(me) knows, at its index
+            final Map<Integer, Card> pins = cfg.infoState && liveOpp != null
+                    ? InfoStates.oppPins(InfoStates.forConsumer(live), liveMe, liveOpp, g) : null;
+            final List<Card> liveLib = liveOpp == null || pins != null ? Collections.emptyList() : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library));
             for (Card lc : liveLib) {
                 if (lc.getView().canBeShownTo(myView)) {
                     Card cc = g.findById(lc.getId());
@@ -8196,7 +8263,7 @@ public final class LookaheadSearch {
                 break;
             }
             final int need = hand.size() - keep.size();
-            final int libNeed = opp.getCardsIn(ZoneType.Library).size() - libKnownTop.size();
+            final int libNeed = opp.getCardsIn(ZoneType.Library).size() - (pins != null ? pins.size() : libKnownTop.size());
             if (need == 0 && libNeed == 0) {
                 continue;
             }
@@ -8212,6 +8279,14 @@ public final class LookaheadSearch {
                     throw new IllegalStateException("belief: no live player for opponent " + opp.getId());
                 }
                 final List<String> pool = beliefPoolFor(live, liveMe, liveOpp);
+                if (pins != null) {
+                    // order-memory-1102: a pinned card we know but cannot see is not drawn again
+                    for (Card pc : pins.values()) {
+                        if (!liveOpp.getGame().findById(pc.getId()).getView().canBeShownTo(myView)) {
+                            pool.remove(pc.getName());
+                        }
+                    }
+                }
                 final double[] ones = new double[pool.size()];
                 Arrays.fill(ones, 1.0);
                 d = new BeliefSampler.Dist(pool, ones, basicsFor(pool, need, libNeed), need, libNeed);
@@ -8235,7 +8310,8 @@ public final class LookaheadSearch {
                 newLib.add(beliefCard(d.slotName[i], opp, g));
             }
             opp.getZone(ZoneType.Hand).setCards(newHand);
-            opp.getZone(ZoneType.Library).setCards(newLib);
+            opp.getZone(ZoneType.Library).setCards(pins == null ? newLib
+                    : InfoStates.assemble(opp.getCardsIn(ZoneType.Library).size(), pins, newLib));
             changed = true;
             synchronized (stats) {
                 stats.beliefWorlds++;

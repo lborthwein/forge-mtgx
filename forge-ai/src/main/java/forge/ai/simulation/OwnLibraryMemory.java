@@ -32,15 +32,66 @@ public final class OwnLibraryMemory {
     /** Diagnostics: shuffles seen, cards noted. */
     public int shuffles = 0, noted = 0;
 
+    /**
+     * order-memory-1102 (R3 spec {@code knownLib}; null = off, the legacy rule above, byte for byte): the known positions
+     * are {@link KnownOwnLibrary}'s instead (the known top and bottom plus non-contiguous fixed offsets). Every card that
+     * enters our library is no longer known by default: a random-order block (cascade, discover, hideaway, Atraxa, the
+     * Oracle's rest, Endurance) and an order the opponent chose (Portent, their fateseal) stay unknown. Brainstorm,
+     * Doomsday, Ponder, scry and tutor tops stay known.
+     */
+    private final KnownOwnLibrary delegate;
+
     public OwnLibraryMemory(final Player seat) {
+        this(seat, false);
+    }
+
+    /** {@code knownLib}: delegate to {@link KnownOwnLibrary} (order-memory-1102); false = the legacy rule. */
+    public OwnLibraryMemory(final Player seat, final boolean knownLib) {
+        this(seat, knownLib, false);
+    }
+
+    /**
+     * order-memory-1102 layer 1 (R3 spec {@code infoState}; wins over knownLib): the known positions are the seat's
+     * {@link InfoStates} view of its own library (the game's shared instance, attached on {@link #watch}).
+     */
+    public OwnLibraryMemory(final Player seat, final boolean knownLib, final boolean infoState) {
         this.seatId = seat.getId();
+        this.seat = seat;
+        this.infoState = infoState;
+        this.delegate = knownLib && !infoState ? new KnownOwnLibrary(seat) : null;
+    }
+
+    private final Player seat;
+    private final boolean infoState;
+    /** InfoState mode: the watched game's state, and the cards seeded before the watch. */
+    private InfoStates is;
+    private final List<Card> seeded = new ArrayList<>();
+
+    /** Is this memory {@link KnownOwnLibrary}'s (the R3 spec's knownLib) or {@link InfoStates}' (infoState)? */
+    public boolean delegating() {
+        return delegate != null || infoState;
+    }
+
+    /** InfoState mode: the game's state this memory reads (null before {@link #watch} or in the other modes). */
+    public InfoStates infoStates() {
+        return is;
     }
 
     /** Subscribe to the live game's events (once). Read-only: it never changes the game. */
     public void watch(final Game live) {
         if (!watching) {
             watching = true;
-            live.subscribeToEvents(this);
+            if (infoState) {
+                is = InfoStates.attach(live);
+                final Player me = live.getPlayer(seatId);
+                if (me != null && !seeded.isEmpty()) {
+                    is.pin(me, me, seeded);
+                }
+            } else if (delegate != null) {
+                delegate.watch(live);
+            } else {
+                live.subscribeToEvents(this);
+            }
         }
     }
 
@@ -65,9 +116,12 @@ public final class OwnLibraryMemory {
         }
     }
 
-    /** The seat looked at these library cards to arrange them (they stay at known positions). */
+    /**
+     * The seat looked at these library cards to arrange them (they stay at known positions). Delegating: a no-op (the
+     * arrangement's own moves teach {@link KnownOwnLibrary}, which also knows when the order was not the seat's).
+     */
     public void noteLooked(final Iterable<Card> cards) {
-        if (cards == null) {
+        if (cards == null || delegate != null || infoState) {
             return;
         }
         synchronized (known) {
@@ -80,8 +134,45 @@ public final class OwnLibraryMemory {
         }
     }
 
+    /**
+     * A copy's memory starts from the root's known positions ({@code cards}: an R3 world, an in-line choose-a-card).
+     * Legacy: {@link #noteLooked}. Delegating: pinned in the tracker (as top-anchored: a hidden take from the middle can
+     * only void more of them, never fewer), before {@link #watch}.
+     */
+    public void seedKnown(final Iterable<Card> cards) {
+        if (infoState) {
+            if (cards != null) {
+                for (Card c : cards) {
+                    seeded.add(c);
+                }
+                if (is != null) {
+                    final Player me = is.watched().getPlayer(seatId);
+                    if (me != null) {
+                        is.pin(me, me, cards);
+                    }
+                }
+            }
+        } else if (delegate == null) {
+            noteLooked(cards);
+        } else if (cards != null) {
+            delegate.pin(cards);
+        }
+    }
+
     /** The ids of {@code me}'s library cards (in {@code g}, a copy or the live game) whose positions the seat knows. */
     public Set<Integer> known(final Player me) {
+        if (infoState) {
+            // read-only when me is a copy's player (InfoStates.known)
+            return is == null ? new HashSet<>() : new HashSet<>(is.known(me, me));
+        }
+        if (delegate != null) {
+            if (me.getGame() == delegate.watched()) {
+                return new HashSet<>(delegate.known(me));
+            }
+            // review #168 S2 / S1 re-check: a copy: read the watched game's known ids without mutating, and only when the
+            // copy's library is in the watched order (each known card at its computed index); otherwise none
+            return new HashSet<>(delegate.knownIn(me));
+        }
         final Set<Integer> out = new HashSet<>();
         synchronized (known) {
             for (Card c : me.getCardsIn(ZoneType.Library)) {
@@ -91,6 +182,20 @@ public final class OwnLibraryMemory {
             }
         }
         return out;
+    }
+
+    /**
+     * Review #168 S3: the caller just reordered the watched game's library with every known card kept at its index (an
+     * R3 world's stratify). Delegating: the tracker accepts the order (its pins survive); legacy: nothing to do.
+     */
+    public void resync() {
+        if (infoState) {
+            if (is != null && is.watched().getPlayer(seatId) != null) {
+                is.resync(is.watched().getPlayer(seatId));
+            }
+        } else if (delegate != null) {
+            delegate.acceptPinnedReorder();
+        }
     }
 
     /** Library ids of {@code me}, top first. */
@@ -144,6 +249,30 @@ public final class OwnLibraryMemory {
     /**
      * Shuffle only the unknown slots of {@code me}'s library ({@code known} stay at their indices), with {@code rng}.
      */
+    /**
+     * order-memory-1102 (infoState consumers): as {@link #shuffleUnknown}, the unknown cards put in a canonical order
+     * (by id) before the shuffle, so the result does not depend on their true order (LeakCheck: a world built from an
+     * InfoState never reads what it marks unknown).
+     */
+    public static void shuffleUnknownCanonical(final Player me, final Set<Integer> known, final Random rng) {
+        final Set<Integer> k = known == null ? Collections.emptySet() : known;
+        final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
+        final List<Card> unknown = new ArrayList<>();
+        for (Card c : lib) {
+            if (!k.contains(c.getId())) {
+                unknown.add(c);
+            }
+        }
+        unknown.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
+        Collections.shuffle(unknown, rng);
+        final List<Card> out = new ArrayList<>(lib.size());
+        int u = 0;
+        for (Card c : lib) {
+            out.add(k.contains(c.getId()) ? c : unknown.get(u++));
+        }
+        me.getZone(ZoneType.Library).setCards(out);
+    }
+
     public static void shuffleUnknown(final Player me, final Set<Integer> known, final Random rng) {
         final List<Integer> before = order(me);
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));

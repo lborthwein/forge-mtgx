@@ -96,6 +96,7 @@ public final class HonestGenerator {
         defaults.putAll(ForcedWinSolver.Config.R2_DEFAULTS); // solver-cap12 round 2: off = unchanged
         defaults.putAll(ForcedWinSolver.Config.R3_DEFAULTS); // solver-cap12 round 3: off = unchanged
         defaults.putAll(ForcedWinSolver.Config.AIWORK_DEFAULTS); // rollout-budget-1101: the field at 0 is not recorded ...
+        defaults.put("infoState", false); // order-memory-1102: off = the recorded config unchanged
         for (java.util.Map.Entry<String, Object> e : defaults.entrySet()) {
             final com.google.gson.JsonElement v = o.get(e.getKey());
             if (v != null && v.isJsonPrimitive() && String.valueOf(e.getValue()).equals(v.getAsString())) {

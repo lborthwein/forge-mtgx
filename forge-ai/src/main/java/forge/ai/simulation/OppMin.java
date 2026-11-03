@@ -318,6 +318,19 @@ public final class OppMin {
         public String answered;
 
         /** {@code onlyTurn}: points only in that turn (-1: any). */
+        /**
+         * covfix-a-1102 (ARCH-PROPOSAL-1102 layer 3; false = off, the default, and then nothing changes): the opponent's
+         * mana abilities with a non-mana part (a cost beyond mana and tapping itself, a rider, or a mana trigger on the
+         * battlefield) are responses like any other: activated on the copy, their costs and effects resolved, the MIN
+         * continuing from there. Pure mana abilities with no trigger are the "no response" branch.
+         */
+        public boolean manaSearch;
+        /** covfix-a-1102: a scripted mana-ability response could not be activated on the copy (fail closed: a cap). */
+        public boolean manaSimFailed;
+        /** Review #169 S1-2: the point key whose priority reopens as a new point after a mana activation, and a counter. */
+        private String reopen;
+        private int reopenSeq;
+
         public Driver(final Script script, final Player opp, final Player victim, final int onlyTurn) {
             this.script = script;
             this.opp = opp;
@@ -335,7 +348,13 @@ public final class OppMin {
          * The opponent's choice at this priority: null = pass; {@code own} = Forge AI's own play. Not a point: {@code own}.
          */
         public List<SpellAbility> choose(final Game g, final java.util.function.Supplier<List<SpellAbility>> own) {
-            final String pk = pointKey(g, victim);
+            String pk = pointKey(g, victim);
+            if (pk != null && pk.equals(reopen)) {
+                // review #169 S1-2: after a mana activation the same priority is a NEW point, its answers read again from
+                // the post-activation state (a counter castable only now), "pass" included
+                pk = pk + "|mana" + (++reopenSeq);
+            }
+            reopen = null;
             if (pk == null || (onlyTurn >= 0 && g.getPhaseHandler().getTurn() != onlyTurn) || !seen.add(pk)) {
                 return own.get();
             }
@@ -349,7 +368,7 @@ public final class OppMin {
                         + " stack " + g.getStack().size());
             }
             final String state = stateKey(g);
-            final Answers as = answers(g, opp, victim, top);
+            final Answers as = answers(g, opp, victim, top, manaSearch);
             final List<SpellAbility> rs = as.list;
             // review S1 (safety net, the base's behaviour): Forge AI's own answer at this point is a candidate too
             final List<SpellAbility> mine = own.get();
@@ -374,6 +393,23 @@ public final class OppMin {
                 forge.ai.AiCardMemory.rememberCard(opp, host, forge.ai.AiCardMemory.MemorySet.HELD_MANA_SOURCES_FOR_NEXT_SPELL);
             }
             answered = (top == null ? "attack" : top.getHostCard().getName()) + " answered by " + sa.getHostCard().getName();
+            if (sa.isManaAbility()) {
+                // covfix-a-1102: a mana-ability response is activated here (mana abilities do not use the stack): its
+                // costs and riders resolve now. Review #169 S1-1: the cost's choices are the response's own (forced),
+                // never Forge AI's. S3: an activation that changed nothing (refused, unpaid) is mana-sim, a cap.
+                final List<List<Integer>> forced = as.forced.get(sa);
+                final String before = manaState(g, opp);
+                boolean ok;
+                try {
+                    ok = forge.ai.ComputerUtil.handlePlayingSpellAbility(opp, sa, null, ab -> new ForcedCost(opp, ab, forced));
+                } catch (RuntimeException e) {
+                    ok = false;
+                }
+                if (!ok || before.equals(manaState(g, opp))) manaSimFailed = true;
+                // review #169 S1-2: the follow-up is the MIN's, not Forge AI's: this priority again, as a new point
+                reopen = pointKey(g, victim);
+                return choose(g, own);
+            }
             return new ArrayList<>(Collections.singletonList(sa));
         }
     }
@@ -540,6 +576,8 @@ public final class OppMin {
         public final java.util.TreeSet<String> gaps;
         /** coverage-fix-1102 (diagnostics only): the source cards of each gap reason. */
         public final java.util.TreeMap<String, java.util.TreeSet<String>> gapCards = new java.util.TreeMap<>();
+        /** Review #169 S1-1: each mana-ability response's forced cost choices (card ids per choosing cost part). */
+        public final java.util.IdentityHashMap<SpellAbility, List<List<Integer>>> forced = new java.util.IdentityHashMap<>();
 
         Answers(final List<SpellAbility> list, final java.util.TreeSet<String> gaps) {
             this.list = list;
@@ -553,6 +591,156 @@ public final class OppMin {
 
     /** {@link #responses} with the reasons the set is not complete (answers OppMin cannot enumerate fully). */
     public static Answers answers(final Game g, final Player opp, final Player victim, final SpellAbility top) {
+        return answers(g, opp, victim, top, false);
+    }
+
+    /**
+     * Review #169 re-check S1: whether the mana an ability produces is a choice (any colour, a combination, a chosen or
+     * reflected colour, more than one option); fail closed: an unreadable ability counts as a choice.
+     */
+    static boolean producedChoice(final SpellAbility sa) {
+        try {
+            for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                if (s.getApi() == ApiType.ManaReflected) return true;
+                if (s.getApi() != ApiType.Mana) continue;
+                final String p = s.getParamOrDefault("Produced", "");
+                if (p.isEmpty() || p.contains("Any") || p.contains("Combo") || p.contains("Chosen") || p.contains(" ")
+                        || s.hasParam("Express") || s.hasParam("ReplaceType")) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
+    /** Review #169 S1-1: the most cost-choice combinations one mana ability may have (more: a cap, never one picked). */
+    static final int MANA_CHOICE_CAP = 24;
+
+    /**
+     * Review #169 S1-1: the legal choices of a mana ability's choosing cost parts, one list of card ids per part (in cost
+     * order), as every combination; an empty combination when nothing is chosen (mana, tapping or sacrificing itself,
+     * life). Null when a part's choice cannot be enumerated (discard, exile, return, another card's counters, an X
+     * amount, an unreadable part) or the combinations exceed {@link #MANA_CHOICE_CAP}: the caller fails closed.
+     */
+    static List<List<List<Integer>>> costChoices(final SpellAbility sa, final Player opp, final Card source) {
+        List<List<List<Integer>>> combos = new ArrayList<>();
+        combos.add(new ArrayList<>());
+        if (sa.getPayCosts() == null) return combos;
+        try {
+            for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
+                if (part instanceof forge.game.cost.CostPartMana || part instanceof forge.game.cost.CostTap
+                        || part instanceof forge.game.cost.CostPayLife || part instanceof forge.game.cost.CostUntap) {
+                    continue;
+                }
+                if (part.payCostFromSource()) continue; // sacrifice, exile or counters of itself: no choice
+                final boolean sac = part instanceof forge.game.cost.CostSacrifice;
+                final boolean tap = part instanceof forge.game.cost.CostTapType;
+                if (!sac && !tap) return null;
+                final Integer n = part.convertAmount();
+                if (n == null || n < 1) return null;
+                List<Card> cands = forge.game.card.CardLists.getValidCards(opp.getCardsIn(ZoneType.Battlefield),
+                        part.getType().split(";"), opp, source, sa);
+                if (tap) {
+                    cands = forge.game.card.CardLists.filter(cands, x -> !x.isTapped() && x != source);
+                }
+                final List<List<Integer>> picks = new ArrayList<>();
+                pick(cands, n, 0, new ArrayList<>(), picks);
+                if (picks.isEmpty()) return null;
+                final List<List<List<Integer>>> next = new ArrayList<>();
+                for (List<List<Integer>> base : combos) {
+                    for (List<Integer> p : picks) {
+                        final List<List<Integer>> x = new ArrayList<>(base);
+                        x.add(p);
+                        next.add(x);
+                        if (next.size() > MANA_CHOICE_CAP) return null;
+                    }
+                }
+                combos = next;
+            }
+        } catch (RuntimeException e) {
+            return null;
+        }
+        return combos;
+    }
+
+    private static void pick(final List<Card> cands, final int n, final int from, final List<Integer> cur,
+            final List<List<Integer>> out) {
+        if (out.size() > MANA_CHOICE_CAP) return;
+        if (cur.size() == n) {
+            out.add(new ArrayList<>(cur));
+            return;
+        }
+        for (int i = from; i < cands.size(); i++) {
+            cur.add(cands.get(i).getId());
+            pick(cands, n, i + 1, cur, out);
+            cur.remove(cur.size() - 1);
+        }
+    }
+
+    /** Review #169 S1-1: Forge AI's payment, with each choosing cost part's cards forced to the response's own choice. */
+    static final class ForcedCost extends forge.ai.AiCostDecision {
+        private final java.util.Iterator<List<Integer>> it;
+
+        ForcedCost(final Player ai, final SpellAbility sa, final List<List<Integer>> forced) {
+            super(ai, sa, false);
+            this.it = forced == null ? java.util.Collections.<List<Integer>>emptyIterator() : forced.iterator();
+        }
+
+        @Override
+        public forge.game.cost.PaymentDecision review(final forge.game.cost.CostPart part,
+                final forge.game.cost.PaymentDecision d) {
+            if ((part instanceof forge.game.cost.CostSacrifice || part instanceof forge.game.cost.CostTapType)
+                    && !part.payCostFromSource() && it.hasNext()) {
+                final List<Card> cards = new ArrayList<>();
+                for (int id : it.next()) {
+                    final Card x = player.getGame().findById(id);
+                    if (x != null) cards.add(x);
+                }
+                return forge.game.cost.PaymentDecision.card(cards);
+            }
+            return d;
+        }
+    }
+
+    /** Review #169 S3: what a mana activation changes (life, pool, permanents, their tapped state and counters, zones). */
+    static String manaState(final Game g, final Player opp) {
+        final StringBuilder sb = new StringBuilder();
+        sb.append(opp.getLife()).append('|').append(opp.getManaPool().totalMana()).append('|');
+        for (Card c : opp.getCardsIn(ZoneType.Battlefield)) {
+            sb.append(c.getId()).append(c.isTapped() ? 't' : 'u').append(c.getCounters()).append(',');
+        }
+        sb.append('|').append(opp.getCardsIn(ZoneType.Graveyard).size()).append('|').append(g.getStack().size());
+        return sb.toString();
+    }
+
+    /** covfix-a-1102: whether a mana trigger (taps for mana, mana added) is on either player's battlefield. */
+    static boolean manaTriggers(final Player opp, final Player victim) {
+        for (Player p : List.of(opp, victim)) {
+            for (Card c : p.getCardsIn(ZoneType.Battlefield)) {
+                for (forge.game.trigger.Trigger t : c.getTriggers()) {
+                    final forge.game.trigger.TriggerType m = t.getMode();
+                    if (m == forge.game.trigger.TriggerType.TapsForMana || m == forge.game.trigger.TriggerType.ManaAdded
+                            || m == forge.game.trigger.TriggerType.Taps) {
+                        return true; // review #169 S3: Taps triggers too (fail closed)
+                    }
+                }
+                for (forge.game.replacement.ReplacementEffect re : c.getReplacementEffects()) {
+                    if (re.getMode() == forge.game.replacement.ReplacementType.ProduceMana) {
+                        return true; // review #169 S3: a mana replacement (Mana Reflection): no mana ability is pure
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** As above; {@code manaSearch} (covfix-a-1102): mana abilities with a non-mana part are answers, not gaps. */
+    public static Answers answers(final Game g, final Player opp, final Player victim, final SpellAbility top,
+            final boolean manaSearch) {
+        final boolean manaTrig = manaSearch && manaTriggers(opp, victim);
+        final Answers out0 = new Answers(new ArrayList<>(), new java.util.TreeSet<>());
         final java.util.TreeSet<String> allGaps = new java.util.TreeSet<>();
         final java.util.TreeMap<String, java.util.TreeSet<String>> gapCards = new java.util.TreeMap<>();
         final TreeMap<String, SpellAbility> byKey = new TreeMap<>();
@@ -602,6 +790,35 @@ public final class OppMin {
                     // effect, an "any player may activate" ability)
                     sa0.setActivatingPlayer(opp);
                     if (!castable(sa0, opp, gaps)) continue;
+                }
+                if (sa0.isManaAbility() && manaSearch) {
+                    // covfix-a-1102: a response like any other, one per source name and cost (copies of one card are
+                    // one outcome); a pure mana ability with no mana trigger in play is the "no response" branch
+                    if (manaTrig && producedChoice(sa0) && castable(sa0, opp, gaps)) {
+                        // review #169 re-check S1: with a mana trigger, replacement or static out, the colour the
+                        // activation produces decides what is castable next; Forge AI would pick it. Fail closed until
+                        // layer 2's DecisionPoint CHOICE kind enumerates the colours
+                        gaps.add("mana-color-choice");
+                        continue;
+                    }
+                    if ((manaAbilityWithCost(sa0) || manaTrig) && castable(sa0, opp, gaps)) {
+                        // review #169 S1-1: one response per legal cost choice (the permanent sacrificed or tapped);
+                        // S2: keyed by the source card's id (its own tap or sacrifice is the choice of that card)
+                        final List<List<List<Integer>>> choices = costChoices(sa0, opp, c);
+                        if (choices == null) {
+                            gaps.add("mana-cost-choice"); // a choice OppMin cannot enumerate, or over the cap
+                            continue;
+                        }
+                        final String mcost = sa0.getPayCosts() == null ? "-" : sa0.getPayCosts().toSimpleString();
+                        for (List<List<Integer>> ch : choices) {
+                            final SpellAbility cs = sa0.copy(opp);
+                            cs.setActivatingPlayer(opp);
+                            final String k = OTHER + "|mana|" + c.getName() + "#" + c.getId() + "|" + mcost + "|"
+                                    + sa0.getDescription() + "|" + ch;
+                            if (byKey.putIfAbsent(k, cs) == null) out0.forced.put(cs, ch);
+                        }
+                    }
+                    continue;
                 }
                 if (sa0.isManaAbility()) {
                     // review #148 re-check 4: a mana ability with a non-mana cost (a sac outlet) answers a line; it is
@@ -687,6 +904,7 @@ public final class OppMin {
         }
         final Answers out = new Answers(new ArrayList<>(byKey.values()), allGaps);
         out.gapCards.putAll(gapCards);
+        out.forced.putAll(out0.forced);
         return out;
     }
 

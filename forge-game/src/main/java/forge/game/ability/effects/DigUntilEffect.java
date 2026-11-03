@@ -287,6 +287,7 @@ public class DigUntilEffect extends SpellAbilityEffect {
 
             if (sa.hasParam("RevealRandomOrder")) {
                 Collections.shuffle(revealed, MyRandom.getRandom());
+                p.getGame().randomOrder(revealed, revealedDest); // order-memory-1102 (no-op without a listener)
             }
 
             if (sa.hasParam("NoMoveRevealed") || sequential) {
@@ -301,7 +302,7 @@ public class DigUntilEffect extends SpellAbilityEffect {
 
                 // Allow ordering the rest of the revealed cards
                 if ((finalDest.isKnown() || (finalDest == ZoneType.Library && !shuffle && !sa.hasParam("RevealRandomOrder"))) && revealed.size() >= 2) {
-                    revealed = (CardCollection)p.getController().orderMoveToZoneList(revealed, finalDest, sa);
+                    revealed = (CardCollection) p.getGame().arranged(p, p.getController().orderMoveToZoneList(revealed, finalDest, sa), finalDest); // order-memory-1102
                 }
 
                 Map<AbilityKey, Object> moveParams = AbilityKey.newMap();
