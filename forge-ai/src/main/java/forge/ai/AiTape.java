@@ -200,6 +200,8 @@ public final class AiTape {
         final JsonArray list;
         final boolean exec;
         int i;
+        /** codec-1103 (class A): a trigger preparation's frame, see {@link #skipNeutral}. */
+        boolean prep;
 
         Cur(final JsonArray list, final boolean exec) {
             this.list = list;
@@ -211,6 +213,8 @@ public final class AiTape {
     private final ArrayDeque<Cur> cursors = new ArrayDeque<>();
 
     private String lastPost;
+    /** codec-1103 (class A): state-neutral AI deliberation asks skipped inside forced trigger preparations. */
+    private int prepNeutral;
     private int entries;
     private int children;
     private int forcedEntries;
@@ -550,6 +554,14 @@ public final class AiTape {
     }
 
     /** Has this replay's {@code field} counter ever been ahead of the record's (see {@link #restore})? */
+    /** codec-1103 (class C): decodes that matched an ability whose id is not the record's; such a replay is inexact. */
+    private int idShift;
+
+    void noteIdShift() {
+        idShift++;
+        aheadFields.add("saIds");
+    }
+
     boolean aheadOn(final String field) {
         return aheadFields.contains(field);
     }
@@ -681,7 +693,14 @@ public final class AiTape {
             throw diverge("the record has no " + what(k, m) + " here: " + (cursors.isEmpty()
                     ? "the tape ended after " + list.size() + " entries" : "its frame had only " + list.size() + " entries"));
         }
-        final JsonObject e = list.get(at).getAsJsonObject();
+        JsonObject e = list.get(at).getAsJsonObject();
+        if (!cursors.isEmpty() && cursors.peek().prep && !fits(e, k, m) && neutral(e)) {
+            skipNeutral(cursors.peek(), k, m);
+            if (cursors.peek().i >= list.size()) {
+                throw diverge("the record has no " + what(k, m) + " here: its frame had only " + list.size() + " entries");
+            }
+            e = list.get(cursors.peek().i).getAsJsonObject();
+        }
         final String ek = str(e, "k");
         final String em = str(e, "m");
         if (!k.equals(ek) || (m != null && !m.equals(em))) {
@@ -743,8 +762,41 @@ public final class AiTape {
         }
     }
 
+    private static boolean fits(final JsonObject e, final String k, final String m) {
+        return k.equals(str(e, "k")) && (m == null || m.equals(str(e, "m")));
+    }
+
+    /**
+     * codec-1103 (class A, DIAG-REPLAY-PILOT): a recorded ask is NEUTRAL when it is a controller decision ("m") without
+     * children whose recorded start and end states are equal: it changed nothing (ids, timestamps, rng and the state
+     * hash included). Inside a trigger's preparation the record's PlayerControllerAi.prepareSingleSa also runs Forge AI's
+     * own deliberation, whose asks (a static-ability choice, the cards it would delve, ...) are recorded there; the forced
+     * preparation runs only the parts that are not the AI's choice ({@link #forcedPrep}) and never makes those asks.
+     * A neutral one is skipped (counted); anything else still diverges, and the preparation's own end state is still
+     * checked against the record ({@link #done}).
+     */
+    static boolean neutral(final JsonObject x) {
+        return "m".equals(str(x, "k")) && !x.has("sub") && x.has("pre") && x.has("post")
+                && str(x, "pre").equals(str(x, "post"));
+    }
+
+    /** Skip the neutral asks at {@code c}'s cursor, up to (not past) the next entry that fits {@code k}/{@code m}. */
+    private void skipNeutral(final Cur c, final String k, final String m) {
+        while (c.i < c.list.size()) {
+            final JsonObject x = c.list.get(c.i).getAsJsonObject();
+            if ((k != null && fits(x, k, m)) || !neutral(x)) {
+                return;
+            }
+            c.i++;
+            prepNeutral++;
+        }
+    }
+
     void leave(final JsonObject e) {
         applyLazyAhead();
+        if (!cursors.isEmpty() && cursors.peek().prep) {
+            skipNeutral(cursors.peek(), null, null);
+        }
         final Cur c = cursors.pop();
         if (c.i < c.list.size()) {
             final JsonObject next = c.list.get(c.i).getAsJsonObject();
@@ -1189,6 +1241,12 @@ public final class AiTape {
                 o.add("driftNotes", dn);
             }
             o.addProperty("ahead", ahead);
+            if (prepNeutral > 0) {
+                o.addProperty("prepNeutral", prepNeutral); // codec-1103: forced replays only; a record never has it
+            }
+            if (idShift > 0) {
+                o.addProperty("idShift", idShift); // codec-1103 class C: forced replays only
+            }
             o.addProperty("lazyMissed", lazyMissed);
             o.addProperty("lazyGone", lazyGone);
             o.addProperty("lazyLate", lazyLate);
@@ -1442,6 +1500,7 @@ public final class AiTape {
         // charm's modes (this tape's child), another player's targets (that player's own tape: they declined). A
         // trigger the AI itself declined asks nothing there.
         enter(e, true);
+        cursors.peek().prep = true;
         final boolean got;
         boolean ok = false;
         try {

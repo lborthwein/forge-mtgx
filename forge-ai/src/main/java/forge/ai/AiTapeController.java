@@ -451,7 +451,7 @@ public class AiTapeController extends PlayerControllerAi implements AiCostDecisi
             }
             final List<SpellAbility> out = new ArrayList<>();
             for (JsonElement x : e.getAsJsonArray()) {
-                out.add(AiTapePlays.decode(g(), getPlayer(), x.getAsJsonObject(), tape.aheadOn("saIds")));
+                out.add(AiTapePlays.decode(g(), getPlayer(), x.getAsJsonObject(), tape.aheadOn("saIds"), tape::noteIdShift));
             }
             return out;
         });
