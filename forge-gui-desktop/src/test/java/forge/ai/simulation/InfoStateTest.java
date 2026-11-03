@@ -616,13 +616,14 @@ public class InfoStateTest extends forge.ai.AITest {
         KnownLibTest.playAndResolve(g, me(g), ChooseACardTest.find(me(g), ZoneType.Hand, "Brainstorm").getFirstSpellAbility(), null);
         Assert.assertEquals(m.known(me(g)).size(), 2);
         Assert.assertSame(m.infoStates(), InfoStates.find(g), "the game's shared instance");
-        // a copy with another order: read-only (the live state is untouched)
+        // a copy: read-only; the ids carry over only in the watched order (review #171 S1), none from another order
         final Game c = new GameCopier(g, true).makeCopy();
         final Player cm = c.getPlayer(me(g).getId());
+        Assert.assertEquals(m.known(cm).size(), 2, "an unchanged copy: the ids survive");
         final List<Card> l = new ArrayList<>(cm.getCardsIn(ZoneType.Library));
         Collections.reverse(l);
         cm.getZone(ZoneType.Library).setCards(l);
-        Assert.assertEquals(m.known(cm).size(), 2, "ids survive a copy");
+        Assert.assertTrue(m.known(cm).isEmpty(), "a reordered copy: none");
         Assert.assertEquals(m.known(me(g)).size(), 2, "the live state was not wiped by the copy read");
         // a pinned reorder of the watched game re-syncs
         OwnLibraryMemory.shuffleUnknownCanonical(me(g), m.known(me(g)), new Random(5));
