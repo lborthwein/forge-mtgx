@@ -117,7 +117,9 @@ public final class HonestLabel {
         /**
          * covfix-a-1102 (1 = the default, and then nothing changes, the sha included): the OppMin label defaults. 2: the
          * MIN searches the opponent's mana abilities (solver key oppManaSearch, ARCH-PROPOSAL-1102 layer 3) and
-         * oppResponses defaults to 16 (was 4), in both checks, unless a solver config sets the key itself.
+         * oppResponses defaults to 16 (was 4), in both checks, unless a solver config sets the key itself. 3: rev 2, and a
+         * branch's response budget is oppDepth by search (solver key oppBudgetByDepth: no budgetHint resource reader, no
+         * clamp of 2), oppDepth defaulting to 4 (oppNodes 64 unchanged; over it is the oppNodes cap, fail closed).
          */
         public int oppMinRev = 1;
 
@@ -183,8 +185,8 @@ public final class HonestLabel {
             if (beliefCube == null || beliefCube.isBlank()) {
                 throw new IllegalArgumentException("refused: the label mode needs a belief cube");
             }
-            if (oppMinRev < 1 || oppMinRev > 2) {
-                throw new IllegalArgumentException("label: oppMinRev in [1, 2]");
+            if (oppMinRev < 1 || oppMinRev > 3) {
+                throw new IllegalArgumentException("label: oppMinRev in [1, 3]");
             }
             if (worlds < 1 || worlds > 64 || beliefBasics < 1) {
                 throw new IllegalArgumentException("label: worlds in [1, 64], beliefBasics >= 1");
@@ -272,6 +274,12 @@ public final class HonestLabel {
             }
             if (!o.has("oppResponses")) o.addProperty("oppResponses", "16");
             if (!o.has("oppManaSearch")) o.addProperty("oppManaSearch", "true");
+            if (oppMinRev < 3) {
+                return;
+            }
+            // covfix-a-1102 rev 3 (layer 3: search, not readers): a branch's budget is oppDepth, default 4
+            if (!o.has("oppBudgetByDepth")) o.addProperty("oppBudgetByDepth", "true");
+            if (!o.has("oppDepth")) o.addProperty("oppDepth", "4");
         }
 
         private static JsonObject defaults() {
