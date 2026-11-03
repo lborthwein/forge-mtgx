@@ -245,6 +245,15 @@ public final class ForcedWinSolver {
          * repeatable mana sink (D5). Read only with loopMacro.
          */
         public boolean loopMacro3 = false;
+        /**
+         * endstep-rows-1103 (N12; false = off, the default, and then nothing changes; read only with engineAnyWindow): at
+         * the opponent's end step with an empty stack the engine's gate is skipped (as after a failed plan). The gate reads
+         * our board's power NOW, which at their end step undercounts what our next turn attacks with (our untap, flash
+         * creatures cast in this window, haste), so a next-turn line set up at their end step never reached the engine.
+         */
+        public boolean engineEndStepOpen = false;
+        /** endstep-rows-1103: its key, recorded only when on (off = the recorded spec unchanged). */
+        public static final java.util.Map<String, Object> ENDSTEP_DEFAULTS = java.util.Map.of("engineEndStepOpen", false);
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         /**
@@ -394,6 +403,7 @@ public final class ForcedWinSolver {
             c.engineCostChoice = "true".equals(get.apply("engineCostChoice"));
             c.engineStack = "true".equals(get.apply("engineStack"));
             c.loopMacro3 = "true".equals(get.apply("loopMacro3"));
+            c.engineEndStepOpen = "true".equals(get.apply("engineEndStepOpen")); // endstep-rows-1103
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -642,6 +652,8 @@ public final class ForcedWinSolver {
         public long cacApplies;
         /** solver-cap12 round 3 (R3-1): ladder escalations, the lines they found, their nodes and steps; only when non-zero. */
         public long ladderRuns, ladderFound, ladderNodes, ladderSteps;
+        /** endstep-rows-1103 (engineEndStepOpen): end-step engine gates skipped; reported only when non-zero. */
+        public long endStepOpens;
         /**
          * rollout-budget-1101: decisions that spent their Forge AI work cap ({@link forge.ai.AiWork#CAP}), and play-outs
          * cut by it (not wins); reported only when non-zero.
@@ -685,6 +697,7 @@ public final class ForcedWinSolver {
             ladderFound += sign * o.ladderFound;
             ladderNodes += sign * o.ladderNodes;
             ladderSteps += sign * o.ladderSteps;
+            endStepOpens += sign * o.endStepOpens;
             aiWorkCaps += sign * o.aiWorkCaps;
             playoutAiWorkCuts += sign * o.playoutAiWorkCuts;
             // coverage-fix-1102 (meter only): counts add with the sign; card names and maxima only add (since() keeps them)
@@ -760,6 +773,9 @@ public final class ForcedWinSolver {
                 o.addProperty("ladder_found", ladderFound);
                 o.addProperty("ladder_nodes", ladderNodes);
                 o.addProperty("ladder_steps", ladderSteps);
+            }
+            if (endStepOpens != 0) {
+                o.addProperty("end_step_opens", endStepOpens); // endstep-rows-1103
             }
             if (aiWorkCaps != 0 || playoutAiWorkCuts != 0) {
                 o.addProperty("ai_work_caps", aiWorkCaps);
@@ -2692,7 +2708,13 @@ public final class ForcedWinSolver {
             poisonLeft = Math.min(poisonLeft, 10 - o.getPoisonCounters());
         }
         final boolean poisonLethal = cfg.engineGateWide && infect > 0 && infect >= poisonLeft;
-        if (!planFailed && !unmodeled && power < pos.oppLife && !poisonLethal) {
+        // endstep-rows-1103 (engineEndStepOpen, with engineAnyWindow): their end step, empty stack: no board-power gate
+        final boolean endStepOpen = cfg.engineEndStepOpen && cfg.engineAnyWindow && !stackWindow
+                && !eph.isPlayerTurn(me) && eph.is(PhaseType.END_OF_TURN) && live.getStack().isEmpty();
+        if (endStepOpen) {
+            meter.endStepOpens++;
+        }
+        if (!planFailed && !unmodeled && power < pos.oppLife && !poisonLethal && !endStepOpen) {
             return null;
         }
         if (!cfg.forced && !cfg.likely) {
