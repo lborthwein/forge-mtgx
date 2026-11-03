@@ -617,7 +617,43 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
      * seat): the forced-win solver in front ({@code forcedWin}) and S-b ({@code plans}). A no-op unless one of the two
      * keys is set, so every other spec's game is unchanged.
      */
+    /**
+     * #173 question: does this search's config turn any InfoStates consumer on (the look-ahead's key, or the solver's
+     * {@code infoState} through plans.solverCfg or forcedWin)? Then the game's InfoStates must be attached at setup, or
+     * the key would silently behave as off (consumers only find it).
+     */
+    public static boolean wantsInfoStates(final Config c) {
+        if (c == null) {
+            return false;
+        }
+        if (c.infoState) {
+            return true;
+        }
+        if (c.forcedWin != null && c.forcedWin.has("infoState")
+                && "true".equals(c.forcedWin.get("infoState").getAsString())) {
+            return true;
+        }
+        if (c.plans != null) {
+            final com.google.gson.JsonObject p = c.plans;
+            for (String k : new String[] {"solverCfg", "defendCfg"}) {
+                if (p.has(k) && p.get(k).isJsonObject() && p.getAsJsonObject(k).has("infoState")
+                        && "true".equals(p.getAsJsonObject(k).get("infoState").getAsString())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Attach {@code g}'s InfoStates when {@link #wantsInfoStates}; returns it (or null). Call on the game's thread. */
+    public static forge.ai.simulation.InfoStates attachInfoStates(final Config c, final Game g) {
+        return g != null && wantsInfoStates(c) ? forge.ai.simulation.InfoStates.attach(g) : null;
+    }
+
     public void attach(final Game g, final boolean[] rlSeat, final RlSeat seat) {
+        // review #172 S2: the game's InfoStates is attached here, at the seat's setup on the game's own thread (a
+        // consumer only finds it)
+        attachInfoStates(cfg, g);
         if (cfg.forcedWin == null && cfg.plans == null && cfg.cac == null) {
             return;
         }

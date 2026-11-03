@@ -524,6 +524,7 @@ public final class RlLiveSeat {
             s.onSearched = this::searched;
         }
         rs.search = s;
+        RlSearch.attachInfoStates(spec.search, g); // #173: attached at bind whenever a consumer key is on (with or without plans)
         if (spec.search.plans != null) {
             // sb-live-1018: S-b's plan hook on this seat's bridged controller (RlSearch.attach, as the bench's RL seat)
             final boolean[] rl = new boolean[ctl.length];

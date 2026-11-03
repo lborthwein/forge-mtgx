@@ -1103,7 +1103,7 @@ public class Game {
      * order-memory-1102: the library-info listeners ({@link LibraryInfoListener}; InfoState layer 1, research). Empty
      * unless a research consumer adds one; never copied to a game copy; not the event bus (see the interface).
      */
-    private final List<LibraryInfoListener> libraryInfoListeners = new ArrayList<>(0);
+    private final List<LibraryInfoListener> libraryInfoListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     public void addLibraryInfoListener(final LibraryInfoListener listener) {
         libraryInfoListeners.add(Objects.requireNonNull(listener));
@@ -1149,10 +1149,25 @@ public class Game {
         }
         final List<Card> roc = Collections.unmodifiableList(cs);
         final List<Player> roo = Collections.unmodifiableList(os);
-        for (LibraryInfoListener l : new ArrayList<>(libraryInfoListeners)) {
-            l.onLibraryInfo(kind, roo, roc, zone);
+        for (LibraryInfoListener l : libraryInfoListeners) {
+            try {
+                l.onLibraryInfo(kind, roo, roc, zone);
+            } catch (RuntimeException e) {
+                // review #172 S1: a listener never takes the game down: it is told, fails closed, and the effect goes on
+                if (!libraryInfoFailureLogged) {
+                    libraryInfoFailureLogged = true;
+                    System.err.println("[library-info] listener failed (fails closed, logged once): " + e);
+                }
+                try {
+                    l.onListenerFailure(e);
+                } catch (RuntimeException ignored) {
+                    // nothing more to do
+                }
+            }
         }
     }
+
+    private boolean libraryInfoFailureLogged = false;
 
     /**
      * order-memory-1102: {@code chooser} arranged {@code cards} going to {@code dest} (an orderMoveToZoneList answer;

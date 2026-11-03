@@ -39,4 +39,11 @@ public interface LibraryInfoListener {
      * @param zone the cards' zone (REVEAL/PEEK) or destination (ARRANGE/RANDOM)
      */
     void onLibraryInfo(Kind kind, List<Player> observers, List<Card> cards, ZoneType zone);
+
+    /**
+     * Review #172 S1: {@link #onLibraryInfo} threw (the game caught it and goes on). A listener that keeps knowledge
+     * must fail closed here (forget what the failed observation could have changed). Default: nothing.
+     */
+    default void onListenerFailure(final RuntimeException failure) {
+    }
 }

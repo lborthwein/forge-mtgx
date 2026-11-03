@@ -465,6 +465,31 @@ public final class InfoStates implements LibraryInfoListener {
     @Override
     public synchronized void onLibraryInfo(final Kind kind, final List<Player> observers, final List<Card> cards,
             final ZoneType zone) {
+        try {
+            onLibraryInfo0(kind, observers, cards, zone);
+        } catch (RuntimeException e) {
+            // review #172 S1: never into the game: fail closed to knowing nothing, log once
+            onListenerFailure(e);
+        }
+    }
+
+    /** Review #172 S1: forget every library for every observer (an observation could not be applied). */
+    @Override
+    public synchronized void onListenerFailure(final RuntimeException failure) {
+        failures++;
+        if (failures == 1) {
+            System.err.println("[infostate] observation failed; every library forgotten (fails closed): " + failure);
+        }
+        for (Player p : game.getRegisteredPlayers()) {
+            forgetLib(p.getId());
+        }
+    }
+
+    /** Review #172 S1: observations that failed (each forgot every library). */
+    public int failures = 0;
+
+    private void onLibraryInfo0(final Kind kind, final List<Player> observers, final List<Card> cards,
+            final ZoneType zone) {
         observations++;
         final Object res = KnownOwnLibrary.resolvingSa(game);
         switch (kind) {
@@ -1049,8 +1074,9 @@ public final class InfoStates implements LibraryInfoListener {
      * statics show from now on, and nothing earlier).
      */
     public static InfoStates forConsumer(final Game live) {
-        final InfoStates s = find(live);
-        return s != null ? s : attach(live);
+        // review #172 S2: a consumer never attaches (a search worker would mutate the game's listener list while the game
+        // thread fires it): absent = it knows nothing beyond what Forge shows. Attach at game creation / bind only.
+        return find(live);
     }
 
     /**
@@ -1060,6 +1086,10 @@ public final class InfoStates implements LibraryInfoListener {
      * order of what is unknown.
      */
     public static void keepOwnLibrary(final InfoStates is, final Player liveMe, final Player me, final java.util.Random rng) {
+        if (is == null) {
+            LookaheadSearch.shuffleOwnLibrary(liveMe, me, rng); // review #172 S2: none attached = Forge's visible top only
+            return;
+        }
         final Map<Integer, Integer> idx = is.knownIndex(liveMe, liveMe);
         final List<Set<Integer>> runs = is.runs(liveMe, liveMe);
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
@@ -1117,6 +1147,9 @@ public final class InfoStates implements LibraryInfoListener {
      * outlived Courser, a peeked card, a card we put there); belief worlds keep them and draw only the other slots.
      */
     public static Map<Integer, Card> oppPins(final InfoStates is, final Player liveMe, final Player liveOpp, final Game g) {
+        if (is == null) {
+            return null; // review #172 S2: none attached: the caller keeps Forge's visible top (the key-off path)
+        }
         final Map<Integer, Card> out = new java.util.TreeMap<>();
         for (Map.Entry<Integer, Integer> e : is.knownIndex(liveMe, liveOpp).entrySet()) {
             final Card c = g.findById(e.getKey());
