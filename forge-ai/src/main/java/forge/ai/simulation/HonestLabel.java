@@ -602,8 +602,8 @@ public final class HonestLabel {
                 // endstep-rows-1103 (measurement only): the row's affordability, no label search
                 r.gate = "afford-only";
                 r.afford = Affordability.of(liveMe,
-                        java.util.Arrays.asList(System.getProperty("forge.bench.affordEnablers", "").split(";")),
-                        java.util.Arrays.asList(System.getProperty("forge.bench.affordPayoffs", "").split(";")));
+                        java.util.Arrays.asList(System.getProperty("forge.bench.affordEnablers", "").replace('_', ' ').split(";")),
+                        java.util.Arrays.asList(System.getProperty("forge.bench.affordPayoffs", "").replace('_', ' ').split(";")));
                 return r;
             }
             if (known != null && spec.knownLib) {
