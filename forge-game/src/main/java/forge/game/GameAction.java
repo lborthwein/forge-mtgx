@@ -399,9 +399,9 @@ public class GameAction {
             cards.set(cards.indexOf(c), copied);
             // 725.3b
             if (cause != null && zoneTo.getZoneType() == ZoneType.Exile) {
-                cards = (CardCollection) cause.getHostCard().getController().getController().orderMoveToZoneList(cards, zoneTo.getZoneType(), cause);
+                cards = (CardCollection) game.arranged(cause.getHostCard().getController(), cause.getHostCard().getController().getController().orderMoveToZoneList(cards, zoneTo.getZoneType(), cause), zoneTo.getZoneType());
             } else {
-                cards = (CardCollection) c.getOwner().getController().orderMoveToZoneList(cards, zoneTo.getZoneType(), cause);
+                cards = (CardCollection) game.arranged(c.getOwner(), c.getOwner().getController().orderMoveToZoneList(cards, zoneTo.getZoneType(), cause), zoneTo.getZoneType());
             }
             cards.set(cards.indexOf(copied), c);
             mergedCards = cards;
@@ -2204,6 +2204,10 @@ public class GameAction {
 
         final ZoneType zone = cards.getFirst().getZone().getZoneType();
         final Player owner = cards.getFirst().getOwner();
+        if (zone == ZoneType.Library && game.hasLibraryInfoListeners()) {
+            // order-memory-1102: the players it is revealed to (research InfoState; no-op without a listener)
+            game.fireLibraryInfo(forge.game.LibraryInfoListener.Kind.REVEAL, to, cards, zone);
+        }
         for (final Player p : to) {
             p.getController().reveal(cards, zone, owner, messagePrefix, addSuffix);
         }
@@ -2230,6 +2234,11 @@ public class GameAction {
         reveal(cards, zt, cardOwner, dontRevealToOwner, messagePrefix, true);
     }
     public void reveal(CardCollectionView cards, ZoneType zt, Player cardOwner, boolean dontRevealToOwner, String messagePrefix, boolean msgAddSuffix) {
+        if (zt == ZoneType.Library && game.hasLibraryInfoListeners()) {
+            // order-memory-1102: every player learns them, the owner included (with dontRevealToOwner the owner has
+            // already seen them); research InfoState, a no-op without a listener
+            game.fireLibraryInfo(forge.game.LibraryInfoListener.Kind.REVEAL, game.getPlayers(), cards, zt);
+        }
         for (Player p : game.getPlayers()) {
             if (dontRevealToOwner && cardOwner == p) {
                 continue;
@@ -2630,6 +2639,10 @@ public class GameAction {
             final Player p = e.getKey();
             final CardCollection topN = new CardCollection(p.getCardsIn(ZoneType.Library, e.getValue()));
             ImmutablePair<CardCollection, CardCollection> decision = p.getController().arrangeForScry(topN);
+            if (game.hasLibraryInfoListeners()) {
+                // order-memory-1102: the scrying player saw the top N and chose where each goes
+                game.fireLibraryInfo(forge.game.LibraryInfoListener.Kind.ARRANGE, Collections.singletonList(p), topN, ZoneType.Library);
+            }
             decisions.put(p, decision);
             int numToTop = decision.getLeft() == null ? 0 : decision.getLeft().size();
             int numToBottom = decision.getRight() == null ? 0 : decision.getRight().size();

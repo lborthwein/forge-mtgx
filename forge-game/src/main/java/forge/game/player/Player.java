@@ -1049,6 +1049,10 @@ public class Player extends GameEntity implements Comparable<Player> {
 
         if (!topN.isEmpty()) {
             final Pair<CardCollection, CardCollection> lists = getController().arrangeForSurveil(topN);
+            if (getGame().hasLibraryInfoListeners()) {
+                // order-memory-1102: the surveilling player saw the top N and chose which stay
+                getGame().fireLibraryInfo(forge.game.LibraryInfoListener.Kind.ARRANGE, java.util.Collections.singletonList(this), topN, ZoneType.Library);
+            }
             final CardCollection toTop = lists.getLeft();
             final CardCollection toGrave = lists.getRight();
 

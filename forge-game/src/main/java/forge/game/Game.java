@@ -1075,6 +1075,89 @@ public class Game {
         }
     }
 
+    /**
+     * order-memory-1102: the library-info listeners ({@link LibraryInfoListener}; InfoState layer 1, research). Empty
+     * unless a research consumer adds one; never copied to a game copy; not the event bus (see the interface).
+     */
+    private final List<LibraryInfoListener> libraryInfoListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+    /** Review #172 S1: a listener failure is logged once per game and never reaches the effect. */
+    private boolean libraryInfoFailureLogged = false;
+
+    public void addLibraryInfoListener(final LibraryInfoListener listener) {
+        libraryInfoListeners.add(Objects.requireNonNull(listener));
+    }
+
+    public void removeLibraryInfoListener(final LibraryInfoListener listener) {
+        libraryInfoListeners.remove(listener);
+    }
+
+    public boolean hasLibraryInfoListeners() {
+        return !libraryInfoListeners.isEmpty();
+    }
+
+    /** A copy of the listener list (a consumer finds the game's shared InfoState here). */
+    public List<LibraryInfoListener> getLibraryInfoListeners() {
+        return new ArrayList<>(libraryInfoListeners);
+    }
+
+    /**
+     * Tell the listeners; a no-op when there are none (nothing is built). {@code cards} and {@code observers} are copied.
+     */
+    public void fireLibraryInfo(final LibraryInfoListener.Kind kind, final Iterable<Player> observers,
+            final Iterable<Card> cards, final ZoneType zone) {
+        if (libraryInfoListeners.isEmpty() || cards == null) {
+            return;
+        }
+        final List<Card> cs = new ArrayList<>();
+        for (Card c : cards) {
+            if (c != null) {
+                cs.add(c);
+            }
+        }
+        if (cs.isEmpty()) {
+            return;
+        }
+        final List<Player> os = new ArrayList<>();
+        if (observers != null) {
+            for (Player p : observers) {
+                if (p != null && !os.contains(p)) {
+                    os.add(p);
+                }
+            }
+        }
+        final List<Card> roc = Collections.unmodifiableList(cs);
+        final List<Player> roo = Collections.unmodifiableList(os);
+        for (LibraryInfoListener l : libraryInfoListeners) {
+            try {
+                l.onLibraryInfo(kind, roo, roc, zone);
+            } catch (RuntimeException e) {
+                // review #172 S1 (fail-safe): an observer never unwinds the effect that teaches it
+                if (!libraryInfoFailureLogged) {
+                    libraryInfoFailureLogged = true;
+                    System.err.println("[library-info] listener failed (ignored, logged once): " + e);
+                }
+            }
+        }
+    }
+
+    /**
+     * order-memory-1102: {@code chooser} arranged {@code cards} going to {@code dest} (an orderMoveToZoneList answer;
+     * wrapped around the controller call, so every controller type is covered). Returns {@code cards} unchanged.
+     */
+    public <T extends Iterable<Card>> T arranged(final Player chooser, final T cards, final ZoneType dest) {
+        if (!libraryInfoListeners.isEmpty() && dest == ZoneType.Library && chooser != null) {
+            fireLibraryInfo(LibraryInfoListener.Kind.ARRANGE, Collections.singletonList(chooser), cards, dest);
+        }
+        return cards;
+    }
+
+    /** order-memory-1102: these cards go to {@code dest} in a random order (right after {@code CardLists.shuffle}). */
+    public void randomOrder(final Iterable<Card> cards, final ZoneType dest) {
+        if (!libraryInfoListeners.isEmpty() && dest == ZoneType.Library) {
+            fireLibraryInfo(LibraryInfoListener.Kind.RANDOM, getPlayers(), cards, dest);
+        }
+    }
+
     public GameRules getRules() {
         return rules;
     }

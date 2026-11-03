@@ -207,6 +207,11 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
          * remainder is never read.
          */
         public String belief = "off";
+        /**
+         * order-memory-1102 layer 1 (off by default and then absent from the JSON): the search worlds read the game's
+         * InfoStates ({@link LookaheadSearch.Config#infoState}). Live: only the policy spec's {@code infoState=on}.
+         */
+        public boolean infoState = false;
         /** honest-belief-1020: the cube list file ({@code mtgx-belief-cube/1}; {@code classpath:} = a jar resource) and its pin. */
         public String beliefCube;
         public String beliefCubeSha256;
@@ -225,7 +230,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 "cpuCapMs", "seedSalt", "decisionLog", "policySha", "includePass", "budgetMs", "connectTimeoutMs",
                 "choices", "choiceAlts", "choiceMaxProb", "choiceCap", "choiceFamilies", "choiceRank", "sameDepartures",
                 "obs", "labelSink", "copyFidelity", "forcedWin", "plans", "blocks", "blockSamples", "blockTop", "belief",
-                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton"));
+                "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "infoState"));
 
         public static Config parse(final JsonObject o) {
             for (String k : o.keySet()) {
@@ -275,6 +280,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
             if (o.has("blockSamples")) c.blockSamples = o.get("blockSamples").getAsInt();
             if (o.has("blockTop")) c.blockTop = o.get("blockTop").getAsInt();
             if (o.has("belief")) c.belief = o.get("belief").getAsString();
+            if (o.has("infoState")) c.infoState = o.get("infoState").getAsBoolean();
             if (o.has("beliefCube") && !o.get("beliefCube").isJsonNull()) c.beliefCube = o.get("beliefCube").getAsString();
             if (o.has("beliefCubeSha256") && !o.get("beliefCubeSha256").isJsonNull()) {
                 c.beliefCubeSha256 = o.get("beliefCubeSha256").getAsString();
@@ -405,6 +411,9 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
                 o.addProperty("blocks", blocks);
                 o.addProperty("blockSamples", blockSamples);
                 o.addProperty("blockTop", blockTop);
+            }
+            if (infoState) {
+                o.addProperty("infoState", true); // order-memory-1102: only when on
             }
             if (!"off".equals(belief)) {
                 // honest-belief-1020: only when on, so every other spec's JSON is unchanged
@@ -614,6 +623,7 @@ public final class RlSearch implements RlSeat.PrioritySearch, LookaheadSearch.Se
         lc.budgetMs = cfg.budgetMs;
         lc.maxSameDepartures = cfg.sameDepartures;
         lc.copyFidelity = cfg.copyFidelity;
+        lc.infoState = cfg.infoState; // order-memory-1102 (off by default)
         if (!"off".equals(cfg.belief)) {
             // honest-belief-1020: the observation-only pool for every world (and, below, the solver's copies)
             lc.belief = cfg.belief;

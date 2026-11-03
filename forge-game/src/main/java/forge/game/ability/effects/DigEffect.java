@@ -366,7 +366,7 @@ public class DigEffect extends SpellAbilityEffect {
                 if (destZone1.equals(ZoneType.Battlefield) || destZone1.equals(ZoneType.Library)) {
                     if (sa.hasParam("GainControl")) {
                         // for Cybership
-                        movedCards = (CardCollection) activator.getController().orderMoveToZoneList(rest, destZone2, sa);
+                        movedCards = (CardCollection) game.arranged(activator, activator.getController().orderMoveToZoneList(rest, destZone2, sa), destZone2); // order-memory-1102
                     } else {
                         movedCards = (CardCollection) GameActionUtil.orderCardsByTheirOwners(game, movedCards, destZone1, sa);
                     }
@@ -440,11 +440,12 @@ public class DigEffect extends SpellAbilityEffect {
                         CardCollection afterOrder = rest;
                         if (sa.hasParam("RestRandomOrder")) {
                             CardLists.shuffle(afterOrder);
+                            game.randomOrder(afterOrder, destZone2); // order-memory-1102
                         } else if (!skipReorder && rest.size() > 1) {
                             if (destZone2 == ZoneType.Graveyard) {
                                 afterOrder = (CardCollection) GameActionUtil.orderCardsByTheirOwners(game, rest, destZone2, sa);
                             } else {
-                                afterOrder = (CardCollection) chooser.getController().orderMoveToZoneList(rest, destZone2, sa);
+                                afterOrder = (CardCollection) game.arranged(chooser, chooser.getController().orderMoveToZoneList(rest, destZone2, sa), destZone2); // order-memory-1102
                             }
                         }
 
