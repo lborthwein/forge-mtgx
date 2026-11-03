@@ -2977,7 +2977,7 @@ public final class ForcedWinSolver {
                                     System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
                     capped = meter.evalCapStops != ec || meter.evalDeadlineStops != ed || meter.playoutStepCaps != sc
                             || meter.playoutCallCaps != cc || meter.playoutWallCuts != wc || meter.playoutAiWorkCuts != aw
-                            || ev.worldsRun < cfg.worlds;
+                            || ev.pUnopposed >= 1.0 && ev.worldsRun < cfg.worlds; // a world-0 loss stops the worlds: resolved
                     if (capped) {
                         meter.loopVariantCaps++;
                         meter.evalCapStops = ec;
