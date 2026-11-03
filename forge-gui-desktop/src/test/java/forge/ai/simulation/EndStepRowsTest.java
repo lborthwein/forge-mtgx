@@ -190,6 +190,10 @@ public class EndStepRowsTest extends SimulationTest {
         // (L3: the opponent's replies on later turns by search), so only "never worse" is asserted here.
         AssertJUnit.assertTrue("end step never worse than hold: " + es, mean(es, vt) >= mean(es, pass));
         AssertJUnit.assertTrue("end step beats our upkeep: " + es + " / " + up, mean(es, vt) > mean(up, vu));
+        // hold is chosen when the end-step play is worse: Bolt now runs into their open Counterspell
+        final int bolt = find(cands, "Lightning Bolt", false);
+        AssertJUnit.assertTrue(es.toString(), bolt >= 0 && mean(es, bolt) < mean(es, pass));
+        AssertJUnit.assertFalse("Bolt now is not the pick: " + es, es.get("pick").getAsInt() == bolt);
     }
 
     /** They are at 1 with Chainer's Edict (a sorcery) in hand; we hold Spectral Sailor (flash 1/1 flier) and an Island. */
@@ -261,5 +265,48 @@ public class EndStepRowsTest extends SimulationTest {
         g.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
         AssertJUnit.assertEquals(new LookaheadSearch(c0).enumerate(g, a, null, 5L, null).size(),
                 new LookaheadSearch(c1).enumerate(g, a, null, 5L, null).size());
+    }
+
+    private static String setupFrame(final String phase, final String active, final String hand, final String bf) {
+        return "[state]\nturn=7\nactiveplayer=" + active + "\nactivephase=" + phase + "\nhumanlife=20\nailife=6\n"
+                + "humanlandsplayed=1\nailandsplayed=0\naihand=\nailibrary=" + ForcedWinSolverTest.LIB20
+                + "\naigraveyard=\naiexile=\naibattlefield=Forest\nhumanhand=" + hand + "\nhumanbattlefield=" + bf
+                + "\nhumangraveyard=\nhumanexile=\nhumanlibrary=" + ForcedWinSolverTest.OURLIB + "\n";
+    }
+
+    private static final String KEYS = "cycles=true,engineAnyWindow=true,engineEndStepOpen=true,engineEveryWindow=true,"
+            + "enginePassBudget=true";
+
+    /** The earliest end turn of the proposals (Integer.MAX_VALUE = none). */
+    private static int earliest(final List<ForcedWinSolver.Proposal> ps) {
+        int t = Integer.MAX_VALUE;
+        for (ForcedWinSolver.Proposal p : ps) if (p.endTurn >= 0) t = Math.min(t, p.endTurn);
+        return t;
+    }
+
+    private void setupPreferredAtTheirEndStep(final String piece, final String payoff, final String lands) {
+        final String hand = piece + ";" + payoff;
+        // their end step (turn 7): the piece now, the payoff on our turn 8; the kill is on turn 8
+        final List<ForcedWinSolver.Proposal> es = propose(ForcedWinSolverTest.game("Default", "Default",
+                setupFrame("END_OF_TURN", "ai", hand, lands)), KEYS);
+        AssertJUnit.assertFalse(piece + " at their end step: a line", es.isEmpty());
+        AssertJUnit.assertTrue(es.get(0).text, es.get(0).text.contains(piece));
+        AssertJUnit.assertEquals(es.get(0).text, 8, earliest(es));
+        // the same cards in our main phase (turn 8): both cannot be cast this turn, the kill is a turn later at best
+        final List<ForcedWinSolver.Proposal> main = propose(ForcedWinSolverTest.game("Default", "Default",
+                setupFrame("MAIN1", "human", hand, lands)), KEYS);
+        System.err.println("[endstep-test] " + piece + " main-phase proposals " + main.size() + " earliest " + earliest(main));
+        AssertJUnit.assertTrue("the end-step setup kills a turn earlier than the main-phase line", earliest(main) > 8);
+    }
+
+    @Test
+    public void pestermiteAtTheirEndStepThenKikiIsPreferredOverOurMainPhase() {
+        setupPreferredAtTheirEndStep("Pestermite", "Kiki-Jiki, Mirror Breaker",
+                "Volcanic Island;Volcanic Island;Mountain;Mountain;Mountain");
+    }
+
+    @Test
+    public void exarchAtTheirEndStepThenTwinIsPreferredOverOurMainPhase() {
+        setupPreferredAtTheirEndStep("Deceiver Exarch", "Splinter Twin", "Volcanic Island;Volcanic Island;Mountain;Mountain");
     }
 }

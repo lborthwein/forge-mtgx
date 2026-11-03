@@ -428,6 +428,8 @@ public final class HonestLabel {
         public int proposals;
         /** The proven line's end: the loser's GameLossReason name, its class, the line's kind and steps. */
         public String endReason, how = "unresolved", lineHow;
+        /** endstep-rows-1103 diagnostics only (-Dforge.bench.lineText=true; null otherwise): the best proposal's text. */
+        public String lineText;
         public int lineSteps = -1;
         /** Turns from the position to the proven end (global turn numbers; -1 = not proven). */
         public int turnsToEnd = -1;
@@ -490,6 +492,7 @@ public final class HonestLabel {
             o.addProperty("how", how);
             if (endReason != null) o.addProperty("end_reason", endReason);
             if (lineHow != null) o.addProperty("line_how", lineHow);
+            if (lineText != null) o.addProperty("line_text", lineText); // endstep-rows-1103 (diagnostics only)
             o.addProperty("line_steps", lineSteps);
             if (turnsToEnd >= 0) {
                 o.addProperty("turns_to_end", turnsToEnd);
@@ -757,6 +760,9 @@ public final class HonestLabel {
                 if (p.proven(spec.worlds) && (proven == null || p.endTurn >= 0 && p.endTurn < proven.endTurn)) {
                     proven = p;
                 }
+            }
+            if (best != null && Boolean.getBoolean("forge.bench.lineText")) {
+                r.lineText = (proven != null ? proven : best).text; // endstep-rows-1103 (diagnostics only)
             }
             if (best != null) {
                 r.pWin = best.pBelief;

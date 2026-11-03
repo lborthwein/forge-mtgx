@@ -274,6 +274,11 @@ final class ForcedWinEngine {
         boolean anyWindow;
         /** endstep-rows-1103 (engineEveryWindow): a root at any window; we never attack outside our own turn. */
         boolean everyWindow;
+        /**
+         * endstep-rows-1103 (enginePassBudget; false = off): the pass that passes the turn gets the search's full step and
+         * card budgets from its own start (as each pass gets its own nodes), not what the this-turn pass left.
+         */
+        boolean passBudget;
         int loopWindow = 8;
         int loopCap = 128;
         /**
@@ -1093,6 +1098,10 @@ final class ForcedWinEngine {
                 lim.nodes = st.nodes + nodeCap / 2;
                 e.passCap = nodeCap / 2;
                 e.passStart = st.nodes;
+                if (lim.passBudget) {
+                    e.stepBase = st.steps; // endstep-rows-1103: pass 2's own step and card budgets
+                    e.cardBase = st.cards;
+                }
                 e.seen.clear();
                 e.table.clear();
                 e.diagPass = 2;

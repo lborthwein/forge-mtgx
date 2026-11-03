@@ -259,9 +259,11 @@ public final class ForcedWinSolver {
          * there; and with engineEndStepOpen the board-power gate is skipped at every such off-main window.
          */
         public boolean engineEveryWindow = false;
+        /** endstep-rows-1103 (false = off): ForcedWinEngine.Limits#passBudget, pass 2's own step and card budgets. */
+        public boolean enginePassBudget = false;
         /** endstep-rows-1103: its keys, recorded only when on (off = the recorded spec unchanged). */
         public static final java.util.Map<String, Object> ENDSTEP_DEFAULTS = java.util.Map.of("engineEndStepOpen", false,
-                "engineEveryWindow", false);
+                "engineEveryWindow", false, "enginePassBudget", false);
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         /**
@@ -413,6 +415,7 @@ public final class ForcedWinSolver {
             c.loopMacro3 = "true".equals(get.apply("loopMacro3"));
             c.engineEndStepOpen = "true".equals(get.apply("engineEndStepOpen")); // endstep-rows-1103
             c.engineEveryWindow = "true".equals(get.apply("engineEveryWindow")); // endstep-rows-1103
+            c.enginePassBudget = "true".equals(get.apply("enginePassBudget")); // endstep-rows-1103
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -2743,6 +2746,7 @@ public final class ForcedWinSolver {
         el.loopMacro3 = cfg.loopMacro3; // review #154 S2
         el.anyWindow = cfg.engineAnyWindow; // R2-4 (c)
         el.everyWindow = cfg.engineAnyWindow && cfg.engineEveryWindow; // endstep-rows-1103
+        el.passBudget = cfg.enginePassBudget; // endstep-rows-1103
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
