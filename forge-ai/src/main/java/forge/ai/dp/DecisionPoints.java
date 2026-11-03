@@ -33,6 +33,73 @@ public final class DecisionPoints {
     }
 
     private static volatile DecisionObserver observer;
+
+    // ------------------------------------------------------------------ PR-E: answerers on game copies, row meter
+    /** Answers the decision points of copies (label lines, roll-outs, solver copies), for both seats. */
+    @FunctionalInterface
+    public interface CopyAnswerers {
+        /** The answerer for {@code seat}'s points in a copy made for label row {@code row} (null: none). */
+        DecisionAnswerer forSeat(Player seat, String row);
+    }
+
+    /** The Forge-default copy answerer: every copy point keeps Forge AI's answer (byte-identical by construction). */
+    public static final CopyAnswerers FORGE_DEFAULT = (seat, row) -> (dp, cur) -> cur;
+
+    private static volatile CopyAnswerers copyAnswerers;
+    private static volatile boolean meter;
+    /** Row -> "kind|by" -> count (the meter; only while {@link #setMeter} is on). */
+    private static final Map<String, Map<String, int[]>> METER = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public static void setCopyAnswerers(final CopyAnswerers c) {
+        copyAnswerers = c;
+    }
+
+    public static CopyAnswerers copyAnswerers() {
+        return copyAnswerers;
+    }
+
+    /** The per-row Forge-answered meter (labeller rows carry {@code dp_meter}); off by default. */
+    public static void setMeter(final boolean on) {
+        meter = on;
+        if (!on) {
+            METER.clear();
+        }
+    }
+
+    public static boolean meter() {
+        return meter;
+    }
+
+    /** Whether copies and rows are tracked (an observer, a copy answerer or the meter is on). */
+    public static boolean tracking() {
+        return observer != null || copyAnswerers != null || meter;
+    }
+
+    /** The installed copy answerer for {@code seat}, when its game is a copy; else null. */
+    public static DecisionAnswerer copyAnswerer(final Player seat) {
+        final CopyAnswerers c = copyAnswerers;
+        if (c == null || seat == null) {
+            return null;
+        }
+        final Game g = seat.getGame();
+        if (!isCopy(g)) {
+            return null;
+        }
+        return c.forSeat(seat, rowOf(g));
+    }
+
+    /** The meter's counts for {@code row} ("kind|by" -> n), removed; null when nothing was counted. */
+    public static Map<String, Integer> takeMeter(final String row) {
+        final Map<String, int[]> m = row == null ? null : METER.remove(row);
+        if (m == null) {
+            return null;
+        }
+        final Map<String, Integer> out = new java.util.TreeMap<>();
+        for (Map.Entry<String, int[]> e : m.entrySet()) {
+            out.put(e.getKey(), e.getValue()[0]);
+        }
+        return out;
+    }
     /** Copies (made while an observer was installed) -> the label row they were made for ("" = none). */
     private static final Map<Game, String> COPIES = Collections.synchronizedMap(new WeakHashMap<>());
     private static final ThreadLocal<String> ROW = new ThreadLocal<>();
@@ -53,7 +120,7 @@ public final class DecisionPoints {
 
     /** GameCopier: {@code copy} was made from {@code orig}. Recorded only while an observer is installed. */
     public static void markCopy(final Game copy, final Game orig) {
-        if (observer == null || copy == null) {
+        if (!tracking() || copy == null) {
             return;
         }
         final String parent = orig == null ? null : COPIES.get(orig);
@@ -73,13 +140,13 @@ public final class DecisionPoints {
 
     /** The labeller starts labelling row {@code key} (game_uid:seat:dec_idx) on this thread. */
     public static void enterRow(final String key) {
-        if (observer != null) {
+        if (tracking()) {
             ROW.set(key);
         }
     }
 
     public static void exitRow() {
-        if (observer != null) {
+        if (tracking()) {
             ROW.remove();
         }
     }
@@ -129,6 +196,13 @@ public final class DecisionPoints {
         final DecisionObserver o = observer;
         if (o != null) {
             o.observe(dp, out, by);
+        }
+        if (meter && !dp.nested() && !"cheatShuffle".equals(dp.ctx())) {
+            final String row = rowOf(dp.seat() == null ? null : dp.seat().getGame());
+            if (row != null) {
+                METER.computeIfAbsent(row, k -> new java.util.concurrent.ConcurrentHashMap<>())
+                        .computeIfAbsent(dp.kind() + "|" + by, k -> new int[1])[0]++;
+            }
         }
         return out;
     }

@@ -519,6 +519,24 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         }
         h.add("decks", dp);
         h.add("deck_sha", ds);
+        // decisionpoint-1102 PR-E: the row's decision meter (only with the bench's dpMeter on): "kind|by" -> points
+        if (forge.ai.dp.DecisionPoints.meter()) {
+            final String mkey = uidStr + ":" + seat + ":" + ord
+                    + ("choice".equals(rowKind) ? ":c" + choiceOrd : "");
+            final java.util.Map<String, Integer> m = forge.ai.dp.DecisionPoints.takeMeter(mkey);
+            final JsonObject mj = new JsonObject();
+            int forgeN = 0;
+            if (m != null) {
+                for (java.util.Map.Entry<String, Integer> e : m.entrySet()) {
+                    mj.addProperty(e.getKey(), e.getValue());
+                    if (e.getKey().endsWith("|forge")) forgeN += e.getValue();
+                }
+            }
+            final JsonObject dm = new JsonObject();
+            dm.addProperty("forge", forgeN);
+            dm.add("by_kind", mj);
+            h.add("dp_meter", dm);
+        }
         records.add(record(h, payload));
         headers.add(h);
         labels.merge(r.label, 1, Integer::sum);
@@ -531,6 +549,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
      * row_kind, choice_ord, r3, r3_sha and r3_ranker (the R3 label-search rows). e1-q8-1101: lib_tag, lib_takes, lib_w,
      * lib_seqs and lib_why (present only with the spec's libLabels on and a proving line that read our hidden library).
      * known-lib-1102: known_top and known_pinned (present only with the spec's knownLib on and some position known).
+     * decisionpoint-1102 PR-E: dp_meter (present only with the bench's dpMeter on): the row's decision points answered
+     * in its copies and lines, {forge: n, by_kind: {"KIND|by": n}}.
      */
     static final String[] INDEX_FIELDS = {"game_uid", "seed", "seat", "dec_idx", "turn", "phase", "stack",
             "turns_before_end", "tape_turns", "tape_reason", "tape_result", "label", "check", "gate", "p_win",
@@ -538,7 +558,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
             "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof",
             "state_sha", "s2t", "row_kind", "choice_ord", "r3", "r3_sha", "r3_ranker", "cap", "cap_hits", "worlds_capped",
-            "proof_cap", "lib_tag", "lib_takes", "lib_w", "lib_seqs", "lib_why", "known_top", "known_pinned"};
+            "proof_cap", "lib_tag", "lib_takes", "lib_w", "lib_seqs", "lib_why", "known_top", "known_pinned", "dp_meter"};
 
     /**
      * rollout-budget-1101 (review #160 S2-2): a step row whose proof check was capped says so (proof_cap): its "no proof"

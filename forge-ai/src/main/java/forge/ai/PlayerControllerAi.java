@@ -128,7 +128,8 @@ public class PlayerControllerAi extends PlayerController {
     @SuppressWarnings("unchecked")
     protected final <A> A dp(final Kind kind, final String ctx, final SpellAbility sa, final Collection<?> options,
             final int min, final int max, final java.util.function.Supplier<A> forge, final Object... args) {
-        final boolean inst = dpAnswerer != null || DecisionPoints.observer() != null;
+        final forge.ai.dp.DecisionAnswerer ans = answerer(); // PR-E: the seat's, else a copy answerer
+        final boolean inst = ans != null || DecisionPoints.observer() != null || DecisionPoints.meter();
         final A def;
         final boolean nested = dpDepth > 0;
         if (inst) {
@@ -148,12 +149,20 @@ public class PlayerControllerAi extends PlayerController {
         final DecisionPoint p = nested
                 ? DecisionPoints.nestedPoint(kind, ctx, player, sa, options, min, max, def, args)
                 : DecisionPoints.point(kind, ctx, player, sa, options, min, max, def, args);
-        return (A) DecisionPoints.resolve(p, cac ? new CacAdapter(this, cacHook) : null, dpAnswerer);
+        return (A) DecisionPoints.resolve(p, cac ? new CacAdapter(this, cacHook) : null, ans);
+    }
+
+    /** PR-E: this seat's answerer: its own, else the installed copy answerer when its game is a copy; else null. */
+    private forge.ai.dp.DecisionAnswerer answerer() {
+        if (dpAnswerer != null) {
+            return dpAnswerer;
+        }
+        return DecisionPoints.copyAnswerers() == null ? null : DecisionPoints.copyAnswerer(player);
     }
 
     /** Whether anything (answerer or census observer) looks at this seat's decision points. */
     public final boolean dpInstrumented() {
-        return dpAnswerer != null || DecisionPoints.observer() != null;
+        return answerer() != null || DecisionPoints.observer() != null || DecisionPoints.meter();
     }
 
     /**
@@ -176,7 +185,7 @@ public class PlayerControllerAi extends PlayerController {
         final A def = forge.get();
         final DecisionPoint pt = DecisionPoints.point(kind, ctx, p, sa, options, min, max, def, args).withValidator(valid);
         final forge.ai.dp.DecisionAnswerer cac = cacAnswer == null ? null : (d, cur) -> cacAnswer.apply((A) cur);
-        return (A) DecisionPoints.resolve(pt, cac, pc.dpAnswerer);
+        return (A) DecisionPoints.resolve(pt, cac, pc.answerer());
     }
 
     /** A decision answered by mutating its argument (combat declarations): observed only; no answerer in PR-B. */
