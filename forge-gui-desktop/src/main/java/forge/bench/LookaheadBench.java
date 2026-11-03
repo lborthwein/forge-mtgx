@@ -508,6 +508,7 @@ public final class LookaheadBench {
             rules.setAISideboardingEnabled(false);
             rules.setSideboardForAI(false);
             rules.setAllowCheatShuffle(false);
+            forge.ai.dp.DecisionPoints.assertNoCheatShuffle(rules, "LookaheadBench"); // decisionpoint-1102: research/live games never allow AI cheat shuffles
             rules.setWarnAboutAICards(false);
             final Match match = new Match(rules, seats, "mtgx-lookahead");
             MyRandom.setRandom(new Random(seed));
