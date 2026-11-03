@@ -46,6 +46,10 @@ import forge.game.zone.ZoneView;
  * </ul>
  * Known limit: a hidden card taken from the very top by a search is read as a take from the top (the seat would not
  * know it came from there); searches nearly always shuffle. Read-only: it never changes the game.
+ *
+ * <p><b>Threads:</b> one tracker is fed and read on its watched game's thread only (events arrive on the game thread;
+ * {@link #known} mutates on an unexplained change). Query a COPY's library through {@link #knownReadOnly}, which never
+ * mutates (review #168 S2: a copy's order differs from the live one, and {@link #known} on it would forget everything).
  */
 public final class KnownOwnLibrary {
     private final int seatId;
@@ -402,6 +406,76 @@ public final class KnownOwnLibrary {
             }
         }
         return out;
+    }
+
+    /**
+     * order-memory-1102: a copy's tracker starts knowing these cards (the root's known positions; {@link
+     * OwnLibraryMemory#seedKnown}), top-anchored: a hidden take from the middle can only void more of them. Call before
+     * {@link #watch}, or with no event since the last one (the snapshot is unchanged).
+     */
+    public void pin(final Iterable<Card> cards) {
+        for (Card c : cards) {
+            if (c != null) {
+                top.add(c.getId());
+            }
+        }
+    }
+
+    /**
+     * Review #168 S2: the known ids of the WATCHED game's library, without mutating: empty when the library changed in a
+     * way the events do not explain (the next {@link #known} on the watched game forgets then). For queries made on a
+     * copy, whose card ids are the watched game's.
+     */
+    public Set<Integer> knownReadOnly() {
+        final Player me = game == null ? null : game.getPlayer(seatId);
+        if (me == null || snap == null) {
+            return new LinkedHashSet<>();
+        }
+        final List<Integer> now = ids(me);
+        final Set<Integer> out = new LinkedHashSet<>();
+        if (!snap.equals(now)) {
+            return out;
+        }
+        for (int x : now) {
+            if (top.contains(x) || bottom.contains(x)) {
+                out.add(x);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Review #168 S1 (re-check): the known ids for a COPY's player {@code copyMe}, without mutating. They are returned
+     * only when the copy's library is in exactly the watched library's order (every known card at its computed index);
+     * any other copy order (a shuffle, a tutor's take, a draw or a reorder in the copy) gives none, since the seat's
+     * knowledge of where a card is does not carry over to a copy whose library has moved (fails closed).
+     */
+    public Set<Integer> knownIn(final Player copyMe) {
+        final Set<Integer> ro = knownReadOnly();
+        if (ro.isEmpty() || copyMe == null) {
+            return new LinkedHashSet<>();
+        }
+        final Player me = game.getPlayer(seatId);
+        if (me == null || !ids(me).equals(ids(copyMe))) {
+            return new LinkedHashSet<>();
+        }
+        return ro;
+    }
+
+    /** The game this tracker watches (null before {@link #watch}). */
+    public Game watched() {
+        return game;
+    }
+
+    /**
+     * Review #168 S3: the caller reordered the watched library itself, keeping every known card at its index (a pinned
+     * shuffle, {@link OwnLibraryMemory#shuffleUnknown}): accept the new order as explained, so the pins survive.
+     */
+    void acceptPinnedReorder() {
+        final Player me = game == null ? null : game.getPlayer(seatId);
+        if (me != null && snap != null) {
+            snap = ids(me);
+        }
     }
 
     /** The known top count of {@code me}'s library (diagnostics). */

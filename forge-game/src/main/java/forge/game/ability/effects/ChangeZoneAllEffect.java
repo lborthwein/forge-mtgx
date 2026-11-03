@@ -104,7 +104,7 @@ public class ChangeZoneAllEffect extends SpellAbilityEffect {
         if (!random && !sa.hasParam("Shuffle")) {
             if (movingToDeck && cards.size() >= 2) {
                 Player p = AbilityUtils.getDefinedPlayers(source, sa.getParam("DefinedPlayer"), sa).get(0);
-                cards = (CardCollection) p.getController().orderMoveToZoneList(cards, destination, sa);
+                cards = (CardCollection) game.arranged(p, p.getController().orderMoveToZoneList(cards, destination, sa), destination); // order-memory-1102
             } else {
                 cards = (CardCollection) GameActionUtil.orderCardsByTheirOwners(game, cards, destination, sa);
             }
@@ -112,6 +112,7 @@ public class ChangeZoneAllEffect extends SpellAbilityEffect {
 
         if (movingToDeck && random) {
             CardLists.shuffle(cards);
+            game.randomOrder(cards, destination); // order-memory-1102 (no-op without a listener)
         }
 
         final CardZoneTable triggerList = CardZoneTable.getSimultaneousInstance(sa);

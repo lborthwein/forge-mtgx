@@ -91,6 +91,15 @@ public final class ForcedWinSolver {
          */
         public boolean frameMemory;
         /**
+         * order-memory-1102 layer 1 (solver key {@code infoState}; off by default, and then nothing changes): the pile
+         * memory is the game's {@link InfoStates} (InfoState(me) of our library) instead of the {@link LibraryWatch}:
+         * random-order blocks and orders the opponent chose are not known, scry and dig bottoms and non-contiguous fixed
+         * offsets are (pinned in the play-out worlds), and the solver's own answers no longer mark cards placed (the
+         * moves they cause teach the state). Cards noted from outside (HonestLabel's root knowledge) still count.
+         * Play-out shuffles of the unknown slots are canonical.
+         */
+        public boolean infoState;
+        /**
          * e1-q8-1101 (DESIGN-R3 ruling 2026-11-01 06:40:01, q^8; false = off, the default, and then nothing changes): each
          * play-out watches which cards hidden from the seat at its start it reads from the seat's own library
          * ({@link HiddenWatch}); evaluations and proposals carry it. Set only by {@link HonestLabel}'s {@code libLabels}
@@ -404,6 +413,7 @@ public final class ForcedWinSolver {
                         + " needs budget=counter (labeller v2 is counts only)");
             }
             c.frameMemory = "true".equals(get.apply("frameMemory"));
+            c.infoState = "true".equals(get.apply("infoState"));
             c.likely = "true".equals(get.apply("likely"));
             c.paySearch = "true".equals(get.apply("paySearch"));
             c.likelyWorlds = intOr(get.apply("likelyWorlds"), c.likelyWorlds);
@@ -986,13 +996,21 @@ public final class ForcedWinSolver {
         }
     }
 
+    /** order-memory-1102 (infoState): the game's state; the known top and the other known ids at the last read. */
+    private InfoStates infoStates;
+    private final Set<Integer> isTop = new HashSet<>(), isPinned = new HashSet<>();
+
     /** Start watching our library (once; the seat's first decision). */
     void watch(Game live) {
         if (watching) {
             return;
         }
         watching = true;
-        live.subscribeToEvents(new LibraryWatch(this));
+        if (cfg.infoState) {
+            infoStates = InfoStates.forConsumer(live);
+        } else {
+            live.subscribeToEvents(new LibraryWatch(this));
+        }
         if (cfg.frameMemory) {
             // EVAL only (frames mined mid-pile): the seat built its library top before the frame began
             for (Card c : me.getCardsIn(ZoneType.Library)) {
@@ -1035,12 +1053,12 @@ public final class ForcedWinSolver {
 
     /** known-lib-1102: the pinned ids in {@code p}'s library (a copy keeps the ids); empty when none are noted. */
     Set<Integer> pinnedIn(Player p) {
-        if (pinned.isEmpty()) {
+        if (pinned.isEmpty() && isPinned.isEmpty()) {
             return Collections.emptySet();
         }
         final Set<Integer> out = new HashSet<>();
         for (Card c : p.getCardsIn(ZoneType.Library)) {
-            if (pinned.contains(c.getId())) {
+            if (pinned.contains(c.getId()) || isPinned.contains(c.getId())) {
                 out.add(c.getId());
             }
         }
@@ -1050,9 +1068,29 @@ public final class ForcedWinSolver {
     /** The known top of our library: the longest prefix whose cards the seat placed; null when none. */
     List<Integer> knownTop(Game live) {
         watch(live);
+        if (infoStates != null) {
+            // order-memory-1102: the known top = the leading run of (noted from outside) + InfoState(me)'s known
+            final Set<Integer> k = infoStates.known(me, me);
+            isTop.clear();
+            isPinned.clear();
+            boolean lead = true;
+            for (Card c : me.getCardsIn(ZoneType.Library)) {
+                final boolean kn = placed.contains(c.getId()) || k.contains(c.getId());
+                if (lead && kn) {
+                    if (k.contains(c.getId())) {
+                        isTop.add(c.getId());
+                    }
+                } else {
+                    lead = false;
+                    if (k.contains(c.getId())) {
+                        isPinned.add(c.getId());
+                    }
+                }
+            }
+        }
         final List<Integer> out = new ArrayList<>();
         for (Card c : me.getCardsIn(ZoneType.Library)) {
-            if (!placed.contains(c.getId())) {
+            if (!placed.contains(c.getId()) && !isTop.contains(c.getId())) {
                 break;
             }
             out.add(c.getId());
@@ -1063,7 +1101,7 @@ public final class ForcedWinSolver {
     private int placedCount(Player p) {
         int n = 0;
         for (Card c : p.getCardsIn(ZoneType.Library)) {
-            if (!placed.contains(c.getId())) {
+            if (!placed.contains(c.getId()) && !isTop.contains(c.getId())) {
                 break;
             }
             n++;
@@ -2911,7 +2949,7 @@ public final class ForcedWinSolver {
                 for (Player o : cm.getOpponents()) {
                     hideOrSample(live, me, (Player) live.getPlayer(o.getId()), o, world == 0, rng);
                 }
-                shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, pinnedIn(cm), rng);
+                shuffleUnknownOwnLibrary(cm, line == null ? placedCount(me) : line.knownTop, pinnedIn(cm), rng, cfg.infoState);
             }
             MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(mix(seed, 3)));
             if (line != null) {
@@ -2987,7 +3025,7 @@ public final class ForcedWinSolver {
             final Random rng = new Random(mix(cfg.seed, 0x425657L + decisionIndex));
             copies++;
             redraw.apply(live, me, g, cm, rng);
-            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), pinnedIn(cm), rng);
+            shuffleUnknownOwnLibrary(cm, knownOrder == null ? 0 : knownOrder.size(), pinnedIn(cm), rng, cfg.infoState);
             return g;
         }
     }
@@ -3326,7 +3364,7 @@ public final class ForcedWinSolver {
                     if (libArrange != null) {
                         libArrange.apply(cm, rng); // e1-q8-1101: an exact-draw sequence at the first hidden slots
                     } else {
-                        shuffleUnknownOwnLibrary(cm, line.knownTop, pinnedIn(cm), rng);
+                        shuffleUnknownOwnLibrary(cm, line.knownTop, pinnedIn(cm), rng, cfg.infoState);
                     }
                 } else if (libArrange != null) {
                     libArrange.apply(cm, rng);
@@ -3508,6 +3546,14 @@ public final class ForcedWinSolver {
      * kept at their index too; the other cards below the known top are shuffled into the other slots.
      */
     static void shuffleUnknownOwnLibrary(Player me, int knownTop, Set<Integer> pinned, Random rng) {
+        shuffleUnknownOwnLibrary(me, knownTop, pinned, rng, false);
+    }
+
+    /**
+     * order-memory-1102: {@code canonical} (the solver's infoState) puts the unknown cards in id order before the shuffle,
+     * so a play-out world never depends on the true order of what the seat does not know.
+     */
+    static void shuffleUnknownOwnLibrary(Player me, int knownTop, Set<Integer> pinned, Random rng, boolean canonical) {
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         final int k = Math.min(knownTop, lib.size());
         if (k >= lib.size()) {
@@ -3518,6 +3564,9 @@ public final class ForcedWinSolver {
             if (pinned == null || !pinned.contains(lib.get(i).getId())) {
                 rest.add(lib.get(i));
             }
+        }
+        if (canonical) {
+            rest.sort((a, b) -> Integer.compare(a.getId(), b.getId()));
         }
         Collections.shuffle(rest, rng);
         final List<Card> out = new ArrayList<>(lib.subList(0, k));
@@ -3698,14 +3747,14 @@ public final class ForcedWinSolver {
     public Card answerPick(ZoneType destination, List<ZoneType> origin, SpellAbility source, CardCollection choices,
             Player decider) {
         final Card c = active == null || decider != me ? null : active.pick(source, choices);
-        if (c != null && destination == ZoneType.Library) {
+        if (c != null && destination == ZoneType.Library && !cfg.infoState) {
             notePlaced(List.of(c));
         }
         return c;
     }
 
     public CardCollectionView answerOrder(CardCollectionView cards, ZoneType destination, SpellAbility source) {
-        if (destination == ZoneType.Library) {
+        if (destination == ZoneType.Library && !cfg.infoState) {
             // pile memory: whichever order is chosen for our library, it is ours
             notePlaced(cards);
         }
