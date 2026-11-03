@@ -96,4 +96,43 @@ public class LibraryInfoFailSafeTest extends forge.ai.AITest {
         Assert.assertEquals(calls[0], 1);
         Assert.assertEquals(g.getLibraryInfoListeners().size(), 2);
     }
+    // ------------------------------------------------------------------ #173: infoState on => attached at setup
+
+    /**
+     * Every config that turns an InfoStates consumer on (the look-ahead's key, the solver's key through plans.solverCfg,
+     * plans.defendCfg or forcedWin) attaches the game's InfoStates at setup; with none on, nothing is attached (so a
+     * key can never silently behave as off, and an off spec stays byte-identical).
+     */
+    @Test
+    public void infoStateOnMeansAttachedAtSetup() {
+        final com.google.gson.JsonObject on = new com.google.gson.JsonObject();
+        on.addProperty("infoState", "true");
+        for (int k = 0; k < 5; k++) {
+            final Game g = KnownLibTest.game("", "Island", "Island;Swamp;Island;Swamp", 20);
+            final forge.bench.rl.RlSearch.Config c = new forge.bench.rl.RlSearch.Config();
+            switch (k) {
+                case 0: break; // nothing on
+                case 1: c.infoState = true; break;
+                case 2: c.plans = new com.google.gson.JsonObject(); c.plans.add("solverCfg", on.deepCopy()); break;
+                case 3: c.plans = new com.google.gson.JsonObject(); c.plans.add("defendCfg", on.deepCopy()); break;
+                default: c.forcedWin = on.deepCopy(); break;
+            }
+            final InfoStates s = forge.bench.rl.RlSearch.attachInfoStates(c, g);
+            Assert.assertEquals(s != null, k != 0, "case " + k);
+            Assert.assertEquals(InfoStates.find(g) != null, k != 0, "case " + k + ": attached iff a consumer is on");
+            Assert.assertSame(InfoStates.forConsumer(g), s, "the consumers find it");
+        }
+    }
+
+    /** Choose-a-card's live memory (and R3's) attaches at bind when its key is on: it reads the game's shared instance. */
+    @Test
+    public void chooseACardMemoryAttachesAtBind() {
+        final Game g = KnownLibTest.game("", "Island", "Island;Swamp;Island;Swamp", 20);
+        final ChooseACard.Config cfg = new ChooseACard.Config();
+        cfg.infoState = true;
+        final ChooseACard c = new ChooseACard(cfg, StaticValuer.INSTANCE, null);
+        c.bind(g, me(g));
+        Assert.assertNotNull(InfoStates.find(g), "attached at bind");
+        Assert.assertSame(c.memory().infoStates(), InfoStates.find(g));
+    }
 }
