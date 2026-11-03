@@ -694,7 +694,7 @@ public final class AiTape {
                     ? "the tape ended after " + list.size() + " entries" : "its frame had only " + list.size() + " entries"));
         }
         JsonObject e = list.get(at).getAsJsonObject();
-        if (!cursors.isEmpty() && cursors.peek().prep && !fits(e, k, m) && neutral(e)) {
+        if (!cursors.isEmpty() && cursors.peek().prep && !fits(e, k, m) && neutral(e, prevPost(cursors.peek()))) {
             skipNeutral(cursors.peek(), k, m);
             if (cursors.peek().i >= list.size()) {
                 throw diverge("the record has no " + what(k, m) + " here: its frame had only " + list.size() + " entries");
@@ -772,19 +772,25 @@ public final class AiTape {
      * hash included). Inside a trigger's preparation the record's PlayerControllerAi.prepareSingleSa also runs Forge AI's
      * own deliberation, whose asks (a static-ability choice, the cards it would delve, ...) are recorded there; the forced
      * preparation runs only the parts that are not the AI's choice ({@link #forcedPrep}) and never makes those asks.
-     * A neutral one is skipped (counted); anything else still diverges, and the preparation's own end state is still
+     * (An entry that records no start state started where the entry before it ended.) A neutral one is skipped (counted); anything else still diverges, and the preparation's own end state is still
      * checked against the record ({@link #done}).
      */
-    static boolean neutral(final JsonObject x) {
-        return "m".equals(str(x, "k")) && !x.has("sub") && x.has("pre") && x.has("post")
-                && str(x, "pre").equals(str(x, "post"));
+    static boolean neutral(final JsonObject x, final String prevPost) {
+        // an entry without its own start state started where the entry before it ended (the record's convention)
+        final String pre = x.has("pre") ? str(x, "pre") : prevPost;
+        return "m".equals(str(x, "k")) && !x.has("sub") && pre != null && x.has("post") && pre.equals(str(x, "post"));
+    }
+
+    private static String prevPost(final Cur c) {
+        return c.i > 0 && c.list.get(c.i - 1).getAsJsonObject().has("post")
+                ? str(c.list.get(c.i - 1).getAsJsonObject(), "post") : null;
     }
 
     /** Skip the neutral asks at {@code c}'s cursor, up to (not past) the next entry that fits {@code k}/{@code m}. */
     private void skipNeutral(final Cur c, final String k, final String m) {
         while (c.i < c.list.size()) {
             final JsonObject x = c.list.get(c.i).getAsJsonObject();
-            if ((k != null && fits(x, k, m)) || !neutral(x)) {
+            if ((k != null && fits(x, k, m)) || !neutral(x, prevPost(c))) {
                 return;
             }
             c.i++;
