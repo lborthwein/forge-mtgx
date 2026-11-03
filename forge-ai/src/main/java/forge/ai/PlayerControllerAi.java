@@ -151,6 +151,34 @@ public class PlayerControllerAi extends PlayerController {
         return (A) DecisionPoints.resolve(p, cac ? new CacAdapter(this, cacHook) : null, dpAnswerer);
     }
 
+    /** Whether anything (answerer or census observer) looks at this seat's decision points. */
+    public final boolean dpInstrumented() {
+        return dpAnswerer != null || DecisionPoints.observer() != null;
+    }
+
+    /**
+     * decisionpoint-1102 PR-C: one decision made inside Forge AI's execution code (a seam: a mana source per symbol, a
+     * cost part's cards, the targets / X fixed before payment), for {@code p}'s seat. {@code forge} is Forge AI's answer
+     * exactly as the seam computed it; {@code cacAnswer} (null = none) is the choose-a-card hook's answer where the
+     * seam already had one (the cost review), counted as {@code by=cac}; {@code valid} (null = the option list's)
+     * checks an answerer's departure. Without an answerer or observer: {@code forge}'s value, nothing else.
+     */
+    @SuppressWarnings("unchecked")
+    public static <A> A seam(final Player p, final Kind kind, final String ctx, final SpellAbility sa,
+            final Collection<?> options, final int min, final int max, final java.util.function.Predicate<Object> valid,
+            final java.util.function.Supplier<A> forge, final java.util.function.UnaryOperator<A> cacAnswer,
+            final Object... args) {
+        final PlayerControllerAi pc = cacOf(p);
+        if (pc == null || !pc.dpInstrumented()) {
+            final A def = forge.get();
+            return cacAnswer == null ? def : cacAnswer.apply(def);
+        }
+        final A def = forge.get();
+        final DecisionPoint pt = DecisionPoints.point(kind, ctx, p, sa, options, min, max, def, args).withValidator(valid);
+        final forge.ai.dp.DecisionAnswerer cac = cacAnswer == null ? null : (d, cur) -> cacAnswer.apply((A) cur);
+        return (A) DecisionPoints.resolve(pt, cac, pc.dpAnswerer);
+    }
+
     /** A decision answered by mutating its argument (combat declarations): observed only; no answerer in PR-B. */
     protected final void dpVoid(final Kind kind, final String ctx, final SpellAbility sa, final Runnable forge,
             final Object... args) {
@@ -467,7 +495,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<Card> chooseContraptionsToCrank(List<Card> contraptions) {
-        return dp(Kind.SELECT, "chooseContraptionsToCrank", null, contraptions, 0, contraptions.size(), () -> chooseContraptionsToCrankAi(contraptions), contraptions);
+        return dp(Kind.SELECT, "chooseContraptionsToCrank", null, contraptions, 0, contraptions == null ? -1 : contraptions.size(), () -> chooseContraptionsToCrankAi(contraptions), contraptions);
     }
 
     private List<Card> chooseContraptionsToCrankAi(List<Card> contraptions) {
@@ -721,7 +749,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<Card> exertAttackers(List<Card> attackers) {
-        return dp(Kind.SELECT, "exertAttackers", null, attackers, 0, attackers.size(), () -> exertAttackersAi(attackers), attackers);
+        return dp(Kind.SELECT, "exertAttackers", null, attackers, 0, attackers == null ? -1 : attackers.size(), () -> exertAttackersAi(attackers), attackers);
     }
 
     private List<Card> exertAttackersAi(List<Card> attackers) {
@@ -730,7 +758,7 @@ public class PlayerControllerAi extends PlayerController {
  
     @Override
     public List<Card> enlistAttackers(List<Card> attackers) {
-        return dp(Kind.SELECT, "enlistAttackers", null, attackers, 0, attackers.size(), () -> enlistAttackersAi(attackers), attackers);
+        return dp(Kind.SELECT, "enlistAttackers", null, attackers, 0, attackers == null ? -1 : attackers.size(), () -> enlistAttackersAi(attackers), attackers);
     }
 
     private List<Card> enlistAttackersAi(List<Card> attackers) {
@@ -1121,7 +1149,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<Integer> chooseDiceToReroll(List<Integer> rolls) {
-        return dp(Kind.SELECT, "chooseDiceToReroll", null, rolls, 0, rolls.size(), () -> chooseDiceToRerollAi(rolls), rolls);
+        return dp(Kind.SELECT, "chooseDiceToReroll", null, rolls, 0, rolls == null ? -1 : rolls.size(), () -> chooseDiceToRerollAi(rolls), rolls);
     }
 
     private List<Integer> chooseDiceToRerollAi(List<Integer> rolls) {
@@ -1337,7 +1365,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<SpellAbility> chooseSaToActivateFromOpeningHand(List<SpellAbility> usableFromOpeningHand) {
-        return dp(Kind.SELECT, "chooseSaToActivateFromOpeningHand", null, usableFromOpeningHand, 0, usableFromOpeningHand.size(), () -> chooseSaToActivateFromOpeningHandAi(usableFromOpeningHand), usableFromOpeningHand);
+        return dp(Kind.SELECT, "chooseSaToActivateFromOpeningHand", null, usableFromOpeningHand, 0, usableFromOpeningHand == null ? -1 : usableFromOpeningHand.size(), () -> chooseSaToActivateFromOpeningHandAi(usableFromOpeningHand), usableFromOpeningHand);
     }
 
     private List<SpellAbility> chooseSaToActivateFromOpeningHandAi(List<SpellAbility> usableFromOpeningHand) {
@@ -2263,7 +2291,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<Card> chooseCardsForSplice(SpellAbility sa, List<Card> cards) {
-        return dp(Kind.SELECT, "chooseCardsForSplice", sa, cards, 0, cards.size(), () -> chooseCardsForSpliceAi(sa, cards), sa, cards);
+        return dp(Kind.SELECT, "chooseCardsForSplice", sa, cards, 0, cards == null ? -1 : cards.size(), () -> chooseCardsForSpliceAi(sa, cards), sa, cards);
     }
 
     private List<Card> chooseCardsForSpliceAi(SpellAbility sa, List<Card> cards) {
@@ -2288,7 +2316,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public List<OptionalCostValue> chooseOptionalCosts(SpellAbility chosen, List<OptionalCostValue> optionalCostValues) {
-        return dp(Kind.SELECT, "chooseOptionalCosts", chosen, optionalCostValues, 0, optionalCostValues.size(), () -> chooseOptionalCostsAi(chosen, optionalCostValues), chosen, optionalCostValues);
+        return dp(Kind.SELECT, "chooseOptionalCosts", chosen, optionalCostValues, 0, optionalCostValues == null ? -1 : optionalCostValues.size(), () -> chooseOptionalCostsAi(chosen, optionalCostValues), chosen, optionalCostValues);
     }
 
     private List<OptionalCostValue> chooseOptionalCostsAi(SpellAbility chosen, List<OptionalCostValue> optionalCostValues) {

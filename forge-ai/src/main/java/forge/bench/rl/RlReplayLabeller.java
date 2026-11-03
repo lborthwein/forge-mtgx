@@ -361,65 +361,69 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         final String stateSha = search == null && r3 == null ? null : TrajectoryRef.stateSha(g);
         final long key = RlSearch.splitmix(uid ^ (0x6276774c4142454cL + 2L * ord + seat));
         forge.ai.dp.DecisionPoints.enterRow(uidStr + ":" + seat + ":" + ord); // decisionpoint-1102 census (no-op when off)
-        final Object[] got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
-            // the seat's own observation (its knowledge only), before anything else reads the game
-            final long f0 = System.nanoTime();
-            final RlFeaturizer.Obs o = feat.observe(g, p, 0, false, null);
-            final RlWire.Decide f = RlSearch.leafFrame(o, uid, seat, turn);
-            f.decIdx = ord;
-            if (f.hasPriv()) {
-                throw new IllegalStateException("bvw label: a value frame with the privileged block");
-            }
-            final byte[] payload = RlWire.encodeDecide(f);
-            final double fms = (System.nanoTime() - f0) / 1e6;
-            if (seats[seat] == null) {
-                seats[seat] = new HonestLabel.Seat(spec);
-            }
-            final java.util.function.Consumer<Game> probe = TEST_PROBE;
-            if (probe != null) {
-                probe.accept(g);
-            }
-            // known-lib-1102: the seat's known own-library positions (null when knownLib is off: the plain call)
-            final java.util.Set<Integer> kl = spec.infoState && infoStates != null ? infoStates.known(p, p)
-                    : knownLib[seat] == null ? null : knownLib[seat].known(p);
-            return new Object[] {payload, seats[seat].label(g, p, key, kl), fms, f.C};
-        }));
-        // bvw-step1-build-1024: the search value, in its own isolation (a copy of the live game; never moves it)
+        final Object[] got;
         StepSearch.Result sr = null;
-        if (search != null) {
-            // bvw-step2-fork-1027 (S2T): this row may be the seat's OPR row; a proof already gives it a target
-            final boolean oprWanted = variant != null && oprK > 0 && !oprDone[seat];
-            final String plabel = ((HonestLabel.Result) got[1]).label;
-            final boolean proofTarget = "win".equals(plabel) || "loss".equals(plabel);
-            try {
-                sr = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> variant == null
-                        ? search.value(g, p, knowledge, uid, key)
-                        : search.value(g, p, knowledge, uid, key, oprWanted, proofTarget)));
-            } catch (StepSearch.PinError e) {
-                // review #9: fatal for the run; this game writes no rows
-                fatal = e.getMessage();
-                FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + e.getMessage());
-                System.err.println("[bvw-label] FATAL " + e.getMessage());
-                return;
-            } catch (IllegalStateException e) {
-                if (forge.ai.simulation.DeckBeliefModel.refusal() == null) {
-                    throw e;
+        try { // review #167 S3: the row is left on every path
+            got = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> {
+                // the seat's own observation (its knowledge only), before anything else reads the game
+                final long f0 = System.nanoTime();
+                final RlFeaturizer.Obs o = feat.observe(g, p, 0, false, null);
+                final RlWire.Decide f = RlSearch.leafFrame(o, uid, seat, turn);
+                f.decIdx = ord;
+                if (f.hasPriv()) {
+                    throw new IllegalStateException("bvw label: a value frame with the privileged block");
+                }
+                final byte[] payload = RlWire.encodeDecide(f);
+                final double fms = (System.nanoTime() - f0) / 1e6;
+                if (seats[seat] == null) {
+                    seats[seat] = new HonestLabel.Seat(spec);
+                }
+                final java.util.function.Consumer<Game> probe = TEST_PROBE;
+                if (probe != null) {
+                    probe.accept(g);
+                }
+                // known-lib-1102: the seat's known own-library positions (null when knownLib is off: the plain call)
+                final java.util.Set<Integer> kl = spec.infoState && infoStates != null ? infoStates.known(p, p)
+                        : knownLib[seat] == null ? null : knownLib[seat].known(p);
+                return new Object[] {payload, seats[seat].label(g, p, key, kl), fms, f.C};
+            }));
+            // bvw-step1-build-1024: the search value, in its own isolation (a copy of the live game; never moves it)
+            if (search != null) {
+                // bvw-step2-fork-1027 (S2T): this row may be the seat's OPR row; a proof already gives it a target
+                final boolean oprWanted = variant != null && oprK > 0 && !oprDone[seat];
+                final String plabel = ((HonestLabel.Result) got[1]).label;
+                final boolean proofTarget = "win".equals(plabel) || "loss".equals(plabel);
+                try {
+                    sr = PlayerControllerBridge.isolated(g, () -> IdScope.detached(() -> variant == null
+                            ? search.value(g, p, knowledge, uid, key)
+                            : search.value(g, p, knowledge, uid, key, oprWanted, proofTarget)));
+                } catch (StepSearch.PinError e) {
+                    // review #9: fatal for the run; this game writes no rows
+                    fatal = e.getMessage();
+                    FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + e.getMessage());
+                    System.err.println("[bvw-label] FATAL " + e.getMessage());
+                    return;
+                } catch (IllegalStateException e) {
+                    if (forge.ai.simulation.DeckBeliefModel.refusal() == null) {
+                        throw e;
+                    }
+                }
+                if (forge.ai.simulation.DeckBeliefModel.refusal() != null) {
+                    // review #155 (follow-up): a deck-belief refusal is fatal for the run (exit 2; the summary names it)
+                    fatal = "deck_belief_refused: " + forge.ai.simulation.DeckBeliefModel.refusal();
+                    FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + fatal);
+                    System.err.println("[bvw-label] FATAL " + fatal);
+                    return;
+                }
+                searchMs += sr.ms;
+                searchWhy.merge(sr.why, 1, Integer::sum);
+                if (sr.s2t != null && sr.s2t.oprRan) {
+                    oprDone[seat] = true;
                 }
             }
-            if (forge.ai.simulation.DeckBeliefModel.refusal() != null) {
-                // review #155 (follow-up): a deck-belief refusal is fatal for the run (exit 2; the summary names it)
-                fatal = "deck_belief_refused: " + forge.ai.simulation.DeckBeliefModel.refusal();
-                FATAL.compareAndSet(null, "game " + Long.toUnsignedString(uid) + ": " + fatal);
-                System.err.println("[bvw-label] FATAL " + fatal);
-                return;
-            }
-            searchMs += sr.ms;
-            searchWhy.merge(sr.why, 1, Integer::sum);
-            if (sr.s2t != null && sr.s2t.oprRan) {
-                oprDone[seat] = true;
-            }
+        } finally {
+            forge.ai.dp.DecisionPoints.exitRow();
         }
-        forge.ai.dp.DecisionPoints.exitRow();
         final byte[] payload = (byte[]) got[0];
         final HonestLabel.Result r = (HonestLabel.Result) got[1];
         frameMs += (Double) got[2];

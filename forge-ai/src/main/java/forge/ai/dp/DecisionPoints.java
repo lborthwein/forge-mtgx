@@ -147,6 +147,9 @@ public final class DecisionPoints {
             return true;
         }
         final Collection<?> opts = dp.options();
+        if (dp.validator() != null) {
+            return dp.validator().test(answer); // PR-C: a seam point's own check (targets, X, cost cards)
+        }
         if (dp.kind() == Kind.NUMBER && answer instanceof Integer n && (opts == null || opts.isEmpty())) {
             return n >= dp.min() && (dp.max() < 0 || n <= dp.max()); // a range the engine passed as min/max
         }

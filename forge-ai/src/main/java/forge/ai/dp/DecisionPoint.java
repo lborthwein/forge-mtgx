@@ -27,6 +27,8 @@ public final class DecisionPoint {
     private final Object[] args;
     private final int count;
     private final boolean nested;
+    /** PR-C: the legality check of a point whose options are not a list (targets, X); null = the list's. */
+    private java.util.function.Predicate<Object> validator;
 
     public DecisionPoint(final Kind kind, final String ctx, final Player seat, final SpellAbility source,
             final Collection<?> options, final int min, final int max, final Object forgeDefault, final Object[] args) {
@@ -80,6 +82,13 @@ public final class DecisionPoint {
     /** Option count, or -1 when the call carries no list. */
     public int optionCount() { return count; }
     public boolean nested() { return nested; }
+    public java.util.function.Predicate<Object> validator() { return validator; }
+
+    /** PR-C: attach the point's own legality check (set once, by the code that built it, before it is answered). */
+    public DecisionPoint withValidator(final java.util.function.Predicate<Object> v) {
+        this.validator = v;
+        return this;
+    }
     public int min() { return min; }
     public int max() { return max; }
     /** Forge AI's own answer, computed first, exactly as without any answerer. */
