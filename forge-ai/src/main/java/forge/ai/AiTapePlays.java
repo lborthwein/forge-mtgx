@@ -97,7 +97,11 @@ final class AiTapePlays {
     }
 
     static SpellAbility decode(final Game g, final Player seat, final JsonObject o) {
-        return decode(g, seat, o, false);
+        return decode(g, seat, o, false, null);
+    }
+
+    static SpellAbility decode(final Game g, final Player seat, final JsonObject o, final boolean idsShifted) {
+        return decode(g, seat, o, idsShifted, null);
     }
 
     /**
@@ -105,7 +109,12 @@ final class AiTapePlays {
      * inexact): every later id is offset, so an ability is matched by its description alone. Otherwise its id must be
      * the record's.
      */
-    static SpellAbility decode(final Game g, final Player seat, final JsonObject o, final boolean idsShifted) {
+    /**
+     * {@code onIdShift} (codec-1103, class C; null = refuse as before): called when the record's ability is matched
+     * although its id is not the record's (the replay is then inexact and later ids are matched as shifted).
+     */
+    static SpellAbility decode(final Game g, final Player seat, final JsonObject o, final boolean idsShifted,
+            final Runnable onIdShift) {
         final int hostId = o.get("h").getAsInt();
         final Card host = (Card) AiTapeCodec.deref(g, "c" + hostId);
         final String d = AiTape.str(o, "d");
@@ -138,6 +147,23 @@ final class AiTapePlays {
                 }
             }
         }
+        if (pick == null && o.has("cp") && onIdShift != null) {
+            // codec-1103 (class C): an alternative-cost or optional-cost variant (overload, ...) is a copy of the card's
+            // ability, built again here by find() as a look-alike of the record's; the one whose copy root is the record's
+            // original (and only it) is the record's play
+            final int cp = o.get("cp").getAsInt();
+            SpellAbility only = null;
+            int n = 0;
+            for (SpellAbility c : found) {
+                if (c.getCopyRoot() == cp || (c.getRootAbility() != null && c.getRootAbility().getCopyRoot() == cp)) {
+                    only = c;
+                    n++;
+                }
+            }
+            if (n == 1) {
+                pick = only;
+            }
+        }
         final boolean copied = pick == null && o.has("cp");
         if (copied) {
             // bvw-decision-log-1027: the AI played a copy of one of the card's abilities: copy that one again here (in
@@ -148,10 +174,34 @@ final class AiTapePlays {
                         + ", which the record's play (" + d + ") was a copy of");
             }
             pick = IdScope.detached(AiTape.DECODE_BASE, () -> base.copy(seat));
+            if (!AiTapeCodec.descOf(pick).equals(d) && onIdShift != null) {
+                // codec-1103 (class C): the record's play was a cost variant of that ability (overload, ...): its one
+                // alternative-cost variant with the record's description
+                final List<SpellAbility> alts = IdScope.detached(AiTape.DECODE_BASE,
+                        () -> GameActionUtil.getAlternativeCosts(base, seat, false));
+                SpellAbility only = null;
+                int n = 0;
+                for (SpellAbility a : alts) {
+                    if (AiTapeCodec.descOf(a).equals(d)) {
+                        only = a;
+                        n++;
+                    }
+                }
+                if (n == 1) {
+                    pick = only;
+                }
+            }
             if (!AiTapeCodec.descOf(pick).equals(d)) {
                 throw new IllegalStateException("card " + hostId + "'s ability " + o.get("cp").getAsInt()
                         + " copies to another ability than the record's (" + d + ")");
             }
+        }
+        if (pick == null && sid0 >= 0 && !idsShifted && onIdShift != null && found.size() == 1) {
+            // codec-1103 (class C): the card has exactly one ability like the record's, on another id (the record's id
+            // counter ran one ahead in Forge AI's deliberation, which a forced replay does not run): it is the record's
+            // play; the replay is marked inexact, and later ids are matched as shifted
+            pick = found.get(0);
+            onIdShift.run();
         }
         if (pick == null && sid0 >= 0 && !idsShifted) {
             throw new IllegalStateException("card " + hostId + "'s ability like the record's has id " + found.get(0).getId()
