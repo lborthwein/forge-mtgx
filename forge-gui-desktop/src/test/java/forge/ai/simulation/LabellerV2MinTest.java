@@ -614,6 +614,35 @@ public class LabellerV2MinTest extends AITest {
         Assert.assertFalse((Boolean) flare[0], "the tap, then Cancel: " + flare[1] + " " + flare[2]);
     }
 
+    /**
+     * Review #169 re-check S1: with a mana trigger out, the colour a mana ability produces decides what is castable next.
+     * Their Mana Flare, one land and Counterspell (UU), against our Bolt at their 3:
+     * - a Volcanic Island's colours are separate abilities (U, R): the U branch makes UU and Counterspell answers: not
+     *   proven (a played MIN branch);
+     * - Mana Confluence ("any colour", Forge AI's pick) is the gap mana-color-choice in the answer set, never a Forge pick:
+     *   not proven;
+     * - without Mana Flare, Counterspell is never castable from one land: proven either way.
+     */
+    @Test
+    public void producedColoursUnderAManaTriggerAreNotForgesPick() {
+        final Object[] vol = run(frame("Counterspell", "Mana Flare;Volcanic Island", 3, "Lightning Bolt", "Mountain"), manaSearch());
+        Assert.assertFalse((Boolean) vol[0], "Volcanic for U, then Counterspell: " + vol[1] + " " + vol[2]);
+        final Object[] conf = run(frame("Counterspell", "Mana Flare;Mana Confluence", 3, "Lightning Bolt", "Mountain"), manaSearch());
+        Assert.assertFalse((Boolean) conf[0], conf[1] + " " + conf[2]);
+        // the answer set itself carries the gap (here Forge's payment check also finds Counterspell castable at once, so the
+        // MIN stops at that real answer before the gap matters)
+        final Game cg = frame("Counterspell", "Mana Flare;Mana Confluence", 3, "Lightning Bolt", "Mountain");
+        Assert.assertTrue(OppMin.answers(cg, cg.getPlayers().get(0), cg.getPlayers().get(1), null, true).gaps
+                .contains("mana-color-choice"), "the colour choice is a gap");
+        final Game ng = frame("Counterspell", "Mana Confluence", 3, "Lightning Bolt", "Mountain");
+        Assert.assertFalse(OppMin.answers(ng, ng.getPlayers().get(0), ng.getPlayers().get(1), null, true).gaps
+                .contains("mana-color-choice"), "no mana trigger: no colour gap");
+        for (String bf : new String[] {"Volcanic Island", "Mana Confluence"}) {
+            final Object[] r = run(frame("Counterspell", bf, 3, "Lightning Bolt", "Mountain"), manaSearch());
+            Assert.assertTrue((Boolean) r[0], "no Flare, " + bf + ": " + r[1] + " " + r[2]);
+        }
+    }
+
     /** covfix-a-1102: oppMinRev 2 is a recorded change (its own sha); rev 1 (absent or explicit) is the old spec. */
     @Test
     public void oppMinRevTwoIsARecordedChange() {

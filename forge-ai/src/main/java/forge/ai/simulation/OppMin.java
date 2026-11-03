@@ -594,6 +594,27 @@ public final class OppMin {
         return answers(g, opp, victim, top, false);
     }
 
+    /**
+     * Review #169 re-check S1: whether the mana an ability produces is a choice (any colour, a combination, a chosen or
+     * reflected colour, more than one option); fail closed: an unreadable ability counts as a choice.
+     */
+    static boolean producedChoice(final SpellAbility sa) {
+        try {
+            for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
+                if (s.getApi() == ApiType.ManaReflected) return true;
+                if (s.getApi() != ApiType.Mana) continue;
+                final String p = s.getParamOrDefault("Produced", "");
+                if (p.isEmpty() || p.contains("Any") || p.contains("Combo") || p.contains("Chosen") || p.contains(" ")
+                        || s.hasParam("Express") || s.hasParam("ReplaceType")) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (RuntimeException e) {
+            return true;
+        }
+    }
+
     /** Review #169 S1-1: the most cost-choice combinations one mana ability may have (more: a cap, never one picked). */
     static final int MANA_CHOICE_CAP = 24;
 
@@ -773,6 +794,13 @@ public final class OppMin {
                 if (sa0.isManaAbility() && manaSearch) {
                     // covfix-a-1102: a response like any other, one per source name and cost (copies of one card are
                     // one outcome); a pure mana ability with no mana trigger in play is the "no response" branch
+                    if (manaTrig && producedChoice(sa0) && castable(sa0, opp, gaps)) {
+                        // review #169 re-check S1: with a mana trigger, replacement or static out, the colour the
+                        // activation produces decides what is castable next; Forge AI would pick it. Fail closed until
+                        // layer 2's DecisionPoint CHOICE kind enumerates the colours
+                        gaps.add("mana-color-choice");
+                        continue;
+                    }
                     if ((manaAbilityWithCost(sa0) || manaTrig) && castable(sa0, opp, gaps)) {
                         // review #169 S1-1: one response per legal cost choice (the permanent sacrificed or tapped);
                         // S2: keyed by the source card's id (its own tap or sacrifice is the choice of that card)
