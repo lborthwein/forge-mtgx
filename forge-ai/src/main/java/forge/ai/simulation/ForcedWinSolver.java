@@ -282,6 +282,12 @@ public final class ForcedWinSolver {
         public boolean oppMin = false;
         public int oppResponses = 4, oppDepth = 2, oppNodes = 64;
         /**
+         * covfix-a-1102 (ARCH-PROPOSAL-1102 layer 3; false = off, the default, and then nothing changes): the MIN searches
+         * the opponent's mana abilities that have a non-mana part (OppMin.Driver#manaSearch) instead of failing closed
+         * on them as the mana-ability gap. A mana ability the copy cannot activate is a cap (mana-sim).
+         */
+        public boolean oppManaSearch = false;
+        /**
          * Tests only (never a spec key): the adversary's own Forge AI answer is replaced by "pass", so v1 is exactly "one
          * counterspell at one of our spells" and v2 exactly the MIN over the scripted responses: a test then shows what
          * each covers structurally, not what Forge AI happens to play.
@@ -331,7 +337,7 @@ public final class ForcedWinSolver {
                 java.util.Map.entry("planScry", false), java.util.Map.entry("planDiscard", false),
                 java.util.Map.entry("payRecord", false), java.util.Map.entry("cacVariants", 6),
                 java.util.Map.entry("cacCap", 48), java.util.Map.entry("payVariants", 3),
-                java.util.Map.entry("planScryMax", 3));
+                java.util.Map.entry("planScryMax", 3), java.util.Map.entry("oppManaSearch", false));
 
         /** Labeller v2: any of its items on (each needs budget=counter). */
         public boolean v2() {
@@ -392,6 +398,7 @@ public final class ForcedWinSolver {
             }
             c.oppDepth = intOr(get.apply("oppDepth"), c.oppDepth);
             c.oppNodes = intOr(get.apply("oppNodes"), c.oppNodes);
+            c.oppManaSearch = "true".equals(get.apply("oppManaSearch")); // covfix-a-1102
             c.cacPicks = v2all || "true".equals(get.apply("cacPicks"));
             c.cacLine = v2all || "true".equals(get.apply("cacLine"));
             c.planScry = v2all || "true".equals(get.apply("planScry"));
@@ -602,6 +609,7 @@ public final class ForcedWinSolver {
             if (cap.startsWith("truncated")) return java.util.List.of("oppResponses");
             if (cap.startsWith("budget")) return java.util.List.of("oppDepth");
             if (cap.startsWith("gap:")) return java.util.Arrays.asList(cap.substring(4).split("\\+"));
+            if (cap.startsWith("branch:mana-sim")) return java.util.List.of("mana-sim");
             if (cap.startsWith("branch:")) return java.util.List.of("branch");
             return java.util.List.of(cap);
         }
@@ -3258,6 +3266,8 @@ public final class ForcedWinSolver {
         final List<Integer> responseSizes = new ArrayList<>();
         /** The shared MIN's record of each response point this play-out met (OppMin). */
         List<OppMin.Point> points;
+        /** covfix-a-1102: a scripted mana-ability response could not be activated on this copy. */
+        boolean manaSimFailed;
     }
 
     /**
@@ -3294,6 +3304,9 @@ public final class ForcedWinSolver {
                 if (o.points != null) for (OppMin.Point pt : o.points) sb.append(pt.size).append(' ');
                 System.err.println("[oppmin] world " + world + " " + script + " won=" + o.won + " why=" + o.why
                         + " points=" + sb);
+            }
+            if (o.manaSimFailed) {
+                return new OppMin.Leaf(Double.NaN, "mana-sim", o.points); // covfix-a-1102: fail closed, a cap
             }
             return new OppMin.Leaf(o.won ? 1.0 : 0.0, o.why, o.points);
         });
@@ -3377,6 +3390,7 @@ public final class ForcedWinSolver {
                     adv.hw = hw;
                     if (script != null) {
                         adv.driver = new OppMin.Driver(script, o, cm, -1); // labeller-v2 (d), the shared MIN
+                        adv.driver.manaSearch = cfg.oppManaSearch; // covfix-a-1102
                         out.points = adv.driver.points;
                     }
                     adv.bounded(wall).callLimited(callLimit);
@@ -3401,6 +3415,7 @@ public final class ForcedWinSolver {
                 meter.playoutStepCaps++;
             }
             out.won = cm.hasWon() || cm.getOpponents().stream().anyMatch(Player::hasLost);
+            out.manaSimFailed = adv != null && adv.driver != null && adv.driver.manaSimFailed; // covfix-a-1102
             out.protectedBy = lineAi.protectedBy;
             if (out.won) {
                 // lane bvw-plr-1023 (read-only): how the copy ended, for label rows

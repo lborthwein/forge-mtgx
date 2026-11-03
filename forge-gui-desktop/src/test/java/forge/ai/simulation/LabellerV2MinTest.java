@@ -535,6 +535,135 @@ public class LabellerV2MinTest extends AITest {
         }
     }
 
+    static ForcedWinSolver.Config manaSearch() {
+        final ForcedWinSolver.Config c = cfg(true, 64);
+        c.oppManaSearch = true;
+        return passive(c);
+    }
+
+    /** The proposals' texts and the meter of one solver run (covfix-a-1102). */
+    static Object[] run(final Game g, final ForcedWinSolver.Config c) {
+        g.AI_TIMEOUT = 600;
+        final ForcedWinSolver s = new ForcedWinSolver(g.getPlayers().get(1), c);
+        s.meter.reasons = true;
+        boolean proven = false;
+        final StringBuilder texts = new StringBuilder();
+        for (ForcedWinSolver.Proposal p : s.propose(g)) {
+            proven |= p.proven(1);
+            texts.append(p.text).append(' ');
+        }
+        return new Object[] {proven, texts.toString(), s.meter.toJson()};
+    }
+
+    /**
+     * covfix-a-1102 (ARCH-PROPOSAL-1102 layer 3): with oppManaSearch the MIN plays the opponent's mana abilities that
+     * have a non-mana part, instead of failing closed on them. Our Bolt at their 3 life:
+     * - Pristine Talisman (gain 1 life) is a real answer: a lost MIN branch, not a cap;
+     * - Ancient Tomb's damage to themselves, even with their Death's Shadow out, and Lotus Petal's sacrifice answer nothing:
+     *   proven (where the readers' rule kept Death's Shadow a gap);
+     * - no mana-ability cut reason is left in the meter.
+     */
+    @Test
+    public void manaAbilitiesAreSearchedNotGapped() {
+        final Object[] tal = run(frame("", "Pristine Talisman", 3, "Lightning Bolt", "Mountain"), manaSearch());
+        Assert.assertFalse((Boolean) tal[0], (String) tal[1]);
+        Assert.assertTrue(((String) tal[1]).contains("fails=min"), "a played and lost MIN branch: " + tal[1]);
+        Assert.assertFalse(((com.google.gson.JsonObject) tal[2]).has("opp_min_cut_reasons"), "no cut: " + tal[2]);
+        for (String bf : new String[] {"Ancient Tomb", "Ancient Tomb;Death's Shadow", "Lotus Petal"}) {
+            final Object[] r = run(frame("", bf, 3, "Lightning Bolt", "Mountain"), manaSearch());
+            Assert.assertTrue((Boolean) r[0], bf + ": " + r[1] + " " + r[2]);
+        }
+        // the reader path is unchanged with the key off: Death's Shadow keeps Ancient Tomb a gap
+        Assert.assertFalse((Boolean) run(frame("", "Ancient Tomb;Death's Shadow", 3, "Lightning Bolt", "Mountain"),
+                passive(cfg(true, 64)))[0]);
+    }
+
+    static ForcedWinSolver.Config manaSearchEngine() {
+        final ForcedWinSolver.Config c = cfgEngine(true);
+        c.oppDepth = 2;
+        c.oppManaSearch = true;
+        return passive(c);
+    }
+
+    /**
+     * Review #169 S1-1: the permanent a mana ability's cost sacrifices is the MIN's choice, one response per legal
+     * choice, never Forge AI's. Our Act of Treason on their Craw Wurm, attacking for their last 6: their Ashnod's Altar
+     * can sacrifice the Wurm in response (the line fails) or their Grizzly Bears (it does not). Not proven; with no Altar,
+     * proven.
+     */
+    @Test
+    public void aSacrificeCostIsTheMinsChoice() {
+        final Object[] alt = run(frame("", "Ashnod's Altar;Craw Wurm;Grizzly Bears", 6, "Act of Treason",
+                "Mountain;Mountain;Mountain"), manaSearchEngine());
+        final Object[] none = run(frame("", "Craw Wurm;Grizzly Bears", 6, "Act of Treason", "Mountain;Mountain;Mountain"),
+                manaSearchEngine());
+        Assert.assertTrue((Boolean) none[0], "control: the steal-and-attack line is proven with no Altar: " + none[1]);
+        Assert.assertFalse((Boolean) alt[0], "sacrificing the stolen Wurm is a response: " + alt[1] + " " + alt[2]);
+    }
+
+    /**
+     * Review #169 S1-2: after a mana activation the same priority is a new point, its answers read again. Their Mana
+     * Flare and two Islands, Cancel (1UU) in hand: not castable before a tap, castable after one (Mana Flare doubles
+     * it). Our Bolt at their 3: not proven. With no Mana Flare, Cancel is never castable: proven.
+     */
+    @Test
+    public void aCounterCastableOnlyAfterAManaTapIsSearched() {
+        final Object[] flare = run(frame("Cancel", "Mana Flare;Island;Island", 3, "Lightning Bolt", "Mountain"), manaSearch());
+        final Object[] none = run(frame("Cancel", "Island;Island", 3, "Lightning Bolt", "Mountain"), manaSearch());
+        Assert.assertTrue((Boolean) none[0], "control: Cancel is never castable: " + none[1]);
+        Assert.assertFalse((Boolean) flare[0], "the tap, then Cancel: " + flare[1] + " " + flare[2]);
+    }
+
+    /**
+     * Review #169 re-check S1: with a mana trigger out, the colour a mana ability produces decides what is castable next.
+     * Their Mana Flare, one land and Counterspell (UU), against our Bolt at their 3:
+     * - a Volcanic Island's colours are separate abilities (U, R): the U branch makes UU and Counterspell answers: not
+     *   proven (a played MIN branch);
+     * - Mana Confluence ("any colour", Forge AI's pick) is the gap mana-color-choice in the answer set, never a Forge pick:
+     *   not proven;
+     * - without Mana Flare, Counterspell is never castable from one land: proven either way.
+     */
+    @Test
+    public void producedColoursUnderAManaTriggerAreNotForgesPick() {
+        final Object[] vol = run(frame("Counterspell", "Mana Flare;Volcanic Island", 3, "Lightning Bolt", "Mountain"), manaSearch());
+        Assert.assertFalse((Boolean) vol[0], "Volcanic for U, then Counterspell: " + vol[1] + " " + vol[2]);
+        final Object[] conf = run(frame("Counterspell", "Mana Flare;Mana Confluence", 3, "Lightning Bolt", "Mountain"), manaSearch());
+        Assert.assertFalse((Boolean) conf[0], conf[1] + " " + conf[2]);
+        // the answer set itself carries the gap (here Forge's payment check also finds Counterspell castable at once, so the
+        // MIN stops at that real answer before the gap matters)
+        final Game cg = frame("Counterspell", "Mana Flare;Mana Confluence", 3, "Lightning Bolt", "Mountain");
+        Assert.assertTrue(OppMin.answers(cg, cg.getPlayers().get(0), cg.getPlayers().get(1), null, true).gaps
+                .contains("mana-color-choice"), "the colour choice is a gap");
+        final Game ng = frame("Counterspell", "Mana Confluence", 3, "Lightning Bolt", "Mountain");
+        Assert.assertFalse(OppMin.answers(ng, ng.getPlayers().get(0), ng.getPlayers().get(1), null, true).gaps
+                .contains("mana-color-choice"), "no mana trigger: no colour gap");
+        for (String bf : new String[] {"Volcanic Island", "Mana Confluence"}) {
+            final Object[] r = run(frame("Counterspell", bf, 3, "Lightning Bolt", "Mountain"), manaSearch());
+            Assert.assertTrue((Boolean) r[0], "no Flare, " + bf + ": " + r[1] + " " + r[2]);
+        }
+    }
+
+    /** covfix-a-1102: oppMinRev 2 is a recorded change (its own sha); rev 1 (absent or explicit) is the old spec. */
+    @Test
+    public void oppMinRevTwoIsARecordedChange() {
+        final com.google.gson.JsonObject o = WinConditionCoverageTest.spec();
+        final HonestLabel.Spec v1 = HonestLabel.Spec.parse(o);
+        Assert.assertEquals(v1.winConfig().oppResponses, 4);
+        Assert.assertFalse(v1.winConfig().oppManaSearch || v1.lossConfig().oppManaSearch);
+        final com.google.gson.JsonObject r1 = o.deepCopy();
+        r1.addProperty("oppMinRev", 1);
+        Assert.assertEquals(HonestLabel.Spec.parse(r1).sha(), v1.sha(), "rev 1 is the old spec");
+        final com.google.gson.JsonObject r2 = o.deepCopy();
+        r2.addProperty("oppMinRev", 2);
+        final HonestLabel.Spec v2 = HonestLabel.Spec.parse(r2);
+        Assert.assertNotEquals(v2.sha(), v1.sha());
+        Assert.assertEquals(v2.winConfig().oppResponses, 16);
+        Assert.assertEquals(v2.lossConfig().oppResponses, 16);
+        Assert.assertTrue(v2.winConfig().oppManaSearch && v2.lossConfig().oppManaSearch);
+        r2.getAsJsonObject("solverCfg").addProperty("oppResponses", "8");
+        Assert.assertEquals(HonestLabel.Spec.parse(r2).winConfig().oppResponses, 8, "an explicit key wins");
+    }
+
     /** Review #148 S1: graveyard targets are enumerated (Scavenging Ooze on our graveyard creature). */
     @Test
     public void graveyardTargetsAreResponses() {
