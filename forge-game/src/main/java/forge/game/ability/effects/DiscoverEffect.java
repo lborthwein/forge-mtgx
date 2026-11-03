@@ -164,6 +164,7 @@ public class DiscoverEffect extends SpellAbilityEffect {
         if (ZoneType.Library.equals(zone)) { // bottom of library in a random order
             pos = -1;
             CardLists.shuffle(cards);
+            game.randomOrder(cards, zone); // order-memory-1102 (no-op without a listener)
         }
 
         for (Card c : cards) {

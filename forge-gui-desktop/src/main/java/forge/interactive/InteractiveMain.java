@@ -962,6 +962,8 @@ public final class InteractiveMain {
                 case "crewNoop": c.crewNoop = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "dudCast": c.dudCast = forge.ai.AiFixes.Mode.parse(p[1]); break; // live-ai-quality-1030
                 case "dudWorlds": c.dudWorlds = Integer.parseInt(p[1].trim()); break;
+                // order-memory-1102 (absent = off): the worlds keep the library positions the seat knows (InfoStates)
+                case "infoState": c.infoState = forge.ai.simulation.LookaheadSearch.Config.infoStateKey(p[0].trim(), p[1].trim()); break;
                 case "copyEot": c.copyEot = forge.ai.AiFixes.Mode.parse(p[1]); break;
                 case "copyFidelity": c.copyFidelity = forge.ai.simulation.LookaheadSearch.Config.copyFidelityLevel(Integer.parseInt(p[1].trim())); break;
                 case "departMedian": c.departMedian = forge.ai.AiFixes.Mode.parse(p[1]); break;

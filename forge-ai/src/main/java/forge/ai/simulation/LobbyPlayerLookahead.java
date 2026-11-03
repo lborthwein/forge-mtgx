@@ -21,6 +21,11 @@ public class LobbyPlayerLookahead extends LobbyPlayerAi {
     public void bind(Game game, LookaheadSearch search) {
         this.liveGame = game;
         this.search = search;
+        if (search != null && search.getConfig().infoState) {
+            // order-memory-1102: the K8 spec's infoState=on watches the game from its creation (bind runs before the
+            // mulligans); off (the default) attaches nothing
+            InfoStates.attach(game);
+        }
     }
 
     public Game getLiveGame() {

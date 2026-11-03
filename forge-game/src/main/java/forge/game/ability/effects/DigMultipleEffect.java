@@ -157,6 +157,7 @@ public class DigMultipleEffect extends SpellAbilityEffect {
                     CardCollection afterOrder = rest;
                     if (sa.hasParam("RestRandomOrder")) {
                         CardLists.shuffle(afterOrder);
+                        sa.getHostCard().getGame().randomOrder(afterOrder, destZone2); // order-memory-1102
                     }
                     if (libraryPosition2 != -1) {
                         // Closest to top

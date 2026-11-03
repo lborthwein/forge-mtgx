@@ -265,6 +265,9 @@ public final class RlLiveSeat {
                     case "blocks": c.blocks = blockKey(k, v, 0, 1); break;
                     case "blocks.samples": c.blockSamples = blockKey(k, v, 0, 64); break;
                     case "blocks.top": c.blockTop = blockKey(k, v, 1, 8); break;
+                    // order-memory-1102 (absent = off, the seat byte for byte as before): the search worlds keep the
+                    // library positions this seat knows (forge.ai.simulation.InfoStates); arming is its own decision
+                    case "infoState": c.infoState = LookaheadSearch.Config.infoStateKey(k, v); break;
                     default:
                         if (k.startsWith("plans.")) {
                             planKey(c, k, v); // sb-live-1018: S-b, flat keys
@@ -397,6 +400,9 @@ public final class RlLiveSeat {
                 o.addProperty("defend", true); // strong-opp-1020: the solver's defense on; absent otherwise
             }
             o.addProperty("belief", spec.search.belief); // honest-belief-1020: always "uniform" live
+            if (spec.search.infoState) {
+                o.addProperty("infoState", LookaheadSearch.Config.INFO_STATE_VERSION); // order-memory-1102: absent when off
+            }
             o.addProperty("helloMs", Math.round((System.nanoTime() - t0) / 1e5) / 10.0);
             o.add("search", spec.search.toJson());
             line(o);
@@ -469,6 +475,10 @@ public final class RlLiveSeat {
         this.game = g;
         this.k8Config = k8;
         this.k8AiFixes = k8AiFixes == null ? AiFixes.Mode.OFF : k8AiFixes;
+        if (spec.search.infoState || k8 != null && k8.infoState) {
+            // order-memory-1102: watch the game from its creation (bind runs before the mulligans), only when a key is on
+            forge.ai.simulation.InfoStates.attach(g);
+        }
         final long uid = RlSearch.splitmix(seed ^ 0x6c697665L);
         final RlFeaturizer feat = new RlFeaturizer(index);
         feat.setVersion(spec.obs());
