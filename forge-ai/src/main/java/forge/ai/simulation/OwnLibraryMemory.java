@@ -32,15 +32,39 @@ public final class OwnLibraryMemory {
     /** Diagnostics: shuffles seen, cards noted. */
     public int shuffles = 0, noted = 0;
 
+    /**
+     * order-memory-1102 (R3 spec {@code knownLib}; null = off, the legacy rule above, byte for byte): the known positions
+     * are {@link KnownOwnLibrary}'s instead (the known top and bottom plus non-contiguous fixed offsets). Every card that
+     * enters our library is no longer known by default: a random-order block (cascade, discover, hideaway, Atraxa, the
+     * Oracle's rest, Endurance) and an order the opponent chose (Portent, their fateseal) stay unknown. Brainstorm,
+     * Doomsday, Ponder, scry and tutor tops stay known.
+     */
+    private final KnownOwnLibrary delegate;
+
     public OwnLibraryMemory(final Player seat) {
+        this(seat, false);
+    }
+
+    /** {@code knownLib}: delegate to {@link KnownOwnLibrary} (order-memory-1102); false = the legacy rule. */
+    public OwnLibraryMemory(final Player seat, final boolean knownLib) {
         this.seatId = seat.getId();
+        this.delegate = knownLib ? new KnownOwnLibrary(seat) : null;
+    }
+
+    /** Is this memory {@link KnownOwnLibrary}'s (the R3 spec's knownLib)? */
+    public boolean delegating() {
+        return delegate != null;
     }
 
     /** Subscribe to the live game's events (once). Read-only: it never changes the game. */
     public void watch(final Game live) {
         if (!watching) {
             watching = true;
-            live.subscribeToEvents(this);
+            if (delegate != null) {
+                delegate.watch(live);
+            } else {
+                live.subscribeToEvents(this);
+            }
         }
     }
 
@@ -65,9 +89,12 @@ public final class OwnLibraryMemory {
         }
     }
 
-    /** The seat looked at these library cards to arrange them (they stay at known positions). */
+    /**
+     * The seat looked at these library cards to arrange them (they stay at known positions). Delegating: a no-op (the
+     * arrangement's own moves teach {@link KnownOwnLibrary}, which also knows when the order was not the seat's).
+     */
     public void noteLooked(final Iterable<Card> cards) {
-        if (cards == null) {
+        if (cards == null || delegate != null) {
             return;
         }
         synchronized (known) {
@@ -80,8 +107,29 @@ public final class OwnLibraryMemory {
         }
     }
 
+    /**
+     * A copy's memory starts from the root's known positions ({@code cards}: an R3 world, an in-line choose-a-card).
+     * Legacy: {@link #noteLooked}. Delegating: pinned in the tracker (as top-anchored: a hidden take from the middle can
+     * only void more of them, never fewer), before {@link #watch}.
+     */
+    public void seedKnown(final Iterable<Card> cards) {
+        if (delegate == null) {
+            noteLooked(cards);
+        } else if (cards != null) {
+            delegate.pin(cards);
+        }
+    }
+
     /** The ids of {@code me}'s library cards (in {@code g}, a copy or the live game) whose positions the seat knows. */
     public Set<Integer> known(final Player me) {
+        if (delegate != null) {
+            if (me.getGame() == delegate.watched()) {
+                return new HashSet<>(delegate.known(me));
+            }
+            // review #168 S2 / S1 re-check: a copy: read the watched game's known ids without mutating, and only when the
+            // copy's library is in the watched order (each known card at its computed index); otherwise none
+            return new HashSet<>(delegate.knownIn(me));
+        }
         final Set<Integer> out = new HashSet<>();
         synchronized (known) {
             for (Card c : me.getCardsIn(ZoneType.Library)) {
@@ -91,6 +139,16 @@ public final class OwnLibraryMemory {
             }
         }
         return out;
+    }
+
+    /**
+     * Review #168 S3: the caller just reordered the watched game's library with every known card kept at its index (an
+     * R3 world's stratify). Delegating: the tracker accepts the order (its pins survive); legacy: nothing to do.
+     */
+    public void resync() {
+        if (delegate != null) {
+            delegate.acceptPinnedReorder();
+        }
     }
 
     /** Library ids of {@code me}, top first. */
