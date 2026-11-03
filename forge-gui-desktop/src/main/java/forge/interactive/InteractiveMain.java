@@ -930,6 +930,7 @@ public final class InteractiveMain {
             switch (p[0].trim()) {
                 case "worlds": c.worlds = Integer.parseInt(p[1].trim()); break;
                 case "breadth": c.breadth = Integer.parseInt(p[1].trim()); break;
+                case "offTurnBreadth": c.offTurnBreadth = Integer.parseInt(p[1].trim()); break; // endstep-rows-1103
                 case "horizon": c.horizonTurns = Integer.parseInt(p[1].trim()); break;
                 case "threads": c.threads = Integer.parseInt(p[1].trim()); break;
                 case "dedup": c.dedup = !"0".equals(p[1].trim()); break;

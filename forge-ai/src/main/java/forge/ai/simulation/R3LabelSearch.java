@@ -145,6 +145,13 @@ public final class R3LabelSearch {
          * pins, and every world shuffle of unknown slots is canonical (it never reads the true order of what is unknown).
          */
         public boolean infoState = false;
+        /**
+         * endstep-rows-1103 (N12; off by default; in the identity only when on): at an empty-stack priority outside our
+         * own main phases (the opponent's end step, their turn, our upkeep/combat/end), every distinct non-mana spell or
+         * ability we can cast and pay for now is a candidate ("instant"), not only the costed draws: a flash creature or an
+         * instant set up at their end step (valued by its line through our next turn) is a row the walk can learn from.
+         */
+        public boolean instantCands = false;
         /** The block as given (sorted), for the identity. */
         JsonObject json = new JsonObject();
 
@@ -162,7 +169,8 @@ public final class R3LabelSearch {
         static final Set<String> KEYS = new TreeSet<>(Arrays.asList("maxCands", "policyTop", "holdPieces", "exploreAnswers", "rowMaxLines", "rowMaxProofs", "rowMaxSteps", "selectWorlds",
                 "targetWorlds", "stratify", "topAnswers", "cac", "inline", "leaf", "maxTurns", "maxSteps", "horizon",
                 "proofLeaf", "profile", "solverSpec", "drawDepth", "seqCap", "samples", "oppMin", "oppMinIn",
-                "oppResponses", "oppDepth", "oppNodes", "oppMinVersion", "maxUnresolvedShare", "seed", "knownLib", "infoState"));
+                "oppResponses", "oppDepth", "oppNodes", "oppMinVersion", "maxUnresolvedShare", "seed", "knownLib", "infoState",
+                "instantCands"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -223,6 +231,7 @@ public final class R3LabelSearch {
             if (o.has("seed")) s.seed = o.get("seed").getAsLong();
             if (o.has("knownLib")) s.knownLib = o.get("knownLib").getAsBoolean();
             if (o.has("infoState")) s.infoState = o.get("infoState").getAsBoolean();
+            if (o.has("instantCands")) s.instantCands = o.get("instantCands").getAsBoolean(); // endstep-rows-1103
             if (!"rollout".equals(s.leaf) && !"value".equals(s.leaf)) {
                 throw new IllegalArgumentException("r3.leaf is \"rollout\" or \"value\", not " + s.leaf);
             }
@@ -280,6 +289,9 @@ public final class R3LabelSearch {
             }
             if (infoState) {
                 o.addProperty("infoState", true); // order-memory-1102 layer 1: only when on
+            }
+            if (instantCands) {
+                o.addProperty("instantCands", true); // endstep-rows-1103: only when on
             }
             return sorted(o);
         }
@@ -1449,6 +1461,13 @@ public final class R3LabelSearch {
                 me = (Player) copier.find(liveMe);
             }
             final List<PCand> draws = new ArrayList<>(), lands = new ArrayList<>(), policy = new ArrayList<>();
+            final List<PCand> instants = new ArrayList<>(); // endstep-rows-1103 (instantCands)
+            final PhaseHandler cph = g.getPhaseHandler();
+            // every window outside our main phases, and any window with the opponent's object on top of the stack
+            final boolean theirTop = !g.getStack().isEmpty() && g.getStack().peek().getSpellAbility() != null
+                    && g.getStack().peek().getSpellAbility().getActivatingPlayer() != me;
+            final boolean offMain = spec.instantCands && (g.getStack().isEmpty()
+                    && !(cph.isPlayerTurn(me) && (cph.is(PhaseType.MAIN1) || cph.is(PhaseType.MAIN2))) || theirTop);
             final Set<String> landNames = new TreeSet<>();
             List<SpellAbility> all = ComputerUtilAbility.getSpellAbilities(ComputerUtilAbility.getAvailableCards(g, me), me);
             all = ComputerUtilAbility.getOriginalAndAltCostAbilities(all, me);
@@ -1466,6 +1485,11 @@ public final class R3LabelSearch {
                         final PCand c = PCand.of(sa, "draw");
                         c.spends = spends(sa, me, spendable);
                         draws.add(c);
+                    } else if (offMain && sa.canPlay() && ComputerUtilCost.canPayCost(sa, me, false)) {
+                        // endstep-rows-1103: any other castable action in a window outside our main phase
+                        final PCand c = PCand.of(sa, theirTop ? "instant-resp" : "instant");
+                        c.spends = spends(sa, me, spendable);
+                        instants.add(c);
                     }
                 } catch (RuntimeException e) {
                     // an ability Forge cannot test here is not a candidate
@@ -1496,6 +1520,7 @@ public final class R3LabelSearch {
             for (PCand c : draws) spent.addAll(c.spends);
             for (PCand c : policy) spent.addAll(c.spends);
             for (PCand c : answers) spent.addAll(c.spends);
+            for (PCand c : instants) spent.addAll(c.spends);
             if (!spent.isEmpty()) {
                 // keep the card: hold the route pieces first (the catalog orders), then every card any candidate spends;
                 // and the policy's best non-spending action
@@ -1517,6 +1542,7 @@ public final class R3LabelSearch {
             for (PCand c : answers) out.putIfAbsent(c.key(), c);
             out.putIfAbsent("pass", PCand.pass("pass"));
             for (PCand c : draws) out.putIfAbsent(c.key(), c);
+            for (PCand c : instants) out.putIfAbsent(c.key(), c);
             for (PCand c : lands) out.putIfAbsent(c.key(), c);
             for (PCand c : policy) out.putIfAbsent(c.key(), c);
             return null;
@@ -1537,7 +1563,7 @@ public final class R3LabelSearch {
     /** Architect review (N12): whether the menu answers an opponent object on the stack (a response row). */
     public static boolean responseRow(final List<PCand> cands) {
         for (PCand c : cands) {
-            if ("respond".equals(c.src)) return true;
+            if ("respond".equals(c.src) || "instant-resp".equals(c.src)) return true;
         }
         return false;
     }

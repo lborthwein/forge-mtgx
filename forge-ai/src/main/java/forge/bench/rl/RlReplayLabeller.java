@@ -361,6 +361,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         final String stateSha = search == null && r3 == null ? null : TrajectoryRef.stateSha(g);
         final long key = RlSearch.splitmix(uid ^ (0x6276774c4142454cL + 2L * ord + seat));
         forge.ai.dp.DecisionPoints.enterRow(uidStr + ":" + seat + ":" + ord); // decisionpoint-1102 census (no-op when off)
+        forge.ai.simulation.ForcedWinSolver.DIAG_ROW.set(uidStr + ":" + seat + ":" + ord); // engine-caps-1103 (diag only)
         final Object[] got;
         StepSearch.Result sr = null;
         try { // review #167 S3: the row is left on every path
@@ -560,7 +561,8 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
             "line_steps", "turns_to_end", "ms", "error", "controllers", "decks", "deck_sha", "meter", "band", "proof",
             "target", "target_source", "search", "search_sha", "value_backend", "hidden_exile", "unsupported_proof",
             "state_sha", "s2t", "row_kind", "choice_ord", "r3", "r3_sha", "r3_ranker", "cap", "cap_hits", "worlds_capped",
-            "proof_cap", "lib_tag", "lib_takes", "lib_w", "lib_seqs", "lib_why", "known_top", "known_pinned", "dp_meter"};
+            "proof_cap", "lib_tag", "lib_takes", "lib_w", "lib_seqs", "lib_why", "known_top", "known_pinned", "dp_meter",
+            "line_text", "afford", "lib_exact_why"}; // endstep-rows-1103: line_text only with -Dforge.bench.lineText (diagnostics)
 
     /**
      * rollout-budget-1101 (review #160 S2-2): a step row whose proof check was capped says so (proof_cap): its "no proof"

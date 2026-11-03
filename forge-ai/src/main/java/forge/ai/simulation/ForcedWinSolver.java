@@ -245,6 +245,36 @@ public final class ForcedWinSolver {
          * repeatable mana sink (D5). Read only with loopMacro.
          */
         public boolean loopMacro3 = false;
+        /**
+         * endstep-rows-1103 (N12; false = off, the default, and then nothing changes; read only with engineAnyWindow): at
+         * the opponent's end step with an empty stack the engine's gate is skipped (as after a failed plan). The gate reads
+         * our board's power NOW, which at their end step undercounts what our next turn attacks with (our untap, flash
+         * creatures cast in this window, haste), so a next-turn line set up at their end step never reached the engine.
+         */
+        public boolean engineEndStepOpen = false;
+        /**
+         * endstep-rows-1103 (owner ruling 11-03, the whole flash/instant class; false = off; read only with engineAnyWindow):
+         * propose() (the label's win check) runs at EVERY empty-stack priority of ours, not only our main phase and their end
+         * step (their upkeep, draw, main, combat; our upkeep, draw, combat, end); the engine rests in the root's window
+         * there; and with engineEndStepOpen the board-power gate is skipped at every such off-main window.
+         */
+        public boolean engineEveryWindow = false;
+        /** endstep-rows-1103 (false = off): ForcedWinEngine.Limits#passBudget, pass 2's own step and card budgets. */
+        public boolean enginePassBudget = false;
+        /**
+         * endstep-rows-1103, owner ruling 11-03 on loop termination (false = off): an engine line with a REPEAT step (a loop
+         * the engine detected by state recurrence with gaining counters, cycles/loopMacro) is re-valued at n = 1, 2, 4, ...
+         * repetitions (up to loopMarginalCap): each variant is verified like any line (played in Forge copies over the
+         * belief worlds, oppMin on), and the line taken is the smallest n whose P(belief) is within loopEps of the best
+         * over the schedule (a curve that turns down is handled). "Enough copies that the win rate stops improving."
+         */
+        public boolean loopMarginal = false;
+        public double loopEps = 0.005;
+        public int loopMarginalCap = 256;
+        /** endstep-rows-1103: its keys, recorded only when on (off = the recorded spec unchanged). */
+        public static final java.util.Map<String, Object> ENDSTEP_DEFAULTS = java.util.Map.of("engineEndStepOpen", false,
+                "engineEveryWindow", false, "enginePassBudget", false,
+                "loopMarginal", false, "loopEps", 0.005, "loopMarginalCap", 256);
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         /**
@@ -394,6 +424,12 @@ public final class ForcedWinSolver {
             c.engineCostChoice = "true".equals(get.apply("engineCostChoice"));
             c.engineStack = "true".equals(get.apply("engineStack"));
             c.loopMacro3 = "true".equals(get.apply("loopMacro3"));
+            c.engineEndStepOpen = "true".equals(get.apply("engineEndStepOpen")); // endstep-rows-1103
+            c.engineEveryWindow = "true".equals(get.apply("engineEveryWindow")); // endstep-rows-1103
+            c.enginePassBudget = "true".equals(get.apply("enginePassBudget")); // endstep-rows-1103
+            c.loopMarginal = "true".equals(get.apply("loopMarginal")); // endstep-rows-1103
+            c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
+            c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -500,6 +536,8 @@ public final class ForcedWinSolver {
 
     /** Receipts to stderr (diagnostics only): -Dforge.ai.forcedWin.receipts=true. */
     static final boolean RECEIPTS = Boolean.getBoolean("forge.ai.forcedWin.receipts");
+    /** engine-caps-1103 (diagnostics only): the label row this thread works on, for the engine's diag lines. */
+    public static final ThreadLocal<String> DIAG_ROW = new ThreadLocal<>();
     /** Diagnostics only: the follower's every priority answer (-Dforge.ai.forcedWin.followTrace). */
     static final boolean DBG_FOLLOW = Boolean.getBoolean("forge.ai.forcedWin.followTrace");
 
@@ -640,6 +678,12 @@ public final class ForcedWinSolver {
         public long cacApplies;
         /** solver-cap12 round 3 (R3-1): ladder escalations, the lines they found, their nodes and steps; only when non-zero. */
         public long ladderRuns, ladderFound, ladderNodes, ladderSteps;
+        /** endstep-rows-1103 (engineEndStepOpen): end-step engine gates skipped; reported only when non-zero. */
+        public long endStepOpens;
+        /** endstep-rows-1103 (loopMarginal): lines whose loop count was chosen by marginal value; only when non-zero. */
+        public long loopMarginals;
+        /** endstep-rows-1103 (loopMarginal): variants whose evaluation capped (unresolved, excluded; not row caps). */
+        public long loopVariantCaps;
         /**
          * rollout-budget-1101: decisions that spent their Forge AI work cap ({@link forge.ai.AiWork#CAP}), and play-outs
          * cut by it (not wins); reported only when non-zero.
@@ -683,6 +727,9 @@ public final class ForcedWinSolver {
             ladderFound += sign * o.ladderFound;
             ladderNodes += sign * o.ladderNodes;
             ladderSteps += sign * o.ladderSteps;
+            endStepOpens += sign * o.endStepOpens;
+            loopMarginals += sign * o.loopMarginals;
+            loopVariantCaps += sign * o.loopVariantCaps;
             aiWorkCaps += sign * o.aiWorkCaps;
             playoutAiWorkCuts += sign * o.playoutAiWorkCuts;
             // coverage-fix-1102 (meter only): counts add with the sign; card names and maxima only add (since() keeps them)
@@ -758,6 +805,13 @@ public final class ForcedWinSolver {
                 o.addProperty("ladder_found", ladderFound);
                 o.addProperty("ladder_nodes", ladderNodes);
                 o.addProperty("ladder_steps", ladderSteps);
+            }
+            if (endStepOpens != 0) {
+                o.addProperty("end_step_opens", endStepOpens); // endstep-rows-1103
+            }
+            if (loopMarginals != 0) {
+                o.addProperty("loop_marginals", loopMarginals); // endstep-rows-1103
+                o.addProperty("loop_variant_caps", loopVariantCaps);
             }
             if (aiWorkCaps != 0 || playoutAiWorkCuts != 0) {
                 o.addProperty("ai_work_caps", aiWorkCaps);
@@ -1969,7 +2023,8 @@ public final class ForcedWinSolver {
         final boolean theirEnd = !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
         final boolean response = cfg.engineStack && !live.getStack().isEmpty()
                 && live.getStack().peek().getActivatingPlayer() != me && GameCopier.stackUnsupported(live) == null; // R3-5
-        if (!response && (!live.getStack().isEmpty() || !ourMain && !theirEnd) || lineActive()) {
+        final boolean every = cfg.engineEveryWindow && cfg.engineAnyWindow; // endstep-rows-1103: any empty-stack window
+        if (!response && (!live.getStack().isEmpty() || !ourMain && !theirEnd && !every) || lineActive()) {
             return out;
         }
         evalSink = new ArrayList<>();
@@ -2657,8 +2712,9 @@ public final class ForcedWinSolver {
         // R3-5 (engineStack): our priority with the opponent's item on top is a window too (any phase)
         final boolean stackWindow = cfg.engineStack && !live.getStack().isEmpty()
                 && live.getStack().peek().getActivatingPlayer() != me && GameCopier.stackUnsupported(live) == null;
+        final boolean ourMain1 = eph.isPlayerTurn(me) && eph.is(PhaseType.MAIN1);
         final boolean otherWindow = stackWindow || cfg.engineAnyWindow && (eph.isPlayerTurn(me) ? eph.is(PhaseType.MAIN2)
-                : eph.is(PhaseType.END_OF_TURN));
+                : eph.is(PhaseType.END_OF_TURN)) || cfg.engineAnyWindow && cfg.engineEveryWindow && !ourMain1; // endstep-rows-1103
         if (!cfg.engine || !main1 && !otherWindow && !eph.is(PhaseType.MAIN1)) {
             return null;
         }
@@ -2690,7 +2746,14 @@ public final class ForcedWinSolver {
             poisonLeft = Math.min(poisonLeft, 10 - o.getPoisonCounters());
         }
         final boolean poisonLethal = cfg.engineGateWide && infect > 0 && infect >= poisonLeft;
-        if (!planFailed && !unmodeled && power < pos.oppLife && !poisonLethal) {
+        // endstep-rows-1103 (engineEndStepOpen, with engineAnyWindow): their end step, empty stack: no board-power gate
+        final boolean offMain = !(eph.isPlayerTurn(me) && (eph.is(PhaseType.MAIN1) || eph.is(PhaseType.MAIN2)));
+        final boolean endStepOpen = cfg.engineEndStepOpen && cfg.engineAnyWindow && !stackWindow && live.getStack().isEmpty()
+                && (!eph.isPlayerTurn(me) && eph.is(PhaseType.END_OF_TURN) || cfg.engineEveryWindow && offMain);
+        if (endStepOpen) {
+            meter.endStepOpens++;
+        }
+        if (!planFailed && !unmodeled && power < pos.oppLife && !poisonLethal && !endStepOpen) {
             return null;
         }
         if (!cfg.forced && !cfg.likely) {
@@ -2706,6 +2769,8 @@ public final class ForcedWinSolver {
         el.loopMacro = cfg.loopMacro; // R2-3
         el.loopMacro3 = cfg.loopMacro3; // review #154 S2
         el.anyWindow = cfg.engineAnyWindow; // R2-4 (c)
+        el.everyWindow = cfg.engineAnyWindow && cfg.engineEveryWindow; // endstep-rows-1103
+        el.passBudget = cfg.enginePassBudget; // endstep-rows-1103
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -2822,7 +2887,7 @@ public final class ForcedWinSolver {
             engineEvalBudget = cfg.engineEvalSteps; // R3-2: label mode, the engine line's own eval-step budget
             engineEvalBase = meter.playoutSteps;
         }
-        final Eval e;
+        Eval e;
         try {
             e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999),
                     deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
@@ -2832,6 +2897,11 @@ public final class ForcedWinSolver {
             }
         }
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
+        final Eval em = cfg.loopMarginal ? loopMarginal(live, line, e, index, t0) : e; // endstep-rows-1103
+        if (em != e) {
+            e = em;
+            line = em.line;
+        }
         if (evalSink != null) {
             evalSink.add(e);
         }
@@ -2845,6 +2915,117 @@ public final class ForcedWinSolver {
         }
         receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms=" + (System.nanoTime() - t0) / 1_000_000);
         return line;
+    }
+
+    // ------------------------------------------------------------------ endstep-rows-1103: loop count by marginal value
+
+    /** endstep-rows-1103 (loopMarginal; diagnostics): the last curve, "n:p n:p ..." and the n taken. */
+    public String lastLoopCurve;
+
+    /**
+     * Owner ruling 11-03: the first REPEAT step's count is chosen by marginal value. Variants at n = 1, 2, 4, ... (to
+     * loopMarginalCap, and the found count) are evaluated as lines; the smallest n within loopEps of the best P is taken
+     * (the found line when every P is 0). Only forced-win lines reach here: a loop that does not win now is not valued
+     * (that needs a value leaf; RESULT.md). Never throws.
+     */
+    private Eval loopMarginal(Game live, Line line, Eval found, int index, long t0) {
+        int at = -1;
+        for (int i = 0; i < line.steps.size(); i++) {
+            if (line.steps.get(i).kind == ForcedWinModel.AbilKind.REPEAT && line.steps.get(i).body != null) {
+                at = i;
+                break;
+            }
+        }
+        if (at < 0) {
+            return found;
+        }
+        final ForcedWinPlanner.Step rep = line.steps.get(at);
+        final List<Integer> sched = new ArrayList<>();
+        for (int n = 1; n <= cfg.loopMarginalCap; n *= 2) {
+            sched.add(n);
+        }
+        if (!sched.contains(rep.times)) {
+            sched.add(rep.times);
+            java.util.Collections.sort(sched);
+        }
+        // coordinator 11-03: a capped variant is UNRESOLVED (never 0): excluded from the choice, and the schedule stops at
+        // it (larger n cost more); its caps are restored out of the row's meter and counted in loop_variant_caps instead
+        // (the found line's own evaluation is never touched). Early stop: two consecutive resolved n within loopEps (P > 0).
+        final List<Eval> resolved = new ArrayList<>();
+        final StringBuilder curve = new StringBuilder();
+        Eval prevOk = null;
+        try {
+            for (final int n : sched) {
+                final Eval ev;
+                boolean capped;
+                if (n == rep.times) {
+                    ev = found;
+                    capped = false;
+                } else {
+                    final long ec = meter.evalCapStops, ed = meter.evalDeadlineStops, sc = meter.playoutStepCaps,
+                            cc = meter.playoutCallCaps, wc = meter.playoutWallCuts, aw = meter.playoutAiWorkCuts;
+                    final List<ForcedWinPlanner.Step> steps = new ArrayList<>(line.steps);
+                    steps.set(at, ForcedWinPlanner.Step.repeat(rep.body, n));
+                    final Line v = new Line(steps, line.pileNames, line.winTurn, line.lifeLeft, line.manaLeft,
+                            line.protection, line.protectionNames, line.how);
+                    v.window = line.window;
+                    v.windowTurn = line.windowTurn;
+                    v.stackStart = line.stackStart;
+                    v.knownTop = line.knownTop;
+                    ev = evaluate(live, v, mix(cfg.seed, index * 1000L + 999), // the same worlds as the found line
+                            deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L,
+                                    System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
+                    capped = meter.evalCapStops != ec || meter.evalDeadlineStops != ed || meter.playoutStepCaps != sc
+                            || meter.playoutCallCaps != cc || meter.playoutWallCuts != wc || meter.playoutAiWorkCuts != aw
+                            || ev.pUnopposed >= 1.0 && ev.worldsRun < cfg.worlds; // a world-0 loss stops the worlds: resolved
+                    if (capped) {
+                        meter.loopVariantCaps++;
+                        meter.evalCapStops = ec;
+                        meter.evalDeadlineStops = ed;
+                        meter.playoutStepCaps = sc;
+                        meter.playoutCallCaps = cc;
+                        meter.playoutWallCuts = wc;
+                        meter.playoutAiWorkCuts = aw;
+                    }
+                }
+                if (capped) {
+                    curve.append(n).append(":cap ");
+                    if (n > rep.times) {
+                        break; // every larger n costs more: the schedule stops here
+                    }
+                    continue;
+                }
+                final double p = ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0;
+                curve.append(n).append(':').append(String.format(java.util.Locale.ROOT, "%.3f", p)).append(' ');
+                resolved.add(ev);
+                if (prevOk != null && n > rep.times) {
+                    final double pp = prevOk.pUnopposed >= 1.0 ? prevOk.pBelief : 0.0;
+                    if (pp > 0 && Math.abs(p - pp) < cfg.loopEps) {
+                        break; // early stop: the curve is flat past the found count
+                    }
+                }
+                prevOk = ev;
+            }
+        } catch (RuntimeException ex) {
+            receipt("FORCED_WIN loop-marginal error " + ex);
+            return found;
+        }
+        // owner addendum 11-03: the smallest n within loopEps of the best resolved P (a curve that turns down is handled)
+        double best = 0;
+        for (Eval ev : resolved) {
+            best = Math.max(best, ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0);
+        }
+        Eval pick = found;
+        for (Eval ev : resolved) {
+            if (best > 0 && (ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0) >= best - cfg.loopEps) {
+                pick = ev;
+                break;
+            }
+        }
+        lastLoopCurve = curve.toString().trim() + " -> n=" + pick.line.steps.get(at).times + " (found " + rep.times + ")";
+        meter.loopMarginals++;
+        receipt("FORCED_WIN loop-marginal" + tag() + " " + lastLoopCurve);
+        return pick;
     }
 
     // ------------------------------------------------------------------ Part B: likely-win lines (solver-gaps-1015)

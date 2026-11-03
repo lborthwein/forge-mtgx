@@ -272,6 +272,13 @@ final class ForcedWinEngine {
          * rests a move at our next priority with an empty stack in the root's turn and phase, not only at our main phase.
          */
         boolean anyWindow;
+        /** endstep-rows-1103 (engineEveryWindow): a root at any window; we never attack outside our own turn. */
+        boolean everyWindow;
+        /**
+         * endstep-rows-1103 (enginePassBudget; false = off): the pass that passes the turn gets the search's full step and
+         * card budgets from its own start (as each pass gets its own nodes), not what the this-turn pass left.
+         */
+        boolean passBudget;
         int loopWindow = 8;
         int loopCap = 128;
         /**
@@ -340,6 +347,8 @@ final class ForcedWinEngine {
         List<Step> afterLoop;
         /** review #152-6: the loop bodies (bodyKey) already fast-forwarded on this node's path. */
         Set<String> loopsDone;
+        /** engine-caps-1103 (diagnostics only): the apply that made this node (-1 = root). */
+        int diagAid = -1;
     }
 
     static String bodyKey(List<Step> body) {
@@ -929,6 +938,46 @@ final class ForcedWinEngine {
             capLimit = limit;
         }
     }
+    // ------------------------------------------------------------------ engine-caps-1103: diagnostics only (off = never read)
+
+    /** -Dforge.ai.forcedWin.engineDiag=PREFIX: one JSON line per search / node / apply / prune to PREFIX-thread.jsonl. */
+    static final String DIAG = System.getProperty("forge.ai.forcedWin.engineDiag");
+    private static final ThreadLocal<java.io.PrintWriter> DIAG_OUT = new ThreadLocal<>();
+    private static final AtomicInteger DIAG_SID = new AtomicInteger();
+    private int diagSid, diagAids, diagPass = 1;
+    private final java.util.Map<String, Integer> diagExact = new java.util.HashMap<>();
+    private final java.util.Map<String, Integer> diagCoarse = new java.util.HashMap<>();
+
+    static void diag(String json) {
+        if (DIAG == null) {
+            return;
+        }
+        java.io.PrintWriter w = DIAG_OUT.get();
+        if (w == null) {
+            try {
+                w = new java.io.PrintWriter(new java.io.BufferedWriter(new java.io.FileWriter(DIAG + "-"
+                        + Thread.currentThread().getId() + ".jsonl", true)), true);
+            } catch (java.io.IOException e) {
+                return;
+            }
+            DIAG_OUT.set(w);
+        }
+        w.println(json);
+    }
+
+    static String jq(Object o) {
+        final String x = String.valueOf(o);
+        final StringBuilder b = new StringBuilder(x.length() + 2).append('"');
+        for (int i = 0; i < x.length() && i < 400; i++) {
+            final char c = x.charAt(i);
+            if (c == '"' || c == '\\') {
+                b.append('\\');
+            }
+            b.append(c < 32 ? ' ' : c);
+        }
+        return b.append('"').toString();
+    }
+
     /** bvw-step1-build-1024 (review #10): the current pass's node budget and the node count when it began. */
     private int passCap;
     private long passStart;
@@ -987,6 +1036,9 @@ final class ForcedWinEngine {
             e.stepBase = st.steps;
             e.cardBase = st.cards;
             held[0] = e;
+            if (DIAG != null) {
+                e.diagSid = DIAG_SID.incrementAndGet();
+            }
             if (likelyOut != null) {
                 e.collect = new ArrayList<>();
                 e.keep = Math.max(1, keep) * 3;
@@ -1033,14 +1085,26 @@ final class ForcedWinEngine {
                 lim.nodes += st.nodes; // solver-cap12-1030: this pass's share from here, not from the solver's birth
             }
             e.passStart = st.nodes;
+            if (DIAG != null) {
+                diag("{\"e\":\"S\",\"row\":" + jq(ForcedWinSolver.DIAG_ROW.get()) + ",\"sid\":" + e.diagSid + ",\"turn\":" + e.startTurn
+                        + ",\"rootCards\":" + root.cards + ",\"hand\":" + jq(root.me.getCardsIn(ZoneType.Hand)) + ",\"bf\":"
+                        + jq(root.me.getCardsIn(ZoneType.Battlefield)) + ",\"nodesCap\":" + nodeCap + ",\"stepsCap\":"
+                        + lim.totalSteps + ",\"cardsCap\":" + lim.totalCards + ",\"branching\":" + lim.branching
+                        + ",\"twoTurns\":" + twoTurns + "}");
+            }
             List<Step> win = e.dfs(root, 0);
             if (win == null && twoTurns && System.nanoTime() < deadline) {
                 lim.passTurn = true;
                 lim.nodes = st.nodes + nodeCap / 2;
                 e.passCap = nodeCap / 2;
                 e.passStart = st.nodes;
+                if (lim.passBudget) {
+                    e.stepBase = st.steps; // endstep-rows-1103: pass 2's own step and card budgets
+                    e.cardBase = st.cards;
+                }
                 e.seen.clear();
                 e.table.clear();
+                e.diagPass = 2;
                 win = e.dfs(root, 0);
             }
             lim.passTurn = twoTurns;
@@ -1070,6 +1134,12 @@ final class ForcedWinEngine {
             lim.nodes = nodeCap0;
             lim.passTurn = passTurn0;
             st.nanos += System.nanoTime() - t0;
+            if (DIAG != null && held[0] != null) {
+                final ForcedWinEngine e = held[0];
+                diag("{\"e\":\"E\",\"sid\":" + e.diagSid + ",\"cap\":" + jq(e.capWhy) + ",\"time\":" + e.stoppedByTime
+                        + ",\"life\":" + e.stoppedByLifetime + ",\"steps\":" + (st.steps - e.stepBase) + ",\"cards\":"
+                        + (st.cards - e.cardBase) + ",\"pass\":" + e.diagPass + ",\"ms\":" + (System.nanoTime() - t0) / 1_000_000 + "}");
+            }
             if (held[0] != null) {
                 // bvw-step1-build-1024 (diagnostics): which budget stopped this search, if any
                 if (held[0].stoppedByCap) {
@@ -1152,6 +1222,19 @@ final class ForcedWinEngine {
         return false;
     }
 
+    private void diagNode(Node node, int depth, List<Step> moves) {
+        if (DIAG == null) {
+            return;
+        }
+        final StringBuilder b = new StringBuilder();
+        for (Step m : moves) {
+            b.append(m).append(" ;; ");
+        }
+        diag("{\"e\":\"N\",\"sid\":" + diagSid + ",\"aid\":" + node.diagAid + ",\"d\":" + depth + ",\"pass\":" + diagPass
+                + ",\"passed\":" + node.passed + ",\"n\":" + moves.size() + ",\"steps\":" + (st.steps - stepBase)
+                + ",\"moves\":" + jq(b) + "}");
+    }
+
     private List<Step> dfs(Node node, int depth) {
         if (lim.pathCards > 0 && pathCards + node.cards > lim.pathCards) {
             st.pathPrunes++; // bvw-step1-build-1024: budget=counter's memory guard (0 = off: never here)
@@ -1178,6 +1261,7 @@ final class ForcedWinEngine {
         // a node is our priority with an empty stack (the copy was taken just after we passed it)
         LookaheadSearch.givePriority(node.g.getPhaseHandler(), node.me);
         final List<Step> moves = moves(node);
+        diagNode(node, depth, moves);
         if (TRACE) {
             ForcedWinSolver.receipt("FW_ENGINE node depth=" + depth + " path=" + node.path + " moves=" + moves);
         }
@@ -1301,6 +1385,7 @@ final class ForcedWinEngine {
         forge.util.IdScope.install(cloneScope(node.ids));
         LookaheadSearch.givePriority(node.g.getPhaseHandler(), node.me);
         final List<Step> moves = moves(node);
+        diagNode(node, depth, moves);
         if (TRACE) {
             ForcedWinSolver.receipt("FW_ENGINE node(ordered) depth=" + depth + " path=" + node.path + " moves=" + moves);
         }
@@ -1578,9 +1663,15 @@ final class ForcedWinEngine {
             }
             if (seenDominated(a.child)) {
                 st.pruned++;
+                if (DIAG != null) {
+                    diag("{\"e\":\"P\",\"sid\":" + diagSid + ",\"aid\":" + a.child.diagAid + ",\"why\":\"dominated\"}");
+                }
                 return null;
             }
         } else if (!seen.add(a.key)) {
+            if (DIAG != null) {
+                diag("{\"e\":\"P\",\"sid\":" + diagSid + ",\"aid\":" + a.child.diagAid + ",\"why\":\"seen\"}");
+            }
             return null;
         }
         return dfs(a.child, depth + 1);
@@ -1737,7 +1828,7 @@ final class ForcedWinEngine {
         }
         // R3-5: a root outside our turn (a response at their main phase) never attacks there (off: the root is ours)
         if (g.getPhaseHandler().is(PhaseType.MAIN1) && canAttack(me)
-                && (!lim.stack || g.getPhaseHandler().isPlayerTurn(me))) {
+                && (!lim.stack && !lim.everyWindow || g.getPhaseHandler().isPlayerTurn(me))) {
             final Step atk = Step.engine(AbilKind.ATTACK, -1, "attack", "attack", "", false);
             if (lethalOnBoard(me)) {
                 out.add(0, atk);
@@ -2363,6 +2454,43 @@ final class ForcedWinEngine {
     private String lastError;
 
     private Applied apply(Node node, Step mv) {
+        final long dS0 = st.steps, dC0 = st.cards;
+        final Applied out = apply0(node, mv);
+        if (DIAG != null) {
+            final int aid = ++diagAids;
+            String res, xk = "", ck = "";
+            int dupX = -1, dupC = -1;
+            if (out == null) {
+                res = "error:" + lastError;
+            } else if (out.won) {
+                res = "won";
+            } else if (out.child == null) {
+                res = "norest:" + out.why;
+            } else {
+                res = "rest";
+                out.child.diagAid = aid;
+                xk = Integer.toHexString(java.util.Objects.hashCode(out.key)) + (out.child.turn != node.turn ? "t" : "");
+                try {
+                    ck = Integer.toHexString(coarseKey(out.child.g, out.child.me).hashCode());
+                } catch (RuntimeException ex) {
+                    ck = "?";
+                }
+                dupX = diagExact.getOrDefault(diagPass + xk, -1);
+                diagExact.putIfAbsent(diagPass + xk, aid);
+                dupC = diagCoarse.getOrDefault(diagPass + ck, -1);
+                diagCoarse.putIfAbsent(diagPass + ck, aid);
+            }
+            diag("{\"e\":\"A\",\"sid\":" + diagSid + ",\"aid\":" + aid + ",\"from\":" + node.diagAid + ",\"pass\":"
+                    + diagPass + ",\"mv\":" + jq(mv) + ",\"kind\":" + jq(mv.kind) + ",\"isPass\":" + mv.pass
+                    + ",\"cac\":" + (mv.cac != null) + ",\"pay\":" + (mv.payFloats != null) + ",\"pick\":"
+                    + (mv.pickName != null) + ",\"trig\":" + (mv.triggerRef != null) + ",\"x\":" + (mv.xValue >= 0)
+                    + ",\"steps\":" + (st.steps - dS0) + ",\"cards\":" + (st.cards - dC0) + ",\"res\":" + jq(res)
+                    + ",\"xk\":" + jq(xk) + ",\"ck\":" + jq(ck) + ",\"dupX\":" + dupX + ",\"dupC\":" + dupC + "}");
+        }
+        return out;
+    }
+
+    private Applied apply0(Node node, Step mv) {
         final Random prev = MyRandom.getThreadRandom();
         MyRandom.setThreadRandom(new PlayoutKeys.TrackedRandom(LookaheadSearch.mix(seed, st.copies)));
         final MoveAi[] held = new MoveAi[1];
