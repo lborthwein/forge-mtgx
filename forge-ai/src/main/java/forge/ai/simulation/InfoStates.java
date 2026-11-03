@@ -465,6 +465,51 @@ public final class InfoStates implements LibraryInfoListener {
     @Override
     public synchronized void onLibraryInfo(final Kind kind, final List<Player> observers, final List<Card> cards,
             final ZoneType zone) {
+        try {
+            onLibraryInfo0(kind, observers, cards, zone);
+        } catch (RuntimeException e) {
+            failClosed(e);
+        }
+    }
+
+    /** A consumer's read failed: fail closed (synchronized, as every state change). */
+    synchronized void failClosedRead(final RuntimeException e) {
+        failClosed(e);
+    }
+
+    /** Diagnostics: internal failures (each one forgot every library). */
+    public int failures = 0;
+
+    /**
+     * Review #172 S1 (fail closed): an internal failure forgets every library for every observer (knowing nothing is
+     * always safe), logs once, and never reaches the game.
+     */
+    private void failClosed(final RuntimeException e) {
+        if (failures++ == 0) {
+            System.err.println("[infostate] internal failure, every library forgotten (logged once): " + e);
+        }
+        try {
+            for (int w : seats) {
+                forgetLib(w);
+                final Player wp = game.getPlayer(w);
+                snap.put(w, wp == null ? null : ids(wp));
+            }
+            for (ResSet s : revealed.values()) {
+                s.clear();
+            }
+            for (ResSet s : arranged.values()) {
+                s.clear();
+            }
+            random.clear();
+            libRes.clear();
+            libResCount.clear();
+        } catch (RuntimeException ignored) {
+            // nothing more to do: the views are cleared first
+        }
+    }
+
+    private void onLibraryInfo0(final Kind kind, final List<Player> observers, final List<Card> cards,
+            final ZoneType zone) {
         observations++;
         final Object res = KnownOwnLibrary.resolvingSa(game);
         switch (kind) {
@@ -557,6 +602,14 @@ public final class InfoStates implements LibraryInfoListener {
 
     @Subscribe
     public synchronized void on(final forge.game.event.GameEventPlayerPriority e) {
+        try {
+            onPriority0();
+        } catch (RuntimeException ex) {
+            failClosed(ex);
+        }
+    }
+
+    private void onPriority0() {
         // between actions: the per-resolution channels end; statics have been re-applied
         for (ResSet s : revealed.values()) {
             s.clear();
@@ -584,12 +637,16 @@ public final class InfoStates implements LibraryInfoListener {
             return;
         }
         events++;
-        final int w = e.player().getId();
-        forgetLib(w);
-        shuffles++;
-        final Player wp = game.getPlayer(w);
-        snap.put(w, wp == null ? null : ids(wp));
-        scan(w);
+        try {
+            final int w = e.player().getId();
+            forgetLib(w);
+            shuffles++;
+            final Player wp = game.getPlayer(w);
+            snap.put(w, wp == null ? null : ids(wp));
+            scan(w);
+        } catch (RuntimeException ex) {
+            failClosed(ex);
+        }
     }
 
     private Integer libOwner(final ZoneView z) {
@@ -1060,8 +1117,19 @@ public final class InfoStates implements LibraryInfoListener {
      * order of what is unknown.
      */
     public static void keepOwnLibrary(final InfoStates is, final Player liveMe, final Player me, final java.util.Random rng) {
-        final Map<Integer, Integer> idx = is.knownIndex(liveMe, liveMe);
-        final List<Set<Integer>> runs = is.runs(liveMe, liveMe);
+        // review #172 S2: a live consumer reads find() only; absent (or a failed read) = nothing known
+        Map<Integer, Integer> idx = java.util.Collections.emptyMap();
+        List<Set<Integer>> runs = java.util.Collections.emptyList();
+        if (is != null) {
+            try {
+                idx = is.knownIndex(liveMe, liveMe);
+                runs = is.runs(liveMe, liveMe);
+            } catch (RuntimeException e) {
+                is.failClosedRead(e);
+                idx = java.util.Collections.emptyMap();
+                runs = java.util.Collections.emptyList();
+            }
+        }
         final List<Card> lib = new ArrayList<>(me.getCardsIn(ZoneType.Library));
         final int n = lib.size();
         final Card[] out = new Card[n];
@@ -1118,7 +1186,17 @@ public final class InfoStates implements LibraryInfoListener {
      */
     public static Map<Integer, Card> oppPins(final InfoStates is, final Player liveMe, final Player liveOpp, final Game g) {
         final Map<Integer, Card> out = new java.util.TreeMap<>();
-        for (Map.Entry<Integer, Integer> e : is.knownIndex(liveMe, liveOpp).entrySet()) {
+        if (is == null) {
+            return out; // review #172 S2: not attached = nothing known
+        }
+        Map<Integer, Integer> idx;
+        try {
+            idx = is.knownIndex(liveMe, liveOpp);
+        } catch (RuntimeException ex) {
+            is.failClosedRead(ex);
+            return out;
+        }
+        for (Map.Entry<Integer, Integer> e : idx.entrySet()) {
             final Card c = g.findById(e.getKey());
             if (c != null) {
                 out.put(e.getValue(), c);

@@ -7284,7 +7284,7 @@ public final class LookaheadSearch {
         if (beliefCube != null && !cfg.beliefShadow) {
             resampleBelief(live, liveMe, g, me, rng, decisionBelief);
         } else if (cfg.infoState) {
-            resample(live, liveMe, g, me, rng, InfoStates.forConsumer(live));
+            resample(live, liveMe, g, me, rng, InfoStates.find(live)); // review #172 S2: find only
         } else {
             resample(live, liveMe, g, me, rng);
         }
@@ -7296,7 +7296,7 @@ public final class LookaheadSearch {
      */
     private void ownLibrary(Game live, Player liveMe, Player me, Random rng) {
         if (cfg.infoState) {
-            InfoStates.keepOwnLibrary(InfoStates.forConsumer(live), liveMe, me, rng);
+            InfoStates.keepOwnLibrary(InfoStates.find(live), liveMe, me, rng); // review #172 S2: find only
         } else {
             shuffleOwnLibrary(liveMe, me, rng);
         }
@@ -7506,7 +7506,7 @@ public final class LookaheadSearch {
             final List<Card> libKnownTop = new ArrayList<>();
             // order-memory-1102 (infoState): every opponent-library card InfoState(me) knows, at its index
             final Map<Integer, Card> pins = cfg.infoState && liveOpp != null
-                    ? InfoStates.oppPins(InfoStates.forConsumer(live), liveMe, liveOpp, g) : null;
+                    ? InfoStates.oppPins(InfoStates.find(live), liveMe, liveOpp, g) : null; // review #172 S2: find only
             final List<Card> liveLib = liveOpp == null || pins != null ? Collections.emptyList() : new ArrayList<>(liveOpp.getCardsIn(ZoneType.Library));
             for (Card lc : liveLib) {
                 if (lc.getView().canBeShownTo(myView)) {

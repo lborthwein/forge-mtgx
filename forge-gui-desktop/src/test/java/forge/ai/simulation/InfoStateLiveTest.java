@@ -583,6 +583,14 @@ public class InfoStateLiveTest extends forge.ai.AITest {
         Assert.assertTrue(onSpec.search.infoState);
         Assert.assertTrue(onSpec.search.toJson().get("infoState").getAsBoolean());
         Assert.expectThrows(IllegalArgumentException.class, () -> forge.bench.rl.RlLiveSeat.Spec.parse(base + ",infoState=1"));
+        // with the live S-b2h + defend keys: the key arms the plan solver and the defender; off, their JSON is unchanged
+        final String plans = base + ",plans.samples=4,plans.solverCfg.budgetMs=6000,plans.solverCfg.hideOwnLibrary=true,"
+                + "plans.defend=true,plans.defendCfg.defendMs=6000";
+        final forge.bench.rl.RlLiveSeat.Spec pOff = forge.bench.rl.RlLiveSeat.Spec.parse(plans);
+        Assert.assertFalse(pOff.search.plans.toString().contains("infoState"), pOff.search.plans.toString());
+        final forge.bench.rl.RlLiveSeat.Spec pOn = forge.bench.rl.RlLiveSeat.Spec.parse("infoState=on," + plans);
+        Assert.assertEquals(pOn.search.plans.getAsJsonObject("solverCfg").get("infoState").getAsString(), "true");
+        Assert.assertEquals(pOn.search.plans.getAsJsonObject("defendCfg").get("infoState").getAsString(), "true");
     }
 
     /** The K8 seat's bind attaches InfoStates only with the key on (and so, live, before the mulligans). */
@@ -686,6 +694,144 @@ public class InfoStateLiveTest extends forge.ai.AITest {
                 rerandomise(g, s, o, seed);
                 s.assertConsistent();
                 Assert.assertEquals(output(g, s, o), before, "observer " + o + " seed " + seed);
+            }
+        }
+    }
+    // ------------------------------------------------------------------ review #172 S1 / S2
+
+    /**
+     * S1: a listener that throws never unwinds the effect (the scry resolves), and an InfoStates internal failure forgets
+     * every library (fail closed) and never rethrows.
+     */
+    @Test
+    public void aFailingListenerNeverUnwindsTheEffectAndInfoStatesFailsClosed() {
+        final Game g = game("Brainstorm;Lightning Bolt;Shock", "Island", "Lightning Bolt;Shock;Island;Swamp;Island;Swamp;Island;Swamp");
+        me(g).dangerouslySetController(new Ordered(g, me(g), null));
+        final InfoStates s = track(g);
+        playAndResolve(g, me(g), find(me(g), ZoneType.Hand, "Brainstorm").getFirstSpellAbility(), null);
+        Assert.assertEquals(known(s, me(g), me(g)).size(), 2);
+        g.addLibraryInfoListener((kind, observers, cards, zone) -> {
+            throw new IllegalStateException("boom");
+        });
+        me(g).dangerouslySetController(new Arrange(g, me(g), List.of("Island", "Swamp")));
+        final int before = me(g).getCardsIn(ZoneType.Library).size();
+        g.getAction().scry(List.of(me(g)), 1, null); // the throwing listener sees the ARRANGE: the scry still resolves
+        Assert.assertEquals(me(g).getCardsIn(ZoneType.Library).size(), before);
+        // an internal failure (a null card list reaches the state): every library forgotten, nothing thrown
+        s.onLibraryInfo(forge.game.LibraryInfoListener.Kind.REVEAL, List.of(me(g)), null, ZoneType.Library);
+        Assert.assertEquals(s.failures, 1);
+        Assert.assertTrue(known(s, me(g), me(g)).isEmpty(), "fail closed: " + s.describe());
+        Assert.assertTrue(known(s, opp(g), me(g)).isEmpty());
+        // and it keeps working afterwards
+        g.getAction().moveToLibrary(find(me(g), ZoneType.Hand, "Lightning Bolt"), 0, null);
+        Assert.assertEquals(known(s, me(g), me(g)), List.of("Lightning Bolt"));
+    }
+
+    /** S2: a consumer with the key on never attaches (find only): not attached = nothing known, and nothing mutated. */
+    @Test
+    public void aConsumerNeverAttachesLate() {
+        final Game g = game("", "Island", LIB8);
+        final LookaheadSearch ls = search(true, true);
+        forge.util.IdScope.open();
+        final GameCopier cp = new GameCopier(g, true);
+        final Game c = cp.makeCopy();
+        ls.redraw(g, me(g), c, (Player) cp.find(me(g)), new Random(1));
+        Assert.assertNull(InfoStates.find(g), "the search thread never attaches");
+        Assert.assertFalse(g.hasLibraryInfoListeners());
+        final ForcedWinSolver.Config cfg = new ForcedWinSolver.Config();
+        cfg.infoState = true;
+        Assert.assertEquals(new ForcedWinSolver(me(g), cfg).knownTopCount(g), 0);
+        Assert.assertNull(InfoStates.find(g));
+        ls.shutdown();
+        forge.util.IdScope.close();
+    }
+
+    // ------------------------------------------------------------------ the S-b solver (plans.*, key infoState)
+
+    private static ForcedWinSolver solver(final Game g, final boolean infoState) {
+        final java.util.Map<String, String> kv = new java.util.HashMap<>();
+        kv.put("hideOwnLibrary", "true");
+        if (infoState) {
+            kv.put("infoState", "true");
+        }
+        final ForcedWinSolver.Config cfg = ForcedWinSolver.Config.fromProps(kv::get);
+        Assert.assertEquals(cfg.infoState, infoState);
+        return new ForcedWinSolver(me(g), cfg);
+    }
+
+    /** The solver's play-out world shuffle of our library, as its rollouts and play-outs do it. */
+    private static List<Integer> solverWorld(final Game g, final ForcedWinSolver fs, final boolean infoState, final long seed) {
+        final GameCopier cp = new GameCopier(g, true);
+        final Game c = cp.makeCopy();
+        final Player cm = (Player) cp.find(me(g));
+        final int k = fs.knownTopCount(g);
+        if (infoState) {
+            ForcedWinSolver.shuffleUnknownOwnLibrary(cm, k, fs.pinnedIn(cm), new Random(seed), true);
+        } else {
+            ForcedWinSolver.shuffleUnknownOwnLibrary(cm, k, new Random(seed));
+        }
+        final List<Integer> out = new ArrayList<>();
+        for (Card x : cm.getCardsIn(ZoneType.Library)) {
+            out.add(x.getId());
+        }
+        return out;
+    }
+
+    /**
+     * A Brainstorm put-back stays at the top of the solver's play-out worlds (16 seeds) with the key on; with it off, a
+     * solver that was not watching when Brainstorm resolved (it subscribes at its first decision) forgets it. Then a
+     * shuffle forgets it with the key on.
+     */
+    @Test
+    public void solverKeepsABrainstormPutBackOnlyWithTheKeyOnAndAShuffleForgets() {
+        for (boolean key : new boolean[] {false, true}) {
+            final Game g = game("Brainstorm;Lightning Bolt;Shock", "Island",
+                    "Island;Swamp;Mountain;Forest;Plains;Island;Swamp;Mountain;Forest;Plains;Island;Swamp");
+            me(g).dangerouslySetController(new Ordered(g, me(g), null));
+            if (key) {
+                track(g); // the live bind attaches before the game starts
+            }
+            playAndResolve(g, me(g), find(me(g), ZoneType.Hand, "Brainstorm").getFirstSpellAbility(), null);
+            final ForcedWinSolver fs = solver(g, key);
+            final int t0 = me(g).getCardsIn(ZoneType.Library).get(0).getId(), t1 = me(g).getCardsIn(ZoneType.Library).get(1).getId();
+            Assert.assertEquals(fs.knownTopCount(g), key ? 2 : 0, "key " + key);
+            int kept = 0;
+            forge.util.IdScope.open();
+            for (long seed = 1; seed <= 16; seed++) {
+                final List<Integer> w = solverWorld(g, fs, key, seed);
+                kept += w.get(0) == t0 && w.get(1) == t1 ? 1 : 0;
+            }
+            forge.util.IdScope.close();
+            Assert.assertEquals(kept == 16, key, "key " + key + ": kept in " + kept + "/16 play-out worlds");
+            if (key) {
+                me(g).shuffle(null);
+                Assert.assertEquals(fs.knownTopCount(g), 0, "a shuffle forgets");
+            }
+        }
+    }
+
+    /** Their Portent over our top: the order the opponent chose is not known to our solver (key on); legacy marks it placed. */
+    @Test
+    public void solverDoesNotKnowAnOpponentReorder() {
+        for (boolean key : new boolean[] {false, true}) {
+            final Game g = game2("Lightning Bolt;Shock", "Island", "Island;Swamp;Island;Swamp;Island;Swamp", "Portent", "Island");
+            if (key) {
+                track(g);
+            }
+            final ForcedWinSolver fs = solver(g, key);
+            Assert.assertEquals(fs.knownTopCount(g), 0); // the solver watches from here (both modes)
+            g.getAction().moveToLibrary(find(me(g), ZoneType.Hand, "Lightning Bolt"), 0, null);
+            g.getAction().moveToLibrary(find(me(g), ZoneType.Hand, "Shock"), 0, null);
+            Assert.assertEquals(fs.knownTopCount(g), 2, "our own put-backs, key " + key);
+            final SpellAbility portent = find(opp(g), ZoneType.Hand, "Portent").getFirstSpellAbility();
+            portent.setActivatingPlayer(opp(g));
+            portent.resetTargets();
+            portent.getTargets().add(me(g));
+            playAndResolve(g, opp(g), portent, null);
+            if (key) {
+                Assert.assertEquals(fs.knownTopCount(g), 0, "their order of our top three is not ours");
+            } else {
+                System.out.println("INFOSTATE legacy solver after their Portent: knownTop " + fs.knownTopCount(g));
             }
         }
     }

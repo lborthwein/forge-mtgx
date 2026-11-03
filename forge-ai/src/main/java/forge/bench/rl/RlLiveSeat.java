@@ -296,6 +296,17 @@ public final class RlLiveSeat {
                     throw new IllegalArgumentException("policySearch: plans needs plans.solverCfg.hideOwnLibrary=true live");
                 }
             }
+            if (c.infoState && c.plans != null) {
+                // order-memory-1102: the key arms S-b's plan solver and the defender too (solver key infoState)
+                for (String sub : new String[] {"solverCfg", "defendCfg"}) {
+                    if (sub.equals("solverCfg") || c.plans.has("defend") && c.plans.get("defend").getAsBoolean()) {
+                        if (!c.plans.has(sub)) {
+                            c.plans.add(sub, new JsonObject());
+                        }
+                        c.plans.getAsJsonObject(sub).addProperty("infoState", "true");
+                    }
+                }
+            }
             c.check();
             AiFixes.Mode.parse(c.departMedian);
             return s;
