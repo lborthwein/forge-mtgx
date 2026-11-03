@@ -682,6 +682,8 @@ public final class ForcedWinSolver {
         public long endStepOpens;
         /** endstep-rows-1103 (loopMarginal): lines whose loop count was chosen by marginal value; only when non-zero. */
         public long loopMarginals;
+        /** endstep-rows-1103 (loopMarginal): variants whose evaluation capped (unresolved, excluded; not row caps). */
+        public long loopVariantCaps;
         /**
          * rollout-budget-1101: decisions that spent their Forge AI work cap ({@link forge.ai.AiWork#CAP}), and play-outs
          * cut by it (not wins); reported only when non-zero.
@@ -727,6 +729,7 @@ public final class ForcedWinSolver {
             ladderSteps += sign * o.ladderSteps;
             endStepOpens += sign * o.endStepOpens;
             loopMarginals += sign * o.loopMarginals;
+            loopVariantCaps += sign * o.loopVariantCaps;
             aiWorkCaps += sign * o.aiWorkCaps;
             playoutAiWorkCuts += sign * o.playoutAiWorkCuts;
             // coverage-fix-1102 (meter only): counts add with the sign; card names and maxima only add (since() keeps them)
@@ -808,6 +811,7 @@ public final class ForcedWinSolver {
             }
             if (loopMarginals != 0) {
                 o.addProperty("loop_marginals", loopMarginals); // endstep-rows-1103
+                o.addProperty("loop_variant_caps", loopVariantCaps);
             }
             if (aiWorkCaps != 0 || playoutAiWorkCuts != 0) {
                 o.addProperty("ai_work_caps", aiWorkCaps);
@@ -2944,16 +2948,22 @@ public final class ForcedWinSolver {
             sched.add(rep.times);
             java.util.Collections.sort(sched);
         }
-        final List<Eval> evs = new ArrayList<>();
+        // coordinator 11-03: a capped variant is UNRESOLVED (never 0): excluded from the choice, and the schedule stops at
+        // it (larger n cost more); its caps are restored out of the row's meter and counted in loop_variant_caps instead
+        // (the found line's own evaluation is never touched). Early stop: two consecutive resolved n within loopEps (P > 0).
+        final List<Eval> resolved = new ArrayList<>();
         final StringBuilder curve = new StringBuilder();
-        Eval pick = null;
+        Eval prevOk = null;
         try {
-            for (int k = 0; k < sched.size(); k++) {
-                final int n = sched.get(k);
+            for (final int n : sched) {
                 final Eval ev;
+                boolean capped;
                 if (n == rep.times) {
                     ev = found;
+                    capped = false;
                 } else {
+                    final long ec = meter.evalCapStops, ed = meter.evalDeadlineStops, sc = meter.playoutStepCaps,
+                            cc = meter.playoutCallCaps, wc = meter.playoutWallCuts, aw = meter.playoutAiWorkCuts;
                     final List<ForcedWinPlanner.Step> steps = new ArrayList<>(line.steps);
                     steps.set(at, ForcedWinPlanner.Step.repeat(rep.body, n));
                     final Line v = new Line(steps, line.pileNames, line.winTurn, line.lifeLeft, line.manaLeft,
@@ -2965,29 +2975,52 @@ public final class ForcedWinSolver {
                     ev = evaluate(live, v, mix(cfg.seed, index * 1000L + 999), // the same worlds as the found line
                             deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L,
                                     System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
+                    capped = meter.evalCapStops != ec || meter.evalDeadlineStops != ed || meter.playoutStepCaps != sc
+                            || meter.playoutCallCaps != cc || meter.playoutWallCuts != wc || meter.playoutAiWorkCuts != aw
+                            || ev.worldsRun < cfg.worlds;
+                    if (capped) {
+                        meter.loopVariantCaps++;
+                        meter.evalCapStops = ec;
+                        meter.evalDeadlineStops = ed;
+                        meter.playoutStepCaps = sc;
+                        meter.playoutCallCaps = cc;
+                        meter.playoutWallCuts = wc;
+                        meter.playoutAiWorkCuts = aw;
+                    }
                 }
-                evs.add(ev);
+                if (capped) {
+                    curve.append(n).append(":cap ");
+                    if (n > rep.times) {
+                        break; // every larger n costs more: the schedule stops here
+                    }
+                    continue;
+                }
                 final double p = ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0;
                 curve.append(n).append(':').append(String.format(java.util.Locale.ROOT, "%.3f", p)).append(' ');
-            }
-            // owner addendum 11-03: a loop with a cost per iteration can turn down, so the whole schedule is valued and the
-            // smallest n within loopEps of the schedule's best P is taken (on a rising curve: where it stops improving)
-            double best = 0;
-            for (Eval ev : evs) {
-                best = Math.max(best, ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0);
-            }
-            for (Eval ev : evs) {
-                if (best > 0 && (ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0) >= best - cfg.loopEps) {
-                    pick = ev;
-                    break;
+                resolved.add(ev);
+                if (prevOk != null && n > rep.times) {
+                    final double pp = prevOk.pUnopposed >= 1.0 ? prevOk.pBelief : 0.0;
+                    if (pp > 0 && Math.abs(p - pp) < cfg.loopEps) {
+                        break; // early stop: the curve is flat past the found count
+                    }
                 }
+                prevOk = ev;
             }
         } catch (RuntimeException ex) {
             receipt("FORCED_WIN loop-marginal error " + ex);
             return found;
         }
-        if (pick == null) {
-            pick = evs.get(evs.size() - 1);
+        // owner addendum 11-03: the smallest n within loopEps of the best resolved P (a curve that turns down is handled)
+        double best = 0;
+        for (Eval ev : resolved) {
+            best = Math.max(best, ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0);
+        }
+        Eval pick = found;
+        for (Eval ev : resolved) {
+            if (best > 0 && (ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0) >= best - cfg.loopEps) {
+                pick = ev;
+                break;
+            }
         }
         lastLoopCurve = curve.toString().trim() + " -> n=" + pick.line.steps.get(at).times + " (found " + rep.times + ")";
         meter.loopMarginals++;
