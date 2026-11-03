@@ -252,8 +252,16 @@ public final class ForcedWinSolver {
          * creatures cast in this window, haste), so a next-turn line set up at their end step never reached the engine.
          */
         public boolean engineEndStepOpen = false;
-        /** endstep-rows-1103: its key, recorded only when on (off = the recorded spec unchanged). */
-        public static final java.util.Map<String, Object> ENDSTEP_DEFAULTS = java.util.Map.of("engineEndStepOpen", false);
+        /**
+         * endstep-rows-1103 (owner ruling 11-03, the whole flash/instant class; false = off; read only with engineAnyWindow):
+         * propose() (the label's win check) runs at EVERY empty-stack priority of ours, not only our main phase and their end
+         * step (their upkeep, draw, main, combat; our upkeep, draw, combat, end); the engine rests in the root's window
+         * there; and with engineEndStepOpen the board-power gate is skipped at every such off-main window.
+         */
+        public boolean engineEveryWindow = false;
+        /** endstep-rows-1103: its keys, recorded only when on (off = the recorded spec unchanged). */
+        public static final java.util.Map<String, Object> ENDSTEP_DEFAULTS = java.util.Map.of("engineEndStepOpen", false,
+                "engineEveryWindow", false);
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         /**
@@ -404,6 +412,7 @@ public final class ForcedWinSolver {
             c.engineStack = "true".equals(get.apply("engineStack"));
             c.loopMacro3 = "true".equals(get.apply("loopMacro3"));
             c.engineEndStepOpen = "true".equals(get.apply("engineEndStepOpen")); // endstep-rows-1103
+            c.engineEveryWindow = "true".equals(get.apply("engineEveryWindow")); // endstep-rows-1103
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -1987,7 +1996,8 @@ public final class ForcedWinSolver {
         final boolean theirEnd = !ph.isPlayerTurn(me) && ph.is(PhaseType.END_OF_TURN);
         final boolean response = cfg.engineStack && !live.getStack().isEmpty()
                 && live.getStack().peek().getActivatingPlayer() != me && GameCopier.stackUnsupported(live) == null; // R3-5
-        if (!response && (!live.getStack().isEmpty() || !ourMain && !theirEnd) || lineActive()) {
+        final boolean every = cfg.engineEveryWindow && cfg.engineAnyWindow; // endstep-rows-1103: any empty-stack window
+        if (!response && (!live.getStack().isEmpty() || !ourMain && !theirEnd && !every) || lineActive()) {
             return out;
         }
         evalSink = new ArrayList<>();
@@ -2675,8 +2685,9 @@ public final class ForcedWinSolver {
         // R3-5 (engineStack): our priority with the opponent's item on top is a window too (any phase)
         final boolean stackWindow = cfg.engineStack && !live.getStack().isEmpty()
                 && live.getStack().peek().getActivatingPlayer() != me && GameCopier.stackUnsupported(live) == null;
+        final boolean ourMain1 = eph.isPlayerTurn(me) && eph.is(PhaseType.MAIN1);
         final boolean otherWindow = stackWindow || cfg.engineAnyWindow && (eph.isPlayerTurn(me) ? eph.is(PhaseType.MAIN2)
-                : eph.is(PhaseType.END_OF_TURN));
+                : eph.is(PhaseType.END_OF_TURN)) || cfg.engineAnyWindow && cfg.engineEveryWindow && !ourMain1; // endstep-rows-1103
         if (!cfg.engine || !main1 && !otherWindow && !eph.is(PhaseType.MAIN1)) {
             return null;
         }
@@ -2709,8 +2720,9 @@ public final class ForcedWinSolver {
         }
         final boolean poisonLethal = cfg.engineGateWide && infect > 0 && infect >= poisonLeft;
         // endstep-rows-1103 (engineEndStepOpen, with engineAnyWindow): their end step, empty stack: no board-power gate
-        final boolean endStepOpen = cfg.engineEndStepOpen && cfg.engineAnyWindow && !stackWindow
-                && !eph.isPlayerTurn(me) && eph.is(PhaseType.END_OF_TURN) && live.getStack().isEmpty();
+        final boolean offMain = !(eph.isPlayerTurn(me) && (eph.is(PhaseType.MAIN1) || eph.is(PhaseType.MAIN2)));
+        final boolean endStepOpen = cfg.engineEndStepOpen && cfg.engineAnyWindow && !stackWindow && live.getStack().isEmpty()
+                && (!eph.isPlayerTurn(me) && eph.is(PhaseType.END_OF_TURN) || cfg.engineEveryWindow && offMain);
         if (endStepOpen) {
             meter.endStepOpens++;
         }
@@ -2730,6 +2742,7 @@ public final class ForcedWinSolver {
         el.loopMacro = cfg.loopMacro; // R2-3
         el.loopMacro3 = cfg.loopMacro3; // review #154 S2
         el.anyWindow = cfg.engineAnyWindow; // R2-4 (c)
+        el.everyWindow = cfg.engineAnyWindow && cfg.engineEveryWindow; // endstep-rows-1103
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);

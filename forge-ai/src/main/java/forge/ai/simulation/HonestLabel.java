@@ -634,7 +634,9 @@ public final class HonestLabel {
             final boolean mine = ph.isPlayerTurn(liveMe);
             final boolean main = ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2);
             final boolean end = ph.is(PhaseType.END_OF_TURN);
-            if ((mine && main || !mine && end || spec.loss && (!mine && main || mine && end)) && GameCopier.SOLVER_COPY_PENDING) {
+            final boolean every = spec.winConfig().engineEveryWindow && spec.winConfig().engineAnyWindow; // endstep-rows-1103
+            if ((mine && main || !mine && end || spec.loss && (!mine && main || mine && end) || every)
+                    && GameCopier.SOLVER_COPY_PENDING) {
                 // gamecopier-fidelity-1030: what the copies cannot carry; a gap that can act this turn leaves the
                 // position unresolved (no check runs), one that acts only after this turn refuses proofs past it
                 final List<String> gaps = GameCopier.unsupportedPending(live);
@@ -657,6 +659,11 @@ public final class HonestLabel {
             } else if (spec.loss && (!mine && main || mine && end)) {
                 r.check = "loss";
                 loss(live, liveMe, liveOpp, key, r, known);
+            } else if (spec.winConfig().engineEveryWindow && spec.winConfig().engineAnyWindow) {
+                // endstep-rows-1103: a window neither check ran at (their upkeep/draw/combat, our upkeep/draw/combat):
+                // the win check, as at their end step
+                r.check = "win";
+                win(live, liveMe, liveOpp, key, r, known);
             } else {
                 r.gate = "phase:" + ph.getPhase();
             }

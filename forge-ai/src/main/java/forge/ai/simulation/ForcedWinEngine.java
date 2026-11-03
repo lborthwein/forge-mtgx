@@ -272,6 +272,8 @@ final class ForcedWinEngine {
          * rests a move at our next priority with an empty stack in the root's turn and phase, not only at our main phase.
          */
         boolean anyWindow;
+        /** endstep-rows-1103 (engineEveryWindow): a root at any window; we never attack outside our own turn. */
+        boolean everyWindow;
         int loopWindow = 8;
         int loopCap = 128;
         /**
@@ -1817,7 +1819,7 @@ final class ForcedWinEngine {
         }
         // R3-5: a root outside our turn (a response at their main phase) never attacks there (off: the root is ours)
         if (g.getPhaseHandler().is(PhaseType.MAIN1) && canAttack(me)
-                && (!lim.stack || g.getPhaseHandler().isPlayerTurn(me))) {
+                && (!lim.stack && !lim.everyWindow || g.getPhaseHandler().isPlayerTurn(me))) {
             final Step atk = Step.engine(AbilKind.ATTACK, -1, "attack", "attack", "", false);
             if (lethalOnBoard(me)) {
                 out.add(0, atk);
