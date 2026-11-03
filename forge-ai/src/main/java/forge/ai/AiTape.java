@@ -1491,6 +1491,19 @@ public final class AiTape {
 
     /** ComputerUtil's checkpoints: {@code sa} is about to be paid for (and put on the stack or resolved). */
     public static void checkpoint(final Player ai, final SpellAbility sa, final String where) {
+        // decisionpoint-1102 (PR-B, observation only): the targets / X Forge AI fixed for this ability (PR-C: a point)
+        if (sa != null && forge.ai.dp.DecisionPoints.observer() != null) {
+            boolean targets = false;
+            for (SpellAbility s = sa; s != null && !targets; s = s.getSubAbility()) {
+                targets = s.usesTargeting() && s.getTargets() != null && !s.getTargets().isEmpty();
+            }
+            if (targets) {
+                forge.ai.dp.DecisionPoints.note(ai, forge.ai.dp.Kind.SELECT, "seam:targets:" + where, -1, "forge");
+            }
+            if (sa.getXManaCostPaid() != null) {
+                forge.ai.dp.DecisionPoints.note(ai, forge.ai.dp.Kind.NUMBER, "seam:x:" + where, -1, "forge");
+            }
+        }
         final AiTape t = covering(ai);
         if (t != null && sa != null) {
             t.config(sa, where);

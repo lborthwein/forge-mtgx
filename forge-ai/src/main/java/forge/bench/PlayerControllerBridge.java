@@ -925,7 +925,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         } finally {
             cacSuppressed = false;
         }
-        return h.priority(this, def);
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.PRIORITY, "chooseSpellAbilityToPlay", null, null, -1, -1, def);
     }
 
     private List<SpellAbility> chooseSpellAbilityToPlayBridged() {
@@ -1969,7 +1970,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         } finally {
             cacSuppressed = false;
         }
-        return h.tuck(this, hand, cardsToReturn, def);
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.SELECT, "tuckCardsViaMulligan", null, hand, cardsToReturn, cardsToReturn, def, hand, cardsToReturn);
     }
 
     private CardCollectionView tuckCardsViaMulliganBridged(final CardCollectionView hand, final int cardsToReturn) {
@@ -2447,7 +2449,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         } finally {
             cacSuppressed = false;
         }
-        return cacDig(this, h, optionList, min, max, sa, def);
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.SELECT, "chooseEntitiesForEffect", sa, optionList, min, max, def, optionList, min, max);
     }
 
     private <T extends GameEntity> List<T> chooseEntitiesForEffectBridged(final FCollectionView<T> optionList,
@@ -2621,7 +2624,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         } finally {
             cacSuppressed = false;
         }
-        return h.confirm(this, sa, mode0, message, def);
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.CHOICE, "confirmAction", sa, null, 1, 1, def, mode0, message);
     }
 
     private boolean confirmActionBridged(final SpellAbility sa, final PlayerActionConfirmMode mode0, final String message,
@@ -2709,7 +2713,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         } finally {
             cacSuppressed = false;
         }
-        return h.scry(this, topN, def);
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.ARRANGE, "arrangeForScry", null, topN, -1, -1, def, topN);
     }
 
     private ImmutablePair<CardCollection, CardCollection> arrangeForScryBridged(final CardCollection topN) {
@@ -3005,7 +3010,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         } finally {
             cacSuppressed = false;
         }
-        return h.surveil(this, topN, def);
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.ARRANGE, "arrangeForSurveil", null, topN, -1, -1, def, topN);
     }
 
     private ImmutablePair<CardCollection, CardCollection> arrangeForSurveilBridged(CardCollection topN) {
@@ -3036,7 +3042,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         } finally {
             cacSuppressed = false;
         }
-        return h.order(this, cards, destinationZone, source, def);
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.ARRANGE, "orderMoveToZoneList", source, cards, -1, -1, def, cards, destinationZone);
     }
 
     private CardCollectionView orderMoveToZoneListBridged(CardCollectionView cards, ZoneType destinationZone, SpellAbility source) {
@@ -3065,7 +3072,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         } finally {
             cacSuppressed = false;
         }
-        return h.discard(this, playerDiscard, sa, validCards, min, max, def);
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.SELECT, "chooseCardsToDiscardFrom", sa, validCards, min, max, def, playerDiscard, validCards, min, max);
     }
 
     private CardCollection chooseCardsToDiscardFromBridged(Player playerDiscard, SpellAbility sa, CardCollection validCards, int min, int max, CardCollectionView visibleToChooser) {
@@ -3228,7 +3236,8 @@ public class PlayerControllerBridge extends PlayerControllerAi implements AiCost
         } finally {
             cacSuppressed = false;
         }
-        return h.pick(this, destination, origin, sa, fetchList, isOptional, decider, def);
+        // decisionpoint-1102: the hook through the same adapter as PlayerControllerAi (CacAdapter)
+        return cacOnce(forge.ai.dp.Kind.SELECT, "chooseSingleCardForZoneChange", sa, fetchList, isOptional ? 0 : 1, 1, def, destination, origin, fetchList, isOptional, decider);
     }
 
     private Card chooseSingleCardForZoneChangeBridged(ZoneType destination, List<ZoneType> origin, SpellAbility sa,

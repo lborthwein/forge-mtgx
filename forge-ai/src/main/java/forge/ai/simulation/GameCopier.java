@@ -369,7 +369,10 @@ public class GameCopier {
         // another thread than the original (forge.game.IndependentCopies).
         forge.game.IndependentCopies.enter();
         try {
-            return makeCopy0(advanceToPhase, aiPlayer);
+            final Game copy = makeCopy0(advanceToPhase, aiPlayer);
+            // decisionpoint-1102 (census attribution only; a no-op without an observer): this game is a copy
+            forge.ai.dp.DecisionPoints.markCopy(copy, origGame);
+            return copy;
         } finally {
             forge.game.IndependentCopies.exit();
         }

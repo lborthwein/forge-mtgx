@@ -726,6 +726,11 @@ public class ComputerUtilMana {
                     && PlayerControllerAi.cacOf(ai) != null && PlayerControllerAi.cacOf(ai).getCacHook() != null
                     && ai.canPayLife(2, false, sa) && ai.getLife() > 2
                     && PlayerControllerAi.cacOf(ai).getCacHook().phyrexianLife(PlayerControllerAi.cacOf(ai), sa, false);
+            // decisionpoint-1102 (PR-B, observation only): one mana source pick of a real payment (PR-C makes it a point)
+            if (!test && forge.ai.dp.DecisionPoints.observer() != null) {
+                forge.ai.dp.DecisionPoints.note(ai, forge.ai.dp.Kind.SELECT, "seam:mana", saList.size(),
+                        cacLife ? "cac" : "forge");
+            }
             if (saPayment == null || cacLife) {
                 boolean lifeInsteadOfBlack = toPay.isBlack() && ai.hasKeyword("PayLifeInsteadOf:B");
                 if ((!toPay.isPhyrexian() && !lifeInsteadOfBlack) || !ai.canPayLife(phyLifeToPay, false, sa)
