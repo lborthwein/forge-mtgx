@@ -26,9 +26,9 @@ import forge.game.zone.ZoneType;
  * <ul>
  * <li>now: each untapped permanent's mana ability with a tap cost (no summoning sickness for creatures), one unit of the
  * colours it can produce; a source whose cost sacrifices it counts now only;</li>
- * <li>from hand, now and next turn: a permanent with mana cost 0 and a mana ability adds a unit (Mox, Petal); a mana
- * permanent whose production exceeds its cost adds the difference now and its production next turn (Sol Ring); a spell
- * whose effect is mana (ApiType.Mana) adds its production minus its cost (Dark Ritual), once per turn window;</li>
+ * <li>from hand, now and next turn: a permanent with mana cost 0 and a mana ability adds a unit; a mana permanent whose
+ * production exceeds its cost adds the difference; a source sacrificed for mana, or a spell whose effect is mana
+ * (ApiType.Mana), adds its net production to ONE of the two windows;</li>
  * <li>next turn: every non-sacrificed source untaps (creatures lose sickness), plus one land from hand (land drop).</li>
  * </ul>
  * Colours are matched: each coloured shard needs a unit able to make it (fewest-colour units first), then generic from the
@@ -100,8 +100,8 @@ public final class Affordability {
     }
 
     /**
-     * Hand mana: a permanent that stays (Mox, Sol Ring) adds to {now, next}; a one-shot (a sacrificed source such as Lotus
-     * Petal, a mana spell such as Dark Ritual) goes to {@code once}: usable in ONE of the two windows.
+     * Hand mana: a permanent that stays adds to {now, next}; a one-shot (a source sacrificed for its mana, a spell whose
+     * effect is mana) goes to {@code once}: usable in ONE of the two windows.
      */
     private static void hand(final Card c, final List<Integer> now, final List<Integer> next, final List<Integer> once,
             final Set<String> skip) {
