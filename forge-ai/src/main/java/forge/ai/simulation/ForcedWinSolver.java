@@ -265,8 +265,8 @@ public final class ForcedWinSolver {
          * endstep-rows-1103, owner ruling 11-03 on loop termination (false = off): an engine line with a REPEAT step (a loop
          * the engine detected by state recurrence with gaining counters, cycles/loopMacro) is re-valued at n = 1, 2, 4, ...
          * repetitions (up to loopMarginalCap): each variant is verified like any line (played in Forge copies over the
-         * belief worlds, oppMin on), and the line taken is the smallest n whose P(belief) is already within loopEps of the
-         * next schedule point's (once it is above 0). "Enough copies that the win rate stops improving."
+         * belief worlds, oppMin on), and the line taken is the smallest n whose P(belief) is within loopEps of the best
+         * over the schedule (a curve that turns down is handled). "Enough copies that the win rate stops improving."
          */
         public boolean loopMarginal = false;
         public double loopEps = 0.005;
@@ -2920,8 +2920,9 @@ public final class ForcedWinSolver {
 
     /**
      * Owner ruling 11-03: the first REPEAT step's count is chosen by marginal value. Variants at n = 1, 2, 4, ... (to
-     * loopMarginalCap, and at least the found count) are evaluated as lines; the smallest n with P(n) > 0 and
-     * P(next) - P(n) < loopEps is taken (the found line when no variant beats that rule). Never throws.
+     * loopMarginalCap, and the found count) are evaluated as lines; the smallest n within loopEps of the best P is taken
+     * (the found line when every P is 0). Only forced-win lines reach here: a loop that does not win now is not valued
+     * (that needs a value leaf; RESULT.md). Never throws.
      */
     private Eval loopMarginal(Game live, Line line, Eval found, int index, long t0) {
         int at = -1;
@@ -2968,13 +2969,17 @@ public final class ForcedWinSolver {
                 evs.add(ev);
                 final double p = ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0;
                 curve.append(n).append(':').append(String.format(java.util.Locale.ROOT, "%.3f", p)).append(' ');
-                if (k > 0 && pick == null) {
-                    final Eval prev = evs.get(k - 1);
-                    final double pp = prev.pUnopposed >= 1.0 ? prev.pBelief : 0.0;
-                    if (pp > 0 && p - pp < cfg.loopEps) {
-                        pick = prev;
-                        break;
-                    }
+            }
+            // owner addendum 11-03: a loop with a cost per iteration can turn down, so the whole schedule is valued and the
+            // smallest n within loopEps of the schedule's best P is taken (on a rising curve: where it stops improving)
+            double best = 0;
+            for (Eval ev : evs) {
+                best = Math.max(best, ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0);
+            }
+            for (Eval ev : evs) {
+                if (best > 0 && (ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0) >= best - cfg.loopEps) {
+                    pick = ev;
+                    break;
                 }
             }
         } catch (RuntimeException ex) {
