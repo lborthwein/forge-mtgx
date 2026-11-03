@@ -230,4 +230,36 @@ public class EndStepRowsTest extends SimulationTest {
         AssertJUnit.assertEquals("end step: it attacks on our turn for the last point " + es, 1.0, mean(es, fl), 1e-9);
         AssertJUnit.assertTrue("main phase: summoning sick, then their Edict " + mm, mean(mm, 0) < mean(es, fl));
     }
+
+    @Test
+    public void liveLookaheadOffTurnBreadthKeepsEveryInstantAtTheirEndStep() {
+        // the live look-ahead (LookaheadSearch) enumerates Forge's answer, pass and the next legal actions in Forge's own
+        // order, cut at breadth B: with five castable instants at their end step B = 2 keeps one; offTurnBreadth keeps all
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        for (int i = 0; i < 20; i++) addCardToZone("Island", a, ZoneType.Library);
+        for (int i = 0; i < 20; i++) addCardToZone("Plains", b, ZoneType.Library);
+        for (String n : new String[] {"Pestermite", "Brainstorm", "Lightning Bolt", "Vampiric Tutor", "Opt"}) {
+            addCardToZone(n, a, ZoneType.Hand);
+        }
+        for (String n : new String[] {"Volcanic Island", "Underground Sea", "Island", "Mountain"}) addCard(n, a);
+        addCard("Plains", b);
+        g.getPhaseHandler().devModeSet(PhaseType.END_OF_TURN, b);
+        g.getAction().checkStateEffects(true);
+        final LookaheadSearch.Config c0 = new LookaheadSearch.Config();
+        c0.breadth = 2;
+        final int n0 = new LookaheadSearch(c0).enumerate(g, a, null, 5L, null).size();
+        final LookaheadSearch.Config c1 = new LookaheadSearch.Config();
+        c1.breadth = 2;
+        c1.offTurnBreadth = 8;
+        final List<LookaheadSearch.Cand> on = new LookaheadSearch(c1).enumerate(g, a, null, 5L, null);
+        System.err.println("[endstep-test] live enumerate B=2: " + n0 + " candidates; offTurnBreadth=8: " + on.size());
+        AssertJUnit.assertEquals(2, n0);
+        AssertJUnit.assertTrue(String.valueOf(on.size()), on.size() >= 6);
+        AssertJUnit.assertFalse(c0.toJson().has("offTurnBreadth"));
+        // our own main phase: the key changes nothing
+        g.getPhaseHandler().devModeSet(PhaseType.MAIN1, a);
+        AssertJUnit.assertEquals(new LookaheadSearch(c0).enumerate(g, a, null, 5L, null).size(),
+                new LookaheadSearch(c1).enumerate(g, a, null, 5L, null).size());
+    }
 }
