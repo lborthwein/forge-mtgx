@@ -76,6 +76,11 @@ public class PeekAndRevealEffect extends SpellAbilityEffect {
             CardCollectionView revealableCards = CardLists.getValidCards(peekCards, revealValid, peekingPlayer, source, sa);
             boolean doReveal = !sa.hasParam("NoReveal") && !revealableCards.isEmpty();
             if (!noPeek) {
+                if (srcZone == ZoneType.Library) {
+                    // order-memory-1102: only the peeker learns them (research InfoState; no-op without a listener)
+                    peekingPlayer.getGame().fireLibraryInfo(forge.game.LibraryInfoListener.Kind.PEEK,
+                            java.util.Collections.singletonList(peekingPlayer), peekCards, srcZone);
+                }
                 peekingPlayer.getController().reveal(peekCards, srcZone, zoneToPeek,
                         source.getTranslatedName() + " - " +
                                 Localizer.getInstance().getMessage("lblLookingCardFrom"));

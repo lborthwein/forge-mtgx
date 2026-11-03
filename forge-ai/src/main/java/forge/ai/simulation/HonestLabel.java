@@ -101,6 +101,14 @@ public final class HonestLabel {
          */
         public boolean knownLib = false;
         /**
+         * order-memory-1102 layer 1 (false = off, the default, and then nothing changes, the sha included): the knownLib
+         * path with {@link InfoStates} as its source (it turns knownLib on, and both appear in the identity): the
+         * labeller passes InfoState(seat)'s known own-library positions, and every belief world (the base world and the
+         * solver's re-draws) keeps the opponent-library cards InfoState(seat) knows at their places (a Courser top that
+         * outlived Courser, a peeked card), with every unknown slot drawn canonically.
+         */
+        public boolean infoState = false;
+        /**
          * coverage-fix-1102 (false = off, the default, and then nothing changes, the sha included): with {@link #meter},
          * each row's meter also carries why its OppMin worlds were cut (by reason, with up to three answer cards each)
          * and which engine counter stopped its engine searches (ForcedWinSolver.Meter#reasons). Diagnostics only.
@@ -109,7 +117,7 @@ public final class HonestLabel {
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "knownLib", "meterReasons"));
+                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "knownLib", "meterReasons", "infoState"));
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
         static final Set<String> HOST_KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("turns", "out", "band",
@@ -143,6 +151,10 @@ public final class HonestLabel {
             if (o.has("libLabels")) s.libLabels = o.get("libLabels").getAsBoolean();
             if (o.has("knownLib")) s.knownLib = o.get("knownLib").getAsBoolean();
             if (o.has("meterReasons")) s.meterReasons = o.get("meterReasons").getAsBoolean();
+            if (o.has("infoState")) s.infoState = o.get("infoState").getAsBoolean();
+            if (s.infoState) {
+                s.knownLib = true; // order-memory-1102: infoState is knownLib's path with InfoState as the source
+            }
             s.checkHonest();
             return s;
         }
@@ -222,6 +234,7 @@ public final class HonestLabel {
             o.addProperty("exact", "false");
             final ForcedWinSolver.Config c = config(o);
             c.libWatch = libLabels; // e1-q8-1101
+            c.infoState = c.infoState || infoState; // order-memory-1102: InfoState pile memory, canonical play-out shuffles
             return c;
         }
 
@@ -266,6 +279,7 @@ public final class HonestLabel {
             c.beliefSingleton = beliefSingleton;
             c.threads = 1;
             c.worlds = worlds;
+            c.infoState = infoState; // order-memory-1102: opponent-library pins from InfoState(seat)
             return c;
         }
 
@@ -304,6 +318,9 @@ public final class HonestLabel {
             }
             if (meterReasons) {
                 o.addProperty("meterReasons", true); // coverage-fix-1102: only when on
+            }
+            if (infoState) {
+                o.addProperty("infoState", true); // order-memory-1102 layer 1: only when on
             }
             return o;
         }
