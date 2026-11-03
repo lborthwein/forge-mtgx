@@ -288,6 +288,11 @@ public final class ForcedWinSolver {
          */
         public boolean oppManaSearch = false;
         /**
+         * covfix-a-1102 (oppMinRev 3; false = off, the default, and then nothing changes): OppMin.Cfg#budgetByDepth, a
+         * branch's response budget is oppDepth (no resource reader, no clamp of 2); the node budget bounds the tree.
+         */
+        public boolean oppBudgetByDepth = false;
+        /**
          * Tests only (never a spec key): the adversary's own Forge AI answer is replaced by "pass", so v1 is exactly "one
          * counterspell at one of our spells" and v2 exactly the MIN over the scripted responses: a test then shows what
          * each covers structurally, not what Forge AI happens to play.
@@ -337,7 +342,8 @@ public final class ForcedWinSolver {
                 java.util.Map.entry("planScry", false), java.util.Map.entry("planDiscard", false),
                 java.util.Map.entry("payRecord", false), java.util.Map.entry("cacVariants", 6),
                 java.util.Map.entry("cacCap", 48), java.util.Map.entry("payVariants", 3),
-                java.util.Map.entry("planScryMax", 3), java.util.Map.entry("oppManaSearch", false));
+                java.util.Map.entry("planScryMax", 3), java.util.Map.entry("oppManaSearch", false),
+                java.util.Map.entry("oppBudgetByDepth", false));
 
         /** Labeller v2: any of its items on (each needs budget=counter). */
         public boolean v2() {
@@ -399,6 +405,7 @@ public final class ForcedWinSolver {
             c.oppDepth = intOr(get.apply("oppDepth"), c.oppDepth);
             c.oppNodes = intOr(get.apply("oppNodes"), c.oppNodes);
             c.oppManaSearch = "true".equals(get.apply("oppManaSearch")); // covfix-a-1102
+            c.oppBudgetByDepth = "true".equals(get.apply("oppBudgetByDepth")); // covfix-a-1102 (oppMinRev 3)
             c.cacPicks = v2all || "true".equals(get.apply("cacPicks"));
             c.cacLine = v2all || "true".equals(get.apply("cacLine"));
             c.planScry = v2all || "true".equals(get.apply("planScry"));
@@ -3289,6 +3296,7 @@ public final class ForcedWinSolver {
     Outcome minWorld(Game live, Line line, long ws, int world, long wall) {
         // architect-o ruling 10-30: the shared budgeted MIN (OppMin), one implementation with the R3 label search
         final OppMin.Cfg oc = new OppMin.Cfg(cfg.oppNodes, cfg.oppResponses, cfg.oppDepth);
+        oc.budgetByDepth = cfg.oppBudgetByDepth; // covfix-a-1102 (oppMinRev 3)
         final Outcome[] firstLost = new Outcome[1];
         final Outcome[] firstOut = new Outcome[1];
         final OppMin.Out m = OppMin.min(oc, script -> {

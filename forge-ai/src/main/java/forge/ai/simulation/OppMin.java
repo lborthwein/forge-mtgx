@@ -68,6 +68,13 @@ public final class OppMin {
     public static final class Cfg {
         public int nodes = 64, perPoint = 4, depth = 2, k = 1;
         public boolean memo = true;
+        /**
+         * covfix-a-1102 (oppMinRev 3, ARCH-PROPOSAL-1102 layer 3; false = the default, and then nothing changes): a
+         * branch's response budget is {@link #depth} itself, by search, instead of the hand-written resource reader
+         * (budgetHint: 2 only when their two cheapest answers fit their mana estimate) and the min(2, depth) clamp. The
+         * node budget still bounds the tree: over it is the oppNodes cap (fail closed).
+         */
+        public boolean budgetByDepth;
 
         public Cfg(final int nodes, final int perPoint, final int depth) {
             if (perPoint > CHARM_CAP) {
@@ -81,7 +88,7 @@ public final class OppMin {
         }
 
         int kMax() {
-            return Math.max(0, Math.min(2, depth));
+            return budgetByDepth ? Math.max(0, depth) : Math.max(0, Math.min(2, depth));
         }
     }
 
@@ -243,7 +250,7 @@ public final class OppMin {
                 b = 0;
                 for (Point p : pts) {
                     if (p.size > 0) {
-                        b = Math.min(cfg.kMax(), Math.max(0, p.budgetHint));
+                        b = cfg.budgetByDepth ? cfg.kMax() : Math.min(cfg.kMax(), Math.max(0, p.budgetHint));
                         break;
                     }
                 }
