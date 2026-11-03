@@ -261,9 +261,20 @@ public final class ForcedWinSolver {
         public boolean engineEveryWindow = false;
         /** endstep-rows-1103 (false = off): ForcedWinEngine.Limits#passBudget, pass 2's own step and card budgets. */
         public boolean enginePassBudget = false;
+        /**
+         * endstep-rows-1103, owner ruling 11-03 on loop termination (false = off): an engine line with a REPEAT step (a loop
+         * the engine detected by state recurrence with gaining counters, cycles/loopMacro) is re-valued at n = 1, 2, 4, ...
+         * repetitions (up to loopMarginalCap): each variant is verified like any line (played in Forge copies over the
+         * belief worlds, oppMin on), and the line taken is the smallest n whose P(belief) is already within loopEps of the
+         * next schedule point's (once it is above 0). "Enough copies that the win rate stops improving."
+         */
+        public boolean loopMarginal = false;
+        public double loopEps = 0.005;
+        public int loopMarginalCap = 256;
         /** endstep-rows-1103: its keys, recorded only when on (off = the recorded spec unchanged). */
         public static final java.util.Map<String, Object> ENDSTEP_DEFAULTS = java.util.Map.of("engineEndStepOpen", false,
-                "engineEveryWindow", false, "enginePassBudget", false);
+                "engineEveryWindow", false, "enginePassBudget", false,
+                "loopMarginal", false, "loopEps", 0.005, "loopMarginalCap", 256);
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         /**
@@ -416,6 +427,9 @@ public final class ForcedWinSolver {
             c.engineEndStepOpen = "true".equals(get.apply("engineEndStepOpen")); // endstep-rows-1103
             c.engineEveryWindow = "true".equals(get.apply("engineEveryWindow")); // endstep-rows-1103
             c.enginePassBudget = "true".equals(get.apply("enginePassBudget")); // endstep-rows-1103
+            c.loopMarginal = "true".equals(get.apply("loopMarginal")); // endstep-rows-1103
+            c.loopEps = dblOr(get.apply("loopEps"), c.loopEps);
+            c.loopMarginalCap = intOr(get.apply("loopMarginalCap"), c.loopMarginalCap);
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -666,6 +680,8 @@ public final class ForcedWinSolver {
         public long ladderRuns, ladderFound, ladderNodes, ladderSteps;
         /** endstep-rows-1103 (engineEndStepOpen): end-step engine gates skipped; reported only when non-zero. */
         public long endStepOpens;
+        /** endstep-rows-1103 (loopMarginal): lines whose loop count was chosen by marginal value; only when non-zero. */
+        public long loopMarginals;
         /**
          * rollout-budget-1101: decisions that spent their Forge AI work cap ({@link forge.ai.AiWork#CAP}), and play-outs
          * cut by it (not wins); reported only when non-zero.
@@ -710,6 +726,7 @@ public final class ForcedWinSolver {
             ladderNodes += sign * o.ladderNodes;
             ladderSteps += sign * o.ladderSteps;
             endStepOpens += sign * o.endStepOpens;
+            loopMarginals += sign * o.loopMarginals;
             aiWorkCaps += sign * o.aiWorkCaps;
             playoutAiWorkCuts += sign * o.playoutAiWorkCuts;
             // coverage-fix-1102 (meter only): counts add with the sign; card names and maxima only add (since() keeps them)
@@ -788,6 +805,9 @@ public final class ForcedWinSolver {
             }
             if (endStepOpens != 0) {
                 o.addProperty("end_step_opens", endStepOpens); // endstep-rows-1103
+            }
+            if (loopMarginals != 0) {
+                o.addProperty("loop_marginals", loopMarginals); // endstep-rows-1103
             }
             if (aiWorkCaps != 0 || playoutAiWorkCuts != 0) {
                 o.addProperty("ai_work_caps", aiWorkCaps);
@@ -2863,7 +2883,7 @@ public final class ForcedWinSolver {
             engineEvalBudget = cfg.engineEvalSteps; // R3-2: label mode, the engine line's own eval-step budget
             engineEvalBase = meter.playoutSteps;
         }
-        final Eval e;
+        Eval e;
         try {
             e = evaluate(live, line, mix(cfg.seed, index * 1000L + 999),
                     deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
@@ -2873,6 +2893,11 @@ public final class ForcedWinSolver {
             }
         }
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
+        final Eval em = cfg.loopMarginal ? loopMarginal(live, line, e, index, t0) : e; // endstep-rows-1103
+        if (em != e) {
+            e = em;
+            line = em.line;
+        }
         if (evalSink != null) {
             evalSink.add(e);
         }
@@ -2886,6 +2911,83 @@ public final class ForcedWinSolver {
         }
         receipt("FORCED_WIN take" + tag() + " turn=" + pos.turn + " " + e + " ms=" + (System.nanoTime() - t0) / 1_000_000);
         return line;
+    }
+
+    // ------------------------------------------------------------------ endstep-rows-1103: loop count by marginal value
+
+    /** endstep-rows-1103 (loopMarginal; diagnostics): the last curve, "n:p n:p ..." and the n taken. */
+    public String lastLoopCurve;
+
+    /**
+     * Owner ruling 11-03: the first REPEAT step's count is chosen by marginal value. Variants at n = 1, 2, 4, ... (to
+     * loopMarginalCap, and at least the found count) are evaluated as lines; the smallest n with P(n) > 0 and
+     * P(next) - P(n) < loopEps is taken (the found line when no variant beats that rule). Never throws.
+     */
+    private Eval loopMarginal(Game live, Line line, Eval found, int index, long t0) {
+        int at = -1;
+        for (int i = 0; i < line.steps.size(); i++) {
+            if (line.steps.get(i).kind == ForcedWinModel.AbilKind.REPEAT && line.steps.get(i).body != null) {
+                at = i;
+                break;
+            }
+        }
+        if (at < 0) {
+            return found;
+        }
+        final ForcedWinPlanner.Step rep = line.steps.get(at);
+        final List<Integer> sched = new ArrayList<>();
+        for (int n = 1; n <= cfg.loopMarginalCap; n *= 2) {
+            sched.add(n);
+        }
+        if (!sched.contains(rep.times)) {
+            sched.add(rep.times);
+            java.util.Collections.sort(sched);
+        }
+        final List<Eval> evs = new ArrayList<>();
+        final StringBuilder curve = new StringBuilder();
+        Eval pick = null;
+        try {
+            for (int k = 0; k < sched.size(); k++) {
+                final int n = sched.get(k);
+                final Eval ev;
+                if (n == rep.times) {
+                    ev = found;
+                } else {
+                    final List<ForcedWinPlanner.Step> steps = new ArrayList<>(line.steps);
+                    steps.set(at, ForcedWinPlanner.Step.repeat(rep.body, n));
+                    final Line v = new Line(steps, line.pileNames, line.winTurn, line.lifeLeft, line.manaLeft,
+                            line.protection, line.protectionNames, line.how);
+                    v.window = line.window;
+                    v.windowTurn = line.windowTurn;
+                    v.stackStart = line.stackStart;
+                    v.knownTop = line.knownTop;
+                    ev = evaluate(live, v, mix(cfg.seed, index * 1000L + 999), // the same worlds as the found line
+                            deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L,
+                                    System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
+                }
+                evs.add(ev);
+                final double p = ev.pUnopposed >= 1.0 ? ev.pBelief : 0.0;
+                curve.append(n).append(':').append(String.format(java.util.Locale.ROOT, "%.3f", p)).append(' ');
+                if (k > 0 && pick == null) {
+                    final Eval prev = evs.get(k - 1);
+                    final double pp = prev.pUnopposed >= 1.0 ? prev.pBelief : 0.0;
+                    if (pp > 0 && p - pp < cfg.loopEps) {
+                        pick = prev;
+                        break;
+                    }
+                }
+            }
+        } catch (RuntimeException ex) {
+            receipt("FORCED_WIN loop-marginal error " + ex);
+            return found;
+        }
+        if (pick == null) {
+            pick = evs.get(evs.size() - 1);
+        }
+        lastLoopCurve = curve.toString().trim() + " -> n=" + pick.line.steps.get(at).times + " (found " + rep.times + ")";
+        meter.loopMarginals++;
+        receipt("FORCED_WIN loop-marginal" + tag() + " " + lastLoopCurve);
+        return pick;
     }
 
     // ------------------------------------------------------------------ Part B: likely-win lines (solver-gaps-1015)

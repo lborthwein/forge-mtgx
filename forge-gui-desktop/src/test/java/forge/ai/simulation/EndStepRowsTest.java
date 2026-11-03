@@ -309,4 +309,34 @@ public class EndStepRowsTest extends SimulationTest {
     public void exarchAtTheirEndStepThenTwinIsPreferredOverOurMainPhase() {
         setupPreferredAtTheirEndStep("Deceiver Exarch", "Splinter Twin", "Volcanic Island;Volcanic Island;Mountain;Mountain");
     }
+
+    @Test
+    public void loopCountIsChosenByMarginalValue() {
+        // Kiki-Jiki + Pestermite in play at our main phase, they are at 20 with two untapped Grizzly Bears: the loop's
+        // count is taken where P(win) stops improving (not "exactly lethal"); off, the found count stands
+        final String f = "[state]\nturn=7\nactiveplayer=human\nactivephase=MAIN1\nhumanlife=20\nailife=20\n"
+                + "humanlandsplayed=0\nailandsplayed=0\naihand=\nailibrary=" + ForcedWinSolverTest.LIB20
+                + "\naigraveyard=\naiexile=\naibattlefield=Forest;Grizzly Bears;Grizzly Bears\nhumanhand=\nhumanbattlefield="
+                + "Pestermite;" + ForcedWinSolverTest.KIKI_BF + "\nhumangraveyard=\nhumanexile=\nhumanlibrary="
+                + ForcedWinSolverTest.OURLIB + "\n";
+        final String k = "cycles=true,loopMacro=true,loopMacro3=true";
+        final Game g0 = ForcedWinSolverTest.game("Default", "Default", f);
+        final ForcedWinSolver s0 = new ForcedWinSolver(g0.getPlayers().get(0), ForcedWinSolver.Config.fromProps(
+                java.util.Map.of("cycles", "true", "loopMacro", "true", "loopMacro3", "true")::get));
+        final List<ForcedWinSolver.Proposal> p0 = s0.propose(g0);
+        final Game g1 = ForcedWinSolverTest.game("Default", "Default", f);
+        final ForcedWinSolver s1 = new ForcedWinSolver(g1.getPlayers().get(0), ForcedWinSolver.Config.fromProps(
+                java.util.Map.of("cycles", "true", "loopMacro", "true", "loopMacro3", "true", "loopMarginal", "true")::get));
+        final List<ForcedWinSolver.Proposal> p1 = s1.propose(g1);
+        System.err.println("[endstep-test] loop off: " + (p0.isEmpty() ? "none" : p0.get(0).text));
+        System.err.println("[endstep-test] loop marginal: " + s1.lastLoopCurve + " | " + (p1.isEmpty() ? "none" : p1.get(0).text));
+        AssertJUnit.assertFalse(p0.isEmpty());
+        AssertJUnit.assertFalse(p1.isEmpty());
+        AssertJUnit.assertNotNull(s1.lastLoopCurve);
+        AssertJUnit.assertEquals(1.0, p1.get(0).pBelief, 1e-9);
+        AssertJUnit.assertNull(s0.lastLoopCurve);
+        final ForcedWinSolver.Config c = ForcedWinSolver.Config.fromProps(x -> null);
+        AssertJUnit.assertFalse(HonestGenerator.solverCfgJson(c).has("loopMarginal"));
+        AssertJUnit.assertFalse(HonestGenerator.solverCfgJson(c).has("loopEps"));
+    }
 }
