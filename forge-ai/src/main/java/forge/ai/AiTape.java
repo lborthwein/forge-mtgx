@@ -694,6 +694,20 @@ public final class AiTape {
                     ? "the tape ended after " + list.size() + " entries" : "its frame had only " + list.size() + " entries"));
         }
         JsonObject e = list.get(at).getAsJsonObject();
+        if (cursors.isEmpty() && !fits(e, k, m)) {
+            // codec-1103 (class A, top level): a one-option ask of Forge AI's deliberation that changed nothing, which the
+            // forced replay never makes, carries no information: skipped (counted), never any other entry
+            while (forcedTop < list.size() && !fits(list.get(forcedTop).getAsJsonObject(), k, m)
+                    && trivial(list.get(forcedTop).getAsJsonObject(),
+                            forcedTop > 0 ? str(list.get(forcedTop - 1).getAsJsonObject(), "post") : null)) {
+                forcedTop++;
+                prepNeutral++;
+            }
+            if (forcedTop >= list.size()) {
+                throw diverge("the record has no " + what(k, m) + " here: the tape ended after " + list.size() + " entries");
+            }
+            e = list.get(forcedTop).getAsJsonObject();
+        }
         if (!cursors.isEmpty() && cursors.peek().prep && !fits(e, k, m) && neutral(e, prevPost(cursors.peek()))) {
             skipNeutral(cursors.peek(), k, m);
             if (cursors.peek().i >= list.size()) {
@@ -779,6 +793,15 @@ public final class AiTape {
         // an entry without its own start state started where the entry before it ended (the record's convention)
         final String pre = x.has("pre") ? str(x, "pre") : prevPost;
         return "m".equals(str(x, "k")) && !x.has("sub") && pre != null && x.has("post") && pre.equals(str(x, "post"));
+    }
+
+    /** A neutral ask with exactly one option offered ({@code "a": {"of": 1, ...}}). */
+    static boolean trivial(final JsonObject x, final String prevPost) {
+        if (!neutral(x, prevPost) || !x.has("a") || !x.get("a").isJsonObject()) {
+            return false;
+        }
+        final JsonObject a = x.getAsJsonObject("a");
+        return a.has("of") && a.get("of").isJsonPrimitive() && a.get("of").getAsInt() == 1;
     }
 
     private static String prevPost(final Cur c) {
