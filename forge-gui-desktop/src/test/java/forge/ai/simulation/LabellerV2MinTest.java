@@ -643,6 +643,51 @@ public class LabellerV2MinTest extends AITest {
         }
     }
 
+    /** covfix-a-1102: oppMinRev 3 is its own recorded change; rev 2 keeps its sha and its budget reader. */
+    @Test
+    public void oppMinRevThreeIsARecordedChange() {
+        final com.google.gson.JsonObject o = WinConditionCoverageTest.spec();
+        final com.google.gson.JsonObject r2 = o.deepCopy();
+        r2.addProperty("oppMinRev", 2);
+        final com.google.gson.JsonObject r3 = o.deepCopy();
+        r3.addProperty("oppMinRev", 3);
+        final HonestLabel.Spec v2 = HonestLabel.Spec.parse(r2), v3 = HonestLabel.Spec.parse(r3);
+        Assert.assertNotEquals(v3.sha(), v2.sha());
+        Assert.assertFalse(v2.winConfig().oppBudgetByDepth || v2.lossConfig().oppBudgetByDepth);
+        Assert.assertEquals(v2.winConfig().oppDepth, 2);
+        Assert.assertTrue(v3.winConfig().oppBudgetByDepth && v3.lossConfig().oppBudgetByDepth);
+        Assert.assertEquals(v3.winConfig().oppDepth, 4);
+        Assert.assertEquals(v3.lossConfig().oppDepth, 4);
+        Assert.assertTrue(v3.winConfig().oppManaSearch && v3.winConfig().oppResponses == 16, "rev 3 includes rev 2");
+        r3.getAsJsonObject("solverCfg").addProperty("oppDepth", "3");
+        Assert.assertEquals(HonestLabel.Spec.parse(r3).winConfig().oppDepth, 3, "an explicit key wins");
+        final com.google.gson.JsonObject bad = o.deepCopy();
+        bad.addProperty("oppMinRev", 4);
+        Assert.assertThrows(IllegalArgumentException.class, () -> HonestLabel.Spec.parse(bad));
+    }
+
+    /**
+     * covfix-a-1102 (oppMinRev 3): the branch budget is the depth, by search, not the resource reader and its clamp of
+     * 2. A counter war three deep (their three Counterspells against our Bolt and our two): with the reader the third
+     * point is past the budget (budget cap events); with the budget by depth 4 the MIN plays all three (none).
+     */
+    @Test
+    public void theBranchBudgetIsSearchedNotRead() {
+        final String def = "Counterspell;Counterspell;Counterspell", lands = "Island;Island;Island;Island;Island;Island";
+        final Object[] r = run(board3(def, lands), passive(withDepth(cfg(true, 64), 4)));
+        final ForcedWinSolver.Config search = withDepth(cfg(true, 64), 4);
+        search.oppBudgetByDepth = true;
+        final Object[] s = run(board3(def, lands), passive(search));
+        Assert.assertFalse((Boolean) r[0], (String) r[1]);
+        Assert.assertFalse((Boolean) s[0], (String) s[1]);
+        final com.google.gson.JsonObject rm = (com.google.gson.JsonObject) r[2], sm = (com.google.gson.JsonObject) s[2];
+        // (both also meet their own-stack-target gap, Counterspell on their own Counterspell: a cap either way)
+        Assert.assertTrue(rm.has("opp_min_cap_events") && rm.getAsJsonObject("opp_min_cap_events").has("budget"),
+                "the reader's budget is reached in the war: " + rm);
+        Assert.assertFalse(sm.has("opp_min_cap_events") && sm.getAsJsonObject("opp_min_cap_events").has("budget"),
+                "searched to depth 4: no budget cap event: " + sm);
+    }
+
     /** covfix-a-1102: oppMinRev 2 is a recorded change (its own sha); rev 1 (absent or explicit) is the old spec. */
     @Test
     public void oppMinRevTwoIsARecordedChange() {
