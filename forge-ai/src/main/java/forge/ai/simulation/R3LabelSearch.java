@@ -1463,8 +1463,11 @@ public final class R3LabelSearch {
             final List<PCand> draws = new ArrayList<>(), lands = new ArrayList<>(), policy = new ArrayList<>();
             final List<PCand> instants = new ArrayList<>(); // endstep-rows-1103 (instantCands)
             final PhaseHandler cph = g.getPhaseHandler();
-            final boolean offMain = spec.instantCands && g.getStack().isEmpty()
-                    && !(cph.isPlayerTurn(me) && (cph.is(PhaseType.MAIN1) || cph.is(PhaseType.MAIN2)));
+            // every window outside our main phases, and any window with the opponent's object on top of the stack
+            final boolean theirTop = !g.getStack().isEmpty() && g.getStack().peek().getSpellAbility() != null
+                    && g.getStack().peek().getSpellAbility().getActivatingPlayer() != me;
+            final boolean offMain = spec.instantCands && (g.getStack().isEmpty()
+                    && !(cph.isPlayerTurn(me) && (cph.is(PhaseType.MAIN1) || cph.is(PhaseType.MAIN2))) || theirTop);
             final Set<String> landNames = new TreeSet<>();
             List<SpellAbility> all = ComputerUtilAbility.getSpellAbilities(ComputerUtilAbility.getAvailableCards(g, me), me);
             all = ComputerUtilAbility.getOriginalAndAltCostAbilities(all, me);
@@ -1484,7 +1487,7 @@ public final class R3LabelSearch {
                         draws.add(c);
                     } else if (offMain && sa.canPlay() && ComputerUtilCost.canPayCost(sa, me, false)) {
                         // endstep-rows-1103: any other castable action in a window outside our main phase
-                        final PCand c = PCand.of(sa, "instant");
+                        final PCand c = PCand.of(sa, theirTop ? "instant-resp" : "instant");
                         c.spends = spends(sa, me, spendable);
                         instants.add(c);
                     }
@@ -1560,7 +1563,7 @@ public final class R3LabelSearch {
     /** Architect review (N12): whether the menu answers an opponent object on the stack (a response row). */
     public static boolean responseRow(final List<PCand> cands) {
         for (PCand c : cands) {
-            if ("respond".equals(c.src)) return true;
+            if ("respond".equals(c.src) || "instant-resp".equals(c.src)) return true;
         }
         return false;
     }

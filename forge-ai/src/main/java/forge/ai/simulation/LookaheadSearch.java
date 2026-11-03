@@ -72,6 +72,13 @@ public final class LookaheadSearch {
     public static final class Config {
         public int worlds = 1;
         public int breadth = 4;
+        /**
+         * endstep-rows-1103 (N12, live; 0 = off, the default, and then nothing changes): at a priority outside our own
+         * main phases (their turn, our upkeep/combat/end, a response), every distinct castable spell or ability past the
+         * breadth-B cut is also a candidate, up to this many candidates in all, so a flash creature or an instant tutor at
+         * their end step is never cut by Forge's own ordering.
+         */
+        public int offTurnBreadth = 0;
         public int horizonTurns = 2;
         public int maxSteps = 5000;
         public long seed = 0L;
@@ -426,6 +433,9 @@ public final class LookaheadSearch {
             o.addProperty("breadth", breadth);
             if (infoState) {
                 o.addProperty("infoState", true); // order-memory-1102: only when on
+            }
+            if (offTurnBreadth > 0) {
+                o.addProperty("offTurnBreadth", offTurnBreadth); // endstep-rows-1103: only when on
             }
             o.addProperty("horizonTurns", horizonTurns);
             o.addProperty("maxSteps", maxSteps);
@@ -4709,8 +4719,12 @@ public final class LookaheadSearch {
                     }
                 }
             }
+            final PhaseHandler eph = g.getPhaseHandler();
+            // endstep-rows-1103 (offTurnBreadth): outside our main phases the cut is the wider one
+            final int cut = cfg.offTurnBreadth > cfg.breadth && !(eph.isPlayerTurn(me) && eph.getPhase() != null
+                    && eph.getPhase().isMain()) ? cfg.offTurnBreadth : cfg.breadth;
             for (SpellAbility sa : legal) {
-                if (out.size() >= cfg.breadth) {
+                if (out.size() >= cut) {
                     break;
                 }
                 Cand c = new Cand(sa, false);

@@ -117,4 +117,114 @@ public class EndStepRowsTest extends SimulationTest {
         final ForcedWinSolver.Config c = ForcedWinSolver.Config.fromProps(k -> null);
         AssertJUnit.assertFalse(HonestGenerator.solverCfgJson(c).has("engineEndStepOpen"));
     }
+
+    // ------------------------------------------------------------------------------------------------ owner scenarios
+    // (test scenarios only: nothing in the code knows these cards; the values come from the R3 row search: oppMin at the
+    // root window, Forge AI seats in the lines, a terminal leaf (1 / 0), else the stub value below)
+
+    private static JsonObject scenarioSpec() {
+        final JsonObject o = R3LabelSearchTest.base();
+        o.addProperty("instantCands", true);
+        o.addProperty("leaf", "value");
+        o.addProperty("horizon", 2);
+        o.addProperty("oppMin", true);
+        o.addProperty("oppMinIn", "both");
+        o.addProperty("selectWorlds", 1);
+        o.addProperty("targetWorlds", 2);
+        return o;
+    }
+
+    private static int find(final List<R3LabelSearch.PCand> cands, final String label, final boolean pass) {
+        for (int i = 0; i < cands.size(); i++) {
+            final R3LabelSearch.PCand c = cands.get(i);
+            if (pass ? c.pass && c.hold == null : !c.pass && c.label.startsWith(label)) return i;
+        }
+        return -1;
+    }
+
+    private static double mean(final JsonObject j, final int i) {
+        return j.getAsJsonArray("cands").get(i).getAsJsonObject().get("mean").getAsDouble();
+    }
+
+    /** They are at 3 with Counterspell and two untapped Islands; we hold Vampiric Tutor and one Bolt, Badlands + Mountain. */
+    private Game vampiricBoard(final PhaseType phase, final boolean theirs) {
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        for (int i = 0; i < 12; i++) addCardToZone("Swamp", a, ZoneType.Library);
+        addCardToZone("Lightning Bolt", a, ZoneType.Library);
+        for (int i = 0; i < 20; i++) addCardToZone("Island", b, ZoneType.Library);
+        addCardToZone("Vampiric Tutor", a, ZoneType.Hand);
+        addCardToZone("Lightning Bolt", a, ZoneType.Hand);
+        addCard("Badlands", a);
+        addCard("Mountain", a);
+        addCardToZone("Counterspell", b, ZoneType.Hand);
+        addCard("Island", b);
+        addCard("Island", b);
+        b.setLife(3, null);
+        g.getPhaseHandler().devModeSet(phase, theirs ? b : a);
+        g.getAction().checkStateEffects(true);
+        return g;
+    }
+
+    @Test
+    public void vampiricAtTheirEndStepBeatsOurUpkeepAgainstAnOpenCounterspell() {
+        // at their end step Vampiric uses last turn's mana: on our turn both lands cast two Bolts into one Counterspell
+        final Game g = vampiricBoard(PhaseType.END_OF_TURN, true);
+        final Player a = g.getPlayers().get(0);
+        final R3LabelSearch r3 = new R3LabelSearch(R3LabelSearchTest.spec(scenarioSpec()),
+                R3LabelSearchTest.env(R3LabelSearchTest.flat(0.0), null));
+        final List<R3LabelSearch.PCand> cands = r3.candidates(g, a, null);
+        final int vt = find(cands, "Vampiric Tutor", false), pass = find(cands, "", true);
+        AssertJUnit.assertTrue(String.valueOf(cands), vt >= 0 && pass >= 0);
+        final JsonObject es = r3.priorityRow(g, a, cands, 21L).toJson();
+        System.err.println("[endstep-test] vampiric end-step row " + es);
+        final Game u = vampiricBoard(PhaseType.UPKEEP, false);
+        final Player au = u.getPlayers().get(0);
+        final List<R3LabelSearch.PCand> cu = r3.candidates(u, au, null);
+        final int vu = find(cu, "Vampiric Tutor", false);
+        AssertJUnit.assertTrue(String.valueOf(cu), vu >= 0);
+        final JsonObject up = r3.priorityRow(u, au, cu, 21L).toJson();
+        System.err.println("[endstep-test] vampiric upkeep row " + up);
+        AssertJUnit.assertTrue("end step beats hold: " + es, mean(es, vt) > mean(es, pass));
+        AssertJUnit.assertTrue("end step beats our upkeep: " + es + " / " + up, mean(es, vt) > mean(up, vu));
+    }
+
+    /** They are at 1 with Chainer's Edict (a sorcery) in hand; we hold Spectral Sailor (flash 1/1 flier) and an Island. */
+    private Game flashBoard(final PhaseType phase, final boolean theirs) {
+        final Game g = initAndCreateGame();
+        final Player a = g.getPlayers().get(0), b = g.getPlayers().get(1);
+        for (int i = 0; i < 20; i++) addCardToZone("Island", a, ZoneType.Library);
+        for (int i = 0; i < 20; i++) addCardToZone("Swamp", b, ZoneType.Library);
+        addCardToZone("Spectral Sailor", a, ZoneType.Hand);
+        addCard("Island", a);
+        addCardToZone("Chainer's Edict", b, ZoneType.Hand);
+        for (int i = 0; i < 2; i++) addCard("Swamp", b);
+        b.setLife(1, null);
+        g.getPhaseHandler().devModeSet(phase, theirs ? b : a);
+        g.getAction().checkStateEffects(true);
+        return g;
+    }
+
+    @Test
+    public void flashCreatureAtTheirEndStepBeatsOurMainIntoSorceryRemoval() {
+        final ChooseACardTest.Stub zero = R3LabelSearchTest.flat(0.0);
+        final JsonObject o = scenarioSpec();
+        o.addProperty("horizon", 3); // through their next turn (their Edict) to our following turn
+        final R3LabelSearch r3 = new R3LabelSearch(R3LabelSearchTest.spec(o), R3LabelSearchTest.env(zero, null));
+        final Game g = flashBoard(PhaseType.END_OF_TURN, true);
+        final Player a = g.getPlayers().get(0);
+        final List<R3LabelSearch.PCand> cands = r3.candidates(g, a, null);
+        final int fl = find(cands, "Spectral Sailor", false);
+        AssertJUnit.assertTrue(String.valueOf(cands), fl >= 0);
+        final JsonObject es = r3.priorityRow(g, a, cands, 23L).toJson();
+        System.err.println("[endstep-test] flash end-step row " + es);
+        final Game m = flashBoard(PhaseType.MAIN1, false);
+        final Player am = m.getPlayers().get(0);
+        final List<R3LabelSearch.PCand> cm = r3.candidates(m, am,
+                java.util.Collections.singletonList(R3LabelSearchTest.firstSpell(am, "Spectral Sailor")));
+        final JsonObject mm = r3.priorityRow(m, am, cm.subList(0, 1), 23L).toJson();
+        System.err.println("[endstep-test] flash main row " + mm);
+        AssertJUnit.assertEquals("end step: it attacks on our turn for the last point " + es, 1.0, mean(es, fl), 1e-9);
+        AssertJUnit.assertTrue("main phase: summoning sick, then their Edict " + mm, mean(mm, 0) < mean(es, fl));
+    }
 }
