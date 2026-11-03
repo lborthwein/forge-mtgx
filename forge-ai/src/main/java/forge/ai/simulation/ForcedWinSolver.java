@@ -500,6 +500,8 @@ public final class ForcedWinSolver {
 
     /** Receipts to stderr (diagnostics only): -Dforge.ai.forcedWin.receipts=true. */
     static final boolean RECEIPTS = Boolean.getBoolean("forge.ai.forcedWin.receipts");
+    /** engine-caps-1103 (diagnostics only): the label row this thread works on, for the engine's diag lines. */
+    public static final ThreadLocal<String> DIAG_ROW = new ThreadLocal<>();
     /** Diagnostics only: the follower's every priority answer (-Dforge.ai.forcedWin.followTrace). */
     static final boolean DBG_FOLLOW = Boolean.getBoolean("forge.ai.forcedWin.followTrace");
 

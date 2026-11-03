@@ -361,6 +361,7 @@ public final class RlReplayLabeller implements PriorityDecisionListener {
         final String stateSha = search == null && r3 == null ? null : TrajectoryRef.stateSha(g);
         final long key = RlSearch.splitmix(uid ^ (0x6276774c4142454cL + 2L * ord + seat));
         forge.ai.dp.DecisionPoints.enterRow(uidStr + ":" + seat + ":" + ord); // decisionpoint-1102 census (no-op when off)
+        forge.ai.simulation.ForcedWinSolver.DIAG_ROW.set(uidStr + ":" + seat + ":" + ord); // engine-caps-1103 (diag only)
         final Object[] got;
         StepSearch.Result sr = null;
         try { // review #167 S3: the row is left on every path
