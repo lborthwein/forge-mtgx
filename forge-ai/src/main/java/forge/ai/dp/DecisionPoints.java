@@ -146,6 +146,9 @@ public final class DecisionPoints {
         if (same(answer, dp.forgeDefault())) {
             return true;
         }
+        if (!sameShape(dp.forgeDefault(), answer)) {
+            return false; // review #175 S2: an answer the caller could not cast to its own type is refused
+        }
         final Collection<?> opts = dp.options();
         if (dp.validator() != null) {
             return dp.validator().test(answer); // PR-C: a seam point's own check (targets, X, cost cards)
@@ -183,6 +186,34 @@ public final class DecisionPoints {
             default:
                 return false;
         }
+    }
+
+    /**
+     * Review #175 S2: whether {@code answer} has the shape of Forge's answer {@code def}, so the controller's cast of it
+     * to the method's own return type cannot fail: a card collection for a card collection, a pair for a pair, a list
+     * for a list, a map for a map, a single game object for a single one (never a collection in its place).
+     * A null default (pass, no choice) gives no shape to check against, so only null is accepted there until the
+     * points declare their answer type (a later PR): conservative, never a failed cast.
+     */
+    static boolean sameShape(final Object def, final Object answer) {
+        if (answer == null) {
+            return true; // null is checked against min/options by the caller's own rules
+        }
+        if (def == null) {
+            return false;
+        }
+        if (def instanceof forge.game.card.CardCollectionView) return answer instanceof forge.game.card.CardCollectionView;
+        if (def instanceof org.apache.commons.lang3.tuple.ImmutablePair<?, ?>) {
+            return answer instanceof org.apache.commons.lang3.tuple.ImmutablePair<?, ?>;
+        }
+        if (def instanceof Pair<?, ?>) return answer instanceof Pair<?, ?>;
+        if (def instanceof java.util.List<?>) return answer instanceof java.util.List<?>;
+        if (def instanceof Collection<?>) return answer instanceof Collection<?>;
+        if (def instanceof Map<?, ?>) return answer instanceof Map<?, ?>;
+        if (def instanceof SpellAbility) return answer instanceof SpellAbility;
+        if (def instanceof forge.game.card.Card) return answer instanceof forge.game.card.Card;
+        if (def instanceof forge.game.GameEntity) return answer instanceof forge.game.GameEntity;
+        return def.getClass().isInstance(answer);
     }
 
     /** The point every instrumented controller method builds (only when something is installed). */

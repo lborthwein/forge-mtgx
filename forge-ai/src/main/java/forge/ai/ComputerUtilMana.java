@@ -272,6 +272,31 @@ public class ComputerUtilMana {
         }
     }
 
+    /**
+     * decisionpoint-1102 (review #175 S1): an answerer's mana source for {@code toPay} is legal only if it is one of the
+     * sources offered AND passes the filters {@link #chooseManaAbility} itself applies before it would pick it: not
+     * the paid ability's own host, not a tap source already spent this payment (PAYS_TAP_COST), a positive Amount, and
+     * canPayShardWithSpellAbility (with the same checkCosts), so a departure never fails halfway through payment.
+     * Anything that is not exactly a SpellAbility is refused (review #175 S2).
+     */
+    static boolean manaPickLegal(final ManaCostBeingPaid cost, final SpellAbility sa, final Player ai,
+            final ManaCostShard toPay, final Collection<SpellAbility> offered, final boolean checkCosts, final Object a) {
+        if (!(a instanceof SpellAbility ma) || offered == null || !offered.contains(ma)) {
+            return false;
+        }
+        if (ma.getHostCard() == sa.getHostCard()) {
+            return false;
+        }
+        if (ma.getPayCosts().hasTapCost() && AiCardMemory.isRememberedCard(ai, ma.getHostCard(), MemorySet.PAYS_TAP_COST)) {
+            return false;
+        }
+        final int amount = ma.hasParam("Amount") ? AbilityUtils.calculateAmount(ma.getHostCard(), ma.getParam("Amount"), ma) : 1;
+        if (amount <= 0) {
+            return false;
+        }
+        return canPayShardWithSpellAbility(toPay, ai, ma, sa, cost, checkCosts, cost.getXManaCostPaidByColor());
+    }
+
     public static SpellAbility chooseManaAbility(ManaCostBeingPaid cost, SpellAbility sa, Player ai, ManaCostShard toPay,
             Collection<SpellAbility> maList, boolean checkCosts) {
         Card saHost = sa.getHostCard();
@@ -705,7 +730,8 @@ public class ComputerUtilMana {
             final boolean checkCosts = checkPlayable || !test;
             final java.util.function.Supplier<SpellAbility> pick = test
                     ? () -> chooseManaAbility(cost, sa, ai, shard, options, checkCosts)
-                    : () -> PlayerControllerAi.seam(ai, forge.ai.dp.Kind.SELECT, "seam:mana", sa, options, 1, 1, null,
+                    : () -> PlayerControllerAi.seam(ai, forge.ai.dp.Kind.SELECT, "seam:mana", sa, options, 1, 1,
+                            a -> manaPickLegal(cost, sa, ai, shard, options, checkCosts, a),
                             () -> chooseManaAbility(cost, sa, ai, shard, options, checkCosts), null, shard);
             if (tape == null) {
                 saPayment = saList.isEmpty() ? null : pick.get();

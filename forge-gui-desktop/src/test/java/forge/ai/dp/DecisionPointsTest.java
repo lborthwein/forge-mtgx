@@ -45,8 +45,12 @@ public class DecisionPointsTest extends AITest {
         assertFalse(DecisionPoints.legal(p(Kind.SELECT, o, 1, 1, List.of("a")), List.of("b", "c")));
         assertTrue(DecisionPoints.legal(p(Kind.ARRANGE, o, -1, -1, o), List.of("c", "a", "b")));
         assertFalse(DecisionPoints.legal(p(Kind.ARRANGE, o, -1, -1, o), List.of("c", "a")));
-        assertTrue(DecisionPoints.legal(p(Kind.ARRANGE, o, -1, -1, null),
+        assertTrue(DecisionPoints.legal(p(Kind.ARRANGE, o, -1, -1, ImmutablePair.of(List.of("a", "b"), List.of("c"))),
                 ImmutablePair.of(List.of("a"), List.of("b", "c"))));
+        // review #175 S2: an answer of another shape than Forge's is refused (a list for a single pick, any answer
+        // where Forge's own answer was null)
+        assertFalse(DecisionPoints.legal(p(Kind.SELECT, o, 1, 1, "a"), List.of("b")));
+        assertFalse(DecisionPoints.legal(p(Kind.SELECT, o, 0, 1, null), "b"));
         assertTrue(DecisionPoints.legal(p(Kind.NUMBER, List.of(), 0, 3, 1), 3));
         assertFalse(DecisionPoints.legal(p(Kind.NUMBER, List.of(), 0, 3, 1), 4));
         assertTrue(DecisionPoints.legal(p(Kind.NUMBER, null, 0, 3, 1), 2));

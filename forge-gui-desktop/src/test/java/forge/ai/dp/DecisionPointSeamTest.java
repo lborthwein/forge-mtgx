@@ -91,4 +91,89 @@ public class DecisionPointSeamTest extends AITest {
         assertTrue(onStack.getTargets().contains(elf), String.valueOf(onStack.getTargets()));
         assertFalse(onStack.getTargets().contains(bear));
     }
+
+    // ------------------------------------------------------------------ review #175: refusals
+
+    @Test
+    public void aManaPickThatIsNotAnOfferedSourceIsRefused() {
+        final String forge = castSolRing(null, null);
+        final String[] opp = new String[1];
+        final String refused = castSolRing((dp, cur) -> {
+            if (!"seam:mana".equals(dp.ctx())) return cur;
+            final Player o = dp.seat().getGame().getPlayers().get(0);
+            final Card land = addCard("Forest", o); // the opponent's land: never offered, never legal
+            opp[0] = land.getName();
+            return land.getManaAbilities().get(0);
+        }, null);
+        assertNotNull(opp[0]);
+        assertEquals(refused, forge);
+    }
+
+    @Test
+    public void aWrongTypeManaAnswerIsRefused() {
+        final String forge = castSolRing(null, null);
+        final String refused = castSolRing((dp, cur) -> {
+            if (!"seam:mana".equals(dp.ctx())) return cur;
+            for (Object o : dp.options()) if (o != cur) return List.of(o); // a list, not a SpellAbility
+            return cur;
+        }, null);
+        assertEquals(refused, forge);
+    }
+
+    @Test
+    public void aDividedSpellsTargetsWithoutADivisionAreRefused() {
+        final Game game = initAndCreateGame();
+        final Player p = game.getPlayers().get(1);
+        final Player opp = game.getPlayers().get(0);
+        addCard("Mountain", p);
+        final Card bear = addCard("Grizzly Bears", opp);
+        final Card elf = addCard("Llanowar Elves", opp);
+        final Card bolt = addCardToZone("Forked Bolt", p, ZoneType.Hand);
+        final SpellAbility sa = bolt.getFirstSpellAbility();
+        sa.setActivatingPlayer(p);
+        assertTrue(sa.isDividedAsYouChoose());
+        sa.resetTargets();
+        sa.getTargets().add(bear);
+        sa.getTargets().add(elf);
+        sa.addDividedAllocation(bear, 1);
+        sa.addDividedAllocation(elf, 1);
+        final List<String> seen = new ArrayList<>();
+        ((PlayerControllerAi) p.getController()).setDecisionAnswerer((dp, cur) -> {
+            if (!"seam:targets:h".equals(dp.ctx())) return cur;
+            seen.add(dp.ctx());
+            final TargetChoices tc = new TargetChoices();
+            tc.add(elf); // no division map: refused
+            return List.of(tc);
+        });
+        assertTrue(ComputerUtil.handlePlayingSpellAbility(p, sa, null));
+        assertEquals(seen.size(), 1);
+        final SpellAbility onStack = game.getStack().peekAbility();
+        assertTrue(onStack.getTargets().contains(bear) && onStack.getTargets().contains(elf),
+                String.valueOf(onStack.getTargets()));
+    }
+
+    @Test
+    public void xOfZeroIsRefusedWhenXCantBe0() {
+        final Game game = initAndCreateGame();
+        final Player p = game.getPlayers().get(1);
+        final Player opp = game.getPlayers().get(0);
+        addCard("Mountain", p);
+        addCard("Mountain", p);
+        final Card blaze = addCardToZone("Blaze", p, ZoneType.Hand);
+        final SpellAbility sa = blaze.getFirstSpellAbility();
+        sa.setActivatingPlayer(p);
+        sa.putParam("XCantBe0", "True");
+        sa.resetTargets();
+        sa.getTargets().add(opp);
+        sa.setXManaCostPaid(1);
+        final List<String> seen = new ArrayList<>();
+        ((PlayerControllerAi) p.getController()).setDecisionAnswerer((dp, cur) -> {
+            if (!"seam:x:h".equals(dp.ctx())) return cur;
+            seen.add(dp.ctx());
+            return 0;
+        });
+        assertTrue(ComputerUtil.handlePlayingSpellAbility(p, sa, null));
+        assertEquals(seen, List.of("seam:x:h"));
+        assertEquals(game.getStack().peekAbility().getXManaCostPaid(), Integer.valueOf(1));
+    }
 }
