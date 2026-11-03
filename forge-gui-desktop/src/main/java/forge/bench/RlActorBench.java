@@ -115,6 +115,10 @@ public final class RlActorBench {
     static final class Cfg {
         /** decisionpoint-1102: write the dynamic decision census (forge.ai.dp.CensusObserver) here; null = off. */
         String dpCensus;
+        /** decisionpoint-1102 PR-E: the copy answerer ("forge"); null = none. */
+        String dpCopyAnswerer;
+        /** decisionpoint-1102 PR-E: the per-row decision meter on label rows. */
+        boolean dpMeter;
         String mode = "train";
         String server = null;
         String actorId = "a00";
@@ -262,6 +266,15 @@ public final class RlActorBench {
         final Cfg c = new Cfg();
         // decisionpoint-1102 (PR-B): the dynamic decision census's output file (absent = off, the default)
         if (o.has("dpCensus") && !o.get("dpCensus").isJsonNull()) c.dpCensus = o.get("dpCensus").getAsString();
+        // decisionpoint-1102 PR-E: an answerer on every game copy's decision points ("forge" = Forge AI's own answer, the
+        // identity arm; absent = none) and the per-row meter (dp_meter on label rows)
+        if (o.has("dpCopyAnswerer") && !o.get("dpCopyAnswerer").isJsonNull()) {
+            c.dpCopyAnswerer = o.get("dpCopyAnswerer").getAsString();
+            if (!"forge".equals(c.dpCopyAnswerer)) {
+                throw new IllegalArgumentException("dpCopyAnswerer is \"forge\" (the only answerer so far), not " + c.dpCopyAnswerer);
+            }
+        }
+        if (o.has("dpMeter")) c.dpMeter = o.get("dpMeter").getAsBoolean();
         if (o.has("mode")) c.mode = o.get("mode").getAsString();
         if (o.has("server") && !o.get("server").isJsonNull()) c.server = o.get("server").getAsString();
         if (o.has("actorId")) c.actorId = o.get("actorId").getAsString();
@@ -1421,15 +1434,26 @@ public final class RlActorBench {
      * of the run (both seats, live games and copies) is counted and the census written at the end.
      */
     public static int run(final Cfg cfg) throws Exception {
-        if (cfg.dpCensus == null) {
-            return run0(cfg);
+        if ("forge".equals(cfg.dpCopyAnswerer)) {
+            forge.ai.dp.DecisionPoints.setCopyAnswerers(forge.ai.dp.DecisionPoints.FORGE_DEFAULT);
         }
-        final forge.ai.dp.CensusObserver census = new forge.ai.dp.CensusObserver(Paths.get(cfg.dpCensus));
-        forge.ai.dp.DecisionPoints.setObserver(census);
+        forge.ai.dp.DecisionPoints.setMeter(cfg.dpMeter);
         try {
-            return run0(cfg);
+            if (cfg.dpCensus == null) {
+                return run0(cfg);
+            }
+            final forge.ai.dp.CensusObserver census = new forge.ai.dp.CensusObserver(Paths.get(cfg.dpCensus));
+            forge.ai.dp.DecisionPoints.setObserver(census);
+            try {
+                return run0(cfg);
+            } finally {
+                census.write();
+                forge.ai.dp.DecisionPoints.setObserver(null);
+            }
         } finally {
-            census.write();
+            // review #176 S2: a run leaves no copy answerer or meter behind (in-process callers, tests)
+            forge.ai.dp.DecisionPoints.setCopyAnswerers(null);
+            forge.ai.dp.DecisionPoints.setMeter(false);
         }
     }
 
