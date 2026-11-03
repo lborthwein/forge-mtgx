@@ -361,5 +361,19 @@ public class EndStepRowsTest extends SimulationTest {
         AssertJUnit.assertFalse(threeDrop.get("affordable").getAsBoolean()); // 4 next turn < 5
         AssertJUnit.assertTrue(petal.get("affordable").getAsBoolean()); // the land drop and a Petal: 5 next turn
         AssertJUnit.assertFalse("colours: no blue source for Pestermite", noBlue.get("affordable").getAsBoolean());
+        // a dual land's two abilities are one source of either colour (review of the frozen rule, 11-03: union, not first)
+        final com.google.gson.JsonObject duals = at.apply("Volcanic Island;Volcanic Island;Volcanic Island;Volcanic Island;Volcanic Island");
+        AssertJUnit.assertTrue(duals.toString(), duals.get("affordable").getAsBoolean());
+    }
+
+    @Test
+    public void affordabilityExplainTwinBoard() throws Exception {
+        final String t = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(System.getProperty("forge.afford.frame",
+                "/home/channel/esrows1103/puzzles2/pz2-twin-06.frame.txt"))));
+        final Game g = FrameLabelRun.install(t);
+        final Player me = g.getPlayers().get(0);
+        System.err.println("[endstep-test] explain " + Affordability.explain(me));
+        System.err.println("[endstep-test] afford " + Affordability.of(me, java.util.List.of("Deceiver Exarch"), java.util.List.of("Splinter Twin")));
+        for (forge.game.card.Card c : me.getCardsIn(ZoneType.Hand)) System.err.println("[endstep-test] hand " + c.getName() + " cost " + c.getManaCost() + " generic " + c.getManaCost().getGenericCost() + " shards " + com.google.common.collect.Lists.newArrayList(c.getManaCost()));
     }
 }

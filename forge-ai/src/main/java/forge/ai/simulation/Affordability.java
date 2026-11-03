@@ -81,17 +81,21 @@ public final class Affordability {
 
     /** Units a battlefield card makes: {now (if untapped and able), next turn}. */
     private static void battlefield(final Card c, final List<Integer> now, final List<Integer> next) {
+        // a source taps once: its abilities' colours are united (a dual land's two abilities), its largest amount taken
+        int m = 0, n = 0;
+        boolean sick = false, sac = true;
         for (SpellAbility ma : c.getManaAbilities()) {
-            final int m = mask(ma);
-            if (m == 0) continue;
-            final int n = amount(ma);
-            final boolean sick = c.isCreature() && c.hasSickness() && taps(ma);
-            final boolean sac = sacrifices(ma);
-            for (int k = 0; k < n; k++) {
-                if (!c.isTapped() && !sick) now.add(m);
-                if (!sac) next.add(m);
-            }
-            return; // one mana ability per source (a source taps once)
+            final int mm = mask(ma);
+            if (mm == 0) continue;
+            m |= mm;
+            n = Math.max(n, amount(ma));
+            sick |= c.isCreature() && c.hasSickness() && taps(ma);
+            sac &= sacrifices(ma);
+        }
+        if (m == 0) return;
+        for (int k = 0; k < n; k++) {
+            if (!c.isTapped() && !sick) now.add(m);
+            if (!sac) next.add(m);
         }
     }
 
@@ -105,9 +109,11 @@ public final class Affordability {
         final ManaCost cost = c.getManaCost();
         final int cmc = cost == null ? 0 : cost.getCMC();
         if (c.isPermanent() && !c.isLand() && !c.getManaAbilities().isEmpty()) {
+            int um = 0;
+            for (SpellAbility ma : c.getManaAbilities()) um |= mask(ma);
             for (SpellAbility ma : c.getManaAbilities()) {
-                final int m = mask(ma);
-                if (m == 0) continue;
+                if (mask(ma) == 0) continue;
+                final int m = um; // a source taps once: its abilities' colours united
                 final int n = amount(ma);
                 final int net = n - cmc;
                 if (sacrifices(ma)) {
@@ -164,6 +170,17 @@ public final class Affordability {
         return units.size() >= generic;
     }
 
+    /** Diagnostics: each battlefield/hand source's contribution "name:now/next/once" (no effect on the verdict). */
+    public static String explain(final Player me) {
+        final StringBuilder sb = new StringBuilder();
+        for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
+            final List<Integer> a = new ArrayList<>(), b = new ArrayList<>();
+            battlefield(c, a, b);
+            sb.append(c.getName()).append(':').append(a).append('/').append(b).append(' ');
+        }
+        return sb.toString();
+    }
+
     /** The row's affordability JSON. */
     public static JsonObject of(final Player me, final Collection<String> enablers, final Collection<String> payoffs) {
         final List<Integer> now = new ArrayList<>(), next = new ArrayList<>(), once = new ArrayList<>();
@@ -173,7 +190,9 @@ public final class Affordability {
         int landMask = 0;
         for (Card c : me.getCardsIn(ZoneType.Hand)) {
             if (c.isLand()) {
-                for (SpellAbility ma : c.getManaAbilities()) landMask = Math.max(landMask, mask(ma));
+                int lm = 0;
+                for (SpellAbility ma : c.getManaAbilities()) lm |= mask(ma);
+                if (Integer.bitCount(lm) > Integer.bitCount(landMask)) landMask = lm;
                 continue;
             }
             hand(c, now, next, once, pieces);
