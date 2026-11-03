@@ -95,8 +95,12 @@ public final class Affordability {
         }
     }
 
-    /** Hand mana: {now, next}; land: the best land for the drop goes to next only. */
-    private static void hand(final Card c, final List<Integer> now, final List<Integer> next, final Set<String> skip) {
+    /**
+     * Hand mana: a permanent that stays (Mox, Sol Ring) adds to {now, next}; a one-shot (a sacrificed source such as Lotus
+     * Petal, a mana spell such as Dark Ritual) goes to {@code once}: usable in ONE of the two windows.
+     */
+    private static void hand(final Card c, final List<Integer> now, final List<Integer> next, final List<Integer> once,
+            final Set<String> skip) {
         if (skip.contains(c.getName())) return;
         final ManaCost cost = c.getManaCost();
         final int cmc = cost == null ? 0 : cost.getCMC();
@@ -106,8 +110,14 @@ public final class Affordability {
                 if (m == 0) continue;
                 final int n = amount(ma);
                 final int net = n - cmc;
-                for (int k = 0; k < net; k++) now.add(m);
-                if (!sacrifices(ma)) for (int k = 0; k < Math.max(0, net); k++) next.add(m);
+                if (sacrifices(ma)) {
+                    for (int k = 0; k < net; k++) once.add(m);
+                } else {
+                    for (int k = 0; k < net; k++) {
+                        now.add(m);
+                        next.add(m);
+                    }
+                }
                 return;
             }
         }
@@ -116,10 +126,7 @@ public final class Affordability {
                 int m = mask(sa);
                 if (m == 0) m = 1 << 5;
                 final int net = amount(sa) - cmc;
-                for (int k = 0; k < net; k++) {
-                    now.add(m);
-                    next.add(m);
-                }
+                for (int k = 0; k < net; k++) once.add(m);
                 return;
             }
         }
@@ -159,7 +166,7 @@ public final class Affordability {
 
     /** The row's affordability JSON. */
     public static JsonObject of(final Player me, final Collection<String> enablers, final Collection<String> payoffs) {
-        final List<Integer> now = new ArrayList<>(), next = new ArrayList<>();
+        final List<Integer> now = new ArrayList<>(), next = new ArrayList<>(), once = new ArrayList<>();
         final Set<String> pieces = new java.util.HashSet<>(enablers);
         pieces.addAll(payoffs);
         for (Card c : me.getCardsIn(ZoneType.Battlefield)) battlefield(c, now, next);
@@ -169,20 +176,32 @@ public final class Affordability {
                 for (SpellAbility ma : c.getManaAbilities()) landMask = Math.max(landMask, mask(ma));
                 continue;
             }
-            hand(c, now, next, pieces);
+            hand(c, now, next, once, pieces);
         }
         final boolean landDrop = landMask != 0;
         if (landDrop) next.add(landMask);
-        boolean enablerNow = false, payoffInPlay = false, payoffNext = false;
+        boolean enablerNow = false, payoffInPlay = false, payoffNext = false, both = false;
         String en = null, pay = null;
-        for (Card c : me.getCardsIn(ZoneType.Hand)) {
-            if (enablers.contains(c.getName()) && pays(c.getManaCost(), now)) {
+        final List<Integer> nowAll = new ArrayList<>(now), nextAll = new ArrayList<>(next);
+        nowAll.addAll(once);
+        nextAll.addAll(once);
+        for (Card e : me.getCardsIn(ZoneType.Hand)) {
+            if (!enablers.contains(e.getName())) continue;
+            if (pays(e.getManaCost(), nowAll)) {
                 enablerNow = true;
-                en = c.getName();
+                en = e.getName();
             }
-            if (payoffs.contains(c.getName()) && pays(c.getManaCost(), next)) {
-                payoffNext = true;
-                pay = c.getName();
+            for (Card p : me.getCardsIn(ZoneType.Hand)) {
+                if (!payoffs.contains(p.getName())) continue;
+                if (pays(p.getManaCost(), nextAll)) {
+                    payoffNext = true;
+                    pay = p.getName();
+                }
+                // the one-shot mana is spent in one window only
+                if (pays(e.getManaCost(), nowAll) && pays(p.getManaCost(), next)
+                        || pays(e.getManaCost(), now) && pays(p.getManaCost(), nextAll)) {
+                    both = true;
+                }
             }
         }
         for (Card c : me.getCardsIn(ZoneType.Battlefield)) {
@@ -193,6 +212,7 @@ public final class Affordability {
         }
         final JsonObject o = new JsonObject();
         o.addProperty("now_units", now.size());
+        o.addProperty("once_units", once.size());
         o.addProperty("next_units", next.size());
         o.addProperty("land_drop", landDrop);
         o.addProperty("enabler_now", enablerNow);
@@ -200,7 +220,7 @@ public final class Affordability {
         o.addProperty("payoff_in_play", payoffInPlay);
         o.addProperty("enabler", en);
         o.addProperty("payoff", pay);
-        o.addProperty("affordable", enablerNow && (payoffNext || payoffInPlay));
+        o.addProperty("affordable", payoffInPlay ? enablerNow : both);
         return o;
     }
 }
