@@ -76,7 +76,15 @@ public class FrameLabelRun extends SimulationTest {
                 final Player me = g.getPlayers().get(r.get("seat").getAsInt());
                 final HonestLabel.Seat seat = new HonestLabel.Seat(HonestLabel.Spec.parse(spec));
                 final long key = ForcedWinSolver.mix(spec.has("seed") ? spec.get("seed").getAsLong() : 1L, ++k);
-                final HonestLabel.Result res = seat.label(g, me, key);
+                // a known top (after Imperial Seal / Mystical Tutor: revealed to the seat only): kept in place in every world
+                java.util.Set<Integer> known = null;
+                final int kt = r.has("knownTop") ? r.get("knownTop").getAsInt() : 0;
+                if (kt > 0) {
+                    known = new java.util.HashSet<>();
+                    final List<forge.game.card.Card> lib = new ArrayList<>(me.getCardsIn(forge.game.zone.ZoneType.Library));
+                    for (int i = 0; i < Math.min(kt, lib.size()); i++) known.add(lib.get(i).getId());
+                }
+                final HonestLabel.Result res = seat.label(g, me, key, known);
                 o.add("label", res.toJson());
                 o.addProperty("phase", String.valueOf(g.getPhaseHandler().getPhase()));
                 o.addProperty("active", g.getPhaseHandler().getPlayerTurn() == me ? "me" : "opp");
