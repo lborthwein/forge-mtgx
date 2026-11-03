@@ -669,6 +669,13 @@ public final class StepSearch {
             cp.dangerouslySetController(bc);
             final boolean[] rl = new boolean[ctl.length];
             rl[seat] = true;
+            if (RlSearch.wantsInfoStates(cfg)) {
+                // #173: the copy carries the labelled game's InfoStates (forked, fresh copy = same order), then attach finds it
+                final forge.ai.simulation.InfoStates src = forge.ai.simulation.InfoStates.find(live);
+                if (src != null) {
+                    src.forkFor(c);
+                }
+            }
             search.attach(c, rl, rs);
             final PlanSearch ps = search.planSearchOf(cp);
             if (ps == null) {

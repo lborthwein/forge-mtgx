@@ -932,7 +932,7 @@ public final class GameActionUtil {
             }
             CardCollectionView subListView = subList;
             if (subList.size() > 1) {
-                subListView = p.getController().orderMoveToZoneList(subList, dest, sa);
+                subListView = game.arranged(p, p.getController().orderMoveToZoneList(subList, dest, sa), dest); // order-memory-1102
             }
             completeList.addAll(subListView);
         }

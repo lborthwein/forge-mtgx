@@ -132,6 +132,19 @@ public final class R3LabelSearch {
         public boolean testUnsafe = false;
         /** Tests only (never a JSON key): the opponent's own play at a response point is a pass (labeller v2's passive). */
         public boolean testPassiveOpp = false;
+        /**
+         * order-memory-1102 (off by default; in the identity only when on, so every other spec's sha is unchanged): the
+         * library memory of the R3 rows, worlds and choose-a-card ({@link OwnLibraryMemory}) delegates to
+         * {@link KnownOwnLibrary}: random-order blocks and orders the opponent chose are not known.
+         */
+        public boolean knownLib = false;
+        /**
+         * order-memory-1102 layer 1 (off by default; in the identity only when on): the R3 rows, worlds and choose-a-card
+         * read the seats' {@link InfoStates} (wins over knownLib): our library as InfoState(me) knows it, the opponent's
+         * library pins as InfoState(me) knows THEIR library (not what they know of it), the belief re-draw keeps those
+         * pins, and every world shuffle of unknown slots is canonical (it never reads the true order of what is unknown).
+         */
+        public boolean infoState = false;
         /** The block as given (sorted), for the identity. */
         JsonObject json = new JsonObject();
 
@@ -149,7 +162,7 @@ public final class R3LabelSearch {
         static final Set<String> KEYS = new TreeSet<>(Arrays.asList("maxCands", "policyTop", "holdPieces", "exploreAnswers", "rowMaxLines", "rowMaxProofs", "rowMaxSteps", "selectWorlds",
                 "targetWorlds", "stratify", "topAnswers", "cac", "inline", "leaf", "maxTurns", "maxSteps", "horizon",
                 "proofLeaf", "profile", "solverSpec", "drawDepth", "seqCap", "samples", "oppMin", "oppMinIn",
-                "oppResponses", "oppDepth", "oppNodes", "oppMinVersion", "maxUnresolvedShare", "seed"));
+                "oppResponses", "oppDepth", "oppNodes", "oppMinVersion", "maxUnresolvedShare", "seed", "knownLib", "infoState"));
 
         public static Spec parse(final JsonObject o) {
             final Spec s = new Spec();
@@ -208,6 +221,8 @@ public final class R3LabelSearch {
             if (o.has("oppNodes")) s.oppNodes = o.get("oppNodes").getAsInt();
             if (o.has("maxUnresolvedShare")) s.maxUnresolvedShare = o.get("maxUnresolvedShare").getAsDouble();
             if (o.has("seed")) s.seed = o.get("seed").getAsLong();
+            if (o.has("knownLib")) s.knownLib = o.get("knownLib").getAsBoolean();
+            if (o.has("infoState")) s.infoState = o.get("infoState").getAsBoolean();
             if (!"rollout".equals(s.leaf) && !"value".equals(s.leaf)) {
                 throw new IllegalArgumentException("r3.leaf is \"rollout\" or \"value\", not " + s.leaf);
             }
@@ -260,6 +275,12 @@ public final class R3LabelSearch {
             o.addProperty("oppMinVersion", OppMin.VERSION);
             o.addProperty("maxUnresolvedShare", maxUnresolvedShare);
             o.addProperty("seed", seed);
+            if (knownLib) {
+                o.addProperty("knownLib", true); // order-memory-1102: only when on
+            }
+            if (infoState) {
+                o.addProperty("infoState", true); // order-memory-1102 layer 1: only when on
+            }
             return sorted(o);
         }
 
@@ -273,6 +294,8 @@ public final class R3LabelSearch {
             c.addProperty("mode", mode);
             final ChooseACard.Config cc = ChooseACard.Config.fromJson(c);
             cc.testUnsafe = testUnsafe;
+            cc.knownLib = knownLib;
+            cc.infoState = infoState;
             return cc;
         }
     }
@@ -313,6 +336,14 @@ public final class R3LabelSearch {
         /** {@code p}'s own library card ids (in the live game) whose positions {@code p} knows. */
         Set<Integer> known(Player p);
 
+        /**
+         * order-memory-1102 (infoState): {@code owner}'s library card ids whose positions {@code observer} knows. The
+         * default is the legacy read ({@code owner}'s own memory), used only with infoState off.
+         */
+        default Set<Integer> known(final Player observer, final Player owner) {
+            return known(owner);
+        }
+
         /** The policy's top {@code k} entries of {@code me}'s menu on the exact copy {@code copy} (none by default). */
         default List<SpellAbility> policyTop(final Game copy, final Player me, final int k) {
             return Collections.emptyList();
@@ -339,7 +370,17 @@ public final class R3LabelSearch {
 
     /** The proof spec's belief re-draw (uniform over its pool): the selection worlds' and the in-line answers'. */
     public static ForcedWinSolver.Redraw beliefRedraw(final HonestLabel.Spec label) {
-        final ForcedWinSolver.Redraw r = new LookaheadSearch(label.beliefConfig()).opponentRedraw();
+        return beliefRedraw(label, false);
+    }
+
+    /**
+     * order-memory-1102 (R3 infoState): as above; with {@code infoState} the re-draw keeps the opponent-library cards
+     * InfoState(me) knows at their places (LookaheadSearch.Config#infoState).
+     */
+    public static ForcedWinSolver.Redraw beliefRedraw(final HonestLabel.Spec label, final boolean infoState) {
+        final LookaheadSearch.Config bc = label.beliefConfig();
+        bc.infoState = bc.infoState || infoState;
+        final ForcedWinSolver.Redraw r = new LookaheadSearch(bc).opponentRedraw();
         if (r == null) {
             throw new IllegalStateException("refused: the R3 label search has no belief re-draw (no belief cube)");
         }
@@ -615,15 +656,17 @@ public final class R3LabelSearch {
         public void make(final Game live, final Player liveMe, final Game g, final Player me) {
             if (truth) {
                 // FLAG-R3-3: the real position, hands kept; every library shuffled below its known positions
+                // (ruling 2026-11-02: knownOpp is the OPPONENT's own known positions, real facts that decide their draws,
+                // so T pins them; our decisions come from the belief worlds below, which never read it)
                 for (Player o : me.getOpponents()) {
-                    OwnLibraryMemory.shuffleUnknown(o, knownOpp, new Random(LookaheadSearch.mix(seed, 0x4F50L)));
+                    shuffleUnknown(o, knownOpp, new Random(LookaheadSearch.mix(seed, 0x4F50L)));
                 }
                 if (seq != null) {
                     DrawExpectation.arrange(me, seq, draws.unknownById, draws.unknownSlots,
                             new Random(LookaheadSearch.mix(seed, 0x5345L)));
                     firstDraw = String.valueOf(seq);
                 } else {
-                    OwnLibraryMemory.shuffleUnknown(me, knownMe, new Random(LookaheadSearch.mix(seed, 0x4D45L)));
+                    shuffleUnknown(me, knownMe, new Random(LookaheadSearch.mix(seed, 0x4D45L)));
                 }
             } else {
                 // belief: their hidden cards from our belief; our unknown slots shuffled below the known positions
@@ -631,17 +674,27 @@ public final class R3LabelSearch {
                 if (rd != null) {
                     rd.apply(live, liveMe, g, me, new Random(LookaheadSearch.mix(seed, 0x5244L)));
                 }
-                OwnLibraryMemory.shuffleUnknown(me, knownMe, new Random(LookaheadSearch.mix(seed, 0x4D45L)));
+                shuffleUnknown(me, knownMe, new Random(LookaheadSearch.mix(seed, 0x4D45L)));
             }
-            memory = new OwnLibraryMemory(me);
-            memory.noteLooked(cardsOf(me, knownMe));
+            memory = new OwnLibraryMemory(me, spec.knownLib, spec.infoState);
+            memory.seedKnown(cardsOf(me, knownMe));
             memory.watch(g);
+        }
+
+        /** order-memory-1102: infoState's canonical shuffle of the unknown slots; otherwise the legacy one. */
+        private void shuffleUnknown(final Player p, final Set<Integer> known, final Random rng) {
+            if (spec.infoState) {
+                OwnLibraryMemory.shuffleUnknownCanonical(p, known, rng);
+            } else {
+                OwnLibraryMemory.shuffleUnknown(p, known, rng);
+            }
         }
 
         /** At the line's start (a priority copy: right after make; a choice copy: after the answer settled). */
         void atStart(final Player me) {
             if (truth && seq == null && spec.stratify && W > 0) {
                 firstDraw = stratify(me, memory.known(me), w, W, new Random(LookaheadSearch.mix(seed, 0x5354L)));
+                memory.resync(); // review #168 S3: stratify keeps the known cards at their indices
             }
         }
     }
@@ -1055,7 +1108,7 @@ public final class R3LabelSearch {
         c.setRedraw(env.redraw());
         c.install(ctrl);
         if (world != null && world.memory != null && c.memory() != null) {
-            c.memory().noteLooked(cardsOf(me, world.memory.known(me)));
+            c.memory().seedKnown(cardsOf(me, world.memory.known(me)));
         }
         ctrl.setCacHook(new TurnGate(c, g, rootTurn));
         return c;
@@ -1503,7 +1556,8 @@ public final class R3LabelSearch {
             }
             final Set<Integer> knownMe = env.known(liveMe);
             final Player liveOpp = liveMe.getOpponents().isEmpty() ? null : liveMe.getOpponents().get(0);
-            final Set<Integer> knownOpp = liveOpp == null ? new HashSet<>() : env.known(liveOpp);
+            final Set<Integer> knownOpp = liveOpp == null ? new HashSet<>()
+                    : spec.infoState ? env.known(liveMe, liveOpp) : env.known(liveOpp);
             final long seed0 = LookaheadSearch.mix(spec.seed, key);
             final boolean minSel = spec.oppMin && "both".equals(spec.oppMinIn);
             for (PCand c : cands) {
@@ -1704,7 +1758,8 @@ public final class R3LabelSearch {
             final Set<Integer> knownMe = new HashSet<>(row.known());
             knownMe.addAll(env.known(liveMe));
             final Player liveOpp = liveMe.getOpponents().isEmpty() ? null : liveMe.getOpponents().get(0);
-            final Set<Integer> knownOpp = liveOpp == null ? new HashSet<>() : env.known(liveOpp);
+            final Set<Integer> knownOpp = liveOpp == null ? new HashSet<>()
+                    : spec.infoState ? env.known(liveMe, liveOpp) : env.known(liveOpp);
             final long seed0 = LookaheadSearch.mix(spec.seed, key);
             // Forge's answer and the m best (ranking score, ties to the lower index), dropped answers excluded
             final List<Integer> idx = new ArrayList<>();

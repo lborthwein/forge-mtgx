@@ -99,6 +99,16 @@ public final class ChooseACard implements CacHook {
          * refuses ON without the value tower and the solver check, and ON or SHADOW without the belief re-draw.
          */
         public boolean testUnsafe = false;
+        /**
+         * order-memory-1102 (never a JSON key; the R3 spec's knownLib sets it): the seat's library memory is
+         * {@link KnownOwnLibrary}'s ({@link OwnLibraryMemory#OwnLibraryMemory(Player, boolean)}). False = the legacy rule.
+         */
+        public boolean knownLib = false;
+        /**
+         * order-memory-1102 layer 1 (never a JSON key; the R3 spec's infoState sets it): the memory is the seat's
+         * {@link InfoStates} view, and copy shuffles of the unknown slots are canonical. Wins over knownLib.
+         */
+        public boolean infoState = false;
 
         public static Config fromJson(final JsonObject o) {
             final Config c = new Config();
@@ -441,7 +451,7 @@ public final class ChooseACard implements CacHook {
      */
     public void bind(final Game g, final Player p) {
         if (memory == null || live != g || me != p) {
-            this.memory = new OwnLibraryMemory(p);
+            this.memory = new OwnLibraryMemory(p, cfg.knownLib, cfg.infoState);
             memory.watch(g);
         }
         this.live = g;
@@ -580,7 +590,7 @@ public final class ChooseACard implements CacHook {
             return; // already installed (a re-install after a controller swap is a no-op on the same controller)
         }
         if (memory == null || live != ctrl.getGame() || me != ctrl.getPlayer()) {
-            this.memory = new OwnLibraryMemory(ctrl.getPlayer());
+            this.memory = new OwnLibraryMemory(ctrl.getPlayer(), cfg.knownLib, cfg.infoState);
             memory.watch(ctrl.getGame());
         }
         this.live = ctrl.getGame();
@@ -2659,6 +2669,9 @@ public final class ChooseACard implements CacHook {
                 // cards this ask shows stay), one seed per decision so every answer sees the same arrangement
                 if (wm != null && !probe) {
                     wm.make(live, me, g, cm);
+                } else if (memory != null && !probe && cfg.infoState) {
+                    OwnLibraryMemory.shuffleUnknownCanonical(cm, memory.known(cm),
+                            new Random(LookaheadSearch.mix(cfg.seed, 0x5EED0000L + d.index)));
                 } else if (memory != null && !probe) {
                     OwnLibraryMemory.shuffleUnknown(cm, memory.known(cm),
                             new Random(LookaheadSearch.mix(cfg.seed, 0x5EED0000L + d.index)));
