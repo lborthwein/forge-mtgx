@@ -272,6 +272,31 @@ public class ComputerUtilMana {
         }
     }
 
+    /**
+     * decisionpoint-1102 (review #175 S1): an answerer's mana source for {@code toPay} is legal only if it is one of the
+     * sources offered AND passes the filters {@link #chooseManaAbility} itself applies before it would pick it: not
+     * the paid ability's own host, not a tap source already spent this payment (PAYS_TAP_COST), a positive Amount, and
+     * canPayShardWithSpellAbility (with the same checkCosts), so a departure never fails halfway through payment.
+     * Anything that is not exactly a SpellAbility is refused (review #175 S2).
+     */
+    static boolean manaPickLegal(final ManaCostBeingPaid cost, final SpellAbility sa, final Player ai,
+            final ManaCostShard toPay, final Collection<SpellAbility> offered, final boolean checkCosts, final Object a) {
+        if (!(a instanceof SpellAbility ma) || offered == null || !offered.contains(ma)) {
+            return false;
+        }
+        if (ma.getHostCard() == sa.getHostCard()) {
+            return false;
+        }
+        if (ma.getPayCosts().hasTapCost() && AiCardMemory.isRememberedCard(ai, ma.getHostCard(), MemorySet.PAYS_TAP_COST)) {
+            return false;
+        }
+        final int amount = ma.hasParam("Amount") ? AbilityUtils.calculateAmount(ma.getHostCard(), ma.getParam("Amount"), ma) : 1;
+        if (amount <= 0) {
+            return false;
+        }
+        return canPayShardWithSpellAbility(toPay, ai, ma, sa, cost, checkCosts, cost.getXManaCostPaidByColor());
+    }
+
     public static SpellAbility chooseManaAbility(ManaCostBeingPaid cost, SpellAbility sa, Player ai, ManaCostShard toPay,
             Collection<SpellAbility> maList, boolean checkCosts) {
         Card saHost = sa.getHostCard();
@@ -698,14 +723,20 @@ public class ComputerUtilMana {
             // lane replay-record-1021: the AI tape records each source the seat taps in a real payment (a forced replay
             // taps the record's); test payments and every other player are untouched
             final AiTape tape = test ? null : AiTape.covering(ai);
+            // decisionpoint-1102 PR-C: a real payment's source for this symbol is a decision point (SELECT among the
+            // sources Forge found for it; Forge AI's pick is the default, a test payment is never a point)
+            final Collection<SpellAbility> options = saList;
+            final ManaCostShard shard = toPay;
+            final boolean checkCosts = checkPlayable || !test;
+            final java.util.function.Supplier<SpellAbility> pick = test
+                    ? () -> chooseManaAbility(cost, sa, ai, shard, options, checkCosts)
+                    : () -> PlayerControllerAi.seam(ai, forge.ai.dp.Kind.SELECT, "seam:mana", sa, options, 1, 1,
+                            a -> manaPickLegal(cost, sa, ai, shard, options, checkCosts, a),
+                            () -> chooseManaAbility(cost, sa, ai, shard, options, checkCosts), null, shard);
             if (tape == null) {
-                saPayment = saList.isEmpty() ? null : chooseManaAbility(cost, sa, ai, toPay, saList, checkPlayable || !test);
+                saPayment = saList.isEmpty() ? null : pick.get();
             } else {
-                final Collection<SpellAbility> options = saList;
-                final ManaCostShard shard = toPay;
-                final boolean checkCosts = checkPlayable || !test;
-                saPayment = tape.mana(options, () -> options.isEmpty() ? null
-                        : chooseManaAbility(cost, sa, ai, shard, options, checkCosts));
+                saPayment = tape.mana(options, () -> options.isEmpty() ? null : pick.get());
             }
 
             if (saPayment != null && ComputerUtilCost.isSacrificeSelfCost(saPayment.getPayCosts()) && sa.isTargeting(saPayment.getHostCard())) {
@@ -726,10 +757,9 @@ public class ComputerUtilMana {
                     && PlayerControllerAi.cacOf(ai) != null && PlayerControllerAi.cacOf(ai).getCacHook() != null
                     && ai.canPayLife(2, false, sa) && ai.getLife() > 2
                     && PlayerControllerAi.cacOf(ai).getCacHook().phyrexianLife(PlayerControllerAi.cacOf(ai), sa, false);
-            // decisionpoint-1102 (PR-B, observation only): one mana source pick of a real payment (PR-C makes it a point)
-            if (!test && forge.ai.dp.DecisionPoints.observer() != null) {
-                forge.ai.dp.DecisionPoints.note(ai, forge.ai.dp.Kind.SELECT, "seam:mana", saList.size(),
-                        cacLife ? "cac" : "forge");
+            // decisionpoint-1102: the hook's Phyrexian-life departure (a point of its own in a later PR), noted
+            if (cacLife) {
+                forge.ai.dp.DecisionPoints.note(ai, forge.ai.dp.Kind.CHOICE, "seam:mana:life", 2, "cac");
             }
             if (saPayment == null || cacLife) {
                 boolean lifeInsteadOfBlack = toPay.isBlack() && ai.hasKeyword("PayLifeInsteadOf:B");

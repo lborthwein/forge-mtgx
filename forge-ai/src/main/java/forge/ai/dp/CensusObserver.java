@@ -36,6 +36,9 @@ public final class CensusObserver implements DecisionObserver {
 
     @Override
     public void observe(final DecisionPoint dp, final Object answer, final String by) {
+        if ("cheatShuffle".equals(dp.ctx())) {
+            return; // review #167: a shuffle's cheat hook, asked at every shuffle, is not a decision; not counted
+        }
         final Player p = dp.seat();
         final Game g = p == null ? null : p.getGame();
         final String scope = DecisionPoints.isCopy(g) ? "copy" : "live";
