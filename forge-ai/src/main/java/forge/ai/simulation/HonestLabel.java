@@ -93,6 +93,13 @@ public final class HonestLabel {
          */
         public boolean libLabels = false;
         /**
+         * endstep-rows-1103 (coordinator 11-03 recommendation; 0 = off, the default, and then nothing changes): a
+         * library-dependent line with 1-2 hidden reads is computed exactly with this sequence cap (LIB_SEQ_CAP 64 when 0),
+         * and when the exact attempt still fails, the full-world sampled re-estimate stands (lib_why not set), as for
+         * rows with more than 2 reads. In the identity only when on.
+         */
+        public int libExactCap = 0;
+        /**
          * known-lib-1102 (GOAL N5b / N10; false = off, the default, and then nothing changes, the spec's sha included):
          * the replay labeller tracks, per seat, which own-library cards the seat knows the position of
          * ({@link KnownOwnLibrary}: a Doomsday pile, a put-back, a Ponder keep, a searched card put on top; a shuffle
@@ -125,7 +132,7 @@ public final class HonestLabel {
 
         static final Set<String> KEYS = new java.util.TreeSet<>(java.util.Arrays.asList("worlds", "solverCfg", "lossCfg",
                 "loss", "redraw", "beliefCube", "beliefCubeSha256", "beliefBasics", "beliefSingleton", "lossWallMs",
-                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "knownLib", "meterReasons", "oppMinRev",
+                "seed", "meter", "sequentialAi", "aiTimeoutSec", "libLabels", "libExactCap", "knownLib", "meterReasons", "oppMinRev",
                 "infoState"));
 
         /** bvw-step1-build-1024: keys the replay config reads beside the spec's own (the label window and outputs). */
@@ -158,6 +165,7 @@ public final class HonestLabel {
             if (o.has("sequentialAi") && !o.get("sequentialAi").isJsonNull()) s.sequentialAi = o.get("sequentialAi").getAsBoolean();
             if (o.has("aiTimeoutSec") && !o.get("aiTimeoutSec").isJsonNull()) s.aiTimeoutSec = o.get("aiTimeoutSec").getAsInt();
             if (o.has("libLabels")) s.libLabels = o.get("libLabels").getAsBoolean();
+            if (o.has("libExactCap")) s.libExactCap = o.get("libExactCap").getAsInt(); // endstep-rows-1103
             if (o.has("knownLib")) s.knownLib = o.get("knownLib").getAsBoolean();
             if (o.has("meterReasons")) s.meterReasons = o.get("meterReasons").getAsBoolean();
             if (o.has("oppMinRev")) s.oppMinRev = o.get("oppMinRev").getAsInt();
@@ -343,6 +351,9 @@ public final class HonestLabel {
             if (libLabels) {
                 o.addProperty("libLabels", true); // e1-q8-1101: only when on, so every other spec's sha is unchanged
             }
+            if (libExactCap > 0) {
+                o.addProperty("libExactCap", libExactCap); // endstep-rows-1103: only when on
+            }
             if (knownLib) {
                 o.addProperty("knownLib", true); // known-lib-1102: only when on, so every other spec's sha is unchanged
             }
@@ -432,6 +443,8 @@ public final class HonestLabel {
         public String lineText;
         /** endstep-rows-1103 measurement only (-Dforge.bench.affordOnly=true; null otherwise): {@link Affordability#of}. */
         public JsonObject afford;
+        /** endstep-rows-1103 (libExactCap only): why the exact attempt failed before the sampled fallback stood. */
+        public String libExactWhy;
         public int lineSteps = -1;
         /** Turns from the position to the proven end (global turn numbers; -1 = not proven). */
         public int turnsToEnd = -1;
@@ -496,6 +509,7 @@ public final class HonestLabel {
             if (lineHow != null) o.addProperty("line_how", lineHow);
             if (lineText != null) o.addProperty("line_text", lineText); // endstep-rows-1103 (diagnostics only)
             if (afford != null) o.add("afford", afford); // endstep-rows-1103 (measurement only)
+            if (libExactWhy != null) o.addProperty("lib_exact_why", libExactWhy); // endstep-rows-1103
             o.addProperty("line_steps", lineSteps);
             if (turnsToEnd >= 0) {
                 o.addProperty("turns_to_end", turnsToEnd);
@@ -928,14 +942,18 @@ public final class HonestLabel {
             r.libTakes = dep.hiddenTakes;
             r.worldsWin = dep.worldsRun;
             if (dep.hiddenTakes <= 2) {
-                final ForcedWinSolver.LibExact x = s.libExact(root, dep, LIB_SEQ_CAP, key);
+                final ForcedWinSolver.LibExact x = s.libExact(root, dep, spec.libExactCap > 0 ? spec.libExactCap : LIB_SEQ_CAP, key);
                 if (x.exact) {
                     r.libTag = "exact-draw";
                     r.libSeqs = x.seqs;
                     r.pWin = x.fraction;
                     return x.fraction >= 1.0 - 1e-9 ? dep : null;
                 }
-                r.libWhy = x.why;
+                if (spec.libExactCap <= 0) {
+                    r.libWhy = x.why; // endstep-rows-1103 libExactCap: the sampled fallback stands, as for > 2 reads
+                } else {
+                    r.libExactWhy = x.why;
+                }
             }
             // review #161 S2-1: k/W re-estimated on fresh worlds keyed by the decision (the proof's own worlds picked the
             // line, so their k = W says nothing); withheld (null) when the re-estimate was cut
