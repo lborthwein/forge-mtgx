@@ -440,13 +440,12 @@ public class EndStepRowsTest extends SimulationTest {
         final HonestLabel.Result exact = libRow(one, 1024);
         final HonestLabel.Result forced = libRow(two, 1);
         final HonestLabel.Result off = libRow(two, null);
-        if (exact.libTag != null) {
-            AssertJUnit.assertEquals(exact.toJson().toString(), "exact-draw", exact.libTag);
-        }
-        if (forced.libTag != null && "sampled".equals(forced.libTag)) {
-            AssertJUnit.assertNull(forced.toJson().toString(), forced.libWhy);
-            AssertJUnit.assertNotNull(forced.toJson().toString(), forced.libExactWhy);
-        }
+        AssertJUnit.assertEquals(exact.toJson().toString(), "exact-draw", exact.libTag);
+        AssertJUnit.assertEquals(1.0, exact.pWin, 1e-9);
+        AssertJUnit.assertEquals(forced.toJson().toString(), "sampled", forced.libTag);
+        AssertJUnit.assertNull(forced.toJson().toString(), forced.libWhy);
+        AssertJUnit.assertEquals("seqCap", forced.libExactWhy);
+        AssertJUnit.assertEquals(8, forced.worldsWin);
         AssertJUnit.assertNull(off.libExactWhy);
     }
 }
