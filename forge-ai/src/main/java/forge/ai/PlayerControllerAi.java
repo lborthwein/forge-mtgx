@@ -182,8 +182,10 @@ public class PlayerControllerAi extends PlayerController {
             final A def = forge.get();
             return cacAnswer == null ? def : cacAnswer.apply(def);
         }
+        final boolean nested = pc.dpDepth > 0; // review #175 S6: a seam asked inside another answer is nested
         final A def = forge.get();
-        final DecisionPoint pt = DecisionPoints.point(kind, ctx, p, sa, options, min, max, def, args).withValidator(valid);
+        final DecisionPoint pt = (nested ? DecisionPoints.nestedPoint(kind, ctx, p, sa, options, min, max, def, args)
+                : DecisionPoints.point(kind, ctx, p, sa, options, min, max, def, args)).withValidator(valid);
         final forge.ai.dp.DecisionAnswerer cac = cacAnswer == null ? null : (d, cur) -> cacAnswer.apply((A) cur);
         return (A) DecisionPoints.resolve(pt, cac, pc.answerer());
     }

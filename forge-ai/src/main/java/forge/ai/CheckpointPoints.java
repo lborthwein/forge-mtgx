@@ -32,6 +32,10 @@ final class CheckpointPoints {
         if (sa == null || pc == null || !pc.dpInstrumented()) {
             return;
         }
+        final AiTape tape = AiTape.covering(ai);
+        if (tape != null && tape.isForced()) {
+            return; // review #175 S5: a forced replay's targets / X are the record's (set by the tape); nobody is asked
+        }
         final List<SpellAbility> links = new ArrayList<>();
         for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
             if (s.usesTargeting()) {
@@ -87,6 +91,19 @@ final class CheckpointPoints {
                         return false;
                     }
                 }
+                // review #175 S3: a divided-as-you-choose ability needs a valid division: at least 1 to every
+                // target and, when the amount is known, exactly that amount in total
+                if (s.isDividedAsYouChoose() && !s.getTargets().isEmpty()) {
+                    for (GameObject o : s.getTargets()) {
+                        final Integer v = s.getDividedValue(o);
+                        if (v == null || v < 1) {
+                            return false;
+                        }
+                    }
+                    if (s.getDividedValue() != null && s.getTotalDividedValue() != s.getDividedValue()) {
+                        return false;
+                    }
+                }
             }
             return true;
         } finally {
@@ -98,6 +115,17 @@ final class CheckpointPoints {
 
     private static boolean legalX(final Player ai, final SpellAbility sa, final Object a) {
         if (!(a instanceof Integer n) || n < 0) {
+            return false;
+        }
+        // review #175 S4: the card's own X limits (XCantBe0, the mana part's XMin, XMax)
+        if (n == 0 && sa.hasParam("XCantBe0")) {
+            return false;
+        }
+        if (sa.getPayCosts() != null && sa.getPayCosts().getCostMana() != null
+                && n < sa.getPayCosts().getCostMana().getXMin()) {
+            return false;
+        }
+        if (sa.hasParam("XMax") && n > forge.game.ability.AbilityUtils.calculateAmount(sa.getHostCard(), sa.getParam("XMax"), sa)) {
             return false;
         }
         final Integer old = sa.getXManaCostPaid();

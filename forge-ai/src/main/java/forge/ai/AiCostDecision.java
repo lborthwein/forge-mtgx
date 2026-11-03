@@ -134,8 +134,8 @@ public class AiCostDecision extends CostDecisionMakerBase {
         // the cards the part may take (the choose-a-card hook's own list); Forge AI's cards are the default
         final int n = decision.cards.size();
         final CardCollectionView chosen = PlayerControllerAi.seam(player, forge.ai.dp.Kind.SELECT, ctx, ability, valid,
-                n, n, a -> a instanceof java.util.Collection<?> c && c.size() == n && valid.containsAll(c)
-                        && new java.util.HashSet<>(c).size() == n,
+                n, n, a -> a instanceof CardCollectionView c && c.size() == n && valid.containsAll(c)
+                        && new java.util.HashSet<>(c).size() == n, // review #175 S2: exactly a CardCollectionView
                 () -> decision.cards, cur -> {
                     final PaymentDecision r = reviewCac(part, decision);
                     return r == decision ? cur : r.cards;
