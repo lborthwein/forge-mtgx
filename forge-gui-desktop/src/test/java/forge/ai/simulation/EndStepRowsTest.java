@@ -376,4 +376,44 @@ public class EndStepRowsTest extends SimulationTest {
         System.err.println("[endstep-test] afford " + Affordability.of(me, java.util.List.of("Deceiver Exarch"), java.util.List.of("Splinter Twin")));
         for (forge.game.card.Card c : me.getCardsIn(ZoneType.Hand)) System.err.println("[endstep-test] hand " + c.getName() + " cost " + c.getManaCost() + " generic " + c.getManaCost().getGenericCost() + " shards " + com.google.common.collect.Lists.newArrayList(c.getManaCost()));
     }
+
+    /** Our main 1 frame: our hand, our lands, their life; they hold {@code theirHand} with {@code theirLands} untapped. */
+    private static String mainFrame(final String hand, final String lands, final int life, final String theirHand,
+            final String theirLands, final String phase, final String active) {
+        return "[state]\nturn=8\nactiveplayer=" + active + "\nactivephase=" + phase + "\nhumanlife=20\nailife=" + life + "\n"
+                + "humanlandsplayed=1\nailandsplayed=0\naihand=" + theirHand + "\nailibrary=" + ForcedWinSolverTest.LIB20
+                + "\naigraveyard=\naiexile=\naibattlefield=" + theirLands + "\nhumanhand=" + hand + "\nhumanbattlefield=" + lands
+                + "\nhumangraveyard=\nhumanexile=\nhumanlibrary=" + ForcedWinSolverTest.OURLIB + "\n";
+    }
+
+    @Test
+    public void untapALandWithTheEnablerToPayTheTripleColour() {
+        // owner 11-03 (C): two red sources only; the enabler's enter trigger untaps a land, so the payoff's three red can
+        // be paid the same turn (float a red, cast the enabler with the other lands, untap that red source, cast the
+        // payoff). Search must find it from the engine's float moves and the trigger's target; no rule knows the cards.
+        final String lands = "Mountain;Mountain;Island;Island;Island;Island;Island";
+        final List<ForcedWinSolver.Proposal> p = propose(ForcedWinSolverTest.game("Default", "Default",
+                mainFrame("Pestermite;Kiki-Jiki, Mirror Breaker", lands, 6, "", "Forest", "MAIN1", "human")), KEYS);
+        System.err.println("[endstep-test] untap-a-land: " + (p.isEmpty() ? "no line" : p.get(0).text));
+        // the frozen affordability rule (measurement only) does not count enter-trigger untaps: listed separately
+        final Game g = ForcedWinSolverTest.game("Default", "Default",
+                mainFrame("Pestermite;Kiki-Jiki, Mirror Breaker", lands, 6, "", "Forest", "MAIN1", "human"));
+        System.err.println("[endstep-test] untap-a-land affordability (no ETB untaps by design) "
+                + Affordability.of(g.getPlayers().get(0), java.util.List.of("Pestermite"), java.util.List.of("Kiki-Jiki, Mirror Breaker")));
+    }
+
+    @Test
+    public void revealValueOfWaitingIsALayer3Requirement() {
+        // owner 11-03 (B): they hold a discard spell and a counter. A flash at their end step reveals the enabler; today the
+        // opponent in our lines is oppMin at our spells plus Forge AI elsewhere, with no belief updated on what it saw, so
+        // the search is not expected to value the reveal. This test REPORTS the two timings' values (no assertion on them).
+        final String lands = "Volcanic Island;Volcanic Island;Mountain;Mountain;Mountain";
+        final String theirs = "Thoughtseize;Counterspell", theirLands = "Island;Island;Swamp";
+        final List<ForcedWinSolver.Proposal> es = propose(ForcedWinSolverTest.game("Default", "Default",
+                mainFrame("Pestermite;Kiki-Jiki, Mirror Breaker", lands, 6, theirs, theirLands, "END_OF_TURN", "ai")), KEYS);
+        final List<ForcedWinSolver.Proposal> main = propose(ForcedWinSolverTest.game("Default", "Default",
+                mainFrame("Pestermite;Kiki-Jiki, Mirror Breaker", lands, 6, theirs, theirLands, "MAIN1", "human")), KEYS);
+        System.err.println("[endstep-test] reveal: end step " + (es.isEmpty() ? "none" : es.get(0).pBelief + " " + es.get(0).text)
+                + " | main " + (main.isEmpty() ? "none" : main.get(0).pBelief + " " + main.get(0).text));
+    }
 }
