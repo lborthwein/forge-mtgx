@@ -416,4 +416,37 @@ public class EndStepRowsTest extends SimulationTest {
         System.err.println("[endstep-test] reveal: end step " + (es.isEmpty() ? "none" : es.get(0).pBelief + " " + es.get(0).text)
                 + " | main " + (main.isEmpty() ? "none" : main.get(0).pBelief + " " + main.get(0).text));
     }
+
+    static final String LABEL_SPEC = "{\"lossCfg\": {\"budget\": \"counter\", \"budgetMs\": \"2000\", \"cycles\": \"true\", \"engineCards\": \"12500\", \"engineMs\": \"750\", \"enginePathCards\": \"20000\", \"engineSteps\": \"500\", \"evalReserveMs\": \"500\", \"evalSteps\": \"4000\", \"hideOwnLibrary\": \"true\", \"wallGraceMs\": \"500\", \"labellerV2\": \"true\", \"engineAnyWindow\": \"true\", \"engineEndStepOpen\": \"true\", \"enginePassBudget\": \"true\", \"engineStack\": \"true\", \"loopMarginal\": \"true\"}, \"lossWallMs\": 0, \"meter\": true, \"redraw\": \"belief\", \"seed\": 747030000, \"sequentialAi\": true, \"aiTimeoutSec\": 600, \"solverCfg\": {\"budget\": \"counter\", \"budgetMs\": \"4000\", \"cycles\": \"true\", \"engineCards\": \"25000\", \"engineMs\": \"2000\", \"enginePathCards\": \"20000\", \"engineSteps\": \"1000\", \"evalReserveMs\": \"1000\", \"evalSteps\": \"4000\", \"hideOwnLibrary\": \"true\", \"wallGraceMs\": \"1000\", \"labellerV2\": \"true\", \"engineAnyWindow\": \"true\", \"engineEndStepOpen\": \"true\", \"enginePassBudget\": \"true\", \"engineStack\": \"true\", \"loopMarginal\": \"true\", \"engineEveryWindow\": \"true\"}, \"worlds\": 8, \"libLabels\": true, \"knownLib\": true, \"meterReasons\": true, \"oppMinRev\": 3, \"libExactCap\": 1024}";
+
+    private static HonestLabel.Result libRow(final String ourLib, final Integer cap) {
+        final com.google.gson.JsonObject spec = com.google.gson.JsonParser.parseString(LABEL_SPEC).getAsJsonObject();
+        if (cap != null) spec.addProperty("libExactCap", cap);
+        final String f = setupFrame("END_OF_TURN", "ai", "Pestermite;Kiki-Jiki, Mirror Breaker",
+                "Volcanic Island;Volcanic Island;Mountain;Mountain;Mountain").replace(ForcedWinSolverTest.OURLIB, ourLib);
+        final Game g = ForcedWinSolverTest.game("Default", "Default", f);
+        final HonestLabel.Result r = new HonestLabel.Seat(HonestLabel.Spec.parse(spec)).label(g, g.getPlayers().get(0), 11L);
+        System.err.println("[endstep-test] lib row cap=" + cap + " " + r.toJson());
+        return r;
+    }
+
+    @Test
+    public void libExactCapExactWhenSmallSampledFallbackOtherwise() {
+        // owner ruling 11-03: a next-turn line reads one hidden card (our draw). With one name left the exact fraction is
+        // computed (exact-draw); with a forced exact failure (cap 1 < 2 distinct names) the full-world sampled estimate
+        // stands (lib_why unset, lib_exact_why says why), as for rows with more than 2 reads. Off: the old withholding.
+        final String one = "Island;Island;Island;Island;Island;Island;Island;Island;Island;Island";
+        final String two = "Island;Mountain;Island;Mountain;Island;Mountain;Island;Mountain;Island;Mountain";
+        final HonestLabel.Result exact = libRow(one, 1024);
+        final HonestLabel.Result forced = libRow(two, 1);
+        final HonestLabel.Result off = libRow(two, null);
+        if (exact.libTag != null) {
+            AssertJUnit.assertEquals(exact.toJson().toString(), "exact-draw", exact.libTag);
+        }
+        if (forced.libTag != null && "sampled".equals(forced.libTag)) {
+            AssertJUnit.assertNull(forced.toJson().toString(), forced.libWhy);
+            AssertJUnit.assertNotNull(forced.toJson().toString(), forced.libExactWhy);
+        }
+        AssertJUnit.assertNull(off.libExactWhy);
+    }
 }
