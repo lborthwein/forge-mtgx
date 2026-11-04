@@ -294,6 +294,12 @@ final class ForcedWinEngine {
          * its end step.
          */
         boolean passToEnd;
+        /**
+         * solver-gaps-1104 (enginePassScale; 0 or 1 = off): the turn-crossing pass's node budget is this many times its
+         * half of the search's nodes, and (with passBudget) its step and card budgets this many times the search's: a
+         * line that crosses a turn gets budget for both turns (work units, N4).
+         */
+        int passScale;
         /** solver-gaps-1104 (engineTriggerTargets; false = off): {@link TriggerTargets#wide}, at most triggerVariants. */
         boolean triggerTargets;
         int triggerVariants = 8;
@@ -1005,6 +1011,8 @@ final class ForcedWinEngine {
      * when the search ends without a line ({@link #shareHit}).
      */
     private long shareNodes = Long.MAX_VALUE, shareSteps = Long.MAX_VALUE;
+    /** solver-gaps-1104 (enginePassScale with passBudget): the current pass's step and card budget multiplier. */
+    private int budgetScale = 1;
     private boolean shareHit;
 
     /** solver-gaps-1104: descend into a root pass move's subtree under its share (enginePassFirst), else plainly. */
@@ -1013,7 +1021,8 @@ final class ForcedWinEngine {
             return descend(node, mv, a, depth);
         }
         shareNodes = st.nodes + Math.max(1, passCap / 3);
-        shareSteps = lim.totalSteps > 0 ? st.steps - stepBase + Math.max(1, lim.totalSteps / 3) : Long.MAX_VALUE;
+        shareSteps = lim.totalSteps > 0 ? st.steps - stepBase + Math.max(1, (long) lim.totalSteps * budgetScale / 3)
+                : Long.MAX_VALUE;
         try {
             return descend(node, mv, a, depth);
         } finally {
@@ -1135,12 +1144,14 @@ final class ForcedWinEngine {
             List<Step> win = e.dfs(root, 0);
             if (win == null && twoTurns && System.nanoTime() < deadline) {
                 lim.passTurn = true;
-                lim.nodes = st.nodes + nodeCap / 2;
-                e.passCap = nodeCap / 2;
+                final int scale = Math.max(1, lim.passScale); // solver-gaps-1104 (1 = unchanged)
+                lim.nodes = st.nodes + nodeCap / 2 * scale;
+                e.passCap = nodeCap / 2 * scale;
                 e.passStart = st.nodes;
                 if (lim.passBudget) {
                     e.stepBase = st.steps; // endstep-rows-1103: pass 2's own step and card budgets
                     e.cardBase = st.cards;
+                    e.budgetScale = scale; // solver-gaps-1104
                 }
                 e.seen.clear();
                 e.table.clear();
@@ -1251,12 +1262,12 @@ final class ForcedWinEngine {
             }
             return true;
         }
-        if (lim.totalSteps > 0 && st.steps - stepBase >= lim.totalSteps) {
-            capAt("steps", st.steps - stepBase, lim.totalSteps); // bvw-step1-build-1024: budget=counter's step cap
+        if (lim.totalSteps > 0 && st.steps - stepBase >= (long) lim.totalSteps * budgetScale) {
+            capAt("steps", st.steps - stepBase, (long) lim.totalSteps * budgetScale); // bvw-step1-build-1024: step cap
             return true;
         }
-        if (lim.totalCards > 0 && st.cards - cardBase >= lim.totalCards) {
-            capAt("cards", st.cards - cardBase, lim.totalCards); // bvw-step1-build-1024: budget=counter's copied-card cap
+        if (lim.totalCards > 0 && st.cards - cardBase >= lim.totalCards * budgetScale) {
+            capAt("cards", st.cards - cardBase, lim.totalCards * budgetScale); // bvw-step1-build-1024: copied-card cap
             return true;
         }
         if (System.nanoTime() > deadline) {

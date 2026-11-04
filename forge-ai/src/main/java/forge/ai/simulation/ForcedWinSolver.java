@@ -294,9 +294,11 @@ public final class ForcedWinSolver {
         public boolean enginePassFirst = false, enginePassToEnd = false, engineTriggerTargets = false, oppMinLoopMemo = false;
         /** solver-gaps-1104: the trigger target classes one engine move branches over (engineTriggerTargets only). */
         public int triggerVariants = 8;
+        /** solver-gaps-1104 (0 = off): ForcedWinEngine.Limits#passScale, the turn-crossing pass's budget multiplier. */
+        public int enginePassScale = 0;
         public static final java.util.Map<String, Object> SOLVERGAPS_DEFAULTS = java.util.Map.of("enginePassFirst", false,
                 "enginePassToEnd", false, "engineTriggerTargets", false, "oppMinLoopMemo", false, "triggerVariants", 8,
-                "oppMinRevealPoints", false);
+                "oppMinRevealPoints", false, "enginePassScale", 0);
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         /**
@@ -458,6 +460,7 @@ public final class ForcedWinSolver {
             c.oppMinLoopMemo = "true".equals(get.apply("oppMinLoopMemo")); // solver-gaps-1104
             c.oppMinRevealPoints = "true".equals(get.apply("oppMinRevealPoints")); // solver-gaps-1104
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
+            c.enginePassScale = intOr(get.apply("enginePassScale"), c.enginePassScale); // solver-gaps-1104
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -561,7 +564,8 @@ public final class ForcedWinSolver {
                 + (loopMacro3 ? " loopMacro3" : "") + (aiWork != 0 ? " aiWork=" + aiWork : "")
                 + (enginePassFirst ? " enginePassFirst" : "") + (enginePassToEnd ? " enginePassToEnd" : "") // solver-gaps-1104
                 + (engineTriggerTargets ? " engineTriggerTargets V=" + triggerVariants : "")
-                + (oppMinLoopMemo ? " oppMinLoopMemo" : "") + (oppMinRevealPoints ? " oppMinRevealPoints" : "");
+                + (oppMinLoopMemo ? " oppMinLoopMemo" : "") + (oppMinRevealPoints ? " oppMinRevealPoints" : "")
+                + (enginePassScale > 0 ? " enginePassScale=" + enginePassScale : "");
         }
     }
 
@@ -2816,6 +2820,7 @@ public final class ForcedWinSolver {
         el.passToEnd = cfg.enginePassToEnd && cfg.engineAnyWindow; // solver-gaps-1104
         el.triggerTargets = cfg.engineTriggerTargets; // solver-gaps-1104
         el.triggerVariants = cfg.triggerVariants;
+        el.passScale = cfg.enginePassScale;
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
