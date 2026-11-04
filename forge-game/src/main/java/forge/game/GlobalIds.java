@@ -24,6 +24,14 @@ public final class GlobalIds {
     }
 
     /**
+     * The counters a game's ids come from: {@code scope}'s (an {@link forge.util.IdScope#capture}) or, for null, the
+     * process-wide ones ({@link #capture()}). Lane shared-engine-1104: from research c7c6e7ed21a; host and tests only.
+     */
+    public static int[] capture(final Object scope) {
+        return scope == null ? capture() : forge.util.IdScope.peek(scope);
+    }
+
+    /**
      * Move every counter forward to {@code to} (from {@link #capture}); a counter already past it is left alone (ids
      * already handed out are never handed out again). Returns how many counters were already past.
      */

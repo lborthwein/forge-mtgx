@@ -54,6 +54,32 @@ public final class IdScope {
         ((AtomicInteger[]) captured)[k.ordinal()].set(k == Kind.COMBAT_VIEW ? -value - 1 : value);
     }
 
+    /**
+     * A captured scope's counters, the last id each handed out (COMBAT_VIEW as a positive count). Lane
+     * shared-engine-1104: from research c7c6e7ed21a (bvw-decision-log-1027), for the multi-game host; unused otherwise.
+     */
+    public static int[] peek(Object captured) {
+        AtomicInteger[] a = (AtomicInteger[]) captured;
+        int[] out = new int[a.length];
+        for (int i = 0; i < a.length; i++) {
+            out[i] = i == Kind.COMBAT_VIEW.ordinal() ? -(a[i].get() + 1) : a[i].get();
+        }
+        return out;
+    }
+
+    /**
+     * A new scope whose counters stand where {@code counters} ({@link #peek}'s form) says. Lane shared-engine-1104: from
+     * research c7c6e7ed21a; the multi-game host starts each game's scope where a lone JVM's counters stand after init.
+     */
+    public static Object scopeAt(int[] counters) {
+        AtomicInteger[] a = new AtomicInteger[Kind.values().length];
+        for (int i = 0; i < a.length; i++) {
+            int v = i < counters.length ? counters[i] : BASE;
+            a[i] = new AtomicInteger(i == Kind.COMBAT_VIEW.ordinal() ? -v - 1 : v);
+        }
+        return a;
+    }
+
     public static boolean isOpen() {
         return scope.get() != null;
     }
