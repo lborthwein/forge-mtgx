@@ -333,7 +333,14 @@ public final class AiTape {
     /** The thread the game runs on: only its calls are decisions (set when the game starts). */
     public void bindGameThread(final Thread t) {
         gameThread = t;
+        // lane shared-engine-1104 (from research bvw-decision-log-1027): the game's own id scope, read on its thread.
+        // A lone JVM's game has none (null: the process-wide counters, as always); a game in a multi-game host has its
+        // own, and its tape must record THOSE counters, as its lone JVM's tape records the process-wide ones.
+        gameScope = Thread.currentThread() == t ? forge.util.IdScope.capture() : null;
     }
+
+    /** The game's own id scope (see {@link #bindGameThread}); null in a one-game process. */
+    private volatile Object gameScope;
 
     public void uninstall() {
         installed.remove(this);
@@ -382,7 +389,7 @@ public final class AiTape {
         final int[] c = game.peekCardIdCounters();
         sb.append('.').append(Integer.toHexString(c[0])).append('.').append(Integer.toHexString(c[1]));
         sb.append('.').append(Long.toHexString(game.getTimestamp()));
-        for (int v : GlobalIds.capture()) {
+        for (int v : GlobalIds.capture(gameScope)) { // lane shared-engine-1104: the game's own counters
             sb.append('.').append(Integer.toHexString(v));
         }
         return sb.toString();
@@ -747,7 +754,8 @@ public final class AiTape {
             if (state != null) {
                 put(r, "st", new JsonPrimitive(state));
             }
-            if (forge.util.IdScope.isOpen()) {
+            // lane shared-engine-1104: "scoped" is a scope other than the game's own (none in a one-game process)
+            if (forge.util.IdScope.capture() != gameScope) {
                 put(r, "sc", new JsonPrimitive(1)); // inside the AI's look-ahead: built on scoped ids
             }
             if (game.findById(card) != st.getCard()) {
