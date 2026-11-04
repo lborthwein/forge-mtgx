@@ -214,6 +214,12 @@ public class GameCopier {
             if (host.getZone() == null || (spell && host.getZone().getZoneType() != ZoneType.Stack)) {
                 return "zone";
             }
+            if (g.findById(host.getId()) == null) {
+                // void-causes-1104 (S2 label void 2989378278): an ability whose host no longer exists in any zone (a
+                // token sacrificed to pay for it); the copier maps a host by its card in the copy, so it cannot be
+                // rebuilt and copyStackFaithfully threw "Couldn't map". Unsupported, like the other gaps above.
+                return "gone";
+            }
             for (SpellAbility s = sa; s != null; s = s.getSubAbility()) {
                 if (!s.usesTargeting()) {
                     continue;
