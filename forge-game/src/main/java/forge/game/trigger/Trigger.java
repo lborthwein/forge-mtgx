@@ -65,6 +65,12 @@ public abstract class Trigger extends TriggerReplacementBase {
      * </p>
      */
     public static void resetIDs() {
+        // lane shared-engine-1103: a game hosted with others resets its own counter, as a lone JVM resets the process's
+        final Object gameIds = forge.util.GameContext.gameIds();
+        if (gameIds != null) {
+            forge.util.IdScope.set(gameIds, forge.util.IdScope.Kind.TRIGGER, 50000);
+            return;
+        }
         Trigger.maxId = 50000;
     }
 

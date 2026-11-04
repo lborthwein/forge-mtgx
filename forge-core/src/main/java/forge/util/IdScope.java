@@ -49,6 +49,11 @@ public final class IdScope {
         }
     }
 
+    /** Lane shared-engine-1103: set a captured scope's counter of {@code k} to {@code value} (its last id handed out). */
+    public static void set(Object captured, Kind k, int value) {
+        ((AtomicInteger[]) captured)[k.ordinal()].set(k == Kind.COMBAT_VIEW ? -value - 1 : value);
+    }
+
     public static boolean isOpen() {
         return scope.get() != null;
     }
@@ -57,6 +62,9 @@ public final class IdScope {
     public static int next(Kind k) {
         AtomicInteger[] a = scope.get();
         if (a == null) {
+            if (GameContext.hosting()) {
+                GameContext.noteUnscopedId(k.name()); // lane shared-engine-1103: an id drawn outside every hosted game
+            }
             return NONE;
         }
         return k == Kind.COMBAT_VIEW ? -a[k.ordinal()].incrementAndGet() : a[k.ordinal()].incrementAndGet();
