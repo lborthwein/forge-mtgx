@@ -300,6 +300,13 @@ final class ForcedWinEngine {
          * line that crosses a turn gets budget for both turns (work units, N4).
          */
         int passScale;
+        /**
+         * solver-gaps-1104 (engineAltLines; 0 = off): the DFS (Forge's move order; not with an engine valuer) records up
+         * to this many distinct winning lines before it returns, so a line that fails verification (an opponent who saw
+         * the setup answers it) does not hide another (the same setup at their end step). Budget stops after the first
+         * line are not caps (as off, which never searched past it).
+         */
+        int altLines;
         /** solver-gaps-1104 (engineTriggerTargets; false = off): {@link TriggerTargets#wide}, at most triggerVariants. */
         boolean triggerTargets;
         int triggerVariants = 8;
@@ -1014,6 +1021,24 @@ final class ForcedWinEngine {
     /** solver-gaps-1104 (enginePassScale with passBudget): the current pass's step and card budget multiplier. */
     private int budgetScale = 1;
     private boolean shareHit;
+    /** solver-gaps-1104 (engineAltLines): the winning lines found so far, in order (first = the line returned). */
+    final List<List<Step>> alts = new ArrayList<>();
+
+    /** solver-gaps-1104: a winning path: returned at once (off), or recorded and returned once altLines are found. */
+    private List<Step> won(List<Step> path) {
+        if (lim.altLines <= 0) {
+            return path;
+        }
+        final String k = path.toString();
+        boolean dup = false;
+        for (List<Step> x : alts) {
+            dup |= x.toString().equals(k);
+        }
+        if (!dup) {
+            alts.add(path);
+        }
+        return alts.size() >= lim.altLines ? alts.get(0) : null;
+    }
 
     /** solver-gaps-1104: descend into a root pass move's subtree under its share (enginePassFirst), else plainly. */
     private List<Step> descendShared(Node node, Step mv, Applied a, int depth) {
@@ -1160,6 +1185,13 @@ final class ForcedWinEngine {
             }
             lim.passTurn = twoTurns;
             lim.nodes = nodeCap;
+            if (win == null && !e.alts.isEmpty()) {
+                win = e.alts.get(0); // solver-gaps-1104 (engineAltLines): the budget ended with lines recorded
+            }
+            if (!e.alts.isEmpty()) {
+                e.stoppedByCap = false; // a stop after the first line is not a cap (off never searched past it)
+                e.stoppedByTime = false;
+            }
             if (win == null && e.shareHit) {
                 e.capAt("nodes-share", st.nodes, lim.nodes); // solver-gaps-1104: a share stop without a line is a cap
             }
@@ -1180,8 +1212,15 @@ final class ForcedWinEngine {
             if (win == null) {
                 return null;
             }
-            return new Line(win, List.of(), win.stream().anyMatch(x -> x.pass) ? 1 : 0, root.me.getLife(), 0, 0, List.of(),
-                    "engine");
+            final Line out = new Line(win, List.of(), win.stream().anyMatch(x -> x.pass) ? 1 : 0, root.me.getLife(), 0, 0,
+                    List.of(), "engine");
+            for (List<Step> alt : e.alts) {
+                if (alt != win) {
+                    out.alternates.add(new Line(alt, List.of(), alt.stream().anyMatch(x -> x.pass) ? 1 : 0,
+                            root.me.getLife(), 0, 0, List.of(), "engine")); // solver-gaps-1104
+                }
+            }
+            return out;
         } catch (RuntimeException | StackOverflowError ex) {
             ForcedWinSolver.receipt("FORCED_WIN engine error " + ex);
             return null;
@@ -1402,7 +1441,11 @@ final class ForcedWinEngine {
             if (a.won) {
                 final List<Step> path = new ArrayList<>(node.path);
                 path.add(mv);
-                return path;
+                final List<Step> w = won(path); // solver-gaps-1104 (engineAltLines; off = return path)
+                if (w != null) {
+                    return w;
+                }
+                continue;
             }
             if (collect != null && a.child != null && !node.passed && !mv.pass && a.child.turn == startTurn) {
                 // Part B: a this-turn position, valued statically
@@ -1663,7 +1706,7 @@ final class ForcedWinEngine {
                     if (fw instanceof List<?> l && !l.isEmpty() && l.get(0) instanceof Step) {
                         @SuppressWarnings("unchecked")
                         final List<Step> win = (List<Step>) fw;
-                        return win;
+                        return won(win); // solver-gaps-1104 (off = win)
                     }
                     @SuppressWarnings("unchecked")
                     final List<Node> cps = (List<Node>) fw;
@@ -1700,7 +1743,7 @@ final class ForcedWinEngine {
             if (body != null) {
                 final Forward fw = fastForward(a.child, body);
                 if (fw.win != null) {
-                    return fw.win;
+                    return won(fw.win); // solver-gaps-1104 (off = fw.win)
                 }
                 if (!seenDominated(fw.node)) {
                     // review #11: while the REPEAT node is searched, its parent link keeps the DFS child's copy too

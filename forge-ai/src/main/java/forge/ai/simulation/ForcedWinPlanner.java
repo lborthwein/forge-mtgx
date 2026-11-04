@@ -270,6 +270,8 @@ public final class ForcedWinPlanner {
          */
         boolean stackStart;
         int windowTurn = -1;
+        /** solver-gaps-1104 (engineAltLines; empty otherwise): the engine's other winning lines, in search order. */
+        final List<Line> alternates = new ArrayList<>();
         final List<String> pileNames;
         /** 0: wins this turn; 1: wins by our next turn (after one pass). */
         final int winTurn;

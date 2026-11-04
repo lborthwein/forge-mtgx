@@ -47,7 +47,7 @@ public class SolverGapsTest extends SimulationTest {
     public void offKeysAreUnrecorded() {
         final ForcedWinSolver.Config c = ForcedWinSolver.Config.fromProps(k -> null);
         for (String k : new String[] {"enginePassFirst", "enginePassToEnd", "engineTriggerTargets", "oppMinLoopMemo",
-                "triggerVariants"}) {
+                "triggerVariants", "oppMinRevealPoints", "enginePassScale", "engineAltLines"}) {
             AssertJUnit.assertFalse(k, HonestGenerator.solverCfgJson(c).has(k));
         }
         AssertJUnit.assertFalse(c.toString().contains("enginePass"));
@@ -141,6 +141,9 @@ public class SolverGapsTest extends SimulationTest {
                 k + ",oppMinRevealPoints=true", "b-reveal");
         final List<ForcedWinSolver.Proposal> best = propose(ForcedWinSolverTest.game("Default", "Default", f),
                 k + ",oppMinRevealPoints=true,enginePassFirst=true", "b-reveal-first");
+        final List<ForcedWinSolver.Proposal> alt = propose(ForcedWinSolverTest.game("Default", "Default", f),
+                k + ",oppMinRevealPoints=true,engineAltLines=3", "b-reveal-alt");
+        AssertJUnit.assertFalse("reveal + alternate lines: a line", alt.isEmpty());
         System.err.println("[solver-gaps-test] b plain=" + (plain.isEmpty() ? "none" : plain.get(0).pBelief + " " + plain.get(0).text)
                 + " | reveal=" + (rev.isEmpty() ? "none" : rev.get(0).pBelief + " " + rev.get(0).text));
         AssertJUnit.assertFalse("reveal + pass first: the end-step line", best.isEmpty());

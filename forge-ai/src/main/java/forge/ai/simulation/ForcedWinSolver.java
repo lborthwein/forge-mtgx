@@ -299,9 +299,11 @@ public final class ForcedWinSolver {
         public int triggerVariants = 8;
         /** solver-gaps-1104 (0 = off): ForcedWinEngine.Limits#passScale, the turn-crossing pass's budget multiplier. */
         public int enginePassScale = 0;
+        /** solver-gaps-1104 (0 = off): ForcedWinEngine.Limits#altLines, the engine's winning lines verified per search. */
+        public int engineAltLines = 0;
         public static final java.util.Map<String, Object> SOLVERGAPS_DEFAULTS = java.util.Map.of("enginePassFirst", false,
                 "enginePassToEnd", false, "engineTriggerTargets", false, "oppMinLoopMemo", false, "triggerVariants", 8,
-                "oppMinRevealPoints", false, "enginePassScale", 0);
+                "oppMinRevealPoints", false, "enginePassScale", 0, "engineAltLines", 0);
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         /**
@@ -464,6 +466,7 @@ public final class ForcedWinSolver {
             c.oppMinRevealPoints = "true".equals(get.apply("oppMinRevealPoints")); // solver-gaps-1104
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             c.enginePassScale = intOr(get.apply("enginePassScale"), c.enginePassScale); // solver-gaps-1104
+            c.engineAltLines = intOr(get.apply("engineAltLines"), c.engineAltLines); // solver-gaps-1104
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
             c.oppMin = v2all || "true".equals(get.apply("oppMin"));
@@ -568,7 +571,8 @@ public final class ForcedWinSolver {
                 + (enginePassFirst ? " enginePassFirst" : "") + (enginePassToEnd ? " enginePassToEnd" : "") // solver-gaps-1104
                 + (engineTriggerTargets ? " engineTriggerTargets V=" + triggerVariants : "")
                 + (oppMinLoopMemo ? " oppMinLoopMemo" : "") + (oppMinRevealPoints ? " oppMinRevealPoints" : "")
-                + (enginePassScale > 0 ? " enginePassScale=" + enginePassScale : "");
+                + (enginePassScale > 0 ? " enginePassScale=" + enginePassScale : "")
+                + (engineAltLines > 0 ? " engineAltLines=" + engineAltLines : "");
         }
     }
 
@@ -664,6 +668,8 @@ public final class ForcedWinSolver {
         public long oppMinNodes, oppMinCuts;
         /** solver-gaps-1104 (oppMinLoopMemo): OppMin points skipped as a dominated loop repeat; only when non-zero. */
         public long oppMinLoopMemo;
+        /** solver-gaps-1104 (engineAltLines): alternate engine lines verified, and taken; only when non-zero. */
+        public long altLines, altTaken;
         /** Review #148: the shared MIN's cap events by reason (process-local diagnostics; never in a label or sha). */
         public final java.util.Map<String, Long> oppMinCapReasons = new java.util.TreeMap<>();
 
@@ -762,6 +768,8 @@ public final class ForcedWinSolver {
             playoutCallCaps += sign * o.playoutCallCaps;
             oppMinNodes += sign * o.oppMinNodes;
             oppMinLoopMemo += sign * o.oppMinLoopMemo;
+            altLines += sign * o.altLines;
+            altTaken += sign * o.altTaken;
             oppMinCuts += sign * o.oppMinCuts;
             cacApplies += sign * o.cacApplies;
             ladderRuns += sign * o.ladderRuns;
@@ -834,6 +842,10 @@ public final class ForcedWinSolver {
             o.addProperty("playout_step_caps", playoutStepCaps);
             o.addProperty("playout_call_caps", playoutCallCaps);
             o.addProperty("ms_bound", msBound());
+            if (altLines != 0) {
+                o.addProperty("alt_lines", altLines); // solver-gaps-1104
+                o.addProperty("alt_taken", altTaken);
+            }
             if (oppMinLoopMemo != 0) {
                 o.addProperty("opp_min_loop_memo", oppMinLoopMemo); // solver-gaps-1104
             }
@@ -2824,6 +2836,7 @@ public final class ForcedWinSolver {
         el.triggerTargets = cfg.engineTriggerTargets; // solver-gaps-1104
         el.triggerVariants = cfg.triggerVariants;
         el.passScale = cfg.enginePassScale;
+        el.altLines = "off".equals(cfg.engineOrder) ? cfg.engineAltLines : 0; // the ordered DFS returns its first line
         el.cycles = cfg.cycles;
         if (cfg.hideOwnLibrary) {
             final List<Integer> kt = knownTop(live);
@@ -2902,6 +2915,11 @@ public final class ForcedWinSolver {
                 line.window = eph.getPhase();
                 line.windowTurn = eph.getTurn();
                 line.stackStart = stackWindow;
+                for (Line alt : line.alternates) {
+                    alt.window = eph.getPhase(); // solver-gaps-1104
+                    alt.windowTurn = eph.getTurn();
+                    alt.stackStart = stackWindow;
+                }
             }
             if (likelyCands != null) {
                 for (Line c : likelyCands) {
@@ -2950,6 +2968,24 @@ public final class ForcedWinSolver {
             }
         }
         receipt("FORCED_WIN eval engine" + tag() + " turn=" + pos.turn + " " + e);
+        if (!line.alternates.isEmpty() && !(e.pUnopposed >= 1.0 && e.pBelief >= 1.0)) {
+            // solver-gaps-1104 (engineAltLines): the engine's other lines, verified the same way; the best P is kept
+            int k = 0;
+            for (Line alt : line.alternates) {
+                final Eval ea = evaluate(live, alt, mix(cfg.seed, index * 1000L + 999),
+                        deadlineAt(Math.max(t0 + budgetMs() * 1_000_000L, System.nanoTime() + cfg.evalReserveMs * 1_000_000L / 2)));
+                meter.altLines++;
+                receipt("FORCED_WIN eval engine-alt" + tag() + " " + (++k) + " " + ea);
+                if ((ea.pUnopposed >= 1.0 ? ea.pBelief : 0) > (e.pUnopposed >= 1.0 ? e.pBelief : 0)) {
+                    e = ea;
+                    line = alt;
+                    meter.altTaken++;
+                }
+                if (e.pUnopposed >= 1.0 && e.pBelief >= 1.0) {
+                    break;
+                }
+            }
+        }
         final Eval em = cfg.loopMarginal ? loopMarginal(live, line, e, index, t0) : e; // endstep-rows-1103
         if (em != e) {
             e = em;
