@@ -1074,6 +1074,7 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
     }
 
     public void mainLoopStep() {
+        forge.game.WorkMeter.tick("mainLoopStep"); // void-causes-1104: hang watchdog unit (no meter open = no-op)
         if (givePriorityToPlayer) {
             if (DEBUG_PHASES) {
                 sw.start();

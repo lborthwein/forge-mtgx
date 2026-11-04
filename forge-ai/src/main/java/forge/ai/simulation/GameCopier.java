@@ -362,6 +362,7 @@ public class GameCopier {
     }
 
     public Game makeCopy() {
+        forge.game.WorkMeter.tick("makeCopy"); // void-causes-1104: hang watchdog unit (no meter open = no-op)
         return makeCopy(null, null);
     }
     public Game makeCopy(PhaseType advanceToPhase, Player aiPlayer) {
@@ -1685,6 +1686,7 @@ public class GameCopier {
         if (v == null || inert(v)) {
             return null;
         }
+        forge.game.WorkMeter.tick("copyLeakWalk"); // void-causes-1104: hang watchdog unit (no meter open = no-op)
         if (depth > 24) {
             return path + "!depth";
         }
