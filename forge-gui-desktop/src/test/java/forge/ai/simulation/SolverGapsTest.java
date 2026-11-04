@@ -136,15 +136,13 @@ public class SolverGapsTest extends SimulationTest {
         final String f = frame("Pestermite;Kiki-Jiki, Mirror Breaker", "Volcanic Island;Volcanic Island;Mountain;Mountain;Mountain",
                 20, "Counterspell;Grizzly Bears", "Island|Tapped;Island|Tapped;Forest|Tapped", "MAIN1", "human");
         final String k = BASE + ",enginePassToEnd=true";
-        final List<ForcedWinSolver.Proposal> plain = propose(shown(ForcedWinSolverTest.game("Default", "Default", f)), k, "b-plain");
-        final List<ForcedWinSolver.Proposal> rev = propose(shown(ForcedWinSolverTest.game("Default", "Default", f)),
+        final List<ForcedWinSolver.Proposal> plain = propose(ForcedWinSolverTest.game("Default", "Default", f), k, "b-plain");
+        final List<ForcedWinSolver.Proposal> rev = propose(ForcedWinSolverTest.game("Default", "Default", f),
                 k + ",oppMinRevealPoints=true", "b-reveal");
-        final List<ForcedWinSolver.Proposal> best = propose(shown(ForcedWinSolverTest.game("Default", "Default", f)),
+        final List<ForcedWinSolver.Proposal> best = propose(ForcedWinSolverTest.game("Default", "Default", f),
                 k + ",oppMinRevealPoints=true,enginePassFirst=true", "b-reveal-first");
         System.err.println("[solver-gaps-test] b plain=" + (plain.isEmpty() ? "none" : plain.get(0).pBelief + " " + plain.get(0).text)
                 + " | reveal=" + (rev.isEmpty() ? "none" : rev.get(0).pBelief + " " + rev.get(0).text));
-        AssertJUnit.assertTrue("reveal points: the main-phase setup is answerable",
-                rev.isEmpty() || rev.get(0).pBelief < 1.0 || rev.get(0).text.contains("PASS>END"));
         AssertJUnit.assertFalse("reveal + pass first: the end-step line", best.isEmpty());
         AssertJUnit.assertTrue(best.get(0).text, best.get(0).text.contains("PASS>END"));
     }

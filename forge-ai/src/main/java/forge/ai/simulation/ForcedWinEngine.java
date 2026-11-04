@@ -281,7 +281,7 @@ final class ForcedWinEngine {
         boolean passBudget;
         /**
          * solver-gaps-1104 (enginePassFirst; false = off): in the pass that searches lines crossing the turn, the pass
-         * moves are tried first at each node of our turn. They were last, behind the branching cap's distinct moves, so on
+         * moves are tried first at each node that has not passed yet. They were last, behind the branching cap's distinct moves, so on
          * a board with that many other moves the second pass never passed (a setup the turn before the kill was never
          * searched). Deterministic: only the order changes.
          */
@@ -1872,8 +1872,10 @@ final class ForcedWinEngine {
             // phase too (a mill loop's kill is the pass; the engine still plays their turn up to the draw)
             out.add(0, Step.PASS);
         } else if (!node.passed && lim.passTurn) {
-            if (lim.passFirst && g.getPhaseHandler().isPlayerTurn(me)) {
-                out.add(0, Step.PASS); // solver-gaps-1104: the pass first in the turn-crossing pass (not behind the cap)
+            if (lim.passFirst) {
+                // solver-gaps-1104: the pass first in the turn-crossing pass (not behind the cap), at our turn's nodes and
+                // at a PASS_END node in their end step alike
+                out.add(0, Step.PASS);
             } else {
                 out.add(Step.PASS);
             }
