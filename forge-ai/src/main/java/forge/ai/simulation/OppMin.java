@@ -75,6 +75,14 @@ public final class OppMin {
          * node budget still bounds the tree: over it is the oppNodes cap (fail closed).
          */
         public boolean budgetByDepth;
+        /**
+         * solver-gaps-1104 (oppMinLoopMemo; false = off, the default, and then nothing changes): a point is expanded once
+         * per loop state. A later point whose {@link Point#loopKey} (the position with the monotone counters out, the
+         * stack by name) equals an earlier expanded one's at the same budget left, and whose counters
+         * ({@link ForcedWinEngine#progress}) dominate that one's for us, is a memo hit: the same answer earlier, before
+         * our loop gained, is no worse for the opponent. A loop's points then cost one iteration's, not n.
+         */
+        public boolean loopMemo;
 
         public Cfg(final int nodes, final int perPoint, final int depth) {
             if (perPoint > CHARM_CAP) {
@@ -160,6 +168,9 @@ public final class OppMin {
          */
         java.util.Map<String, java.util.TreeSet<String>> gapCards = java.util.Collections.emptyMap();
         List<String> answerNames = java.util.Collections.emptyList();
+        /** solver-gaps-1104 (loopMemo only; null otherwise): the point's loop state and our counters there. */
+        String loopKey;
+        long[] pv;
 
         Point(final int size, final String state, final int impact, final int budgetHint) {
             this(size, state, impact, budgetHint, null);
@@ -196,6 +207,8 @@ public final class OppMin {
         /** The script of the min branch. */
         public String why;
         public int nodes, memoHits, maxResponses, budget;
+        /** solver-gaps-1104 (loopMemo): points skipped as a dominated repeat of a loop state. */
+        public int loopMemoHits;
         public Leaf firstLeaf;
         /** Every cap event of the tree by reason (review #148: the recall cost of failing closed). */
         public final java.util.TreeMap<String, Integer> caps = new java.util.TreeMap<>();
@@ -221,6 +234,7 @@ public final class OppMin {
         stack.push(Script.passAll());
         stack.push(Script.forgeRoot());
         final Set<String> memo = new HashSet<>();
+        final java.util.Map<String, List<long[]>> loopSeen = new java.util.HashMap<>(); // solver-gaps-1104 (loopMemo)
         double lo = Double.POSITIVE_INFINITY;
         while (!stack.isEmpty()) {
             final Script s = stack.pop();
@@ -284,6 +298,23 @@ public final class OppMin {
                     out.memoHits++;
                     continue;
                 }
+                if (cfg.loopMemo && p.loopKey != null && p.pv != null) {
+                    // solver-gaps-1104: an earlier point of the same loop state that this one's counters dominate
+                    final List<long[]> seen = loopSeen.computeIfAbsent(p.loopKey + "|" + left, k -> new ArrayList<>());
+                    boolean dominated = false;
+                    for (long[] e : seen) {
+                        if (ForcedWinEngine.dominates(p.pv, e)) {
+                            dominated = true;
+                            break;
+                        }
+                    }
+                    if (dominated) {
+                        out.memoHits++;
+                        out.loopMemoHits++;
+                        continue;
+                    }
+                    seen.add(p.pv);
+                }
                 for (int r = 0; r < p.size; r++) {
                     kids.add(s.with(j, r, b));
                     kidImpact.add(p.impact);
@@ -332,6 +363,24 @@ public final class OppMin {
          * continuing from there. Pure mana abilities with no trigger are the "no response" branch.
          */
         public boolean manaSearch;
+        /** solver-gaps-1104 (Cfg#loopMemo): record each point's loop state and counters. */
+        public boolean loopMemo;
+        /**
+         * solver-gaps-1104 (oppMinRevealPoints; false = off, the default, and then nothing changes): the information the
+         * opponent has seen is a decision point of its own. Its priority in its own main phase with an empty stack is a
+         * response point while we have a nonland permanent that entered the battlefield since its previous turn (a card
+         * it has seen enter, {@link #revealKey}). Its choices there: Forge AI's own play, pass (hold its mana and cards
+         * for our turn), and each castable answer that targets one of those permanents or us. A setup cast before its
+         * turn is answerable there; one flashed in at its end step is not seen until then. The answers that do not
+         * target the revealed cards stay Forge AI's (this point is an addition to the base, never a removal).
+         */
+        public boolean reveal;
+
+        /** The point key at this priority: {@link OppMin#pointKey}, else (reveal only) {@link #revealKey}. */
+        private String key(final Game g) {
+            final String pk = pointKey(g, victim);
+            return pk != null || !reveal ? pk : revealKey(g, opp, victim);
+        }
         /** covfix-a-1102: a scripted mana-ability response could not be activated on the copy (fail closed: a cap). */
         public boolean manaSimFailed;
         /** Review #169 S1-2: the point key whose priority reopens as a new point after a mana activation, and a counter. */
@@ -345,9 +394,27 @@ public final class OppMin {
             this.onlyTurn = onlyTurn;
         }
 
+        /** solver-gaps-1104 (loopMemo): the point's loop state (the coarse position, the stack by name) and counters. */
+        private Point loop(final Point p, final Game g) {
+            if (!loopMemo) return p;
+            try {
+                final StringBuilder sb = new StringBuilder(ForcedWinEngine.coarseKey(g, victim));
+                for (SpellAbilityStackInstance si : g.getStack()) {
+                    final SpellAbility sa = si.getSpellAbility();
+                    sb.append("|st:").append(sa == null ? "?" : (sa.getHostCard() == null ? "" : sa.getHostCard().getName())
+                            + "/" + sa.getDescription() + "/" + (sa.getActivatingPlayer() == victim ? "v" : "o"));
+                }
+                p.loopKey = sb.toString();
+                p.pv = ForcedWinEngine.progress(g, victim);
+            } catch (RuntimeException e) {
+                p.loopKey = null; // no loop state: the exact memo only
+            }
+            return p;
+        }
+
         /** Whether this priority is a new response point (and records it if so). */
         public boolean isPoint(final Game g) {
-            final String pk = pointKey(g, victim);
+            final String pk = key(g);
             return pk != null && (onlyTurn < 0 || g.getPhaseHandler().getTurn() == onlyTurn) && !seen.contains(pk);
         }
 
@@ -355,7 +422,7 @@ public final class OppMin {
          * The opponent's choice at this priority: null = pass; {@code own} = Forge AI's own play. Not a point: {@code own}.
          */
         public List<SpellAbility> choose(final Game g, final java.util.function.Supplier<List<SpellAbility>> own) {
-            String pk = pointKey(g, victim);
+            String pk = key(g);
             if (pk != null && pk.equals(reopen)) {
                 // review #169 S1-2: after a mana activation the same priority is a NEW point, its answers read again from
                 // the post-activation state (a counter castable only now), "pass" included
@@ -375,19 +442,20 @@ public final class OppMin {
                         + " stack " + g.getStack().size());
             }
             final String state = stateKey(g);
-            final Answers as = answers(g, opp, victim, top, manaSearch);
+            final boolean rev = pk.startsWith("rev:");
+            final Answers as = rev ? revealAnswers(g, opp, victim) : answers(g, opp, victim, top, manaSearch);
             final List<SpellAbility> rs = as.list;
             // review S1 (safety net, the base's behaviour): Forge AI's own answer at this point is a candidate too
             final List<SpellAbility> mine = own.get();
             if (script.forge) {
-                points.add(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs));
+                points.add(loop(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs), g));
                 return mine;
             }
             final SpellAbility fa = mine == null || mine.isEmpty() ? null : mine.get(0);
             if (fa != null && fa.getActivatingPlayer() == opp && !fa.isManaAbility() && !sameAsAny(fa, rs)) {
                 rs.add(fa);
             }
-            points.add(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs));
+            points.add(loop(diag(new Point(rs.size(), state, impact(top), budgetHint(opp, rs), as.gap()), as, rs), g));
             if (DEBUG && as.gap() != null) System.err.println("[oppmin] point " + idx + " gap " + as.gap());
             final int r = script.respAt(idx);
             if (r < 0 || r >= rs.size()) return null;
@@ -414,11 +482,57 @@ public final class OppMin {
                 }
                 if (!ok || before.equals(manaState(g, opp))) manaSimFailed = true;
                 // review #169 S1-2: the follow-up is the MIN's, not Forge AI's: this priority again, as a new point
-                reopen = pointKey(g, victim);
+                reopen = key(g);
                 return choose(g, own);
             }
             return new ArrayList<>(Collections.singletonList(sa));
         }
+    }
+
+    /**
+     * solver-gaps-1104 (Driver#reveal): a reveal point at the opponent's own main-phase priority with an empty stack,
+     * while {@link #revealed} is not empty; null otherwise. Keyed by turn, phase and the revealed cards.
+     */
+    public static String revealKey(final Game g, final Player opp, final Player victim) {
+        final PhaseHandler ph = g.getPhaseHandler();
+        if (!g.getStack().isEmpty() || !ph.isPlayerTurn(opp) || !(ph.is(PhaseType.MAIN1) || ph.is(PhaseType.MAIN2))) return null;
+        final List<Card> r = revealed(g, victim);
+        if (r.isEmpty()) return null;
+        final StringBuilder sb = new StringBuilder("rev:").append(ph.getTurn()).append(':').append(ph.getPhase());
+        for (Card c : r) sb.append(':').append(c.getId());
+        return sb.toString();
+    }
+
+    /** The victim's nonland permanents that entered the battlefield since the opponent's previous turn (by turn in zone). */
+    static List<Card> revealed(final Game g, final Player victim) {
+        final List<Card> out = new ArrayList<>();
+        final int turn = g.getPhaseHandler().getTurn();
+        for (Card c : victim.getCardsIn(ZoneType.Battlefield)) {
+            if (!c.isLand() && c.getTurnInZone() >= turn - 1) out.add(c);
+        }
+        return out;
+    }
+
+    /**
+     * solver-gaps-1104: the answers at a reveal point: the castable answers ({@link #answers}, every zone) that target a
+     * revealed card or the victim; no gap (the set is an addition: the other plays stay Forge AI's).
+     */
+    static Answers revealAnswers(final Game g, final Player opp, final Player victim) {
+        final Answers all = answers(g, opp, victim, null, false);
+        final Set<Integer> ids = new HashSet<>();
+        for (Card c : revealed(g, victim)) ids.add(c.getId());
+        final List<SpellAbility> keep = new ArrayList<>();
+        for (SpellAbility sa : all.list) {
+            boolean hits = false;
+            for (SpellAbility x = sa; x != null && !hits; x = x.getSubAbility()) {
+                if (!x.usesTargeting() || x.getTargets() == null) continue;
+                for (GameObject o : x.getTargets()) {
+                    hits |= o instanceof Card c && ids.contains(c.getId()) || o == victim;
+                }
+            }
+            if (hits) keep.add(sa);
+        }
+        return new Answers(keep, new java.util.TreeSet<>());
     }
 
     /** Whether {@code fa} is already in {@code rs} (same card, same ability, same targets). */
