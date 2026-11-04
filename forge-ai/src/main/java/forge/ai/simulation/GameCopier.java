@@ -654,6 +654,16 @@ public class GameCopier {
                 final Card nc = cardMap.get(c);
                 if (nc != null) {
                     fidelityLeftOut += nc.copyTurnStateFrom(c, m);
+                    if (c.getEffectSourceAbility() != null && nc.getEffectSourceAbility() == null
+                            && nc.getEffectSource() != null) {
+                        // void-causes-1104 (S2 label NPE, game 2989384742): copyTurnStateFrom gives an effect card its
+                        // source CARD; a static ability of the effect that reads the source ABILITY (its extra
+                        // loyalty activations) then threw in every copy. The ability goes too (unmapped = as before).
+                        final SpellAbility esa = copyEffectSourceAbility(c.getEffectSourceAbility());
+                        if (esa != null && esa.getHostCard() == nc.getEffectSource()) {
+                            nc.setEffectSource(esa);
+                        }
+                    }
                 }
             }
         }
@@ -2127,6 +2137,47 @@ public class GameCopier {
         } else {
             zoneOwner.getZone(zone).add(newCard);
         }
+    }
+
+    /**
+     * void-causes-1104: the copy's counterpart of an effect's source ability {@code esa} (a resolved ability: no longer on
+     * the stack, so nothing else maps it): the copied host's own ability that {@code esa}'s root was played from (by
+     * description, as {@link #findSAInCard}), copied with the same ids and marked as played from it
+     * ({@code getOriginalAbility}), and the sub-ability at {@code esa}'s place in that chain. Null when the host was
+     * not copied or the ability is not found (the effect then keeps only its source card, as before).
+     */
+    private SpellAbility copyEffectSourceAbility(SpellAbility esa) {
+        final Card host = esa.getHostCard();
+        final Card newHost = host == null ? null : cardMap.get(host);
+        if (newHost == null) {
+            return null;
+        }
+        final SpellAbility root = esa.getRootAbility();
+        final SpellAbility played = root.getOriginalAbility() != null ? root.getOriginalAbility() : root;
+        final SpellAbility printed = findSAInCard(played, newHost);
+        if (printed == null) {
+            return null;
+        }
+        final SpellAbility n = printed.copy(newHost, true); // lki: the same ids, no id drawn in the copy
+        if (root.getOriginalAbility() != null) {
+            n.setOriginalAbility(printed);
+        }
+        // the same place in the sub-ability chain when esa is on it; else (a die result's or a mode's ability, held
+        // outside that chain) the root, which is what every reader of the effect's source ability goes through
+        int depth = 0;
+        SpellAbility a = root;
+        while (a != null && a != esa) {
+            a = a.getSubAbility();
+            depth++;
+        }
+        if (a == null) {
+            return n;
+        }
+        SpellAbility sub = n;
+        for (int k = 0; sub != null && k < depth; k++) {
+            sub = sub.getSubAbility();
+        }
+        return sub != null ? sub : n;
     }
 
     private static SpellAbility findSAInCard(SpellAbility sa, Card c) {
