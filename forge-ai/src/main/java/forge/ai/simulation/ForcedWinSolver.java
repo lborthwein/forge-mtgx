@@ -277,8 +277,11 @@ public final class ForcedWinSolver {
                 "loopMarginal", false, "loopEps", 0.005, "loopMarginalCap", 256);
         /**
          * solver-gaps-1104 (all false = off, the default, and then nothing changes; recorded only when on).
-         * enginePassFirst: the engine's turn-crossing pass tries the pass first at each node of our turn (it sat behind
-         * the branching cap). enginePassToEnd (read with engineAnyWindow): that pass also offers PASS_END, resting at our
+         * enginePassFirst: the engine's turn-crossing pass tries the pass first at each unpassed node (it sat behind the
+         * branching cap), each of the root's pass moves searches under a third of that pass's nodes and steps (a share stop
+         * without a line is a cap), and at our main phase the engine runs without the board-power gate (the turn before
+         * the kill, next turn's attackers are in hand). enginePassScale (0 = off): that pass's budgets times this.
+         * enginePassToEnd (read with engineAnyWindow): that pass also offers PASS_END, resting at our
          * priority in the opponent's end step before our turn (a flash setup there, seen by the opponent only then).
          * engineTriggerTargets: an engine move's targeting trigger of ours branches over every legal target class (cards
          * equal by controller, name and tapped state are one class), our own mana sources ranked by the mana they make
