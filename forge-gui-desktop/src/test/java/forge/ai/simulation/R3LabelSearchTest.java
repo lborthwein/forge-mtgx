@@ -602,6 +602,51 @@ public class R3LabelSearchTest extends SimulationTest {
         AssertJUnit.assertEquals(fp, LookaheadSearch.fingerprint(g));
     }
 
+    /**
+     * label-parallel-1103 (many label games in one JVM): our R3 row (threads 4) is byte-identical when another game of
+     * the JVM, with its hidden cards re-randomised (both libraries shuffled, the opponent's hand changed), runs its own
+     * R3 row on another thread at the same time.
+     */
+    @Test
+    public void concurrentGamesShareNoHiddenState() throws Exception {
+        final JsonObject o = base();
+        o.addProperty("selectWorlds", 3);
+        o.addProperty("targetWorlds", 4);
+        o.addProperty("maxTurns", 6);
+        final java.util.function.Supplier<String> ours = () -> {
+            final Game g = boltBoard(3, 20, false, true);
+            final Player a = g.getPlayers().get(0);
+            final R3LabelSearch r3 = new R3LabelSearch(spec(o), env(flat(0.5), null));
+            r3.setThreads(4);
+            return noMs(r3.priorityRow(g, a, r3.candidates(g, a,
+                    Collections.singletonList(firstSpell(a, "Lightning Bolt"))), 91L).toJson()).toString();
+        };
+        final String before = ours.get();
+        for (long seed = 1; seed <= 3; seed++) {
+            final Game og = boltBoard(3, 20, seed % 2 == 0, true);
+            final Player oa = og.getPlayers().get(0), ob = og.getPlayers().get(1);
+            final Random rng = new Random(seed);
+            for (Player p : og.getPlayers()) {
+                final List<Card> lib = new ArrayList<>(p.getCardsIn(ZoneType.Library));
+                Collections.shuffle(lib, rng);
+                p.getZone(ZoneType.Library).setCards(lib);
+            }
+            for (int i = 0; i < (int) seed; i++) addCardToZone(i % 2 == 0 ? "Counterspell" : "Shock", ob, ZoneType.Hand);
+            final String[] other = {null};
+            final Thread t = new Thread(() -> {
+                final R3LabelSearch r3o = new R3LabelSearch(spec(o), env(flat(0.5), null));
+                r3o.setThreads(4);
+                other[0] = r3o.priorityRow(og, oa, r3o.candidates(og, oa,
+                        Collections.singletonList(firstSpell(oa, "Lightning Bolt"))), 91L).toJson().toString();
+            }, "rlreplay-w-other");
+            t.start();
+            final String now = ours.get();
+            t.join();
+            AssertJUnit.assertNotNull(other[0]);
+            AssertJUnit.assertEquals("seed " + seed, before, now);
+        }
+    }
+
     private String parallelRows(final int threads) {
         final StringBuilder sb = new StringBuilder();
         // a priority row: the determinism row's board, and the recorded Bolt (several candidates: Bolt, hold, pass)
