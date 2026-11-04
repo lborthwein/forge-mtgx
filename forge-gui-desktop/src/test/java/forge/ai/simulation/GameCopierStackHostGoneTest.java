@@ -36,10 +36,24 @@ public class GameCopierStackHostGoneTest extends SimulationTest {
         game.getStack().add(draw);
         Assert.assertNull(GameCopier.stackUnsupported(game), "the token is still there: supported");
         // pay the sacrifice: the token leaves the battlefield and ceases to exist
-        game.getAction().sacrifice(new forge.game.card.CardCollection(clue), draw, false, null);
+        final java.util.Map<forge.game.ability.AbilityKey, Object> params = forge.game.ability.AbilityKey.newMap();
+        params.put(forge.game.ability.AbilityKey.LastStateBattlefield, game.copyLastStateBattlefield());
+        game.getAction().sacrifice(new forge.game.card.CardCollection(clue), draw, false, params);
         game.getAction().checkStateEffects(true);
         Assert.assertNull(game.findById(clue.getId()), "a sacrificed token exists in no zone");
         Assert.assertFalse(game.getStack().isEmpty());
-        Assert.assertEquals(GameCopier.stackUnsupported(game), "gone");
+        // before the fix the check accepted this stack and the copy threw (the label void's stack)
+        final String why = GameCopier.stackUnsupported(game);
+        if (why == null) {
+            final GameCopier copier = new GameCopier(game, true);
+            copier.setCopyStack(true);
+            try {
+                copier.makeCopy();
+                Assert.fail("accepted, and the copy did not throw either");
+            } catch (RuntimeException e) {
+                Assert.fail("stackUnsupported accepted a stack the copier cannot rebuild: " + e);
+            }
+        }
+        Assert.assertEquals(why, "gone");
     }
 }
