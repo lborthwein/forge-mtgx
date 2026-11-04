@@ -604,16 +604,19 @@ public class R3LabelSearchTest extends SimulationTest {
 
     private String parallelRows(final int threads) {
         final StringBuilder sb = new StringBuilder();
-        // a priority row, several candidates (Bolt the bears, Bolt them, pass, the land)
+        // a priority row: the determinism row's board, and the recorded Bolt (several candidates: Bolt, hold, pass)
         final JsonObject o = base();
         o.addProperty("selectWorlds", 3);
         o.addProperty("targetWorlds", 5);
         o.addProperty("maxTurns", 6);
-        final Game g = boltBoard(6, 20, false, true);
-        final Player a = g.getPlayers().get(0);
-        final R3LabelSearch r3 = new R3LabelSearch(spec(o), env(flat(0.5), null));
-        r3.setThreads(threads);
-        sb.append(noMs(r3.priorityRow(g, a, r3.candidates(g, a, null), 77L).toJson())).append('\n');
+        for (boolean bolt : new boolean[] {false, true}) {
+            final Game g = boltBoard(bolt ? 3 : 6, 20, false, true);
+            final Player a = g.getPlayers().get(0);
+            final R3LabelSearch r3 = new R3LabelSearch(spec(o), env(flat(0.5), null));
+            r3.setThreads(threads);
+            sb.append(noMs(r3.priorityRow(g, a, r3.candidates(g, a, bolt ? Collections.singletonList(firstSpell(a,
+                    "Lightning Bolt")) : null), 77L).toJson())).append('\n');
+        }
         // oppMin's MIN (their Counterspell, then the bears) in the target worlds
         final JsonObject m = base();
         m.addProperty("selectWorlds", 2);
@@ -646,11 +649,12 @@ public class R3LabelSearchTest extends SimulationTest {
             c.addProperty("targetWorlds", 4);
             c.addProperty("maxTurns", 6);
             c.addProperty("rowMaxLines", cap);
-            final Game gc = boltBoard(6, 20, false, true);
+            final Game gc = boltBoard(3, 20, false, true);
             final Player ac = gc.getPlayers().get(0);
             final R3LabelSearch r3c = new R3LabelSearch(spec(c), env(flat(0.5), null));
             r3c.setThreads(threads);
-            sb.append(noMs(r3c.priorityRow(gc, ac, r3c.candidates(gc, ac, null), 78L + cap).toJson())).append('\n');
+            sb.append(noMs(r3c.priorityRow(gc, ac, r3c.candidates(gc, ac,
+                    Collections.singletonList(firstSpell(ac, "Lightning Bolt"))), 78L + cap).toJson())).append('\n');
         }
         // a choice row (Demonic Tutor's pick), with the choice engine's own log and counts
         final Game d = doomsdayBoard();

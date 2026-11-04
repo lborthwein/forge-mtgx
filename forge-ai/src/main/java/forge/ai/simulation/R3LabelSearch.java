@@ -1337,7 +1337,8 @@ public final class R3LabelSearch {
      * would have. A unit after a stop is dropped: it never ran in sequence, and it leaves nothing.
      */
     void runUnits(final int n, final Work row, final ChooseACard.Row choice, final UnitFn f, final Commit c) {
-        if (threads <= 1 || n <= 1 || sequentialWhy() != null) {
+        if (threads <= 1 || n <= 1 || sequentialWhy() != null || row.over(spec) != null) {
+            // (a row already over its cap: every line of these units stops at its first check, as in sequence)
             for (int u = 0; u < n; u++) {
                 if (!c.accept(u, f.run(u, row))) return;
             }
