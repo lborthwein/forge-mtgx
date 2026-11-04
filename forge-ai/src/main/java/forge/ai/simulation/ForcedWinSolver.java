@@ -2790,7 +2790,11 @@ public final class ForcedWinSolver {
         if (endStepOpen) {
             meter.endStepOpens++;
         }
-        if (!planFailed && !unmodeled && power < pos.oppLife && !poisonLethal && !endStepOpen) {
+        // solver-gaps-1104 (enginePassFirst): the turn-crossing search also runs at our main phase without the gate (the
+        // gate reads our power now; the turn before the kill, next turn's attackers are still in our hand)
+        final boolean passOpen = cfg.enginePassFirst && eph.isPlayerTurn(me) && live.getStack().isEmpty()
+                && (eph.is(PhaseType.MAIN1) || eph.is(PhaseType.MAIN2));
+        if (!planFailed && !unmodeled && power < pos.oppLife && !poisonLethal && !endStepOpen && !passOpen) {
             return null;
         }
         if (!cfg.forced && !cfg.likely) {

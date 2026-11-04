@@ -41,7 +41,7 @@ public class SolverGapsTest extends SimulationTest {
     static final String BASE = "budget=counter,budgetMs=4000,cycles=true,engineCards=75000,engineMs=2000,enginePathCards=20000,"
             + "engineSteps=3000,evalReserveMs=1000,evalSteps=4000,wallGraceMs=1000,labellerV2=true,engineAnyWindow=true,"
             + "engineEndStepOpen=true,enginePassBudget=true,engineStack=true,loopMarginal=true,engineEveryWindow=true,"
-            + "engineNodes=500";
+            + "engineNodes=500,hideOwnLibrary=true,defense=false,likely=false,defendMs=0";
 
     @Test
     public void offKeysAreUnrecorded() {
