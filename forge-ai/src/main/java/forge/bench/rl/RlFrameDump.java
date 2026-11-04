@@ -38,6 +38,12 @@ import forge.util.IdScope;
  * seat, so {@code tools/ml/rl/labels.py read_sink} reads them as label files. Nothing is written during the game; {@link
  * #finish} writes the game's rows only when its replay is digest-equal to the tape (else none, loudly).
  *
+ * <p><b>The observation schedule matters.</b> {@link RlKnowledge} settles a pending sighting (a card that may have
+ * turned face down) when it is next queried, against the card's visibility at that moment. So a frame depends on which
+ * earlier positions were observed: a dump over band [lo, hi) reproduces a labeller of the same band position for
+ * position, while a whole-game dump (hi &lt;= 0) settles at every decision and its band frames can show more known
+ * cards than the banded dump's. Each dump is deterministic for its own band.
+ *
  * <p>Outputs ({@link Sink}, one of each per JVM): {@code frames-<pid>.mxl.gz} (one gzip member per game) and {@code
  * games-<pid>.jsonl} (one row per replayed game, with its row counts and frame time).
  */

@@ -123,17 +123,28 @@ public class RlFrameDumpTest {
                 Assert.assertTrue(lr.containsKey(e.getKey()), "dump priority row without a label row " + e.getKey());
             }
         }
-        // the whole game: a superset, the band's rows byte for byte
+        // the whole game: a superset of the band's positions, and deterministic (two runs byte for byte). Its band
+        // frames may differ from the banded dump's: RlKnowledge settles pending sightings when it is queried, so what
+        // a frame shows depends on which earlier positions were observed (RlFrameDump's class comment)
         final Path all = Files.createTempDirectory(RlLabelReplayTest.out, "fd-all-");
         Assert.assertEquals(RlActorBench.replay(dumpCfg(all, 0, 0), RlLabelReplayTest.index, "test"), 0);
         final Map<String, Object[]> ar = byKey(RlLabelReplayTest.records(all));
         Assert.assertTrue(ar.size() > dr.size(), ar.size() + " vs " + dr.size());
+        int same = 0;
         for (Map.Entry<String, Object[]> e : dr.entrySet()) {
             final Object[] a = ar.get(e.getKey());
             Assert.assertNotNull(a, e.getKey());
-            Assert.assertTrue(Arrays.equals((byte[]) a[1], (byte[]) e.getValue()[1]), e.getKey());
+            same += Arrays.equals((byte[]) a[1], (byte[]) e.getValue()[1]) ? 1 : 0;
+        }
+        final Path all2 = Files.createTempDirectory(RlLabelReplayTest.out, "fd-all2-");
+        Assert.assertEquals(RlActorBench.replay(dumpCfg(all2, 0, 0), RlLabelReplayTest.index, "test"), 0);
+        final Map<String, Object[]> ar2 = byKey(RlLabelReplayTest.records(all2));
+        Assert.assertEquals(ar2.keySet(), ar.keySet());
+        for (Map.Entry<String, Object[]> e : ar.entrySet()) {
+            Assert.assertTrue(Arrays.equals((byte[]) ar2.get(e.getKey())[1], (byte[]) e.getValue()[1]),
+                    "not deterministic at " + e.getKey());
         }
         System.err.println("[frame-dump test] label rows " + lr.size() + " band rows " + dr.size() + " all rows "
-                + ar.size());
+                + ar.size() + " band rows byte-equal in the whole-game dump " + same + "/" + dr.size());
     }
 }
