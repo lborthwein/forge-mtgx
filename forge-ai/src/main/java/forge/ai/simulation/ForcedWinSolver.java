@@ -286,12 +286,17 @@ public final class ForcedWinSolver {
          * oppMinLoopMemo: OppMin expands a response point once per loop state: a later point whose position equals an
          * earlier one with the monotone counters out (ForcedWinEngine#coarseKey, the stack by name) and whose counters
          * dominate it for us is a memo hit (answering earlier, before our loop gained, is no worse for the opponent).
+         * oppMinRevealPoints (read with oppMin): the opponent's own main-phase priority is a response point while it has
+         * seen a nonland permanent of ours enter since its previous turn (OppMin.Driver#reveal): it may answer that card,
+         * or hold its mana for our turn. The cost of revealing a setup early is then searched, not assumed away.
          */
+        public boolean oppMinRevealPoints = false;
         public boolean enginePassFirst = false, enginePassToEnd = false, engineTriggerTargets = false, oppMinLoopMemo = false;
         /** solver-gaps-1104: the trigger target classes one engine move branches over (engineTriggerTargets only). */
         public int triggerVariants = 8;
         public static final java.util.Map<String, Object> SOLVERGAPS_DEFAULTS = java.util.Map.of("enginePassFirst", false,
-                "enginePassToEnd", false, "engineTriggerTargets", false, "oppMinLoopMemo", false, "triggerVariants", 8);
+                "enginePassToEnd", false, "engineTriggerTargets", false, "oppMinLoopMemo", false, "triggerVariants", 8,
+                "oppMinRevealPoints", false);
         public int ladderNodes = 2000, ladderSteps = 20000, ladderCards = 400000, ladderPathCards = 60000;
         public int engineEvalSteps = 0, orderCap = 24, xVariants = 8;
         /**
@@ -451,6 +456,7 @@ public final class ForcedWinSolver {
             c.enginePassToEnd = "true".equals(get.apply("enginePassToEnd")); // solver-gaps-1104
             c.engineTriggerTargets = "true".equals(get.apply("engineTriggerTargets")); // solver-gaps-1104
             c.oppMinLoopMemo = "true".equals(get.apply("oppMinLoopMemo")); // solver-gaps-1104
+            c.oppMinRevealPoints = "true".equals(get.apply("oppMinRevealPoints")); // solver-gaps-1104
             c.triggerVariants = intOr(get.apply("triggerVariants"), c.triggerVariants);
             // PREDECLARATION-labeller-v2 §0: labellerV2=true turns all five items on
             final boolean v2all = "true".equals(get.apply("labellerV2"));
@@ -555,7 +561,7 @@ public final class ForcedWinSolver {
                 + (loopMacro3 ? " loopMacro3" : "") + (aiWork != 0 ? " aiWork=" + aiWork : "")
                 + (enginePassFirst ? " enginePassFirst" : "") + (enginePassToEnd ? " enginePassToEnd" : "") // solver-gaps-1104
                 + (engineTriggerTargets ? " engineTriggerTargets V=" + triggerVariants : "")
-                + (oppMinLoopMemo ? " oppMinLoopMemo" : "");
+                + (oppMinLoopMemo ? " oppMinLoopMemo" : "") + (oppMinRevealPoints ? " oppMinRevealPoints" : "");
         }
     }
 
@@ -3618,6 +3624,7 @@ public final class ForcedWinSolver {
                         adv.driver = new OppMin.Driver(script, o, cm, -1); // labeller-v2 (d), the shared MIN
                         adv.driver.manaSearch = cfg.oppManaSearch; // covfix-a-1102
                         adv.driver.loopMemo = cfg.oppMinLoopMemo; // solver-gaps-1104
+                        adv.driver.reveal = cfg.oppMinRevealPoints; // solver-gaps-1104
                         out.points = adv.driver.points;
                     }
                     adv.bounded(wall).callLimited(callLimit);
